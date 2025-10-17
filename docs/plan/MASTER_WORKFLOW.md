@@ -14,7 +14,7 @@ This master workflow coordinates all phases of the Blit v2 development effort. T
 1. **FAST**: Start copying immediately, minimize perceived latency (≤1s)
 2. **SIMPLE**: No user tunables for speed; planner chooses best path automatically
 3. **RELIABLE**: Mirror deletions, checksums, and correctness outweigh speed
-4. **PRIVATE**: No external telemetry; user data never leaves the machine
+4. **PRIVATE**: No external performance reporting; user data never leaves the machine
 
 ### Development Principles
 
@@ -167,7 +167,7 @@ Detailed workflows for each phase are in separate documents:
 
 ## Phase 2: Streaming Orchestrator & Local Operations (CURRENT)
 
-**Goal**: Deliver v5 streaming local pipeline - streaming planner, adaptive predictor, telemetry, stall detection
+**Goal**: Deliver v5 streaming local pipeline - streaming planner, adaptive predictor, performance history, stall detection
 **Duration**: 7-10 days (per v5 plan)
 **Status**: In progress (Phase 2.5 benchmarks showing parity)
 
@@ -194,11 +194,11 @@ See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 - Streaming planner with heartbeat scheduler (1s default, 500ms when workers starved)
 - 10s stall detector (planner + workers idle) with error messaging
 - Fast-path routing (tiny manifests → direct copy, huge files → large-file worker)
-- Adaptive predictor fed by local telemetry (perceived latency ≤ 1s)
+- Adaptive predictor fed by local performance history (perceived latency ≤ 1s)
 - Deprecate `--ludicrous-speed` (accept as no-op for compatibility)
 - CLI progress indicator (spinner + throughput + ETA)
 - `blit diagnostics perf` command
-- Local telemetry in capped JSONL (~/.config/blit/perf_local.jsonl)
+- Local performance history in capped JSONL (~/.config/blit/perf_local.jsonl)
 - Comprehensive unit/integration tests for streaming behavior
 
 ## Phase 2.5: Performance Validation (CRITICAL GATE)
@@ -245,6 +245,7 @@ See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 - Advanced override: `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1`
 - Network tuning: disable Nagle, large send/recv buffers, optional BBR
 - Progress signals from remote operations to CLI
+- Remote performance history: local-only JSONL store (no runtime prompts), optional manual `blit-utils profile`, daemon idle self-profiling if benchmarks prove value
 
 See [WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md) for details.
 

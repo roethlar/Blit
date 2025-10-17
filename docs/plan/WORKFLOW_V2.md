@@ -4,10 +4,10 @@ This document outlines the high-level, phased plan for completing `blit-v2`. It 
 
 ## Phase 2: Streaming Orchestrator & Local Operations
 
-**Goal:** Realise the v5 local design—streaming planner, adaptive predictor, and telemetry-backed heuristics.
+**Goal:** Realise the v5 local design—streaming planner, adaptive predictor, and performance-history-backed heuristics.
 
 - ✅ Streaming planner + heartbeat/stall guard wired into `TransferOrchestrator`.
-- 🔄 Next: telemetry/predictor, progress UI, Windows/Linux parity tests.
+- 🔄 Next: performance history/predictor, progress UI, Windows/Linux parity tests.
 - Ensure tests/benchmarks cover new behaviour; keep docs/logs current.
 
 ## Phase 2.5: Performance & Validation Gate

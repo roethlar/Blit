@@ -9,7 +9,7 @@
 - **FAST:** bytes start moving immediately, planner overhead stays invisible unless something genuinely stalls.
 - **SIMPLE:** no user-facing tuning flags; the orchestrator decides the optimal path. Debug-only overrides may exist but are not required for normal operation.
 - **RELIABLE:** mirror deletions, checksum parity, filesystem safety checks always take precedence over raw speed.
-- **Privacy:** telemetry is strictly local; nothing leaves the user’s machine.
+- **Privacy:** performance history is strictly local; nothing leaves the user’s machine.
 
 ---
 
@@ -66,7 +66,7 @@ These heuristics are internal; users continue to run `blit copy` / `blit mirror`
 
 ---
 
-## 5. Telemetry (Local Only)
+## 5. Performance History (Local Only)
 
 ### 5.1 Purpose
 
@@ -77,7 +77,7 @@ These heuristics are internal; users continue to run `blit copy` / `blit mirror`
 
 - Metrics are stored locally as a capped JSON Lines file (e.g., `~/.config/blit/perf_local.jsonl`, max ~1 MiB).
 - Each entry includes: timestamp, workload signature (file count, total bytes, flags), planning_ms, copy_ms, stall_count, filesystem profile.
-- No data is sent off-machine. Debug env var `BLIT_DISABLE_LOCAL_TELEMETRY=1` can disable recording entirely.
+- No data is sent off-machine. Set `BLIT_DISABLE_PERF_HISTORY=1` to disable recording entirely.
 
 ### 5.3 Usage
 
@@ -107,9 +107,9 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 - After each run, record actual planning_ms. If prediction error exceeds 25%, adjust coefficients more aggressively.
 - Track consecutive mispredictions; if 3+ in a row, log a diagnostic entry recommending investigation (e.g., unusual filesystem latency).
 
-### 6.4 Telemetry Opt-Out
+### 6.4 Performance History Opt-Out
 
-- When telemetry is disabled, prediction falls back to conservative defaults and no updates occur.
+- When performance history capture is disabled, prediction falls back to conservative defaults and no updates occur.
 
 ---
 
@@ -135,7 +135,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
    - Ensure direct copy path reuses existing copy primitives (preserve timestamps, symlinks).
 4. **Telemetry Store**
    - JSONL writer with size cap + optional disable flag.
-   - Prediction model persistence (e.g., store coefficients alongside telemetry log).
+   - Prediction model persistence (e.g., store coefficients alongside performance history log).
 5. **Timeout & Messaging**
    - Implement 10 s stall detection with clear user-facing errors.
    - Add progress messages under `--verbose`.
@@ -162,7 +162,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 | Question | Resolution |
 |----------|------------|
-| Do we expose telemetry summaries? | Yes, via `blit diagnostics perf` (local only). |
+| Do we expose performance summaries? | Yes, via `blit diagnostics perf` (local only). |
 | Different thresholds for low-powered hardware? | Managed automatically by adaptive predictor; no hard-coded per-hardware rules. |
 | Cross-filesystem performance differences? | Predictor coefficients segmented by source/dest FS profile; transfer engine monitors backpressure to throttle. |
 | Cache mirror deletion plans? | No; correctness risk outweighs gain. |
@@ -174,7 +174,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 - Investigate FSEvents/USN journal integration for incremental planning.
 - Explore GPU/accelerated hashing for checksum mode.
-- Consider remote telemetry opt-in to improve heuristics globally (opt-in only).
+- Consider remote performance history opt-in to improve heuristics globally (opt-in only).
 - Revisit `--max-threads` flag usage; deprecate if unused.
 
 ---

@@ -11,10 +11,11 @@
 
 **2025-10-17 06:40:00Z** - **ACTION**: Restored automatic skip-unchanged heuristics in `TransferFacade`; planner now switches to parallel filtering only for large or checksum-heavy manifests. Sequential remains default, no user-exposed tunables, and `cargo test` confirms behavior.
 
-**2025-10-17 07:10:00Z** - **ACTION**: Published `greenfield_plan_v5.md` and refreshed workflow/TODO docs to capture the streaming planner, telemetry, and RDMA roadmap. Updated non-negotiable principles, added new Phase 2 tasks, and ensured all references point to v5 so future sessions retain context after reset.
+**2025-10-17 07:10:00Z** - **ACTION**: Published `greenfield_plan_v5.md` and refreshed workflow/TODO docs to capture the streaming planner, performance history, and RDMA roadmap. Updated non-negotiable principles, added new Phase 2 tasks, and ensured all references point to v5 so future sessions retain context after reset.
 
 **2025-10-17 07:25:00Z** - **ACTION**: Incorporated firewall/NAT handling into the spec. Added automatic gRPC fallback, advanced `--force-grpc-data` override, cryptographically strong token binding requirements, and help/man page updates to keep advanced flags clearly documented.
 
 **2025-10-17 21:18:41Z** - **ACTION**: Implemented streaming `TransferFacade::stream_local_plan`, `TaskStreamSender`, and `TransferOrchestrator` with heartbeat + 10 s stall detection. Verified Windows/Linux unit tests (`cargo test -p blit-core`) succeed via `scripts/windows/run-blit-tests.ps1`.
 **2025-10-17 21:48:06Z** - **ACTION**: Added orchestrator fast-path routing for tiny manifests and single large files (direct copy + large-file worker). Updated TODO/plan docs and confirmed `cargo test -p blit-core` passes.
 **2025-10-17 22:13:55Z** - **ACTION**: Added `scripts/macos/run-blit-tests.sh` to mirror the Windows test harness on macOS; runs fmt/check/unit tests and captures UTF-8 logs under `logs/`.
+**2025-10-17 23:17:33Z** - **ACTION**: Implemented local performance history writer (`perf_history.rs`) with JSONL append + rotation, integrated orchestrator logging (fast-path + streaming) and env guard `BLIT_DISABLE_PERF_HISTORY`. `cargo test -p blit-core` remains green.

@@ -9,6 +9,8 @@ use tokio::runtime::Builder;
 use crate::enumeration::{EntryKind, FileEnumerator};
 use crate::fs_enum::{CopyJob, FileEntry, FileFilter};
 use crate::mirror_planner::MirrorPlanner;
+use crate::perf_history::{append_local_record, OptionSnapshot, PerformanceRecord, TransferMode};
+use crate::perf_predictor::PerformancePredictor;
 use crate::transfer_engine::{
     create_task_stream, execute_streaming_plan, SchedulerOptions, TaskStreamSender,
 };
@@ -213,6 +215,8 @@ impl TransferOrchestrator {
 
         let start_time = Instant::now();
 
+        let mut predictor = PerformancePredictor::load().ok();
+
         let mut copy_config = CopyConfig::default();
         copy_config.workers = options.workers.max(1);
         copy_config.preserve_times = options.preserve_times;
@@ -229,11 +233,21 @@ impl TransferOrchestrator {
                     if options.verbose {
                         eprintln!("Fast-path routing: no work required (all files up to date)");
                     }
-                    LocalMirrorSummary {
+                    let summary = LocalMirrorSummary {
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         ..Default::default()
+                    };
+                    if let Some(record) = record_performance_history(
+                        &summary,
+                        &options,
+                        Some("no_work"),
+                        0,
+                        summary.duration.as_millis(),
+                    ) {
+                        update_predictor(&mut predictor, &record, options.verbose);
                     }
+                    summary
                 }
                 FastPathDecision::Tiny { files } => {
                     let total_bytes: u64 = files.iter().map(|(_, size)| *size).sum();
@@ -246,14 +260,24 @@ impl TransferOrchestrator {
                     }
                     let rels: Vec<PathBuf> = files.iter().map(|(rel, _)| rel.clone()).collect();
                     copy_paths_blocking(src_root, dest_root, &rels, &copy_config)?;
-                    LocalMirrorSummary {
+                    let summary = LocalMirrorSummary {
                         planned_files: files.len(),
                         copied_files: files.len(),
                         total_bytes,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         ..Default::default()
+                    };
+                    if let Some(record) = record_performance_history(
+                        &summary,
+                        &options,
+                        Some("tiny_manifest"),
+                        0,
+                        summary.duration.as_millis(),
+                    ) {
+                        update_predictor(&mut predictor, &record, options.verbose);
                     }
+                    summary
                 }
                 FastPathDecision::Huge { file, size } => {
                     if options.verbose {
@@ -264,14 +288,24 @@ impl TransferOrchestrator {
                         );
                     }
                     copy_large_blocking(src_root, dest_root, &file, &copy_config)?;
-                    LocalMirrorSummary {
+                    let summary = LocalMirrorSummary {
                         planned_files: 1,
                         copied_files: 1,
                         total_bytes: size,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         ..Default::default()
+                    };
+                    if let Some(record) = record_performance_history(
+                        &summary,
+                        &options,
+                        Some("single_huge_file"),
+                        0,
+                        summary.duration.as_millis(),
+                    ) {
+                        update_predictor(&mut predictor, &record, options.verbose);
                     }
+                    summary
                 }
             };
 
@@ -294,6 +328,8 @@ impl TransferOrchestrator {
             ludicrous: options.ludicrous_speed,
             force_tar: options.force_tar,
         };
+
+        let planning_start = Instant::now();
 
         let stream = TransferFacade::stream_local_plan(
             src_root,
@@ -368,6 +404,7 @@ impl TransferOrchestrator {
         transfer_result?;
         let drive_summary = planner_stats?;
         let plan_final = plan_handle.wait()?;
+        let planner_duration_ms = planning_start.elapsed().as_millis();
 
         let mut summary = LocalMirrorSummary {
             planned_files: plan_final.copy_jobs.len(),
@@ -404,6 +441,16 @@ impl TransferOrchestrator {
                 summary.total_bytes,
                 summary.duration
             );
+        }
+
+        if let Some(record) = record_performance_history(
+            &summary,
+            &options,
+            None,
+            planner_duration_ms,
+            summary.duration.as_millis(),
+        ) {
+            update_predictor(&mut predictor, &record, options.verbose);
         }
 
         Ok(summary)
@@ -544,4 +591,61 @@ fn apply_local_deletions(
     }
 
     Ok((deleted_files, deleted_dirs))
+}
+
+fn record_performance_history(
+    summary: &LocalMirrorSummary,
+    options: &LocalMirrorOptions,
+    fast_path: Option<&'static str>,
+    planner_duration_ms: u128,
+    transfer_duration_ms: u128,
+) -> Option<PerformanceRecord> {
+    let options_snapshot = OptionSnapshot {
+        dry_run: options.dry_run,
+        preserve_symlinks: options.preserve_symlinks,
+        include_symlinks: options.include_symlinks,
+        skip_unchanged: options.skip_unchanged,
+        checksum: options.checksum,
+        workers: options.workers.max(1),
+    };
+
+    let record = PerformanceRecord::new(
+        if options.mirror {
+            TransferMode::Mirror
+        } else {
+            TransferMode::Copy
+        },
+        None,
+        None,
+        summary.planned_files,
+        summary.total_bytes,
+        options_snapshot,
+        fast_path.map(|s| s.to_string()),
+        planner_duration_ms,
+        transfer_duration_ms,
+        0,
+        0,
+    );
+
+    if let Err(err) = append_local_record(&record) {
+        if options.verbose {
+            eprintln!("Failed to update performance history: {err:?}");
+        }
+    }
+    Some(record)
+}
+
+fn update_predictor(
+    predictor: &mut Option<PerformancePredictor>,
+    record: &PerformanceRecord,
+    verbose: bool,
+) {
+    if let Some(ref mut predictor) = predictor {
+        predictor.observe(record);
+        if let Err(err) = predictor.save() {
+            if verbose {
+                eprintln!("Failed to persist predictor state: {err:?}");
+            }
+        }
+    }
 }

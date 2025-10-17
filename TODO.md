@@ -32,9 +32,10 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Refactor `TransferFacade` and planner into streaming producer with heartbeat flushes.
 - [x] Implement 10 s stall detection and progress messaging in orchestrator.
 - [x] Implement fast-path routing for tiny/huge manifests in orchestrator.
-- [ ] Add adaptive predictor + local telemetry store with `blit diagnostics perf`.
+- [ ] Add adaptive predictor + local performance history store with `blit diagnostics perf`.
 - [ ] Remove `--ludicrous-speed` behaviour (make no-op) and add CLI progress UI.
 - [ ] Update unit/integration tests to cover fast-path routing and predictor logic.
+- [ ] Benchmark performance history warm-up impact (1st/10th/100th run) and document results.
 
 ## Phase 2.5: Performance & Validation Checkpoint
 
@@ -47,7 +48,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Implement the raw TCP data plane for `Push`.
 - [ ] Implement `Pull`, `List`, and `Purge` services.
 - [ ] Add CLI/daemon progress propagation for remote operations.
-- [ ] Record remote benchmark metrics in telemetry log + DEVLOG.
+- [ ] Record remote benchmark metrics in performance history log + DEVLOG.
 - [ ] Generate cryptographically strong one-time tokens (signed, nonce-based) and bind them to accepted sockets.
 - [ ] Implement automatic gRPC data-plane fallback with warnings + advanced override (`--force-grpc-data` / env var).
 

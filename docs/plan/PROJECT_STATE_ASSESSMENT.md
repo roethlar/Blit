@@ -65,19 +65,21 @@ crates/blit-cli/src/main.rs
 
 **Status Notes**:
 - Hybrid transport design retained per v5 plan; proto updates pending Phase 3 implementation.
-- Streaming orchestrator + fast-path routing complete; telemetry/predictor work still pending.
+- Streaming orchestrator + fast-path routing complete; performance history/predictor work still pending.
 - macOS test harness (`scripts/macos/run-blit-tests.sh`) mirrors the Windows runner for parity logging.
 
 ### ⚠️ Phase 2: Orchestrator & Local Operations (IN PROGRESS)
 
 **Completion**: ~55%
-**Status**: Streaming orchestrator and fast-path routing implemented; telemetry/predictor + UX pending
+**Status**: Streaming orchestrator and fast-path routing implemented; performance history/predictor + UX pending
 
 **Completed (this session)**:
 - ✅ `TransferFacade::stream_local_plan` emitting streaming batches
 - ✅ `TaskStreamSender`/`create_task_stream`/`execute_streaming_plan`
 - ✅ `TransferOrchestrator` with heartbeat, stall detection, mirror deletions
 - ✅ Fast-path routing for tiny manifests and single huge files
+- ✅ Local performance history writer wired into orchestrator (JSONL, capped, env toggle)
+- ✅ Predictor state scaffold (`perf_predictor.rs`) loading/saving coefficients and updated after each run
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 
 **Remaining Work**:
@@ -85,6 +87,7 @@ crates/blit-cli/src/main.rs
 - [ ] CLI progress UX + flag cleanup
 - [ ] Unit/integration coverage for fast-path routing and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios
+- [ ] Benchmark performance history warm-up impact (run 1 vs. 10 vs. 100) and capture results in docs
 
 ### ⏳ Phase 2.5: Performance & Validation Checkpoint (NOT STARTED)
 
@@ -111,10 +114,10 @@ None currently. Previous dependency/orchestrator blockers resolved; next decisio
 
 ## Next Steps (Priority Order)
 
-1. Implement adaptive telemetry + predictor stack (Phase 2.2) and persist coefficients.
+1. Implement adaptive performance history + predictor stack (Phase 2.2) and persist coefficients.
 2. Deliver CLI progress UX / flag cleanup (Phase 2.3) with streaming hooks.
 3. Add unit/integration coverage for fast-path routing & upcoming predictor (Phase 2.4).
-4. Expand benchmarks and telemetry capture to validate fast-path vs streaming mix (Phase 2.4/2.5).
+4. Expand benchmarks and performance history capture to validate fast-path vs streaming mix (Phase 2.4/2.5).
 5. Continue updating docs/DEVLOG after each milestone to maintain handoff fidelity.
 
 ## File Structure Overview

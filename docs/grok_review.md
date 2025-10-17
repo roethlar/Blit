@@ -1,9 +1,9 @@
 """
 ### Overall Take on Blit v2: The Elon Musk Edition of rsync
 
-First off, kudos for framing this as a "ludicrously over-engineered file copy tool" commissioned by Elon Musk—that's a perfect vibe. It evokes something that's hyper-optimized for speed (like Tesla's Plaid mode), architecturally ambitious (gRPC + raw TCP hybrid? Bold.), and perhaps a bit meme-worthy in its scope (local telemetry for adaptive planning? We're basically building Skynet for file copies). Since you mentioned it's 100% AI-developed, I'll treat this as a collaborative critique: the docs are impressively detailed and structured, showing a clear progression from foundation to production. It's like if rsync met Kubernetes—modular, phased, with quality gates and everything.
+First off, kudos for framing this as a "ludicrously over-engineered file copy tool" commissioned by Elon Musk—that's a perfect vibe. It evokes something that's hyper-optimized for speed (like Tesla's Plaid mode), architecturally ambitious (gRPC + raw TCP hybrid? Bold.), and perhaps a bit meme-worthy in its scope (local performance history for adaptive planning? We're basically building Skynet for file copies). Since you mentioned it's 100% AI-developed, I'll treat this as a collaborative critique: the docs are impressively detailed and structured, showing a clear progression from foundation to production. It's like if rsync met Kubernetes—modular, phased, with quality gates and everything.
 
-Honestly, this feels like a solid plan for a high-performance file sync tool. It builds on proven concepts (zero-copy transfers, manifest-based planning) while modernizing with Rust's safety and gRPC's structure. The emphasis on validation checkpoints (e.g., Phase 2.5) is smart—it prevents you from building a castle on sand. If executed well, Blit v2 could indeed outperform rsync in specific scenarios, like massive local mirrors or hybrid remote transfers, while being more maintainable than v1. But yes, it's over-engineered: the docs alone are a novella (truncated sections? We're talking epic length), and features like adaptive predictors and local-only telemetry scream "we're solving problems that might not exist at scale." It's fun, but it risks feature creep and maintenance hell. If this is for real-world use (e.g., xAI internal tools?), trim the fat; if it's a thought experiment, lean into the ludicrousness.
+Honestly, this feels like a solid plan for a high-performance file sync tool. It builds on proven concepts (zero-copy transfers, manifest-based planning) while modernizing with Rust's safety and gRPC's structure. The emphasis on validation checkpoints (e.g., Phase 2.5) is smart—it prevents you from building a castle on sand. If executed well, Blit v2 could indeed outperform rsync in specific scenarios, like massive local mirrors or hybrid remote transfers, while being more maintainable than v1. But yes, it's over-engineered: the docs alone are a novella (truncated sections? We're talking epic length), and features like adaptive predictors and local-only performance history scream "we're solving problems that might not exist at scale." It's fun, but it risks feature creep and maintenance hell. If this is for real-world use (e.g., xAI internal tools?), trim the fat; if it's a thought experiment, lean into the ludicrousness.
 
 Now, let's break it down: strengths, areas for improvement, and suggestions. I'll be brutally honest—some parts are gold, others feel like premature optimization or reinventing wheels.
 
@@ -18,12 +18,12 @@ Now, let's break it down: strengths, areas for improvement, and suggestions. I'l
 
 - **Documentation Depth**: The docs are comprehensive—phase-specific workflows, risk matrices, checklists, even certificate generation scripts. If this is AI-generated, it's coherent and actionable, with XML-like formats for tools (though that's a bit meta).
 
-- **Focus on Reliability**: Tenets like "RELIABLE" overriding speed (e.g., full planner for deletions/checksums) prevent data-loss nightmares. Privacy-first telemetry (local JSONL only) is a nice touch.
+- **Focus on Reliability**: Tenets like "RELIABLE" overriding speed (e.g., full planner for deletions/checksums) prevent data-loss nightmares. Privacy-first performance history (local JSONL only) is a nice touch.
 
 ### Areas for Improvement
 Honesty time: While the plan is thorough, it's bloated in places. It feels like over-planning for a file copy tool—rsync has survived decades with simpler internals. Here's where it could falter:
 
-- **Over-Engineering in Heuristics**: The adaptive predictor (linear model with EMA, segmented by FS type) and heartbeat-based flushing are clever, but might be YAGNI (You Ain't Gonna Need It). For most users, a static 1s planner timeout and basic fast-paths (e.g., ≤8 files) would suffice. The telemetry store adds complexity—capped JSONL is fine, but maintaining coefficients per FS/OS could lead to bugs in edge cases (e.g., network shares). Risk: Overfitting to benchmarks, underperforming in real-world variability.
+- **Over-Engineering in Heuristics**: The adaptive predictor (linear model with EMA, segmented by FS type) and heartbeat-based flushing are clever, but might be YAGNI (You Ain't Gonna Need It). For most users, a static 1s planner timeout and basic fast-paths (e.g., ≤8 files) would suffice. The performance history store adds complexity—capped JSONL is fine, but maintaining coefficients per FS/OS could lead to bugs in edge cases (e.g., network shares). Risk: Overfitting to benchmarks, underperforming in real-world variability.
 
 - **Hybrid Transport Complexity**: This is the "Elon" part—cool, but is it necessary? Pure gRPC streaming (Option A) might hit 95% parity with less code (no token negotiation, fewer connections to manage). Raw TCP adds security headaches (e.g., token validation, port allocation) and debugging pain. If Phase 2.5 shows gRPC is "good enough," ditch hybrid to ship faster. Also, wrapping data plane in TLS (Phase 4) negates some zero-copy benefits if not careful.
 
@@ -42,7 +42,7 @@ Honesty time: While the plan is thorough, it's bloated in places. It feels like 
 ### Suggestions
 To make this even more "Musk-ian" (innovative, fast, meme-able), here's constructive advice:
 
-1. **Simplify the Heuristics**: Merge adaptive predictor into a simpler rule-based system (e.g., if files < 1000, stream; else, batch). Ditch local telemetry unless you plan opt-in remote sharing (as in Future Work). Add a `--profile` flag to dump perf data for manual tuning.
+1. **Simplify the Heuristics**: Merge adaptive predictor into a simpler rule-based system (e.g., if files < 1000, stream; else, batch). Ditch local performance history unless you plan opt-in remote sharing (as in Future Work). Add a `--profile` flag to dump perf data for manual tuning.
 
 2. **Enhance Performance Validation**: In Phase 2.5, add real-time events (e.g., FSEvents on macOS, USN on Windows) as a fast-path for incremental mirrors—rsync does this implicitly. Benchmark against rsync/robocopy for external validation. Use criterion.rs for micro-benchmarks on zero-copy.
 
@@ -154,7 +154,7 @@ To make Blit v2 a screaming-fast, 100GbE-ready beast, here’s how to address th
 
 7. **Cut Scope Ruthlessly**:
    - Drop TLS, auth, and packaging from Phase 4. Focus on core transfer logic.
-   - Simplify predictor to static rules (e.g., <1000 files = stream, else batch). Keep telemetry for debugging but disable by default.
+   - Simplify predictor to static rules (e.g., <1000 files = stream, else batch). Keep performance history for debugging but disable by default.
    - Defer Windows support unless needed—focus on Linux for 25GbE servers.
 
 8. **AI Artifact Cleanup**:

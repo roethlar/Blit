@@ -72,7 +72,7 @@ My original review optimized for "shipping production software on a deadline" an
 
 #### 1.2 Adaptive Predictor (Section 6)
 
-**Design**: Learn planning overhead from telemetry using EMA-updated linear model, route to fast-path or streaming planner based on prediction.
+**Design**: Learn planning overhead from performance history using EMA-updated linear model, route to fast-path or streaming planner based on prediction.
 
 **Why This Is Interesting**:
 - ML applied to systems programming (rare combination)
@@ -98,7 +98,7 @@ My original review optimized for "shipping production software on a deadline" an
    - 16+ combinations if you consider {SSD, HDD, NFS, USB} × {SSD, HDD, NFS, USB}
    - Or can you model `planning_ms ≈ f(src) + g(dst)` independently?
 
-3. **Cold-start problem**: New filesystem types have no telemetry. Conservative defaults work but may be overly cautious.
+3. **Cold-start problem**: New filesystem types have no performance history. Conservative defaults work but may be overly cautious.
 
 **AI Capability Test**: Can AI:
 - Implement EMA coefficient updates correctly
@@ -132,21 +132,21 @@ My original review optimized for "shipping production software on a deadline" an
    - Falls through to streaming planner (intended?)
 
 **AI Capability Test**: Can AI:
-- Collect telemetry across workload spectrum
+- Collect performance history across workload spectrum
 - Identify optimal threshold values empirically
 - Implement adaptive thresholds that adjust per-filesystem
 - Detect and handle boundary cases gracefully
 
 ---
 
-#### 1.4 Telemetry System (Section 5)
+#### 1.4 Performance history System (Section 5)
 
 **Design**: Local-only JSONL log with capped size, feeds predictor and diagnostics.
 
 **Why This Is Well-Designed**:
-- Privacy-first (no remote telemetry) ✅
+- Privacy-first (no remote performance history) ✅
 - Lightweight (1 MiB cap prevents bloat) ✅
-- Opt-out available (`BLIT_DISABLE_LOCAL_TELEMETRY=1`) ✅
+- Opt-out available (`BLIT_DISABLE_PERF_HISTORY=1`) ✅
 - Multiple consumers (predictor, diagnostics) ✅
 
 **Schema Completeness**: Should capture:
@@ -180,10 +180,10 @@ My original review optimized for "shipping production software on a deadline" an
 ```
 
 **AI Capability Test**: Can AI:
-- Design appropriate telemetry schema
+- Design appropriate performance history schema
 - Implement JSONL writer with size rotation
 - Build analysis tools (`blit diagnostics perf`)
-- Visualize telemetry patterns (planning_ms vs. file_count plots)
+- Visualize performance history patterns (planning_ms vs. file_count plots)
 
 ---
 
@@ -371,7 +371,7 @@ planning_ms ≈ α * files + β * files^2 + γ * total_bytes + δ
 ---
 
 **Experiment Design**:
-1. Collect telemetry from diverse workloads
+1. Collect performance history from diverse workloads
 2. Train all 5 models on 70% of data
 3. Evaluate RMSE on held-out 30%
 4. Select best model, deploy to production
@@ -396,7 +396,7 @@ If you have 4 filesystem types: {SSD, HDD, NFS, USB}
 
 **Challenges**:
 1. **Sparse data**: Some combinations rarely used (USB → NFS?)
-2. **Cold start**: New FS types have no telemetry history
+2. **Cold start**: New FS types have no performance history history
 3. **Overfitting**: 48 parameters from limited data
 
 **Alternative Architectures**:
@@ -440,11 +440,11 @@ planning_ms ≈ bottleneck_latency * (α * files + β * bytes) + γ
 
 ---
 
-**Recommendation**: **Implement all three, evaluate on cross-FS telemetry**
+**Recommendation**: **Implement all three, evaluate on cross-FS performance history**
 
 **AI Capability Test**: Can AI:
 - Detect filesystem types programmatically (`statvfs`, mount options)
-- Handle sparse telemetry (Bayesian priors for cold-start FS types)
+- Handle sparse performance history (Bayesian priors for cold-start FS types)
 - Implement model comparison framework
 - Choose best architecture based on prediction accuracy
 
@@ -463,7 +463,7 @@ planning_ms ≈ bottleneck_latency * (α * files + β * bytes) + γ
 
 **Adaptive Timeout Design**:
 ```rust
-fn compute_stall_timeout(fs_type: FsType, telemetry: &Telemetry) -> Duration {
+fn compute_stall_timeout(fs_type: FsType, performance history: &Performance history) -> Duration {
     let base_timeout = Duration::from_secs(10);
 
     // Adjust based on filesystem type
@@ -476,7 +476,7 @@ fn compute_stall_timeout(fs_type: FsType, telemetry: &Telemetry) -> Duration {
     };
 
     // Adjust based on historical planning time for this FS
-    let historical_p99 = telemetry.planning_time_p99_for_fs(fs_type);
+    let historical_p99 = performance history.planning_time_p99_for_fs(fs_type);
     let history_multiplier = if historical_p99 > 5_000 {
         2.0  // This FS is historically slow
     } else {
@@ -494,7 +494,7 @@ fn compute_stall_timeout(fs_type: FsType, telemetry: &Telemetry) -> Duration {
 
 **AI Capability Test**: Can AI:
 - Implement filesystem type detection
-- Calculate percentile statistics from telemetry
+- Calculate percentile statistics from performance history
 - Balance false positives (abort legitimate slow ops) vs. false negatives (wait forever on hung FS)
 
 ---
@@ -505,7 +505,7 @@ fn compute_stall_timeout(fs_type: FsType, telemetry: &Telemetry) -> Duration {
 1. Streaming planner refactor ✅
 2. Heartbeat scheduler ✅
 3. Fast-path integration ✅
-4. Telemetry store ✅
+4. Performance history store ✅
 5. Timeout & messaging ✅
 6. CLI cleanup ✅
 7. Testing & benchmarks ✅
@@ -545,7 +545,7 @@ fn compute_stall_timeout(fs_type: FsType, telemetry: &Telemetry) -> Duration {
 
 | Question | v5 Resolution | My Assessment |
 |----------|---------------|---------------|
-| Expose telemetry summaries? | Yes, `blit diagnostics perf` | ✅ Good |
+| Expose performance history summaries? | Yes, `blit diagnostics perf` | ✅ Good |
 | Different thresholds for low-power hardware? | Adaptive predictor handles automatically | ⚠️ Needs validation on ARM |
 | Cross-filesystem performance? | Predictor segmented by FS profile | ✅ Sound design, needs implementation choices |
 | Cache deletion plans? | No, too risky | ✅ Correct decision |
@@ -609,7 +609,7 @@ if consecutive_mispredictions > 5 {
 - Maybe 20 files is still "small enough" for direct copy?
 - Maybe there should be a middle-ground fast-path for medium workloads?
 
-**Exploration**: After collecting telemetry, analyze the distribution:
+**Exploration**: After collecting performance history, analyze the distribution:
 - What % of workloads are ≤8 files? (fast-path eligible)
 - What % are 9-100 files? (medium workload)
 - What % are >100 files? (large workload)
@@ -677,9 +677,9 @@ But may hurt for:
 
 **Tier 1: Basic Correctness**
 - [ ] Streaming planner produces identical results to blocking planner
-- [ ] Predictor doesn't crash on edge cases (zero files, missing telemetry)
+- [ ] Predictor doesn't crash on edge cases (zero files, missing performance history)
 - [ ] Fast-paths actually bypass planner (verify with traces)
-- [ ] Telemetry writes valid JSONL
+- [ ] Performance history writes valid JSONL
 
 **Tier 2: Performance**
 - [ ] Streaming reduces time-to-first-byte by >50% for large workloads
@@ -691,7 +691,7 @@ But may hurt for:
 - [ ] Handles planner crashes gracefully (no data loss)
 - [ ] Adapts to new filesystems (cold-start problem solved)
 - [ ] Works across platforms (Linux, Windows, macOS)
-- [ ] Degrades gracefully when telemetry disabled
+- [ ] Degrades gracefully when performance history disabled
 
 **Tier 4: Polish**
 - [ ] `blit diagnostics perf` provides useful insights
@@ -706,7 +706,7 @@ But may hurt for:
 Given no timeline pressure, optimize for **learning and exploration**:
 
 **Phase 0: Infrastructure & Measurement**
-1. Implement telemetry system first (need data for all decisions)
+1. Implement performance history system first (need data for all decisions)
 2. Build benchmarking harness (synthetic + real workloads)
 3. Create baseline: measure v1 planning time across workload spectrum
 4. Build visualization tools (plot distributions, identify patterns)
@@ -714,7 +714,7 @@ Given no timeline pressure, optimize for **learning and exploration**:
 **Phase 1: Simple Implementation**
 1. Implement blocking planner (keep existing architecture)
 2. Add fast-path heuristics (≤8 files, single large file)
-3. Collect telemetry from real usage
+3. Collect performance history from real usage
 4. Analyze: where does planning hurt? Which workloads are slow?
 
 **Phase 2: Streaming Exploration**
@@ -725,13 +725,13 @@ Given no timeline pressure, optimize for **learning and exploration**:
 
 **Phase 3: Predictor Experimentation**
 1. Implement 3-5 predictor models (linear, polynomial, decision tree, etc.)
-2. Train on 70% of telemetry, validate on 30%
+2. Train on 70% of performance history, validate on 30%
 3. Compare RMSE, R², per-FS-type accuracy
 4. Select best model, deploy to production
-5. Monitor: track prediction errors in telemetry
+5. Monitor: track prediction errors in performance history
 
 **Phase 4: Optimization & Polish**
-1. Tune thresholds based on telemetry (8 files optimal? or 5? or 12?)
+1. Tune thresholds based on performance history (8 files optimal? or 5? or 12?)
 2. Add adaptive timeout based on FS type
 3. Implement cross-FS prediction (test Option A vs. B vs. C)
 4. Build introspection tools (`explain-decision`, `simulate-workload`)
@@ -744,7 +744,7 @@ Given no timeline pressure, optimize for **learning and exploration**:
 
 **Phase 6: Hardening**
 1. Error injection testing (hung FS, OOM, planner crashes)
-2. Fuzz testing (malformed telemetry, edge case workloads)
+2. Fuzz testing (malformed performance history, edge case workloads)
 3. Long-running stability tests (millions of files)
 4. Performance regression suite (ensure no slowdowns)
 
@@ -775,7 +775,7 @@ Given no timeline pressure, optimize for **learning and exploration**:
 **5. Cross-FS Prediction Model**
 - Hypothesis: Additive model (Src + Dst) sufficient, don't need full matrix
 - Experiment: Train separate-model vs. additive vs. bottleneck
-- Metric: Prediction accuracy on cross-FS telemetry
+- Metric: Prediction accuracy on cross-FS performance history
 
 **6. Adaptive Timeout Effectiveness**
 - Hypothesis: FS-aware timeouts reduce false positives
@@ -859,7 +859,7 @@ If AI struggles, the failure modes will be instructive: where did it get stuck? 
 **Hypothesis**: Filesystem-first model predicts better than linear model
 
 **Setup**:
-- Collect 1000+ telemetry samples across diverse workloads
+- Collect 1000+ performance history samples across diverse workloads
 - Train 5 models: linear, polynomial, FS-first, decision tree, additive
 - Validate on held-out 30% test set
 

@@ -1,9 +1,9 @@
 and# Phase 2: Streaming Orchestrator & Local Operations
 
-**Goal**: Deliver the v5 local transfer pipeline (streaming planner, adaptive predictor, telemetry, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
+**Goal**: Deliver the v5 local transfer pipeline (streaming planner, adaptive predictor, performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
 **Prerequisites**: Phase 0 & 1 complete (workspace, ported modules, gRPC scaffolding).
 **Status**: In progress (streaming planner + fast-path routing in place)
-**Critical Path**: Adaptive predictor/telemetry, CLI progress UX.
+**Critical Path**: Adaptive predictor/performance history, CLI progress UX.
 
 ## Success Criteria
 
@@ -34,10 +34,12 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.2.1 | Implement local telemetry writer (capped JSONL). | `telemetry.rs` with rotate-on-size logic. |
+| 2.2.1 | Implement local performance history writer (capped JSONL). | `perf_history.rs` with rotate-on-size logic. |
 | 2.2.2 | Build EMA-based predictor segmented by filesystem profile. | Predictor struct + serde (for persistence). |
 | 2.2.3 | Integrate predictor into orchestrator routing decisions. | Orchestrator chooses streaming vs. fast-path based on prediction. |
 | 2.2.4 | Add `blit diagnostics perf` CLI command. | Command prints recent runs + stats. |
+
+**Note:** Final release toggle (enabled by default vs. opt-in) will be decided from benchmark evidence; once committed, the setting remains stable across releases.
 
 ### 2.3 CLI UX & Flag Cleanup
 
@@ -53,7 +55,8 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 |------|-------------|-------------|
 | 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | `transfer_engine` streaming tests passing on Windows/Linux |
 | 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | TODO |
-| 2.4.3 | Update `scripts/bench_local_mirror.sh` to record telemetry and run new scenarios. | Script outputs ratio + writes to log. |
+| 2.4.3 | Update `scripts/bench_local_mirror.sh` to record performance history snapshots and run new scenarios. | Script outputs ratio + writes to log. |
+| 2.4.4 | Quantify performance history warm-up impact (first vs. 10th vs. 100th run) across representative workloads. | Benchmark report captured in docs with hard numbers and log references. |
 
 ### 2.5 Documentation & Logging
 
@@ -77,7 +80,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 | Risk | Mitigation |
 |------|------------|
 | Streaming refactor introduces deadlocks | Extensive unit tests; use async-aware mutexes | 
-| Predictor destabilises routing | Start with conservative defaults; log mispredictions; allow telemetry opt-out |
+| Predictor destabilises routing | Start with conservative defaults; log mispredictions; allow performance history opt-out |
 | Progress UI regresses non-interactive usage | Provide quiet mode, ensure logs respect TTY detection |
 | Telemetry log growth | Size cap + rotation; disable when env set |
 

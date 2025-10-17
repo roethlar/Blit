@@ -10,6 +10,8 @@ pub mod local_worker;
 pub mod logger;
 pub mod mirror_planner;
 pub mod orchestrator;
+pub mod perf_history;
+pub mod perf_predictor;
 pub mod tar_stream;
 pub mod transfer_engine;
 pub mod transfer_facade;

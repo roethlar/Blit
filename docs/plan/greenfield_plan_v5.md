@@ -10,7 +10,7 @@
    - Incremental planner that emits work every heartbeat (1 s default, 500 ms when workers are starved).
    - 10 s stall detector (planner *and* workers idle) with precise error reporting.
    - Automatic fast-paths for trivial workloads and huge single files.
-   - Adaptive predictor fed by local telemetry to keep perceived latency ≤ 1 s.
+   - Adaptive predictor fed by local performance history to keep perceived latency ≤ 1 s.
    - No user speed flags (`--ludicrous-speed` is deprecated); buffers/workers auto-tuned.
 
 2. **Hybrid Remote Transport** — Remote push/pull mirror the v1 data-path performance by keeping:
@@ -22,13 +22,13 @@
 3. **Telemetry & Diagnostics** — All metrics stay on-device:
    - Capped JSONL log (`~/.config/blit/perf_local.jsonl`) storing workload signature, planner/copy durations, stall events.
    - `blit diagnostics perf` surfaces recent runs for troubleshooting.
-   - `BLIT_DISABLE_LOCAL_TELEMETRY=1` opt-out for debugging.
+   - `BLIT_DISABLE_PERF_HISTORY=1` opt-out for debugging.
 
 4. **Inviolable Principles** — Every code change must respect:
    - **FAST**: Start copying immediately, minimise perceived latency.
    - **SIMPLE**: No user tunables for speed; planner chooses the best path automatically.
    - **RELIABLE**: Mirror deletions, checksums, and correctness outweigh speed.
-   - **PRIVATE**: No external telemetry; user data never leaves the machine.
+   - **PRIVATE**: No external performance reporting; user data never leaves the machine.
 
 5. **Future-Proofing** — The plan explicitly reserves:
    - RDMA support (RoCEv2 / InfiniBand) after the hybrid TCP path lands.
@@ -127,7 +127,7 @@
 
 - Change journal integrations (USN, FSEvents) for faster incremental planning.
 - GPU-accelerated hashing for checksum mode.
-- Optional remote telemetry opt-in (if ever justified, with explicit user consent).
+- Optional remote performance history opt-in (if ever justified, with explicit user consent).
 - Advanced storage tuning (stripe-aware writes, preallocation heuristics).
 
 ---

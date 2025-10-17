@@ -738,9 +738,46 @@ async fn purge(
 }
 ```
 
+## Day 6: Telemetry & Predictor Integration (5-7 hours)
+
+### Task 3.4.1: Remote Performance History Store
+**Priority**: 🔴 Critical  
+**Effort**: 2 hours
+
+- Implement JSONL performance history writer for remote runs (parallel to local Phase 2 logic).
+- Keep data local-only, capped (~1 MiB); no runtime prompts.
+- Record handshake latency, manifest size, transfer duration, transport selection, retry counts.
+- Honour `BLIT_DISABLE_PERF_HISTORY` (shared with local) and ensure failures never abort transfers.
+
+### Task 3.4.2: Daemon ⇄ CLI Performance History Exchange
+**Priority**: 🟡 Important  
+**Effort**: 2 hours
+
+- CLI uploads its run summary to the shared history handler after completion.
+- CLI fetches daemon performance snapshot at connection time; no interactive prompts.
+- Daemon maintains its own JSONL (same schema) and merges into predictor inputs.
+
+### Task 3.4.3: Idle Interval Profiling (Daemon)
+**Priority**: 🟡 Important  
+**Effort**: 1-2 hours
+
+- Daemon performs lightweight self-check every 24 h when idle (handshake + small disk probe).
+- Writes results to the performance history store; respects disable flag; zero prompts.
+- Skip if constrained (high load, disk full) to avoid user disruption.
+
+### Task 3.4.4: Remote Predictor Hook
+**Priority**: 🔴 Critical  
+**Effort**: 1-2 hours
+
+- Extend predictor to consume remote performance history (both CLI + daemon) and select transport/stream counts.
+- First-run defaults remain conservative; performance history refines choices on subsequent runs.
+- Document how history age affects routing (stale > N days triggers warning, not prompt).
+
+**Note:** Shipping default (automatic vs. opt-in performance history) depends on benchmark data; once the behavior is chosen it remains consistent across releases.
+
 ## Day 7: Integration Testing (6-8 hours)
 
-### Task 3.4.1: Integration Test Suite
+### Task 3.5.1: Integration Test Suite
 **Priority**: 🔴 Critical
 **Effort**: 4-5 hours
 
@@ -788,7 +825,7 @@ async fn test_push_pull_roundtrip() {
 }
 ```
 
-### Task 3.4.2: Manual End-to-End Testing
+### Task 3.5.2: Manual End-to-End Testing
 **Priority**: 🟡 Important
 **Effort**: 2-3 hours
 
