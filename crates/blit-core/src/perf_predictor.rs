@@ -140,12 +140,13 @@ impl PerformancePredictor {
         }
     }
 
-    pub fn predict_ms(
-        &mut self,
-        record: &PerformanceRecord,
-    ) -> f64 {
+    pub fn predict_ms(&mut self, record: &PerformanceRecord) -> f64 {
         let key = ProfileKey::new(record);
-        let profile = self.state.profiles.entry(key).or_insert_with(PredictorProfile::new);
+        let profile = self
+            .state
+            .profiles
+            .entry(key)
+            .or_insert_with(PredictorProfile::new);
         profile
             .coefficients
             .predict_ms(record.file_count, record.total_bytes)
@@ -153,7 +154,11 @@ impl PerformancePredictor {
 
     pub fn observe(&mut self, record: &PerformanceRecord) {
         let key = ProfileKey::new(record);
-        let profile = self.state.profiles.entry(key).or_insert_with(PredictorProfile::new);
+        let profile = self
+            .state
+            .profiles
+            .entry(key)
+            .or_insert_with(PredictorProfile::new);
         profile.coefficients.apply_observation(
             record.file_count,
             record.total_bytes,
@@ -176,7 +181,11 @@ impl PerformancePredictor {
         &self.path
     }
 
-    pub fn load_recent_records(&self, history_path: &PathBuf, limit: usize) -> Result<Vec<PerformanceRecord>> {
+    pub fn load_recent_records(
+        &self,
+        history_path: &PathBuf,
+        limit: usize,
+    ) -> Result<Vec<PerformanceRecord>> {
         let file = File::open(history_path)?;
         let reader = BufReader::new(file);
         let mut records = Vec::new();
