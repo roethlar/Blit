@@ -24,15 +24,17 @@ Before starting Phase 3, confirm the transport architecture choice:
 - Maximum performance via raw TCP + zero-copy
 - More complex but matches original architectural vision
 
-**Recommendation from Phase 2.5**:
-- If local performance ≥95% of v1 with gRPC buffers → Choose Option A
-- If performance struggles or close to threshold → Choose Option B
+**Decision Status** (per greenfield_plan_v5.md):
+- ✅ **DECIDED**: Hybrid Transport (Option B)
+- This workflow implements the authoritative v5 architecture
+- Option A (gRPC-only) is NOT pursued per v5 plan
 
-This workflow provides detailed implementation for **Option B (Hybrid Transport)** as specified in `greenfield_plan_v5.md`. If Option A is chosen, significant sections will be simpler.
-
-> **Security & Resilience Requirements**
-> - Data-plane handshake must emit a cryptographically strong, short-lived token (e.g., signed JWT with nonce + expiry) and the server must bind the accepted socket to that token before allowing zero-copy writes.
-> - CLI must automatically fall back to gRPC-streamed data if the negotiated TCP port is unreachable (firewall/NAT). Emit a warning and honour the advanced `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1` override for environments that require it.
+> **Security & Resilience Requirements (per greenfield_plan_v5.md)**
+> - ✅ **REQUIRED**: Data-plane token must be cryptographically strong (e.g., signed JWT with nonce + expiry)
+> - ✅ **REQUIRED**: Server must bind accepted socket to token before zero-copy writes (prevents replay attacks)
+> - ✅ **REQUIRED**: Automatic fallback to gRPC-streamed data if TCP port unreachable (firewall/NAT)
+> - ✅ **REQUIRED**: Emit warning when falling back to gRPC data plane
+> - ✅ **REQUIRED**: Support advanced override `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1` for locked-down environments
 
 ### Success Criteria
 

@@ -9,12 +9,20 @@
 
 This master workflow coordinates all phases of the Blit v2 development effort. The project follows a **validation-driven approach** where each phase must meet quality gates before proceeding to the next.
 
-### Core Principles
+### Core Principles (v5 Inviolable Standards)
+
+1. **FAST**: Start copying immediately, minimize perceived latency (≤1s)
+2. **SIMPLE**: No user tunables for speed; planner chooses best path automatically
+3. **RELIABLE**: Mirror deletions, checksums, and correctness outweigh speed
+4. **PRIVATE**: No external telemetry; user data never leaves the machine
+
+### Development Principles
 
 1. **Build Working, Then Build Complete**: Each phase delivers functional capability
-2. **Performance Parity**: Must match or exceed v1 performance benchmarks
+2. **Performance Parity**: Must match or exceed v1 performance benchmarks (≥95%)
 3. **Test-First**: Integration tests guide implementation
 4. **Incremental Complexity**: Start local, add network, add production features
+5. **Documentation Survival**: Update docs + DEVLOG to survive context resets
 
 ### Phase Dependencies
 
@@ -88,74 +96,62 @@ Each phase has **mandatory quality gates** that must pass before proceeding:
 
 ## Architectural Decisions
 
-### Decision 1: Transport Model (PENDING)
+### Decision 1: Transport Model
 
-**Status**: Requires immediate decision
-**Options**:
+**Status**: ✅ **DECIDED** (per greenfield_plan_v5.md)
+**Selected**: **Hybrid Transport** (gRPC control plane + TCP data plane)
 
-#### Option A: gRPC-Only Transport (Current Implementation)
-**Pros**:
-- Already implemented in proto
-- Simpler codebase
-- Standard approach
-- Good enough for most use cases
+**Architecture**:
+- **Control Plane**: gRPC for manifests, negotiations, progress, list/purge operations
+- **Data Plane**: Raw TCP negotiated via one-time cryptographically strong token
+- **Zero-Copy**: Linux sendfile/splice/copy_file_range on data plane
+- **Fallback**: Automatic gRPC-streamed data when TCP port unreachable (firewall/NAT)
+- **Override**: Advanced `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1` for locked-down environments
 
-**Cons**:
-- Potential performance overhead
-- May not match v1 zero-copy speed
-- Less control over data transfer
+**Security Requirements**:
+- Data-plane token must be cryptographically strong (e.g., signed JWT with nonce + expiry)
+- Server must bind accepted socket to token before zero-copy writes
+- Prevents replay attacks
 
-**Effort**: 0 days (continue as-is)
-
-#### Option B: Hybrid Transport (Plan v4 Spec)
-**Pros**:
-- Maximum performance (raw TCP + zero-copy)
-- Matches original plan
-- Full control over data plane
-- Can reuse v1 zero-copy primitives directly
-
-**Cons**:
-- More complex implementation
-- Two connection channels to manage
-- Token-based security needed for data plane
-
-**Effort**: 1-2 days (proto refactor + negotiation)
-
-**Recommendation**:
-- Start with **Option A (gRPC-only)** for Phase 2
-- Measure performance in Phase 2.5
-- If performance is <95% of v1, implement **Option B (Hybrid)** before Phase 3
+**Rationale**:
+- Matches v1 data-path performance
+- Full control over zero-copy optimizations
+- Prepares for RDMA extension (Phase 3.5)
+- Maintains v5 plan FAST/SIMPLE/RELIABLE/PRIVATE principles
 
 ### Decision 2: Error Handling Strategy
 
-**Status**: To be decided in Phase 2
+**Status**: ⏳ **TO BE DECIDED** in Phase 2
 **Options**:
-- `anyhow` for application errors
+- `anyhow` for application errors (recommended)
 - Custom error types with `thiserror`
 - `eyre` for error reporting
 
 **Recommendation**: Use `anyhow` for consistency with modern Rust practices
+**Action Required**: Make explicit decision during Phase 2 implementation
 
 ### Decision 3: Async Runtime
 
-**Status**: Implicit decision (Tokio via Tonic)
-**Current**: Tokio (required by Tonic)
-**Implication**: Use Tokio throughout for consistency
+**Status**: ✅ **DECIDED**
+**Selected**: **Tokio** (required by Tonic gRPC framework)
+**Implication**: Use Tokio throughout codebase for consistency
 
 ## Phase Workflows
 
 Detailed workflows for each phase are in separate documents:
 
-- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** - Orchestrator & Local Operations
+- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** - Streaming Orchestrator & Local Operations (v5 design)
 - **[WORKFLOW_PHASE_2.5.md](./WORKFLOW_PHASE_2.5.md)** - Performance & Validation Checkpoint
-- **[WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md)** - Remote Operations (Hybrid Transport)
+- **[WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md)** - Hybrid Remote Operations (gRPC + TCP)
 - **[WORKFLOW_PHASE_4.md](./WORKFLOW_PHASE_4.md)** - Production Hardening & Packaging
 
-## Phase 2: Orchestrator & Local Operations (CURRENT)
+**Note**: Phase 3.5 (RDMA Enablement) documented in [greenfield_plan_v5.md](./greenfield_plan_v5.md) is post-v2.0 work
 
-**Goal**: Local file transfer working end-to-end
-**Duration**: 3-4 days
-**Status**: 5% complete (blocked)
+## Phase 2: Streaming Orchestrator & Local Operations (CURRENT)
+
+**Goal**: Deliver v5 streaming local pipeline - streaming planner, adaptive predictor, telemetry, stall detection
+**Duration**: 7-10 days (per v5 plan)
+**Status**: In progress (Phase 2.5 benchmarks showing parity)
 
 ### Immediate Blockers (Day 1, Hour 1)
 
@@ -172,16 +168,20 @@ Detailed workflows for each phase are in separate documents:
    cargo test -p blit-core
    ```
 
-### Core Tasks (Days 1-3)
+### Core Tasks (Days 1-10)
 
 See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 
-**Summary**:
-- Implement `TransferOrchestrator` struct
-- Implement `execute_local_mirror()` using ported modules
-- Wire CLI commands to orchestrator
-- Add integration tests
-- Verify local operations work
+**Summary** (per v5 plan):
+- Streaming planner with heartbeat scheduler (1s default, 500ms when workers starved)
+- 10s stall detector (planner + workers idle) with error messaging
+- Fast-path routing (tiny manifests → direct copy, huge files → large-file worker)
+- Adaptive predictor fed by local telemetry (perceived latency ≤ 1s)
+- Deprecate `--ludicrous-speed` (accept as no-op for compatibility)
+- CLI progress indicator (spinner + throughput + ETA)
+- `blit diagnostics perf` command
+- Local telemetry in capped JSONL (~/.config/blit/perf_local.jsonl)
+- Comprehensive unit/integration tests for streaming behavior
 
 ## Phase 2.5: Performance Validation (CRITICAL GATE)
 
@@ -209,16 +209,24 @@ See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 - ✅ Pass → Proceed to Phase 3
 - ❌ Fail → Profile, optimize, or implement hybrid transport
 
-## Phase 3: Remote Operations
+## Phase 3: Hybrid Remote Operations
 
-**Goal**: Network operations working with chosen transport model
-**Duration**: 7-10 days
+**Goal**: Implement gRPC control plane + TCP data plane with zero-copy
+**Duration**: 8-12 days (per v5 plan)
 **Status**: Not started
 
 **Prerequisites**:
 - Phase 2 complete
-- Phase 2.5 passed
-- Transport architecture decision made
+- Phase 2.5 passed (≥95% v1 parity validated)
+
+**Key Features** (per v5 plan):
+- Control plane handshake with needlist exchange
+- One-time cryptographically strong token for data plane
+- TCP data plane with zero-copy (sendfile/splice/copy_file_range on Linux)
+- Automatic fallback to gRPC-streamed data when TCP port unreachable
+- Advanced override: `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1`
+- Network tuning: disable Nagle, large send/recv buffers, optional BBR
+- Progress signals from remote operations to CLI
 
 See [WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md) for details.
 
@@ -379,3 +387,4 @@ echo "**2025-10-16 HH:MM:00Z** - **ACTION**: <description>" >> DEVLOG.md
 | Date | Author | Change |
 |------|--------|--------|
 | 2025-10-16 | Claude | Initial master workflow creation |
+| 2025-10-17 | Claude | Updated to align with greenfield_plan_v5.md: transport decision, phase durations, v5 principles |
