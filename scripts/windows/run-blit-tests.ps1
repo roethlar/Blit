@@ -20,9 +20,15 @@ function Run-Step {
 
     try {
         & $Command 2>&1 | Tee-Object -FilePath $logFile
+        $exitCode = $LASTEXITCODE
     } catch {
         Write-Error "Step '$Name' failed. See $logFile"
         throw
+    }
+
+    if ($exitCode -ne 0) {
+        Write-Error "Step '$Name' exited with code $exitCode. See $logFile"
+        throw "CommandFailed"
     }
 
     Write-Host "--> Logs: $logFile"
