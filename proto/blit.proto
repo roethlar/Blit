@@ -1,0 +1,115 @@
+syntax = "proto3";
+package blit.v2;
+
+// The main service for all data transfer and remote management operations.
+service Blit {
+  // Push uses a bidirectional stream for an efficient "check-then-send" workflow.
+  rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
+
+  // Streams a file or directory from the server to the client.
+  rpc Pull(PullRequest) returns (stream PullChunk);
+
+  // Lists contents of a remote directory.
+  rpc List(ListRequest) returns (ListResponse);
+
+  // Deletes files/directories on the server for mirror operations.
+  rpc Purge(PurgeRequest) returns (PurgeResponse);
+
+  // Provides path completion suggestions for a given remote path prefix.
+  rpc CompletePath(CompletionRequest) returns (CompletionResponse);
+
+  // Lists the available modules on the server.
+  rpc ListModules(ListModulesRequest) returns (ListModulesResponse);
+}
+
+// Optional service for handling authentication if needed in the future.
+service BlitAuth {
+  rpc Authenticate(AuthRequest) returns (AuthResponse);
+}
+
+// --- Message Definitions ---
+
+// Push Operation
+message ClientPushRequest {
+  oneof payload {
+    PushHeader header = 1;
+    FileHeader file_manifest = 2;
+    ManifestComplete manifest_complete = 3;
+    FileData file_data = 4;
+    UploadComplete upload_complete = 5;
+  }
+}
+
+message ServerPushResponse {
+  oneof payload {
+    Ack ack = 1;
+    FileList files_to_upload = 2; // The "NeedList"
+    PushSummary summary = 3;
+  }
+}
+
+message PushHeader {
+  string module = 1;
+  bool mirror_mode = 2;
+  // Note: Other options like checksum type can be added here.
+}
+
+message FileHeader {
+  string relative_path = 1;
+  uint64 size = 2;
+  int64 mtime_seconds = 3;
+  uint32 permissions = 4;
+}
+
+message FileData {
+  bytes content = 1;
+}
+
+message ManifestComplete {}
+message UploadComplete {}
+message Ack {}
+message FileList { repeated string relative_paths = 1; }
+message PushSummary {
+    uint64 files_transferred = 1;
+    uint64 bytes_transferred = 2;
+}
+
+// Pull Operation
+message PullRequest {
+  string module = 1;
+  string path = 2;
+}
+
+message PullChunk {
+  oneof payload {
+    FileHeader file_header = 1;
+    FileData file_data = 2;
+  }
+}
+
+// Other Operations
+message ListRequest { string module = 1; string path = 2; }
+message ListResponse { repeated FileInfo entries = 1; }
+message FileInfo {
+  string name = 1;
+  bool is_dir = 2;
+  uint64 size = 3;
+  int64 mtime_seconds = 4;
+}
+
+message PurgeRequest { string module = 1; repeated string paths_to_delete = 2; }
+message PurgeResponse { uint64 files_deleted = 1; }
+
+message CompletionRequest { string path_prefix = 1; }
+message CompletionResponse { repeated string completions = 1; }
+
+message ListModulesRequest {}
+message ListModulesResponse { repeated ModuleInfo modules = 1; }
+message ModuleInfo {
+    string name = 1;
+    string path = 2;
+    bool read_only = 3;
+}
+
+message AuthRequest { string token = 1; }
+message AuthResponse { bool authenticated = 1; }

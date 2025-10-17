@@ -1,0 +1,10 @@
+[package]
+name = "blit-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.11"
+blit-core = { path = "../blit-core" }
+tokio-stream = "0.1"

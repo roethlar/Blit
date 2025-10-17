@@ -1,0 +1,381 @@
+# Blit v2 Master Workflow
+
+**Project**: Blit v2 - Hybrid Transport File Transfer System
+**Strategy**: Phased greenfield development with continuous validation
+**Current Phase**: Phase 2 (Orchestrator & Local Operations)
+**Target Completion**: ~20-25 working days from current state
+
+## Overview
+
+This master workflow coordinates all phases of the Blit v2 development effort. The project follows a **validation-driven approach** where each phase must meet quality gates before proceeding to the next.
+
+### Core Principles
+
+1. **Build Working, Then Build Complete**: Each phase delivers functional capability
+2. **Performance Parity**: Must match or exceed v1 performance benchmarks
+3. **Test-First**: Integration tests guide implementation
+4. **Incremental Complexity**: Start local, add network, add production features
+
+### Phase Dependencies
+
+```
+Phase 0 (Foundation) ✅
+    ↓
+Phase 1 (gRPC Scaffolding) ✅
+    ↓
+Phase 2 (Local Operations) ← CURRENT
+    ↓
+Phase 2.5 (Validation Gate) ← CRITICAL CHECKPOINT
+    ↓
+Phase 3 (Remote Operations)
+    ↓
+Phase 4 (Production Hardening)
+```
+
+## Phase Summary
+
+| Phase | Status | Duration | Completion | Critical Path |
+|-------|--------|----------|------------|---------------|
+| 0: Foundation | ✅ Complete | 4-5 days | 100% | Core logic porting |
+| 1: gRPC Scaffolding | ✅ Complete | 2-3 days | 100% | Proto definition |
+| 2: Orchestrator | ⚠️ In Progress | 3-4 days | 5% | Orchestrator implementation |
+| 2.5: Validation | ⏳ Not Started | 1-2 days | 0% | Performance benchmarks |
+| 3: Remote Ops | ⏳ Not Started | 7-10 days | 0% | Hybrid transport |
+| 4: Production | ⏳ Not Started | 5-7 days | 0% | TLS & packaging |
+| **Total** | **In Progress** | **22-31 days** | **40%** | |
+
+## Current State
+
+**Last Completed**: Phase 1 (gRPC Scaffolding)
+**Current Blocker**: Empty orchestrator.rs + build failure (globset dependency)
+**Next Milestone**: Local mirror working end-to-end
+
+See [PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md) for detailed status.
+
+## Quality Gates
+
+Each phase has **mandatory quality gates** that must pass before proceeding:
+
+### Phase 2 Gate: Local Operations Functional
+- ✅ `cargo build` succeeds for all crates
+- ✅ `cargo test` passes for blit-core
+- ✅ `blit mirror <src> <dst>` works locally
+- ✅ `blit copy <src> <dst>` works locally
+- ✅ Zero-copy logic executes correctly
+- ✅ Integration tests pass
+
+### Phase 2.5 Gate: Performance Validated
+- ✅ Single large file (4GiB) within 5% of v1 speed
+- ✅ Many small files (100k) within 5% of v1 speed
+- ✅ Memory usage within acceptable bounds
+- ✅ CPU utilization reasonable
+
+**🚨 HARD GATE**: Do not proceed to Phase 3 if Phase 2.5 fails. Fix performance issues first.
+
+### Phase 3 Gate: Remote Operations Functional
+- ✅ Push operation works over network
+- ✅ Pull operation works over network
+- ✅ List and Purge operations work
+- ✅ Network error handling robust
+- ✅ Progress reporting functional
+
+### Phase 4 Gate: Production Ready
+- ✅ TLS working for control plane
+- ✅ Authentication functional
+- ✅ Platform-specific packages built
+- ✅ End-to-end integration tests pass
+- ✅ Documentation complete
+
+## Architectural Decisions
+
+### Decision 1: Transport Model (PENDING)
+
+**Status**: Requires immediate decision
+**Options**:
+
+#### Option A: gRPC-Only Transport (Current Implementation)
+**Pros**:
+- Already implemented in proto
+- Simpler codebase
+- Standard approach
+- Good enough for most use cases
+
+**Cons**:
+- Potential performance overhead
+- May not match v1 zero-copy speed
+- Less control over data transfer
+
+**Effort**: 0 days (continue as-is)
+
+#### Option B: Hybrid Transport (Plan v4 Spec)
+**Pros**:
+- Maximum performance (raw TCP + zero-copy)
+- Matches original plan
+- Full control over data plane
+- Can reuse v1 zero-copy primitives directly
+
+**Cons**:
+- More complex implementation
+- Two connection channels to manage
+- Token-based security needed for data plane
+
+**Effort**: 1-2 days (proto refactor + negotiation)
+
+**Recommendation**:
+- Start with **Option A (gRPC-only)** for Phase 2
+- Measure performance in Phase 2.5
+- If performance is <95% of v1, implement **Option B (Hybrid)** before Phase 3
+
+### Decision 2: Error Handling Strategy
+
+**Status**: To be decided in Phase 2
+**Options**:
+- `anyhow` for application errors
+- Custom error types with `thiserror`
+- `eyre` for error reporting
+
+**Recommendation**: Use `anyhow` for consistency with modern Rust practices
+
+### Decision 3: Async Runtime
+
+**Status**: Implicit decision (Tokio via Tonic)
+**Current**: Tokio (required by Tonic)
+**Implication**: Use Tokio throughout for consistency
+
+## Phase Workflows
+
+Detailed workflows for each phase are in separate documents:
+
+- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** - Orchestrator & Local Operations
+- **[WORKFLOW_PHASE_2.5.md](./WORKFLOW_PHASE_2.5.md)** - Performance & Validation Checkpoint
+- **[WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md)** - Remote Operations (Hybrid Transport)
+- **[WORKFLOW_PHASE_4.md](./WORKFLOW_PHASE_4.md)** - Production Hardening & Packaging
+
+## Phase 2: Orchestrator & Local Operations (CURRENT)
+
+**Goal**: Local file transfer working end-to-end
+**Duration**: 3-4 days
+**Status**: 5% complete (blocked)
+
+### Immediate Blockers (Day 1, Hour 1)
+
+1. **Fix globset dependency** (5 minutes)
+   ```bash
+   # In crates/blit-core/Cargo.toml
+   # Change: globset = "^1.1"
+   # To: globset = "0.4"
+   ```
+
+2. **Verify build** (2 minutes)
+   ```bash
+   cargo build
+   cargo test -p blit-core
+   ```
+
+### Core Tasks (Days 1-3)
+
+See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
+
+**Summary**:
+- Implement `TransferOrchestrator` struct
+- Implement `execute_local_mirror()` using ported modules
+- Wire CLI commands to orchestrator
+- Add integration tests
+- Verify local operations work
+
+## Phase 2.5: Performance Validation (CRITICAL GATE)
+
+**Goal**: Verify v2 local performance ≥95% of v1
+**Duration**: 1-2 days
+**Status**: Not started
+
+### Benchmark Scenarios
+
+1. **Large File**: 4GiB single file
+2. **Many Small Files**: 100k files (1-10KB each)
+3. **Mixed Workload**: 1k files (varying sizes)
+4. **Mirror Update**: Incremental changes to large directory tree
+
+### Success Criteria
+
+| Metric | v1 Baseline | v2 Target | Status |
+|--------|-------------|-----------|--------|
+| Large file (4GiB) | X GB/s | ≥95% of v1 | ⏳ |
+| 100k small files | X sec | ≥95% of v1 | ⏳ |
+| Mixed workload | X sec | ≥95% of v1 | ⏳ |
+| Memory usage | X MB | ≤110% of v1 | ⏳ |
+
+**Gate Decision**:
+- ✅ Pass → Proceed to Phase 3
+- ❌ Fail → Profile, optimize, or implement hybrid transport
+
+## Phase 3: Remote Operations
+
+**Goal**: Network operations working with chosen transport model
+**Duration**: 7-10 days
+**Status**: Not started
+
+**Prerequisites**:
+- Phase 2 complete
+- Phase 2.5 passed
+- Transport architecture decision made
+
+See [WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md) for details.
+
+## Phase 4: Production Hardening
+
+**Goal**: Deployable, secure, documented system
+**Duration**: 5-7 days
+**Status**: Not started
+
+**Prerequisites**:
+- Phase 3 complete
+- All core features working
+
+See [WORKFLOW_PHASE_4.md](./WORKFLOW_PHASE_4.md) for details.
+
+## Parallelization Opportunities
+
+### Within Phases
+
+**Phase 2**:
+- ⚡ Orchestrator implementation || CLI wiring (after orchestrator API defined)
+- ⚡ Unit tests || Integration tests (can develop in parallel)
+
+**Phase 3**:
+- ⚡ Push implementation || Pull implementation (independent services)
+- ⚡ List service || Purge service (independent)
+
+**Phase 4**:
+- ⚡ TLS implementation || Package building
+- ⚡ Documentation || Integration tests
+
+### Across Phases (Advanced)
+
+**Speculative Development**:
+- While in Phase 2, can prototype Phase 3 hybrid transport negotiation
+- While in Phase 3, can prepare Phase 4 packaging scripts
+
+**Caution**: Don't parallelize core features until current phase validated
+
+## Risk Management
+
+### High-Risk Items
+
+| Risk | Phase | Mitigation |
+|------|-------|------------|
+| Performance regression | 2.5 | Early benchmarking, hybrid transport option |
+| Hybrid transport complexity | 3 | Start with gRPC-only, upgrade if needed |
+| Platform compatibility | 4 | Reuse v1 Windows logic, early testing |
+| Scope creep | All | Strict MVP adherence, defer nice-to-haves |
+
+### Rollback Points
+
+**After Phase 2.5 Failure**:
+- Option 1: Optimize gRPC path (profile-guided)
+- Option 2: Implement hybrid transport
+- Option 3: Investigate zero-copy improvements
+
+**After Phase 3**:
+- If network issues arise, can simplify to basic streaming
+- Can defer TLS to later iteration
+
+## Success Metrics
+
+### Phase-Level Metrics
+
+- **Phase 2**: `blit mirror <src> <dst>` works locally, tests pass
+- **Phase 2.5**: Performance ≥95% of v1
+- **Phase 3**: Remote operations work reliably
+- **Phase 4**: Deployable packages, TLS working, docs complete
+
+### Project-Level Metrics
+
+- **Functional**: All v1 operations supported
+- **Performance**: ≥95% of v1 speed across all scenarios
+- **Quality**: >80% test coverage, no critical bugs
+- **Usability**: Drop-in replacement for v1 CLI
+
+## Communication & Tracking
+
+### Daily Status Updates (during active development)
+
+Update `DEVLOG.md` with:
+- Tasks completed
+- Blockers encountered
+- Decisions made
+- Next steps
+
+### Checkpoint Reviews
+
+- **End of Phase 2**: Local operations demo
+- **End of Phase 2.5**: Performance results review
+- **End of Phase 3**: Remote operations demo
+- **End of Phase 4**: Release candidate review
+
+## Next Actions
+
+### Immediate (Today)
+1. Fix globset dependency in `blit-core/Cargo.toml`
+2. Verify build succeeds
+3. Make transport architecture decision
+4. Begin orchestrator implementation
+
+### This Week (Phase 2)
+1. Implement `TransferOrchestrator`
+2. Wire CLI to orchestrator
+3. Add integration tests
+4. Complete Phase 2 quality gate
+
+### Next Week (Phase 2.5)
+1. Create benchmark harness
+2. Run v1 baseline benchmarks
+3. Run v2 benchmarks
+4. Analyze results and make go/no-go decision
+
+### Following Weeks (Phase 3 & 4)
+See phase-specific workflows
+
+## Appendix: Command Reference
+
+### Development Commands
+
+```bash
+# Build all crates
+cargo build
+
+# Build specific crate
+cargo build -p blit-core
+
+# Test all
+cargo test
+
+# Test specific crate
+cargo test -p blit-core
+
+# Run daemon
+cargo run -p blit-daemon
+
+# Run CLI
+cargo run -p blit-cli -- mirror <src> <dst>
+```
+
+### Workflow Commands
+
+```bash
+# Check current status
+cat TODO.md
+cat DEVLOG.md
+
+# Update task status
+# Edit TODO.md and check off completed items
+
+# Log progress
+echo "**2025-10-16 HH:MM:00Z** - **ACTION**: <description>" >> DEVLOG.md
+```
+
+## Document History
+
+| Date | Author | Change |
+|------|--------|--------|
+| 2025-10-16 | Claude | Initial master workflow creation |
