@@ -101,7 +101,7 @@ pub async fn execute_plan(
     let closed_flag = task_sender.closed_flag();
 
     for task in plan.tasks.into_iter() {
-        task_sender.send_blocking(task)?;
+        task_sender.send(task).await?;
     }
     drop(task_sender);
 
