@@ -121,14 +121,22 @@ Each phase has **mandatory quality gates** that must pass before proceeding:
 
 ### Decision 2: Error Handling Strategy
 
-**Status**: ⏳ **TO BE DECIDED** in Phase 2
-**Options**:
-- `anyhow` for application errors (recommended)
-- Custom error types with `thiserror`
-- `eyre` for error reporting
+**Status**: ✅ **DECIDED**
+**Selected**: **`eyre`** (with `color-eyre` for CLI)
 
-**Recommendation**: Use `anyhow` for consistency with modern Rust practices
-**Action Required**: Make explicit decision during Phase 2 implementation
+**Rationale**:
+- Blit is a user-facing CLI tool - UX matters
+- Beautiful error formatting with color-coded output
+- Clear error chains show full context for debugging
+- Drop-in `anyhow` replacement (same API)
+- Modern CLI tools use similar approaches (ripgrep, fd, bat)
+- File transfer errors benefit from clear path/permission/network diagnostics
+
+**Implementation**:
+- `blit-cli`: Use `eyre::Result<()>` with `color_eyre::install()`
+- `blit-daemon`: Use `eyre::Result<()>`
+- `blit-core`: Use `eyre::Result<T>` for public APIs
+- Add dependencies: `eyre`, `color-eyre`
 
 ### Decision 3: Async Runtime
 
