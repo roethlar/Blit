@@ -63,45 +63,27 @@ crates/blit-daemon/src/main.rs
 crates/blit-cli/src/main.rs
 ```
 
-**⚠️ Architectural Discrepancy**:
-The `greenfield_plan_v5.md` specifies a **streaming orchestrator with hybrid transport**:
-- Control plane: gRPC for negotiation and metadata
-- Data plane: Raw TCP for bulk transfer with `DataTransferNegotiation` message
+**Status Notes**:
+- Hybrid transport design retained per v5 plan; proto updates pending Phase 3 implementation.
+- Streaming orchestrator + fast-path routing complete; telemetry/predictor work still pending.
 
-However, the current `proto/blit.proto` implements a **standard gRPC streaming approach**:
-- `FileData` is included in `ClientPushRequest` (line 38)
-- No `DataTransferNegotiation` message present
-- No separation of control and data planes
+### ⚠️ Phase 2: Orchestrator & Local Operations (IN PROGRESS)
 
-**Decision Required**: Choose one of:
-1. **Continue with gRPC-only**: Simpler, standard approach, may have performance overhead
-2. **Implement hybrid transport**: Matches plan, maximum performance, more complex
+**Completion**: ~55%
+**Status**: Streaming orchestrator and fast-path routing implemented; telemetry/predictor + UX pending
 
-### ⚠️ Phase 2: Orchestrator & Local Operations (IN PROGRESS - BLOCKED)
-
-**Completion**: 5% (file created only)
-**Status**: BLOCKED
-
-**Completed**:
-- ✅ `orchestrator.rs` file created in `blit-core/src/`
-- ✅ Module declared in `lib.rs`
-
-**Blocked By**:
-1. **Build failure**: `globset = "^1.1"` dependency doesn't exist
-   - Latest globset version is `0.4.17`
-   - Fix: Update `Cargo.toml` to use `globset = "0.4"`
-
-2. **Empty implementation**: `orchestrator.rs` has 0 lines
-   - Needs: `TransferOrchestrator` struct definition
-   - Needs: `new()` constructor
-   - Needs: `execute_local_mirror()` method
+**Completed (this session)**:
+- ✅ `TransferFacade::stream_local_plan` emitting streaming batches
+- ✅ `TaskStreamSender`/`create_task_stream`/`execute_streaming_plan`
+- ✅ `TransferOrchestrator` with heartbeat, stall detection, mirror deletions
+- ✅ Fast-path routing for tiny manifests and single huge files
+- ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 
 **Remaining Work**:
-- [ ] Fix dependency version mismatch
-- [ ] Implement `TransferOrchestrator` struct
-- [ ] Implement local mirror logic using ported modules
-- [ ] Wire CLI commands to orchestrator
-- [ ] Add integration tests for local operations
+- [ ] Telemetry + predictor + diagnostics command
+- [ ] CLI progress UX + flag cleanup
+- [ ] Unit/integration coverage for fast-path routing and predictor heuristics
+- [ ] Integration / benchmark coverage for streaming + fast-path scenarios
 
 ### ⏳ Phase 2.5: Performance & Validation Checkpoint (NOT STARTED)
 
@@ -117,62 +99,22 @@ However, the current `proto/blit.proto` implements a **standard gRPC streaming a
 
 ## Critical Blockers
 
-### 🔴 Blocker 1: Build Failure (High Priority)
-
-**Issue**: Dependency version mismatch prevents compilation
-**Location**: `crates/blit-core/Cargo.toml`
-**Error**: `globset = "^1.1"` doesn't exist (latest is 0.4.17)
-**Impact**: Cannot build or test any code
-**Fix**: Update to `globset = "0.4"`
-**Effort**: 1 minute
-
-### 🔴 Blocker 2: Empty Orchestrator (High Priority)
-
-**Issue**: Core component not implemented
-**Location**: `crates/blit-core/src/orchestrator.rs` (0 lines)
-**Impact**: Cannot proceed with Phase 2
-**Requirements**:
-```rust
-pub struct TransferOrchestrator {
-    // Configuration and state
-}
-
-impl TransferOrchestrator {
-    pub fn new(/* params */) -> Self { /* ... */ }
-    pub fn execute_local_mirror(/* params */) -> Result</* ... */> { /* ... */ }
-}
-```
-**Effort**: 2-3 days
-
-### 🟡 Decision 1: Transport Architecture (Medium Priority)
-
-**Issue**: Proto doesn't match hybrid transport plan
-**Options**:
-1. **gRPC-only**: Use current proto, simpler implementation
-2. **Hybrid**: Refactor proto to match plan v4, maximum performance
-
-**Recommendation**: Decide based on performance requirements:
-- If v1 performance parity is critical → Hybrid transport
-- If rapid MVP delivery is priority → gRPC-only
-
-**Effort**:
-- gRPC-only: 0 days (continue as-is)
-- Hybrid: 1-2 days (proto refactor + negotiation logic)
+None currently. Previous dependency/orchestrator blockers resolved; next decisions tracked under Phase 3 planning.
 
 ## Technical Debt
 
-1. **Test Coverage**: Unknown test status (tests may not run due to build failure)
+1. **Test Coverage**: Streaming path covered; need fast-path + predictor unit/integration tests
 2. **Documentation**: No inline documentation for ported modules
 3. **Error Handling**: Unknown error handling strategy
 4. **Logging**: No logging infrastructure visible
 
 ## Next Steps (Priority Order)
 
-1. **Fix globset dependency** (1 min) - Unblock builds
-2. **Decide on transport architecture** (discussion) - Clarify direction
-3. **Implement TransferOrchestrator** (2-3 days) - Core Phase 2 work
-4. **Wire CLI to orchestrator** (1 day) - Enable end-to-end testing
-5. **Run Phase 2.5 benchmarks** (1 day) - Validate performance
+1. Implement adaptive telemetry + predictor stack (Phase 2.2) and persist coefficients.
+2. Deliver CLI progress UX / flag cleanup (Phase 2.3) with streaming hooks.
+3. Add unit/integration coverage for fast-path routing & upcoming predictor (Phase 2.4).
+4. Expand benchmarks and telemetry capture to validate fast-path vs streaming mix (Phase 2.4/2.5).
+5. Continue updating docs/DEVLOG after each milestone to maintain handoff fidelity.
 
 ## File Structure Overview
 
@@ -191,7 +133,7 @@ blit_v2/
 │   │   │   ├── mirror_planner.rs # ✅ Ported
 │   │   │   ├── buffer.rs       # ✅ Ported
 │   │   │   ├── zero_copy.rs    # ✅ Ported
-│   │   │   ├── orchestrator.rs # ⚠️ EMPTY
+│   │   │   ├── orchestrator.rs # ✅ Streaming + fast-path orchestrator
 │   │   │   └── generated/
 │   │   │       └── mod.rs      # ✅ gRPC generated code
 │   │   └── build.rs            # Proto compilation

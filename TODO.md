@@ -29,8 +29,9 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Implement `execute_local_mirror` method on the orchestrator.
 - [x] Port consolidated path modules (`copy`, `tar_stream`, `transfer_*`, `local_worker`, `logger`, `delete`, `win_fs`) from v1 into `blit-core`.
 - [x] Wire the `blit-cli` `mirror` and `copy` commands to the orchestrator.
-- [ ] Refactor `TransferFacade` and planner into streaming producer with heartbeat flushes.
-- [ ] Implement 10 s stall detection and progress messaging in orchestrator.
+- [x] Refactor `TransferFacade` and planner into streaming producer with heartbeat flushes.
+- [x] Implement 10 s stall detection and progress messaging in orchestrator.
+- [x] Implement fast-path routing for tiny/huge manifests in orchestrator.
 - [ ] Add adaptive predictor + local telemetry store with `blit diagnostics perf`.
 - [ ] Remove `--ludicrous-speed` behaviour (make no-op) and add CLI progress UI.
 - [ ] Update unit/integration tests to cover fast-path routing and predictor logic.

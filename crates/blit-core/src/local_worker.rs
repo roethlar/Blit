@@ -205,7 +205,7 @@ async fn handle_large_file(
     Ok(())
 }
 
-fn copy_paths_blocking(
+pub(crate) fn copy_paths_blocking(
     src_root: &Path,
     dest_root: &Path,
     rels: &[PathBuf],
@@ -219,7 +219,7 @@ fn copy_paths_blocking(
     Ok(())
 }
 
-fn copy_large_blocking(
+pub(crate) fn copy_large_blocking(
     src_root: &Path,
     dest_root: &Path,
     rel: &PathBuf,

@@ -6,11 +6,9 @@ This document outlines the high-level, phased plan for completing `blit-v2`. It 
 
 **Goal:** Realise the v5 local design—streaming planner, adaptive predictor, and telemetry-backed heuristics.
 
-1. Implement async/streaming planner+heartbeat in `TransferFacade`/`TransferOrchestrator`.
-2. Add 10 s stall detector, CLI progress UI, and fast-path routing for tiny/huge workloads.
-3. Persist local telemetry + EMA predictor; expose `blit diagnostics perf`.
-4. Deprecate `--ludicrous-speed`; ensure auto buffer/worker tuning.
-5. Expand unit/integration tests + benchmarks to cover new behaviour.
+- ✅ Streaming planner + heartbeat/stall guard wired into `TransferOrchestrator`.
+- 🔄 Next: telemetry/predictor, progress UI, Windows/Linux parity tests.
+- Ensure tests/benchmarks cover new behaviour; keep docs/logs current.
 
 ## Phase 2.5: Performance & Validation Gate
 

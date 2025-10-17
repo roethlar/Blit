@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -6,14 +6,18 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use tokio::runtime::Builder;
 
-use crate::fs_enum::FileFilter;
+use crate::enumeration::{EntryKind, FileEnumerator};
+use crate::fs_enum::{CopyJob, FileEntry, FileFilter};
 use crate::mirror_planner::MirrorPlanner;
 use crate::transfer_engine::{
     create_task_stream, execute_streaming_plan, SchedulerOptions, TaskStreamSender,
 };
 use crate::transfer_facade::{PlannerEvent, TransferFacade};
 use crate::transfer_plan::PlanOptions;
-use crate::{local_worker::LocalWorkerFactory, CopyConfig};
+use crate::{
+    local_worker::{copy_large_blocking, copy_paths_blocking, LocalWorkerFactory},
+    CopyConfig,
+};
 
 /// Options for executing a local mirror/copy operation.
 #[derive(Clone, Debug)]
@@ -65,7 +69,121 @@ pub struct LocalMirrorSummary {
     pub duration: Duration,
 }
 
+const TINY_FILE_LIMIT: usize = 8;
+const TINY_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+const HUGE_SINGLE_BYTES: u64 = 1024 * 1024 * 1024;
+
+enum FastPathDecision {
+    NoWork,
+    Tiny { files: Vec<(PathBuf, u64)> },
+    Huge { file: PathBuf, size: u64 },
+}
+
+#[derive(Debug)]
+struct FastPathAbort;
+
+impl std::fmt::Display for FastPathAbort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fast-path aborted")
+    }
+}
+
+impl std::error::Error for FastPathAbort {}
+
 pub struct TransferOrchestrator;
+
+fn maybe_select_fast_path(
+    src_root: &Path,
+    dest_root: &Path,
+    options: &LocalMirrorOptions,
+) -> Result<Option<FastPathDecision>> {
+    if options.mirror || options.checksum || options.force_tar {
+        return Ok(None);
+    }
+
+    let mut enumerator = FileEnumerator::new(options.filter.clone_without_cache());
+    if !options.preserve_symlinks {
+        enumerator = enumerator.follow_symlinks(true);
+    }
+    if options.include_symlinks {
+        enumerator = enumerator.include_symlinks(true);
+    }
+
+    let planner = MirrorPlanner::new(options.checksum);
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    let mut aborted = false;
+    let mut huge_candidate: Option<(PathBuf, u64)> = None;
+
+    let scan_result = enumerator.enumerate_local_streaming(src_root, |entry| {
+        if let EntryKind::File { size } = entry.kind {
+            let should_copy = if options.skip_unchanged {
+                let job = CopyJob {
+                    entry: FileEntry {
+                        path: entry.absolute_path.clone(),
+                        size,
+                        is_directory: false,
+                    },
+                };
+                planner.should_copy_entry(&job, src_root, dest_root)
+            } else {
+                true
+            };
+
+            if should_copy {
+                if files.is_empty() {
+                    huge_candidate = Some((entry.relative_path.clone(), size));
+                } else {
+                    huge_candidate = None;
+                }
+
+                files.push((entry.relative_path.clone(), size));
+                total_bytes += size;
+
+                if files.len() > TINY_FILE_LIMIT {
+                    aborted = true;
+                    return Err(FastPathAbort.into());
+                }
+
+                if total_bytes > TINY_TOTAL_BYTES && files.len() > 1 {
+                    aborted = true;
+                    return Err(FastPathAbort.into());
+                }
+            }
+        }
+
+        Ok(())
+    });
+
+    match scan_result {
+        Ok(()) => {}
+        Err(err) => {
+            if err.downcast_ref::<FastPathAbort>().is_none() {
+                return Err(err);
+            }
+        }
+    }
+
+    if aborted {
+        return Ok(None);
+    }
+
+    if files.is_empty() {
+        return Ok(Some(FastPathDecision::NoWork));
+    }
+
+    if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
+        return Ok(Some(FastPathDecision::Tiny { files }));
+    }
+
+    if let Some((file, size)) = huge_candidate {
+        if size >= HUGE_SINGLE_BYTES {
+            return Ok(Some(FastPathDecision::Huge { file, size }));
+        }
+    }
+
+    Ok(None)
+}
 
 impl TransferOrchestrator {
     pub fn new() -> Self {
@@ -95,6 +213,81 @@ impl TransferOrchestrator {
 
         let start_time = Instant::now();
 
+        let mut copy_config = CopyConfig::default();
+        copy_config.workers = options.workers.max(1);
+        copy_config.preserve_times = options.preserve_times;
+        copy_config.dry_run = options.dry_run;
+        copy_config.checksum = if options.checksum {
+            Some(crate::checksum::ChecksumType::Blake3)
+        } else {
+            None
+        };
+
+        if let Some(decision) = maybe_select_fast_path(src_root, dest_root, &options)? {
+            let summary = match decision {
+                FastPathDecision::NoWork => {
+                    if options.verbose {
+                        eprintln!("Fast-path routing: no work required (all files up to date)");
+                    }
+                    LocalMirrorSummary {
+                        dry_run: options.dry_run,
+                        duration: start_time.elapsed(),
+                        ..Default::default()
+                    }
+                }
+                FastPathDecision::Tiny { files } => {
+                    let total_bytes: u64 = files.iter().map(|(_, size)| *size).sum();
+                    if options.verbose {
+                        eprintln!(
+                            "Fast-path routing: tiny manifest ({} file(s), {} bytes)",
+                            files.len(),
+                            total_bytes
+                        );
+                    }
+                    let rels: Vec<PathBuf> = files.iter().map(|(rel, _)| rel.clone()).collect();
+                    copy_paths_blocking(src_root, dest_root, &rels, &copy_config)?;
+                    LocalMirrorSummary {
+                        planned_files: files.len(),
+                        copied_files: files.len(),
+                        total_bytes,
+                        dry_run: options.dry_run,
+                        duration: start_time.elapsed(),
+                        ..Default::default()
+                    }
+                }
+                FastPathDecision::Huge { file, size } => {
+                    if options.verbose {
+                        eprintln!(
+                            "Fast-path routing: huge file {} ({} bytes)",
+                            file.display(),
+                            size
+                        );
+                    }
+                    copy_large_blocking(src_root, dest_root, &file, &copy_config)?;
+                    LocalMirrorSummary {
+                        planned_files: 1,
+                        copied_files: 1,
+                        total_bytes: size,
+                        dry_run: options.dry_run,
+                        duration: start_time.elapsed(),
+                        ..Default::default()
+                    }
+                }
+            };
+
+            if options.verbose {
+                eprintln!(
+                    "Completed local {} via fast-path: {} file(s), {} bytes in {:.2?}",
+                    if options.mirror { "mirror" } else { "copy" },
+                    summary.copied_files,
+                    summary.total_bytes,
+                    summary.duration
+                );
+            }
+
+            return Ok(summary);
+        }
+
         let mut filter = options.filter.clone_without_cache();
         let planner_for_stream = MirrorPlanner::new(options.checksum);
         let plan_options = PlanOptions {
@@ -119,16 +312,6 @@ impl TransferOrchestrator {
         let (task_sender, task_receiver) = create_task_stream(1024);
         let remaining = task_sender.remaining();
         let closed_flag = task_sender.closed_flag();
-
-        let mut copy_config = CopyConfig::default();
-        copy_config.workers = options.workers.max(1);
-        copy_config.preserve_times = options.preserve_times;
-        copy_config.dry_run = options.dry_run;
-        copy_config.checksum = if options.checksum {
-            Some(crate::checksum::ChecksumType::Blake3)
-        } else {
-            None
-        };
 
         let worker_factory = LocalWorkerFactory {
             src_root: src_root.to_path_buf(),

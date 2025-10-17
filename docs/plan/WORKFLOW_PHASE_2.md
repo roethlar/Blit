@@ -1,9 +1,9 @@
-# Phase 2: Streaming Orchestrator & Local Operations
+and# Phase 2: Streaming Orchestrator & Local Operations
 
 **Goal**: Deliver the v5 local transfer pipeline (streaming planner, adaptive predictor, telemetry, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
 **Prerequisites**: Phase 0 & 1 complete (workspace, ported modules, gRPC scaffolding).
-**Status**: Planned
-**Critical Path**: Streaming planner + heartbeat scheduler, adaptive predictor, CLI UX.
+**Status**: In progress (streaming planner + fast-path routing in place)
+**Critical Path**: Adaptive predictor/telemetry, CLI progress UX.
 
 ## Success Criteria
 
@@ -25,10 +25,10 @@
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.1.1 | Refactor `TransferFacade::build_local_plan` into an async stream producing batches. | Stream adapter returning `TransferBatch` enums. |
-| 2.1.2 | Implement heartbeat scheduler (1 s default, adaptive 0.5 s when workers are idle). | Scheduler module invoked by `TransferOrchestrator`. |
-| 2.1.3 | Add 10 s stall detector (planner + workers idle) with error messaging. | Tests simulating stalled enumerator + documentation of failure mode. |
-| 2.1.4 | Wire fast-path routing: tiny manifests → direct copy; single huge file → large-file worker. | Unit tests covering routing decisions. |
+| 2.1.1 | Refactor `TransferFacade::build_local_plan` into an async stream producing batches. | ✅ `TransferFacade::stream_local_plan` emitting `PlannerEvent` |
+| 2.1.2 | Implement heartbeat scheduler (1 s default, adaptive 0.5 s when workers are idle). | ✅ Heartbeat loop in `drive_planner_events` |
+| 2.1.3 | Add 10 s stall detector (planner + workers idle) with error messaging. | ✅ Stall guard in `drive_planner_events`; Windows+Linux verified |
+| 2.1.4 | Wire fast-path routing: tiny manifests → direct copy; single huge file → large-file worker. | ✅ Fast-path routing implemented in orchestrator; dedicated tests follow under 2.4.x. |
 
 ### 2.2 Adaptive Predictor & Telemetry
 
@@ -51,8 +51,8 @@
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | Test cases in `crates/blit-core/tests`. |
-| 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | Entries in `tests/` directory. |
+| 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | `transfer_engine` streaming tests passing on Windows/Linux |
+| 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | TODO |
 | 2.4.3 | Update `scripts/bench_local_mirror.sh` to record telemetry and run new scenarios. | Script outputs ratio + writes to log. |
 
 ### 2.5 Documentation & Logging
