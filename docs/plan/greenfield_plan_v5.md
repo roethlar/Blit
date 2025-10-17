@@ -117,12 +117,11 @@
 
 **Goal:** Final polish prior to general availability.
 
-- TLS for control plane (and optionally data plane via STARTTLS-style negotiation).
-- AuthN/authZ (token-based or mTLS) once core performance is validated.
+- AuthN/authZ (token-based) once core performance is validated.
 - Packaging: installers, systemd units, cross-compilation targets.
 - End-to-end integration test matrix (Linux, macOS, Windows).
 - Documentation updates and CLI help refresh.
-  - Ensure advanced options (`--max-threads`, `--force-grpc-data`) are documented in “Advanced / Niche” sections of help/man pages.
+  - Ensure advanced options (`--max-threads`, `--force-grpc-data`) are documented in "Advanced / Niche" sections of help/man pages.
 
 ### Phase 5 — Future Optimisations (Post-launch)
 
@@ -159,7 +158,6 @@
 | Windows RDMA viability | TBD | Evaluate once TCP hybrid stabilises. |
 | Progress UI granularity | Planned | Must include throughput + ETA; evaluate `indicatif`. |
 | RDMA hardware procurement | Pending | Coordinate when Phase 3.5 starts. |
-| TLS for data plane | Deferred | Evaluate cost once TCP path proven. |
 
 ---
 

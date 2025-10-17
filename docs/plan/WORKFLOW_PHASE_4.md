@@ -1,10 +1,11 @@
 # Phase 4: Production Hardening & Packaging
+*Phase 4 is OPTIONAL*
 
 **Goal**: Production-ready, secure, packaged, and documented system
 **Duration**: 5-7 days
 **Prerequisites**: Phase 3 complete
 **Status**: Not started
-**Critical Path**: TLS implementation, comprehensive testing
+**Critical Path**: Authentication, comprehensive testing, packaging
 
 ## Overview
 
@@ -12,8 +13,7 @@ Phase 4 transforms the functional v2 implementation into a production-ready syst
 
 ### Success Criteria
 
-- ✅ TLS encryption for control plane
-- ✅ Authentication system functional
+- ✅ Authentication system functional (token-based)
 - ✅ Comprehensive integration test suite
 - ✅ Platform-specific packages (Linux, macOS, Windows)
 - ✅ Complete user documentation
@@ -21,131 +21,14 @@ Phase 4 transforms the functional v2 implementation into a production-ready syst
 - ✅ Migration guide from v1
 - ✅ All quality gates passed
 
-## Day 1-2: Security Hardening (8-12 hours)
+## Day 1-2: Security Hardening (4-6 hours)
 
-### Task 4.1.1: Implement TLS for Control Plane
+### Task 4.1.1: Implement Token-Based Authentication
 **Priority**: 🔴 Critical
-**Effort**: 4-5 hours
+**Effort**: 3-4 hours
 **Security**: Essential for production
 
-**Server-side TLS setup** (`blit-daemon`):
-
-```rust
-// crates/blit-daemon/src/main.rs
-
-use tonic::transport::{Server, ServerTlsConfig, Certificate, Identity};
-use std::fs;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "0.0.0.0:50051".parse()?;
-    let service = BlitService::new();
-
-    // Load TLS certificates
-    let cert_path = std::env::var("BLIT_CERT_PATH")
-        .unwrap_or_else(|_| "/etc/blit/cert.pem".to_string());
-    let key_path = std::env::var("BLIT_KEY_PATH")
-        .unwrap_or_else(|_| "/etc/blit/key.pem".to_string());
-
-    let cert = fs::read_to_string(cert_path)?;
-    let key = fs::read_to_string(key_path)?;
-
-    let identity = Identity::from_pem(cert, key);
-
-    // Optional: Client certificate verification
-    let ca_cert_path = std::env::var("BLIT_CA_CERT_PATH").ok();
-    let tls_config = if let Some(ca_path) = ca_cert_path {
-        let ca_cert = fs::read_to_string(ca_path)?;
-        ServerTlsConfig::new()
-            .identity(identity)
-            .client_ca_root(Certificate::from_pem(ca_cert))
-    } else {
-        ServerTlsConfig::new().identity(identity)
-    };
-
-    println!("Blit daemon listening on {} (TLS enabled)", addr);
-
-    Server::builder()
-        .tls_config(tls_config)?
-        .add_service(BlitServer::new(service))
-        .serve(addr)
-        .await?;
-
-    Ok(())
-}
-```
-
-**Client-side TLS**:
-
-```rust
-// crates/blit-cli/src/main.rs
-
-use tonic::transport::{ClientTlsConfig, Certificate};
-
-async fn connect_to_daemon(url: &str, use_tls: bool) -> Result<BlitClient> {
-    if use_tls {
-        let ca_cert_path = std::env::var("BLIT_CA_CERT_PATH")
-            .unwrap_or_else(|_| "/etc/blit/ca-cert.pem".to_string());
-        let ca_cert = tokio::fs::read_to_string(ca_cert_path).await?;
-
-        let tls_config = ClientTlsConfig::new()
-            .ca_certificate(Certificate::from_pem(ca_cert))
-            .domain_name("blit.example.com");  // Must match cert CN
-
-        let channel = Channel::from_shared(url)?
-            .tls_config(tls_config)?
-            .connect()
-            .await?;
-
-        Ok(BlitClient::new(channel))
-    } else {
-        let channel = Channel::from_shared(url)?.connect().await?;
-        Ok(BlitClient::new(channel))
-    }
-}
-```
-
-**Certificate generation script** (`scripts/generate_certs.sh`):
-
-```bash
-#!/bin/bash
-# scripts/generate_certs.sh
-# Generate self-signed certificates for development/testing
-
-set -e
-
-CERT_DIR="${1:-./certs}"
-mkdir -p "$CERT_DIR"
-
-# Generate CA
-openssl req -x509 -newkey rsa:4096 -days 365 -nodes \
-  -keyout "$CERT_DIR/ca-key.pem" \
-  -out "$CERT_DIR/ca-cert.pem" \
-  -subj "/CN=Blit CA"
-
-# Generate server cert
-openssl req -newkey rsa:4096 -nodes \
-  -keyout "$CERT_DIR/server-key.pem" \
-  -out "$CERT_DIR/server-req.pem" \
-  -subj "/CN=localhost"
-
-# Sign server cert
-openssl x509 -req -in "$CERT_DIR/server-req.pem" \
-  -CA "$CERT_DIR/ca-cert.pem" \
-  -CAkey "$CERT_DIR/ca-key.pem" \
-  -CAcreateserial \
-  -out "$CERT_DIR/server-cert.pem" \
-  -days 365
-
-echo "Certificates generated in $CERT_DIR"
-```
-
-### Task 4.1.2: Implement Authentication
-**Priority**: 🟡 Important
-**Effort**: 3-4 hours
-**Security**: Important for multi-user scenarios
-
-**Token-based authentication**:
+**Token-based authentication** (already implemented for data plane in Phase 3):
 
 ```rust
 // crates/blit-core/src/auth.rs
@@ -240,52 +123,7 @@ async fn push(&self, request: Request<...>) -> Result<...> {
 }
 ```
 
-### Task 4.1.3: TLS for Data Plane (Hybrid Transport)
-**Priority**: 🟢 Nice to have (Option B only)
-**Effort**: 2-3 hours
-**Skip**: If using gRPC-only transport
-
-**Wrap data plane TCP in TLS**:
-
-```rust
-use tokio_rustls::{TlsAcceptor, TlsConnector, rustls};
-
-// Server-side
-async fn accept_data_connection_tls(
-    port: u16,
-    expected_token: Vec<u8>,
-    tls_acceptor: TlsAcceptor,
-) -> Result<()> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    let (socket, _addr) = listener.accept().await?;
-
-    // TLS handshake
-    let mut tls_stream = tls_acceptor.accept(socket).await?;
-
-    // Verify token and receive data
-    // ... (same as before but using tls_stream)
-}
-
-// Client-side
-async fn transfer_files_via_data_plane_tls(
-    source: &Path,
-    host: &str,
-    port: u32,
-    token: &[u8],
-    files_to_upload: &[String],
-    tls_connector: TlsConnector,
-) -> Result<()> {
-    let socket = TcpStream::connect(format!("{}:{}", host, port)).await?;
-
-    // TLS handshake
-    let mut tls_stream = tls_connector.connect(host.try_into()?, socket).await?;
-
-    // Send token and data
-    // ... (same as before but using tls_stream)
-}
-```
-
-## Day 3-4: Comprehensive Testing (10-14 hours)
+## Day 2-3: Comprehensive Testing (10-14 hours)
 
 ### Task 4.2.1: Expand Integration Test Suite
 **Priority**: 🔴 Critical
@@ -481,7 +319,7 @@ fn test_windows_paths() {
 }
 ```
 
-## Day 5-6: Packaging & Distribution (8-12 hours)
+## Day 4-5: Packaging & Distribution (8-12 hours)
 
 ### Task 4.3.1: Create Platform Packages
 **Priority**: 🔴 Critical
@@ -679,7 +517,7 @@ jobs:
           prerelease: false
 ```
 
-## Day 7: Documentation & Migration (6-8 hours)
+## Day 6: Documentation & Migration (6-8 hours)
 
 ### Task 4.4.1: User Documentation
 **Priority**: 🔴 Critical
@@ -749,8 +587,6 @@ Create `/etc/blit/config.toml`:
 ```toml
 [daemon]
 listen_addr = "0.0.0.0:50051"
-tls_cert = "/etc/blit/cert.pem"
-tls_key = "/etc/blit/key.pem"
 
 [[modules]]
 name = "data"
@@ -762,15 +598,6 @@ name = "backups"
 path = "/srv/blit/backups"
 read_only = true
 ```
-
-## TLS Setup
-
-Generate certificates:
-```bash
-sudo ./scripts/generate_certs.sh /etc/blit
-```
-
-Configure daemon to use TLS (see config above).
 
 ## Authentication
 
@@ -821,10 +648,10 @@ python3 scripts/migrate_config.py /etc/blit.conf > /etc/blit/config.toml
 
 ## New Features in v2
 
-- TLS encryption
 - Authentication tokens
 - Improved progress reporting
-- Hybrid transport for maximum performance
+- Hybrid transport for maximum performance (gRPC control + TCP data)
+- Zero-copy data transfer
 - Better error messages
 
 ## Side-by-Side Deployment
@@ -858,10 +685,10 @@ cargo doc --no-deps --workspace
 Final quality gate before v2 release:
 
 ### Security
-- [ ] TLS working for control plane
-- [ ] Authentication functional
+- [ ] Token-based authentication functional
 - [ ] No secrets in code or logs
-- [ ] Security audit completed (if applicable)
+- [ ] Cryptographically strong tokens (JWT with nonce/expiry)
+- [ ] Socket binding prevents replay attacks
 
 ### Testing
 - [ ] All unit tests pass
