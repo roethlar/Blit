@@ -12,10 +12,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .out_dir("src/generated")
-        .compile(
-            &[proto_file.to_str().unwrap()],
-            &[proto_dir.to_str().unwrap()],
-        )?;
+        .compile(&[proto_file.as_path()], &[proto_dir.as_path()])?;
     Ok(())
 }

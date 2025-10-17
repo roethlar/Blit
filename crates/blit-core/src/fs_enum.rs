@@ -200,47 +200,6 @@ pub fn enumerate_symlinks(root: &Path, filter: &mut FileFilter) -> Result<Vec<Sy
         .collect())
 }
 
-/// Windows implementation: use WalkDir without following reparse points.
-#[cfg(windows)]
-pub fn enumerate_directory_filtered(
-    root: &Path,
-    filter: &mut FileFilter,
-) -> Result<Vec<FileEntry>> {
-    use walkdir::WalkDir;
-
-    let mut entries = Vec::new();
-    filter.ensure_compiled();
-
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.file_type().is_dir() {
-                filter.should_include_dir(e.path())
-            } else {
-                true
-            }
-        })
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if entry.file_type().is_file() {
-            if let Ok(metadata) = entry.metadata() {
-                let size = metadata.len();
-                if filter.should_include_file(path, size) {
-                    entries.push(FileEntry {
-                        path: path.to_path_buf(),
-                        size,
-                        is_directory: false,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(entries)
-}
-
 #[cfg(windows)]
 pub fn enumerate_directory_filtered(
     root: &Path,
