@@ -17,3 +17,4 @@
 
 **2025-10-17 21:18:41Z** - **ACTION**: Implemented streaming `TransferFacade::stream_local_plan`, `TaskStreamSender`, and `TransferOrchestrator` with heartbeat + 10 s stall detection. Verified Windows/Linux unit tests (`cargo test -p blit-core`) succeed via `scripts/windows/run-blit-tests.ps1`.
 **2025-10-17 21:48:06Z** - **ACTION**: Added orchestrator fast-path routing for tiny manifests and single large files (direct copy + large-file worker). Updated TODO/plan docs and confirmed `cargo test -p blit-core` passes.
+**2025-10-17 22:13:55Z** - **ACTION**: Added `scripts/macos/run-blit-tests.sh` to mirror the Windows test harness on macOS; runs fmt/check/unit tests and captures UTF-8 logs under `logs/`.

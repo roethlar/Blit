@@ -66,6 +66,7 @@ crates/blit-cli/src/main.rs
 **Status Notes**:
 - Hybrid transport design retained per v5 plan; proto updates pending Phase 3 implementation.
 - Streaming orchestrator + fast-path routing complete; telemetry/predictor work still pending.
+- macOS test harness (`scripts/macos/run-blit-tests.sh`) mirrors the Windows runner for parity logging.
 
 ### ⚠️ Phase 2: Orchestrator & Local Operations (IN PROGRESS)
 

@@ -19,7 +19,7 @@ function Run-Step {
     $logFile = Join-Path $logDir "$($Name.Replace(' ', '-'))-$timestamp.log"
 
     try {
-        & $Command 2>&1 | Tee-Object -FilePath $logFile
+        & $Command 2>&1 | Tee-Object -FilePath $logFile -Encoding utf8
         $exitCode = $LASTEXITCODE
     } catch {
         Write-Error "Step '$Name' failed. See $logFile"
