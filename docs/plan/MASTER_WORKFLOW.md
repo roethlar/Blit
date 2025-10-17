@@ -144,6 +144,16 @@ Each phase has **mandatory quality gates** that must pass before proceeding:
 **Selected**: **Tokio** (required by Tonic gRPC framework)
 **Implication**: Use Tokio throughout codebase for consistency
 
+### Decision 4: Progress Reporting Architecture
+
+**Status**: ⏳ **TO BE DECIDED** in Phase 2
+**Options**:
+- **Option 1**: Trait-based callbacks - CLI has no progress, GUIs implement `ProgressCallback` trait (recommended)
+- **Option 2**: `indicatif` in CLI - built-in progress bars with rate-limiting
+
+**Recommendation**: Option 1 (zero-cost for CLI, GUI-ready)
+**Details**: See WORKFLOW_PHASE_2.md for implementation details
+
 ## Phase Workflows
 
 Detailed workflows for each phase are in separate documents:
