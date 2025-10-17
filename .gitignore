@@ -17,7 +17,6 @@ Cargo.lock
 
 # Claude Code specific
 .claude/
-.serena/
 
 # Debug and test artifacts
 *.log
