@@ -23,3 +23,4 @@
 **2025-10-18 00:31:15Z** - **ACTION**: Added `blit diagnostics perf` command and CLI local copy/mirror execution with indicatif spinner + final throughput summary; macOS/Windows test wrappers now run `cargo test -p blit-cli`.
 **2025-10-18 01:16:18Z** - **ACTION**: Removed legacy `--ludicrous-speed` flag entirely and added CLI local transfer tests covering copy + dry-run flows. `cargo test -p blit-cli` now exercises these scenarios.
 **2025-10-18 01:58:45Z** - **ACTION**: Added predictor/streaming integration tests under `tests/integration/`, surfaced verbose planner estimates from the predictor, verified `cargo test --tests` plus platform suites, and introduced `scripts/windows/bench-local-mirror.ps1` for parity benchmarks.
+**2025-10-18 02:45:12Z** - **ACTION**: Reworked macOS/Linux + Windows benchmark scripts to run v2 binaries only, auto-generate synthetic payloads, disable perf-history during timing, and preserve log directories by default for review.

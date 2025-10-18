@@ -55,7 +55,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 |------|-------------|-------------|
 | 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | `transfer_engine` streaming tests passing on Windows/Linux |
 | 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | TODO |
-| 2.4.3 | Update `scripts/bench_local_mirror.sh` to record performance history snapshots and run new scenarios. | Script outputs ratio + writes to log. Windows variant: `scripts/windows/bench-local-mirror.ps1`. |
+| 2.4.3 | Keep macOS/Linux + Windows benchmarks v2-only (synthetic payload, perf-history disabled by default). | `scripts/bench_local_mirror.sh` / `scripts/windows/bench-local-mirror.ps1` emit summary timings + log paths. |
 | 2.4.4 | Quantify performance history warm-up impact (first vs. 10th vs. 100th run) across representative workloads. | Benchmark report captured in docs with hard numbers and log references. |
 
 ### 2.5 Documentation & Logging

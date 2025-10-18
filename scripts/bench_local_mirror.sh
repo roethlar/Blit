@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SIZE_MB=${SIZE_MB:-256}
-WORK_ROOT=${BENCH_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/blit_v2_bench.XXXXXX")}
-KEEP_WORK=${KEEP_BENCH_DIR:-0}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
-REPO_ROOT=$(pwd)
-V1_ROOT=$(realpath "$REPO_ROOT/..")
-V2_ROOT=$(realpath "$REPO_ROOT")
+SIZE_MB=${SIZE_MB:-256}
+RUNS=${RUNS:-5}
+WARMUP=${WARMUP:-1}
+KEEP_WORK=${KEEP_BENCH_DIR:-1}
+WORK_ROOT=${BENCH_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/blit_v2_bench.XXXXXX")}
 
 SRC_DIR="$WORK_ROOT/src"
-DST_V1="$WORK_ROOT/dst_v1"
-DST_V2="$WORK_ROOT/dst_v2"
+DST_DIR="$WORK_ROOT/dst_blit"
 LOG_FILE="$WORK_ROOT/bench.log"
 
-mkdir -p "$SRC_DIR" "$DST_V1" "$DST_V2"
+mkdir -p "$SRC_DIR" "$DST_DIR"
+: >"$LOG_FILE"
+set -o pipefail
+
+if [[ "$KEEP_WORK" != "0" ]]; then
+  CLEANUP_LABEL="preserved"
+else
+  CLEANUP_LABEL="removed"
+  trap 'rm -rf "$WORK_ROOT"' EXIT
+fi
+
+log() {
+  echo "$*" | tee -a "$LOG_FILE"
+}
+
+log "Workspace: $WORK_ROOT (will be $CLEANUP_LABEL on exit)"
+log "Generating ${SIZE_MB} MiB synthetic payload..."
 
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$SRC_DIR" "$SIZE_MB" <<'PY'
@@ -29,7 +45,7 @@ for idx in range(32):
     subdir = os.path.join(root, f"dir_{idx:02d}")
     os.makedirs(subdir, exist_ok=True)
     with open(os.path.join(subdir, "file.txt"), "w", encoding="utf-8") as fh:
-        fh.write("hello world\n" * (idx + 1))
+        fh.write(("hello world\n") * (idx + 1))
 PY
 else
   dd if=/dev/urandom of="$SRC_DIR/payload.bin" bs=1M count="$SIZE_MB" status=none
@@ -40,49 +56,92 @@ else
   done
 fi
 
+if command -v du >/dev/null 2>&1; then
+  log "Payload size: $(du -sh "$SRC_DIR" | cut -f1)"
+fi
+
+log "Building blit-cli (release)..."
 (
-  cd "$V1_ROOT"
-  cargo build --release --quiet --bin blit
-) >>"$LOG_FILE" 2>&1
-(
-  cd "$V2_ROOT"
-  cargo build --release --quiet --bin blit-cli
+  cd "$REPO_ROOT"
+  cargo build --release --package blit-cli --bin blit-cli
 ) >>"$LOG_FILE" 2>&1
 
-V1_BIN="$V1_ROOT/target/release/blit"
-V2_BIN="$V2_ROOT/target/release/blit-cli"
+BLIT_BIN="$REPO_ROOT/target/release/blit-cli"
+if [[ ! -x "$BLIT_BIN" ]]; then
+  log "error: expected binary not found at $BLIT_BIN"
+  exit 1
+fi
+log "Binary ready: $BLIT_BIN"
 
-measure() {
-  local label=$1
-  shift
-  local start_ns=$(date +%s%N)
-  "$@"
-  local end_ns=$(date +%s%N)
-  local elapsed_ns=$((end_ns - start_ns))
-  python3 - "$label" "$elapsed_ns" <<'PY'
-import sys
-label, elapsed_ns = sys.argv[1], int(sys.argv[2])
-print(f"{label}: {elapsed_ns / 1e9:.3f} s")
-PY
+if ! [[ "$RUNS" =~ ^[0-9]+$ && "$WARMUP" =~ ^[0-9]+$ ]]; then
+  log "error: RUNS and WARMUP must be non-negative integers"
+  exit 1
+fi
+
+if [[ -z "${BLIT_DISABLE_PERF_HISTORY+x}" ]]; then
+  export BLIT_DISABLE_PERF_HISTORY=1
+  log "Perf history disabled for benchmark runs (set BLIT_DISABLE_PERF_HISTORY=0 to keep history)."
+else
+  log "Perf history env already set to '$BLIT_DISABLE_PERF_HISTORY'."
+fi
+
+prepare_dest() {
+  rm -rf "$DST_DIR"
+  mkdir -p "$DST_DIR"
 }
 
-if ! command -v hyperfine >/dev/null 2>&1; then
-  echo "hyperfine not found; running sequential timings" | tee -a "$LOG_FILE"
-  rm -rf "$DST_V1" && mkdir -p "$DST_V1"
-  measure "v1 mirror" "$V1_BIN" mirror "$SRC_DIR" "$DST_V1" --ludicrous-speed
-  rm -rf "$DST_V2" && mkdir -p "$DST_V2"
-  measure "v2 mirror" "$V2_BIN" mirror "$SRC_DIR" "$DST_V2"
-else
+RUN_ONCE_LAST_NS=0
+
+run_once() {
+  local phase=$1
+  local index=$2
+  prepare_dest
+  log "$phase run $index: mirror -> $DST_DIR"
+  local start_ns end_ns elapsed_ns elapsed_s status
+  start_ns=$(date +%s%N)
+  "$BLIT_BIN" mirror --no-progress "$SRC_DIR" "$DST_DIR" 2>&1 | tee -a "$LOG_FILE"
+  status=${PIPESTATUS[0]}
+  end_ns=$(date +%s%N)
+  if [[ $status -ne 0 ]]; then
+    log "error: blit-cli exited with status $status"
+    exit $status
+  fi
+  elapsed_ns=$((end_ns - start_ns))
+  elapsed_s=$(awk "BEGIN { printf \"%.3f\", $elapsed_ns/1e9 }")
+  log "$phase run $index completed in ${elapsed_s}s"
+  RUN_ONCE_LAST_NS=$elapsed_ns
+}
+
+declare -a MEASURED_NS=()
+
+if command -v hyperfine >/dev/null 2>&1; then
+  log "Running hyperfine benchmark (runs=$RUNS, warmup=$WARMUP)..."
+  prepare_cmd=$(printf "rm -rf '%s' && mkdir -p '%s'" "$DST_DIR" "$DST_DIR")
+  blit_cmd=$(printf "env BLIT_DISABLE_PERF_HISTORY=%q %q mirror --no-progress %q %q" \
+    "$BLIT_DISABLE_PERF_HISTORY" "$BLIT_BIN" "$SRC_DIR" "$DST_DIR")
   hyperfine \
-    --warmup 1 \
-    --prepare "rm -rf '$DST_V1' && mkdir -p '$DST_V1'" \
-    "$V1_BIN mirror '$SRC_DIR' '$DST_V1' --ludicrous-speed" \
-    --prepare "rm -rf '$DST_V2' && mkdir -p '$DST_V2'" \
-    "$V2_BIN mirror '$SRC_DIR' '$DST_V2'" | tee -a "$LOG_FILE"
+    --warmup "$WARMUP" \
+    --runs "$RUNS" \
+    --prepare "$prepare_cmd" \
+    "$blit_cmd" | tee -a "$LOG_FILE"
+else
+  log "hyperfine not found; running sequential timings (runs=$RUNS, warmup=$WARMUP)"
+  for ((i = 1; i <= WARMUP; i++)); do
+    run_once "Warmup" "$i/$WARMUP" >/dev/null
+  done
+  for ((i = 1; i <= RUNS; i++)); do
+    run_once "Measured" "$i/$RUNS"
+    MEASURED_NS+=("$RUN_ONCE_LAST_NS")
+  done
 fi
 
-echo
-echo "Benchmark artefacts stored in: $WORK_ROOT"
-if [ "$KEEP_WORK" != "1" ]; then
-  trap 'rm -rf "$WORK_ROOT"' EXIT
+if (( ${#MEASURED_NS[@]} > 0 )); then
+  total_ns=0
+  for ns in "${MEASURED_NS[@]}"; do
+    total_ns=$((total_ns + ns))
+  done
+  avg_s=$(awk "BEGIN { printf \"%.3f\", $total_ns/${#MEASURED_NS[@]}/1e9 }")
+  log "Average over ${#MEASURED_NS[@]} measured run(s): ${avg_s}s"
 fi
+
+log "Benchmark complete. Full log: $LOG_FILE"
