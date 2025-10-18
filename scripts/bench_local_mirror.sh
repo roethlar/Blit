@@ -83,32 +83,36 @@ else
   log "Perf history env already set to '$BLIT_DISABLE_PERF_HISTORY'."
 fi
 
-declare -a TOOL_NAMES=()
-declare -A TOOL_DEST
-declare -A TOOL_LABEL
-declare -A TOOL_SUM_NS
-declare -A TOOL_COUNT
+TOOL_NAMES=()
+TOOL_DESTS=()
+TOOL_LABELS=()
+TOOL_SUM_NS=()
+TOOL_COUNTS=()
+
+add_tool() {
+  local name=$1
+  local dest=$2
+  local label=$3
+  TOOL_NAMES+=("$name")
+  TOOL_DESTS+=("$dest")
+  TOOL_LABELS+=("$label")
+  TOOL_SUM_NS+=("0")
+  TOOL_COUNTS+=("0")
+}
 
 DST_BLIT="$WORK_ROOT/dst_blit"
-TOOL_NAMES+=("blit")
-TOOL_DEST["blit"]="$DST_BLIT"
-TOOL_LABEL["blit"]="blit v2 mirror"
-TOOL_SUM_NS["blit"]=0
-TOOL_COUNT["blit"]=0
+add_tool "blit" "$DST_BLIT" "blit v2 mirror"
 
 if command -v rsync >/dev/null 2>&1; then
   DST_RSYNC="$WORK_ROOT/dst_rsync"
-  TOOL_NAMES+=("rsync")
-  TOOL_DEST["rsync"]="$DST_RSYNC"
-  TOOL_LABEL["rsync"]="rsync -a --delete"
-  TOOL_SUM_NS["rsync"]=0
-  TOOL_COUNT["rsync"]=0
+  add_tool "rsync" "$DST_RSYNC" "rsync -a --delete"
 else
   log "rsync not found; skipping rsync baseline."
 fi
 
 run_tool_command() {
-  local tool=$1 dest=$2
+  local tool=$1
+  local dest=$2
   case "$tool" in
     blit)
       env BLIT_DISABLE_PERF_HISTORY="$BLIT_DISABLE_PERF_HISTORY" \
@@ -126,20 +130,22 @@ run_tool_command() {
 }
 
 run_once() {
-  local tool=$1
+  local idx=$1
   local phase=$2
   local index=$3
   local total=$4
-  local dest=${TOOL_DEST[$tool]}
+
+  local name=${TOOL_NAMES[$idx]}
+  local dest=${TOOL_DESTS[$idx]}
+  local label=${TOOL_LABELS[$idx]}
 
   rm -rf "$dest"
   mkdir -p "$dest"
 
-  local label=${TOOL_LABEL[$tool]}
   log "[$label] $phase run $index/$total -> $dest"
   local start_ns end_ns elapsed_ns elapsed_s status
   start_ns=$(date +%s%N)
-  run_tool_command "$tool" "$dest" 2>&1 | tee -a "$LOG_FILE"
+  run_tool_command "$name" "$dest" 2>&1 | tee -a "$LOG_FILE"
   status=${PIPESTATUS[0]}
   end_ns=$(date +%s%N)
   if [[ $status -ne 0 ]]; then
@@ -151,27 +157,29 @@ run_once() {
   log "[$label] $phase run $index completed in ${elapsed_s}s"
 
   if [[ "$phase" == "Measured" ]]; then
-    TOOL_SUM_NS["$tool"]=$(( ${TOOL_SUM_NS[$tool]} + elapsed_ns ))
-    TOOL_COUNT["$tool"]=$(( ${TOOL_COUNT[$tool]} + 1 ))
+    local current_sum=${TOOL_SUM_NS[$idx]}
+    local current_count=${TOOL_COUNTS[$idx]}
+    TOOL_SUM_NS[$idx]=$(( current_sum + elapsed_ns ))
+    TOOL_COUNTS[$idx]=$(( current_count + 1 ))
   fi
 }
 
 log "Running warmups (runs=$WARMUP) and measured passes (runs=$RUNS)..."
-for tool in "${TOOL_NAMES[@]}"; do
+for idx in "${!TOOL_NAMES[@]}"; do
   for ((i = 1; i <= WARMUP; i++)); do
-    run_once "$tool" "Warmup" "$i" "$WARMUP" >/dev/null
+    run_once "$idx" "Warmup" "$i" "$WARMUP" >/dev/null
   done
   for ((i = 1; i <= RUNS; i++)); do
-    run_once "$tool" "Measured" "$i" "$RUNS"
+    run_once "$idx" "Measured" "$i" "$RUNS"
   done
 done
 
-for tool in "${TOOL_NAMES[@]}"; do
-  count=${TOOL_COUNT[$tool]}
+for idx in "${!TOOL_NAMES[@]}"; do
+  count=${TOOL_COUNTS[$idx]}
   if (( count > 0 )); then
-    sum_ns=${TOOL_SUM_NS[$tool]}
+    sum_ns=${TOOL_SUM_NS[$idx]}
     avg_s=$(awk "BEGIN { printf \"%.3f\", $sum_ns/$count/1e9 }")
-    label=${TOOL_LABEL[$tool]}
+    label=${TOOL_LABELS[$idx]}
     log "Average [$label] over $count measured run(s): ${avg_s}s"
   fi
 done

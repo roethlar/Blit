@@ -64,7 +64,14 @@ try {
     Write-Log "Building blit-cli (release)..."
     Push-Location $RepoRoot
     try {
-        cargo build --release --package blit-cli --bin blit-cli 2>&1 | Tee-Object -FilePath $logFile -Append
+        $previousActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & cargo build --release --package blit-cli --bin blit-cli 2>&1 |
+                ForEach-Object { Write-Log $_ }
+        } finally {
+            $ErrorActionPreference = $previousActionPreference
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed with exit code $LASTEXITCODE"
         }
