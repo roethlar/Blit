@@ -70,7 +70,7 @@ crates/blit-cli/src/main.rs
 
 ### ⚠️ Phase 2: Orchestrator & Local Operations (IN PROGRESS)
 
-**Completion**: ~55%
+**Completion**: ~60%
 **Status**: Streaming orchestrator and fast-path routing implemented; performance history/predictor + UX pending
 
 **Completed (this session)**:
@@ -86,7 +86,7 @@ crates/blit-cli/src/main.rs
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
 - [ ] CLI progress UX + flag cleanup
-- [ ] Broader integration coverage for fast-path and predictor heuristics
+- [x] Broader integration coverage for fast-path and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios
 - [ ] Benchmark performance history warm-up impact (run 1 vs. 10 vs. 100) and capture results in docs
 
