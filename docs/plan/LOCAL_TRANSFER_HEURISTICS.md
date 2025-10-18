@@ -119,7 +119,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 ## 7. Worker & Buffer Tuning (No `--ludicrous-speed`)
 
-- Remove `--ludicrous-speed` semantics from CLI; the planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU.
+- Remove `--ludicrous-speed` flag entirely; the planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU.
 - Default worker count = `num_cpus::get()` (with safeguards for hyper-threaded vs. physical cores). Upper bound clamps to 16 by default but adapts if the machine proves capable.
 - Optional debug flag `--max-threads N` (or env `BLIT_MAX_THREADS=N`) caps worker count for testing or constrained environments. Not required for normal use.
 - Buffer sizing logic evaluates run-time conditions (e.g., detect memory pressure via `sysinfo`) to avoid over-allocating on small systems.
@@ -144,7 +144,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
    - Implement 10 s stall detection with clear user-facing errors.
    - Add progress messages under `--verbose`.
 6. **CLI Cleanup**
-   - Deprecate `--ludicrous-speed`; keep accepting it as no-op for compatibility until CLI v2 lands.
+   - Remove `--ludicrous-speed`; no compatibility shim required prior to CLI v2.
    - Document optional debug overrides.
 7. **Testing & Benchmarks**
    - Unit tests for fast-path routing, predictor updates, stall detection.

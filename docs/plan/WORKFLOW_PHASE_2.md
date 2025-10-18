@@ -15,7 +15,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 
 ## Guiding Principles
 
-1. **No user tunables** – `--ludicrous-speed` becomes a no-op; planner owns performance decisions.
+1. **No user tunables** – `--ludicrous-speed` flag removed; planner owns performance decisions.
 2. **Telemetry stays local** – JSONL log under config dir, capped to ~1 MiB, with optional opt-out.
 3. **Documentation-first** – Update plan/docs/DEVLOG as tasks complete to survive context resets.
 

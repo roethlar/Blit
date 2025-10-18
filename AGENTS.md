@@ -36,4 +36,4 @@
 ## Agent-Specific Expectations
 - After meaningful work, update `TODO.md`, appropriate `docs/plan/WORKFLOW_PHASE_{N}.md` document, and `DEVLOG.md` so other agents can resume quickly.
 - Persist session context via Serena memories (`write_memory`) when the platform is available, especially before resets or restarts.
-- Use MCP tools whenever possible and appropriate.
+- Use MCP tools to edit and read files whenever possible.
