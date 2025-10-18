@@ -74,6 +74,7 @@ pub struct LocalMirrorSummary {
 const TINY_FILE_LIMIT: usize = 8;
 const TINY_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 const HUGE_SINGLE_BYTES: u64 = 1024 * 1024 * 1024;
+const PREDICT_STREAMING_THRESHOLD_MS: f64 = 1_000.0;
 
 enum FastPathDecision {
     NoWork,
@@ -98,6 +99,7 @@ fn maybe_select_fast_path(
     src_root: &Path,
     dest_root: &Path,
     options: &LocalMirrorOptions,
+    predictor: Option<&PerformancePredictor>,
 ) -> Result<Option<FastPathDecision>> {
     if options.mirror || options.checksum || options.force_tar {
         return Ok(None);
@@ -110,6 +112,12 @@ fn maybe_select_fast_path(
     if options.include_symlinks {
         enumerator = enumerator.include_symlinks(true);
     }
+
+    let mode = if options.mirror {
+        TransferMode::Mirror
+    } else {
+        TransferMode::Copy
+    };
 
     let planner = MirrorPlanner::new(options.checksum);
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
@@ -175,7 +183,13 @@ fn maybe_select_fast_path(
     }
 
     if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
-        return Ok(Some(FastPathDecision::Tiny { files }));
+        let use_fast_path = predictor
+            .and_then(|p| p.predict_planner_ms(mode.clone(), None, files.len(), total_bytes))
+            .map(|(ms, observations)| observations == 0 || ms > PREDICT_STREAMING_THRESHOLD_MS)
+            .unwrap_or(true);
+        if use_fast_path {
+            return Ok(Some(FastPathDecision::Tiny { files }));
+        }
     }
 
     if let Some((file, size)) = huge_candidate {
@@ -227,7 +241,9 @@ impl TransferOrchestrator {
             None
         };
 
-        if let Some(decision) = maybe_select_fast_path(src_root, dest_root, &options)? {
+        if let Some(decision) =
+            maybe_select_fast_path(src_root, dest_root, &options, predictor.as_ref())?
+        {
             let summary = match decision {
                 FastPathDecision::NoWork => {
                     if options.verbose {

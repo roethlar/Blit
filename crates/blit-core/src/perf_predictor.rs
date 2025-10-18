@@ -98,6 +98,20 @@ impl ProfileKey {
             fast_path: record.fast_path.clone(),
         }
     }
+
+    fn from_components(
+        source_fs: Option<String>,
+        dest_fs: Option<String>,
+        mode: TransferMode,
+        fast_path: Option<&str>,
+    ) -> Self {
+        Self {
+            source_fs,
+            dest_fs,
+            mode,
+            fast_path: fast_path.map(|s| s.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +164,22 @@ impl PerformancePredictor {
         profile
             .coefficients
             .predict_ms(record.file_count, record.total_bytes)
+    }
+
+    pub fn predict_planner_ms(
+        &self,
+        mode: TransferMode,
+        fast_path: Option<&str>,
+        file_count: usize,
+        total_bytes: u64,
+    ) -> Option<(f64, u64)> {
+        let key = ProfileKey::from_components(None, None, mode, fast_path);
+        self.state.profiles.get(&key).map(|profile| {
+            (
+                profile.coefficients.predict_ms(file_count, total_bytes),
+                profile.observations,
+            )
+        })
     }
 
     pub fn observe(&mut self, record: &PerformanceRecord) {

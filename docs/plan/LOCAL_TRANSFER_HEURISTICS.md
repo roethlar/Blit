@@ -64,6 +64,8 @@ These are deterministic decisions made before streaming begins:
 
 These heuristics are internal; users continue to run `blit copy` / `blit mirror` with no additional flags.
 
+*Tiny manifest fast path is additionally gated by the predictor: once a profile has observations, we only bypass streaming when predicted planning time exceeds 1 s; with no history we default to fast-path for the initial runs.*
+
 ---
 
 ## 5. Performance History (Local Only)
@@ -99,7 +101,8 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 ### 6.2 Routing Decisions
 
 - If predicted planning_ms ≤ 1000 ms: enter streaming planner immediately.
-- If predicted planning_ms > 1000 ms *but* fast-path conditions are met (Section 4), use fast-path.
+- If predicted planning_ms > 1000 ms *and* fast-path conditions are met (Section 4), use fast-path.
+- When no historical data exists for a profile, default to heuristics and log the first observation.
 - If predicted planning_ms > 1000 ms and no fast-path applies, still enter streaming planner but emit a verbose warning (`expected planning time >1s; continuing due to mirror/checksum requirements`).
 
 ### 6.3 Self-Correction

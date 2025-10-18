@@ -79,7 +79,7 @@ crates/blit-cli/src/main.rs
 - ✅ `TransferOrchestrator` with heartbeat, stall detection, mirror deletions
 - ✅ Fast-path routing for tiny manifests and single huge files
 - ✅ Local performance history writer wired into orchestrator (JSONL, capped, env toggle)
-- ✅ Predictor state scaffold (`perf_predictor.rs`) loading/saving coefficients and updated after each run
+- ✅ Predictor state scaffold (`perf_predictor.rs`) loading/saving coefficients; tiny fast path now uses predictions once observations exist
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 
 **Remaining Work**:
