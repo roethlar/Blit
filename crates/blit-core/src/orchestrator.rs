@@ -205,8 +205,16 @@ fn maybe_select_fast_path(
         return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork, None));
     }
 
-    let prediction =
-        predictor.and_then(|p| p.predict_planner_ms(mode.clone(), None, files.len(), total_bytes));
+    let prediction = predictor.and_then(|p| {
+        p.predict_planner_ms(
+            mode.clone(),
+            None,
+            options.skip_unchanged,
+            options.checksum,
+            files.len(),
+            total_bytes,
+        )
+    });
 
     if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
         let use_fast_path = prediction
@@ -618,9 +626,7 @@ fn apply_local_deletions(
                     }
                 }
                 Err(err) => {
-                    if verbose {
-                        eprintln!("Failed to delete file {}: {}", path.display(), err);
-                    }
+                    eprintln!("Failed to delete file {}: {}", path.display(), err);
                 }
             }
         } else {
@@ -641,9 +647,7 @@ fn apply_local_deletions(
                     }
                 }
                 Err(err) => {
-                    if verbose {
-                        eprintln!("Failed to delete directory {}: {}", path.display(), err);
-                    }
+                    eprintln!("Failed to delete directory {}: {}", path.display(), err);
                 }
             }
         } else {

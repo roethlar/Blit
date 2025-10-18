@@ -4,6 +4,7 @@
 //! config directory. The data stays on-device and can be disabled via
 //! `BLIT_DISABLE_PERF_HISTORY=1`.
 
+use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -167,6 +168,8 @@ fn history_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("perf_local.jsonl"))
 }
 
+/// Best-effort rotation that prefers keeping the newest records over enforcing the cap exactly.
+/// If a concurrent writer appends while we're trimming, we skip rotation to avoid data loss.
 fn enforce_size_cap(path: &Path, max_bytes: u64) -> Result<()> {
     let metadata = match fs::metadata(path) {
         Ok(meta) => meta,
@@ -178,30 +181,53 @@ fn enforce_size_cap(path: &Path, max_bytes: u64) -> Result<()> {
         return Ok(());
     }
 
+    // Capture the size we observed so we can detect concurrent appends.
+    let observed_len = metadata.len();
+
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut lines: Vec<String> = reader
+    let mut lines: VecDeque<String> = reader
         .lines()
-        .collect::<std::result::Result<_, _>>()
-        .context("read performance history for rotation")?;
+        .collect::<std::result::Result<Vec<String>, _>>()
+        .context("read performance history for rotation")?
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
 
     if lines.is_empty() {
         return Ok(());
     }
 
-    // Keep trimming from the front until we're under the cap.
-    while lines.len() > 1 && estimated_size(&lines) > max_bytes as usize {
-        lines.remove(0);
+    let mut total_size: usize = lines.iter().map(|l| l.len() + 1).sum();
+    let mut trimmed = false;
+
+    while lines.len() > 1 && total_size > max_bytes as usize {
+        if let Some(front) = lines.pop_front() {
+            total_size -= front.len() + 1;
+            trimmed = true;
+        }
     }
 
-    let mut file = File::create(path).context("rewrite performance history during rotation")?;
+    if !trimmed {
+        // Either the file already fits under the cap or a single entry is larger than the cap.
+        return Ok(());
+    }
+
+    // If another process appended between our stat and trimming pass, skip rotation to avoid
+    // clobbering newer records. We'll enforce the cap on the next write.
+    let current_len = fs::metadata(path)?.len();
+    if current_len > observed_len {
+        return Ok(());
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .context("truncate performance history during rotation")?;
+
     for line in lines {
         writeln!(file, "{line}")?;
     }
     Ok(())
-}
-
-fn estimated_size(lines: &[String]) -> usize {
-    // Rough estimate including newline per line.
-    lines.iter().map(|l| l.len() + 1).sum()
 }

@@ -89,6 +89,8 @@ struct ProfileKey {
     dest_fs: Option<String>,
     mode: TransferMode,
     fast_path: Option<String>,
+    skip_unchanged: bool,
+    checksum: bool,
 }
 
 impl ProfileKey {
@@ -98,6 +100,8 @@ impl ProfileKey {
             dest_fs: record.dest_fs.clone(),
             mode: record.mode.clone(),
             fast_path: record.fast_path.clone(),
+            skip_unchanged: record.options.skip_unchanged,
+            checksum: record.options.checksum,
         }
     }
 
@@ -106,12 +110,16 @@ impl ProfileKey {
         dest_fs: Option<String>,
         mode: TransferMode,
         fast_path: Option<&str>,
+        skip_unchanged: bool,
+        checksum: bool,
     ) -> Self {
         Self {
             source_fs,
             dest_fs,
             mode,
             fast_path: fast_path.map(|s| s.to_string()),
+            skip_unchanged,
+            checksum,
         }
     }
 }
@@ -172,10 +180,13 @@ impl PerformancePredictor {
         &self,
         mode: TransferMode,
         fast_path: Option<&str>,
+        skip_unchanged: bool,
+        checksum: bool,
         file_count: usize,
         total_bytes: u64,
     ) -> Option<(f64, u64)> {
-        let key = ProfileKey::from_components(None, None, mode, fast_path);
+        let key =
+            ProfileKey::from_components(None, None, mode, fast_path, skip_unchanged, checksum);
         self.state.profiles.get(&key).map(|profile| {
             (
                 profile.coefficients.predict_ms(file_count, total_bytes),

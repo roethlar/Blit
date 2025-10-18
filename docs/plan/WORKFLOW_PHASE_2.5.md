@@ -10,18 +10,24 @@
 
 Phase 2.5 is a **mandatory quality gate** that must pass before proceeding to Phase 3. This phase validates that the v2 architecture can achieve acceptable performance for local operations before investing in network features.
 
-### Current Benchmark Snapshot (2025-10-16 — 2025-10-17)
+### Current Benchmark Snapshot (updated 2025-10-18)
 
-- Script: `scripts/bench_local_mirror.sh` (builds v1/v2, mirrors a randomized dataset)
-- Run command: `SIZE_MB=128 scripts/bench_local_mirror.sh`
-- Result 2025-10-16 (pre-optimization): v1 mirror 0.269 s, v2 mirror 0.519 s (v2 ≈ 1.93× slower)
-- Result 2025-10-17 (skip-unchanged sequential threshold, reuse source entries for deletions): v1 mirror 0.267 s, v2 mirror **0.266–0.286 s** (median ratio ≈0.99)
-- Status: **IN PROGRESS** – Large-file workload now within parity window; small-file and mixed scenarios still need benchmarking before declaring GO
+- **Harness**: `scripts/bench_local_mirror.sh` (macOS/Linux) + `scripts/windows/bench-local-mirror.ps1` (Windows); now v2-only with rsync/robocopy baselines.
+- **macOS (2025-10-18, `SIZE_MB=512`, 1 warmup, 5 runs)**  
+  - `blit-cli mirror`: **0.275 s avg** (log ephemeral; command output captured in session)  
+  - `rsync -a --delete`: 0.605 s avg  
+  - **Result**: v2 outperforms rsync (~220% of baseline throughput) — meets Phase 2.5 threshold for this workload.
+- **Windows (2025-10-18, `SizeMB=256`, 1 warmup, 5 runs)**  
+  - `blit-cli mirror`: **1.087 s avg**  
+  - `robocopy /MIR`: 0.405 s avg  
+  - Log: `logs/bench.log` (preserved at the time of run)  
+  - **Result**: v2 is ~2.68× slower than robocopy — **fails** the ≥95% parity gate on Windows.
+- Earlier 2025-10-16/17 v1 comparisons remain referenced for historical context; up-to-date parity evaluation now uses the platform-native tools as proxies for v1 performance until the legacy binary is available.
 
 Follow-up actions:
-1. Profile the new `TransferOrchestrator`/transfer façade to identify hot spots.
-2. Compare worker scheduling and buffer sizes against the legacy v1 implementation.
-3. Re-run the benchmark after optimizations and update this document with new ratios.
+1. Deep-dive Windows hot paths (robocopy delta) — capture ETW traces, inspect worker copy strategy, and compare filesystem API usage.
+2. Re-run macOS + Windows suites after fixes (same scripts/flags) and record new ratios.
+3. Extend coverage to small-file + mixed datasets once Windows parity is recovered.
 
 ### Critical Decision Point
 
@@ -40,9 +46,10 @@ This phase produces a **GO/NO-GO decision**:
 
 | Metric | Target | Status |
 |--------|--------|--------|
-| Large file (4GiB) | ≥95% of v1 speed | ✅ 2025-10-17: v1 0.267 s, v2 0.266–0.286 s (median ratio ≈0.99); continue spot checks |
-| 100k small files | ≥95% of v1 speed | ⏳ |
-| Mixed workload | ≥95% of v1 speed | ⏳ |
+| Large file (NVMe → NVMe, macOS 512 MiB) | ≥95% of baseline | ✅ `blit-cli` 0.275 s vs `rsync` 0.605 s (220% of baseline) |
+| Large file (NVMe → NVMe, Windows 256 MiB) | ≥95% of baseline | ❌ `blit-cli` 1.087 s vs `robocopy` 0.405 s (37% of baseline) |
+| 100k small files | ≥95% of baseline | ⏳ |
+| Mixed workload | ≥95% of baseline | ⏳ |
 | Memory usage | ≤110% of v1 | ⏳ |
 | CPU utilization | Reasonable (subjective) | ⏳ |
 

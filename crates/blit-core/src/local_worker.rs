@@ -113,9 +113,7 @@ async fn local_worker_loop(
         });
 
         if let Err(err) = result {
-            if progress {
-                eprintln!("[w{idx}] error: {err}");
-            }
+            eprintln!("[w{idx}] error: {err}");
         }
 
         remaining.fetch_sub(1, Relaxed);
