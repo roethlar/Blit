@@ -62,39 +62,25 @@ try {
         cargo build --release --bin blit-cli 2>&1 | Tee-Object -FilePath $logFile -Append
     } finally { Pop-Location }
 
-    $hyperfine = Get-Command hyperfine -ErrorAction SilentlyContinue
-
-    if ($null -eq $hyperfine) {
-        Write-Host "hyperfine not found; running sequential timings"
-
-        function Measure-Step {
-            param(
-                [string]$Label,
-                [scriptblock]$Command
-            )
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            & $Command
-            $sw.Stop()
-            $msg = "{0}: {1:N3} s" -f $Label, $sw.Elapsed.TotalSeconds
-            $msg | Tee-Object -FilePath $logFile -Append
-        }
-
-        Remove-Item $dstV1 -Recurse -Force -ErrorAction SilentlyContinue
-        [System.IO.Directory]::CreateDirectory($dstV1) | Out-Null
-        Measure-Step "v1 mirror" { & $v1Bin mirror $srcDir $dstV1 --ludicrous-speed }
-
-        Remove-Item $dstV2 -Recurse -Force -ErrorAction SilentlyContinue
-        [System.IO.Directory]::CreateDirectory($dstV2) | Out-Null
-        Measure-Step "v2 mirror" { & $v2Bin mirror $srcDir $dstV2 }
-    } else {
-        Write-Host "Running hyperfine benchmarks" | Tee-Object -FilePath $logFile -Append
-        & $hyperfine \
-            --warmup 1 \
-            --prepare "Remove-Item '$dstV1' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path '$dstV1' >\$null" \
-            "$v1Bin mirror '$srcDir' '$dstV1' --ludicrous-speed" \
-            --prepare "Remove-Item '$dstV2' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path '$dstV2' >\$null" \
-            "$v2Bin mirror '$srcDir' '$dstV2'" | Tee-Object -FilePath $logFile -Append
+    function Measure-Step {
+        param(
+            [string]$Label,
+            [scriptblock]$Command
+        )
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        & $Command
+        $sw.Stop()
+        $msg = "{0}: {1:N3} s" -f $Label, $sw.Elapsed.TotalSeconds
+        $msg | Tee-Object -FilePath $logFile -Append
     }
+
+    Remove-Item $dstV1 -Recurse -Force -ErrorAction SilentlyContinue
+    [System.IO.Directory]::CreateDirectory($dstV1) | Out-Null
+    Measure-Step "v1 mirror" { & $v1Bin mirror $srcDir $dstV1 --ludicrous-speed }
+
+    Remove-Item $dstV2 -Recurse -Force -ErrorAction SilentlyContinue
+    [System.IO.Directory]::CreateDirectory($dstV2) | Out-Null
+    Measure-Step "v2 mirror" { & $v2Bin mirror $srcDir $dstV2 }
 
     Write-Host "Benchmark artefacts stored in: $workRoot"
     Write-Host "Log file: $logFile"
