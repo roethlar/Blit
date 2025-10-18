@@ -119,6 +119,34 @@ pub fn append_local_record(record: &PerformanceRecord) -> Result<()> {
     Ok(())
 }
 
+pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
+    let path = history_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = File::open(&path)?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<PerformanceRecord>(&line) {
+            records.push(record);
+        }
+    }
+
+    if limit == 0 || records.len() <= limit {
+        return Ok(records);
+    }
+
+    let start = records.len().saturating_sub(limit);
+    Ok(records[start..].to_vec())
+}
+
 fn perf_history_disabled() -> bool {
     env::var(DISABLE_ENV)
         .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
