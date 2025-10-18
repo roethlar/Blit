@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -234,4 +236,14 @@ impl PerformancePredictor {
 
 fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / 1_048_576.0
+}
+
+#[cfg(test)]
+impl PerformancePredictor {
+    pub fn for_tests(dir: &Path) -> Self {
+        Self {
+            state: PredictorState::new(),
+            path: dir.join(STATE_FILENAME),
+        }
+    }
 }

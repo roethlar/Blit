@@ -665,3 +665,94 @@ fn update_predictor(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
+    use crate::perf_predictor::PerformancePredictor;
+    use anyhow::Result;
+    use tempfile::tempdir;
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn tiny_fast_path_without_history_prefers_fastpath() -> Result<()> {
+        let _guard = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
+        let temp = tempdir()?;
+        let src = temp.path().join("src");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&src)?;
+        std::fs::create_dir_all(&dest)?;
+        std::fs::write(src.join("file.txt"), b"hello")?;
+
+        let options = LocalMirrorOptions::default();
+        let decision = maybe_select_fast_path(&src, &dest, &options, None)?;
+        assert!(matches!(decision, Some(FastPathDecision::Tiny { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn tiny_fast_path_uses_predictor_when_history_exists() -> Result<()> {
+        let _guard = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
+        let temp = tempdir()?;
+        let src = temp.path().join("src");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&src)?;
+        std::fs::create_dir_all(&dest)?;
+        std::fs::write(src.join("file.txt"), b"hello")?;
+
+        let mut predictor = PerformancePredictor::for_tests(temp.path());
+        let snapshot = OptionSnapshot {
+            dry_run: false,
+            preserve_symlinks: true,
+            include_symlinks: true,
+            skip_unchanged: true,
+            checksum: false,
+            workers: 4,
+        };
+        let record = PerformanceRecord::new(
+            TransferMode::Copy,
+            None,
+            None,
+            2,
+            256,
+            snapshot,
+            None,
+            100,
+            1_000,
+            0,
+            0,
+        );
+        predictor.observe(&record);
+
+        let options = LocalMirrorOptions::default();
+        let decision = maybe_select_fast_path(&src, &dest, &options, Some(&predictor))?;
+        assert!(
+            decision.is_none(),
+            "predictor should keep streaming path when predicted planning is fast"
+        );
+        Ok(())
+    }
+}

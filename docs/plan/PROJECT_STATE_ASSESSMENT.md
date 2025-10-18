@@ -80,12 +80,13 @@ crates/blit-cli/src/main.rs
 - ✅ Fast-path routing for tiny manifests and single huge files
 - ✅ Local performance history writer wired into orchestrator (JSONL, capped, env toggle)
 - ✅ Predictor state scaffold (`perf_predictor.rs`) loading/saving coefficients; tiny fast path now uses predictions once observations exist
+- ✅ Unit tests covering fast-path predictor gating (`orchestrator::tests`)
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
 - [ ] CLI progress UX + flag cleanup
-- [ ] Unit/integration coverage for fast-path routing and predictor heuristics
+- [ ] Broader integration coverage for fast-path and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios
 - [ ] Benchmark performance history warm-up impact (run 1 vs. 10 vs. 100) and capture results in docs
 
