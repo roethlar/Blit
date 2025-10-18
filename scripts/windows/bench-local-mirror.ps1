@@ -21,12 +21,9 @@ $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("blit_v2_bench_$guid")
 [System.IO.Directory]::CreateDirectory($workRoot) | Out-Null
 
 $srcDir = Join-Path $workRoot "src"
-$dstDir = Join-Path $workRoot "dst_blit"
 $logFile = Join-Path $workRoot "bench.log"
 
-foreach ($dir in @($srcDir, $dstDir)) {
-    [System.IO.Directory]::CreateDirectory($dir) | Out-Null
-}
+[System.IO.Directory]::CreateDirectory($srcDir) | Out-Null
 New-Item -Path $logFile -ItemType File -Force | Out-Null
 
 function Write-Log {
@@ -96,64 +93,131 @@ try {
         Write-Log "Perf history env already set to '$previousPerf'."
     }
 
-    function Invoke-BlitRun {
+    $toolNames = New-Object System.Collections.Generic.List[string]
+    $toolDest = @{}
+    $toolLabel = @{}
+    $toolSum = @{}
+    $toolCount = @{}
+
+    $dstBlit = Join-Path $workRoot "dst_blit"
+    $toolNames.Add("blit")
+    $toolDest["blit"] = $dstBlit
+    $toolLabel["blit"] = "blit v2 mirror"
+    $toolSum["blit"] = 0.0
+    $toolCount["blit"] = 0
+
+    if (Get-Command robocopy -ErrorAction SilentlyContinue) {
+        $dstRobocopy = Join-Path $workRoot "dst_robocopy"
+        $toolNames.Add("robocopy")
+        $toolDest["robocopy"] = $dstRobocopy
+        $toolLabel["robocopy"] = "robocopy /MIR"
+        $toolSum["robocopy"] = 0.0
+        $toolCount["robocopy"] = 0
+    } else {
+        Write-Log "robocopy not found; skipping robocopy baseline."
+    }
+
+    function Invoke-ToolCommand {
         param(
+            [string]$Tool,
+            [string]$Source,
+            [string]$Destination,
+            [string]$Binary
+        )
+
+        switch ($Tool) {
+            "blit" {
+                $output = & $Binary mirror $Source $Destination --no-progress 2>&1
+                $exitCode = $LASTEXITCODE
+            }
+            "robocopy" {
+                $args = @($Source, $Destination, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
+                $output = & robocopy @args 2>&1
+                $code = $LASTEXITCODE
+                $exitCode = if ($code -ge 8) { $code } else { 0 }
+            }
+            default {
+                throw "Unknown tool: $Tool"
+            }
+        }
+
+        return [pscustomobject]@{
+            Output = $output
+            ExitCode = $exitCode
+        }
+    }
+
+    function Invoke-ToolRun {
+        param(
+            [string]$Tool,
             [string]$Phase,
             [int]$Index,
             [int]$Total,
-            [string]$Binary,
             [string]$Source,
-            [string]$Destination
+            [string]$Destination,
+            [string]$Binary,
+            [hashtable]$LabelMap,
+            [hashtable]$SumMap,
+            [hashtable]$CountMap
         )
 
         if (Test-Path $Destination) {
             Remove-Item $Destination -Recurse -Force -ErrorAction SilentlyContinue
         }
         [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
-        Write-Log ("{0} run {1}/{2}: mirror -> {3}" -f $Phase, $Index, $Total, $Destination)
+        $label = $LabelMap[$Tool]
+        Write-Log ("[{0}] {1} run {2}/{3}: mirror -> {4}" -f $label, $Phase, $Index, $Total, $Destination)
 
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $cmdOutput = & $Binary mirror $Source $Destination --no-progress 2>&1
-        $exitCode = $LASTEXITCODE
-        if ($cmdOutput) {
-            foreach ($line in $cmdOutput) {
-                Write-Host $line
-                Add-Content -Path $logFile -Value $line
-            }
-        }
+        $result = Invoke-ToolCommand -Tool $Tool -Source $Source -Destination $Destination -Binary $Binary
         $sw.Stop()
 
-        if ($exitCode -ne 0) {
-            throw "blit-cli exited with $exitCode during $Phase run $Index."
+        if ($result.Output) {
+            foreach ($line in $result.Output) {
+                if ($null -ne $line) {
+                    Write-Host $line
+                    Add-Content -Path $logFile -Value $line
+                }
+            }
         }
 
-        $elapsed = "{0:N3}" -f $sw.Elapsed.TotalSeconds
-        Write-Log ("{0} run {1} completed in {2} s" -f $Phase, $Index, $elapsed)
-        return $sw.Elapsed.TotalSeconds
-    }
+        if ($result.ExitCode -ne 0) {
+            throw "$label exited with $($result.ExitCode) during $Phase run $Index."
+        }
 
-    $measurements = @()
+        $elapsed = $sw.Elapsed.TotalSeconds
+        Write-Log ("[{0}] {1} run {2} completed in {3:N3} s" -f $label, $Phase, $Index, $elapsed)
 
-    if ($Warmup -gt 0) {
-        Write-Log "Warmup runs: $Warmup"
-        for ($i = 1; $i -le $Warmup; $i++) {
-            Invoke-BlitRun -Phase "Warmup" -Index $i -Total $Warmup -Binary $blitBin -Source $srcDir -Destination $dstDir | Out-Null
+        if ($Phase -eq "Measured") {
+            $SumMap[$Tool] = $SumMap[$Tool] + $elapsed
+            $CountMap[$Tool] = $CountMap[$Tool] + 1
         }
     }
 
-    if ($Runs -gt 0) {
-        Write-Log "Measured runs: $Runs"
-        for ($i = 1; $i -le $Runs; $i++) {
-            $duration = Invoke-BlitRun -Phase "Measured" -Index $i -Total $Runs -Binary $blitBin -Source $srcDir -Destination $dstDir
-            $measurements += $duration
+    foreach ($tool in $toolNames) {
+        if ($Warmup -gt 0) {
+            Write-Log ("[{0}] Warmup runs: {1}" -f $toolLabel[$tool], $Warmup)
+            for ($i = 1; $i -le $Warmup; $i++) {
+                Invoke-ToolRun -Tool $tool -Phase "Warmup" -Index $i -Total $Warmup -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount | Out-Null
+            }
         }
-    } else {
-        Write-Log "No measured runs requested (Runs=0)."
+
+        if ($Runs -gt 0) {
+            Write-Log ("[{0}] Measured runs: {1}" -f $toolLabel[$tool], $Runs)
+            for ($i = 1; $i -le $Runs; $i++) {
+                Invoke-ToolRun -Tool $tool -Phase "Measured" -Index $i -Total $Runs -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount
+            }
+        } else {
+            Write-Log ("[{0}] No measured runs requested (Runs=0)." -f $toolLabel[$tool])
+        }
     }
 
-    if ($measurements.Length -gt 0) {
-        $avg = ($measurements | Measure-Object -Average).Average
-        Write-Log ("Average over {0} measured run(s): {1:N3} s" -f $measurements.Length, $avg)
+    foreach ($tool in $toolNames) {
+        $count = $toolCount[$tool]
+        if ($count -gt 0) {
+            $avg = $toolSum[$tool] / $count
+            Write-Log ("Average [{0}] over {1} measured run(s): {2:N3} s" -f $toolLabel[$tool], $count, $avg)
+        }
     }
 
     Write-Log "Benchmark complete. Log: $logFile"

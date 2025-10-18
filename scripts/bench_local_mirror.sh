@@ -11,10 +11,8 @@ KEEP_WORK=${KEEP_BENCH_DIR:-1}
 WORK_ROOT=${BENCH_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/blit_v2_bench.XXXXXX")}
 
 SRC_DIR="$WORK_ROOT/src"
-DST_DIR="$WORK_ROOT/dst_blit"
 LOG_FILE="$WORK_ROOT/bench.log"
-
-mkdir -p "$SRC_DIR" "$DST_DIR"
+mkdir -p "$SRC_DIR"
 : >"$LOG_FILE"
 set -o pipefail
 
@@ -85,63 +83,97 @@ else
   log "Perf history env already set to '$BLIT_DISABLE_PERF_HISTORY'."
 fi
 
-prepare_dest() {
-  rm -rf "$DST_DIR"
-  mkdir -p "$DST_DIR"
+declare -a TOOL_NAMES=()
+declare -A TOOL_DEST
+declare -A TOOL_LABEL
+declare -A TOOL_SUM_NS
+declare -A TOOL_COUNT
+
+DST_BLIT="$WORK_ROOT/dst_blit"
+TOOL_NAMES+=("blit")
+TOOL_DEST["blit"]="$DST_BLIT"
+TOOL_LABEL["blit"]="blit v2 mirror"
+TOOL_SUM_NS["blit"]=0
+TOOL_COUNT["blit"]=0
+
+if command -v rsync >/dev/null 2>&1; then
+  DST_RSYNC="$WORK_ROOT/dst_rsync"
+  TOOL_NAMES+=("rsync")
+  TOOL_DEST["rsync"]="$DST_RSYNC"
+  TOOL_LABEL["rsync"]="rsync -a --delete"
+  TOOL_SUM_NS["rsync"]=0
+  TOOL_COUNT["rsync"]=0
+else
+  log "rsync not found; skipping rsync baseline."
+fi
+
+run_tool_command() {
+  local tool=$1 dest=$2
+  case "$tool" in
+    blit)
+      env BLIT_DISABLE_PERF_HISTORY="$BLIT_DISABLE_PERF_HISTORY" \
+        "$BLIT_BIN" mirror --no-progress "$SRC_DIR" "$dest"
+      ;;
+    rsync)
+      rsync -a --delete --human-readable --stats --no-inc-recursive \
+        "$SRC_DIR/" "$dest/"
+      ;;
+    *)
+      echo "unknown tool: $tool" >&2
+      return 1
+      ;;
+  esac
 }
 
-RUN_ONCE_LAST_NS=0
-
 run_once() {
-  local phase=$1
-  local index=$2
-  prepare_dest
-  log "$phase run $index: mirror -> $DST_DIR"
+  local tool=$1
+  local phase=$2
+  local index=$3
+  local total=$4
+  local dest=${TOOL_DEST[$tool]}
+
+  rm -rf "$dest"
+  mkdir -p "$dest"
+
+  local label=${TOOL_LABEL[$tool]}
+  log "[$label] $phase run $index/$total -> $dest"
   local start_ns end_ns elapsed_ns elapsed_s status
   start_ns=$(date +%s%N)
-  "$BLIT_BIN" mirror --no-progress "$SRC_DIR" "$DST_DIR" 2>&1 | tee -a "$LOG_FILE"
+  run_tool_command "$tool" "$dest" 2>&1 | tee -a "$LOG_FILE"
   status=${PIPESTATUS[0]}
   end_ns=$(date +%s%N)
   if [[ $status -ne 0 ]]; then
-    log "error: blit-cli exited with status $status"
+    log "error: $label exited with status $status"
     exit $status
   fi
   elapsed_ns=$((end_ns - start_ns))
   elapsed_s=$(awk "BEGIN { printf \"%.3f\", $elapsed_ns/1e9 }")
-  log "$phase run $index completed in ${elapsed_s}s"
-  RUN_ONCE_LAST_NS=$elapsed_ns
+  log "[$label] $phase run $index completed in ${elapsed_s}s"
+
+  if [[ "$phase" == "Measured" ]]; then
+    TOOL_SUM_NS["$tool"]=$(( ${TOOL_SUM_NS[$tool]} + elapsed_ns ))
+    TOOL_COUNT["$tool"]=$(( ${TOOL_COUNT[$tool]} + 1 ))
+  fi
 }
 
-declare -a MEASURED_NS=()
-
-if command -v hyperfine >/dev/null 2>&1; then
-  log "Running hyperfine benchmark (runs=$RUNS, warmup=$WARMUP)..."
-  prepare_cmd=$(printf "rm -rf '%s' && mkdir -p '%s'" "$DST_DIR" "$DST_DIR")
-  blit_cmd=$(printf "env BLIT_DISABLE_PERF_HISTORY=%q %q mirror --no-progress %q %q" \
-    "$BLIT_DISABLE_PERF_HISTORY" "$BLIT_BIN" "$SRC_DIR" "$DST_DIR")
-  hyperfine \
-    --warmup "$WARMUP" \
-    --runs "$RUNS" \
-    --prepare "$prepare_cmd" \
-    "$blit_cmd" | tee -a "$LOG_FILE"
-else
-  log "hyperfine not found; running sequential timings (runs=$RUNS, warmup=$WARMUP)"
+log "Running warmups (runs=$WARMUP) and measured passes (runs=$RUNS)..."
+for tool in "${TOOL_NAMES[@]}"; do
   for ((i = 1; i <= WARMUP; i++)); do
-    run_once "Warmup" "$i/$WARMUP" >/dev/null
+    run_once "$tool" "Warmup" "$i" "$WARMUP" >/dev/null
   done
   for ((i = 1; i <= RUNS; i++)); do
-    run_once "Measured" "$i/$RUNS"
-    MEASURED_NS+=("$RUN_ONCE_LAST_NS")
+    run_once "$tool" "Measured" "$i" "$RUNS"
   done
-fi
+done
 
-if (( ${#MEASURED_NS[@]} > 0 )); then
-  total_ns=0
-  for ns in "${MEASURED_NS[@]}"; do
-    total_ns=$((total_ns + ns))
-  done
-  avg_s=$(awk "BEGIN { printf \"%.3f\", $total_ns/${#MEASURED_NS[@]}/1e9 }")
-  log "Average over ${#MEASURED_NS[@]} measured run(s): ${avg_s}s"
-fi
+for tool in "${TOOL_NAMES[@]}"; do
+  count=${TOOL_COUNT[$tool]}
+  if (( count > 0 )); then
+    sum_ns=${TOOL_SUM_NS[$tool]}
+    avg_s=$(awk "BEGIN { printf \"%.3f\", $sum_ns/$count/1e9 }")
+    label=${TOOL_LABEL[$tool]}
+    log "Average [$label] over $count measured run(s): ${avg_s}s"
+  fi
+done
 
 log "Benchmark complete. Full log: $LOG_FILE"

@@ -82,7 +82,7 @@ crates/blit-cli/src/main.rs
 - ✅ Predictor state scaffold (`perf_predictor.rs`) loading/saving coefficients; tiny fast path now uses predictions once observations exist
 - ✅ Unit tests covering fast-path predictor gating (`orchestrator::tests`)
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
-- ✅ Local benchmark harnesses (macOS/Linux + Windows) updated to run v2-only binaries with perf-history disabled by default
+- ✅ Local benchmark harnesses (macOS/Linux + Windows) run v2-only binaries with perf-history disabled and include rsync/robocopy baselines
 
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
