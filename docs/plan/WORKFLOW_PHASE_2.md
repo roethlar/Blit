@@ -37,7 +37,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 | 2.2.1 | Implement local performance history writer (capped JSONL). | `perf_history.rs` with rotate-on-size logic. |
 | 2.2.2 | Build EMA-based predictor segmented by filesystem profile. | Predictor struct + serde (for persistence). |
 | 2.2.3 | Integrate predictor into orchestrator routing decisions. | Orchestrator chooses streaming vs. fast-path based on prediction. |
-| 2.2.4 | Add `blit diagnostics perf` CLI command. | Command prints recent runs + stats. |
+| 2.2.4 | Add `blit diagnostics perf` CLI command. | ✅ Command prints recent runs + stats. |
 
 **Note:** Final release toggle (enabled by default vs. opt-in) will be decided from benchmark evidence; once committed, the setting remains stable across releases.
 
@@ -87,7 +87,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 ## Exit Checklist (Phase 2 Complete)
 
 - [ ] Streaming planner + heartbeat + stall detector merged.
-- [ ] Telemetry/predictor integrated; diagnostics command works.
+- [x] Performance history/predictor integrated; diagnostics command works.
 - [ ] CLI progress indicator + flag cleanup in place.
 - [ ] New unit/integration tests pass; CI green.
 - [ ] Benchmarks executed and recorded in Phase 2.5 doc.

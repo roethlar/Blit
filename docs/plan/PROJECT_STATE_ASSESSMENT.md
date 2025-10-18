@@ -83,7 +83,7 @@ crates/blit-cli/src/main.rs
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 
 **Remaining Work**:
-- [ ] Telemetry + predictor + diagnostics command
+- [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
 - [ ] CLI progress UX + flag cleanup
 - [ ] Unit/integration coverage for fast-path routing and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios

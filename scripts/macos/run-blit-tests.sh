@@ -35,4 +35,5 @@ run_step() {
 run_step "cargo fmt -- --check" cargo fmt -- --check
 run_step "cargo check" cargo check
 run_step "cargo test -p blit-core" cargo test -p blit-core
+run_step "cargo test -p blit-cli" cargo test -p blit-cli
 run_step "cargo test workspace" cargo test

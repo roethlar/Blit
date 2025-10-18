@@ -32,7 +32,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Refactor `TransferFacade` and planner into streaming producer with heartbeat flushes.
 - [x] Implement 10 s stall detection and progress messaging in orchestrator.
 - [x] Implement fast-path routing for tiny/huge manifests in orchestrator.
-- [ ] Add adaptive predictor + local performance history store with `blit diagnostics perf`.
+- [x] Add adaptive predictor + local performance history store with `blit diagnostics perf`.
 - [ ] Remove `--ludicrous-speed` behaviour (make no-op) and add CLI progress UI.
 - [ ] Update unit/integration tests to cover fast-path routing and predictor logic.
 - [ ] Benchmark performance history warm-up impact (1st/10th/100th run) and document results.
