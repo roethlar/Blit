@@ -88,7 +88,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 
 - [ ] Streaming planner + heartbeat + stall detector merged.
 - [x] Performance history/predictor integrated; diagnostics command works.
-- [ ] CLI progress indicator + flag cleanup in place.
+- [x] CLI progress indicator + flag cleanup in place.
 - [ ] New unit/integration tests pass; CI green.
 - [ ] Benchmarks executed and recorded in Phase 2.5 doc.
 - [ ] DEVLOG and docs updated with outcomes.

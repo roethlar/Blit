@@ -10,3 +10,4 @@ clap = { version = "4", features = ["derive"] }
 blit-core = { path = "../blit-core" }
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+indicatif = "0.17"

@@ -1,7 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
-use std::time::{Duration, UNIX_EPOCH};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(name = "blit")]
@@ -13,12 +16,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Copy files locally from source to destination
+    Copy(LocalArgs),
+    /// Mirror a directory locally (including deletions at destination)
+    Mirror(LocalArgs),
     /// Push files to a remote server
     Push { source: String, destination: String },
     /// Pull files from a remote server
     Pull { source: String, destination: String },
-    /// Mirror a directory to a remote server
-    Mirror { source: String, destination: String },
     /// List contents of a remote directory
     Ls { path: String },
     /// Diagnostics and tooling commands
@@ -41,6 +46,29 @@ struct PerfArgs {
     limit: usize,
 }
 
+#[derive(Args)]
+struct LocalArgs {
+    /// Source path for the transfer
+    source: String,
+    /// Destination path for the transfer
+    destination: String,
+    /// Perform a dry run without making changes
+    #[arg(long)]
+    dry_run: bool,
+    /// Force checksum comparison of files
+    #[arg(long)]
+    checksum: bool,
+    /// Keep verbose logs from the orchestrator
+    #[arg(long)]
+    verbose: bool,
+    /// Disable the interactive progress indicator
+    #[arg(long)]
+    no_progress: bool,
+    /// Number of worker threads to use (default: CPU count)
+    #[arg(long)]
+    workers: Option<usize>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -53,19 +81,14 @@ async fn main() -> Result<()> {
             println!("Pushing from {} to {}", source, destination);
             // To be implemented in Phase 2
         }
+        Commands::Copy(args) => run_local_transfer(args, false).await?,
+        Commands::Mirror(args) => run_local_transfer(args, true).await?,
         Commands::Pull {
             source,
             destination,
         } => {
             println!("Pulling from {} to {}", source, destination);
             // To be implemented in Phase 3
-        }
-        Commands::Mirror {
-            source,
-            destination,
-        } => {
-            println!("Mirroring from {} to {}", source, destination);
-            // To be implemented in Phase 2
         }
         Commands::Ls { path } => {
             println!("Listing contents of {}", path);
@@ -179,4 +202,148 @@ fn run_diagnostics_perf(limit: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {
+    let src_path = PathBuf::from(&args.source);
+    let dest_path = PathBuf::from(&args.destination);
+
+    if !src_path.exists() {
+        anyhow::bail!("source path does not exist: {}", src_path.display());
+    }
+
+    let options = build_local_options(args, mirror);
+    let dry_run = options.dry_run;
+    let verbose = options.verbose;
+    let workers = options.workers;
+
+    let progress_bar = if args.no_progress {
+        None
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap()
+                .tick_strings(&["⠁", "⠂", "⠄", "⠂"]),
+        );
+        pb.enable_steady_tick(Duration::from_millis(120));
+        pb.set_message(format!(
+            "{} {} → {}",
+            if mirror { "Mirroring" } else { "Copying" },
+            src_path.display(),
+            dest_path.display()
+        ));
+        Some(pb)
+    };
+
+    let src_clone = src_path.clone();
+    let dest_clone = dest_path.clone();
+    let start = Instant::now();
+
+    let summary = tokio::task::spawn_blocking(move || {
+        let orchestrator = TransferOrchestrator::new();
+        orchestrator
+            .execute_local_mirror(&src_clone, &dest_clone, options)
+            .with_context(|| {
+                format!(
+                    "failed to {} from {} to {}",
+                    if mirror { "mirror" } else { "copy" },
+                    src_clone.display(),
+                    dest_clone.display()
+                )
+            })
+    })
+    .await??;
+
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
+
+    let elapsed = start.elapsed();
+    print_summary(mirror, dry_run, verbose, workers, &summary, elapsed);
+
+    Ok(())
+}
+
+fn build_local_options(args: &LocalArgs, mirror: bool) -> LocalMirrorOptions {
+    let mut options = LocalMirrorOptions::default();
+    options.mirror = mirror;
+    options.dry_run = args.dry_run;
+    options.verbose = args.verbose;
+    options.progress = false;
+    options.checksum = args.checksum;
+    if let Some(workers) = args.workers {
+        options.workers = workers.max(1);
+    }
+    options
+}
+
+fn print_summary(
+    mirror: bool,
+    dry_run: bool,
+    verbose: bool,
+    workers: usize,
+    summary: &LocalMirrorSummary,
+    elapsed: Duration,
+) {
+    let operation = if mirror { "Mirror" } else { "Copy" };
+    let duration = if summary.duration.is_zero() {
+        elapsed
+    } else {
+        summary.duration
+    };
+
+    let throughput = if duration.as_secs_f64() > 0.0 {
+        summary.total_bytes as f64 / duration.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    println!(
+        "{}{} complete: {} files, {} in {:.2?}",
+        operation,
+        if dry_run { " (dry run)" } else { "" },
+        summary.copied_files,
+        format_bytes(summary.total_bytes),
+        duration
+    );
+
+    if summary.deleted_files > 0 || summary.deleted_dirs > 0 {
+        println!(
+            "• Deleted: {} file(s), {} dir(s)",
+            summary.deleted_files, summary.deleted_dirs
+        );
+    }
+
+    println!(
+        "• Throughput: {}/s | Workers used: {}",
+        format_bytes(throughput as u64),
+        workers
+    );
+
+    if verbose {
+        println!(
+            "• Planned {} file(s), total bytes {}",
+            summary.planned_files,
+            format_bytes(summary.total_bytes)
+        );
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    if bytes == 0 {
+        return "0 B".to_owned();
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.2} {}", value, UNITS[unit])
+    }
 }

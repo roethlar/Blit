@@ -37,6 +37,7 @@ Weakness: small workloads pay the planning cost before any data is moved (percei
 
 - The orchestrator maintains a 1 s heartbeat timer. At each tick it flushes whatever batches are ready to the worker queue.
 - Flush cadence dynamically adjusts based on queue saturation: 1000 ms while the queue is empty, tightening to 500 ms if workers are draining results quickly, relaxing back when the queue fills.
+- CLI progress spinner (indicatif) tracks elapsed time and surfaces final throughput; `--no-progress` disables the spinner, while `--verbose` keeps raw planner logs.
 
 ### 3.3 Stall Detection & Timeouts
 
