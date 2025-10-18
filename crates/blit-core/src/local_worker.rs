@@ -17,7 +17,9 @@ use filetime::FileTime;
 use tokio::task::JoinHandle;
 
 use crate::buffer::BufferSizer;
-use crate::copy::{copy_file, file_needs_copy_with_checksum_type, mmap_copy_file};
+#[cfg(all(unix, not(target_os = "macos")))]
+use crate::copy::mmap_copy_file;
+use crate::copy::{copy_file, file_needs_copy_with_checksum_type};
 use crate::logger::{Logger, NoopLogger};
 use crate::tar_stream::tar_stream_transfer_list;
 use crate::tar_stream::TarConfig;
@@ -225,7 +227,6 @@ pub(crate) fn copy_large_blocking(
     rel: &PathBuf,
     config: &CopyConfig,
 ) -> Result<()> {
-    let src = src_root.join(rel);
     let dest = dest_root.join(rel);
 
     if let Some(parent) = dest.parent() {
@@ -238,6 +239,7 @@ pub(crate) fn copy_large_blocking(
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let src = src_root.join(rel);
         let _ = mmap_copy_file(&src, &dest)?;
         if config.preserve_times {
             if let Ok(md) = std::fs::metadata(&src) {

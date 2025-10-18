@@ -1,5 +1,6 @@
 //! Zero-copy primitives for high-performance I/O.
 
+#[cfg(all(unix, not(target_os = "macos")))]
 use anyhow::{Context, Result};
 
 #[cfg(all(unix, not(target_os = "macos")))]
