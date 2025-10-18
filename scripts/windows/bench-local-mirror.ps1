@@ -105,6 +105,7 @@ try {
     $toolLabel = @{}
     $toolSum = @{}
     $toolCount = @{}
+    $toolBinary = @{}
 
     $dstBlit = Join-Path $workRoot "dst_blit"
     $toolNames.Add("blit")
@@ -112,14 +113,33 @@ try {
     $toolLabel["blit"] = "blit v2 mirror"
     $toolSum["blit"] = 0.0
     $toolCount["blit"] = 0
+    $toolBinary["blit"] = $blitBin
 
-    if (Get-Command robocopy -ErrorAction SilentlyContinue) {
+    function Get-RobocopyPath {
+        $cmd = Get-Command robocopy -ErrorAction SilentlyContinue
+        if ($cmd -and $cmd.Source -and (Test-Path $cmd.Source)) {
+            return $cmd.Source
+        }
+        if ($env:SystemRoot) {
+            foreach ($sub in @("System32", "Sysnative")) {
+                $candidate = Join-Path (Join-Path $env:SystemRoot $sub) "robocopy.exe"
+                if (Test-Path $candidate) {
+                    return $candidate
+                }
+            }
+        }
+        return $null
+    }
+
+    $robocopyPath = Get-RobocopyPath
+    if ($robocopyPath) {
         $dstRobocopy = Join-Path $workRoot "dst_robocopy"
         $toolNames.Add("robocopy")
         $toolDest["robocopy"] = $dstRobocopy
         $toolLabel["robocopy"] = "robocopy /MIR"
         $toolSum["robocopy"] = 0.0
         $toolCount["robocopy"] = 0
+        $toolBinary["robocopy"] = $robocopyPath
     } else {
         Write-Log "robocopy not found; skipping robocopy baseline."
     }
@@ -138,8 +158,9 @@ try {
                 $exitCode = $LASTEXITCODE
             }
             "robocopy" {
+                $exe = if ($Binary -and (Test-Path $Binary)) { $Binary } else { "robocopy" }
                 $args = @($Source, $Destination, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-                $output = & robocopy @args 2>&1
+                $output = & $exe @args 2>&1
                 $code = $LASTEXITCODE
                 $exitCode = if ($code -ge 8) { $code } else { 0 }
             }
@@ -165,7 +186,8 @@ try {
             [string]$Binary,
             [hashtable]$LabelMap,
             [hashtable]$SumMap,
-            [hashtable]$CountMap
+            [hashtable]$CountMap,
+            [hashtable]$BinaryMap
         )
 
         if (Test-Path $Destination) {
@@ -176,7 +198,15 @@ try {
         Write-Log ("[{0}] {1} run {2}/{3}: mirror -> {4}" -f $label, $Phase, $Index, $Total, $Destination)
 
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $result = Invoke-ToolCommand -Tool $Tool -Source $Source -Destination $Destination -Binary $Binary
+        $binToUse = $null
+        if ($BinaryMap.ContainsKey($Tool)) {
+            $binToUse = $BinaryMap[$Tool]
+        }
+        if (-not $binToUse) {
+            $binToUse = $Binary
+        }
+
+        $result = Invoke-ToolCommand -Tool $Tool -Source $Source -Destination $Destination -Binary $binToUse
         $sw.Stop()
 
         if ($result.Output) {
@@ -205,14 +235,14 @@ try {
         if ($Warmup -gt 0) {
             Write-Log ("[{0}] Warmup runs: {1}" -f $toolLabel[$tool], $Warmup)
             for ($i = 1; $i -le $Warmup; $i++) {
-                Invoke-ToolRun -Tool $tool -Phase "Warmup" -Index $i -Total $Warmup -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount | Out-Null
+                Invoke-ToolRun -Tool $tool -Phase "Warmup" -Index $i -Total $Warmup -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount -BinaryMap $toolBinary | Out-Null
             }
         }
 
         if ($Runs -gt 0) {
             Write-Log ("[{0}] Measured runs: {1}" -f $toolLabel[$tool], $Runs)
             for ($i = 1; $i -le $Runs; $i++) {
-                Invoke-ToolRun -Tool $tool -Phase "Measured" -Index $i -Total $Runs -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount
+                Invoke-ToolRun -Tool $tool -Phase "Measured" -Index $i -Total $Runs -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount -BinaryMap $toolBinary
             }
         } else {
             Write-Log ("[{0}] No measured runs requested (Runs=0)." -f $toolLabel[$tool])

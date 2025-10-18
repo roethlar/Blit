@@ -119,8 +119,13 @@ run_tool_command() {
         "$BLIT_BIN" mirror --no-progress "$SRC_DIR" "$dest"
       ;;
     rsync)
-      rsync -a --delete --human-readable --stats --no-inc-recursive \
-        "$SRC_DIR/" "$dest/"
+      if rsync --help 2>&1 | grep -q -- '--no-inc-recursive'; then
+        rsync -a --delete --human-readable --stats --no-inc-recursive \
+          "$SRC_DIR/" "$dest/"
+      else
+        rsync -a --delete --human-readable --stats \
+          "$SRC_DIR/" "$dest/"
+      fi
       ;;
     *)
       echo "unknown tool: $tool" >&2
