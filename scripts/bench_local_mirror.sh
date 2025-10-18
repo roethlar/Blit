@@ -174,7 +174,12 @@ for idx in "${!TOOL_NAMES[@]}"; do
   for ((i = 1; i <= WARMUP; i++)); do
     run_once "$idx" "Warmup" "$i" "$WARMUP" >/dev/null
   done
-  for ((i = 1; i <= RUNS; i++)); do
+done
+
+for ((i = 1; i <= RUNS; i++)); do
+  tool_count=${#TOOL_NAMES[@]}
+  for offset in "${!TOOL_NAMES[@]}"; do
+    idx=$(( (offset + i - 1) % tool_count ))
     run_once "$idx" "Measured" "$i" "$RUNS"
   done
 done
