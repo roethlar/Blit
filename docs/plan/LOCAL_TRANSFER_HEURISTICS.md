@@ -103,23 +103,22 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 - If predicted planning_ms ≤ 1000 ms: enter streaming planner immediately.
 - If predicted planning_ms > 1000 ms *and* fast-path conditions are met (Section 4), use fast-path.
-- When no historical data exists for a profile, default to heuristics and log the first observation.
 - If predicted planning_ms > 1000 ms and no fast-path applies, still enter streaming planner but emit a verbose warning (`expected planning time >1s; continuing due to mirror/checksum requirements`).
+- When verbose mode is enabled, report the predictor estimate before entering the planner; defaults remain quiet unless a stall occurs.
 
 ### 6.3 Self-Correction
 
 - After each run, record actual planning_ms. If prediction error exceeds 25%, adjust coefficients more aggressively.
-- Track consecutive mispredictions; if 3+ in a row, log a diagnostic entry recommending investigation (e.g., unusual filesystem latency).
-
+- 
 ### 6.4 Performance History Opt-Out
 
 - When performance history capture is disabled, prediction falls back to conservative defaults and no updates occur.
 
 ---
 
-## 7. Worker & Buffer Tuning (No `--ludicrous-speed`)
+## 7. Worker & Buffer Tuning
 
-- Remove `--ludicrous-speed` flag entirely; the planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU.
+- The planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU (no manual speed flags).
 - Default worker count = `num_cpus::get()` (with safeguards for hyper-threaded vs. physical cores). Upper bound clamps to 16 by default but adapts if the machine proves capable.
 - Optional debug flag `--max-threads N` (or env `BLIT_MAX_THREADS=N`) caps worker count for testing or constrained environments. Not required for normal use.
 - Buffer sizing logic evaluates run-time conditions (e.g., detect memory pressure via `sysinfo`) to avoid over-allocating on small systems.

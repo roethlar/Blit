@@ -76,10 +76,33 @@ const TINY_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 const HUGE_SINGLE_BYTES: u64 = 1024 * 1024 * 1024;
 const PREDICT_STREAMING_THRESHOLD_MS: f64 = 1_000.0;
 
+#[derive(Clone, Debug)]
 enum FastPathDecision {
     NoWork,
     Tiny { files: Vec<(PathBuf, u64)> },
     Huge { file: PathBuf, size: u64 },
+}
+
+#[derive(Clone, Debug, Default)]
+struct FastPathOutcome {
+    decision: Option<FastPathDecision>,
+    prediction: Option<(f64, u64)>,
+}
+
+impl FastPathOutcome {
+    fn fast_path(decision: FastPathDecision, prediction: Option<(f64, u64)>) -> Self {
+        Self {
+            decision: Some(decision),
+            prediction,
+        }
+    }
+
+    fn streaming(prediction: Option<(f64, u64)>) -> Self {
+        Self {
+            decision: None,
+            prediction,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -100,9 +123,9 @@ fn maybe_select_fast_path(
     dest_root: &Path,
     options: &LocalMirrorOptions,
     predictor: Option<&PerformancePredictor>,
-) -> Result<Option<FastPathDecision>> {
+) -> Result<FastPathOutcome> {
     if options.mirror || options.checksum || options.force_tar {
-        return Ok(None);
+        return Ok(FastPathOutcome::streaming(None));
     }
 
     let mut enumerator = FileEnumerator::new(options.filter.clone_without_cache());
@@ -175,30 +198,38 @@ fn maybe_select_fast_path(
     }
 
     if aborted {
-        return Ok(None);
+        return Ok(FastPathOutcome::streaming(None));
     }
 
     if files.is_empty() {
-        return Ok(Some(FastPathDecision::NoWork));
+        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork, None));
     }
 
+    let prediction =
+        predictor.and_then(|p| p.predict_planner_ms(mode.clone(), None, files.len(), total_bytes));
+
     if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
-        let use_fast_path = predictor
-            .and_then(|p| p.predict_planner_ms(mode.clone(), None, files.len(), total_bytes))
+        let use_fast_path = prediction
             .map(|(ms, observations)| observations == 0 || ms > PREDICT_STREAMING_THRESHOLD_MS)
             .unwrap_or(true);
         if use_fast_path {
-            return Ok(Some(FastPathDecision::Tiny { files }));
+            return Ok(FastPathOutcome::fast_path(
+                FastPathDecision::Tiny { files },
+                prediction,
+            ));
         }
     }
 
     if let Some((file, size)) = huge_candidate {
         if size >= HUGE_SINGLE_BYTES {
-            return Ok(Some(FastPathDecision::Huge { file, size }));
+            return Ok(FastPathOutcome::fast_path(
+                FastPathDecision::Huge { file, size },
+                None,
+            ));
         }
     }
 
-    Ok(None)
+    Ok(FastPathOutcome::streaming(prediction))
 }
 
 impl TransferOrchestrator {
@@ -241,9 +272,10 @@ impl TransferOrchestrator {
             None
         };
 
-        if let Some(decision) =
-            maybe_select_fast_path(src_root, dest_root, &options, predictor.as_ref())?
-        {
+        let fast_path_outcome =
+            maybe_select_fast_path(src_root, dest_root, &options, predictor.as_ref())?;
+        let streaming_prediction = fast_path_outcome.prediction.clone();
+        if let Some(decision) = fast_path_outcome.decision.clone() {
             let summary = match decision {
                 FastPathDecision::NoWork => {
                     if options.verbose {
@@ -336,6 +368,19 @@ impl TransferOrchestrator {
             }
 
             return Ok(summary);
+        }
+
+        if options.verbose {
+            if let Some((pred_ms, observations)) = streaming_prediction {
+                if pred_ms > 0.0 {
+                    eprintln!(
+                        "Predictor estimate: planning ≈ {:.0} ms ({} observation{})",
+                        pred_ms,
+                        observations,
+                        if observations == 1 { "" } else { "s" }
+                    );
+                }
+            }
         }
 
         let mut filter = options.filter.clone_without_cache();
@@ -708,8 +753,11 @@ mod tests {
         std::fs::write(src.join("file.txt"), b"hello")?;
 
         let options = LocalMirrorOptions::default();
-        let decision = maybe_select_fast_path(&src, &dest, &options, None)?;
-        assert!(matches!(decision, Some(FastPathDecision::Tiny { .. })));
+        let outcome = maybe_select_fast_path(&src, &dest, &options, None)?;
+        assert!(matches!(
+            outcome.decision,
+            Some(FastPathDecision::Tiny { .. })
+        ));
         Ok(())
     }
 
@@ -748,11 +796,13 @@ mod tests {
         predictor.observe(&record);
 
         let options = LocalMirrorOptions::default();
-        let decision = maybe_select_fast_path(&src, &dest, &options, Some(&predictor))?;
+        let outcome = maybe_select_fast_path(&src, &dest, &options, Some(&predictor))?;
         assert!(
-            decision.is_none(),
+            outcome.decision.is_none(),
             "predictor should keep streaming path when predicted planning is fast"
         );
+        let (pred_ms, _) = outcome.prediction.expect("expected prediction");
+        assert!(pred_ms <= PREDICT_STREAMING_THRESHOLD_MS);
         Ok(())
     }
 }

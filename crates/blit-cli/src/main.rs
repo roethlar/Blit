@@ -347,3 +347,88 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.2} {}", value, UNITS[unit])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.prev {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    #[test]
+    fn copy_local_transfers_file() -> Result<()> {
+        let _env = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src)?;
+        std::fs::write(src.join("hello.txt"), b"hello")?;
+
+        let args = LocalArgs {
+            source: src.to_string_lossy().into_owned(),
+            destination: dest.to_string_lossy().into_owned(),
+            dry_run: false,
+            checksum: false,
+            verbose: false,
+            no_progress: true,
+            workers: None,
+        };
+
+        runtime().block_on(run_local_transfer(&args, false))?;
+        let copied = std::fs::read(dest.join("hello.txt"))?;
+        assert_eq!(copied, b"hello");
+        Ok(())
+    }
+
+    #[test]
+    fn copy_local_dry_run_creates_no_files() -> Result<()> {
+        let _env = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
+        let tmp = tempdir()?;
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&src)?;
+        std::fs::write(src.join("hello.txt"), b"hello")?;
+
+        let args = LocalArgs {
+            source: src.to_string_lossy().into_owned(),
+            destination: dest.to_string_lossy().into_owned(),
+            dry_run: true,
+            checksum: false,
+            verbose: false,
+            no_progress: true,
+            workers: None,
+        };
+
+        runtime().block_on(run_local_transfer(&args, false))?;
+        assert!(!dest.join("hello.txt").exists());
+        Ok(())
+    }
+}

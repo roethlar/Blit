@@ -35,7 +35,6 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Add adaptive predictor + local performance history store with `blit diagnostics perf`.
 - [x] Remove `--ludicrous-speed` behaviour (make no-op) and add CLI progress UI.
 - [x] Update unit/integration tests to cover fast-path routing and predictor logic.
-- [ ] Benchmark performance history warm-up impact (1st/10th/100th run) and document results.
 
 ## Phase 2.5: Performance & Validation Checkpoint
 
