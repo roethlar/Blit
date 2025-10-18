@@ -2,4 +2,4 @@
 set -euo pipefail
 sudo npm install -g @openai/codex
 pipx upgrade SuperClaude
-codex resume 0199d518-151c-7861-b6d7-0b17cf16a6df -s danger-full-access -a never
+codex resume 0199f419-b5b4-7422-839b-3be13b973ea8 -s danger-full-access -a never
