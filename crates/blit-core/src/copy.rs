@@ -23,6 +23,8 @@ const WINDOWS_NO_BUFFERING_THRESHOLD: u64 = 1 * 1024 * 1024 * 1024; // 1 GiB
 const WINDOWS_NO_BUFFERING_FLOOR: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB baseline
 #[cfg(windows)]
 const WINDOWS_NO_BUFFERING_HEADROOM: u64 = 512 * 1024 * 1024; // leave 512 MiB for cache
+#[cfg(windows)]
+const COPY_FILE_NO_BUFFERING_FLAG: u32 = 0x0000_1000; // per CopyFileExW docs
 
 #[cfg(windows)]
 fn should_use_copyfile_no_buffering(file_size: u64) -> bool {
@@ -969,7 +971,7 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{CopyFileExW, COPY_FILE_NO_BUFFERING};
+    use windows::Win32::Storage::FileSystem::CopyFileExW;
 
     // Ensure destination directory exists
     if let Some(parent) = dst.parent() {
@@ -985,7 +987,7 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
 
     let mut flags: u32 = 0;
     if should_use_copyfile_no_buffering(file_size) {
-        flags |= COPY_FILE_NO_BUFFERING.0;
+        flags |= COPY_FILE_NO_BUFFERING_FLAG;
     }
 
     // SAFETY: The wide strings are NUL-terminated and pinned in these vectors for the duration of
