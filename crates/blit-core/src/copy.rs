@@ -144,6 +144,24 @@ pub fn copy_file(
 ) -> Result<u64> {
     logger.start(src, dst);
 
+    #[cfg(windows)]
+    if !is_network {
+        match windows_copyfile(src, dst) {
+            Ok(bytes) => {
+                preserve_metadata(src, dst)?;
+                logger.copy_done(src, dst, bytes);
+                return Ok(bytes);
+            }
+            Err(err) => {
+                log::warn!(
+                    "windows_copyfile fallback to streaming copy for {}: {}",
+                    src.display(),
+                    err
+                );
+            }
+        }
+    }
+
     let result: Result<u64> = (|| {
         // Get file size for buffer calculation
         let metadata = fs::metadata(src)?;
