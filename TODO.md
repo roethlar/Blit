@@ -40,6 +40,8 @@ This is the master checklist. Execute the first unchecked item. After completion
 
 - [x] Create benchmark script for local mirror performance.
 - [x] Run and compare against v1. (2025-10-16: v2 ~1.93× slower; optimization needed before GO)
+- [ ] Analyse Windows ETW traces (`logs/blit_windows_bench.zip`) and propose copy-path optimisations.
+- [ ] Re-run Windows benchmark after fixes (256 MiB, warmup 1, runs 5) and update Phase 2.5 doc with new ratio.
 
 ## Phase 3: Remote Operations (Hybrid Transport)
 

@@ -23,6 +23,7 @@ Cargo.lock
 *.tmp
 debug/
 tmp/
+logs/
 
 # OS specific
 Thumbs.db

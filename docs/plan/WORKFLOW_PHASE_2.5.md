@@ -16,18 +16,18 @@ Phase 2.5 is a **mandatory quality gate** that must pass before proceeding to Ph
 - **macOS (2025-10-18, `SIZE_MB=512`, 1 warmup, 5 runs)**  
   - `blit-cli mirror`: **0.275 s avg** (log ephemeral; command output captured in session)  
   - `rsync -a --delete`: 0.605 s avg  
-  - **Result**: v2 outperforms rsync (~220% of baseline throughput) — meets Phase 2.5 threshold for this workload.
+  - **Result**: v2 outperforms rsync (~220% of baseline throughput) — passes the Phase 2.5 gate for this workload.
 - **Windows (2025-10-18, `SizeMB=256`, 1 warmup, 5 runs)**  
-  - `blit-cli mirror`: **1.087 s avg**  
-  - `robocopy /MIR`: 0.405 s avg  
-  - Log: `logs/bench.log` (preserved at the time of run)  
-  - **Result**: v2 is ~2.68× slower than robocopy — **fails** the ≥95% parity gate on Windows.
-- Earlier 2025-10-16/17 v1 comparisons remain referenced for historical context; up-to-date parity evaluation now uses the platform-native tools as proxies for v1 performance until the legacy binary is available.
+  - Baseline run: `blit-cli` **1.086 s avg** vs `robocopy` 0.487 s avg (≈2.23× slower)  
+  - ETW-instrumented run: `blit-cli` **1.226 s avg** vs `robocopy` 0.567 s avg (≈2.16× slower)  
+  - Artifacts: `logs/blit_windows_bench.zip` (SHA256 `801B0AF5…F14F3D`) contains both bench logs, ETW traces (`file.etl`, `cpu.etl`), and system snapshots.  
+  - **Result**: v2 remains well below the ≥95 % parity threshold on Windows; profiling analysis pending.
+- Earlier 2025-10-16/17 v1 comparisons remain referenced for historical context; up-to-date parity evaluation now uses platform-native tools as proxies until the legacy binary is available.
 
 Follow-up actions:
-1. Deep-dive Windows hot paths (robocopy delta) — capture ETW traces, inspect worker copy strategy, and compare filesystem API usage.
-2. Re-run macOS + Windows suites after fixes (same scripts/flags) and record new ratios.
-3. Extend coverage to small-file + mixed datasets once Windows parity is recovered.
+1. Analyse collected ETW traces (`logs/blit_windows_bench.zip`) to identify the bottleneck (file I/O vs scheduler vs cache). Document findings + proposed fixes.
+2. Prototype copy-path improvements on Windows, then re-run the 256 MiB benchmark (same parameters) to measure impact.
+3. After Windows parity improves, extend coverage to small-file + mixed datasets.
 
 ### Critical Decision Point
 
