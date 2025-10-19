@@ -78,7 +78,7 @@ impl FileEnumerator {
             bail!("enumeration root does not exist: {}", root.display());
         }
 
-        let mut filter = self.filter.clone_without_cache();
+        let filter = self.filter.clone_without_cache();
 
         let mut walker = WalkDir::new(root)
             .follow_links(self.follow_symlinks)

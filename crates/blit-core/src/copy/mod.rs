@@ -634,7 +634,6 @@ fn sparse_copy_windows(
     let mut zero_buf = vec![0u8; 64 * 1024];
     let zero_threshold: usize = 256 * 1024; // create holes only for >=256KiB zero runs
     let mut written: u64 = 0;
-    let mut offset: u64 = 0;
     let mut zero_run: usize = 0;
 
     loop {
@@ -663,12 +662,10 @@ fn sparse_copy_windows(
                     written += to_write as u64;
                 }
             }
-            offset += zero_run as u64;
             zero_run = 0;
         }
         // Write the non-zero chunk
         dst.write_all(chunk)?;
-        offset += n as u64;
         written += n as u64;
     }
     // Flush trailing zeros
@@ -684,7 +681,6 @@ fn sparse_copy_windows(
                 written += to_write as u64;
             }
         }
-        offset += zero_run as u64;
     }
     // Ensure final logical length matches source
     dst.set_len(file_size)?;

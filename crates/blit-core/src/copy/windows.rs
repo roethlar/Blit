@@ -179,6 +179,14 @@ mod tests {
     }
 
     #[test]
+    fn small_file_threshold_is_inclusive() {
+        assert!(!should_use_copyfile_no_buffering_inner(
+            WINDOWS_NO_BUFFERING_SMALL_FILE_MAX,
+            Some(snapshot(32, 28))
+        ));
+    }
+
+    #[test]
     fn low_available_memory_triggers_no_buffering() {
         assert!(should_use_copyfile_no_buffering_inner(
             2 * GB,
@@ -199,6 +207,14 @@ mod tests {
         assert!(!should_use_copyfile_no_buffering_inner(
             1_500 * MB,
             Some(snapshot(64, 60))
+        ));
+    }
+
+    #[test]
+    fn floor_threshold_triggers_no_buffering() {
+        assert!(should_use_copyfile_no_buffering_inner(
+            WINDOWS_NO_BUFFERING_FLOOR,
+            Some(snapshot(32, 28))
         ));
     }
 }

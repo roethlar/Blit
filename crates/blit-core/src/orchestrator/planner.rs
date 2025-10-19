@@ -66,9 +66,10 @@ pub(super) async fn drive_planner_events(
                     last_worker_activity = now;
                 }
 
+                let final_remaining = remaining.load(Ordering::Relaxed);
                 if now.duration_since(last_planner_activity) >= stall_timeout
                     && now.duration_since(last_worker_activity) >= stall_timeout
-                    && (!closed_flag.load(Ordering::SeqCst) || current_remaining > 0)
+                    && (!closed_flag.load(Ordering::SeqCst) || final_remaining > 0)
                 {
                     return Err(eyre!("planner or workers stalled for > {:?}", stall_timeout));
                 }

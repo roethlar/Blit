@@ -1,4 +1,5 @@
 use eyre::Result;
+use once_cell::sync::OnceCell;
 use std::path::{Path, PathBuf};
 
 use crate::enumeration::{EntryKind, EnumeratedEntry, FileEnumerator};
@@ -26,16 +27,16 @@ pub struct CopyJob {
 }
 
 /// File filter options (robocopy-style compatibility)
-#[derive(Default, Clone, Debug)]
+#[derive(Debug)]
 pub struct FileFilter {
     pub exclude_files: Vec<String>,
     pub exclude_dirs: Vec<String>,
     pub min_size: Option<u64>,
     pub max_size: Option<u64>,
     #[allow(dead_code)]
-    compiled_files: Option<globset::GlobSet>,
+    compiled_files: OnceCell<globset::GlobSet>,
     #[allow(dead_code)]
-    compiled_dirs: Option<globset::GlobSet>,
+    compiled_dirs: OnceCell<globset::GlobSet>,
 }
 
 impl FileFilter {
@@ -48,38 +49,40 @@ impl FileFilter {
             exclude_dirs: self.exclude_dirs.clone(),
             min_size: self.min_size,
             max_size: self.max_size,
-            compiled_files: None,
-            compiled_dirs: None,
+            compiled_files: OnceCell::new(),
+            compiled_dirs: OnceCell::new(),
         }
     }
 
-    fn ensure_compiled(&mut self) {
-        if self.compiled_files.is_none() {
-            let mut b = globset::GlobSetBuilder::new();
-            for pat in &self.exclude_files {
-                if let Ok(g) = globset::Glob::new(pat) {
-                    b.add(g);
-                }
+    fn build_globset(patterns: &[String]) -> globset::GlobSet {
+        let mut builder = globset::GlobSetBuilder::new();
+        for pat in patterns {
+            if let Ok(glob) = globset::Glob::new(pat) {
+                builder.add(glob);
             }
-            self.compiled_files = b.build().ok();
         }
-        if self.compiled_dirs.is_none() {
-            let mut b = globset::GlobSetBuilder::new();
-            for pat in &self.exclude_dirs {
-                if let Ok(g) = globset::Glob::new(pat) {
-                    b.add(g);
-                }
-            }
-            self.compiled_dirs = b.build().ok();
-        }
+        builder.build().unwrap_or_else(|_| {
+            globset::GlobSetBuilder::new()
+                .build()
+                .expect("empty globset")
+        })
     }
-    pub(crate) fn allows_file(&mut self, path: &Path, size: u64) -> bool {
-        self.ensure_compiled();
+
+    fn file_globs(&self) -> &globset::GlobSet {
+        self.compiled_files
+            .get_or_init(|| Self::build_globset(&self.exclude_files))
+    }
+
+    fn dir_globs(&self) -> &globset::GlobSet {
+        self.compiled_dirs
+            .get_or_init(|| Self::build_globset(&self.exclude_dirs))
+    }
+
+    pub(crate) fn allows_file(&self, path: &Path, size: u64) -> bool {
         self.should_include_file(path, size)
     }
 
-    pub(crate) fn allows_dir(&mut self, path: &Path) -> bool {
-        self.ensure_compiled();
+    pub(crate) fn allows_dir(&self, path: &Path) -> bool {
         self.should_include_dir(path)
     }
     /// Check if a file should be included
@@ -89,15 +92,13 @@ impl FileFilter {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if let Some(gs) = &self.compiled_files {
-            if gs.is_match(&filename) {
+        let gs = self.file_globs();
+        if gs.is_match(&filename) {
+            return false;
+        }
+        for pattern in &self.exclude_files {
+            if glob_match(pattern, &filename) {
                 return false;
-            }
-        } else {
-            for pattern in &self.exclude_files {
-                if glob_match(pattern, &filename) {
-                    return false;
-                }
             }
         }
 
@@ -118,22 +119,46 @@ impl FileFilter {
 
     /// Check if a directory should be included
     fn should_include_dir(&self, path: &Path) -> bool {
-        if let Some(gs) = &self.compiled_dirs {
-            if gs.is_match(path.to_string_lossy().as_ref()) {
-                return false;
-            }
-        } else {
-            for pattern in &self.exclude_dirs {
-                for component in path.components() {
-                    if let Some(component_str) = component.as_os_str().to_str() {
-                        if glob_match(pattern, component_str) {
-                            return false;
-                        }
+        let gs = self.dir_globs();
+        if gs.is_match(path.to_string_lossy().as_ref()) {
+            return false;
+        }
+        for pattern in &self.exclude_dirs {
+            for component in path.components() {
+                if let Some(component_str) = component.as_os_str().to_str() {
+                    if glob_match(pattern, component_str) {
+                        return false;
                     }
                 }
             }
         }
         true
+    }
+}
+
+impl Default for FileFilter {
+    fn default() -> Self {
+        Self {
+            exclude_files: Vec::new(),
+            exclude_dirs: Vec::new(),
+            min_size: None,
+            max_size: None,
+            compiled_files: OnceCell::new(),
+            compiled_dirs: OnceCell::new(),
+        }
+    }
+}
+
+impl Clone for FileFilter {
+    fn clone(&self) -> Self {
+        Self {
+            exclude_files: self.exclude_files.clone(),
+            exclude_dirs: self.exclude_dirs.clone(),
+            min_size: self.min_size,
+            max_size: self.max_size,
+            compiled_files: OnceCell::new(),
+            compiled_dirs: OnceCell::new(),
+        }
     }
 }
 

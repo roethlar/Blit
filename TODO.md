@@ -45,6 +45,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Prototype large-file heuristics (>1 GiB) and rerun 1–4 GiB suites.
   - 2025-10-19: Heuristic tuned (≤512 MiB cached, 2 GiB floor). wingpt-10.md confirms 512 MiB regression fixed and 4 GiB now beats robocopy.
 - [x] Refactor oversized modules (`crates/blit-core/src/copy/`, `crates/blit-core/src/orchestrator/`) into focused submodules before Phase 3 to keep AI edits manageable.
+- [ ] Produce CLI/manpage documentation (include debug limiter behaviour, diagnostics commands, and hybrid transport flags once available).
 - [ ] Extend proto (`proto/blit.proto`) with DataTransferNegotiation + reserved RDMA fields and transport stats ahead of Phase 3.
 - [ ] Document CLI debug limiter mode (`--workers`) in help text and plan docs.
 

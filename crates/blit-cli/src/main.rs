@@ -64,8 +64,8 @@ struct LocalArgs {
     /// Disable the interactive progress indicator
     #[arg(long)]
     no_progress: bool,
-    /// Number of worker threads to use (default: CPU count)
-    #[arg(long)]
+    /// Limit worker threads (advanced debugging only)
+    #[arg(long, hide = true)]
     workers: Option<usize>,
 }
 
