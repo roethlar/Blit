@@ -45,19 +45,19 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Prototype large-file heuristics (>1 GiB) and rerun 1–4 GiB suites.
   - 2025-10-19: Heuristic tuned (≤512 MiB cached, 2 GiB floor). wingpt-10.md confirms 512 MiB regression fixed and 4 GiB now beats robocopy.
 - [x] Refactor oversized modules (`crates/blit-core/src/copy/`, `crates/blit-core/src/orchestrator/`) into focused submodules before Phase 3 to keep AI edits manageable.
-- [ ] Produce CLI/manpage documentation (include debug limiter behaviour, diagnostics commands, and hybrid transport flags once available).
-- [ ] Extend proto (`proto/blit.proto`) with DataTransferNegotiation + reserved RDMA fields and transport stats ahead of Phase 3.
-- [ ] Document CLI debug limiter mode (`--workers`) in help text and plan docs.
+- [x] Produce CLI/manpage documentation (include debug limiter behaviour, diagnostics commands, and hybrid transport flags once available). *(2025-10-19: `docs/cli/blit.1.md` added; hybrid transport flags pending Phase 3.)*
+- [x] Extend proto (`proto/blit.proto`) with DataTransferNegotiation + reserved RDMA fields and transport stats ahead of Phase 3. *(2025-10-19: control-plane negotiation message plus push summary stats in place.)*
+- [x] Document CLI debug limiter mode (`--workers`) in help text and plan docs. *(2025-10-19: CLI man page + plan updates.)*
 
 ## Phase 3: Remote Operations (Hybrid Transport)
 
-- [ ] Implement gRPC handshake for the `Push` service.
+- [x] Implement gRPC handshake for the `Push` service. *(2025-10-19: CLI streams manifest, daemon returns need list + fallback negotiation; data plane transfer pending.)*
 - [ ] Implement the raw TCP data plane for `Push`.
 - [ ] Implement `Pull`, `List`, and `Purge` services.
 - [ ] Add CLI/daemon progress propagation for remote operations.
 - [ ] Record remote benchmark metrics in performance history log + DEVLOG.
 - [ ] Generate cryptographically strong one-time tokens (signed, nonce-based) and bind them to accepted sockets.
-- [ ] Implement automatic gRPC data-plane fallback with warnings + advanced override (`--force-grpc-data` / env var).
+- [x] Implement automatic gRPC data-plane fallback with warnings + advanced override (`--force-grpc-data` / env var). *(2025-10-19: CLI streams files via control plane when TCP unavailable; daemon receives fallback uploads and records stats. Override flag pending Phase 3 CLI work.)*
 
 ## Phase 4: Production Hardening & Packaging
 

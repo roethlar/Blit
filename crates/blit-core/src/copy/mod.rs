@@ -18,6 +18,9 @@ use crate::checksum::{self, ChecksumType};
 use crate::fs_enum::FileEntry;
 
 #[cfg(windows)]
+const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+
+#[cfg(windows)]
 mod windows;
 
 #[cfg(windows)]
@@ -191,13 +194,11 @@ pub fn copy_file(
         #[cfg(windows)]
         use std::os::windows::fs::OpenOptionsExt;
         #[cfg(windows)]
-        use windows::Win32::Storage::FileSystem::FILE_FLAG_SEQUENTIAL_SCAN;
-
         #[cfg(windows)]
         let src_file = {
             let o = std::fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0 as u32)
+                .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
                 .open(src)?;
             o
         };
@@ -210,7 +211,7 @@ pub fn copy_file(
                 .create(true)
                 .write(true)
                 .truncate(true)
-                .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0 as u32)
+                .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
                 .open(&dst)?;
             o
         };

@@ -120,7 +120,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 - The planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU (no manual speed flags).
 - Default worker count = `num_cpus::get()` (with safeguards for hyper-threaded vs. physical cores). Upper bound clamps to 16 by default but adapts if the machine proves capable.
-- Optional debug limiters (`--workers`, `--max-threads`, `BLIT_MAX_THREADS`) cap worker count for diagnostics. These remain hidden from normal help output and trigger a visible "DEBUG MODE" banner so operators know FAST heuristics are constrained.
+- Optional debug limiter (`--workers`) caps worker count for diagnostics. The flag remains hidden from normal help output; when active the CLI prints a `[DEBUG] Worker limiter active` banner and FAST guarantees are suspended. See `docs/cli/blit.1.md` for operator guidance.
 - CLI stays quiet during transfers; progress events are emitted for verbose/log subscribers and GUI surfaces.
 - Buffer sizing logic evaluates run-time conditions (e.g., detect memory pressure via `sysinfo`) to avoid over-allocating on small systems.
 

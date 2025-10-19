@@ -15,7 +15,7 @@
 
 ## Guiding Principles
 
-1. **No user tunables** – Planner owns performance decisions. Debug limiters (`--workers`, `--max-threads`, env overrides) must be clearly labelled and pause “FAST” guarantees when active.
+1. **No user tunables** – Planner owns performance decisions. The sole debug limiter (`--workers`) must be clearly labelled, pause “FAST” guarantees when active, and remain hidden from normal help output (documented in `docs/cli/blit.1.md`).
 2. **Telemetry stays local** – JSONL log under config dir, capped to ~1 MiB, with optional opt-out.
 3. **Documentation-first** – Update plan/docs/DEVLOG as tasks complete to survive context resets.
 

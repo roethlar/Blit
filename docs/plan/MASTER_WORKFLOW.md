@@ -201,7 +201,7 @@ See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 - `blit diagnostics perf` command
 - Local performance history in capped JSONL (~/.config/blit/perf_local.jsonl)
 - Comprehensive unit/integration tests for streaming behavior
-- TODO: Generate CLI/manpage documentation covering debug options, diagnostics, and upcoming transport flags
+- ✅ CLI/manpage documentation covers debug limiter behaviour and diagnostics (`docs/cli/blit.1.md`; hybrid transport flags will be appended in Phase 3)
 
 ## Phase 2.5: Performance Validation (CRITICAL GATE)
 

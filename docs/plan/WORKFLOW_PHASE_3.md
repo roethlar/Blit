@@ -273,6 +273,8 @@ cargo run -p blit-daemon
 **Effort**: 4-5 hours
 **Skip sections**: If Option A, implement direct file streaming
 
+**Status 2025-10-19**: ✅ Handshake + data plane online. `blit-daemon` accepts `Push` streams, validates module headers, emits need lists (path traversal guarded + mtime/size comparison), and either (a) spins up a token-authenticated TCP listener for the hybrid data plane or (b) falls back to the control plane when TCP binding fails. `blit-cli` streams manifests via `RemotePushClient`, connects to the data port when advertised, and otherwise resends file data over gRPC before consuming the summary.
+
 **Server-side implementation** (`blit-daemon`):
 
 ```rust
@@ -464,6 +466,8 @@ async fn execute_remote_push(
 **Priority**: 🔴 Critical (Option B)
 **Effort**: 6-8 hours
 **Skip**: If Option A, use gRPC streaming
+
+**Status 2025-10-19**: ✅ Data-plane scaffold implemented. Daemon allocates an ephemeral TCP port, issues a 32-byte token, accepts the connection, verifies the token, and streams requested files to disk with traversal safeguards. CLI connects automatically post-negotiation and streams file contents; fallback path still pending for environments where TCP is blocked.
 
 **Server-side data receiver**:
 

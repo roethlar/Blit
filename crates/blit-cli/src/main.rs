@@ -1,4 +1,6 @@
+use blit_core::fs_enum::FileFilter;
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
+use blit_core::remote::{RemoteEndpoint, RemotePushClient, RemotePushReport};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use eyre::{bail, Context, Result};
@@ -78,10 +80,7 @@ async fn main() -> Result<()> {
         Commands::Push {
             source,
             destination,
-        } => {
-            println!("Pushing from {} to {}", source, destination);
-            // To be implemented in Phase 2
-        }
+        } => run_remote_push(source, destination).await?,
         Commands::Copy(args) => run_local_transfer(args, false).await?,
         Commands::Mirror(args) => run_local_transfer(args, true).await?,
         Commands::Pull {
@@ -203,6 +202,64 @@ fn run_diagnostics_perf(limit: usize) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_remote_push(source: &str, destination: &str) -> Result<()> {
+    let endpoint = RemoteEndpoint::parse(destination)?;
+    let mut client = RemotePushClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("connecting to {}", endpoint.control_plane_uri()))?;
+
+    let filter = FileFilter::default();
+    let source_path = PathBuf::from(source);
+    let report = client
+        .push(&source_path, &filter, false)
+        .await
+        .with_context(|| {
+            format!(
+                "negotiating push manifest for {} -> blit://{}:{}/{}",
+                source, endpoint.host, endpoint.port, endpoint.module
+            )
+        })?;
+
+    describe_push_result(&report);
+
+    Ok(())
+}
+
+fn describe_push_result(report: &RemotePushReport) {
+    let file_count = report.files_requested.len();
+    if file_count == 0 {
+        println!("Remote already up to date; nothing to upload.");
+    } else if report.fallback_used {
+        println!(
+            "Negotiation complete: {} file(s) scheduled; using gRPC data fallback.",
+            file_count
+        );
+    } else if let Some(port) = report.data_port {
+        println!(
+            "Negotiation complete: {} file(s) scheduled; data port {} established.",
+            file_count, port
+        );
+    } else {
+        println!(
+            "Negotiation complete: {} file(s) scheduled; awaiting server summary.",
+            file_count
+        );
+    }
+
+    let summary = &report.summary;
+    println!(
+        "Transfer complete: {} file(s), {} bytes (zero-copy {} bytes){}.",
+        summary.files_transferred,
+        summary.bytes_transferred,
+        summary.bytes_zero_copy,
+        if summary.tcp_fallback_used {
+            " [gRPC fallback]"
+        } else {
+            ""
+        }
+    );
 }
 
 async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {

@@ -1,0 +1,1 @@
+2025-10-19: Implemented initial remote push handshake. blit-daemon `push` now parses manifests, validates modules, responds with FilesToUpload + DataTransferNegotiation (gRPC fallback) and summary. CLI uses `RemotePushClient` and `RemoteEndpoint` parser to stream manifests and report negotiation counts. Data-plane socket + actual transfers still TODO.
