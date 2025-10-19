@@ -1,5 +1,3 @@
-
-
 **2025-10-15 18:15:00Z** - **ACTION**: Began Phase 2. Created the `orchestrator.rs` file and module in `blit-core`.
 **2025-10-16 04:20:00Z** - **ACTION**: Added `scripts/bench_local_mirror.sh` to benchmark local mirror performance (v1 vs v2) and vendored `protoc` via `protoc-bin-vendored`, enabling `cargo check` without external dependencies. CLI mirror/copy now runs via `spawn_blocking`.
 
@@ -27,3 +25,4 @@
 **2025-10-18 03:22:06Z** - **ACTION**: Extended local benchmark harnesses to record rsync (macOS/Linux) and robocopy (Windows) baselines alongside blit v2 timings, ensuring consistent warmup/measured loops and summarised averages in the saved logs.
 **2025-10-18 04:05:33Z** - **ACTION**: Captured platform baselines: macOS (512 MiB, 5 runs) shows `blit-cli` 0.275 s avg vs `rsync` 0.605 s; Windows (256 MiB, 5 runs) shows `blit-cli` 1.087 s avg vs `robocopy` 0.405 s (`logs/bench.log`). Windows parity gap flagged for profiling in Phase 2.5 follow-up.
 **2025-10-18 19:55:04Z** - **ACTION**: wingpt reproduced Windows gap with ETW enabled (`blit-cli` 1.226 s vs `robocopy` 0.567 s). Collected traces and system info bundled at `logs/blit_windows_bench.zip` (SHA256 `801B0AF560FF290126313D8256148C002F507103502B6D4A72486EB412F14F3D`) for analysis.
+**2025-10-18 20:41:12Z** - **RESULT**: CopyFileExW path verified on Windows: 512 MiB workload now 0.724 s avg (707 MiB/s) vs robocopy 0.775 s. Larger datasets (1–4 GiB) expose cache/worker limits per wingpt-5.md; plan to add >1 GiB heuristics, adaptive workers, cache-aware buffering.

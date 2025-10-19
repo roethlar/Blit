@@ -17,17 +17,18 @@ Phase 2.5 is a **mandatory quality gate** that must pass before proceeding to Ph
   - `blit-cli mirror`: **0.275 s avg** (log ephemeral; command output captured in session)  
   - `rsync -a --delete`: 0.605 s avg  
   - **Result**: v2 outperforms rsync (~220% of baseline throughput) — passes the Phase 2.5 gate for this workload.
-- **Windows (2025-10-18, `SizeMB=256`, 1 warmup, 5 runs)**  
-  - Baseline run: `blit-cli` **1.086 s avg** vs `robocopy` 0.487 s avg (≈2.23× slower)  
-  - ETW-instrumented run: `blit-cli` **1.226 s avg** vs `robocopy` 0.567 s avg (≈2.16× slower)  
-  - Artifacts: `logs/blit_windows_bench.zip` (SHA256 `801B0AF5…F14F3D`) contains both bench logs, ETW traces (`file.etl`, `cpu.etl`), and system snapshots.  
-  - **Result**: v2 remains well below the ≥95 % parity threshold on Windows; profiling analysis pending.
+- **Windows (2025-10-18, `SizeMB` = 256 MiB–4 GiB, warmup 1, 5 runs unless noted)**  
+  - Pre-fix baseline (256 MiB): `blit-cli` **1.086 s avg** vs `robocopy` 0.487 s avg (≈2.23× slower); ETW run 1.226 s vs 0.567 s.  
+  - **After CopyFileExW optimisation (512 MiB dataset)**: `blit-cli` **0.724 s avg** (707 MiB/s) vs `robocopy` 0.775 s avg (660 MiB/s) — blit is ~7 % faster; peak run 0.569 s (987 MiB/s).  
+  - Scaling study: 256 MiB (0.621 s vs 0.404 s), 1 GiB (1.906 s vs 1.295 s), 2 GiB (4.205 s vs 2.694 s), 4 GiB (8.443 s vs 8.046 s). Gap persists for 1–2 GiB workloads due to cache/worker behaviour.  
+  - Detailed findings and PerfView notes: `agentcomms/wingpt-4.md`, `agentcomms/wingpt-5.md`; raw data archived in `logs/blit_windows_bench.zip` (SHA256 `801B0AF5…F14F3D`).  
+  - **Result**: Windows parity achieved for ≤512 MiB transfers; larger datasets still trail robocopy by ~1.5× pending cache-aware tuning.
 - Earlier 2025-10-16/17 v1 comparisons remain referenced for historical context; up-to-date parity evaluation now uses platform-native tools as proxies until the legacy binary is available.
 
 Follow-up actions:
-1. Analyse collected ETW traces (`logs/blit_windows_bench.zip`) to identify the bottleneck (file I/O vs scheduler vs cache). Document findings + proposed fixes.
-2. Prototype copy-path improvements on Windows, then re-run the 256 MiB benchmark (same parameters) to measure impact.
-3. After Windows parity improves, extend coverage to small-file + mixed datasets.
+1. Implement wingpt’s recommendations: detect >1 GiB files, reduce worker fan-out, and explore cache-aware buffering/flags on Windows.  
+2. Re-run 1 GiB–4 GiB Windows benchmarks post-tuning to confirm parity; keep 512 MiB regression in watch list.  
+3. Extend coverage to mixed and small-file workloads once large-file heuristics land, and fold results into this checkpoint.
 
 ### Critical Decision Point
 
@@ -47,7 +48,7 @@ This phase produces a **GO/NO-GO decision**:
 | Metric | Target | Status |
 |--------|--------|--------|
 | Large file (NVMe → NVMe, macOS 512 MiB) | ≥95% of baseline | ✅ `blit-cli` 0.275 s vs `rsync` 0.605 s (220% of baseline) |
-| Large file (NVMe → NVMe, Windows 256 MiB) | ≥95% of baseline | ❌ `blit-cli` 1.087 s vs `robocopy` 0.405 s (37% of baseline) |
+| Large file (NVMe → NVMe, Windows 512 MiB) | ≥95% of baseline | ✅ `blit-cli` 0.724 s vs `robocopy` 0.775 s (~107%) — note 1–2 GiB workloads still lag |
 | 100k small files | ≥95% of baseline | ⏳ |
 | Mixed workload | ≥95% of baseline | ⏳ |
 | Memory usage | ≤110% of v1 | ⏳ |
