@@ -31,7 +31,6 @@ pub fn analyze_warmup_result(gbps: f64) -> usize {
 pub fn determine_tuning(
     default_chunk_bytes: usize,
     warmup_result: Option<(f64, usize)>,
-    ludicrous: bool,
 ) -> TuningParams {
     let (warmup_gbps, chunk_bytes) = match warmup_result {
         Some((gbps, chunk)) => (Some(gbps), chunk),
@@ -47,8 +46,6 @@ pub fn determine_tuning(
         } else {
             2 // Gigabit
         }
-    } else if ludicrous {
-        4
     } else {
         2
     };
@@ -67,7 +64,7 @@ mod tests {
 
     #[test]
     fn test_tuning_with_high_bandwidth() {
-        let params = determine_tuning(16 * 1024 * 1024, Some((9.5, 32 * 1024 * 1024)), false);
+        let params = determine_tuning(16 * 1024 * 1024, Some((9.5, 32 * 1024 * 1024)));
         assert_eq!(params.chunk_bytes, 32 * 1024 * 1024);
         assert_eq!(params.initial_streams, 6);
         assert_eq!(params.max_streams, 8);
@@ -75,14 +72,8 @@ mod tests {
 
     #[test]
     fn test_tuning_fallback() {
-        let params = determine_tuning(16 * 1024 * 1024, None, false);
+        let params = determine_tuning(16 * 1024 * 1024, None);
         assert_eq!(params.chunk_bytes, 16 * 1024 * 1024);
         assert_eq!(params.initial_streams, 2);
-    }
-
-    #[test]
-    fn test_ludicrous_mode() {
-        let params = determine_tuning(16 * 1024 * 1024, None, true);
-        assert_eq!(params.initial_streams, 4);
     }
 }

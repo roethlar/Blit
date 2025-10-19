@@ -196,7 +196,7 @@ See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 - 10s stall detector (planner + workers idle) with error messaging
 - Fast-path routing (tiny manifests → direct copy, huge files → large-file worker)
 - Adaptive predictor fed by local performance history (perceived latency ≤ 1s)
-- Deprecate `--ludicrous-speed` (accept as no-op for compatibility)
+- ✅ Planner auto-tunes buffer sizing and worker counts (no manual speed flags)
 - CLI progress indicator (spinner + throughput + ETA)
 - `blit diagnostics perf` command
 - Local performance history in capped JSONL (~/.config/blit/perf_local.jsonl)

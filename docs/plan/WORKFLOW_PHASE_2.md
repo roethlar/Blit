@@ -45,7 +45,7 @@
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.3.1 | Remove `--ludicrous-speed`; maintain automatic tuning unless debug limiters are applied. | CLI parsing update + release note. |
+| 2.3.1 | Keep planner fully automatic; manual speed flags are not exposed (only debug limiters). | CLI parsing update + release note. |
 | 2.3.2 | Keep CLI quiet while exposing progress hooks (events/verbose logging) for GUI surfaces. | Progress event plumbing + docs. |
 | 2.3.3 | When debug limiters are used, make it obvious (CLI banner/log) that FAST mode is capped. | Logging hooks + tests. |
 

@@ -29,6 +29,14 @@ service BlitAuth {
 
 // --- Message Definitions ---
 
+// Negotiation response indicating how the data plane (TCP/RDMA) is configured.
+message DataTransferNegotiation {
+  uint32 tcp_port = 1;
+  string one_time_token = 2;
+  bool tcp_fallback = 3; // true when the server could not reserve the preferred data-plane.
+  reserved 4 to 10; // RDMA fields (QP numbers, GID, etc.) for Phase 3.5
+}
+
 // Push Operation
 message ClientPushRequest {
   oneof payload {
@@ -45,6 +53,7 @@ message ServerPushResponse {
     Ack ack = 1;
     FileList files_to_upload = 2; // The "NeedList"
     PushSummary summary = 3;
+    DataTransferNegotiation negotiation = 4; // Negotiation event before summary
   }
 }
 
@@ -72,6 +81,8 @@ message FileList { repeated string relative_paths = 1; }
 message PushSummary {
     uint64 files_transferred = 1;
     uint64 bytes_transferred = 2;
+    uint64 bytes_zero_copy = 3; // bytes sent via zero-copy kernel paths
+    bool tcp_fallback_used = 4; // true if we had to fall back to gRPC streaming
 }
 
 // Pull Operation

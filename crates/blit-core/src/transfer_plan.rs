@@ -23,22 +23,18 @@ pub struct Plan {
 /// Planner tuning options shared across engines.
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
-    pub ludicrous: bool,
     pub force_tar: bool,
 }
 
 impl PlanOptions {
-    pub fn new(ludicrous: bool) -> Self {
-        Self {
-            ludicrous,
-            force_tar: false,
-        }
+    pub fn new() -> Self {
+        Self { force_tar: false }
     }
 }
 
 impl Default for PlanOptions {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }
 
@@ -107,9 +103,7 @@ pub fn build_plan(
     let mut small_tasks: Vec<TransferTask> = Vec::new();
     let use_tar = options.force_tar || !small.is_empty();
     if use_tar {
-        let target_shard = if options.ludicrous {
-            768 * 1024 * 1024 // 768 MiB in ludicrous mode
-        } else if total_bytes > 1_000_000_000 {
+        let target_shard = if total_bytes > 1_000_000_000 {
             768 * 1024 * 1024 // 768 MiB for large manifests (>1GB total)
         } else {
             512 * 1024 * 1024 // 512 MiB default (was 256 MiB)
@@ -136,9 +130,7 @@ pub fn build_plan(
     }
 
     let mut medium_tasks: Vec<TransferTask> = Vec::new();
-    let target_bundle: u64 = if options.ludicrous {
-        384 * 1024 * 1024 // 384 MiB in ludicrous (was 320 MiB)
-    } else if total_bytes > 1_000_000_000 {
+    let target_bundle: u64 = if total_bytes > 1_000_000_000 {
         256 * 1024 * 1024 // 256 MiB for large manifests
     } else {
         128 * 1024 * 1024 // 128 MiB default
@@ -182,11 +174,9 @@ pub fn build_plan(
             i_m += 1;
         }
     }
-    // Choose chunk size: larger for big transfers or ludicrous mode
+    // Choose chunk size: larger for big transfers dominated by large files
     let large_bytes = bins_bytes[4] + bins_bytes[5];
-    let chunk_bytes = if options.ludicrous {
-        32 * 1024 * 1024 // 32 MiB in ludicrous mode
-    } else if total_bytes > 1_000_000_000 {
+    let chunk_bytes = if total_bytes > 1_000_000_000 {
         32 * 1024 * 1024 // 32 MiB for transfers >1GB
     } else if large_bytes * 100 / total_bytes.max(1) >= 50 {
         32 * 1024 * 1024 // 32 MiB when dominated by large files

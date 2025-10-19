@@ -1,25 +1,28 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eyre::{eyre, Context, Result};
 use tokio::runtime::Builder;
 
-use crate::enumeration::{EntryKind, FileEnumerator};
-use crate::fs_enum::{CopyJob, FileEntry, FileFilter};
+use crate::fs_enum::FileFilter;
 use crate::mirror_planner::MirrorPlanner;
-use crate::perf_history::{append_local_record, OptionSnapshot, PerformanceRecord, TransferMode};
 use crate::perf_predictor::PerformancePredictor;
-use crate::transfer_engine::{
-    create_task_stream, execute_streaming_plan, SchedulerOptions, TaskStreamSender,
-};
-use crate::transfer_facade::{PlannerEvent, TransferFacade};
+use crate::transfer_engine::{create_task_stream, execute_streaming_plan, SchedulerOptions};
+use crate::transfer_facade::TransferFacade;
 use crate::transfer_plan::PlanOptions;
 use crate::{
     local_worker::{copy_large_blocking, copy_paths_blocking, LocalWorkerFactory},
     CopyConfig,
 };
+
+mod fast_path;
+mod history;
+mod planner;
+
+use fast_path::{maybe_select_fast_path, FastPathDecision};
+use history::{record_performance_history, update_predictor};
+use planner::drive_planner_events;
 
 /// Options for executing a local mirror/copy operation.
 #[derive(Clone, Debug)]
@@ -29,7 +32,6 @@ pub struct LocalMirrorOptions {
     pub dry_run: bool,
     pub progress: bool,
     pub verbose: bool,
-    pub ludicrous_speed: bool,
     pub force_tar: bool,
     pub preserve_symlinks: bool,
     pub include_symlinks: bool,
@@ -48,7 +50,6 @@ impl Default for LocalMirrorOptions {
             dry_run: false,
             progress: false,
             verbose: false,
-            ludicrous_speed: false,
             force_tar: false,
             preserve_symlinks: true,
             include_symlinks: true,
@@ -73,174 +74,7 @@ pub struct LocalMirrorSummary {
     pub duration: Duration,
 }
 
-const TINY_FILE_LIMIT: usize = 8;
-const TINY_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
-const HUGE_SINGLE_BYTES: u64 = 1024 * 1024 * 1024;
-const PREDICT_STREAMING_THRESHOLD_MS: f64 = 1_000.0;
-
-#[derive(Clone, Debug)]
-enum FastPathDecision {
-    NoWork,
-    Tiny { files: Vec<(PathBuf, u64)> },
-    Huge { file: PathBuf, size: u64 },
-}
-
-#[derive(Clone, Debug, Default)]
-struct FastPathOutcome {
-    decision: Option<FastPathDecision>,
-    prediction: Option<(f64, u64)>,
-}
-
-impl FastPathOutcome {
-    fn fast_path(decision: FastPathDecision, prediction: Option<(f64, u64)>) -> Self {
-        Self {
-            decision: Some(decision),
-            prediction,
-        }
-    }
-
-    fn streaming(prediction: Option<(f64, u64)>) -> Self {
-        Self {
-            decision: None,
-            prediction,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct FastPathAbort;
-
-impl std::fmt::Display for FastPathAbort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "fast-path aborted")
-    }
-}
-
-impl std::error::Error for FastPathAbort {}
-
 pub struct TransferOrchestrator;
-
-fn maybe_select_fast_path(
-    src_root: &Path,
-    dest_root: &Path,
-    options: &LocalMirrorOptions,
-    predictor: Option<&PerformancePredictor>,
-) -> Result<FastPathOutcome> {
-    if options.mirror || options.checksum || options.force_tar {
-        return Ok(FastPathOutcome::streaming(None));
-    }
-
-    let mut enumerator = FileEnumerator::new(options.filter.clone_without_cache());
-    if !options.preserve_symlinks {
-        enumerator = enumerator.follow_symlinks(true);
-    }
-    if options.include_symlinks {
-        enumerator = enumerator.include_symlinks(true);
-    }
-
-    let mode = if options.mirror {
-        TransferMode::Mirror
-    } else {
-        TransferMode::Copy
-    };
-
-    let planner = MirrorPlanner::new(options.checksum);
-    let mut files: Vec<(PathBuf, u64)> = Vec::new();
-    let mut total_bytes: u64 = 0;
-    let mut aborted = false;
-    let mut huge_candidate: Option<(PathBuf, u64)> = None;
-
-    let scan_result = enumerator.enumerate_local_streaming(src_root, |entry| {
-        if let EntryKind::File { size } = entry.kind {
-            let should_copy = if options.skip_unchanged {
-                let job = CopyJob {
-                    entry: FileEntry {
-                        path: entry.absolute_path.clone(),
-                        size,
-                        is_directory: false,
-                    },
-                };
-                planner.should_copy_entry(&job, src_root, dest_root)
-            } else {
-                true
-            };
-
-            if should_copy {
-                if files.is_empty() {
-                    huge_candidate = Some((entry.relative_path.clone(), size));
-                } else {
-                    huge_candidate = None;
-                }
-
-                files.push((entry.relative_path.clone(), size));
-                total_bytes += size;
-
-                if files.len() > TINY_FILE_LIMIT {
-                    aborted = true;
-                    return Err(FastPathAbort.into());
-                }
-
-                if total_bytes > TINY_TOTAL_BYTES && files.len() > 1 {
-                    aborted = true;
-                    return Err(FastPathAbort.into());
-                }
-            }
-        }
-
-        Ok(())
-    });
-
-    match scan_result {
-        Ok(()) => {}
-        Err(err) => {
-            if err.downcast_ref::<FastPathAbort>().is_none() {
-                return Err(err);
-            }
-        }
-    }
-
-    if aborted {
-        return Ok(FastPathOutcome::streaming(None));
-    }
-
-    if files.is_empty() {
-        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork, None));
-    }
-
-    let prediction = predictor.and_then(|p| {
-        p.predict_planner_ms(
-            mode.clone(),
-            None,
-            options.skip_unchanged,
-            options.checksum,
-            files.len(),
-            total_bytes,
-        )
-    });
-
-    if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
-        let use_fast_path = prediction
-            .map(|(ms, observations)| observations == 0 || ms > PREDICT_STREAMING_THRESHOLD_MS)
-            .unwrap_or(true);
-        if use_fast_path {
-            return Ok(FastPathOutcome::fast_path(
-                FastPathDecision::Tiny { files },
-                prediction,
-            ));
-        }
-    }
-
-    if let Some((file, size)) = huge_candidate {
-        if size >= HUGE_SINGLE_BYTES {
-            return Ok(FastPathOutcome::fast_path(
-                FastPathDecision::Huge { file, size },
-                None,
-            ));
-        }
-    }
-
-    Ok(FastPathOutcome::streaming(prediction))
-}
 
 impl TransferOrchestrator {
     pub fn new() -> Self {
@@ -393,7 +227,6 @@ impl TransferOrchestrator {
         let mut filter = options.filter.clone_without_cache();
         let planner_for_stream = MirrorPlanner::new(options.checksum);
         let plan_options = PlanOptions {
-            ludicrous: options.ludicrous_speed,
             force_tar: options.force_tar,
         };
 
@@ -424,7 +257,6 @@ impl TransferOrchestrator {
         };
 
         let scheduler_opts = SchedulerOptions {
-            ludicrous_speed: options.ludicrous_speed,
             progress: options.progress || options.verbose,
             byte_drain: None,
             initial_streams: Some(options.workers.min(12).max(1)),
@@ -432,11 +264,7 @@ impl TransferOrchestrator {
         };
 
         // Default chunk size mirrors historic plan logic.
-        let chunk_bytes = if options.ludicrous_speed {
-            32 * 1024 * 1024
-        } else {
-            16 * 1024 * 1024
-        };
+        let chunk_bytes = 16 * 1024 * 1024;
 
         let runtime = Builder::new_multi_thread()
             .worker_threads(options.workers.max(1))
@@ -511,6 +339,64 @@ impl TransferOrchestrator {
             );
         }
 
+        fn apply_local_deletions(
+            entries: &[crate::enumeration::EnumeratedEntry],
+            dest_root: &Path,
+            planner: &MirrorPlanner,
+            filter: &FileFilter,
+            perform: bool,
+            verbose: bool,
+        ) -> Result<(usize, usize)> {
+            let delete_plan =
+                planner.plan_local_deletions_from_entries(entries, dest_root, filter)?;
+            let mut deleted_files = 0usize;
+            let mut deleted_dirs = 0usize;
+
+            for path in delete_plan.files {
+                #[cfg(windows)]
+                crate::win_fs::clear_readonly_recursive(&path);
+
+                if perform {
+                    match std::fs::remove_file(&path) {
+                        Ok(_) => {
+                            deleted_files += 1;
+                            if verbose {
+                                eprintln!("Deleted file: {}", path.display());
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("Failed to delete file {}: {}", path.display(), err);
+                        }
+                    }
+                } else {
+                    deleted_files += 1;
+                }
+            }
+
+            for path in delete_plan.dirs {
+                #[cfg(windows)]
+                crate::win_fs::clear_readonly_recursive(&path);
+
+                if perform {
+                    match std::fs::remove_dir(&path) {
+                        Ok(_) => {
+                            deleted_dirs += 1;
+                            if verbose {
+                                eprintln!("Deleted directory: {}", path.display());
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("Failed to delete directory {}: {}", path.display(), err);
+                        }
+                    }
+                } else {
+                    deleted_dirs += 1;
+                }
+            }
+
+            Ok((deleted_files, deleted_dirs))
+        }
+
         if let Some(record) = record_performance_history(
             &summary,
             &options,
@@ -522,290 +408,5 @@ impl TransferOrchestrator {
         }
 
         Ok(summary)
-    }
-}
-
-struct PlannerDriveSummary {
-    enumerated_files: usize,
-    total_bytes: u64,
-}
-
-async fn drive_planner_events(
-    options: &LocalMirrorOptions,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<PlannerEvent>,
-    task_sender: TaskStreamSender,
-    remaining: Arc<AtomicUsize>,
-    closed_flag: Arc<AtomicBool>,
-    stall_timeout: Duration,
-    heartbeat: Duration,
-) -> Result<PlannerDriveSummary> {
-    let mut last_planner_activity = Instant::now();
-    let mut last_worker_remaining = remaining.load(Ordering::Relaxed);
-    let mut last_worker_activity = Instant::now();
-    let mut enumerated_files = 0usize;
-    let mut total_bytes = 0u64;
-
-    let mut ticker = tokio::time::interval(heartbeat);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    let mut sender = Some(task_sender);
-
-    loop {
-        tokio::select! {
-            maybe_event = events.recv() => {
-                match maybe_event {
-                    Some(PlannerEvent::Task(task)) => {
-                        if let Some(ref s) = sender {
-                            s.send(task).await?;
-                        }
-                        last_planner_activity = Instant::now();
-                    }
-                    Some(PlannerEvent::Progress { enumerated_files: files, total_bytes: bytes }) => {
-                        enumerated_files = files;
-                        total_bytes = bytes;
-                        last_planner_activity = Instant::now();
-                        if options.verbose {
-                            eprintln!("Planning… {} file(s), {} bytes", files, bytes);
-                        }
-                    }
-                    None => {
-                        break;
-                    }
-                }
-            }
-            _ = ticker.tick() => {
-                let now = Instant::now();
-                let current_remaining = remaining.load(Ordering::Relaxed);
-                if current_remaining < last_worker_remaining {
-                    last_worker_remaining = current_remaining;
-                    last_worker_activity = now;
-                }
-
-                if now.duration_since(last_planner_activity) >= stall_timeout
-                    && now.duration_since(last_worker_activity) >= stall_timeout
-                    && (!closed_flag.load(Ordering::SeqCst) || current_remaining > 0)
-                {
-                    return Err(eyre!("planner or workers stalled for > {:?}", stall_timeout));
-                }
-            }
-        }
-    }
-
-    // Close the task sender to signal no further work.
-    drop(sender.take());
-
-    Ok(PlannerDriveSummary {
-        enumerated_files,
-        total_bytes,
-    })
-}
-
-fn apply_local_deletions(
-    entries: &[crate::enumeration::EnumeratedEntry],
-    dest_root: &Path,
-    planner: &MirrorPlanner,
-    filter: &FileFilter,
-    perform: bool,
-    verbose: bool,
-) -> Result<(usize, usize)> {
-    let delete_plan = planner.plan_local_deletions_from_entries(entries, dest_root, filter)?;
-    let mut deleted_files = 0usize;
-    let mut deleted_dirs = 0usize;
-
-    for path in delete_plan.files {
-        #[cfg(windows)]
-        crate::win_fs::clear_readonly_recursive(&path);
-
-        if perform {
-            match std::fs::remove_file(&path) {
-                Ok(_) => {
-                    deleted_files += 1;
-                    if verbose {
-                        eprintln!("Deleted file: {}", path.display());
-                    }
-                }
-                Err(err) => {
-                    eprintln!("Failed to delete file {}: {}", path.display(), err);
-                }
-            }
-        } else {
-            deleted_files += 1;
-        }
-    }
-
-    for path in delete_plan.dirs {
-        #[cfg(windows)]
-        crate::win_fs::clear_readonly_recursive(&path);
-
-        if perform {
-            match std::fs::remove_dir(&path) {
-                Ok(_) => {
-                    deleted_dirs += 1;
-                    if verbose {
-                        eprintln!("Deleted directory: {}", path.display());
-                    }
-                }
-                Err(err) => {
-                    eprintln!("Failed to delete directory {}: {}", path.display(), err);
-                }
-            }
-        } else {
-            deleted_dirs += 1;
-        }
-    }
-
-    Ok((deleted_files, deleted_dirs))
-}
-
-fn record_performance_history(
-    summary: &LocalMirrorSummary,
-    options: &LocalMirrorOptions,
-    fast_path: Option<&'static str>,
-    planner_duration_ms: u128,
-    transfer_duration_ms: u128,
-) -> Option<PerformanceRecord> {
-    let options_snapshot = OptionSnapshot {
-        dry_run: options.dry_run,
-        preserve_symlinks: options.preserve_symlinks,
-        include_symlinks: options.include_symlinks,
-        skip_unchanged: options.skip_unchanged,
-        checksum: options.checksum,
-        workers: options.workers.max(1),
-    };
-
-    let record = PerformanceRecord::new(
-        if options.mirror {
-            TransferMode::Mirror
-        } else {
-            TransferMode::Copy
-        },
-        None,
-        None,
-        summary.planned_files,
-        summary.total_bytes,
-        options_snapshot,
-        fast_path.map(|s| s.to_string()),
-        planner_duration_ms,
-        transfer_duration_ms,
-        0,
-        0,
-    );
-
-    if let Err(err) = append_local_record(&record) {
-        if options.verbose {
-            eprintln!("Failed to update performance history: {err:?}");
-        }
-    }
-    Some(record)
-}
-
-fn update_predictor(
-    predictor: &mut Option<PerformancePredictor>,
-    record: &PerformanceRecord,
-    verbose: bool,
-) {
-    if let Some(ref mut predictor) = predictor {
-        predictor.observe(record);
-        if let Err(err) = predictor.save() {
-            if verbose {
-                eprintln!("Failed to persist predictor state: {err:?}");
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
-    use crate::perf_predictor::PerformancePredictor;
-    use eyre::Result;
-    use tempfile::tempdir;
-
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(prev) = &self.prev {
-                std::env::set_var(self.key, prev);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
-    #[test]
-    fn tiny_fast_path_without_history_prefers_fastpath() -> Result<()> {
-        let _guard = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
-        let temp = tempdir()?;
-        let src = temp.path().join("src");
-        let dest = temp.path().join("dest");
-        std::fs::create_dir_all(&src)?;
-        std::fs::create_dir_all(&dest)?;
-        std::fs::write(src.join("file.txt"), b"hello")?;
-
-        let options = LocalMirrorOptions::default();
-        let outcome = maybe_select_fast_path(&src, &dest, &options, None)?;
-        assert!(matches!(
-            outcome.decision,
-            Some(FastPathDecision::Tiny { .. })
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn tiny_fast_path_uses_predictor_when_history_exists() -> Result<()> {
-        let _guard = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
-        let temp = tempdir()?;
-        let src = temp.path().join("src");
-        let dest = temp.path().join("dest");
-        std::fs::create_dir_all(&src)?;
-        std::fs::create_dir_all(&dest)?;
-        std::fs::write(src.join("file.txt"), b"hello")?;
-
-        let mut predictor = PerformancePredictor::for_tests(temp.path());
-        let snapshot = OptionSnapshot {
-            dry_run: false,
-            preserve_symlinks: true,
-            include_symlinks: true,
-            skip_unchanged: true,
-            checksum: false,
-            workers: 4,
-        };
-        let record = PerformanceRecord::new(
-            TransferMode::Copy,
-            None,
-            None,
-            2,
-            256,
-            snapshot,
-            None,
-            100,
-            1_000,
-            0,
-            0,
-        );
-        predictor.observe(&record);
-
-        let options = LocalMirrorOptions::default();
-        let outcome = maybe_select_fast_path(&src, &dest, &options, Some(&predictor))?;
-        assert!(
-            outcome.decision.is_none(),
-            "predictor should keep streaming path when predicted planning is fast"
-        );
-        let (pred_ms, _) = outcome.prediction.expect("expected prediction");
-        assert!(pred_ms <= PREDICT_STREAMING_THRESHOLD_MS);
-        Ok(())
     }
 }

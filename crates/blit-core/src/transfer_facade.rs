@@ -277,9 +277,11 @@ struct TaskAggregator {
     small_paths: Vec<PathBuf>,
     small_bytes: u64,
     small_target: u64,
+    total_small_bytes: u64,
     medium_paths: Vec<PathBuf>,
     medium_bytes: u64,
     medium_target: u64,
+    total_medium_bytes: u64,
     medium_max: u64,
     chunk_bytes: usize,
     options: PlanOptions,
@@ -287,33 +289,44 @@ struct TaskAggregator {
 
 impl TaskAggregator {
     fn new(options: PlanOptions) -> Self {
-        let small_target = if options.ludicrous {
-            768 * 1024 * 1024
-        } else {
-            512 * 1024 * 1024
-        };
-        let medium_target = if options.ludicrous {
-            384 * 1024 * 1024
-        } else {
-            128 * 1024 * 1024
-        };
+        let small_target = 512 * 1024 * 1024;
+        let medium_target = 128 * 1024 * 1024;
         let medium_max = (medium_target as f64 * 1.25) as u64;
-        let chunk_bytes = if options.ludicrous {
-            32 * 1024 * 1024
-        } else {
-            16 * 1024 * 1024
-        };
+        let chunk_bytes = 16 * 1024 * 1024;
 
         Self {
             small_paths: Vec::new(),
             small_bytes: 0,
             small_target,
+            total_small_bytes: 0,
             medium_paths: Vec::new(),
             medium_bytes: 0,
             medium_target,
+            total_medium_bytes: 0,
             medium_max,
             chunk_bytes,
             options,
+        }
+    }
+
+    fn promote_small_strategy(&mut self) {
+        const PROMOTE_SMALL_THRESHOLD: u64 = 1_000_000_000; // 1 GiB of small files streamed
+        if self.total_small_bytes >= PROMOTE_SMALL_THRESHOLD
+            && self.small_target < 768 * 1024 * 1024
+        {
+            self.small_target = 768 * 1024 * 1024;
+            self.chunk_bytes = self.chunk_bytes.max(32 * 1024 * 1024);
+        }
+    }
+
+    fn promote_medium_strategy(&mut self) {
+        const PROMOTE_MEDIUM_THRESHOLD: u64 = 512 * 1024 * 1024; // 512 MiB of medium files
+        if self.total_medium_bytes >= PROMOTE_MEDIUM_THRESHOLD
+            && self.medium_target < 384 * 1024 * 1024
+        {
+            self.medium_target = 384 * 1024 * 1024;
+            self.medium_max = (self.medium_target as f64 * 1.25) as u64;
+            self.chunk_bytes = self.chunk_bytes.max(32 * 1024 * 1024);
         }
     }
 
@@ -328,6 +341,8 @@ impl TaskAggregator {
         if size < 1_048_576 {
             self.small_paths.push(rel);
             self.small_bytes += size;
+            self.total_small_bytes = self.total_small_bytes.saturating_add(size);
+            self.promote_small_strategy();
             if self.small_bytes >= self.small_target && !self.small_paths.is_empty() {
                 let paths = std::mem::take(&mut self.small_paths);
                 self.small_bytes = 0;
@@ -338,6 +353,8 @@ impl TaskAggregator {
 
         self.medium_paths.push(rel);
         self.medium_bytes += size;
+        self.total_medium_bytes = self.total_medium_bytes.saturating_add(size);
+        self.promote_medium_strategy();
         if (self.medium_bytes >= self.medium_target && !self.medium_paths.is_empty())
             || (self.medium_bytes > self.medium_max)
         {

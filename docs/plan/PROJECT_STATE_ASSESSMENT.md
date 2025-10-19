@@ -88,6 +88,8 @@ crates/blit-cli/src/main.rs
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
 - [ ] Verify new Windows large-file caching heuristics via 1–4 GiB benchmarks; iterate on worker fan-out/cache hints if parity still lags
+- [x] Split `copy.rs` and `orchestrator.rs` into smaller modules to keep AI-driven edits safe before expanding Phase 3 scope
+    - Result: `copy/` now hosts `mod.rs` + `windows.rs`; `orchestrator/` contains `mod.rs`, `fast_path.rs`, `planner.rs`, and `history.rs`, shrinking primary files to manageable size for future work.
 - [ ] CLI progress UX + flag cleanup
 - [x] Broader integration coverage for fast-path and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios

@@ -18,7 +18,6 @@ pub struct Sample {
 }
 
 pub struct SchedulerOptions {
-    pub ludicrous_speed: bool,
     pub progress: bool,
     pub byte_drain: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     pub initial_streams: Option<usize>,
@@ -151,11 +150,7 @@ async fn execute_streaming_with_receiver(
     let (stat_tx, mut stat_rx) = mpsc::unbounded_channel::<Sample>();
 
     let initial_streams = options.initial_streams.unwrap_or(4); // Start with 4 workers (was 2-3)
-    let max_streams_base = if options.ludicrous_speed {
-        16 // Was: 12
-    } else {
-        12 // Was: 8
-    };
+    let max_streams_base = 12;
 
     // Bound by CPU cores * 2
     let cpu_bound = num_cpus::get() * 2;
@@ -336,7 +331,6 @@ mod tests {
         };
 
         let opts = SchedulerOptions {
-            ludicrous_speed: false,
             progress: false,
             byte_drain: None,
             initial_streams: Some(2),
@@ -386,7 +380,6 @@ mod tests {
         };
 
         let opts = SchedulerOptions {
-            ludicrous_speed: false,
             progress: false,
             byte_drain: None,
             initial_streams: Some(5),
@@ -425,7 +418,6 @@ mod tests {
         };
 
         let opts = SchedulerOptions {
-            ludicrous_speed: false,
             progress: false,
             byte_drain: None,
             initial_streams: Some(3),
@@ -459,7 +451,6 @@ mod tests {
         };
 
         let opts = SchedulerOptions {
-            ludicrous_speed: false,
             progress: false,
             byte_drain: None,
             initial_streams: Some(100),
@@ -499,7 +490,6 @@ mod tests {
         };
 
         let opts = SchedulerOptions {
-            ludicrous_speed: false,
             progress: false,
             byte_drain: None,
             initial_streams: Some(20),

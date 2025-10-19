@@ -11,7 +11,7 @@
    - 10 s stall detector (planner *and* workers idle) with precise error reporting.
    - Automatic fast-paths for trivial workloads and huge single files.
    - Adaptive predictor fed by local performance history to keep perceived latency ≤ 1 s.
-   - No user speed flags (`--ludicrous-speed` removed); buffers/workers auto-tuned.
+   - No user speed flags; planner auto-tunes buffers/workers based on workload.
 
 2. **Hybrid Remote Transport** — Remote push/pull mirror the v1 data-path performance by keeping:
    - gRPC control plane for manifests, negotiations, progress, and purge/list operations.
@@ -76,7 +76,7 @@
    - Add `blit diagnostics perf` command.
 
 3. **CLI Experience**
-   - Remove `--ludicrous-speed`; keep planner fully automatic unless debug limiters are set.
+   - Keep planner fully automatic; expose only debug limiters when absolutely necessary.
    - Keep CLI quiet to avoid overhead, but emit structured progress events/verbose hooks for GUI layers.
 
 4. **Testing & Benchmarks**
@@ -144,7 +144,7 @@
 ## 5. Non-Negotiables (for any contributor or AI agent)
 
 1. Respect the FAST/SIMPLE/RELIABLE/PRIVATE principles at all times.
-2. Never reintroduce removed flags (`--mir`, `--ludicrous-speed`) as behaviour toggles.
+2. Never reintroduce removed speed flags (`--mir`, etc.) as behaviour toggles.
 3. Do not add user-facing performance tunables unless explicitly approved.
 4. Telemetry stays local; no remote logging without signed-off design change.
 5. Every change must update relevant docs + DEVLOG to survive context resets.
