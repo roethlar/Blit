@@ -12,7 +12,7 @@ use std::sync::{
     Arc,
 };
 
-use anyhow::{bail, Context, Result};
+use eyre::{bail, Context, Result};
 use filetime::FileTime;
 use tokio::task::JoinHandle;
 

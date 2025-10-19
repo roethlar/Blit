@@ -120,7 +120,8 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 - The planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU (no manual speed flags).
 - Default worker count = `num_cpus::get()` (with safeguards for hyper-threaded vs. physical cores). Upper bound clamps to 16 by default but adapts if the machine proves capable.
-- Optional debug flag `--max-threads N` (or env `BLIT_MAX_THREADS=N`) caps worker count for testing or constrained environments. Not required for normal use.
+- Optional debug limiters (`--workers`, `--max-threads`, `BLIT_MAX_THREADS`) cap worker count for diagnostics. Using them must surface a clear “DEBUG MODE” indicator so operators know FAST heuristics are constrained.
+- CLI stays quiet during transfers; progress events are emitted for verbose/log subscribers and GUI surfaces.
 - Buffer sizing logic evaluates run-time conditions (e.g., detect memory pressure via `sysinfo`) to avoid over-allocating on small systems.
 
 ---

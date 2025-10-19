@@ -6,6 +6,8 @@ use blit_core::generated::{
 };
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 
+use eyre::Result;
+
 #[derive(Default)]
 pub struct BlitService;
 
@@ -55,7 +57,7 @@ impl Blit for BlitService {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let addr = "[::1]:50051".parse()?;
     let service = BlitService::default();
 

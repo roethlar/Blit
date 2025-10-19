@@ -1,4 +1,4 @@
-use anyhow::Result;
+use eyre::Result;
 use blit_core::enumeration::{EntryKind, FileEnumerator};
 use blit_core::fs_enum::FileFilter;
 

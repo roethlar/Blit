@@ -1,7 +1,7 @@
 use std::fs;
 use tempfile::tempdir;
 
-use anyhow::Result;
+use eyre::Result;
 use blit_core::orchestrator::{LocalMirrorOptions, TransferOrchestrator};
 use blit_core::perf_history::{append_local_record, OptionSnapshot, PerformanceRecord, TransferMode};
 use blit_core::perf_predictor::PerformancePredictor;

@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::perf_history::{config_dir, PerformanceRecord, TransferMode};

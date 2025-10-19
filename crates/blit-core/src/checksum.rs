@@ -1,6 +1,6 @@
 //! Checksum and hashing utilities
 
-use anyhow::{bail, Context, Result};
+use eyre::{bail, Context, Result};
 use log::warn;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -35,7 +35,7 @@ pub struct RollingChecksum {
 }
 
 impl RollingChecksum {
-    pub fn new(block_size: usize) -> anyhow::Result<Self> {
+    pub fn new(block_size: usize) -> Result<Self> {
         let bs: u32 = block_size.try_into().with_context(|| {
             format!(
                 "block_size {} exceeds u32::MAX for rolling checksum",
@@ -105,13 +105,13 @@ impl RollingChecksum {
 }
 
 /// Compute rolling checksum for a block (rsync-compatible)
-pub fn rsync_rolling_checksum(data: &[u8]) -> anyhow::Result<u32> {
+pub fn rsync_rolling_checksum(data: &[u8]) -> Result<u32> {
     RollingChecksum::compute(data)
 }
 
 impl RollingChecksum {
     /// Convenience method: compute the rolling checksum for a slice
-    pub fn compute(data: &[u8]) -> anyhow::Result<u32> {
+    pub fn compute(data: &[u8]) -> Result<u32> {
         let mut checksum = RollingChecksum::new(data.len())?;
         checksum.init(data);
         Ok(checksum.value())

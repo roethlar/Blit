@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
+use eyre::{bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -71,6 +71,7 @@ struct LocalArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    color_eyre::install()?;
     let cli = Cli::parse();
 
     match &cli.command {
@@ -209,13 +210,19 @@ async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {
     let dest_path = PathBuf::from(&args.destination);
 
     if !src_path.exists() {
-        anyhow::bail!("source path does not exist: {}", src_path.display());
+        bail!("source path does not exist: {}", src_path.display());
     }
 
     let options = build_local_options(args, mirror);
     let dry_run = options.dry_run;
     let verbose = options.verbose;
+    let debug_mode = options.debug_mode;
     let workers = options.workers;
+    if debug_mode {
+        eprintln!(
+            "[DEBUG] Worker limiter active – FAST planner auto-tuning capped to {workers} thread(s)."
+        );
+    }
 
     let progress_bar = if args.no_progress {
         None
@@ -260,7 +267,9 @@ async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {
     }
 
     let elapsed = start.elapsed();
-    print_summary(mirror, dry_run, verbose, workers, &summary, elapsed);
+    print_summary(
+        mirror, dry_run, verbose, debug_mode, workers, &summary, elapsed,
+    );
 
     Ok(())
 }
@@ -274,6 +283,7 @@ fn build_local_options(args: &LocalArgs, mirror: bool) -> LocalMirrorOptions {
     options.checksum = args.checksum;
     if let Some(workers) = args.workers {
         options.workers = workers.max(1);
+        options.debug_mode = true;
     }
     options
 }
@@ -282,6 +292,7 @@ fn print_summary(
     mirror: bool,
     dry_run: bool,
     verbose: bool,
+    debug_mode: bool,
     workers: usize,
     summary: &LocalMirrorSummary,
     elapsed: Duration,
@@ -320,6 +331,9 @@ fn print_summary(
         format_bytes(throughput as u64),
         workers
     );
+    if debug_mode {
+        println!("• Debug limiter active – worker cap {} thread(s)", workers);
+    }
 
     if verbose {
         println!(

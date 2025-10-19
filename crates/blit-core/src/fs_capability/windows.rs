@@ -1,7 +1,7 @@
 //! Windows filesystem capability implementation
 
 use super::{Capabilities, FastCopyResult, FilesystemCapability, MetadataPreserved};
-use anyhow::{Context, Result};
+use eyre::{bail, Context, Result};
 use std::path::Path;
 
 pub struct WindowsCapability {
@@ -109,7 +109,7 @@ fn try_copyfileex(src: &Path, dst: &Path) -> Result<u64> {
 
 #[cfg(not(windows))]
 fn try_copyfileex(_src: &Path, _dst: &Path) -> Result<u64> {
-    anyhow::bail!("CopyFileEx not available")
+    bail!("CopyFileEx not available")
 }
 
 #[cfg(test)]

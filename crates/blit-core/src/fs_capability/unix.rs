@@ -1,7 +1,7 @@
 //! Unix/Linux filesystem capability implementation
 
 use super::{Capabilities, FastCopyResult, FilesystemCapability, MetadataPreserved};
-use anyhow::{Context, Result};
+use eyre::{bail, Context, Result};
 use std::path::Path;
 
 pub struct UnixCapability {
@@ -131,7 +131,7 @@ fn try_copy_file_range(src: &Path, dst: &Path) -> Result<u64> {
         };
 
         if copied < 0 {
-            anyhow::bail!("copy_file_range failed");
+            bail!("copy_file_range failed");
         }
 
         if copied == 0 {
@@ -146,7 +146,7 @@ fn try_copy_file_range(src: &Path, dst: &Path) -> Result<u64> {
 
 #[cfg(not(target_os = "linux"))]
 fn try_copy_file_range(_src: &Path, _dst: &Path) -> Result<u64> {
-    anyhow::bail!("copy_file_range not available")
+    bail!("copy_file_range not available")
 }
 
 fn try_sendfile(src: &Path, dst: &Path) -> Result<u64> {
@@ -171,7 +171,7 @@ fn try_sendfile(src: &Path, dst: &Path) -> Result<u64> {
         let sent = unsafe { libc::sendfile(dst_fd, src_fd, &mut offset, to_send) };
 
         if sent < 0 {
-            anyhow::bail!("sendfile failed");
+            bail!("sendfile failed");
         }
 
         if sent == 0 {

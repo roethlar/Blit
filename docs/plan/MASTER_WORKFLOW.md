@@ -3,7 +3,7 @@
 **Project**: Blit v2 - Hybrid Transport File Transfer System
 **Strategy**: Phased greenfield development with continuous validation
 **Current Phase**: Phase 2 (Orchestrator & Local Operations)
-**Target Completion**: ~20-25 working days from current state
+**Target Completion**: Open-ended; progress advances only when quality gates pass
 
 ## Overview
 
@@ -42,21 +42,21 @@ Phase 4 (Production Hardening)
 
 ## Phase Summary
 
-| Phase | Status | Duration | Completion | Critical Path |
-|-------|--------|----------|------------|---------------|
-| 0: Foundation | ✅ Complete | 4-5 days | 100% | Core logic porting |
-| 1: gRPC Scaffolding | ✅ Complete | 2-3 days | 100% | Proto definition |
-| 2: Orchestrator | ⚠️ In Progress | 3-4 days | 5% | Orchestrator implementation |
-| 2.5: Validation | ⏳ Not Started | 1-2 days | 0% | Performance benchmarks |
-| 3: Remote Ops | ⏳ Not Started | 7-10 days | 0% | Hybrid transport |
-| 4: Production | ⏳ Not Started | 5-7 days | 0% | TLS & packaging |
-| **Total** | **In Progress** | **22-31 days** | **40%** | |
+| Phase | Status | Duration (guidance) | Completion | Critical Path |
+|-------|--------|----------------------|------------|---------------|
+| 0: Foundation | ✅ Complete | n/a | 100% | Core logic porting |
+| 1: gRPC Scaffolding | ✅ Complete | n/a | 100% | Proto definition |
+| 2: Orchestrator | ⚠️ In Progress | Open | ~70% | Streaming orchestrator + local heuristics |
+| 2.5: Validation | ⚠️ In Progress | Open | ~40% | Performance benchmarks & parity tuning |
+| 3: Remote Ops | ⏳ Not Started | Open | 0% | Hybrid transport |
+| 4: Production | ⏳ Not Started | Open | 0% | TLS & packaging |
+| **Total** | **In Progress** | **Open** | **~60%** | |
 
 ## Current State
 
 **Last Completed**: Phase 1 (gRPC Scaffolding)
-**Current Blocker**: Empty orchestrator.rs + build failure (globset dependency)
-**Next Milestone**: Local mirror working end-to-end
+**Current Focus**: Phase 2 streaming heuristics + Windows large-file parity (Phase 2.5 gate)
+**Next Milestone**: Validate Windows benchmarks (1–4 GiB) and close Phase 2.5
 
 See [PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md) for detailed status.
 
@@ -128,7 +128,7 @@ Each phase has **mandatory quality gates** that must pass before proceeding:
 - Blit is a user-facing CLI tool - UX matters
 - Beautiful error formatting with color-coded output
 - Clear error chains show full context for debugging
-- Drop-in `anyhow` replacement (same API)
+- Drop-in replacement compatible with existing `anyhow` call sites (same API surface)
 - Modern CLI tools use similar approaches (ripgrep, fd, bat)
 - File transfer errors benefit from clear path/permission/network diagnostics
 
@@ -146,13 +146,14 @@ Each phase has **mandatory quality gates** that must pass before proceeding:
 
 ### Decision 4: Progress Reporting Architecture
 
-**Status**: ⏳ **TO BE DECIDED** in Phase 2
-**Options**:
-- **Option 1**: Trait-based callbacks - CLI has no progress, GUIs implement `ProgressCallback` trait (recommended)
-- **Option 2**: `indicatif` in CLI - built-in progress bars with rate-limiting
+**Status**: ✅ **DECIDED**
+**Selected**: Quiet CLI with progress hooks for future GUIs/daemons
 
-**Recommendation**: Option 1 (zero-cost for CLI, GUI-ready)
-**Details**: See WORKFLOW_PHASE_2.md for implementation details
+**Details**:
+- CLI keeps transfer output minimal to avoid any performance impact.
+- Orchestrator exposes structured progress events so GUI layers can render rich status.
+- Debug/verbose modes may surface extra telemetry; default runs stay silent.
+- Implementation guidance lives in WORKFLOW_PHASE_2.md and LOCAL_TRANSFER_HEURISTICS.md.
 
 ## Phase Workflows
 

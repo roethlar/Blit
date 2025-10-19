@@ -32,7 +32,7 @@
 
 5. **Future-Proofing** — The plan explicitly reserves:
    - RDMA support (RoCEv2 / InfiniBand) after the hybrid TCP path lands.
-   - Progress UI (spinner + throughput) exposed consistently in CLI.
+   - Structured progress events ready for GUI/daemon surfaces while CLI stays quiet by default.
    - Optional OS-specific change journals (USN/FSEvents) once baseline is stable.
 
 ## 2. Protocol Definition Updates (`proto/blit.proto`)
@@ -61,7 +61,7 @@
 - Implement skeleton `blit` CLI (`copy`, `mirror`, `push`, `pull`) and `blitd` server.
 - Add integration test to prove Ping/Pong RPC and negotiation message wiring.
 
-### Phase 2 — Streaming Orchestrator & Local Operations (7–10 days)
+### Phase 2 — Streaming Orchestrator & Local Operations (open schedule)
 
 **Goal:** Deliver the end-to-end local pipeline exactly as designed.
 
@@ -76,15 +76,15 @@
    - Add `blit diagnostics perf` command.
 
 3. **CLI Experience**
-   - Remove `--ludicrous-speed`; no compatibility layer required.
-   - Introduce unified progress indicator (spinner + throughput + ETA) for copy/mirror.
+   - Remove `--ludicrous-speed`; keep planner fully automatic unless debug limiters are set.
+   - Keep CLI quiet to avoid overhead, but emit structured progress events/verbose hooks for GUI layers.
 
 4. **Testing & Benchmarks**
    - Unit tests for fast-path selection, predictor updates, stall detection.
    - Integration tests for: 1 file, 8 files, 100k files, sparse directories, checksum mirror.
    - Initial benchmark harness (`scripts/bench_local_mirror.sh`) covering same scenarios.
 
-### Phase 2.5 — Performance Gate (2–3 days)
+### Phase 2.5 — Performance Gate (open schedule)
 
 **Goal:** Validate parity with v1 before touching remote code.
 
@@ -93,7 +93,7 @@
 - Gate: all scenarios ≥ 95 % of v1 throughput, planner overhead perceptions ≤ 1 s.
 - If gate fails, iterate within Phase 2 until satisfied.
 
-### Phase 3 — Hybrid Remote Operations (8–12 days)
+### Phase 3 — Hybrid Remote Operations (open schedule)
 
 **Goal:** Implement and stabilise the gRPC + TCP data path.
 
@@ -103,9 +103,9 @@
    - Implement automatic gRPC-stream fallback when TCP negotiation fails; emit warning and respect advanced `force-grpc` override.
 3. Pull/List/Purge services mirrored on the hybrid transport.
 4. Network tuning: disable Nagle, set large send/recv buffers, optional BBR hints.
-5. Progress signals piped back to CLI from remote operations.
+5. Progress signals piped back for GUI consumption; CLI remains quiet unless verbose/debug output is requested.
 
-### Phase 3.5 — RDMA Enablement (5–7 days)
+### Phase 3.5 — RDMA Enablement (open schedule)
 
 **Goal:** Prepare for 25/100 GbE deployments.
 
@@ -113,7 +113,7 @@
 - Abstract transport layer so zero-copy operations select TCP vs. RDMA blindly.
 - Add benchmarks on RDMA-capable hardware (pending availability).
 
-### Phase 4 — Production Hardening & Packaging (5–7 days)
+### Phase 4 — Production Hardening & Packaging (open schedule)
 
 **Goal:** Final polish prior to general availability.
 
@@ -136,7 +136,7 @@
 
 - Every major milestone must be logged in `DEVLOG.md` with timestamp + action.
 - `TODO.md` remains the canonical task list; mark items off only when code + docs land.
-- `agent_comms/codex_resume.md` (or equivalent) must capture session state so any LLM can resume after context reset.
+- DEVLOG/TODO/workflow updates must capture session state so any LLM can resume after context reset; `agentcomms/` is reserved for real-time coordination between agents.
 - All scripts/configs default to no network access; explicit callouts required otherwise.
 
 ---
@@ -156,7 +156,7 @@
 | Topic | Status | Notes |
 |-------|--------|-------|
 | Windows RDMA viability | TBD | Evaluate once TCP hybrid stabilises. |
-| Progress UI granularity | Planned | Must include throughput + ETA; evaluate `indicatif`. |
+| Progress event granularity | Planned | Define lightweight event schema for GUI layers; CLI stays minimal. |
 | RDMA hardware procurement | Pending | Coordinate when Phase 3.5 starts. |
 
 ---

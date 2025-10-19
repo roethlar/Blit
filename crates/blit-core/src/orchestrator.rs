@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use eyre::{eyre, Context, Result};
 use tokio::runtime::Builder;
 
 use crate::enumeration::{EntryKind, FileEnumerator};
@@ -37,6 +37,7 @@ pub struct LocalMirrorOptions {
     pub checksum: bool,
     pub workers: usize,
     pub preserve_times: bool,
+    pub debug_mode: bool,
 }
 
 impl Default for LocalMirrorOptions {
@@ -55,6 +56,7 @@ impl Default for LocalMirrorOptions {
             checksum: false,
             workers: num_cpus::get().max(1),
             preserve_times: true,
+            debug_mode: false,
         }
     }
 }
@@ -252,10 +254,7 @@ impl TransferOrchestrator {
         options: LocalMirrorOptions,
     ) -> Result<LocalMirrorSummary> {
         if !src_root.exists() {
-            return Err(anyhow!(
-                "source path does not exist: {}",
-                src_root.display()
-            ));
+            return Err(eyre!("source path does not exist: {}", src_root.display()));
         }
 
         if !options.dry_run {
@@ -586,7 +585,7 @@ async fn drive_planner_events(
                     && now.duration_since(last_worker_activity) >= stall_timeout
                     && (!closed_flag.load(Ordering::SeqCst) || current_remaining > 0)
                 {
-                    return Err(anyhow!("planner or workers stalled for > {:?}", stall_timeout));
+                    return Err(eyre!("planner or workers stalled for > {:?}", stall_timeout));
                 }
             }
         }
@@ -720,7 +719,7 @@ mod tests {
     use super::*;
     use crate::perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
     use crate::perf_predictor::PerformancePredictor;
-    use anyhow::Result;
+    use eyre::Result;
     use tempfile::tempdir;
 
     struct EnvGuard {

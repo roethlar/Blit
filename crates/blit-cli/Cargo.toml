@@ -8,7 +8,8 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.11"
 clap = { version = "4", features = ["derive"] }
 blit-core = { path = "../blit-core" }
-anyhow = "1.0"
+eyre = "0.6"
+color-eyre = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 indicatif = "0.17"
 

@@ -7,6 +7,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
+use eyre::{eyre, Result};
+
 use crate::transfer_plan::{Plan, TransferTask};
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -35,7 +37,7 @@ pub struct WorkerParams {
 }
 
 pub trait WorkerFactory: Send + Sync {
-    fn spawn_worker(&self, params: WorkerParams) -> JoinHandle<anyhow::Result<()>>;
+    fn spawn_worker(&self, params: WorkerParams) -> JoinHandle<Result<()>>;
 }
 
 pub struct TaskStreamSender {
@@ -45,19 +47,19 @@ pub struct TaskStreamSender {
 }
 
 impl TaskStreamSender {
-    pub fn send_blocking(&self, task: TransferTask) -> anyhow::Result<()> {
+    pub fn send_blocking(&self, task: TransferTask) -> Result<()> {
         self.remaining.fetch_add(1, Ordering::Relaxed);
         self.tx
             .blocking_send(task)
-            .map_err(|_| anyhow::anyhow!("transfer task receiver dropped"))
+            .map_err(|_| eyre!("transfer task receiver dropped"))
     }
 
-    pub async fn send(&self, task: TransferTask) -> anyhow::Result<()> {
+    pub async fn send(&self, task: TransferTask) -> Result<()> {
         self.remaining.fetch_add(1, Ordering::Relaxed);
         self.tx
             .send(task)
             .await
-            .map_err(|_| anyhow::anyhow!("transfer task receiver dropped"))
+            .map_err(|_| eyre!("transfer task receiver dropped"))
     }
 
     pub fn remaining(&self) -> Arc<AtomicUsize> {
@@ -94,7 +96,7 @@ pub async fn execute_plan(
     plan: Plan,
     chunk_bytes: usize,
     options: SchedulerOptions,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let total_tasks = plan.tasks.len().max(1);
     let (task_sender, rx_tasks) = create_task_stream(total_tasks);
     let remaining = task_sender.remaining();
@@ -123,7 +125,7 @@ pub async fn execute_streaming_plan(
     task_receiver: mpsc::Receiver<TransferTask>,
     remaining: Arc<AtomicUsize>,
     closed_flag: Arc<AtomicBool>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     execute_streaming_with_receiver(
         factory,
         task_receiver,
@@ -142,7 +144,7 @@ async fn execute_streaming_with_receiver(
     options: SchedulerOptions,
     remaining: Arc<AtomicUsize>,
     closed_flag: Arc<AtomicBool>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let rx_shared = Arc::new(Mutex::new(rx_tasks));
     let active = Arc::new(AtomicUsize::new(0));
     let exit_tokens = Arc::new(AtomicUsize::new(0));
@@ -161,7 +163,7 @@ async fn execute_streaming_with_receiver(
         .max_streams
         .unwrap_or(max_streams_base.min(cpu_bound));
 
-    let mut handles: Vec<JoinHandle<anyhow::Result<()>>> = Vec::new();
+    let mut handles: Vec<JoinHandle<Result<()>>> = Vec::new();
     for idx in 0..initial_streams {
         let params = WorkerParams {
             idx,
@@ -234,7 +236,7 @@ async fn execute_streaming_with_receiver(
         match handle.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => errors.push(e),
-            Err(e) => errors.push(anyhow::anyhow!("worker panic: {}", e)),
+            Err(e) => errors.push(eyre!("worker panic: {}", e)),
         }
     }
 
@@ -272,7 +274,7 @@ async fn execute_streaming_with_receiver(
         }
 
         let summary = format!("{} worker(s) failed: {}", total_errors, error_msg);
-        return Err(anyhow::anyhow!(summary));
+        return Err(eyre!(summary));
     }
 
     Ok(())
@@ -290,7 +292,7 @@ mod tests {
     }
 
     impl WorkerFactory for MockWorkerFactory {
-        fn spawn_worker(&self, params: WorkerParams) -> JoinHandle<anyhow::Result<()>> {
+        fn spawn_worker(&self, params: WorkerParams) -> JoinHandle<Result<()>> {
             let idx = params.idx;
             let result = self.worker_results.get(idx).cloned().unwrap_or(Ok(()));
 
@@ -306,7 +308,7 @@ mod tests {
                 // Return the predetermined result
                 let outcome = match result {
                     Ok(()) => Ok(()),
-                    Err(e) => Err(anyhow::anyhow!("{}", e)),
+                    Err(e) => Err(eyre!("{}", e)),
                 };
 
                 params.active.fetch_sub(1, Ordering::Relaxed);

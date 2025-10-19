@@ -3,7 +3,7 @@
 //! Provides trait-based interface for metadata preservation, symlinks,
 //! sparse files, and fast copy operations across macOS/Linux/Windows.
 
-use anyhow::Result;
+use eyre::Result;
 use std::path::Path;
 
 #[cfg(target_os = "macos")]

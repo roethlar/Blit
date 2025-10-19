@@ -1,4 +1,4 @@
-and# Phase 2: Streaming Orchestrator & Local Operations
+# Phase 2: Streaming Orchestrator & Local Operations
 
 **Goal**: Deliver the v5 local transfer pipeline (streaming planner, adaptive predictor, performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
 **Prerequisites**: Phase 0 & 1 complete (workspace, ported modules, gRPC scaffolding).
@@ -9,13 +9,13 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 
 - `blit copy` / `blit mirror` start emitting data within ≤ 1 s of command invocation for qualifying workloads.
 - Planner flushes batches incrementally; stall detector aborts with clear messaging after 10 s of inactivity.
-- CLI shows throughput + ETA progress for local operations.
+- CLI remains quiet by default; orchestrator exposes progress events for GUIs/verbose listeners.
 - Telemetry log and `blit diagnostics perf` work; predictor adjusts routing automatically.
 - All unit/integration tests (including new fast-path scenarios) pass; benchmarks meet Phase 2.5 targets.
 
 ## Guiding Principles
 
-1. **No user tunables** – `--ludicrous-speed` flag removed; planner owns performance decisions.
+1. **No user tunables** – Planner owns performance decisions. Debug limiters (`--workers`, `--max-threads`, env overrides) must be clearly labelled and pause “FAST” guarantees when active.
 2. **Telemetry stays local** – JSONL log under config dir, capped to ~1 MiB, with optional opt-out.
 3. **Documentation-first** – Update plan/docs/DEVLOG as tasks complete to survive context resets.
 
@@ -45,9 +45,9 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 2.3.1 | Remove `--ludicrous-speed` behaviour; leave as no-op with warning slated for removal. | CLI parsing update + release note. |
-| 2.3.2 | Add progress indicator (spinner + throughput + ETA) using `indicatif`. | Shared progress module for copy/mirror. |
-| 2.3.3 | Ensure verbose mode prints heartbeat stats; default remains quiet until stall. | Logging hooks + tests. |
+| 2.3.1 | Remove `--ludicrous-speed`; maintain automatic tuning unless debug limiters are applied. | CLI parsing update + release note. |
+| 2.3.2 | Keep CLI quiet while exposing progress hooks (events/verbose logging) for GUI surfaces. | Progress event plumbing + docs. |
+| 2.3.3 | When debug limiters are used, make it obvious (CLI banner/log) that FAST mode is capped. | Logging hooks + tests. |
 
 ### 2.4 Testing & Benchmarks
 
@@ -64,7 +64,7 @@ and# Phase 2: Streaming Orchestrator & Local Operations
 |------|-------------|-------------|
 | 2.5.1 | Keep `DEVLOG.md` updated per milestone. | Timestamped entries. |
 | 2.5.2 | Update knowledge docs (`LOCAL_TRANSFER_HEURISTICS.md`, plan summaries) as behaviour changes. | Docs remain authoritative. |
-| 2.5.3 | Sync `agent_comms/codex_resume.md` (or equivalent) after major steps. | Resume file stays current. |
+| 2.5.3 | Capture handoff context via DEVLOG/TODO/workflow updates; reserve `agentcomms/` for live coordination. | Docs remain authoritative between sessions. |
 
 ## Execution Order
 

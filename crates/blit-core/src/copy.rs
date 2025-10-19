@@ -2,7 +2,7 @@
 //! Focus on 10GbE saturation with minimal overhead
 
 use crate::logger::Logger;
-use anyhow::{anyhow, Context, Result};
+use eyre::{eyre, Context, Result};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use std::fs::{self, File};
@@ -247,7 +247,7 @@ pub fn copy_file(
         // Ensure destination directory exists
         let parent = dst
             .parent()
-            .ok_or_else(|| anyhow!("destination has no parent: {}", dst.display()))?;
+            .ok_or_else(|| eyre!("destination has no parent: {}", dst.display()))?;
         fs::create_dir_all(parent)?;
 
         // Open files and stream directly to destination (no staging)

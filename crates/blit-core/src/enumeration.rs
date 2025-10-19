@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use eyre::{bail, Context, Result};
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 
@@ -75,7 +75,7 @@ impl FileEnumerator {
         F: FnMut(EnumeratedEntry) -> Result<()>,
     {
         if !root.exists() {
-            anyhow::bail!("enumeration root does not exist: {}", root.display());
+            bail!("enumeration root does not exist: {}", root.display());
         }
 
         let mut filter = self.filter.clone_without_cache();

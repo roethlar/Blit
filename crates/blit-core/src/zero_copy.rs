@@ -1,7 +1,7 @@
 //! Zero-copy primitives for high-performance I/O.
 
 #[cfg(all(unix, not(target_os = "macos")))]
-use anyhow::{Context, Result};
+use eyre::{Context, Result};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::unix::io::AsRawFd;

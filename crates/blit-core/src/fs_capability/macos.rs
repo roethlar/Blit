@@ -1,7 +1,7 @@
 //! macOS filesystem capability implementation
 
 use super::{Capabilities, FastCopyResult, FilesystemCapability, MetadataPreserved};
-use anyhow::Result;
+use eyre::Result;
 use std::path::Path;
 
 pub struct MacOSCapability {

@@ -1,8 +1,8 @@
 //! Simplified tar streaming for small files
 //! Pulled from streaming_batch.rs and simplified for Windows focus
 
-use anyhow::Result;
 use crossbeam_channel as mpsc;
+use eyre::{bail, eyre, Result};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -40,10 +40,10 @@ impl Default for TarConfig {
     }
 }
 
-fn sanitize_rel_path(rel: &Path) -> anyhow::Result<PathBuf> {
+fn sanitize_rel_path(rel: &Path) -> Result<PathBuf> {
     use std::path::Component::*;
     if rel.is_absolute() {
-        anyhow::bail!("refusing absolute tar entry path: {}", rel.display());
+        bail!("refusing absolute tar entry path: {}", rel.display());
     }
     let mut clean = PathBuf::new();
     for comp in rel.components() {
@@ -51,7 +51,7 @@ fn sanitize_rel_path(rel: &Path) -> anyhow::Result<PathBuf> {
             Normal(s) => clean.push(s),
             CurDir => {}
             ParentDir | RootDir | Prefix(_) => {
-                anyhow::bail!("unsafe component in tar entry path: {}", rel.display());
+                bail!("unsafe component in tar entry path: {}", rel.display());
             }
         }
     }
@@ -206,7 +206,7 @@ pub fn tar_stream_transfer_cb(
                     PathBuf::from(path.file_name().unwrap_or_default())
                 } else {
                     let rp = path.strip_prefix(&source_path).map_err(|_| {
-                        anyhow::anyhow!("failed to compute relative path for {}", path.display())
+                        eyre!("failed to compute relative path for {}", path.display())
                     })?;
                     // Sanitize: disallow absolute and parent components
                     let mut clean = PathBuf::new();
@@ -216,10 +216,7 @@ pub fn tar_stream_transfer_cb(
                             Normal(s) => clean.push(s),
                             CurDir => {}
                             ParentDir | RootDir | Prefix(_) => {
-                                anyhow::bail!(
-                                    "unsafe path component in tar entry: {}",
-                                    rp.display()
-                                )
+                                bail!("unsafe path component in tar entry: {}", rp.display())
                             }
                         }
                     }
@@ -262,11 +259,11 @@ pub fn tar_stream_transfer_cb(
     // Wait for both threads
     let (file_count, total_bytes) = packer
         .join()
-        .map_err(|_| anyhow::anyhow!("Packer thread panicked"))??;
+        .map_err(|_| eyre!("Packer thread panicked"))??;
 
     unpacker
         .join()
-        .map_err(|_| anyhow::anyhow!("Unpacker thread panicked"))??;
+        .map_err(|_| eyre!("Unpacker thread panicked"))??;
 
     Ok((file_count, total_bytes))
 }
@@ -357,11 +354,11 @@ pub fn tar_stream_transfer_list_cb(
     // Wait for both threads
     let (file_count, total_bytes) = packer
         .join()
-        .map_err(|_| anyhow::anyhow!("Packer thread panicked"))??;
+        .map_err(|_| eyre!("Packer thread panicked"))??;
 
     unpacker
         .join()
-        .map_err(|_| anyhow::anyhow!("Unpacker thread panicked"))??;
+        .map_err(|_| eyre!("Unpacker thread panicked"))??;
 
     Ok((file_count, total_bytes))
 }

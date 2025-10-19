@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_BYTES: u64 = 1_000_000; // ~1 MiB cap per design docs
@@ -158,9 +158,8 @@ pub fn config_dir() -> Result<PathBuf> {
     if let Some(proj) = ProjectDirs::from("com", "Blit", "Blit") {
         return Ok(proj.config_dir().to_path_buf());
     }
-    let home = env::var_os("HOME").ok_or_else(|| {
-        anyhow::anyhow!("cannot determine HOME directory for performance history")
-    })?;
+    let home = env::var_os("HOME")
+        .ok_or_else(|| eyre!("cannot determine HOME directory for performance history"))?;
     Ok(Path::new(&home).join(".config").join("blit"))
 }
 

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use eyre::{eyre, Context, Result};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ impl PlanJoinHandle {
     pub fn wait(self) -> Result<LocalPlanFinal> {
         match self.handle.join() {
             Ok(res) => res,
-            Err(err) => Err(anyhow!("planner thread panicked: {:?}", err)),
+            Err(err) => Err(eyre!("planner thread panicked: {:?}", err)),
         }
     }
 }
@@ -369,6 +369,6 @@ impl TaskAggregator {
 
     fn emit_task(&self, tx: &UnboundedSender<PlannerEvent>, task: TransferTask) -> Result<()> {
         tx.send(PlannerEvent::Task(task))
-            .map_err(|_| anyhow!("planner consumer dropped"))
+            .map_err(|_| eyre!("planner consumer dropped"))
     }
 }

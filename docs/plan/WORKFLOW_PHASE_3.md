@@ -479,7 +479,7 @@ async fn accept_data_connection(port: u16, expected_token: Vec<u8>) -> Result<()
     socket.read_exact(&mut token_buf).await?;
 
     if token_buf != expected_token {
-        return Err(anyhow!("Invalid token"));
+        return Err(eyre!("Invalid token"));
     }
 
     // Phase 2: Receive files
