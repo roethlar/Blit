@@ -70,8 +70,8 @@ crates/blit-cli/src/main.rs
 
 ### ⚠️ Phase 2: Orchestrator & Local Operations (IN PROGRESS)
 
-**Completion**: ~60%
-**Status**: Streaming orchestrator and fast-path routing implemented; performance history/predictor + UX pending
+**Completion**: ~70%
+**Status**: Streaming orchestrator and fast-path routing implemented; performance history/predictor + UX pending; Windows local performance now competitive for ≤512 MiB workloads (CopyFileExW)
 
 **Completed (this session)**:
 - ✅ `TransferFacade::stream_local_plan` emitting streaming batches
@@ -83,17 +83,19 @@ crates/blit-cli/src/main.rs
 - ✅ Unit tests covering fast-path predictor gating (`orchestrator::tests`)
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 - ✅ Local benchmark harnesses (macOS/Linux + Windows) run v2-only binaries with perf-history disabled and include rsync/robocopy baselines
+- ✅ Windows local-copy path now uses CopyFileExW fast path; 512 MiB benchmark beats robocopy (~7% faster)
 
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
+- [ ] Tune Windows large-file heuristics (worker fan-out, cache-aware buffering) for 1–2 GiB workloads
 - [ ] CLI progress UX + flag cleanup
 - [x] Broader integration coverage for fast-path and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios
 - [ ] Benchmark performance history warm-up impact (run 1 vs. 10 vs. 100) and capture results in docs
 
-### ⏳ Phase 2.5: Performance & Validation Checkpoint (NOT STARTED)
+### ⚙️ Phase 2.5: Performance & Validation Checkpoint (IN PROGRESS)
 
-**Completion**: 0%
+**Completion**: ~40%
 
 ### ⏳ Phase 3: Remote Operations (NOT STARTED)
 

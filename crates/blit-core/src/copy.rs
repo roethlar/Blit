@@ -17,6 +17,9 @@ use crate::buffer::BufferSizer;
 use crate::checksum::{self, ChecksumType};
 use crate::fs_enum::FileEntry;
 
+#[cfg(windows)]
+const WINDOWS_NO_BUFFERING_THRESHOLD: u64 = 1 * 1024 * 1024 * 1024; // 1 GiB
+
 /// Check if a file needs to be copied (for mirror mode)
 pub fn file_needs_copy(src: &Path, dst: &Path, use_checksum: bool) -> Result<bool> {
     // If destination doesn't exist, definitely copy
@@ -846,6 +849,14 @@ pub fn chunked_copy_file(
 ) -> Result<u64> {
     logger.start(src, dst);
 
+    #[cfg(windows)]
+    if !is_network {
+        if let Ok(bytes) = windows_copyfile(src, dst) {
+            preserve_metadata(src, dst)?;
+            logger.copy_done(src, dst, bytes);
+            return Ok(bytes);
+        }
+    }
     let result: Result<u64> = (|| {
         let metadata = fs::metadata(src)?;
         let file_size = metadata.len();
@@ -894,7 +905,7 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::CopyFileExW;
+    use windows::Win32::Storage::FileSystem::{CopyFileExW, COPY_FILE_NO_BUFFERING};
 
     // Ensure destination directory exists
     if let Some(parent) = dst.parent() {
@@ -902,9 +913,17 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
             .with_context(|| format!("create parent dir {}", parent.display()))?;
     }
 
+    let file_size = std::fs::metadata(src)?.len();
+
     let to_wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain(std::iter::once(0)).collect() };
     let src_w = to_wide(src.as_os_str());
     let dst_w = to_wide(dst.as_os_str());
+
+    let mut flags: u32 = 0;
+    if file_size >= WINDOWS_NO_BUFFERING_THRESHOLD {
+        flags |= COPY_FILE_NO_BUFFERING.0;
+    }
+
     // SAFETY: The wide strings are NUL-terminated and pinned in these vectors for the duration of
     // the call; we pass null progress/abort callbacks as allowed by `CopyFileExW` docs.
     let ok = unsafe {
@@ -914,13 +933,12 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
             None,
             None,
             None,
-            0,
+            flags,
         )
         .is_ok()
     };
     if ok {
-        let bytes = std::fs::metadata(dst)?.len();
-        Ok(bytes)
+        Ok(file_size)
     } else {
         // Fall back to Rust copy if API not available/failed
         std::fs::copy(src, dst).context("Failed to copy file via CopyFileExW (fallback)")
