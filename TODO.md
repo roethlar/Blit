@@ -43,6 +43,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Analyse Windows ETW traces (wingpt-4/5.md findings logged) (`logs/blit_windows_bench.zip`) and propose copy-path optimisations.
 - [x] Re-run Windows benchmark after CopyFileExW fix (512 MiB) and update docs.
 - [ ] Prototype large-file heuristics (>1 GiB) and rerun 1–4 GiB suites.
+  - 2025-10-18: Adaptive COPY_FILE_NO_BUFFERING gating landed; awaiting Windows 1–4 GiB re-bench via wingpt.
 
 ## Phase 3: Remote Operations (Hybrid Transport)
 

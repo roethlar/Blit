@@ -21,13 +21,14 @@ Phase 2.5 is a **mandatory quality gate** that must pass before proceeding to Ph
   - Pre-fix baseline (256 MiB): `blit-cli` **1.086 s avg** vs `robocopy` 0.487 s avg (≈2.23× slower); ETW run 1.226 s vs 0.567 s.  
   - **After CopyFileExW optimisation (512 MiB dataset)**: `blit-cli` **0.724 s avg** (707 MiB/s) vs `robocopy` 0.775 s avg (660 MiB/s) — blit is ~7 % faster; peak run 0.569 s (987 MiB/s).  
   - Scaling study: 256 MiB (0.621 s vs 0.404 s), 1 GiB (1.906 s vs 1.295 s), 2 GiB (4.205 s vs 2.694 s), 4 GiB (8.443 s vs 8.046 s). Gap persists for 1–2 GiB workloads due to cache/worker behaviour.  
+  - Adaptive `COPY_FILE_NO_BUFFERING` gating (2025-10-18) now keeps cache for ≤4 GiB or when physical RAM has ≥512 MiB headroom; awaiting fresh Windows benchmark runs to validate.
   - Detailed findings and PerfView notes: `agentcomms/wingpt-4.md`, `agentcomms/wingpt-5.md`; raw data archived in `logs/blit_windows_bench.zip` (SHA256 `801B0AF5…F14F3D`).  
   - **Result**: Windows parity achieved for ≤512 MiB transfers; larger datasets still trail robocopy by ~1.5× pending cache-aware tuning.
 - Earlier 2025-10-16/17 v1 comparisons remain referenced for historical context; up-to-date parity evaluation now uses platform-native tools as proxies until the legacy binary is available.
 
 Follow-up actions:
-1. Implement wingpt’s recommendations: detect >1 GiB files, reduce worker fan-out, and explore cache-aware buffering/flags on Windows.  
-2. Re-run 1 GiB–4 GiB Windows benchmarks post-tuning to confirm parity; keep 512 MiB regression in watch list.  
+1. Validate adaptive cache/no-buffering heuristics with 1 GiB–4 GiB Windows benchmarks (wingpt).  
+2. Expand large-file tuning if results still trail (worker fan-out, cache-aware buffering); keep 512 MiB regression in watch list.  
 3. Extend coverage to mixed and small-file workloads once large-file heuristics land, and fold results into this checkpoint.
 
 ### Critical Decision Point

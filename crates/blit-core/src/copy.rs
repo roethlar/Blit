@@ -19,6 +19,70 @@ use crate::fs_enum::FileEntry;
 
 #[cfg(windows)]
 const WINDOWS_NO_BUFFERING_THRESHOLD: u64 = 1 * 1024 * 1024 * 1024; // 1 GiB
+#[cfg(windows)]
+const WINDOWS_NO_BUFFERING_FLOOR: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB baseline
+#[cfg(windows)]
+const WINDOWS_NO_BUFFERING_HEADROOM: u64 = 512 * 1024 * 1024; // leave 512 MiB for cache
+
+#[cfg(windows)]
+fn should_use_copyfile_no_buffering(file_size: u64) -> bool {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    if file_size < WINDOWS_NO_BUFFERING_THRESHOLD {
+        return false;
+    }
+
+    let mut threshold = WINDOWS_NO_BUFFERING_FLOOR;
+
+    unsafe {
+        let mut status = MEMORYSTATUSEX::default();
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+
+        if GlobalMemoryStatusEx(&mut status).is_ok() {
+            if status.ullTotalPhys > 0 {
+                let half_total = status.ullTotalPhys / 2;
+                if half_total > threshold {
+                    threshold = half_total;
+                }
+            }
+
+            if status.ullAvailPhys > 0 {
+                let has_headroom =
+                    file_size.saturating_add(WINDOWS_NO_BUFFERING_HEADROOM) <= status.ullAvailPhys;
+                if has_headroom {
+                    log::trace!(
+                        "windows_copyfile: using cached path — file={file_size} bytes, avail_phys={} bytes",
+                        status.ullAvailPhys
+                    );
+                    return false;
+                }
+            }
+
+            log::trace!(
+                "windows_copyfile: evaluating NO_BUFFERING — file={file_size} bytes, total_phys={} bytes, avail_phys={} bytes, threshold={} bytes",
+                status.ullTotalPhys,
+                status.ullAvailPhys,
+                threshold
+            );
+        } else {
+            log::trace!(
+                "windows_copyfile: GlobalMemoryStatusEx failed; applying static NO_BUFFERING threshold {threshold} bytes"
+            );
+        }
+    }
+
+    if file_size > threshold {
+        log::trace!(
+            "windows_copyfile: enabling NO_BUFFERING — file={file_size} bytes exceeds threshold {threshold} bytes"
+        );
+        true
+    } else {
+        log::trace!(
+            "windows_copyfile: keeping cached copy — file={file_size} bytes below threshold {threshold} bytes"
+        );
+        false
+    }
+}
 
 /// Check if a file needs to be copied (for mirror mode)
 pub fn file_needs_copy(src: &Path, dst: &Path, use_checksum: bool) -> Result<bool> {
@@ -920,7 +984,7 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
     let dst_w = to_wide(dst.as_os_str());
 
     let mut flags: u32 = 0;
-    if file_size >= WINDOWS_NO_BUFFERING_THRESHOLD {
+    if should_use_copyfile_no_buffering(file_size) {
         flags |= COPY_FILE_NO_BUFFERING.0;
     }
 

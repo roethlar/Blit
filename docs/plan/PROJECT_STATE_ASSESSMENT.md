@@ -87,7 +87,7 @@ crates/blit-cli/src/main.rs
 
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
-- [ ] Tune Windows large-file heuristics (worker fan-out, cache-aware buffering) for 1–2 GiB workloads
+- [ ] Verify new Windows large-file caching heuristics via 1–4 GiB benchmarks; iterate on worker fan-out/cache hints if parity still lags
 - [ ] CLI progress UX + flag cleanup
 - [x] Broader integration coverage for fast-path and predictor heuristics
 - [ ] Integration / benchmark coverage for streaming + fast-path scenarios
