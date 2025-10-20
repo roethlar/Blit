@@ -38,7 +38,7 @@
 | 2.2.2 | Build EMA-based predictor segmented by filesystem profile. | Predictor struct + serde (for persistence). |
 | 2.2.3 | Integrate predictor into orchestrator routing decisions. | Orchestrator chooses streaming vs. fast-path based on prediction. |
 | 2.2.4 | Add `blit diagnostics perf` CLI command. | ✅ Command prints recent runs + stats. |
-| 2.2.5 | Add CLI/config toggle for telemetry (`profile` command remains visible). Replace environment variable usage. | CLI flag/config option + documentation. |
+| 2.2.5 | Add CLI/config toggle for telemetry (`profile` command remains visible). Replace environment variable usage. | Diagnostics toggles (`blit diagnostics perf --enable/--disable`) + settings file. |
 
 **Note:** Final release toggle (enabled by default vs. opt-in) will be decided from benchmark evidence; once committed, the setting remains stable across releases. Implementation must avoid environment-variable configuration.
 
@@ -55,7 +55,7 @@
 | Task | Description | Deliverable |
 |------|-------------|-------------|
 | 2.4.1 | Extend unit tests for planner streaming, predictor, stall detector. | `transfer_engine` streaming tests passing on Windows/Linux |
-| 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | TODO |
+| 2.4.2 | Add integration tests covering 1-file, 8-file, 100k-file, checksum mirror scenarios. | `tests/integration/local_transfers.rs` exercises tiny vs streaming manifests; large/100k cases still pending. |
 | 2.4.3 | Keep macOS/Linux + Windows benchmarks v2-only (synthetic payload, perf-history disabled by default) and capture rsync/robocopy baselines. | `scripts/bench_local_mirror.sh` (vs `rsync`) / `scripts/windows/bench-local-mirror.ps1` (vs `robocopy`) emit summary timings + log paths. |
 | 2.4.4 | Quantify performance history warm-up impact (first vs. 10th vs. 100th run) across representative workloads. | Benchmark report captured in docs with hard numbers and log references. |
 

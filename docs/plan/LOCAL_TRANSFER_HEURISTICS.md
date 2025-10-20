@@ -37,7 +37,7 @@ Weakness: small workloads pay the planning cost before any data is moved (percei
 
 - The orchestrator maintains a 1 s heartbeat timer. At each tick it flushes whatever batches are ready to the worker queue.
 - Flush cadence dynamically adjusts based on queue saturation: 1000 ms while the queue is empty, tightening to 500 ms if workers are draining results quickly, relaxing back when the queue fills.
-- CLI progress spinner (indicatif) tracks elapsed time and surfaces final throughput; `--no-progress` disables the spinner, while `--verbose` keeps raw planner logs.
+- CLI progress spinner (indicatif) tracks elapsed time and surfaces final throughput when `--progress` is supplied; otherwise the CLI stays quiet, while `--verbose` keeps raw planner logs.
 
 ### 3.3 Stall Detection & Timeouts
 
@@ -80,7 +80,7 @@ These heuristics are internal; users continue to run `blit copy` / `blit mirror`
 
 - Metrics are stored locally as a capped JSON Lines file (e.g., `~/.config/blit/perf_local.jsonl`, max ~1 MiB).
 - Each entry includes: timestamp, workload signature (file count, total bytes, flags), planning_ms, copy_ms, stall_count, filesystem profile.
-- No data is sent off-machine. Set `BLIT_DISABLE_PERF_HISTORY=1` to disable recording entirely.
+- No data is sent off-machine. Use `blit diagnostics perf --disable` (and `--enable`) to toggle recording in the local config directory.
 
 ### 5.3 Usage
 

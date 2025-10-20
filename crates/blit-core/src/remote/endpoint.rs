@@ -30,6 +30,10 @@ impl RemoteEndpoint {
             bail!("remote location cannot be empty");
         }
 
+        if looks_like_local_path(trimmed) {
+            bail!("input appears to be a local path");
+        }
+
         if let Some(idx) = trimmed.find("://") {
             // Root export (server://path)
             let host_port = &trimmed[..idx];
@@ -183,6 +187,43 @@ fn display_host(host: &str) -> String {
     } else {
         host.to_string()
     }
+}
+
+fn looks_like_local_path(input: &str) -> bool {
+    if input.is_empty() {
+        return false;
+    }
+
+    let first = input.chars().next().unwrap();
+    if matches!(first, '.' | '/' | '\\' | '~') {
+        return true;
+    }
+
+    if input.starts_with("//") || input.starts_with("\\\\") {
+        return true;
+    }
+
+    if input.contains('\\') {
+        return true;
+    }
+
+    if input.contains('/') && !input.contains(":/") && !input.contains("://") {
+        return true;
+    }
+
+    if input.len() >= 3 {
+        let mut chars = input.chars();
+        let drive = chars.next().unwrap();
+        if drive.is_ascii_alphabetic() {
+            if let Some(':') = chars.next() {
+                if matches!(chars.next(), Some('\\') | Some('/')) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

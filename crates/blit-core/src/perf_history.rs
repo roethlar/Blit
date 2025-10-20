@@ -1,8 +1,9 @@
 //! Local performance history writer for adaptive planning.
 //!
 //! Records summarized run information to a capped JSONL file under the user's
-//! config directory. The data stays on-device and can be disabled via
-//! `BLIT_DISABLE_PERF_HISTORY=1`.
+//! config directory. The data stays on-device and can be toggled via the CLI
+//! (`blit diagnostics perf --enable/--disable`). Environment variables no longer
+//! control the behaviour; configuration is persisted alongside the history file.
 
 use std::collections::VecDeque;
 use std::env;
@@ -16,7 +17,7 @@ use eyre::{eyre, Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_BYTES: u64 = 1_000_000; // ~1 MiB cap per design docs
-const DISABLE_ENV: &str = "BLIT_DISABLE_PERF_HISTORY";
+const SETTINGS_FILE: &str = "settings.json";
 
 /// High-level category of a transfer run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -91,8 +92,10 @@ impl PerformanceRecord {
 /// Append a record to the local performance history store.
 ///
 /// Errors are bubbled up so callers can decide whether to log or ignore them.
+/// The function honours the persisted enable/disable flag; callers do not need
+/// to perform a separate check.
 pub fn append_local_record(record: &PerformanceRecord) -> Result<()> {
-    if perf_history_disabled() {
+    if !perf_history_enabled()? {
         return Ok(());
     }
 
@@ -148,13 +151,10 @@ pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
     Ok(records[start..].to_vec())
 }
 
-fn perf_history_disabled() -> bool {
-    env::var(DISABLE_ENV)
-        .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
 pub fn config_dir() -> Result<PathBuf> {
+    if let Some(path) = env::var_os("BLIT_CONFIG_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     if let Some(proj) = ProjectDirs::from("com", "Blit", "Blit") {
         return Ok(proj.config_dir().to_path_buf());
     }
@@ -165,6 +165,85 @@ pub fn config_dir() -> Result<PathBuf> {
 
 fn history_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("perf_local.jsonl"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Settings {
+    #[serde(default = "default_perf_history_enabled")]
+    perf_history_enabled: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            perf_history_enabled: true,
+        }
+    }
+}
+
+fn default_perf_history_enabled() -> bool {
+    true
+}
+
+fn settings_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join(SETTINGS_FILE))
+}
+
+fn load_settings() -> Result<Settings> {
+    let path = settings_path()?;
+    if !path.exists() {
+        return Ok(Settings::default());
+    }
+
+    let bytes = fs::read(&path)
+        .with_context(|| format!("failed to read perf history settings {}", path.display()))?;
+    if bytes.is_empty() {
+        return Ok(Settings::default());
+    }
+
+    let settings: Settings =
+        serde_json::from_slice(&bytes).context("failed to parse perf history settings JSON")?;
+    Ok(settings)
+}
+
+fn store_settings(settings: &Settings) -> Result<()> {
+    let path = settings_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create settings directory {}", parent.display()))?;
+    }
+
+    let mut file = File::create(&path)
+        .with_context(|| format!("failed to write perf history settings {}", path.display()))?;
+    let json =
+        serde_json::to_vec_pretty(settings).context("failed to serialize perf history settings")?;
+    file.write_all(&json)
+        .context("failed to persist perf history settings")?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Returns whether performance history is currently enabled.
+pub fn perf_history_enabled() -> Result<bool> {
+    Ok(load_settings()?.perf_history_enabled)
+}
+
+/// Persist the performance history enablement flag.
+pub fn set_perf_history_enabled(enabled: bool) -> Result<()> {
+    let mut settings = load_settings().unwrap_or_default();
+    settings.perf_history_enabled = enabled;
+    store_settings(&settings)
+}
+
+/// Remove the stored performance history file. Returns `Ok(true)` if the file
+/// was removed, `Ok(false)` if it did not exist.
+pub fn clear_history() -> Result<bool> {
+    let path = history_path()?;
+    match fs::remove_file(&path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Best-effort rotation that prefers keeping the newest records over enforcing the cap exactly.
@@ -198,33 +277,19 @@ fn enforce_size_cap(path: &Path, max_bytes: u64) -> Result<()> {
     }
 
     let mut total_size: usize = lines.iter().map(|l| l.len() + 1).sum();
-    let mut trimmed = false;
-
-    while lines.len() > 1 && total_size > max_bytes as usize {
-        if let Some(front) = lines.pop_front() {
-            total_size -= front.len() + 1;
-            trimmed = true;
+    while total_size as u64 > max_bytes {
+        if lines.pop_front().is_none() {
+            break;
         }
+        total_size = lines.iter().map(|l| l.len() + 1).sum();
     }
 
-    if !trimmed {
-        // Either the file already fits under the cap or a single entry is larger than the cap.
+    // Re-read metadata to ensure nothing appended during trimming.
+    if fs::metadata(path).map(|m| m.len()).unwrap_or(observed_len) != observed_len {
         return Ok(());
     }
 
-    // If another process appended between our stat and trimming pass, skip rotation to avoid
-    // clobbering newer records. We'll enforce the cap on the next write.
-    let current_len = fs::metadata(path)?.len();
-    if current_len > observed_len {
-        return Ok(());
-    }
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .context("truncate performance history during rotation")?;
-
+    let mut file = File::create(path)?;
     for line in lines {
         writeln!(file, "{line}")?;
     }

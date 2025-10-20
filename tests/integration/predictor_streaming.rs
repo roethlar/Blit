@@ -1,14 +1,12 @@
+use blit_core::orchestrator::{LocalMirrorOptions, TransferOrchestrator};
+use blit_core::perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
+use blit_core::perf_predictor::PerformancePredictor;
+use eyre::Result;
 use std::fs;
 use tempfile::tempdir;
 
-use eyre::Result;
-use blit_core::orchestrator::{LocalMirrorOptions, TransferOrchestrator};
-use blit_core::perf_history::{append_local_record, OptionSnapshot, PerformanceRecord, TransferMode};
-use blit_core::perf_predictor::PerformancePredictor;
-
 #[test]
 fn streaming_forced_when_prediction_low() -> Result<()> {
-    std::env::set_var("BLIT_DISABLE_PERF_HISTORY", "1");
     let tmp = tempdir()?;
     let src = tmp.path().join("src");
     let dest = tmp.path().join("dest");
@@ -40,10 +38,9 @@ fn streaming_forced_when_prediction_low() -> Result<()> {
     predictor.observe(&record);
     predictor.save()?;
 
-    let options = LocalMirrorOptions {
-        progress: false,
-        ..Default::default()
-    };
+    let mut options = LocalMirrorOptions::default();
+    options.progress = false;
+    options.perf_history = false;
     let orchestrator = TransferOrchestrator::new();
     let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
     assert_eq!(summary.copied_files, 1);
@@ -52,7 +49,6 @@ fn streaming_forced_when_prediction_low() -> Result<()> {
 
 #[test]
 fn fast_path_when_prediction_high() -> Result<()> {
-    std::env::set_var("BLIT_DISABLE_PERF_HISTORY", "1");
     let tmp = tempdir()?;
     let src = tmp.path().join("src");
     let dest = tmp.path().join("dest");
@@ -84,10 +80,9 @@ fn fast_path_when_prediction_high() -> Result<()> {
     predictor.observe(&record);
     predictor.save()?;
 
-    let options = LocalMirrorOptions {
-        progress: false,
-        ..Default::default()
-    };
+    let mut options = LocalMirrorOptions::default();
+    options.progress = false;
+    options.perf_history = false;
     let orchestrator = TransferOrchestrator::new();
     let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
     assert_eq!(summary.copied_files, 1);

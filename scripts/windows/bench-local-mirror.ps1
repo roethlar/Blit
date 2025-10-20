@@ -36,9 +36,6 @@ $workspaceDisposition = if ($Cleanup) { 'removed' } else { 'preserved' }
 Write-Log ("Workspace: {0} (will be {1} on exit)" -f $workRoot, $workspaceDisposition)
 Write-Log "Generating ${SizeMB} MiB synthetic payload..."
 
-$previousPerf = $env:BLIT_DISABLE_PERF_HISTORY
-$perfEnvSetByScript = $false
-
 try {
     # Generate source payload
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -92,13 +89,11 @@ try {
         throw "Runs and Warmup must be non-negative integers."
     }
 
-    if ([string]::IsNullOrEmpty($previousPerf)) {
-        $env:BLIT_DISABLE_PERF_HISTORY = "1"
-        $perfEnvSetByScript = $true
-        Write-Log "Perf history disabled for benchmark runs (set BLIT_DISABLE_PERF_HISTORY=0 to keep history)."
-    } else {
-        Write-Log "Perf history env already set to '$previousPerf'."
-    }
+    $configDir = Join-Path $workRoot "blit_config"
+    [System.IO.Directory]::CreateDirectory($configDir) | Out-Null
+    $env:BLIT_CONFIG_DIR = $configDir
+    Write-Log ("Using isolated config dir at {0}" -f $configDir)
+    & $blitBin diagnostics perf --disable --clear 2>&1 | ForEach-Object { Write-Log $_ }
 
     $toolNames = New-Object System.Collections.Generic.List[string]
     $toolDest = @{}
@@ -154,7 +149,7 @@ try {
 
         switch ($Tool) {
             "blit" {
-                $output = & $Binary mirror $Source $Destination --no-progress 2>&1
+                $output = & $Binary mirror $Source $Destination 2>&1
                 $exitCode = $LASTEXITCODE
             }
             "robocopy" {
@@ -257,15 +252,10 @@ try {
         }
     }
 
+    & $blitBin diagnostics perf --enable 2>&1 | ForEach-Object { Write-Log $_ }
     Write-Log "Benchmark complete. Log: $logFile"
 
 } finally {
-    if ($perfEnvSetByScript) {
-        Remove-Item env:BLIT_DISABLE_PERF_HISTORY -ErrorAction SilentlyContinue
-    } elseif (-not [string]::IsNullOrEmpty($previousPerf)) {
-        $env:BLIT_DISABLE_PERF_HISTORY = $previousPerf
-    }
-
     if ($Cleanup) {
         Write-Host "Cleaning up workspace: $workRoot"
         Remove-Item $workRoot -Recurse -Force -ErrorAction SilentlyContinue

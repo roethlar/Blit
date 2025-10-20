@@ -10,10 +10,7 @@ pub(super) fn record_performance_history(
     planner_duration_ms: u128,
     transfer_duration_ms: u128,
 ) -> Option<PerformanceRecord> {
-    if std::env::var("BLIT_DISABLE_PERF_HISTORY")
-        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
-        .unwrap_or(false)
-    {
+    if !options.perf_history {
         return None;
     }
 

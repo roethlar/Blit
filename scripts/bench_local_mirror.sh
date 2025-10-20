@@ -76,12 +76,11 @@ if ! [[ "$RUNS" =~ ^[0-9]+$ && "$WARMUP" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if [[ -z "${BLIT_DISABLE_PERF_HISTORY+x}" ]]; then
-  export BLIT_DISABLE_PERF_HISTORY=1
-  log "Perf history disabled for benchmark runs (set BLIT_DISABLE_PERF_HISTORY=0 to keep history)."
-else
-  log "Perf history env already set to '$BLIT_DISABLE_PERF_HISTORY'."
-fi
+BENCH_CONFIG_DIR="$WORK_ROOT/blit_config"
+mkdir -p "$BENCH_CONFIG_DIR"
+export BLIT_CONFIG_DIR="$BENCH_CONFIG_DIR"
+log "Using isolated config dir at $BLIT_CONFIG_DIR"
+"$BLIT_BIN" diagnostics perf --disable --clear >>"$LOG_FILE" 2>&1 || true
 
 TOOL_NAMES=()
 TOOL_DESTS=()
@@ -115,8 +114,7 @@ run_tool_command() {
   local dest=$2
   case "$tool" in
     blit)
-      env BLIT_DISABLE_PERF_HISTORY="$BLIT_DISABLE_PERF_HISTORY" \
-        "$BLIT_BIN" mirror --no-progress "$SRC_DIR" "$dest"
+      "$BLIT_BIN" mirror "$SRC_DIR" "$dest"
       ;;
     rsync)
       if rsync --help 2>&1 | grep -q -- '--no-inc-recursive'; then
@@ -194,4 +192,5 @@ for idx in "${!TOOL_NAMES[@]}"; do
   fi
 done
 
+"$BLIT_BIN" diagnostics perf --enable >>"$LOG_FILE" 2>&1 || true
 log "Benchmark complete. Full log: $LOG_FILE"

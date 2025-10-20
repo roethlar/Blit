@@ -818,8 +818,16 @@ mod tests {
         (addr, shutdown_tx, server)
     }
 
-    fn default_endpoint(addr: SocketAddr) -> Result<RemoteEndpoint> {
-        RemoteEndpoint::parse(&format!("blit://{}:{}/default", addr.ip(), addr.port()))
+    fn module_endpoint(addr: SocketAddr, rel_path: &str) -> Result<RemoteEndpoint> {
+        let authority = format!("{}:{}", addr.ip(), addr.port());
+        if rel_path.is_empty() {
+            RemoteEndpoint::parse(&format!("{authority}:/default/"))
+        } else {
+            RemoteEndpoint::parse(&format!(
+                "{authority}:/default/{}",
+                rel_path.trim_start_matches('/')
+            ))
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -834,12 +842,9 @@ mod tests {
 
         let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
 
-        let mut endpoint = default_endpoint(addr)?;
-        let remote_path = endpoint.resource.clone().unwrap_or_else(|| ".".to_string());
-        endpoint.resource = None;
-
+        let endpoint = module_endpoint(addr, "")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(&remote_path, dest.path()).await;
+        let pull_result = client.pull(dest.path()).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -870,12 +875,9 @@ mod tests {
 
         let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), true).await;
 
-        let mut endpoint = default_endpoint(addr)?;
-        let remote_path = endpoint.resource.clone().unwrap_or_else(|| ".".to_string());
-        endpoint.resource = None;
-
+        let endpoint = module_endpoint(addr, "")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(&remote_path, dest.path()).await;
+        let pull_result = client.pull(dest.path()).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -905,11 +907,9 @@ mod tests {
 
         let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
 
-        let mut endpoint = default_endpoint(addr)?;
-        endpoint.resource = None;
-
+        let endpoint = module_endpoint(addr, "nested/beta.txt")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull("nested/beta.txt", dest.path()).await;
+        let pull_result = client.pull(dest.path()).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -932,11 +932,9 @@ mod tests {
 
         let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
 
-        let mut endpoint = default_endpoint(addr)?;
-        endpoint.resource = None;
-
+        let endpoint = module_endpoint(addr, "../secret")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull("../secret", dest.path()).await;
+        let pull_result = client.pull(dest.path()).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -963,11 +961,9 @@ mod tests {
 
         let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
 
-        let mut endpoint = default_endpoint(addr)?;
-        endpoint.resource = None;
-
+        let endpoint = module_endpoint(addr, "missing.txt")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull("missing.txt", dest.path()).await;
+        let pull_result = client.pull(dest.path()).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();

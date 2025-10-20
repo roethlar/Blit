@@ -1,5 +1,6 @@
 use blit_core::fs_enum::FileFilter;
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
+use blit_core::perf_history;
 use blit_core::remote::{
     RemoteEndpoint, RemotePath, RemotePullClient, RemotePullReport, RemotePushClient,
     RemotePushReport,
@@ -11,6 +12,27 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
+
+struct AppContext {
+    perf_history_enabled: bool,
+}
+
+impl AppContext {
+    fn load() -> Self {
+        let perf_history_enabled = match perf_history::perf_history_enabled() {
+            Ok(enabled) => enabled,
+            Err(err) => {
+                eprintln!(
+                    "[warn] failed to read performance history settings (defaulting to enabled): {err:?}"
+                );
+                true
+            }
+        };
+        Self {
+            perf_history_enabled,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "blit")]
@@ -50,6 +72,15 @@ struct PerfArgs {
     /// Number of recent records to display (0 = all)
     #[arg(long, default_value_t = 50)]
     limit: usize,
+    /// Enable performance history capture
+    #[arg(long, conflicts_with = "disable")]
+    enable: bool,
+    /// Disable performance history capture
+    #[arg(long, conflicts_with = "enable")]
+    disable: bool,
+    /// Remove the stored performance history file
+    #[arg(long)]
+    clear: bool,
 }
 
 #[derive(Args)]
@@ -67,9 +98,9 @@ struct TransferArgs {
     /// Keep verbose logs from the orchestrator
     #[arg(long)]
     verbose: bool,
-    /// Disable the interactive progress indicator
+    /// Show an interactive progress indicator
     #[arg(long)]
-    no_progress: bool,
+    progress: bool,
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]
     workers: Option<usize>,
@@ -89,7 +120,7 @@ struct ListArgs {
 }
 
 #[derive(Copy, Clone)]
-enum TransferMode {
+enum TransferKind {
     Copy,
     Mirror,
 }
@@ -103,16 +134,17 @@ enum Endpoint {
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+    let mut ctx = AppContext::load();
 
     match &cli.command {
-        Commands::Copy(args) => run_transfer(args, TransferMode::Copy).await?,
-        Commands::Mirror(args) => run_transfer(args, TransferMode::Mirror).await?,
-        Commands::Move(args) => run_move(args).await?,
+        Commands::Copy(args) => run_transfer(&ctx, args, TransferKind::Copy).await?,
+        Commands::Mirror(args) => run_transfer(&ctx, args, TransferKind::Mirror).await?,
+        Commands::Move(args) => run_move(&ctx, args).await?,
         Commands::Scan(args) => run_scan(args).await?,
         Commands::List(args) => run_list(args).await?,
         Commands::Diagnostics { command } => match command {
-            DiagnosticsCommand::Perf(PerfArgs { limit }) => {
-                run_diagnostics_perf(*limit)?;
+            DiagnosticsCommand::Perf(args) => {
+                run_diagnostics_perf(&mut ctx, args)?;
             }
         },
     }
@@ -120,30 +152,50 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_diagnostics_perf(limit: usize) -> Result<()> {
-    use blit_core::perf_history::{config_dir, read_recent_records, TransferMode};
+fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()> {
+    if args.enable {
+        perf_history::set_perf_history_enabled(true)?;
+        ctx.perf_history_enabled = true;
+        println!("Performance history enabled (persisted).");
+    }
 
-    let disabled = std::env::var("BLIT_DISABLE_PERF_HISTORY")
-        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
-        .unwrap_or(false);
+    if args.disable {
+        perf_history::set_perf_history_enabled(false)?;
+        ctx.perf_history_enabled = false;
+        println!("Performance history disabled (persisted).");
+    }
 
-    let history_path = config_dir()?.join("perf_local.jsonl");
-    let records = read_recent_records(limit)?;
+    if args.clear {
+        match perf_history::clear_history()? {
+            true => println!("Cleared performance history log."),
+            false => println!("No performance history log to clear."),
+        }
+    }
+
+    // Refresh status from disk in case multiple toggles happened earlier.
+    if let Ok(enabled) = perf_history::perf_history_enabled() {
+        ctx.perf_history_enabled = enabled;
+    }
+
+    let history_path = perf_history::config_dir()?.join("perf_local.jsonl");
+    let records = perf_history::read_recent_records(args.limit)?;
 
     println!(
         "Performance history (showing up to {} entries): {}",
-        limit,
+        args.limit,
         records.len()
     );
     println!("History file: {}", history_path.display());
     println!(
         "Status: {}",
-        if disabled {
-            "disabled via BLIT_DISABLE_PERF_HISTORY"
-        } else if records.is_empty() {
-            "enabled (no entries yet)"
+        if ctx.perf_history_enabled {
+            if records.is_empty() {
+                "enabled (no entries yet)"
+            } else {
+                "enabled"
+            }
         } else {
-            "enabled"
+            "disabled via CLI settings"
         }
     );
 
@@ -185,8 +237,8 @@ fn run_diagnostics_perf(limit: usize) -> Result<()> {
         let millis = last.timestamp_epoch_ms.min(u64::MAX as u128) as u64;
         let timestamp = DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_millis(millis));
         let mode = match last.mode {
-            TransferMode::Copy => "copy",
-            TransferMode::Mirror => "mirror",
+            perf_history::TransferMode::Copy => "copy",
+            perf_history::TransferMode::Mirror => "mirror",
         };
         let fast_path_label = last.fast_path.as_deref().unwrap_or("streaming");
 
@@ -220,7 +272,7 @@ fn run_diagnostics_perf(limit: usize) -> Result<()> {
     Ok(())
 }
 
-async fn run_transfer(args: &TransferArgs, mode: TransferMode) -> Result<()> {
+async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let dst_endpoint = parse_transfer_endpoint(&args.destination)?;
 
@@ -230,10 +282,11 @@ async fn run_transfer(args: &TransferArgs, mode: TransferMode) -> Result<()> {
                 bail!("source path does not exist: {}", src_path.display());
             }
             run_local_transfer(
+                ctx,
                 args,
                 &src_path,
                 &dst_path,
-                matches!(mode, TransferMode::Mirror),
+                matches!(mode, TransferKind::Mirror),
             )
             .await
         }
@@ -244,20 +297,21 @@ async fn run_transfer(args: &TransferArgs, mode: TransferMode) -> Result<()> {
             ensure_remote_transfer_supported(args)?;
             ensure_remote_destination_supported(&remote)?;
             run_remote_push_transfer(
+                ctx,
                 args,
                 &src_path,
                 remote,
-                matches!(mode, TransferMode::Mirror),
+                matches!(mode, TransferKind::Mirror),
             )
             .await
         }
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
-            if matches!(mode, TransferMode::Mirror) {
+            if matches!(mode, TransferKind::Mirror) {
                 bail!("remote-to-local mirror is not supported yet");
             }
             ensure_remote_transfer_supported(args)?;
             ensure_remote_source_supported(&remote)?;
-            run_remote_pull_transfer(args, remote, &dst_path).await
+            run_remote_pull_transfer(ctx, args, remote, &dst_path).await
         }
         (Endpoint::Remote(_), Endpoint::Remote(_)) => {
             bail!("remote-to-remote transfers are not supported yet")
@@ -265,7 +319,7 @@ async fn run_transfer(args: &TransferArgs, mode: TransferMode) -> Result<()> {
     }
 }
 
-async fn run_move(args: &TransferArgs) -> Result<()> {
+async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let dst_endpoint = parse_transfer_endpoint(&args.destination)?;
 
@@ -277,7 +331,7 @@ async fn run_move(args: &TransferArgs) -> Result<()> {
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
-            run_local_transfer(args, &src_path, &dst_path, true).await?;
+            run_local_transfer(ctx, args, &src_path, &dst_path, true).await?;
 
             if src_path.is_dir() {
                 fs::remove_dir_all(&src_path)
@@ -365,6 +419,7 @@ fn format_remote_endpoint(remote: &RemoteEndpoint) -> String {
 }
 
 async fn run_remote_push_transfer(
+    _ctx: &AppContext,
     _args: &TransferArgs,
     source_path: &Path,
     remote: RemoteEndpoint,
@@ -391,6 +446,7 @@ async fn run_remote_push_transfer(
 }
 
 async fn run_remote_pull_transfer(
+    _ctx: &AppContext,
     _args: &TransferArgs,
     remote: RemoteEndpoint,
     dest_root: &Path,
@@ -460,6 +516,7 @@ fn describe_push_result(report: &RemotePushReport, destination: &str) {
 }
 
 async fn run_local_transfer(
+    ctx: &AppContext,
     args: &TransferArgs,
     src_path: &Path,
     dest_path: &Path,
@@ -469,7 +526,7 @@ async fn run_local_transfer(
         bail!("source path does not exist: {}", src_path.display());
     }
 
-    let options = build_local_options(args, mirror);
+    let options = build_local_options(ctx, args, mirror);
     let dry_run = options.dry_run;
     let verbose = options.verbose;
     let debug_mode = options.debug_mode;
@@ -480,14 +537,14 @@ async fn run_local_transfer(
         );
     }
 
-    let progress_bar = if args.no_progress {
+    let progress_bar = if !args.progress {
         None
     } else {
         let pb = ProgressBar::new_spinner();
         pb.set_style(
             ProgressStyle::with_template("{spinner} {msg}")
                 .unwrap()
-                .tick_strings(&["⠁", "⠂", "⠄", "⠂"]),
+                .tick_strings(&["-", "\\", "|", "/"]),
         );
         pb.enable_steady_tick(Duration::from_millis(120));
         pb.set_message(format!(
@@ -530,12 +587,13 @@ async fn run_local_transfer(
     Ok(())
 }
 
-fn build_local_options(args: &TransferArgs, mirror: bool) -> LocalMirrorOptions {
+fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> LocalMirrorOptions {
     let mut options = LocalMirrorOptions::default();
     options.mirror = mirror;
     options.dry_run = args.dry_run;
     options.verbose = args.verbose;
-    options.progress = false;
+    options.progress = args.progress;
+    options.perf_history = ctx.perf_history_enabled;
     options.checksum = args.checksum;
     if let Some(workers) = args.workers {
         options.workers = workers.max(1);
@@ -623,29 +681,6 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(prev) = &self.prev {
-                std::env::set_var(self.key, prev);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -655,12 +690,14 @@ mod tests {
 
     #[test]
     fn copy_local_transfers_file() -> Result<()> {
-        let _env = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
         let tmp = tempdir()?;
         let src = tmp.path().join("src");
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&src)?;
         std::fs::write(src.join("hello.txt"), b"hello")?;
+        let ctx = AppContext {
+            perf_history_enabled: false,
+        };
 
         let args = TransferArgs {
             source: src.to_string_lossy().into_owned(),
@@ -668,11 +705,11 @@ mod tests {
             dry_run: false,
             checksum: false,
             verbose: false,
-            no_progress: true,
+            progress: false,
             workers: None,
         };
 
-        runtime().block_on(run_local_transfer(&args, &src, &dest, false))?;
+        runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
         let copied = std::fs::read(dest.join("hello.txt"))?;
         assert_eq!(copied, b"hello");
         Ok(())
@@ -680,12 +717,14 @@ mod tests {
 
     #[test]
     fn copy_local_dry_run_creates_no_files() -> Result<()> {
-        let _env = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
         let tmp = tempdir()?;
         let src = tmp.path().join("src");
         let dest = tmp.path().join("dest");
         std::fs::create_dir_all(&src)?;
         std::fs::write(src.join("hello.txt"), b"hello")?;
+        let ctx = AppContext {
+            perf_history_enabled: false,
+        };
 
         let args = TransferArgs {
             source: src.to_string_lossy().into_owned(),
@@ -693,11 +732,11 @@ mod tests {
             dry_run: true,
             checksum: false,
             verbose: false,
-            no_progress: true,
+            progress: false,
             workers: None,
         };
 
-        runtime().block_on(run_local_transfer(&args, &src, &dest, false))?;
+        runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
         assert!(!dest.join("hello.txt").exists());
         Ok(())
     }

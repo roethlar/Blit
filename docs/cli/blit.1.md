@@ -1,72 +1,90 @@
 # BLIT(1) blit Manual
 % Blit v2 Team
-% 2025-10-19
+% 2025-10-20
 
 ## NAME
-blit - high-performance local file transfer CLI with streaming planner
+blit – local and hybrid-transport file transfer CLI
 
 ## SYNOPSIS
 `blit copy [OPTIONS] <SOURCE> <DESTINATION>`  
 `blit mirror [OPTIONS] <SOURCE> <DESTINATION>`  
-`blit push <SOURCE> blit://host:port/module`  
-`blit pull blit://host:port/module[/path] <DESTINATION>`  
-`blit diagnostics perf [--limit <N>]`
+`blit move [OPTIONS] <SOURCE> <DESTINATION>`  
+`blit scan [--wait <SECONDS>]`  
+`blit list <REMOTE>`  
+`blit diagnostics perf [--limit <N>] [--enable|--disable] [--clear]`
 
 ## DESCRIPTION
-`blit` drives the v2 streaming transfer engine. Local commands keep
-runtime output minimal to avoid impacting throughput while still emitting
-structured events that future GUI layers can display.
+`blit` drives the v2 streaming transfer engine. Local commands stay quiet
+by default so that terminal output never throttles the transfer, yet they
+still emit structured progress events that future GUI surfaces can
+subscribe to.
 
-`copy` performs a one-way local transfer from `<SOURCE>` to
-`<DESTINATION>` without deleting extraneous files.  
-`mirror` performs a local transfer that also removes files present only
-at the destination. The planner automatically selects fast paths for tiny
-and large workloads and tunes worker counts without user input.
+- `copy` copies a local `<SOURCE>` into `<DESTINATION>` without deleting
+  extraneous files.
+- `mirror` performs the same copy but removes files that are only present
+  at the destination.
+- `move` mirrors the source into the destination and then removes the
+  original tree.
+- `scan` and `list` are reserved for Phase 3 remote discovery commands and
+  currently return *not implemented* errors.
+
+Remote transfers will reuse `copy`, `mirror`, and `move` once the daemon
+configuration work lands (Phase 3). For now the CLI handles only local
+paths.
 
 ## OPTIONS
 - `--dry-run`  
-  Enumerate and plan the transfer, but do not modify the destination.
+  Enumerate and plan the transfer without modifying the destination.
 
 - `--checksum`  
-  Force checksum validation for changed files (defaults to metadata
-  comparison).
+  Force checksum validation for changed files (metadata comparison is the
+  default).
 
 - `--verbose`  
-  Emit progress and planner diagnostics to stderr.
+  Emit planner heartbeat messages and fast-path decisions to stderr.
 
-- `--no-progress`  
-  Disable the interactive progress spinner (already quiet by default).
+- `--progress`  
+  Show an interactive ASCII spinner while the transfer runs. When omitted
+  the CLI prints only the final summary so that scripting and logging
+  stay clean.
 
-These options apply to both `copy` and `mirror`.
+These options apply to `copy`, `mirror`, and `move`.
 
 ## DEBUG OPTIONS
 - `--workers <N>` *(hidden)*  
   Caps the planner at `N` worker threads for diagnostic runs. When this
-  limiter is active the CLI prints `[DEBUG] Worker limiter active – FAST
-  planner auto-tuning capped to N thread(s).` The transfer still succeeds,
-  but throughput guarantees are suspended. This flag exists solely for
-  engineering analysis; remove it for production runs.
+  limiter is active the CLI prints  
+  `[DEBUG] Worker limiter active – FAST planner auto-tuning capped to N thread(s).`  
+  The transfer still succeeds, but throughput guarantees are suspended.
+  This flag exists solely for engineering analysis; remove it for
+  production runs.
 
 Planner tuning is otherwise automatic. There are no other CLI tunables or
 environment variables that affect worker selection.
 
 ## DIAGNOSTICS
-`blit diagnostics perf [--limit <N>]` prints the most recent local
-performance history captured by the orchestrator (50 records by default).
-This command is read-only and never uploads data.
+`blit diagnostics perf` inspects and manages the local performance
+history captured by the orchestrator (50 records shown by default).
 
-## REMOTE COMMANDS
-`push` uploads local trees to a remote daemon module, negotiating either
-the TCP data plane or the gRPC fallback automatically. `pull` downloads
-remote files or directories into the specified destination directory.
-`ls` remains reserved for future Phase 3 work.
+- `--limit <N>` shows the most recent `N` entries (0 = all).
+- `--enable` / `--disable` toggle capture in the on-disk settings file.
+- `--clear` removes the stored JSONL history file.
+
+These flags operate on the config directory described below; toggling is
+persistent until changed again.
 
 ## ENVIRONMENT
-None.
+The CLI does not use environment variables for behaviour, but the
+following testing hook is honoured:
+
+- `BLIT_CONFIG_DIR` – overrides the config directory path. Useful for
+  integration tests and benchmark harnesses.
 
 ## FILES
 - `${XDG_CONFIG_HOME:-$HOME/.config}/blit/perf_local.jsonl` – local
-  performance history captured after each transfer.
+  performance history captured after each run.
+- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/settings.json` – persisted CLI
+  settings (currently just the performance-history toggle).
 
 ## SEE ALSO
 `docs/plan/LOCAL_TRANSFER_HEURISTICS.md`, `docs/plan/MASTER_WORKFLOW.md`

@@ -184,32 +184,8 @@ mod tests {
     use eyre::Result;
     use tempfile::tempdir;
 
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(prev) = &self.prev {
-                std::env::set_var(self.key, prev);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
     #[test]
     fn tiny_fast_path_without_history_prefers_fastpath() -> Result<()> {
-        let _guard = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
         let temp = tempdir()?;
         let src = temp.path().join("src");
         let dest = temp.path().join("dest");
@@ -217,7 +193,8 @@ mod tests {
         std::fs::create_dir_all(&dest)?;
         std::fs::write(src.join("file.txt"), b"hello")?;
 
-        let options = LocalMirrorOptions::default();
+        let mut options = LocalMirrorOptions::default();
+        options.perf_history = false;
         let outcome = maybe_select_fast_path(&src, &dest, &options, None)?;
         assert!(matches!(
             outcome.decision,
@@ -228,7 +205,6 @@ mod tests {
 
     #[test]
     fn tiny_fast_path_uses_predictor_when_history_exists() -> Result<()> {
-        let _guard = EnvGuard::set("BLIT_DISABLE_PERF_HISTORY", "1");
         let temp = tempdir()?;
         let src = temp.path().join("src");
         let dest = temp.path().join("dest");
@@ -260,7 +236,8 @@ mod tests {
         );
         predictor.observe(&record);
 
-        let options = LocalMirrorOptions::default();
+        let mut options = LocalMirrorOptions::default();
+        options.perf_history = false;
         let outcome = maybe_select_fast_path(&src, &dest, &options, Some(&predictor))?;
         assert!(
             outcome.decision.is_none(),
