@@ -203,7 +203,7 @@ pub fn ensure_long_path(p: &Path) -> PathBuf {
         return PathBuf::from(buf);
     }
     // Drive path like C:\...
-    let mut norm = match p.normalize() {
+    let norm = match p.normalize() {
         Ok(n) => n.into_path_buf(),
         Err(_) => p.to_path_buf(),
     };

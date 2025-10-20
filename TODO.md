@@ -54,6 +54,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Implement gRPC handshake for the `Push` service. *(2025-10-19: CLI streams manifest, daemon returns need list + fallback negotiation; data plane transfer pending.)*
 - [x] Implement the raw TCP data plane for `Push`. *(2025-10-19: token-authenticated TCP port allocation in daemon + CLI streaming.)*
 - [x] Implement the `Pull` service. *(2025-10-19: daemon streams files/directories, CLI writes to destination.)*
+- [x] Add remote pull integration tests (directory + single-file, forced gRPC path, invalid traversal/missing path errors). *(2025-10-19: new async tests in `crates/blit-daemon/src/main.rs`.)*
 - [ ] Implement the `List` service.
 - [ ] Implement the `Purge` service.
 - [ ] Add CLI/daemon progress propagation for remote operations.

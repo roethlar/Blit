@@ -84,6 +84,7 @@ crates/blit-cli/src/main.rs
 - ✅ Windows + Linux unit tests for `transfer_engine` streaming path
 - ✅ Local benchmark harnesses (macOS/Linux + Windows) run v2-only binaries with perf-history disabled and include rsync/robocopy baselines
 - ✅ Windows local-copy path now uses CopyFileExW fast path; 512 MiB benchmark beats robocopy (~7% faster)
+- ✅ Remote pull integration coverage: daemon/CLI tests exercise directory and single-file pulls, forced gRPC mode, and traversal/missing-path errors.
 
 **Remaining Work**:
 - [ ] Predictor-driven routing refinements beyond tiny fast path (e.g., streaming heuristics)
@@ -99,9 +100,9 @@ crates/blit-cli/src/main.rs
 
 **Completion**: ~40%
 
-### ⏳ Phase 3: Remote Operations (NOT STARTED)
+### ⚙️ Phase 3: Remote Operations (IN PROGRESS)
 
-**Completion**: 0%
+**Completion**: ~45%
 
 ### ⏳ Phase 4: Production Hardening (NOT STARTED)
 

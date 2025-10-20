@@ -757,7 +757,13 @@ async fn read_u64(stream: &mut TcpStream) -> Result<u64, Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blit_core::remote::{RemoteEndpoint, RemotePullClient};
+    use eyre::Result;
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use tokio_stream::wrappers::TcpListenerStream;
 
     #[test]
     fn resolve_relative_path_rejects_parent_segments() {
@@ -773,6 +779,211 @@ mod tests {
             assert!(resolve_relative_path("\\abs\\path").is_err());
             assert!(resolve_relative_path("C:\\abs\\path").is_err());
         }
+    }
+
+    async fn spawn_test_daemon(
+        root: PathBuf,
+        force_grpc_data: bool,
+    ) -> (
+        SocketAddr,
+        oneshot::Sender<()>,
+        JoinHandle<Result<(), tonic::transport::Error>>,
+    ) {
+        let service = BlitService::new(force_grpc_data);
+        {
+            let mut modules = service.modules.lock().await;
+            modules.insert(
+                "default".to_string(),
+                ModuleConfig {
+                    name: "default".to_string(),
+                    path: root,
+                    read_only: false,
+                },
+            );
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(BlitServer::new(service))
+                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+
+        (addr, shutdown_tx, server)
+    }
+
+    fn default_endpoint(addr: SocketAddr) -> Result<RemoteEndpoint> {
+        RemoteEndpoint::parse(&format!("blit://{}:{}/default", addr.ip(), addr.port()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_pull_transfers_directory_tree() -> Result<()> {
+        let src = tempdir()?;
+        let nested = src.path().join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(src.path().join("alpha.txt"), b"alpha")?;
+        fs::write(nested.join("beta.txt"), b"beta")?;
+
+        let dest = tempdir()?;
+
+        let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
+
+        let mut endpoint = default_endpoint(addr)?;
+        let remote_path = endpoint.resource.clone().unwrap_or_else(|| ".".to_string());
+        endpoint.resource = None;
+
+        let mut client = RemotePullClient::connect(endpoint).await?;
+        let pull_result = client.pull(&remote_path, dest.path()).await;
+        drop(client);
+        let _ = shutdown.send(());
+        server.await.unwrap().unwrap();
+        let report = pull_result?;
+
+        assert_eq!(report.files_transferred, 2);
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("alpha.txt"))?,
+            "alpha"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("nested").join("beta.txt"))?,
+            "beta"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_pull_transfers_directory_tree_with_forced_grpc() -> Result<()> {
+        let src = tempdir()?;
+        let nested = src.path().join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(src.path().join("alpha.txt"), b"alpha")?;
+        fs::write(nested.join("beta.txt"), b"beta")?;
+
+        let dest = tempdir()?;
+
+        let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), true).await;
+
+        let mut endpoint = default_endpoint(addr)?;
+        let remote_path = endpoint.resource.clone().unwrap_or_else(|| ".".to_string());
+        endpoint.resource = None;
+
+        let mut client = RemotePullClient::connect(endpoint).await?;
+        let pull_result = client.pull(&remote_path, dest.path()).await;
+        drop(client);
+        let _ = shutdown.send(());
+        server.await.unwrap().unwrap();
+        let report = pull_result?;
+
+        assert_eq!(report.files_transferred, 2);
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("alpha.txt"))?,
+            "alpha"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("nested").join("beta.txt"))?,
+            "beta"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_pull_transfers_single_file() -> Result<()> {
+        let src = tempdir()?;
+        let nested = src.path().join("nested");
+        fs::create_dir_all(&nested)?;
+        fs::write(nested.join("beta.txt"), b"beta")?;
+
+        let dest = tempdir()?;
+
+        let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
+
+        let mut endpoint = default_endpoint(addr)?;
+        endpoint.resource = None;
+
+        let mut client = RemotePullClient::connect(endpoint).await?;
+        let pull_result = client.pull("nested/beta.txt", dest.path()).await;
+        drop(client);
+        let _ = shutdown.send(());
+        server.await.unwrap().unwrap();
+        let report = pull_result?;
+
+        assert_eq!(report.files_transferred, 1);
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("nested").join("beta.txt"))?,
+            "beta"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_pull_rejects_parent_segments_request() -> Result<()> {
+        let src = tempdir()?;
+        fs::write(src.path().join("file.txt"), b"content")?;
+        let dest = tempdir()?;
+
+        let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
+
+        let mut endpoint = default_endpoint(addr)?;
+        endpoint.resource = None;
+
+        let mut client = RemotePullClient::connect(endpoint).await?;
+        let pull_result = client.pull("../secret", dest.path()).await;
+        drop(client);
+        let _ = shutdown.send(());
+        server.await.unwrap().unwrap();
+
+        assert!(pull_result.is_err());
+        let err = pull_result.unwrap_err().to_string();
+        assert!(
+            err.contains("parent directory"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            dest.path().read_dir()?.next().is_none(),
+            "destination should remain empty"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_pull_reports_missing_paths() -> Result<()> {
+        let src = tempdir()?;
+        fs::write(src.path().join("file.txt"), b"content")?;
+        let dest = tempdir()?;
+
+        let (addr, shutdown, server) = spawn_test_daemon(src.path().to_path_buf(), false).await;
+
+        let mut endpoint = default_endpoint(addr)?;
+        endpoint.resource = None;
+
+        let mut client = RemotePullClient::connect(endpoint).await?;
+        let pull_result = client.pull("missing.txt", dest.path()).await;
+        drop(client);
+        let _ = shutdown.send(());
+        server.await.unwrap().unwrap();
+
+        assert!(pull_result.is_err());
+        let err = pull_result.unwrap_err().to_string();
+        assert!(
+            err.contains("path not found"),
+            "unexpected error message: {err}"
+        );
+        assert!(
+            dest.path().read_dir()?.next().is_none(),
+            "destination should remain empty"
+        );
+
+        Ok(())
     }
 
     #[test]

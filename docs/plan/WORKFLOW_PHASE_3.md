@@ -614,7 +614,7 @@ pub fn execute_remote_push<P: ProgressReporter>(
 **Priority**: 🔴 Critical
 **Effort**: 4-5 hours
 
-**Status 2025-10-19**: ✅ Initial implementation in place: daemon streams individual files or directory trees over `PullChunk`, and the CLI writes them to a destination directory via `RemotePullClient`.
+**Status 2025-10-19**: ✅ Initial implementation in place: daemon streams individual files or directory trees over `PullChunk`, and the CLI writes them to a destination directory via `RemotePullClient`. Integration tests (`remote_pull_*`) now launch the daemon in-process to verify directory/single-file pulls, forced gRPC mode, and traversal/missing-path errors.
 
 **Server implementation**:
 ```rust

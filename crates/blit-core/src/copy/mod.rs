@@ -319,10 +319,12 @@ fn attempt_block_clone_windows(src: &File, dst: &File, file_size: u64) -> Result
         FILE_WRITE_ACCESS,
     );
 
+    #[allow(non_camel_case_types, non_snake_case)]
     #[repr(C)]
     struct LARGE_INTEGER {
         QuadPart: i64,
     }
+    #[allow(non_camel_case_types, non_snake_case)]
     #[repr(C)]
     struct DUPLICATE_EXTENTS_DATA {
         FileHandle: HANDLE,
@@ -597,6 +599,7 @@ fn mark_file_sparse(file: &File) -> bool {
         FILE_SPECIAL_ACCESS,
     );
 
+    #[allow(non_camel_case_types, non_snake_case)]
     #[repr(C)]
     struct FILE_SET_SPARSE_BUFFER {
         SetSparse: u8, // BOOLEAN
@@ -632,7 +635,7 @@ fn sparse_copy_windows(
     let _ = mark_file_sparse(dst);
 
     let mut buf = vec![0u8; buffer_size];
-    let mut zero_buf = vec![0u8; 64 * 1024];
+    let zero_buf = vec![0u8; 64 * 1024];
     let zero_threshold: usize = 256 * 1024; // create holes only for >=256KiB zero runs
     let mut written: u64 = 0;
     let mut zero_run: usize = 0;
