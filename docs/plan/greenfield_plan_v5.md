@@ -16,7 +16,7 @@
 2. **Hybrid Remote Transport** — Remote push/pull mirror the v1 data-path performance by keeping:
    - gRPC control plane for manifests, negotiations, progress, and purge/list operations.
    - Raw TCP data plane negotiated via one-time, cryptographically strong token for bulk transfers (zero-copy on Linux via `sendfile`, `copy_file_range`, `splice`).
-   - Automatic fallback to gRPC-streamed data when the negotiated TCP port cannot be reached (firewall/NAT); surface as a warning and continue, with an advanced `--force-grpc-data`/`BLIT_FORCE_GRPC_DATA=1` override for locked-down environments.
+   - Automatic fallback to gRPC-streamed data when the negotiated TCP port cannot be reached (firewall/NAT); surface as a warning and continue, with an advanced `--force-grpc-data` override for locked-down environments.
    - Planned RDMA/RoCEv2 extension point in Phase 3.5 for 25/100 GbE environments.
 
 3. **Telemetry & Diagnostics** — All metrics stay on-device:

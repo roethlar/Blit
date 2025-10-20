@@ -6,38 +6,52 @@ pub struct RemoteEndpoint {
     pub host: String,
     pub port: u16,
     pub module: String,
+    pub resource: Option<String>,
 }
 
 impl RemoteEndpoint {
     const SCHEME: &'static str = "blit://";
     const DEFAULT_PORT: u16 = 50051;
 
-    /// Parses a `blit://host:port/module` style URL into host/port/module parts.
+    /// Parses a `blit://host:port/module[/path]` style URL into host/port/module parts.
     ///
-    /// The module segment may contain additional path components; they are
-    /// preserved verbatim. IPv6 addresses must be wrapped in `[]` (e.g.,
-    /// `blit://[::1]:50051/module`).
+    /// The portion after the module (if any) is returned as the optional resource path.
+    /// IPv6 addresses must be wrapped in `[]` (e.g., `blit://[::1]:50051/module`).
     pub fn parse(raw: &str) -> Result<Self> {
         if !raw.starts_with(Self::SCHEME) {
             bail!("remote URL must start with {} (got {})", Self::SCHEME, raw);
         }
 
         let body = &raw[Self::SCHEME.len()..];
-        let (authority, module) = match body.split_once('/') {
+        let (authority, module_and_path) = match body.split_once('/') {
             Some(parts) => parts,
             None => bail!("remote URL missing module component: {}", raw),
         };
 
-        if module.is_empty() {
+        if module_and_path.is_empty() {
             bail!("remote URL module segment cannot be empty");
         }
 
         let (host, port) = parse_authority(authority)?;
 
+        let mut segments = module_and_path.splitn(2, '/');
+        let module = segments.next().unwrap();
+        if module.is_empty() {
+            bail!("remote URL module segment cannot be empty");
+        }
+        let resource = segments.next().and_then(|rest| {
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            }
+        });
+
         Ok(Self {
             host,
             port,
             module: module.to_string(),
+            resource,
         })
     }
 
@@ -99,12 +113,14 @@ mod tests {
         assert_eq!(ep.host, "example.com");
         assert_eq!(ep.port, 6000);
         assert_eq!(ep.module, "module");
+        assert!(ep.resource.is_none());
     }
 
     #[test]
     fn defaults_port() {
         let ep = RemoteEndpoint::parse("blit://example.com/module").unwrap();
         assert_eq!(ep.port, RemoteEndpoint::DEFAULT_PORT);
+        assert!(ep.resource.is_none());
     }
 
     #[test]
@@ -112,7 +128,8 @@ mod tests {
         let ep = RemoteEndpoint::parse("blit://[::1]:6000/module/sub").unwrap();
         assert_eq!(ep.host, "::1");
         assert_eq!(ep.port, 6000);
-        assert_eq!(ep.module, "module/sub");
+        assert_eq!(ep.module, "module");
+        assert_eq!(ep.resource.as_deref(), Some("sub"));
     }
 
     #[test]

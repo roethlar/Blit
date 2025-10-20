@@ -1,11 +1,13 @@
 use blit_core::fs_enum::FileFilter;
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
-use blit_core::remote::{RemoteEndpoint, RemotePushClient, RemotePushReport};
+use blit_core::remote::{
+    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
+};
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use eyre::{bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -86,10 +88,7 @@ async fn main() -> Result<()> {
         Commands::Pull {
             source,
             destination,
-        } => {
-            println!("Pulling from {} to {}", source, destination);
-            // To be implemented in Phase 3
-        }
+        } => run_remote_pull(source, destination).await?,
         Commands::Ls { path } => {
             println!("Listing contents of {}", path);
             // To be implemented in Phase 3
@@ -206,6 +205,9 @@ fn run_diagnostics_perf(limit: usize) -> Result<()> {
 
 async fn run_remote_push(source: &str, destination: &str) -> Result<()> {
     let endpoint = RemoteEndpoint::parse(destination)?;
+    if endpoint.resource.is_some() {
+        bail!("push destination must refer to a module (e.g. blit://host:port/module)");
+    }
     let mut client = RemotePushClient::connect(endpoint.clone())
         .await
         .with_context(|| format!("connecting to {}", endpoint.control_plane_uri()))?;
@@ -225,6 +227,40 @@ async fn run_remote_push(source: &str, destination: &str) -> Result<()> {
     describe_push_result(&report);
 
     Ok(())
+}
+
+async fn run_remote_pull(source: &str, destination: &str) -> Result<()> {
+    let mut endpoint = RemoteEndpoint::parse(source)?;
+    let remote_path = endpoint.resource.clone().unwrap_or_else(|| ".".to_string());
+    endpoint.resource = None;
+
+    let mut client = RemotePullClient::connect(endpoint.clone())
+        .await
+        .with_context(|| format!("connecting to {}", endpoint.control_plane_uri()))?;
+
+    let dest_root = PathBuf::from(destination);
+    let report = client
+        .pull(&remote_path, &dest_root)
+        .await
+        .with_context(|| {
+            format!(
+                "pulling {} from blit://{}:{}/{}",
+                remote_path, endpoint.host, endpoint.port, endpoint.module
+            )
+        })?;
+
+    describe_pull_result(&report, &dest_root);
+
+    Ok(())
+}
+
+fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
+    println!(
+        "Pull complete: {} file(s), {} bytes written to {}.",
+        report.files_transferred,
+        report.bytes_transferred,
+        dest_root.display()
+    );
 }
 
 fn describe_push_result(report: &RemotePushReport) {

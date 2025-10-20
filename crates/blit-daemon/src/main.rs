@@ -1,14 +1,18 @@
 use base64::{engine::general_purpose, Engine as _};
+use blit_core::enumeration::{EntryKind, FileEnumerator};
+use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_server::{Blit, BlitServer};
 use blit_core::generated::{
-    client_push_request, server_push_response, Ack, ClientPushRequest, CompletionRequest,
-    CompletionResponse, DataTransferNegotiation, FileHeader, FileList, ListModulesRequest,
-    ListModulesResponse, ListRequest, ListResponse, PullChunk, PullRequest, PurgeRequest,
-    PurgeResponse, PushSummary, ServerPushResponse,
+    client_push_request, pull_chunk::Payload as PullPayload, server_push_response, Ack,
+    ClientPushRequest, CompletionRequest, CompletionResponse, DataTransferNegotiation, FileData,
+    FileHeader, FileList, ListModulesRequest, ListModulesResponse, ListRequest, ListResponse,
+    PullChunk, PullRequest, PurgeRequest, PurgeResponse, PushSummary, ServerPushResponse,
 };
+use clap::Parser;
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,6 +24,7 @@ use tonic::{transport::Server, Request, Response, Status, Streaming};
 use eyre::Result;
 
 type PushSender = mpsc::Sender<Result<ServerPushResponse, Status>>;
+type PullSender = mpsc::Sender<Result<PullChunk, Status>>;
 
 const TOKEN_LEN: usize = 32;
 
@@ -37,18 +42,30 @@ struct TransferStats {
     bytes_zero_copy: u64,
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "blit-daemon", about = "Remote transfer daemon for blit v2")]
+struct DaemonArgs {
+    /// Bind address for the gRPC control plane (host:port)
+    #[arg(long, default_value = "127.0.0.1:50051")]
+    bind: String,
+    /// Force the daemon to use the gRPC data plane instead of TCP
+    #[arg(long)]
+    force_grpc_data: bool,
+}
+
 pub struct BlitService {
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
+    force_grpc_data: bool,
 }
 
 impl Default for BlitService {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
 impl BlitService {
-    pub fn new() -> Self {
+    pub fn new(force_grpc_data: bool) -> Self {
         let mut modules = HashMap::new();
         if let Ok(cwd) = std::env::current_dir() {
             modules.insert(
@@ -63,6 +80,7 @@ impl BlitService {
 
         Self {
             modules: Arc::new(Mutex::new(modules)),
+            force_grpc_data,
         }
     }
 }
@@ -79,9 +97,12 @@ impl Blit for BlitService {
         let modules = Arc::clone(&self.modules);
         let (tx, rx) = mpsc::channel(32);
         let stream = request.into_inner();
+        let force_grpc_data = self.force_grpc_data;
 
         tokio::spawn(async move {
-            if let Err(status) = handle_push_stream(modules, stream, tx.clone()).await {
+            if let Err(status) =
+                handle_push_stream(modules, stream, tx.clone(), force_grpc_data).await
+            {
                 let _ = tx.send(Err(status)).await;
             }
         });
@@ -91,9 +112,19 @@ impl Blit for BlitService {
 
     async fn pull(
         &self,
-        _request: Request<PullRequest>,
+        request: Request<PullRequest>,
     ) -> Result<Response<Self::PullStream>, Status> {
-        Err(Status::unimplemented("Pull is not yet implemented"))
+        let req = request.into_inner();
+        let module = resolve_module(&self.modules, &req.module).await?;
+
+        let (tx, rx) = mpsc::channel(32);
+        tokio::spawn(async move {
+            if let Err(status) = stream_pull(module, req.path, tx.clone()).await {
+                let _ = tx.send(Err(status)).await;
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn list(&self, _request: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
@@ -124,8 +155,9 @@ impl Blit for BlitService {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let addr = "[::1]:50051".parse()?;
-    let service = BlitService::new();
+    let args = DaemonArgs::parse();
+    let addr: SocketAddr = args.bind.parse()?;
+    let service = BlitService::new(args.force_grpc_data);
 
     println!("blitd v2 listening on {}", addr);
 
@@ -141,6 +173,7 @@ async fn handle_push_stream(
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
     mut stream: Streaming<ClientPushRequest>,
     tx: PushSender,
+    force_grpc_data: bool,
 ) -> Result<(), Status> {
     let mut module: Option<ModuleConfig> = None;
     let mut manifest: Vec<FileHeader> = Vec::new();
@@ -201,56 +234,19 @@ async fn handle_push_stream(
     .await?;
 
     if files_requested.is_empty() {
-        send_control_message(
-            &tx,
-            server_push_response::Payload::Negotiation(DataTransferNegotiation {
-                tcp_port: 0,
-                one_time_token: String::new(),
-                tcp_fallback: true,
-            }),
-        )
-        .await?;
+        execute_grpc_fallback(&tx, &mut stream, &module, files_requested).await?;
+        return Ok(());
+    }
 
-        send_control_message(
-            &tx,
-            server_push_response::Payload::Summary(PushSummary {
-                files_transferred: 0,
-                bytes_transferred: 0,
-                bytes_zero_copy: 0,
-                tcp_fallback_used: true,
-            }),
-        )
-        .await?;
-
+    if force_grpc_data {
+        execute_grpc_fallback(&tx, &mut stream, &module, files_requested).await?;
         return Ok(());
     }
 
     let listener = match bind_data_plane_listener().await {
         Ok(listener) => listener,
         Err(_) => {
-            send_control_message(
-                &tx,
-                server_push_response::Payload::Negotiation(DataTransferNegotiation {
-                    tcp_port: 0,
-                    one_time_token: String::new(),
-                    tcp_fallback: true,
-                }),
-            )
-            .await?;
-
-            let stats = receive_fallback_data(&mut stream, &module, files_requested).await?;
-
-            send_control_message(
-                &tx,
-                server_push_response::Payload::Summary(PushSummary {
-                    files_transferred: stats.files_transferred,
-                    bytes_transferred: stats.bytes_transferred,
-                    bytes_zero_copy: stats.bytes_zero_copy,
-                    tcp_fallback_used: true,
-                }),
-            )
-            .await?;
-
+            execute_grpc_fallback(&tx, &mut stream, &module, files_requested).await?;
             return Ok(());
         }
     };
@@ -358,6 +354,16 @@ fn compute_need_list(
 }
 
 fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
+    #[cfg(windows)]
+    {
+        if rel.starts_with('/') || rel.starts_with('\\') {
+            return Err(Status::invalid_argument(format!(
+                "absolute-style path not allowed in manifest: {}",
+                rel
+            )));
+        }
+    }
+
     let path = Path::new(rel);
     if path.is_absolute() {
         return Err(Status::invalid_argument(format!(
@@ -390,6 +396,19 @@ fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
             let dur = err.duration();
             Some(-(dur.as_secs() as i64))
         }
+    }
+}
+
+fn permissions_mode(meta: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0
     }
 }
 
@@ -572,6 +591,151 @@ async fn receive_fallback_data(
     Ok(stats)
 }
 
+async fn execute_grpc_fallback(
+    tx: &PushSender,
+    stream: &mut Streaming<ClientPushRequest>,
+    module: &ModuleConfig,
+    files_requested: Vec<FileHeader>,
+) -> Result<(), Status> {
+    send_control_message(
+        tx,
+        server_push_response::Payload::Negotiation(DataTransferNegotiation {
+            tcp_port: 0,
+            one_time_token: String::new(),
+            tcp_fallback: true,
+        }),
+    )
+    .await?;
+
+    let stats = receive_fallback_data(stream, module, files_requested).await?;
+
+    send_control_message(
+        tx,
+        server_push_response::Payload::Summary(PushSummary {
+            files_transferred: stats.files_transferred,
+            bytes_transferred: stats.bytes_transferred,
+            bytes_zero_copy: stats.bytes_zero_copy,
+            tcp_fallback_used: true,
+        }),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn stream_pull(
+    module: ModuleConfig,
+    requested_path: String,
+    tx: PullSender,
+) -> Result<(), Status> {
+    let requested = if requested_path.trim().is_empty() {
+        PathBuf::from(".")
+    } else {
+        resolve_relative_path(&requested_path)?
+    };
+
+    let root = module.path.join(&requested);
+
+    if !root.exists() {
+        return Err(Status::not_found(format!(
+            "path not found in module '{}': {}",
+            module.name, requested_path
+        )));
+    }
+
+    if root.is_file() {
+        let relative_name = if requested == PathBuf::from(".") {
+            root.file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            requested.clone()
+        };
+        stream_single_file(&tx, &relative_name, &root).await?;
+    } else if root.is_dir() {
+        let root_clone = root.clone();
+        let entries = tokio::task::spawn_blocking(move || {
+            let enumerator = FileEnumerator::new(FileFilter::default());
+            enumerator.enumerate_local(&root_clone)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("enumeration task failed: {}", e)))?
+        .map_err(|e| Status::internal(format!("enumeration error: {}", e)))?;
+
+        for entry in entries {
+            if matches!(entry.kind, EntryKind::File { .. }) {
+                stream_single_file(&tx, &entry.relative_path, &entry.absolute_path).await?;
+            }
+        }
+    } else {
+        return Err(Status::invalid_argument(format!(
+            "unsupported path type for pull: {}",
+            requested_path
+        )));
+    }
+
+    Ok(())
+}
+
+async fn stream_single_file(
+    tx: &PullSender,
+    relative: &Path,
+    abs_path: &Path,
+) -> Result<(), Status> {
+    let metadata = tokio::fs::metadata(abs_path)
+        .await
+        .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
+
+    let normalized = normalize_relative_path(relative);
+
+    tx.send(Ok(PullChunk {
+        payload: Some(PullPayload::FileHeader(FileHeader {
+            relative_path: normalized,
+            size: metadata.len(),
+            mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            permissions: permissions_mode(&metadata),
+        })),
+    }))
+    .await
+    .map_err(|_| Status::internal("failed to send pull header"))?;
+
+    let mut file = tokio::fs::File::open(abs_path)
+        .await
+        .map_err(|err| Status::internal(format!("open {}: {}", abs_path.display(), err)))?;
+    let mut buffer = vec![0u8; 64 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|err| Status::internal(format!("read {}: {}", abs_path.display(), err)))?;
+        if read == 0 {
+            break;
+        }
+
+        tx.send(Ok(PullChunk {
+            payload: Some(PullPayload::FileData(FileData {
+                content: buffer[..read].to_vec(),
+            })),
+        }))
+        .await
+        .map_err(|_| Status::internal("failed to send pull chunk"))?;
+    }
+
+    Ok(())
+}
+
+fn normalize_relative_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        raw.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        raw.into_owned()
+    }
+}
 async fn read_u32(stream: &mut TcpStream) -> Result<u32, Status> {
     let mut buf = [0u8; 4];
     stream
@@ -599,7 +763,16 @@ mod tests {
     fn resolve_relative_path_rejects_parent_segments() {
         assert!(resolve_relative_path("../evil").is_err());
         assert!(resolve_relative_path("sub/../../evil").is_err());
-        assert!(resolve_relative_path("/abs/path").is_err());
+        #[cfg(unix)]
+        {
+            assert!(resolve_relative_path("/abs/path").is_err());
+        }
+        #[cfg(windows)]
+        {
+            assert!(resolve_relative_path("/abs/path").is_err());
+            assert!(resolve_relative_path("\\abs\\path").is_err());
+            assert!(resolve_relative_path("C:\\abs\\path").is_err());
+        }
     }
 
     #[test]

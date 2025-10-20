@@ -34,7 +34,7 @@ Before starting Phase 3, confirm the transport architecture choice:
 > - ✅ **REQUIRED**: Server must bind accepted socket to token before zero-copy writes (prevents replay attacks)
 > - ✅ **REQUIRED**: Automatic fallback to gRPC-streamed data if TCP port unreachable (firewall/NAT)
 > - ✅ **REQUIRED**: Emit warning when falling back to gRPC data plane
-> - ✅ **REQUIRED**: Support advanced override `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1` for locked-down environments
+> - ✅ **REQUIRED**: Support advanced override `--force-grpc-data` for locked-down environments
 
 ### Success Criteria
 
@@ -613,6 +613,8 @@ pub fn execute_remote_push<P: ProgressReporter>(
 ### Task 3.3.1: Implement Pull Operation
 **Priority**: 🔴 Critical
 **Effort**: 4-5 hours
+
+**Status 2025-10-19**: ✅ Initial implementation in place: daemon streams individual files or directory trees over `PullChunk`, and the CLI writes them to a destination directory via `RemotePullClient`.
 
 **Server implementation**:
 ```rust

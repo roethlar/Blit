@@ -106,7 +106,7 @@ Each phase has **mandatory quality gates** that must pass before proceeding:
 - **Data Plane**: Raw TCP negotiated via one-time cryptographically strong token
 - **Zero-Copy**: Linux sendfile/splice/copy_file_range on data plane
 - **Fallback**: Automatic gRPC-streamed data when TCP port unreachable (firewall/NAT)
-- **Override**: Advanced `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1` for locked-down environments
+- **Override**: Advanced `--force-grpc-data` CLI flag for locked-down environments
 
 **Security Requirements**:
 - Data-plane token must be cryptographically strong (e.g., signed JWT with nonce + expiry)
@@ -244,7 +244,7 @@ See [WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md) for detailed breakdown.
 - One-time cryptographically strong token for data plane
 - TCP data plane with zero-copy (sendfile/splice/copy_file_range on Linux)
 - Automatic fallback to gRPC-streamed data when TCP port unreachable
-- Advanced override: `--force-grpc-data` / `BLIT_FORCE_GRPC_DATA=1`
+- Advanced override: `--force-grpc-data`
 - Network tuning: disable Nagle, large send/recv buffers, optional BBR
 - Progress signals from remote operations to CLI
 - Remote performance history: local-only JSONL store (no runtime prompts), optional manual `blit-utils profile`, daemon idle self-profiling if benchmarks prove value

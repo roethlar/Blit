@@ -52,12 +52,14 @@ This is the master checklist. Execute the first unchecked item. After completion
 ## Phase 3: Remote Operations (Hybrid Transport)
 
 - [x] Implement gRPC handshake for the `Push` service. *(2025-10-19: CLI streams manifest, daemon returns need list + fallback negotiation; data plane transfer pending.)*
-- [ ] Implement the raw TCP data plane for `Push`.
-- [ ] Implement `Pull`, `List`, and `Purge` services.
+- [x] Implement the raw TCP data plane for `Push`. *(2025-10-19: token-authenticated TCP port allocation in daemon + CLI streaming.)*
+- [x] Implement the `Pull` service. *(2025-10-19: daemon streams files/directories, CLI writes to destination.)*
+- [ ] Implement the `List` service.
+- [ ] Implement the `Purge` service.
 - [ ] Add CLI/daemon progress propagation for remote operations.
 - [ ] Record remote benchmark metrics in performance history log + DEVLOG.
 - [ ] Generate cryptographically strong one-time tokens (signed, nonce-based) and bind them to accepted sockets.
-- [x] Implement automatic gRPC data-plane fallback with warnings + advanced override (`--force-grpc-data` / env var). *(2025-10-19: CLI streams files via control plane when TCP unavailable; daemon receives fallback uploads and records stats. Override flag pending Phase 3 CLI work.)*
+- [x] Implement automatic gRPC data-plane fallback with warnings + advanced override (`--force-grpc-data`). *(2025-10-19: CLI flag exposes fallback path; daemon streams via control plane and logs summary.)*
 
 ## Phase 4: Production Hardening & Packaging
 

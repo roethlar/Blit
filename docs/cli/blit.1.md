@@ -8,9 +8,9 @@ blit - high-performance local file transfer CLI with streaming planner
 ## SYNOPSIS
 `blit copy [OPTIONS] <SOURCE> <DESTINATION>`  
 `blit mirror [OPTIONS] <SOURCE> <DESTINATION>`  
+`blit push <SOURCE> blit://host:port/module`  
+`blit pull blit://host:port/module[/path] <DESTINATION>`  
 `blit diagnostics perf [--limit <N>]`
-
-Planned (Phase 3): `blit push`, `blit pull`, `blit ls`
 
 ## DESCRIPTION
 `blit` drives the v2 streaming transfer engine. Local commands keep
@@ -56,9 +56,10 @@ performance history captured by the orchestrator (50 records by default).
 This command is read-only and never uploads data.
 
 ## REMOTE COMMANDS
-`push`, `pull`, and `ls` subcommands are reserved for Phase 3 hybrid
-transport work. Current builds acknowledge the commands but the data
-plane is not yet implemented.
+`push` uploads local trees to a remote daemon module, negotiating either
+the TCP data plane or the gRPC fallback automatically. `pull` downloads
+remote files or directories into the specified destination directory.
+`ls` remains reserved for future Phase 3 work.
 
 ## ENVIRONMENT
 None.
