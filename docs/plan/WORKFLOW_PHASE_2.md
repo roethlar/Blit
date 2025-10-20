@@ -1,6 +1,6 @@
 # Phase 2: Streaming Orchestrator & Local Operations
 
-**Goal**: Deliver the v5 local transfer pipeline (streaming planner, adaptive predictor, performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
+**Goal**: Deliver the local transfer pipeline defined in plan v6 (streaming planner, adaptive predictor, local performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
 **Prerequisites**: Phase 0 & 1 complete (workspace, ported modules, gRPC scaffolding).
 **Status**: In progress (streaming planner + fast-path routing in place)
 **Critical Path**: Adaptive predictor/performance history, CLI progress UX.
@@ -16,7 +16,7 @@
 ## Guiding Principles
 
 1. **No user tunables** – Planner owns performance decisions. The sole debug limiter (`--workers`) must be clearly labelled, pause “FAST” guarantees when active, and remain hidden from normal help output (documented in `docs/cli/blit.1.md`).
-2. **Telemetry stays local** – JSONL log under config dir, capped to ~1 MiB, with optional opt-out.
+2. **Telemetry stays local** – JSONL log under config dir, capped to ~1 MiB. Opt-out should be driven by CLI/config settings (no environment variables once work completes).
 3. **Documentation-first** – Update plan/docs/DEVLOG as tasks complete to survive context resets.
 
 ## Work Breakdown
@@ -38,8 +38,9 @@
 | 2.2.2 | Build EMA-based predictor segmented by filesystem profile. | Predictor struct + serde (for persistence). |
 | 2.2.3 | Integrate predictor into orchestrator routing decisions. | Orchestrator chooses streaming vs. fast-path based on prediction. |
 | 2.2.4 | Add `blit diagnostics perf` CLI command. | ✅ Command prints recent runs + stats. |
+| 2.2.5 | Add CLI/config toggle for telemetry (`profile` command remains visible). Replace environment variable usage. | CLI flag/config option + documentation. |
 
-**Note:** Final release toggle (enabled by default vs. opt-in) will be decided from benchmark evidence; once committed, the setting remains stable across releases.
+**Note:** Final release toggle (enabled by default vs. opt-in) will be decided from benchmark evidence; once committed, the setting remains stable across releases. Implementation must avoid environment-variable configuration.
 
 ### 2.3 CLI UX & Flag Cleanup
 

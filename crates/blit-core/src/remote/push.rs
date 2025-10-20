@@ -20,7 +20,7 @@ use crate::generated::{
     ClientPushRequest, FileData, FileHeader, ManifestComplete, PushHeader, PushSummary,
     UploadComplete,
 };
-use crate::remote::endpoint::RemoteEndpoint;
+use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 
 #[derive(Debug, Clone)]
 pub struct RemotePushReport {
@@ -72,11 +72,25 @@ impl RemotePushClient {
             .map_err(map_status)?
             .into_inner();
 
+        let (module, rel_path) = match &self.endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
+            RemotePath::Root { .. } => {
+                bail!("remote destination requires a module path (server:/module/...)");
+            }
+            RemotePath::Discovery => {
+                bail!("remote destination missing module specification");
+            }
+        };
+
+        if !rel_path.as_os_str().is_empty() {
+            bail!("remote module sub-paths are not supported yet");
+        }
+
         // Send header first
         send_payload(
             &tx,
             ClientPayload::Header(PushHeader {
-                module: self.endpoint.module.clone(),
+                module,
                 mirror_mode,
             }),
         )

@@ -49,30 +49,29 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Extend proto (`proto/blit.proto`) with DataTransferNegotiation + reserved RDMA fields and transport stats ahead of Phase 3. *(2025-10-19: control-plane negotiation message plus push summary stats in place.)*
 - [x] Document CLI debug limiter mode (`--workers`) in help text and plan docs. *(2025-10-19: CLI man page + plan updates.)*
 
-## Phase 3: Remote Operations (Hybrid Transport)
+## Phase 3: Remote Operations & Admin Tooling
 
-- [x] Implement gRPC handshake for the `Push` service. *(2025-10-19: CLI streams manifest, daemon returns need list + fallback negotiation; data plane transfer pending.)*
-- [x] Implement the raw TCP data plane for `Push`. *(2025-10-19: token-authenticated TCP port allocation in daemon + CLI streaming.)*
-- [x] Implement the `Pull` service. *(2025-10-19: daemon streams files/directories, CLI writes to destination.)*
-- [x] Add remote pull integration tests (directory + single-file, forced gRPC path, invalid traversal/missing path errors). *(2025-10-19: new async tests in `crates/blit-daemon/src/main.rs`.)*
-- [ ] Implement the `List` service.
-- [ ] Implement the `Purge` service.
-- [ ] Add CLI/daemon progress propagation for remote operations.
-- [ ] Record remote benchmark metrics in performance history log + DEVLOG.
-- [ ] Generate cryptographically strong one-time tokens (signed, nonce-based) and bind them to accepted sockets.
-- [x] Implement automatic gRPC data-plane fallback with warnings + advanced override (`--force-grpc-data`). *(2025-10-19: CLI flag exposes fallback path; daemon streams via control plane and logs summary.)*
+- [x] Hybrid transport control/data plane scaffolding (push/pull) – initial implementation complete.
+- [x] Remote pull integration tests (directory + single-file, forced gRPC path, traversal errors).
+- [ ] Realign CLI verbs (`copy`, `mirror`, `move`, `scan`, `list`) and remove legacy `push`/`pull`.
+- [ ] Update canonical remote URL parser to support `server:/module/...` and `server://...` syntax.
+- [ ] Implement daemon TOML config loader (modules, root export, mDNS flags) with warnings for implicit working-directory exports.
+- [ ] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results.
+- [ ] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove).
+- [ ] Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared clients.
+- [ ] Ensure destructive operations prompt unless `--yes` is supplied.
+- [ ] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback.
+- [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
+- [ ] Capture remote benchmark runs (TCP vs forced gRPC fallback) and log results.
 
 ## Phase 4: Production Hardening & Packaging
 
-- [ ] Benchmark remote transfer performance.
-- [ ] Add TLS security to the control plane.
-- [ ] Create packaging scripts for major platforms.
-- [ ] Write comprehensive integration tests.
-- [ ] Document advanced options (`--max-threads`, `--force-grpc-data`) in help/man pages; mark as niche.
+- [ ] Produce packaging artifacts for supported platforms (Linux, macOS, Windows).
+- [ ] Document installation/configuration (config.toml, `--root`, mDNS, service setup).
+- [ ] Build end-to-end integration/regression suite and integrate with CI.
+- [ ] Review logging/error output for production readiness.
+- [ ] Prepare release notes/changelog with benchmark data and support matrix.
 
-## Phase 3.5: RDMA Enablement (post Phase 3)
+## Phase 3.5: RDMA Enablement (post-release)
 
-- [ ] Negotiate RDMA capability in control plane and extend data-plane abstraction.
-- [ ] Implement RoCEv2 transport option (client + server).
-- [ ] Benchmark RDMA path on 25/100 GbE hardware and log results.
-- [ ] Update docs and diagnostics to reflect RDMA status.
+- [ ] Track deferred RDMA/RoCE work (control-plane negotiation, transport abstraction, benchmarking) for future planning.

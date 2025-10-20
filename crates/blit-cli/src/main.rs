@@ -1,12 +1,14 @@
 use blit_core::fs_enum::FileFilter;
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
 use blit_core::remote::{
-    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
+    RemoteEndpoint, RemotePath, RemotePullClient, RemotePullReport, RemotePushClient,
+    RemotePushReport,
 };
 use chrono::{DateTime, Utc};
 use clap::{Args, Parser, Subcommand};
 use eyre::{bail, Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -20,16 +22,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Copy files locally from source to destination
-    Copy(LocalArgs),
-    /// Mirror a directory locally (including deletions at destination)
-    Mirror(LocalArgs),
-    /// Push files to a remote server
-    Push { source: String, destination: String },
-    /// Pull files from a remote server
-    Pull { source: String, destination: String },
-    /// List contents of a remote directory
-    Ls { path: String },
+    /// Copy files between local and/or remote locations
+    Copy(TransferArgs),
+    /// Mirror a directory (including deletions at destination)
+    Mirror(TransferArgs),
+    /// Move a directory or file (mirror + remove source)
+    Move(TransferArgs),
+    /// Discover daemons advertising via mDNS
+    Scan(ScanArgs),
+    /// List modules or paths on a remote daemon
+    List(ListArgs),
     /// Diagnostics and tooling commands
     Diagnostics {
         #[command(subcommand)]
@@ -51,7 +53,7 @@ struct PerfArgs {
 }
 
 #[derive(Args)]
-struct LocalArgs {
+struct TransferArgs {
     /// Source path for the transfer
     source: String,
     /// Destination path for the transfer
@@ -73,26 +75,41 @@ struct LocalArgs {
     workers: Option<usize>,
 }
 
+#[derive(Args)]
+struct ScanArgs {
+    /// Seconds to wait for mDNS responses
+    #[arg(long, default_value_t = 2)]
+    wait: u64,
+}
+
+#[derive(Args)]
+struct ListArgs {
+    /// Remote location to list (e.g., server:/module/, server:/module/path, server)
+    target: String,
+}
+
+#[derive(Copy, Clone)]
+enum TransferMode {
+    Copy,
+    Mirror,
+}
+
+enum Endpoint {
+    Local(PathBuf),
+    Remote(RemoteEndpoint),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Push {
-            source,
-            destination,
-        } => run_remote_push(source, destination).await?,
-        Commands::Copy(args) => run_local_transfer(args, false).await?,
-        Commands::Mirror(args) => run_local_transfer(args, true).await?,
-        Commands::Pull {
-            source,
-            destination,
-        } => run_remote_pull(source, destination).await?,
-        Commands::Ls { path } => {
-            println!("Listing contents of {}", path);
-            // To be implemented in Phase 3
-        }
+        Commands::Copy(args) => run_transfer(args, TransferMode::Copy).await?,
+        Commands::Mirror(args) => run_transfer(args, TransferMode::Mirror).await?,
+        Commands::Move(args) => run_move(args).await?,
+        Commands::Scan(args) => run_scan(args).await?,
+        Commands::List(args) => run_list(args).await?,
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommand::Perf(PerfArgs { limit }) => {
                 run_diagnostics_perf(*limit)?;
@@ -203,54 +220,194 @@ fn run_diagnostics_perf(limit: usize) -> Result<()> {
     Ok(())
 }
 
-async fn run_remote_push(source: &str, destination: &str) -> Result<()> {
-    let endpoint = RemoteEndpoint::parse(destination)?;
-    if endpoint.resource.is_some() {
-        bail!("push destination must refer to a module (e.g. blit://host:port/module)");
-    }
-    let mut client = RemotePushClient::connect(endpoint.clone())
-        .await
-        .with_context(|| format!("connecting to {}", endpoint.control_plane_uri()))?;
+async fn run_transfer(args: &TransferArgs, mode: TransferMode) -> Result<()> {
+    let src_endpoint = parse_transfer_endpoint(&args.source)?;
+    let dst_endpoint = parse_transfer_endpoint(&args.destination)?;
 
-    let filter = FileFilter::default();
-    let source_path = PathBuf::from(source);
-    let report = client
-        .push(&source_path, &filter, false)
-        .await
-        .with_context(|| {
-            format!(
-                "negotiating push manifest for {} -> blit://{}:{}/{}",
-                source, endpoint.host, endpoint.port, endpoint.module
+    match (src_endpoint, dst_endpoint) {
+        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
+            if !src_path.exists() {
+                bail!("source path does not exist: {}", src_path.display());
+            }
+            run_local_transfer(
+                args,
+                &src_path,
+                &dst_path,
+                matches!(mode, TransferMode::Mirror),
             )
-        })?;
+            .await
+        }
+        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
+            if !src_path.exists() {
+                bail!("source path does not exist: {}", src_path.display());
+            }
+            ensure_remote_transfer_supported(args)?;
+            ensure_remote_destination_supported(&remote)?;
+            run_remote_push_transfer(
+                args,
+                &src_path,
+                remote,
+                matches!(mode, TransferMode::Mirror),
+            )
+            .await
+        }
+        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
+            if matches!(mode, TransferMode::Mirror) {
+                bail!("remote-to-local mirror is not supported yet");
+            }
+            ensure_remote_transfer_supported(args)?;
+            ensure_remote_source_supported(&remote)?;
+            run_remote_pull_transfer(args, remote, &dst_path).await
+        }
+        (Endpoint::Remote(_), Endpoint::Remote(_)) => {
+            bail!("remote-to-remote transfers are not supported yet")
+        }
+    }
+}
 
-    describe_push_result(&report);
+async fn run_move(args: &TransferArgs) -> Result<()> {
+    let src_endpoint = parse_transfer_endpoint(&args.source)?;
+    let dst_endpoint = parse_transfer_endpoint(&args.destination)?;
 
+    match (src_endpoint, dst_endpoint) {
+        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
+            if args.dry_run {
+                bail!("move does not support --dry-run");
+            }
+            if !src_path.exists() {
+                bail!("source path does not exist: {}", src_path.display());
+            }
+            run_local_transfer(args, &src_path, &dst_path, true).await?;
+
+            if src_path.is_dir() {
+                fs::remove_dir_all(&src_path)
+                    .with_context(|| format!("removing {}", src_path.display()))?;
+            } else if src_path.is_file() {
+                fs::remove_file(&src_path)
+                    .with_context(|| format!("removing {}", src_path.display()))?;
+            }
+            Ok(())
+        }
+        _ => bail!("remote moves are not supported yet"),
+    }
+}
+
+async fn run_scan(args: &ScanArgs) -> Result<()> {
+    let _ = args;
+    bail!("`blit scan` is not implemented yet (pending Phase 3 work)");
+}
+
+async fn run_list(args: &ListArgs) -> Result<()> {
+    let _ = args;
+    bail!("`blit list` is not implemented yet (pending Phase 3 work)");
+}
+
+fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
+    match RemoteEndpoint::parse(input) {
+        Ok(endpoint) => Ok(Endpoint::Remote(endpoint)),
+        Err(err) => {
+            if input.contains("://") || input.contains(":/") {
+                Err(err)
+            } else {
+                Ok(Endpoint::Local(PathBuf::from(input)))
+            }
+        }
+    }
+}
+
+fn ensure_remote_transfer_supported(args: &TransferArgs) -> Result<()> {
+    if args.dry_run {
+        bail!("--dry-run is not supported for remote transfers");
+    }
+    if args.checksum {
+        bail!("--checksum is not supported for remote transfers");
+    }
+    if args.workers.is_some() {
+        bail!("--workers limiter is not supported for remote transfers");
+    }
     Ok(())
 }
 
-async fn run_remote_pull(source: &str, destination: &str) -> Result<()> {
-    let mut endpoint = RemoteEndpoint::parse(source)?;
-    let remote_path = endpoint.resource.clone().unwrap_or_else(|| ".".to_string());
-    endpoint.resource = None;
+fn ensure_remote_destination_supported(remote: &RemoteEndpoint) -> Result<()> {
+    match &remote.path {
+        RemotePath::Module { rel_path, .. } => {
+            if !rel_path.as_os_str().is_empty() {
+                bail!(
+                    "remote module sub-paths are not supported yet ({}).",
+                    format_remote_endpoint(remote)
+                );
+            }
+            Ok(())
+        }
+        RemotePath::Root { .. } => bail!(
+            "root exports (server://...) are not supported yet; configure daemon root export first"
+        ),
+        RemotePath::Discovery => {
+            bail!("remote destination must include a module (e.g., server:/module/)",)
+        }
+    }
+}
 
-    let mut client = RemotePullClient::connect(endpoint.clone())
+fn ensure_remote_source_supported(remote: &RemoteEndpoint) -> Result<()> {
+    match remote.path {
+        RemotePath::Module { .. } => Ok(()),
+        RemotePath::Root { .. } => bail!(
+            "root exports (server://...) are not supported yet; configure daemon root export first"
+        ),
+        RemotePath::Discovery => {
+            bail!("remote source must include a module (e.g., server:/module/)")
+        }
+    }
+}
+
+fn format_remote_endpoint(remote: &RemoteEndpoint) -> String {
+    remote.display()
+}
+
+async fn run_remote_push_transfer(
+    _args: &TransferArgs,
+    source_path: &Path,
+    remote: RemoteEndpoint,
+    mirror_mode: bool,
+) -> Result<()> {
+    let mut client = RemotePushClient::connect(remote.clone())
         .await
-        .with_context(|| format!("connecting to {}", endpoint.control_plane_uri()))?;
+        .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
-    let dest_root = PathBuf::from(destination);
+    let filter = FileFilter::default();
     let report = client
-        .pull(&remote_path, &dest_root)
+        .push(source_path, &filter, mirror_mode)
         .await
         .with_context(|| {
             format!(
-                "pulling {} from blit://{}:{}/{}",
-                remote_path, endpoint.host, endpoint.port, endpoint.module
+                "negotiating push manifest for {} -> {}",
+                source_path.display(),
+                format_remote_endpoint(&remote)
             )
         })?;
 
-    describe_pull_result(&report, &dest_root);
+    describe_push_result(&report, &format_remote_endpoint(&remote));
+    Ok(())
+}
 
+async fn run_remote_pull_transfer(
+    _args: &TransferArgs,
+    remote: RemoteEndpoint,
+    dest_root: &Path,
+) -> Result<()> {
+    let mut client = RemotePullClient::connect(remote.clone())
+        .await
+        .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
+
+    let report = client.pull(dest_root).await.with_context(|| {
+        format!(
+            "pulling from {} into {}",
+            format_remote_endpoint(&remote),
+            dest_root.display()
+        )
+    })?;
+
+    describe_pull_result(&report, dest_root);
     Ok(())
 }
 
@@ -263,10 +420,13 @@ fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
     );
 }
 
-fn describe_push_result(report: &RemotePushReport) {
+fn describe_push_result(report: &RemotePushReport, destination: &str) {
     let file_count = report.files_requested.len();
     if file_count == 0 {
-        println!("Remote already up to date; nothing to upload.");
+        println!(
+            "Remote already up to date; nothing to upload ({}).",
+            destination
+        );
     } else if report.fallback_used {
         println!(
             "Negotiation complete: {} file(s) scheduled; using gRPC data fallback.",
@@ -296,12 +456,15 @@ fn describe_push_result(report: &RemotePushReport) {
             ""
         }
     );
+    println!("Destination: {}", destination);
 }
 
-async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {
-    let src_path = PathBuf::from(&args.source);
-    let dest_path = PathBuf::from(&args.destination);
-
+async fn run_local_transfer(
+    args: &TransferArgs,
+    src_path: &Path,
+    dest_path: &Path,
+    mirror: bool,
+) -> Result<()> {
     if !src_path.exists() {
         bail!("source path does not exist: {}", src_path.display());
     }
@@ -336,8 +499,8 @@ async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {
         Some(pb)
     };
 
-    let src_clone = src_path.clone();
-    let dest_clone = dest_path.clone();
+    let src_clone = src_path.to_path_buf();
+    let dest_clone = dest_path.to_path_buf();
     let start = Instant::now();
 
     let summary = tokio::task::spawn_blocking(move || {
@@ -367,7 +530,7 @@ async fn run_local_transfer(args: &LocalArgs, mirror: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_local_options(args: &LocalArgs, mirror: bool) -> LocalMirrorOptions {
+fn build_local_options(args: &TransferArgs, mirror: bool) -> LocalMirrorOptions {
     let mut options = LocalMirrorOptions::default();
     options.mirror = mirror;
     options.dry_run = args.dry_run;
@@ -499,7 +662,7 @@ mod tests {
         std::fs::create_dir_all(&src)?;
         std::fs::write(src.join("hello.txt"), b"hello")?;
 
-        let args = LocalArgs {
+        let args = TransferArgs {
             source: src.to_string_lossy().into_owned(),
             destination: dest.to_string_lossy().into_owned(),
             dry_run: false,
@@ -509,7 +672,7 @@ mod tests {
             workers: None,
         };
 
-        runtime().block_on(run_local_transfer(&args, false))?;
+        runtime().block_on(run_local_transfer(&args, &src, &dest, false))?;
         let copied = std::fs::read(dest.join("hello.txt"))?;
         assert_eq!(copied, b"hello");
         Ok(())
@@ -524,7 +687,7 @@ mod tests {
         std::fs::create_dir_all(&src)?;
         std::fs::write(src.join("hello.txt"), b"hello")?;
 
-        let args = LocalArgs {
+        let args = TransferArgs {
             source: src.to_string_lossy().into_owned(),
             destination: dest.to_string_lossy().into_owned(),
             dry_run: true,
@@ -534,7 +697,7 @@ mod tests {
             workers: None,
         };
 
-        runtime().block_on(run_local_transfer(&args, false))?;
+        runtime().block_on(run_local_transfer(&args, &src, &dest, false))?;
         assert!(!dest.join("hello.txt").exists());
         Ok(())
     }

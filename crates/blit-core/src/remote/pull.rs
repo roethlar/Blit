@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{pull_chunk, FileData, PullRequest};
-use crate::remote::endpoint::RemoteEndpoint;
+use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 
 #[derive(Debug, Default, Clone)]
 pub struct RemotePullReport {
@@ -29,16 +29,32 @@ impl RemotePullClient {
         Ok(Self { endpoint, client })
     }
 
-    pub async fn pull(&mut self, remote_path: &str, dest_root: &Path) -> Result<RemotePullReport> {
+    pub async fn pull(&mut self, dest_root: &Path) -> Result<RemotePullReport> {
         if !dest_root.exists() {
             fs::create_dir_all(dest_root).await.with_context(|| {
                 format!("creating destination directory {}", dest_root.display())
             })?;
         }
 
+        let (module, rel_path) = match &self.endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
+            RemotePath::Root { .. } => {
+                bail!("root exports (server://...) are not supported yet; configure daemon root");
+            }
+            RemotePath::Discovery => {
+                bail!("remote source must specify a module (server:/module/...)");
+            }
+        };
+
+        let path_str = if rel_path.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            normalize_for_request(&rel_path)
+        };
+
         let pull_request = PullRequest {
-            module: self.endpoint.module.clone(),
-            path: remote_path.to_string(),
+            module,
+            path: path_str,
         };
 
         let mut stream = self
@@ -123,4 +139,15 @@ fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
     }
 
     Ok(path.to_path_buf())
+}
+
+fn normalize_for_request(path: &PathBuf) -> String {
+    if path.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        path.iter()
+            .map(|component| component.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
 }
