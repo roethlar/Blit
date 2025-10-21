@@ -26,6 +26,8 @@ use crate::tar_stream::TarConfig;
 use crate::transfer_engine::{Sample, WorkerFactory, WorkerParams};
 use crate::transfer_plan::TransferTask;
 use crate::CopyConfig;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 
 /// WorkerFactory implementation for local filesystem operations.
 pub struct LocalWorkerFactory {
@@ -211,11 +213,34 @@ pub(crate) fn copy_paths_blocking(
     rels: &[PathBuf],
     config: &CopyConfig,
 ) -> Result<()> {
+    if rels.is_empty() {
+        return Ok(());
+    }
+
+    let workers = config.workers.max(1);
+    if workers == 1 || rels.len() < 32 {
+        let sizer = BufferSizer::default();
+        let logger = NoopLogger;
+        for rel in rels {
+            copy_path_maybe(src_root, dest_root, rel.as_path(), config, &sizer, &logger)?;
+        }
+        return Ok(());
+    }
+
     let sizer = BufferSizer::default();
     let logger = NoopLogger;
-    for rel in rels {
-        copy_path_maybe(src_root, dest_root, rel.as_path(), config, &sizer, &logger)?;
-    }
+
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .context("build parallel copy pool")?;
+
+    pool.install(|| {
+        rels.par_iter().try_for_each(|rel| {
+            copy_path_maybe(src_root, dest_root, rel.as_path(), config, &sizer, &logger)
+        })
+    })?;
+
     Ok(())
 }
 

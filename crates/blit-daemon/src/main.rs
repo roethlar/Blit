@@ -10,6 +10,7 @@ use blit_core::generated::{
 };
 use clap::Parser;
 use rand::{rngs::OsRng, RngCore};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
@@ -21,7 +22,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 
-use eyre::Result;
+use eyre::{eyre, Context, Result};
 
 type PushSender = mpsc::Sender<Result<ServerPushResponse, Status>>;
 type PullSender = mpsc::Sender<Result<PullChunk, Status>>;
@@ -33,8 +34,244 @@ struct ModuleConfig {
     name: String,
     path: PathBuf,
     read_only: bool,
+    _comment: Option<String>,
+    _use_chroot: bool,
 }
 
+#[derive(Debug, Clone)]
+struct RootExport {
+    path: PathBuf,
+    read_only: bool,
+    use_chroot: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RootSpec {
+    path: PathBuf,
+    read_only: bool,
+    use_chroot: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MdnsConfig {
+    disabled: bool,
+    name: Option<String>,
+}
+
+impl Default for MdnsConfig {
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            name: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DaemonRuntime {
+    bind_host: String,
+    port: u16,
+    modules: HashMap<String, ModuleConfig>,
+    default_root: Option<RootExport>,
+    mdns: MdnsConfig,
+    motd: Option<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    daemon: RawDaemonSection,
+    #[serde(default, rename = "module")]
+    modules: Vec<RawModule>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawDaemonSection {
+    bind: Option<String>,
+    port: Option<u16>,
+    motd: Option<String>,
+    no_mdns: Option<bool>,
+    mdns_name: Option<String>,
+    root: Option<PathBuf>,
+    #[serde(default)]
+    root_read_only: bool,
+    #[serde(default)]
+    root_use_chroot: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawModule {
+    name: String,
+    path: PathBuf,
+    #[serde(default)]
+    comment: Option<String>,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    use_chroot: bool,
+}
+
+fn default_config_path() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\ProgramData\Blit\config.toml")
+    } else {
+        PathBuf::from("/etc/blit/config.toml")
+    }
+}
+
+fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
+    let mut warnings = Vec::new();
+
+    let config_path = if let Some(path) = &args.config {
+        Some(path.clone())
+    } else {
+        let candidate = default_config_path();
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
+    };
+
+    let raw = if let Some(ref path) = config_path {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config file {}", path.display()))?;
+        toml::from_str::<RawConfig>(&contents)
+            .with_context(|| format!("failed to parse config file {}", path.display()))?
+    } else {
+        RawConfig::default()
+    };
+
+    let bind_host = args
+        .bind
+        .clone()
+        .or_else(|| raw.daemon.bind.clone())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = args.port.or(raw.daemon.port).unwrap_or(9031);
+
+    let motd = raw.daemon.motd.clone();
+    let mdns_disabled = if args.no_mdns {
+        true
+    } else {
+        raw.daemon.no_mdns.unwrap_or(false)
+    };
+    let mdns_name = args.mdns_name.clone().or(raw.daemon.mdns_name.clone());
+    let mdns = MdnsConfig {
+        disabled: mdns_disabled,
+        name: mdns_name,
+    };
+
+    let mut modules = HashMap::new();
+    for module in raw.modules {
+        if module.name.trim().is_empty() {
+            return Err(eyre!("module names cannot be empty"));
+        }
+        if modules.contains_key(&module.name) {
+            return Err(eyre!("duplicate module '{}' in config", module.name));
+        }
+        let canonical = fs::canonicalize(&module.path).with_context(|| {
+            format!(
+                "failed to resolve path '{}' for module '{}'",
+                module.path.display(),
+                module.name
+            )
+        })?;
+        modules.insert(
+            module.name.clone(),
+            ModuleConfig {
+                name: module.name,
+                path: canonical,
+                read_only: module.read_only,
+                _comment: module.comment,
+                _use_chroot: module.use_chroot,
+            },
+        );
+    }
+
+    let mut root_spec = if let Some(cli_root) = &args.root {
+        Some(RootSpec {
+            path: cli_root.clone(),
+            read_only: false,
+            use_chroot: raw.daemon.root_use_chroot,
+        })
+    } else if let Some(cfg_root) = raw.daemon.root.clone() {
+        Some(RootSpec {
+            path: cfg_root,
+            read_only: raw.daemon.root_read_only,
+            use_chroot: raw.daemon.root_use_chroot,
+        })
+    } else {
+        None
+    };
+
+    let mut default_root = None;
+
+    if modules.is_empty() {
+        let chosen = if let Some(spec) = root_spec.take() {
+            spec
+        } else {
+            let cwd = std::env::current_dir().context("failed to determine working directory")?;
+            warnings.push(format!(
+                "no modules configured; exporting working directory {} as 'default'",
+                cwd.display()
+            ));
+            RootSpec {
+                path: cwd,
+                read_only: false,
+                use_chroot: false,
+            }
+        };
+        let canonical = fs::canonicalize(&chosen.path).with_context(|| {
+            format!(
+                "failed to resolve default export path '{}'",
+                chosen.path.display()
+            )
+        })?;
+        modules.insert(
+            "default".to_string(),
+            ModuleConfig {
+                name: "default".to_string(),
+                path: canonical.clone(),
+                read_only: chosen.read_only,
+                _comment: None,
+                _use_chroot: chosen.use_chroot,
+            },
+        );
+        default_root = Some(RootExport {
+            path: canonical,
+            read_only: chosen.read_only,
+            use_chroot: chosen.use_chroot,
+        });
+    } else if let Some(spec) = root_spec {
+        let canonical = fs::canonicalize(&spec.path).with_context(|| {
+            format!(
+                "failed to resolve root export path '{}'",
+                spec.path.display()
+            )
+        })?;
+        default_root = Some(RootExport {
+            path: canonical,
+            read_only: spec.read_only,
+            use_chroot: spec.use_chroot,
+        });
+    } else if !modules.contains_key("default") {
+        warnings.push(
+            "no default root configured; server:// requests will be rejected until --root or config root is provided"
+                .to_string(),
+        );
+    }
+
+    Ok(DaemonRuntime {
+        bind_host,
+        port,
+        modules,
+        default_root,
+        mdns,
+        motd,
+        warnings,
+    })
+}
 #[derive(Debug, Default)]
 struct TransferStats {
     files_transferred: u64,
@@ -45,9 +282,24 @@ struct TransferStats {
 #[derive(Parser, Debug)]
 #[command(name = "blit-daemon", about = "Remote transfer daemon for blit v2")]
 struct DaemonArgs {
-    /// Bind address for the gRPC control plane (host:port)
-    #[arg(long, default_value = "127.0.0.1:50051")]
-    bind: String,
+    /// Path to the daemon configuration file (TOML). Defaults to /etc/blit/config.toml when present.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Host/IP address to bind (overrides config file)
+    #[arg(long)]
+    bind: Option<String>,
+    /// Port to bind (overrides config file)
+    #[arg(long)]
+    port: Option<u16>,
+    /// Exported root path for server:// when no modules are defined
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// Disable mDNS advertisement even if enabled in config
+    #[arg(long)]
+    no_mdns: bool,
+    /// Override the advertised mDNS instance name
+    #[arg(long)]
+    mdns_name: Option<String>,
     /// Force the daemon to use the gRPC data plane instead of TCP
     #[arg(long)]
     force_grpc_data: bool,
@@ -55,33 +307,29 @@ struct DaemonArgs {
 
 pub struct BlitService {
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
+    _default_root: Option<RootExport>,
     force_grpc_data: bool,
 }
 
-impl Default for BlitService {
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
 impl BlitService {
-    pub fn new(force_grpc_data: bool) -> Self {
-        let mut modules = HashMap::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            modules.insert(
-                "default".to_string(),
-                ModuleConfig {
-                    name: "default".to_string(),
-                    path: cwd,
-                    read_only: false,
-                },
-            );
-        }
-
+    pub(crate) fn from_runtime(
+        modules: HashMap<String, ModuleConfig>,
+        default_root: Option<RootExport>,
+        force_grpc_data: bool,
+    ) -> Self {
         Self {
             modules: Arc::new(Mutex::new(modules)),
+            _default_root: default_root,
             force_grpc_data,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_modules(
+        modules: HashMap<String, ModuleConfig>,
+        force_grpc_data: bool,
+    ) -> Self {
+        Self::from_runtime(modules, None, force_grpc_data)
     }
 }
 
@@ -156,8 +404,50 @@ impl Blit for BlitService {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = DaemonArgs::parse();
-    let addr: SocketAddr = args.bind.parse()?;
-    let service = BlitService::new(args.force_grpc_data);
+    let runtime = load_runtime(&args)?;
+    let DaemonRuntime {
+        bind_host,
+        port,
+        modules,
+        default_root,
+        mdns,
+        motd,
+        warnings,
+    } = runtime;
+
+    for warning in &warnings {
+        eprintln!("[warn] {warning}");
+    }
+
+    let addr: SocketAddr = format!("{}:{}", bind_host, port).parse()?;
+    if let Some(motd) = motd {
+        println!("motd: {motd}");
+    }
+    if let Some(root) = &default_root {
+        eprintln!(
+            "[info] default root export: {}{}{}",
+            root.path.display(),
+            if root.read_only { " (read-only)" } else { "" },
+            if root.use_chroot { " [chroot]" } else { "" }
+        );
+    }
+    if !mdns.disabled {
+        if let Some(name) = &mdns.name {
+            eprintln!(
+                "[info] mDNS advertising requested for '{}' but not yet implemented; ignoring",
+                name
+            );
+        } else {
+            eprintln!("[info] mDNS advertising requested but not yet implemented; ignoring");
+        }
+    } else if let Some(name) = &mdns.name {
+        eprintln!(
+            "[info] mDNS advertising disabled; instance name '{}' ignored",
+            name
+        );
+    }
+
+    let service = BlitService::from_runtime(modules, default_root, args.force_grpc_data);
 
     println!("blitd v2 listening on {}", addr);
 
@@ -789,18 +1079,18 @@ mod tests {
         oneshot::Sender<()>,
         JoinHandle<Result<(), tonic::transport::Error>>,
     ) {
-        let service = BlitService::new(force_grpc_data);
-        {
-            let mut modules = service.modules.lock().await;
-            modules.insert(
-                "default".to_string(),
-                ModuleConfig {
-                    name: "default".to_string(),
-                    path: root,
-                    read_only: false,
-                },
-            );
-        }
+        let mut map = HashMap::new();
+        map.insert(
+            "default".to_string(),
+            ModuleConfig {
+                name: "default".to_string(),
+                path: root,
+                read_only: false,
+                _comment: None,
+                _use_chroot: false,
+            },
+        );
+        let service = BlitService::with_modules(map, force_grpc_data);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -989,6 +1279,8 @@ mod tests {
             name: "default".to_string(),
             path: dir.path().to_path_buf(),
             read_only: false,
+            _comment: None,
+            _use_chroot: false,
         };
 
         let match_path = dir.path().join("match.txt");

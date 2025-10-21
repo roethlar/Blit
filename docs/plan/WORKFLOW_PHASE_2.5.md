@@ -59,9 +59,24 @@ If NO-GO, typical remediation includes tuning CopyFileEx heuristics, adjusting p
 
 ---
 
-## 4. Current Snapshot (2025-10-19)
+## 4. Current Snapshot (2025-10-20)
 
-Recent benchmark runs (macOS + Windows) already show blit-cli meeting/exceeding comparators for large files (see `logs/bench_local_mirror*.log`, `logs/wingpt/windows_bench_extract/`). Mixed/small-file suites still need fresh data before declaring GO for Phase 3.
+- **Large sequential workloads (✅ complete)**  
+  - Linux: `logs/linux/bench_local_size512_20251020T222233Z/bench.log` (512 MiB average 3.85 s vs rsync 6.61 s) and `logs/linux/bench_local_size2048_20251020T222342Z/bench.log` (2 GiB average 9.37 s vs rsync 10.19 s).  
+  - macOS: `logs/macos/bench-local-mirror-size512-20251020T220548Z/bench.log` (0.397 s vs rsync 1.234 s) and `logs/macos/bench-local-mirror-size2048-20251020T220703Z/bench.log` (1.597 s vs 5.009 s).  
+  - Windows: `logs/wingpt/bench-512mb-20251020.log` (0.775 s vs robocopy 0.727 s) and `logs/wingpt/bench-2048mb-20251020.log` (4.10 s vs 4.19 s).
+- **Tiny manifest sanity checks (✅ complete)**  
+  - Linux/macOS: `logs/linux/bench_local_size000_20251020T221948Z/bench.log`, `logs/macos/bench-local-mirror-size0-20251020T220501Z/bench.log` (rsync still faster, expected).  
+  - Windows: `logs/wingpt/bench-0mb-20251020.log` (robocopy faster; planner overhead dominates).
+- **Many small files (✅ complete)**  
+  - Linux: `logs/linux/bench_smallfiles_20251021T012247Z/bench.log` (100 k × 4 KiB; tuned `rsync --whole-file --inplace --no-compress`) → blit 4.43 ± 0.10 s vs rsync 7.72 ± 0.02 s (~174 %).  
+  - macOS/Windows runs queued with the same harness to lock the gate fully.
+- **Mixed workload (✅ complete)**  
+  - Linux: `logs/linux/bench_mixed_20251021T012509Z/bench.log` (512 MiB payload + 50 k × 2 KiB files) → blit 2.59 ± 0.33 s vs rsync 5.80 ± 0.62 s (~224 %).  
+  - macOS/Windows mixed runs to follow with tuned comparator flags.
+- **Incremental mirror (🚨 needs work)**  
+  - Linux: `logs/linux/bench_incremental_base_20251021T012748Z/bench.log` (baseline) and `logs/linux/bench_incremental_update_20251021T012818Z/bench.log` (touch 2 k, delete 1 k, add 1 k). First mutation pass: blit 1.15 s vs rsync 0.68 s (~60 %). Subsequent passes noop for both.  
+  - Need further optimisation plus macOS/Windows reruns before calling GO.
 
 ---
 

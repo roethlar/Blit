@@ -32,7 +32,7 @@
 ### 3.2 Daemon Configuration & Discovery
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 3.2.1 | Add TOML config loader (`/etc/blit/config.toml` or path via `--config`) with module definitions (`name`, `path`, `comment`, `read_only`, `use_chroot`) and daemon settings (`bind`, `port`, `motd`, `no_mdns`, `mdns_name`, optional default root). | Config parser module + validation + tests. |
+| 3.2.1 | Add TOML config loader (`/etc/blit/config.toml` or path via `--config`) with module definitions (`name`, `path`, `comment`, `read_only`, `use_chroot`) and daemon settings (`bind`, `port`, `motd`, `no_mdns`, `mdns_name`, optional default root). | ✅ `blit-daemon` now parses config/CLI overrides, populates modules/default root, and warns when falling back to the working directory. |
 | 3.2.2 | Implement behaviour when no modules defined: use `--root`/config root export; otherwise default to daemon working directory with warning. | Daemon startup logic and log messaging. |
 | 3.2.3 | Integrate mDNS advertisement (`_blit._tcp.local.`) enabled by default, disabled via `--no-mdns`. | Advertising helper with lifecycle management + tests. |
 | 3.2.4 | Ensure `blit scan` and `blit-utils scan` consume mDNS results cross-platform. | CLI/util output demonstrating discovery, integration tests. |

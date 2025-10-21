@@ -32,9 +32,88 @@ function Write-Log {
     Add-Content -Path $logFile -Value $Message
 }
 
+function Apply-IncrementalChanges {
+    if ($script:IncrementalApplied) {
+        return
+    }
+    if ($incrementalTouchCount -le 0 -and $incrementalDeleteCount -le 0 -and $incrementalAddCount -le 0) {
+        return
+    }
+
+    Write-Log ("Applying incremental changes to source tree (touch={0}, delete={1}, add={2})..." -f $incrementalTouchCount, $incrementalDeleteCount, $incrementalAddCount)
+    $files = Get-ChildItem -Path $srcDir -Recurse -File | Sort-Object FullName
+
+    $touchTargets = @()
+    if ($incrementalTouchCount -gt 0) {
+        $touchTargets = $files | Select-Object -First $incrementalTouchCount
+    }
+
+    $remaining = if ($touchTargets.Count -gt 0) {
+        $files | Select-Object -Skip $touchTargets.Count
+    } else {
+        $files
+    }
+
+    $deleteTargets = @()
+    if ($incrementalDeleteCount -gt 0) {
+        $deleteTargets = $remaining | Select-Object -First $incrementalDeleteCount
+    }
+
+    foreach ($file in $touchTargets) {
+        try {
+            Add-Content -Path $file.FullName -Value "`nupdated $(Get-Date -Format o)`n" -Encoding UTF8
+        } catch {
+            Write-Log ("[warn] failed to touch {0}: {1}" -f $file.FullName, $_.Exception.Message)
+        }
+    }
+
+    foreach ($file in $deleteTargets) {
+        try {
+            Remove-Item $file.FullName -Force -ErrorAction Stop
+        } catch {
+            Write-Log ("[warn] failed to delete {0}: {1}" -f $file.FullName, $_.Exception.Message)
+        }
+    }
+
+    if ($incrementalAddCount -gt 0) {
+        $rngLocal = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $payload = New-Object byte[] $incrementalAddBytes
+        $rngLocal.GetBytes($payload)
+        $addRoot = Join-Path $srcDir "incremental_new"
+        [System.IO.Directory]::CreateDirectory($addRoot) | Out-Null
+        for ($i = 0; $i -lt $incrementalAddCount; $i++) {
+            $filePath = Join-Path $addRoot ("new_{0:D6}.dat" -f $i)
+            [System.IO.File]::WriteAllBytes($filePath, $payload)
+        }
+        $rngLocal.Dispose()
+    }
+
+    $script:IncrementalApplied = $true
+    $totalFiles = (Get-ChildItem -Path $srcDir -Recurse -File | Measure-Object).Count
+    Write-Log ("Incremental changes applied. Source now has {0} files." -f $totalFiles)
+}
+
 $workspaceDisposition = if ($Cleanup) { 'removed' } else { 'preserved' }
 Write-Log ("Workspace: {0} (will be {1} on exit)" -f $workRoot, $workspaceDisposition)
 Write-Log "Generating ${SizeMB} MiB synthetic payload..."
+
+$smallFileCount = [int]([Environment]::GetEnvironmentVariable("SMALL_FILE_COUNT") ?? "0")
+$smallFileBytes = [int]([Environment]::GetEnvironmentVariable("SMALL_FILE_BYTES") ?? "4096")
+$smallFileDirSize = [int]([Environment]::GetEnvironmentVariable("SMALL_FILE_DIR_SIZE") ?? "1000")
+
+$preserveDest = [int]([Environment]::GetEnvironmentVariable("PRESERVE_DEST") ?? "0")
+$incrementalTouchCount = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_TOUCH_COUNT") ?? "0")
+$incrementalDeleteCount = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_DELETE_COUNT") ?? "0")
+$incrementalAddCount = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_ADD_COUNT") ?? "0")
+$incrementalAddBytes = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_ADD_BYTES") ?? "1024")
+$script:IncrementalApplied = $false
+
+$robocopyFlagsDefault = "/MIR /COPYALL /FFT /R:1 /W:1 /NDL /NFL /NJH /NJS /NP"
+$robocopyFlagString = [Environment]::GetEnvironmentVariable("ROBOCOPY_FLAGS")
+if ([string]::IsNullOrWhiteSpace($robocopyFlagString)) {
+    $robocopyFlagString = $robocopyFlagsDefault
+}
+$robocopyFlags = $robocopyFlagString.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
 
 try {
     # Generate source payload
@@ -56,6 +135,20 @@ try {
         [System.IO.Directory]::CreateDirectory($subDir) | Out-Null
         $lines = ("hello world`n" * ($i + 1))
         [System.IO.File]::WriteAllText((Join-Path $subDir "file.txt"), $lines)
+    }
+
+    if ($smallFileCount -gt 0) {
+        Write-Log ("Generating {0} small files ({1} bytes each)..." -f $smallFileCount, $smallFileBytes)
+        $payload = New-Object byte[] $smallFileBytes
+        $rng.GetBytes($payload)
+        for ($i = 0; $i -lt $smallFileCount; $i++) {
+            $bucket = [int][math]::Floor($i / [double][Math]::Max(1, $smallFileDirSize))
+            $dirPath = Join-Path $srcDir ("small\\grp_{0:D4}" -f $bucket)
+            [System.IO.Directory]::CreateDirectory($dirPath) | Out-Null
+            $filePath = Join-Path $dirPath ("file_{0:D6}.dat" -f $i)
+            [System.IO.File]::WriteAllBytes($filePath, $payload)
+        }
+        Write-Log "Small-file payload generated."
     }
 
     Write-Log "Building blit-cli (release)..."
@@ -154,7 +247,8 @@ try {
             }
             "robocopy" {
                 $exe = if ($Binary -and (Test-Path $Binary)) { $Binary } else { "robocopy" }
-                $args = @($Source, $Destination, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
+                $args = @($Source, $Destination) + $robocopyFlags
+                Write-Log ("[robocopy] args: {0}" -f ($args -join ' '))
                 $output = & $exe @args 2>&1
                 $code = $LASTEXITCODE
                 $exitCode = if ($code -ge 8) { $code } else { 0 }
@@ -185,10 +279,17 @@ try {
             [hashtable]$BinaryMap
         )
 
-        if (Test-Path $Destination) {
-            Remove-Item $Destination -Recurse -Force -ErrorAction SilentlyContinue
+        if ($preserveDest -eq 1) {
+            if (-not (Test-Path $Destination)) {
+                [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
+            }
         }
-        [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
+        else {
+            if (Test-Path $Destination) {
+                Remove-Item $Destination -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            [System.IO.Directory]::CreateDirectory($Destination) | Out-Null
+        }
         $label = $LabelMap[$Tool]
         Write-Log ("[{0}] {1} run {2}/{3}: mirror -> {4}" -f $label, $Phase, $Index, $Total, $Destination)
 
@@ -232,6 +333,10 @@ try {
             for ($i = 1; $i -le $Warmup; $i++) {
                 Invoke-ToolRun -Tool $tool -Phase "Warmup" -Index $i -Total $Warmup -Source $srcDir -Destination $toolDest[$tool] -Binary $blitBin -LabelMap $toolLabel -SumMap $toolSum -CountMap $toolCount -BinaryMap $toolBinary | Out-Null
             }
+        }
+
+        if (-not $script:IncrementalApplied) {
+            Apply-IncrementalChanges
         }
 
         if ($Runs -gt 0) {

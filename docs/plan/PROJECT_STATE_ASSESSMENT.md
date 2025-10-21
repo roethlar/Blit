@@ -17,7 +17,7 @@ Blit v2 continues under the Feature Completeness & Transport plan (v6). Core-loc
 | Phase 0 – Foundation | ✅ Complete | Workspace + core modules ported |
 | Phase 1 – gRPC Scaffolding | ✅ Complete | Proto + tonic scaffolding live |
 | Phase 2 – Local Ops | ⚠️ In Progress | Streaming planner, predictor, CopyFileEx heuristics done; UX/tests/benchmarks outstanding |
-| Phase 2.5 – Validation | ⚠️ In Progress | Bench suite defined; more data required |
+| Phase 2.5 – Validation | ⚠️ In Progress | Large + small + mixed workloads GO on Linux; incremental mirror still below target (needs tuning + macOS/Windows reruns) |
 | Phase 3 – Remote Ops | ⚠️ In Progress | Hybrid transport + remote pull implemented; CLI verb realignment + admin RPCs pending |
 | Phase 4 – Production | ⏳ Not Started | Packaging/docs/tests to follow |
 | Phase 3.5 – RDMA | Deferred | Documented for post-release work |
@@ -50,7 +50,7 @@ Blit v2 continues under the Feature Completeness & Transport plan (v6). Core-loc
 
 ### Phase 2.5 – Performance Validation (In Progress)
 - Benchmark harnesses (`scripts/bench_local_mirror.sh`, Windows PowerShell equivalent) exist.
-- Need updated benchmark runs (large file, many small files, mixed workloads, incremental mirrors) with results logged in DEVLOG + Phase 2.5 doc.
+- Need incremental benchmark improvements + macOS/Windows reruns; large/small/mixed logged on 2025-10-21.
 
 ### Phase 3 – Remote Operations (In Progress)
 - **Delivered**:  
@@ -62,7 +62,7 @@ Blit v2 continues under the Feature Completeness & Transport plan (v6). Core-loc
   - CLI verb realignment (remove `push`/`pull`, restore `copy`/`mirror`/`move` remote paths, `scan`, `list`).  
   - Canonical URL parser updates to `server:/module/...` / `server://...`.  
   - blit-utils tooling (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`).  
-  - Daemon config loader (TOML modules, `--root`, mDNS flags) and behaviour when no modules configured.  
+  - mDNS wiring for the new daemon config (advertising + CLI `scan`) and follow-up behaviours (chroot, read-only enforcement).
   - mDNS advertisement integration + discovery tests.  
   - Admin RPCs backing the utilities (list modules/paths, recursive enumeration, disk usage, remote delete).  
   - Integration tests covering remote transfer + admin verbs.  
@@ -95,7 +95,7 @@ No hard blockers at this moment; focus is aligning implementation with plan v6 r
    - Convert CLI command set to `copy`, `mirror`, `move`, `scan`, `list`, diagnostics.  
    - Update URL parsing to canonical syntax.  
    - Implement `blit-utils` verbs and supporting RPCs.  
-   - Build TOML config loader + `--root` handling, mDNS advertising toggle.
+  - Wire mDNS advertising + discovery on top of the new config loader.
 
 3. **Phase 2 Finishing Work**  
    - Complete CLI progress UX clean-up and debugging messages.  
@@ -123,7 +123,7 @@ blit_v2/
 ├── crates/
 │   ├── blit-core/      # Core logic (streaming planner, predictor, hybrid transport scaffolding)
 │   ├── blit-cli/       # CLI binary (needs verb realignment)
-│   ├── blit-daemon/    # Daemon (needs config loader, admin RPCs, mDNS)
+│   ├── blit-daemon/    # Daemon (config loader in place; admin RPCs + mDNS outstanding)
 │   └── blit-utils/     # Admin tooling (verbs to be implemented)
 ├── scripts/            # Benchmark/test harnesses (macOS, Windows)
 ├── docs/plan/          # Plan v6, workflows, state assessments (this folder)
