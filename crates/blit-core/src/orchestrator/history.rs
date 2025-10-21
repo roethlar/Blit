@@ -29,7 +29,7 @@ pub(super) fn record_performance_history(
         TransferMode::Copy
     };
 
-    let record = PerformanceRecord::new(
+    let mut record = PerformanceRecord::new(
         mode,
         None,
         None,
@@ -42,6 +42,14 @@ pub(super) fn record_performance_history(
         0,
         0,
     );
+    record.tar_shard_tasks = summary.tar_shard_tasks as u32;
+    record.tar_shard_files = summary.tar_shard_files as u32;
+    record.tar_shard_bytes = summary.tar_shard_bytes;
+    record.raw_bundle_tasks = summary.raw_bundle_tasks as u32;
+    record.raw_bundle_files = summary.raw_bundle_files as u32;
+    record.raw_bundle_bytes = summary.raw_bundle_bytes;
+    record.large_tasks = summary.large_tasks as u32;
+    record.large_bytes = summary.large_bytes;
 
     if let Err(err) = append_local_record(&record) {
         if options.verbose {

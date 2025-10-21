@@ -40,6 +40,19 @@ pub struct LocalPlanFinal {
     pub copy_jobs: Vec<CopyJob>,
     pub chunk_bytes: usize,
     pub total_bytes: u64,
+    pub task_stats: PlanTaskStats,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PlanTaskStats {
+    pub tar_shard_tasks: usize,
+    pub tar_shard_files: usize,
+    pub tar_shard_bytes: u64,
+    pub raw_bundle_tasks: usize,
+    pub raw_bundle_files: usize,
+    pub raw_bundle_bytes: u64,
+    pub large_tasks: usize,
+    pub large_bytes: u64,
 }
 
 pub struct LocalPlanStream {
@@ -153,6 +166,7 @@ impl TransferFacade {
                 copy_jobs,
                 chunk_bytes: aggregator.chunk_bytes,
                 total_bytes,
+                task_stats: aggregator.stats.clone(),
             })
         });
 
@@ -288,6 +302,7 @@ struct TaskAggregator {
     medium_max: u64,
     chunk_bytes: usize,
     options: PlanOptions,
+    stats: PlanTaskStats,
 }
 
 impl TaskAggregator {
@@ -312,6 +327,7 @@ impl TaskAggregator {
             medium_max,
             chunk_bytes,
             options,
+            stats: PlanTaskStats::default(),
         }
     }
 
@@ -361,6 +377,8 @@ impl TaskAggregator {
         const LARGE_THRESHOLD: u64 = 256 * 1024 * 1024;
         if size >= LARGE_THRESHOLD {
             self.chunk_bytes = 32 * 1024 * 1024;
+            self.stats.large_tasks = self.stats.large_tasks.saturating_add(1);
+            self.stats.large_bytes = self.stats.large_bytes.saturating_add(size);
             self.emit_task(tx, TransferTask::Large { path: rel })?;
             return Ok(());
         }
@@ -378,8 +396,12 @@ impl TaskAggregator {
             let reached_count = self.small_paths.len() >= self.small_count_target;
 
             if (reached_bytes || reached_count) && !self.small_paths.is_empty() {
+                let shard_bytes = self.small_bytes;
                 let paths = std::mem::take(&mut self.small_paths);
                 self.small_bytes = 0;
+                self.stats.tar_shard_tasks = self.stats.tar_shard_tasks.saturating_add(1);
+                self.stats.tar_shard_files = self.stats.tar_shard_files.saturating_add(paths.len());
+                self.stats.tar_shard_bytes = self.stats.tar_shard_bytes.saturating_add(shard_bytes);
                 self.emit_task(tx, TransferTask::TarShard(paths))?;
             }
             return Ok(());
@@ -392,8 +414,12 @@ impl TaskAggregator {
         if (self.medium_bytes >= self.medium_target && !self.medium_paths.is_empty())
             || (self.medium_bytes > self.medium_max)
         {
+            let bundle_bytes = self.medium_bytes;
             let bundle = std::mem::take(&mut self.medium_paths);
             self.medium_bytes = 0;
+            self.stats.raw_bundle_tasks = self.stats.raw_bundle_tasks.saturating_add(1);
+            self.stats.raw_bundle_files = self.stats.raw_bundle_files.saturating_add(bundle.len());
+            self.stats.raw_bundle_bytes = self.stats.raw_bundle_bytes.saturating_add(bundle_bytes);
             self.emit_task(tx, TransferTask::RawBundle(bundle))?;
         }
 
@@ -411,14 +437,27 @@ impl TaskAggregator {
                 || leftover_bytes >= self.small_target;
             if should_tar {
                 self.chunk_bytes = self.chunk_bytes.max(self.small_target as usize);
+                self.stats.tar_shard_tasks = self.stats.tar_shard_tasks.saturating_add(1);
+                self.stats.tar_shard_files = self.stats.tar_shard_files.saturating_add(paths.len());
+                self.stats.tar_shard_bytes =
+                    self.stats.tar_shard_bytes.saturating_add(leftover_bytes);
                 self.emit_task(tx, TransferTask::TarShard(paths))?;
             } else {
+                self.stats.raw_bundle_tasks = self.stats.raw_bundle_tasks.saturating_add(1);
+                self.stats.raw_bundle_files =
+                    self.stats.raw_bundle_files.saturating_add(paths.len());
+                self.stats.raw_bundle_bytes =
+                    self.stats.raw_bundle_bytes.saturating_add(leftover_bytes);
                 self.emit_task(tx, TransferTask::RawBundle(paths))?;
             }
         }
         if !self.medium_paths.is_empty() {
+            let bundle_bytes = self.medium_bytes;
             let bundle = std::mem::take(&mut self.medium_paths);
             self.medium_bytes = 0;
+            self.stats.raw_bundle_tasks = self.stats.raw_bundle_tasks.saturating_add(1);
+            self.stats.raw_bundle_files = self.stats.raw_bundle_files.saturating_add(bundle.len());
+            self.stats.raw_bundle_bytes = self.stats.raw_bundle_bytes.saturating_add(bundle_bytes);
             self.emit_task(tx, TransferTask::RawBundle(bundle))?;
         }
         Ok(())

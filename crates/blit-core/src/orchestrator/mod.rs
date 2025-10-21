@@ -74,6 +74,14 @@ pub struct LocalMirrorSummary {
     pub deleted_dirs: usize,
     pub dry_run: bool,
     pub duration: Duration,
+    pub tar_shard_tasks: usize,
+    pub tar_shard_files: usize,
+    pub tar_shard_bytes: u64,
+    pub raw_bundle_tasks: usize,
+    pub raw_bundle_files: usize,
+    pub raw_bundle_bytes: u64,
+    pub large_tasks: usize,
+    pub large_bytes: u64,
 }
 
 pub struct TransferOrchestrator;
@@ -185,6 +193,8 @@ impl TransferOrchestrator {
                         total_bytes: size,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
+                        large_tasks: 1,
+                        large_bytes: size,
                         ..Default::default()
                     };
                     if let Some(record) = record_performance_history(
@@ -312,6 +322,14 @@ impl TransferOrchestrator {
             duration: start_time.elapsed(),
             ..Default::default()
         };
+        summary.tar_shard_tasks = plan_final.task_stats.tar_shard_tasks;
+        summary.tar_shard_files = plan_final.task_stats.tar_shard_files;
+        summary.tar_shard_bytes = plan_final.task_stats.tar_shard_bytes;
+        summary.raw_bundle_tasks = plan_final.task_stats.raw_bundle_tasks;
+        summary.raw_bundle_files = plan_final.task_stats.raw_bundle_files;
+        summary.raw_bundle_bytes = plan_final.task_stats.raw_bundle_bytes;
+        summary.large_tasks = plan_final.task_stats.large_tasks;
+        summary.large_bytes = plan_final.task_stats.large_bytes;
 
         if options.mirror {
             let deletion_planner = MirrorPlanner::new(options.checksum);

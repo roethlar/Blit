@@ -53,6 +53,22 @@ pub struct PerformanceRecord {
     pub transfer_duration_ms: u128,
     pub stall_events: u32,
     pub error_count: u32,
+    #[serde(default)]
+    pub tar_shard_tasks: u32,
+    #[serde(default)]
+    pub tar_shard_files: u32,
+    #[serde(default)]
+    pub tar_shard_bytes: u64,
+    #[serde(default)]
+    pub raw_bundle_tasks: u32,
+    #[serde(default)]
+    pub raw_bundle_files: u32,
+    #[serde(default)]
+    pub raw_bundle_bytes: u64,
+    #[serde(default)]
+    pub large_tasks: u32,
+    #[serde(default)]
+    pub large_bytes: u64,
 }
 
 impl PerformanceRecord {
@@ -85,6 +101,14 @@ impl PerformanceRecord {
             transfer_duration_ms,
             stall_events,
             error_count,
+            tar_shard_tasks: 0,
+            tar_shard_files: 0,
+            tar_shard_bytes: 0,
+            raw_bundle_tasks: 0,
+            raw_bundle_files: 0,
+            raw_bundle_bytes: 0,
+            large_tasks: 0,
+            large_bytes: 0,
         }
     }
 }

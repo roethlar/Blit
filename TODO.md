@@ -56,7 +56,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Realign CLI verbs (`copy`, `mirror`, `move`, `scan`, `list`) and remove legacy `push`/`pull`.
 - [ ] Update canonical remote URL parser to support `server:/module/...` and `server://...` syntax.
 - [x] Implement daemon TOML config loader (modules, root export, mDNS flags) with warnings for implicit working-directory exports. *(2025-10-20: `blit-daemon` loads `/etc/blit/config.toml`/`--config`, supports `--root`, `--bind`, `--port`, `--no-mdns`, `--mdns-name`, and warns on implicit working-directory exports.)*
-- [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 4.43 s vs tuned rsync 7.72 s on Linux; macOS/Windows reruns pending)*
+- [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.90 s vs tuned rsync 8.56 s on Linux; macOS 10.53 s vs rsync 11.62 s; Windows blit 60.9 s, robocopy runs pending completion.)*
 - [x] Investigate mixed workload (512 MiB + 50 k × 2 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.59 s vs tuned rsync 5.80 s on Linux; macOS/Windows reruns pending)*
 - [ ] Improve incremental mirror throughput (touch 2 k/delete 1 k/add 1 k); target ≥95 % of rsync baseline. *(Current: blit 1.15 s vs rsync 0.68 s on Linux)*
 - [ ] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results.
