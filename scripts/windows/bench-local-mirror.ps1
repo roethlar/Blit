@@ -32,6 +32,18 @@ function Write-Log {
     Add-Content -Path $logFile -Value $Message
 }
 
+function Get-EnvOrDefault {
+    param(
+        [string]$Name,
+        [string]$Default
+    )
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $Default
+    }
+    return $value
+}
+
 function Apply-IncrementalChanges {
     if ($script:IncrementalApplied) {
         return
@@ -97,15 +109,15 @@ $workspaceDisposition = if ($Cleanup) { 'removed' } else { 'preserved' }
 Write-Log ("Workspace: {0} (will be {1} on exit)" -f $workRoot, $workspaceDisposition)
 Write-Log "Generating ${SizeMB} MiB synthetic payload..."
 
-$smallFileCount = [int]([Environment]::GetEnvironmentVariable("SMALL_FILE_COUNT") ?? "0")
-$smallFileBytes = [int]([Environment]::GetEnvironmentVariable("SMALL_FILE_BYTES") ?? "4096")
-$smallFileDirSize = [int]([Environment]::GetEnvironmentVariable("SMALL_FILE_DIR_SIZE") ?? "1000")
+$smallFileCount = [int](Get-EnvOrDefault -Name "SMALL_FILE_COUNT" -Default "0")
+$smallFileBytes = [int](Get-EnvOrDefault -Name "SMALL_FILE_BYTES" -Default "4096")
+$smallFileDirSize = [int](Get-EnvOrDefault -Name "SMALL_FILE_DIR_SIZE" -Default "1000")
 
-$preserveDest = [int]([Environment]::GetEnvironmentVariable("PRESERVE_DEST") ?? "0")
-$incrementalTouchCount = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_TOUCH_COUNT") ?? "0")
-$incrementalDeleteCount = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_DELETE_COUNT") ?? "0")
-$incrementalAddCount = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_ADD_COUNT") ?? "0")
-$incrementalAddBytes = [int]([Environment]::GetEnvironmentVariable("INCREMENTAL_ADD_BYTES") ?? "1024")
+$preserveDest = [int](Get-EnvOrDefault -Name "PRESERVE_DEST" -Default "0")
+$incrementalTouchCount = [int](Get-EnvOrDefault -Name "INCREMENTAL_TOUCH_COUNT" -Default "0")
+$incrementalDeleteCount = [int](Get-EnvOrDefault -Name "INCREMENTAL_DELETE_COUNT" -Default "0")
+$incrementalAddCount = [int](Get-EnvOrDefault -Name "INCREMENTAL_ADD_COUNT" -Default "0")
+$incrementalAddBytes = [int](Get-EnvOrDefault -Name "INCREMENTAL_ADD_BYTES" -Default "1024")
 $script:IncrementalApplied = $false
 
 $robocopyFlagsDefault = "/MIR /COPYALL /FFT /R:1 /W:1 /NDL /NFL /NJH /NJS /NP"

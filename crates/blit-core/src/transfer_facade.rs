@@ -276,7 +276,10 @@ impl TransferFacade {
 struct TaskAggregator {
     small_paths: Vec<PathBuf>,
     small_bytes: u64,
+    small_count: u64,
     small_target: u64,
+    small_count_target: usize,
+    small_profile: bool,
     total_small_bytes: u64,
     medium_paths: Vec<PathBuf>,
     medium_bytes: u64,
@@ -289,7 +292,7 @@ struct TaskAggregator {
 
 impl TaskAggregator {
     fn new(options: PlanOptions) -> Self {
-        let small_target = 512 * 1024 * 1024;
+        let small_target = 8 * 1024 * 1024;
         let medium_target = 128 * 1024 * 1024;
         let medium_max = (medium_target as f64 * 1.25) as u64;
         let chunk_bytes = 16 * 1024 * 1024;
@@ -297,7 +300,10 @@ impl TaskAggregator {
         Self {
             small_paths: Vec::new(),
             small_bytes: 0,
+            small_count: 0,
             small_target,
+            small_count_target: 2048,
+            small_profile: false,
             total_small_bytes: 0,
             medium_paths: Vec::new(),
             medium_bytes: 0,
@@ -310,11 +316,14 @@ impl TaskAggregator {
     }
 
     fn promote_small_strategy(&mut self) {
-        const PROMOTE_SMALL_THRESHOLD: u64 = 1_000_000_000; // 1 GiB of small files streamed
-        if self.total_small_bytes >= PROMOTE_SMALL_THRESHOLD
-            && self.small_target < 768 * 1024 * 1024
+        if self.total_small_bytes >= 768 * 1024 * 1024 && self.small_target < 64 * 1024 * 1024 {
+            self.small_target = 64 * 1024 * 1024;
+        } else if self.total_small_bytes >= 256 * 1024 * 1024
+            && self.small_target < 32 * 1024 * 1024
         {
-            self.small_target = 768 * 1024 * 1024;
+            self.small_target = 32 * 1024 * 1024;
+        }
+        if self.total_small_bytes >= 1_000_000_000 {
             self.chunk_bytes = self.chunk_bytes.max(32 * 1024 * 1024);
         }
     }
@@ -330,6 +339,24 @@ impl TaskAggregator {
         }
     }
 
+    fn update_small_profile(&mut self) {
+        if self.small_profile {
+            return;
+        }
+        if self.small_count >= 64 {
+            let avg = if self.small_count == 0 {
+                0
+            } else {
+                self.total_small_bytes / self.small_count
+            };
+            if avg <= 64 * 1024 {
+                self.small_profile = true;
+                self.small_count_target = 1024;
+                self.chunk_bytes = self.chunk_bytes.max(self.small_target as usize);
+            }
+        }
+    }
+
     fn push(&mut self, rel: PathBuf, size: u64, tx: &UnboundedSender<PlannerEvent>) -> Result<()> {
         const LARGE_THRESHOLD: u64 = 256 * 1024 * 1024;
         if size >= LARGE_THRESHOLD {
@@ -341,9 +368,16 @@ impl TaskAggregator {
         if size < 1_048_576 {
             self.small_paths.push(rel);
             self.small_bytes += size;
+            self.small_count = self.small_count.saturating_add(1);
             self.total_small_bytes = self.total_small_bytes.saturating_add(size);
             self.promote_small_strategy();
-            if self.small_bytes >= self.small_target && !self.small_paths.is_empty() {
+            self.update_small_profile();
+            self.chunk_bytes = self.chunk_bytes.max(self.small_target as usize);
+
+            let reached_bytes = self.small_bytes >= self.small_target;
+            let reached_count = self.small_paths.len() >= self.small_count_target;
+
+            if (reached_bytes || reached_count) && !self.small_paths.is_empty() {
                 let paths = std::mem::take(&mut self.small_paths);
                 self.small_bytes = 0;
                 self.emit_task(tx, TransferTask::TarShard(paths))?;
@@ -368,9 +402,15 @@ impl TaskAggregator {
 
     fn flush_remaining(&mut self, tx: &UnboundedSender<PlannerEvent>) -> Result<()> {
         if !self.small_paths.is_empty() {
+            let leftover_bytes = self.small_bytes;
             let paths = std::mem::take(&mut self.small_paths);
             self.small_bytes = 0;
-            if self.options.force_tar {
+            let should_tar = self.options.force_tar
+                || self.small_profile
+                || paths.len() >= self.small_count_target
+                || leftover_bytes >= self.small_target;
+            if should_tar {
+                self.chunk_bytes = self.chunk_bytes.max(self.small_target as usize);
                 self.emit_task(tx, TransferTask::TarShard(paths))?;
             } else {
                 self.emit_task(tx, TransferTask::RawBundle(paths))?;
@@ -387,5 +427,64 @@ impl TaskAggregator {
     fn emit_task(&self, tx: &UnboundedSender<PlannerEvent>, task: TransferTask) -> Result<()> {
         tx.send(PlannerEvent::Task(task))
             .map_err(|_| eyre!("planner consumer dropped"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn drain_tasks(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<PlannerEvent>,
+    ) -> Vec<TransferTask> {
+        let mut out = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            if let PlannerEvent::Task(task) = evt {
+                out.push(task);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tiny_files_emit_tar_shards() {
+        let options = PlanOptions::default();
+        let mut aggregator = TaskAggregator::new(options);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        for idx in 0..2048 {
+            let rel = PathBuf::from(format!("tiny-{idx}"));
+            aggregator.push(rel, 4 * 1024, &tx).unwrap();
+        }
+        aggregator.flush_remaining(&tx).unwrap();
+
+        let tasks = drain_tasks(&mut rx);
+        assert!(
+            tasks
+                .iter()
+                .any(|task| matches!(task, TransferTask::TarShard(list) if !list.is_empty())),
+            "expected at least one tar shard task, got: {:?}",
+            tasks
+        );
+    }
+
+    #[test]
+    fn handful_of_small_files_stay_raw() {
+        let options = PlanOptions::default();
+        let mut aggregator = TaskAggregator::new(options);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        for idx in 0..4 {
+            let rel = PathBuf::from(format!("small-{idx}"));
+            aggregator.push(rel, 512 * 1024, &tx).unwrap();
+        }
+        aggregator.flush_remaining(&tx).unwrap();
+
+        let tasks = drain_tasks(&mut rx);
+        assert_eq!(tasks.len(), 1);
+        match &tasks[0] {
+            TransferTask::RawBundle(paths) => assert_eq!(paths.len(), 4),
+            other => panic!("expected raw bundle, got {other:?}"),
+        }
     }
 }

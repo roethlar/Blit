@@ -119,6 +119,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 ## 7. Worker & Buffer Tuning
 
 - The planner automatically selects aggressive buffer sizes, tar shard targets, and worker counts based on workload and available CPU (no manual speed flags).
+- Small-file workloads (≥32 sub-1 MiB files or avg size ≤64 KiB) immediately enter the tar-shard path; shards flush around 8 MiB/≈1 k files and scale up to 32/64 MiB as manifests grow, keeping per-file overhead invisible.
 - Default worker count = `num_cpus::get()` (with safeguards for hyper-threaded vs. physical cores). Upper bound clamps to 16 by default but adapts if the machine proves capable.
 - Optional debug limiter (`--workers`) caps worker count for diagnostics. The flag remains hidden from normal help output; when active the CLI prints a `[DEBUG] Worker limiter active` banner and FAST guarantees are suspended. See `docs/cli/blit.1.md` for operator guidance.
 - CLI stays quiet during transfers; progress events are emitted for verbose/log subscribers and GUI surfaces.

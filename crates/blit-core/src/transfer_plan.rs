@@ -101,20 +101,48 @@ pub fn build_plan(
     let total_bytes: u128 = bins_bytes.iter().copied().sum();
 
     let mut small_tasks: Vec<TransferTask> = Vec::new();
-    let use_tar = options.force_tar || !small.is_empty();
+    let small_count = small.len();
+    let total_small_bytes: u64 = small.iter().fold(0u64, |acc, p| {
+        acc.saturating_add(*size_map.get(p).unwrap_or(&(64 * 1024)))
+    });
+    let avg_small_size = if small_count == 0 {
+        0
+    } else {
+        total_small_bytes / small_count as u64
+    };
+
+    let use_tar = if options.force_tar {
+        true
+    } else if small_count == 0 {
+        false
+    } else {
+        small_count >= 32 || avg_small_size <= 128 * 1024
+    };
+
     if use_tar {
-        let target_shard = if total_bytes > 1_000_000_000 {
-            768 * 1024 * 1024 // 768 MiB for large manifests (>1GB total)
+        let target_shard = if total_small_bytes >= 768 * 1024 * 1024 {
+            64 * 1024 * 1024
+        } else if total_small_bytes >= 256 * 1024 * 1024 {
+            32 * 1024 * 1024
         } else {
-            512 * 1024 * 1024 // 512 MiB default (was 256 MiB)
+            8 * 1024 * 1024
         };
+        let count_target = if small_count >= 2048 {
+            2048
+        } else if small_count >= 1024 {
+            1024
+        } else {
+            256
+        };
+
         let mut cur: Vec<PathBuf> = Vec::new();
         let mut cur_bytes: u64 = 0;
         for p in small.iter() {
             let size = *size_map.get(p).unwrap_or(&(64 * 1024));
-            if cur_bytes + size > target_shard as u64 && !cur.is_empty() {
-                small_tasks.push(TransferTask::TarShard(cur.clone()));
-                cur.clear();
+            let would_exceed = cur_bytes + size > target_shard;
+            let reached_count = cur.len() >= count_target;
+            if !cur.is_empty() && (would_exceed || reached_count) {
+                small_tasks.push(TransferTask::TarShard(std::mem::take(&mut cur)));
                 cur_bytes = 0;
             }
             cur.push(p.clone());
