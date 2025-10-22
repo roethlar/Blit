@@ -52,19 +52,10 @@ struct RootSpec {
     use_chroot: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct MdnsConfig {
     disabled: bool,
     name: Option<String>,
-}
-
-impl Default for MdnsConfig {
-    fn default() -> Self {
-        Self {
-            disabled: false,
-            name: None,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -608,6 +599,7 @@ async fn send_control_message(
     .map_err(|_| Status::internal("failed to send push response"))
 }
 
+#[allow(clippy::result_large_err)]
 fn compute_need_list(
     module: &ModuleConfig,
     manifest: &[FileHeader],
@@ -643,6 +635,7 @@ fn compute_need_list(
     Ok(needs)
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
     #[cfg(windows)]
     {

@@ -588,13 +588,15 @@ async fn run_local_transfer(
 }
 
 fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> LocalMirrorOptions {
-    let mut options = LocalMirrorOptions::default();
-    options.mirror = mirror;
-    options.dry_run = args.dry_run;
-    options.verbose = args.verbose;
-    options.progress = args.progress;
-    options.perf_history = ctx.perf_history_enabled;
-    options.checksum = args.checksum;
+    let mut options = LocalMirrorOptions {
+        mirror,
+        dry_run: args.dry_run,
+        verbose: args.verbose,
+        progress: args.progress,
+        perf_history: ctx.perf_history_enabled,
+        checksum: args.checksum,
+        ..LocalMirrorOptions::default()
+    };
     if let Some(workers) = args.workers {
         options.workers = workers.max(1);
         options.debug_mode = true;
@@ -655,6 +657,19 @@ fn print_summary(
             summary.planned_files,
             format_bytes(summary.total_bytes)
         );
+        if summary.tar_shard_tasks > 0 || summary.raw_bundle_tasks > 0 || summary.large_tasks > 0 {
+            println!(
+                "• Planner mix: {} tar shard(s) [{} file(s), {}], {} bundle(s) [{} file(s), {}], {} large task(s) [{}]",
+                summary.tar_shard_tasks,
+                summary.tar_shard_files,
+                format_bytes(summary.tar_shard_bytes),
+                summary.raw_bundle_tasks,
+                summary.raw_bundle_files,
+                format_bytes(summary.raw_bundle_bytes),
+                summary.large_tasks,
+                format_bytes(summary.large_bytes),
+            );
+        }
     }
 }
 

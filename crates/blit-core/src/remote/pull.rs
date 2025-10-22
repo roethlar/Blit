@@ -141,7 +141,7 @@ fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn normalize_for_request(path: &PathBuf) -> String {
+fn normalize_for_request(path: &Path) -> String {
     if path.as_os_str().is_empty() {
         ".".to_string()
     } else {

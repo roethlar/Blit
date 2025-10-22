@@ -215,7 +215,7 @@ impl MirrorPlanner {
                             Ok(duration) => {
                                 let local_secs = duration.as_secs() as i64;
                                 let diff = local_secs - remote.mtime;
-                                diff > 2 || diff < -2
+                                !(-2..=2).contains(&diff)
                             }
                             Err(_) => true,
                         },
@@ -262,7 +262,7 @@ impl MirrorPlanner {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             let diff = local_secs - remote_state.mtime;
-            diff > 2 || diff < -2
+            !(-2..=2).contains(&diff)
         }
     }
 }

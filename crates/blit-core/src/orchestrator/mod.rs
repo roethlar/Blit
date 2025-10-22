@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 use eyre::{eyre, Context, Result};
 use tokio::runtime::Builder;
 
+use crate::auto_tune::derive_local_plan_tuning;
 use crate::fs_enum::FileFilter;
 use crate::mirror_planner::MirrorPlanner;
+use crate::perf_history::{read_recent_records, TransferMode};
 use crate::perf_predictor::PerformancePredictor;
 use crate::transfer_engine::{create_task_stream, execute_streaming_plan, SchedulerOptions};
 use crate::transfer_facade::TransferFacade;
@@ -20,7 +22,7 @@ mod fast_path;
 mod history;
 mod planner;
 
-use fast_path::{maybe_select_fast_path, FastPathDecision};
+use fast_path::{maybe_select_fast_path, FastPathDecision, FastPathOutcome};
 use history::{record_performance_history, update_predictor};
 use planner::drive_planner_events;
 
@@ -113,20 +115,25 @@ impl TransferOrchestrator {
 
         let mut predictor = PerformancePredictor::load().ok();
 
-        let mut copy_config = CopyConfig::default();
-        copy_config.workers = options.workers.max(1);
-        copy_config.preserve_times = options.preserve_times;
-        copy_config.dry_run = options.dry_run;
-        copy_config.checksum = if options.checksum {
-            Some(crate::checksum::ChecksumType::Blake3)
-        } else {
-            None
+        let copy_config = CopyConfig {
+            workers: options.workers.max(1),
+            preserve_times: options.preserve_times,
+            dry_run: options.dry_run,
+            checksum: if options.checksum {
+                Some(crate::checksum::ChecksumType::Blake3)
+            } else {
+                None
+            },
         };
 
         let fast_path_outcome =
             maybe_select_fast_path(src_root, dest_root, &options, predictor.as_ref())?;
-        let streaming_prediction = fast_path_outcome.prediction.clone();
-        if let Some(decision) = fast_path_outcome.decision.clone() {
+        let FastPathOutcome {
+            decision,
+            prediction,
+        } = fast_path_outcome;
+        let streaming_prediction = prediction;
+        if let Some(decision) = decision {
             let summary = match decision {
                 FastPathDecision::NoWork => {
                     if options.verbose {
@@ -238,9 +245,35 @@ impl TransferOrchestrator {
 
         let mut filter = options.filter.clone_without_cache();
         let planner_for_stream = MirrorPlanner::new(options.checksum);
-        let plan_options = PlanOptions {
+        let mut plan_options = PlanOptions {
             force_tar: options.force_tar,
+            ..PlanOptions::default()
         };
+
+        if options.perf_history {
+            if let Ok(history) = read_recent_records(50) {
+                let target_mode = if options.mirror {
+                    TransferMode::Mirror
+                } else {
+                    TransferMode::Copy
+                };
+                let filtered: Vec<_> = history
+                    .iter()
+                    .rev()
+                    .filter(|record| record.mode == target_mode)
+                    .filter(|record| record.options.checksum == options.checksum)
+                    .filter(|record| record.options.skip_unchanged == options.skip_unchanged)
+                    .filter(|record| record.fast_path.as_deref() != Some("tiny_manifest"))
+                    .take(20)
+                    .cloned()
+                    .collect();
+                if let Some(tuning) = derive_local_plan_tuning(&filtered) {
+                    plan_options.small_target = Some(tuning.small_target_bytes);
+                    plan_options.small_count_target = Some(tuning.small_count_target);
+                    plan_options.medium_target = Some(tuning.medium_target_bytes);
+                }
+            }
+        }
 
         let planning_start = Instant::now();
 
@@ -271,7 +304,7 @@ impl TransferOrchestrator {
         let scheduler_opts = SchedulerOptions {
             progress: options.progress || options.verbose,
             byte_drain: None,
-            initial_streams: Some(options.workers.min(12).max(1)),
+            initial_streams: Some(options.workers.clamp(1, 12)),
             max_streams: Some(options.workers.max(1)),
         };
 
@@ -428,5 +461,11 @@ impl TransferOrchestrator {
         }
 
         Ok(summary)
+    }
+}
+
+impl Default for TransferOrchestrator {
+    fn default() -> Self {
+        Self::new()
     }
 }

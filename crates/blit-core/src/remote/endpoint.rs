@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eyre::{bail, eyre, Result};
 
@@ -174,7 +174,7 @@ fn normalize_relative_path_buf(raw: &str) -> PathBuf {
     }
 }
 
-fn rel_path_to_string(path: &PathBuf) -> String {
+fn rel_path_to_string(path: &Path) -> String {
     path.iter()
         .map(|component| component.to_string_lossy())
         .collect::<Vec<_>>()

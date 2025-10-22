@@ -23,6 +23,12 @@ impl UnixCapability {
     }
 }
 
+impl Default for UnixCapability {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FilesystemCapability for UnixCapability {
     fn preserve_metadata(&self, src: &Path, dst: &Path) -> Result<MetadataPreserved> {
         use filetime::{set_file_mtime, FileTime};

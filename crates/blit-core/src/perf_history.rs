@@ -72,6 +72,7 @@ pub struct PerformanceRecord {
 }
 
 impl PerformanceRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: TransferMode,
         source_fs: Option<String>,

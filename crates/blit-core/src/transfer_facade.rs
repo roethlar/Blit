@@ -89,6 +89,7 @@ impl TransferFacade {
     const PARALLEL_CHECKSUM_THRESHOLD: usize = 1024;
     const PARALLEL_BYTE_THRESHOLD: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
 
+    #[allow(clippy::too_many_arguments)]
     pub fn stream_local_plan(
         src_root: &Path,
         dest_root: &Path,
@@ -148,6 +149,7 @@ impl TransferFacade {
 
                         aggregator.push(rel, size, &tx)?;
 
+                        #[allow(clippy::manual_is_multiple_of)]
                         if enumerated_files % 256 == 0 {
                             let _ = tx.send(PlannerEvent::Progress {
                                 enumerated_files,
@@ -222,10 +224,7 @@ impl TransferFacade {
                     .filter(|job| planner.should_copy_entry(job, &src_root, &dest_root))
                     .collect();
             } else {
-                copy_jobs = copy_jobs
-                    .into_iter()
-                    .filter(|job| planner.should_copy_entry(job, &src_root, &dest_root))
-                    .collect();
+                copy_jobs.retain(|job| planner.should_copy_entry(job, &src_root, &dest_root));
             }
         }
 
@@ -307,8 +306,8 @@ struct TaskAggregator {
 
 impl TaskAggregator {
     fn new(options: PlanOptions) -> Self {
-        let small_target = 8 * 1024 * 1024;
-        let medium_target = 128 * 1024 * 1024;
+        let small_target = options.small_target.unwrap_or(8 * 1024 * 1024);
+        let medium_target = options.medium_target.unwrap_or(128 * 1024 * 1024);
         let medium_max = (medium_target as f64 * 1.25) as u64;
         let chunk_bytes = 16 * 1024 * 1024;
 
@@ -317,7 +316,7 @@ impl TaskAggregator {
             small_bytes: 0,
             small_count: 0,
             small_target,
-            small_count_target: 2048,
+            small_count_target: options.small_count_target.unwrap_or(2048),
             small_profile: false,
             total_small_bytes: 0,
             medium_paths: Vec::new(),

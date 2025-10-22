@@ -161,8 +161,10 @@ async fn handle_tar_shard(
     let shard_chunk = max(chunk_bytes, 1 << 20);
 
     tokio::task::block_in_place(move || -> Result<()> {
-        let mut cfg = TarConfig::default();
-        cfg.chunk_size = shard_chunk;
+        let cfg = TarConfig {
+            chunk_size: shard_chunk,
+            ..TarConfig::default()
+        };
         tar_stream_transfer_list(&entries, &dest, &cfg, false)?;
         Ok(())
     })
@@ -194,12 +196,12 @@ async fn handle_copy_list(
 async fn handle_large_file(
     src_root: &Path,
     dest_root: &Path,
-    rel: &PathBuf,
+    rel: &Path,
     config: &CopyConfig,
 ) -> Result<()> {
     let src = src_root.to_path_buf();
     let dest = dest_root.to_path_buf();
-    let rel_clone = rel.clone();
+    let rel_clone = rel.to_path_buf();
     let cfg = config.clone();
 
     tokio::task::block_in_place(move || copy_large_blocking(&src, &dest, &rel_clone, &cfg))
@@ -247,7 +249,7 @@ pub(crate) fn copy_paths_blocking(
 pub(crate) fn copy_large_blocking(
     src_root: &Path,
     dest_root: &Path,
-    rel: &PathBuf,
+    rel: &Path,
     config: &CopyConfig,
 ) -> Result<()> {
     let dest = dest_root.join(rel);
@@ -272,12 +274,13 @@ pub(crate) fn copy_large_blocking(
                 }
             }
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(any(not(unix), target_os = "macos"))]
     {
-        copy_paths_blocking(src_root, dest_root, std::slice::from_ref(rel), config)
+        let rel_buf = rel.to_path_buf();
+        copy_paths_blocking(src_root, dest_root, std::slice::from_ref(&rel_buf), config)
     }
 }
 

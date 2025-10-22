@@ -7,9 +7,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -220,19 +218,19 @@ impl PerformancePredictor {
         Ok(())
     }
 
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
     pub fn load_recent_records(
         &self,
-        history_path: &PathBuf,
+        history_path: &Path,
         limit: usize,
     ) -> Result<Vec<PerformanceRecord>> {
         let file = File::open(history_path)?;
         let reader = BufReader::new(file);
         let mut records = Vec::new();
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if let Ok(record) = serde_json::from_str::<PerformanceRecord>(&line) {
                 records.push(record);
             }

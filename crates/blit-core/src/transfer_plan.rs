@@ -24,11 +24,19 @@ pub struct Plan {
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
     pub force_tar: bool,
+    pub small_target: Option<u64>,
+    pub small_count_target: Option<usize>,
+    pub medium_target: Option<u64>,
 }
 
 impl PlanOptions {
     pub fn new() -> Self {
-        Self { force_tar: false }
+        Self {
+            force_tar: false,
+            small_target: None,
+            small_count_target: None,
+            medium_target: None,
+        }
     }
 }
 
@@ -50,6 +58,7 @@ pub fn build_plan(
     let mut size_map: HashMap<PathBuf, u64> = HashMap::new();
     let mut small: Vec<PathBuf> = Vec::new();
     let mut medium: Vec<(PathBuf, u64)> = Vec::new();
+    let mut total_medium_bytes: u64 = 0;
     let mut large_files: Vec<TransferTask> = Vec::new();
     // Kickoff histogram (bytes per bin)
     let mut bins_bytes = [0u128; 6];
@@ -77,6 +86,7 @@ pub fn build_plan(
         } else if e.size < 256 * 1_048_576 {
             // <256MB
             medium.push((rel, e.size));
+            total_medium_bytes = total_medium_bytes.saturating_add(e.size);
             if e.size < 32 * 1_048_576 {
                 bins_bytes[2] += e.size as u128;
                 bins_count[2] += 1;
@@ -120,20 +130,24 @@ pub fn build_plan(
     };
 
     if use_tar {
-        let target_shard = if total_small_bytes >= 768 * 1024 * 1024 {
-            64 * 1024 * 1024
+        let mut target_shard = options.small_target.unwrap_or(8 * 1024 * 1024);
+        if total_small_bytes >= 768 * 1024 * 1024 {
+            target_shard = target_shard.max(64 * 1024 * 1024);
         } else if total_small_bytes >= 256 * 1024 * 1024 {
-            32 * 1024 * 1024
+            target_shard = target_shard.max(32 * 1024 * 1024);
         } else {
-            8 * 1024 * 1024
-        };
-        let count_target = if small_count >= 2048 {
-            2048
-        } else if small_count >= 1024 {
-            1024
-        } else {
-            256
-        };
+            target_shard = target_shard.max(4 * 1024 * 1024);
+        }
+        let mut count_target = options
+            .small_count_target
+            .unwrap_or(if small_count >= 2048 {
+                2048
+            } else if small_count >= 1024 {
+                1024
+            } else {
+                256
+            });
+        count_target = count_target.clamp(128, 4096);
 
         let mut cur: Vec<PathBuf> = Vec::new();
         let mut cur_bytes: u64 = 0;
@@ -158,21 +172,18 @@ pub fn build_plan(
     }
 
     let mut medium_tasks: Vec<TransferTask> = Vec::new();
-    let target_bundle: u64 = if total_bytes > 1_000_000_000 {
-        256 * 1024 * 1024 // 256 MiB for large manifests
-    } else {
-        128 * 1024 * 1024 // 128 MiB default
-    };
+    let mut target_bundle: u64 = options.medium_target.unwrap_or(128 * 1024 * 1024);
+    if total_medium_bytes >= 512 * 1024 * 1024 {
+        target_bundle = target_bundle.max(384 * 1024 * 1024);
+    } else if total_bytes > 1_000_000_000 {
+        target_bundle = target_bundle.max(256 * 1024 * 1024);
+    }
     // Slight spread to avoid synchronized boundaries
     let max_bundle: u64 = (target_bundle as f64 * 1.25) as u64;
     let mut cur_b: Vec<PathBuf> = Vec::new();
     let mut cur_sz: u64 = 0;
     for (p, sz) in medium.into_iter() {
-        if cur_sz >= target_bundle && !cur_b.is_empty() {
-            medium_tasks.push(TransferTask::RawBundle(std::mem::take(&mut cur_b)));
-            cur_sz = 0;
-        }
-        if cur_sz + sz > max_bundle && !cur_b.is_empty() {
+        if !cur_b.is_empty() && (cur_sz >= target_bundle || cur_sz + sz > max_bundle) {
             medium_tasks.push(TransferTask::RawBundle(std::mem::take(&mut cur_b)));
             cur_sz = 0;
         }
@@ -204,10 +215,10 @@ pub fn build_plan(
     }
     // Choose chunk size: larger for big transfers dominated by large files
     let large_bytes = bins_bytes[4] + bins_bytes[5];
-    let chunk_bytes = if total_bytes > 1_000_000_000 {
-        32 * 1024 * 1024 // 32 MiB for transfers >1GB
-    } else if large_bytes * 100 / total_bytes.max(1) >= 50 {
-        32 * 1024 * 1024 // 32 MiB when dominated by large files
+    let chunk_bytes = if total_bytes > 1_000_000_000
+        || large_bytes * 100 / total_bytes.max(1) >= 50
+    {
+        32 * 1024 * 1024 // 32 MiB for large transfers or large-file dominance
     } else {
         16 * 1024 * 1024 // 16 MiB default
     };

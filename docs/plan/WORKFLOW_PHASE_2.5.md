@@ -69,14 +69,17 @@ If NO-GO, typical remediation includes tuning CopyFileEx heuristics, adjusting p
   - Linux/macOS: `logs/linux/bench_local_size000_20251020T221948Z/bench.log`, `logs/macos/bench-local-mirror-size0-20251020T220501Z/bench.log` (rsync still faster, expected).  
   - Windows: `logs/wingpt/bench-0mb-20251020.log` (robocopy faster; planner overhead dominates).
 - **Many small files (✅ complete)**  
-  - Linux: `logs/linux/bench_smallfiles_20251021T012247Z/bench.log` (100 k × 4 KiB; tuned `rsync --whole-file --inplace --no-compress`) → blit 4.43 ± 0.10 s vs rsync 7.72 ± 0.02 s (~174 %).  
-  - macOS/Windows runs queued with the same harness to lock the gate fully.
+  - Linux: `logs/linux/bench_smallfiles_tar_20251021T024313Z/bench.log` (100 k × 4 KiB) → blit 2.90 ± 0.02 s vs tuned rsync 8.56 ± 0.14 s (~295 %).  
+  - macOS: `logs/macos/bench_smallfiles_tar_20251021T021418Z/bench.log` → blit 10.53 s vs rsync 11.62 s (~109 %).  
+  - Windows: `logs/wingpt/bench-100k-smallfiles-20251021.log` → blit 60.63 s vs robocopy 218.48 s (~360 %).
 - **Mixed workload (✅ complete)**  
-  - Linux: `logs/linux/bench_mixed_20251021T012509Z/bench.log` (512 MiB payload + 50 k × 2 KiB files) → blit 2.59 ± 0.33 s vs rsync 5.80 ± 0.62 s (~224 %).  
-  - macOS/Windows mixed runs to follow with tuned comparator flags.
-- **Incremental mirror (🚨 needs work)**  
-  - Linux: `logs/linux/bench_incremental_base_20251021T012748Z/bench.log` (baseline) and `logs/linux/bench_incremental_update_20251021T012818Z/bench.log` (touch 2 k, delete 1 k, add 1 k). First mutation pass: blit 1.15 s vs rsync 0.68 s (~60 %). Subsequent passes noop for both.  
-  - Need further optimisation plus macOS/Windows reruns before calling GO.
+  - Linux: `logs/linux/bench_mixed_tar_20251022T015203Z/bench.log` (512 MiB payload + 50 k × 2 KiB files) → blit 2.24 ± 0.07 s vs rsync 6.95 ± 0.32 s (~310 %).  
+  - macOS: `logs/macos/bench_mixed_tar_20251022T014611Z/bench.log` → blit 6.32 s vs rsync 6.56 s (~104 %).  
+  - Windows: `logs/wingpt/bench_mixed_incremental_20251021T230000Z/bench.log` (summarised from WingPT harness) → blit 31.26 s avg vs robocopy 110.51 s (~353 %).
+- **Incremental mirror (✅ complete)**  
+  - Linux: `logs/linux/bench_incremental_base_tar_20251022T015347Z/bench.log` (baseline) and `logs/linux/bench_incremental_update_tar_20251022T015347Z/bench.log` (touch 2 k, delete 1 k, add 1 k). Mutation averages: blit 0.61 ± 0.01 s vs rsync 1.23 ± 0.05 s (~202 %).  
+  - macOS: `logs/macos/bench_incremental_base_tar_20251022T014812Z/bench.log` / `bench_incremental_update_tar_20251022T014823Z/bench.log` → blit 0.65 s vs rsync 0.69 s.  
+  - Windows: `logs/wingpt/bench_mixed_incremental_20251021T230000Z/bench.log` (same run: baseline 7.10 s vs robocopy 20.72 s; mutation average 6.45 s vs 6.94 s).
 
 ---
 

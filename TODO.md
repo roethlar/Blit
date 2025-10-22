@@ -56,9 +56,9 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Realign CLI verbs (`copy`, `mirror`, `move`, `scan`, `list`) and remove legacy `push`/`pull`.
 - [ ] Update canonical remote URL parser to support `server:/module/...` and `server://...` syntax.
 - [x] Implement daemon TOML config loader (modules, root export, mDNS flags) with warnings for implicit working-directory exports. *(2025-10-20: `blit-daemon` loads `/etc/blit/config.toml`/`--config`, supports `--root`, `--bind`, `--port`, `--no-mdns`, `--mdns-name`, and warns on implicit working-directory exports.)*
-- [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.90 s vs tuned rsync 8.56 s on Linux; macOS 10.53 s vs rsync 11.62 s; Windows blit 60.9 s, robocopy runs pending completion.)*
-- [x] Investigate mixed workload (512 MiB + 50 k × 2 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.59 s vs tuned rsync 5.80 s on Linux; macOS/Windows reruns pending)*
-- [ ] Improve incremental mirror throughput (touch 2 k/delete 1 k/add 1 k); target ≥95 % of rsync baseline. *(Current: blit 1.15 s vs rsync 0.68 s on Linux)*
+- [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.90 s vs tuned rsync 8.56 s on Linux; macOS 10.53 s vs rsync 11.62 s; Windows 60.63 s vs robocopy 218.48 s.)*
+- [x] Investigate mixed workload (512 MiB + 50 k × 2 KiB); target ≥95 % of rsync baseline. *(2025-10-22: Linux blit 2.24 s vs rsync 6.95 s; macOS 6.32 s vs 6.56 s; Windows 31.26 s vs robocopy 110.51 s.)*
+- [x] Improve incremental mirror throughput (touch 2 k/delete 1 k/add 1 k); target ≥95 % of rsync baseline. *(2025-10-22: Linux baseline 0.86 s vs rsync 1.32 s, mutation 0.61 s vs 1.23 s; macOS 0.65 s vs 0.69 s; Windows 7.10 s baseline and 6.45 s mutation vs robocopy 20.72 s/6.94 s.)*
 - [ ] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results.
 - [ ] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove).
 - [ ] Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared clients.
