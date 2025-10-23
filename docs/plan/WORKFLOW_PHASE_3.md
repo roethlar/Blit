@@ -57,6 +57,8 @@
 | 3.4.4 | Expose shell completions using canonical URL syntax (bash/zsh/fish/powershell). | Completion scripts updated. |
 | 3.4.5 | Integrate `profile` command with local performance history (read-only insights). | CLI output + documentation. |
 
+*Status 2025-10-23*: Purge RPC and `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes now reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Remaining admin RPCs (`find`, `du`, `df`, completions, scan discovery) are still pending.
+
 ### 3.5 Testing & Validation
 | Task | Description | Deliverable |
 |------|-------------|-------------|

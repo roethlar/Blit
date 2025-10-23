@@ -62,7 +62,8 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Implement filesystem journal-based change detection (USN on Windows, FSEvents on macOS, fanotify/inotify on Linux) to avoid full re-enumeration on no-op incremental runs; re-benchmark 0-change mutation once implemented.
 - [ ] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results.
 - [ ] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove).
-- [ ] Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared clients.
+- [ ] Finish `blit-utils` admin surface: implement `scan`, `find`, `du`, `df`, and `completions` (list/ls/profile/rm implemented; rm wired to Purge on 2025-10-23).
+- [x] Wire remote mirror execution to the Purge RPC so remote mirrors delete extraneous files using the daemon. *(2025-10-23: `handle_push_stream` reuses purge helpers to remove remote extras and reports `entries_deleted` in summary.)*
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
 - [ ] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback.
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.

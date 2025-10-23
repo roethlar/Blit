@@ -84,6 +84,7 @@ message PushSummary {
     uint64 bytes_transferred = 2;
     uint64 bytes_zero_copy = 3; // bytes sent via zero-copy kernel paths
     bool tcp_fallback_used = 4; // true if we had to fall back to gRPC streaming
+    uint64 entries_deleted = 5; // count of files/dirs removed during mirror purge
 }
 
 // Pull Operation

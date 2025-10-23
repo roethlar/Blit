@@ -17,7 +17,7 @@ constraints (read-only modules, chroot boundaries).
 | `blit-utils find <remote:/module/path> [--pattern <glob>]` | Recursive find reporting paths matching criteria. | Streams results, optional JSON. |
 | `blit-utils du <remote:/module/path>` | Summarises disk usage for a subtree. | Displays total size/file count; optional depth parameter. |
 | `blit-utils df <remote>` | Reports module storage metrics (space used/free). | Requires new RPC. |
-| `blit-utils rm <remote:/module/path> [--yes]` | Removes files/dirs remotely (respecting read-only). | Prompts unless `--yes`; requires Purge RPC. |
+| `blit-utils rm <remote:/module/path> [--yes]` | Removes files/dirs remotely (respecting read-only). | Prompts unless `--yes`; requires Purge RPC. Implemented 2025-10-23. |
 | `blit-utils completions <shell>` | Emits shell completion scripts for CLI and utils. | Integrates with canonical URL parser. |
 | `blit-utils profile` | Displays local performance history / predictor coefficients. | Reuses existing JSONL + predictor state. |
 

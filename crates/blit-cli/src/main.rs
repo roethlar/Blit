@@ -527,6 +527,17 @@ fn describe_push_result(report: &RemotePushReport, destination: &str) {
             ""
         }
     );
+    if summary.entries_deleted > 0 {
+        let plural = if summary.entries_deleted == 1 {
+            ""
+        } else {
+            "s"
+        };
+        println!(
+            "Remote purge removed {} entr{}.",
+            summary.entries_deleted, plural
+        );
+    }
     println!("Destination: {}", destination);
 }
 

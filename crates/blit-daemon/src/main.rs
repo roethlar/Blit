@@ -12,8 +12,9 @@ use blit_core::generated::{
 use clap::Parser;
 use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,6 +54,18 @@ struct RootSpec {
     use_chroot: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct DeletionStats {
+    files: u64,
+    dirs: u64,
+}
+
+impl DeletionStats {
+    fn total(self) -> u64 {
+        self.files + self.dirs
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct MdnsConfig {
     disabled: bool,
@@ -68,6 +81,217 @@ struct DaemonRuntime {
     mdns: MdnsConfig,
     motd: Option<String>,
     warnings: Vec<String>,
+}
+
+fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>, Status> {
+    let mut sanitized = Vec::new();
+    for raw in paths {
+        if raw.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "paths_to_delete cannot contain empty entries",
+            ));
+        }
+        let rel = resolve_relative_path(&raw)?;
+        if rel.as_os_str().is_empty() || rel == Path::new(".") {
+            return Err(Status::invalid_argument(
+                "refusing to delete module root; specify a sub-path",
+            ));
+        }
+        sanitized.push(rel);
+    }
+    Ok(sanitized)
+}
+
+async fn delete_rel_paths(
+    module_path: PathBuf,
+    rel_paths: Vec<PathBuf>,
+) -> Result<DeletionStats, Status> {
+    tokio::task::spawn_blocking(move || delete_rel_paths_sync(&module_path, rel_paths))
+        .await
+        .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
+}
+
+async fn purge_extraneous_entries(
+    module_path: PathBuf,
+    expected_files: Vec<PathBuf>,
+) -> Result<DeletionStats, Status> {
+    tokio::task::spawn_blocking(move || {
+        let extraneous = plan_extraneous_entries(&module_path, &expected_files)?;
+        if extraneous.is_empty() {
+            return Ok(DeletionStats::default());
+        }
+        delete_rel_paths_sync(&module_path, extraneous)
+    })
+    .await
+    .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
+}
+
+fn plan_extraneous_entries(
+    module_path: &Path,
+    expected_files: &[PathBuf],
+) -> Result<Vec<PathBuf>, Status> {
+    let enumerator = FileEnumerator::new(FileFilter::default());
+    let entries = enumerator.enumerate_local(module_path).map_err(|err| {
+        Status::internal(format!(
+            "enumerating target {}: {}",
+            module_path.display(),
+            err
+        ))
+    })?;
+
+    let mut expected_file_set: HashSet<PathBuf> = HashSet::new();
+    let mut expected_dirs: HashSet<PathBuf> = HashSet::new();
+    expected_dirs.insert(PathBuf::from("."));
+
+    for rel in expected_files {
+        expected_file_set.insert(rel.clone());
+        let mut current = rel.parent();
+        while let Some(parent) = current {
+            if parent.as_os_str().is_empty() {
+                expected_dirs.insert(PathBuf::from("."));
+                break;
+            }
+            expected_dirs.insert(parent.to_path_buf());
+            current = parent.parent();
+        }
+    }
+
+    let mut files_to_delete = Vec::new();
+    let mut dirs_to_delete = Vec::new();
+
+    for entry in entries {
+        let rel = entry.relative_path;
+        if rel.as_os_str().is_empty() || rel == Path::new(".") {
+            continue;
+        }
+        match &entry.kind {
+            EntryKind::Directory => {
+                if !expected_dirs.contains(&rel) {
+                    dirs_to_delete.push(rel);
+                }
+            }
+            _ => {
+                if !expected_file_set.contains(&rel) {
+                    files_to_delete.push(rel);
+                }
+            }
+        }
+    }
+
+    dirs_to_delete.sort_by_key(|p| p.components().count());
+    dirs_to_delete.reverse();
+
+    files_to_delete.extend(dirs_to_delete);
+    Ok(files_to_delete)
+}
+
+fn delete_rel_paths_sync(
+    module_path: &Path,
+    rel_paths: Vec<PathBuf>,
+) -> Result<DeletionStats, Status> {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+
+    for rel in rel_paths {
+        if rel.as_os_str().is_empty() || rel == Path::new(".") {
+            continue;
+        }
+
+        let target = module_path.join(&rel);
+        let metadata = match std::fs::symlink_metadata(&target) {
+            Ok(meta) => meta,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(Status::internal(format!(
+                    "stat {}: {}",
+                    target.display(),
+                    err
+                )));
+            }
+        };
+
+        if metadata.file_type().is_dir() {
+            dirs.push(rel);
+        } else {
+            files.push(rel);
+        }
+    }
+
+    let mut stats = DeletionStats::default();
+
+    for rel in files {
+        let target = module_path.join(&rel);
+        #[cfg(windows)]
+        {
+            if let Err(err) = blit_core::win_fs::clear_readonly_recursive(&target) {
+                return Err(Status::internal(format!(
+                    "failed to clear read-only flag on {}: {}",
+                    target.display(),
+                    err
+                )));
+            }
+        }
+        match std::fs::remove_file(&target) {
+            Ok(_) => {
+                stats.files += 1;
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) if err.kind() == ErrorKind::IsADirectory => {
+                match std::fs::remove_dir_all(&target) {
+                    Ok(_) => {
+                        stats.dirs += 1;
+                    }
+                    Err(inner) if inner.kind() == ErrorKind::NotFound => {}
+                    Err(inner) => {
+                        return Err(Status::internal(format!(
+                            "remove_dir_all {}: {}",
+                            target.display(),
+                            inner
+                        )));
+                    }
+                }
+            }
+            Err(err) => {
+                return Err(Status::internal(format!(
+                    "remove_file {}: {}",
+                    target.display(),
+                    err
+                )));
+            }
+        }
+    }
+
+    dirs.sort_by_key(|p| p.components().count());
+    dirs.reverse();
+
+    for rel in dirs {
+        let target = module_path.join(&rel);
+        #[cfg(windows)]
+        {
+            if let Err(err) = blit_core::win_fs::clear_readonly_recursive(&target) {
+                return Err(Status::internal(format!(
+                    "failed to clear read-only flag on {}: {}",
+                    target.display(),
+                    err
+                )));
+            }
+        }
+        match std::fs::remove_dir_all(&target) {
+            Ok(_) => {
+                stats.dirs += 1;
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(Status::internal(format!(
+                    "remove_dir_all {}: {}",
+                    target.display(),
+                    err
+                )));
+            }
+        }
+    }
+
+    Ok(stats)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -455,9 +679,27 @@ impl Blit for BlitService {
 
     async fn purge(
         &self,
-        _request: Request<PurgeRequest>,
+        request: Request<PurgeRequest>,
     ) -> Result<Response<PurgeResponse>, Status> {
-        Err(Status::unimplemented("Purge is not yet implemented"))
+        let req = request.into_inner();
+        let module = resolve_module(&self.modules, &req.module).await?;
+        if module.read_only {
+            return Err(Status::permission_denied(format!(
+                "module '{}' is read-only",
+                module.name
+            )));
+        }
+
+        let sanitized = sanitize_request_paths(req.paths_to_delete)?;
+        if sanitized.is_empty() {
+            return Ok(Response::new(PurgeResponse { files_deleted: 0 }));
+        }
+
+        let stats = delete_rel_paths(module.path.clone(), sanitized).await?;
+
+        Ok(Response::new(PurgeResponse {
+            files_deleted: stats.total(),
+        }))
     }
 
     async fn complete_path(
@@ -552,6 +794,8 @@ async fn handle_push_stream(
     let mut module: Option<ModuleConfig> = None;
     let mut manifest: Vec<FileHeader> = Vec::new();
     let mut manifest_complete = false;
+    let mut mirror_mode = false;
+    let mut expected_rel_files: Vec<PathBuf> = Vec::new();
 
     while let Some(request) = stream.message().await? {
         match request.payload {
@@ -566,6 +810,7 @@ async fn handle_push_stream(
                         config.name
                     )));
                 }
+                mirror_mode = header.mirror_mode;
                 let dest_path = header.destination_path.trim();
                 if !dest_path.is_empty() {
                     let rel = resolve_relative_path(dest_path)?;
@@ -575,6 +820,8 @@ async fn handle_push_stream(
                 send_control_message(&tx, server_push_response::Payload::Ack(Ack {})).await?;
             }
             Some(client_push_request::Payload::FileManifest(file)) => {
+                let rel = resolve_relative_path(&file.relative_path)?;
+                expected_rel_files.push(rel);
                 manifest.push(file);
             }
             Some(client_push_request::Payload::ManifestComplete(_)) => {
@@ -612,62 +859,74 @@ async fn handle_push_stream(
     )
     .await?;
 
-    if files_requested.is_empty() {
-        execute_grpc_fallback(&tx, &mut stream, &module, files_requested).await?;
-        return Ok(());
-    }
+    let (transfer_stats, tcp_fallback_used) = if files_requested.is_empty() || force_grpc_data {
+        (
+            execute_grpc_fallback(&tx, &mut stream, &module, files_requested.clone()).await?,
+            true,
+        )
+    } else {
+        match bind_data_plane_listener().await {
+            Ok(listener) => {
+                let port = listener
+                    .local_addr()
+                    .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
+                    .port();
 
-    if force_grpc_data {
-        execute_grpc_fallback(&tx, &mut stream, &module, files_requested).await?;
-        return Ok(());
-    }
+                let token = generate_token();
+                let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
-    let listener = match bind_data_plane_listener().await {
-        Ok(listener) => listener,
-        Err(_) => {
-            execute_grpc_fallback(&tx, &mut stream, &module, files_requested).await?;
-            return Ok(());
+                let (summary_tx, summary_rx) = oneshot::channel();
+                let module_for_transfer = module.clone();
+                let files_for_transfer = files_requested.clone();
+
+                tokio::spawn(async move {
+                    let result = accept_data_connection(
+                        listener,
+                        token,
+                        module_for_transfer,
+                        files_for_transfer,
+                    )
+                    .await;
+                    let _ = summary_tx.send(result);
+                });
+
+                send_control_message(
+                    &tx,
+                    server_push_response::Payload::Negotiation(DataTransferNegotiation {
+                        tcp_port: port as u32,
+                        one_time_token: token_string,
+                        tcp_fallback: false,
+                    }),
+                )
+                .await?;
+
+                let stats = summary_rx
+                    .await
+                    .map_err(|_| Status::internal("data plane task cancelled"))??;
+
+                (stats, false)
+            }
+            Err(_) => (
+                execute_grpc_fallback(&tx, &mut stream, &module, files_requested.clone()).await?,
+                true,
+            ),
         }
     };
-    let port = listener
-        .local_addr()
-        .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
-        .port();
 
-    let token = generate_token();
-    let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
-
-    let (summary_tx, summary_rx) = oneshot::channel();
-    let module_for_transfer = module.clone();
-    let files_for_transfer = files_requested.clone();
-
-    tokio::spawn(async move {
-        let result =
-            accept_data_connection(listener, token, module_for_transfer, files_for_transfer).await;
-        let _ = summary_tx.send(result);
-    });
-
-    send_control_message(
-        &tx,
-        server_push_response::Payload::Negotiation(DataTransferNegotiation {
-            tcp_port: port as u32,
-            one_time_token: token_string,
-            tcp_fallback: false,
-        }),
-    )
-    .await?;
-
-    let summary_stats = summary_rx
-        .await
-        .map_err(|_| Status::internal("data plane task cancelled"))??;
+    let mut entries_deleted = 0u64;
+    if mirror_mode {
+        let purge_stats = purge_extraneous_entries(module.path.clone(), expected_rel_files).await?;
+        entries_deleted = purge_stats.total();
+    }
 
     send_control_message(
         &tx,
         server_push_response::Payload::Summary(PushSummary {
-            files_transferred: summary_stats.files_transferred,
-            bytes_transferred: summary_stats.bytes_transferred,
-            bytes_zero_copy: summary_stats.bytes_zero_copy,
-            tcp_fallback_used: false,
+            files_transferred: transfer_stats.files_transferred,
+            bytes_transferred: transfer_stats.bytes_transferred,
+            bytes_zero_copy: transfer_stats.bytes_zero_copy,
+            tcp_fallback_used,
+            entries_deleted,
         }),
     )
     .await?;
@@ -977,7 +1236,7 @@ async fn execute_grpc_fallback(
     stream: &mut Streaming<ClientPushRequest>,
     module: &ModuleConfig,
     files_requested: Vec<FileHeader>,
-) -> Result<(), Status> {
+) -> Result<TransferStats, Status> {
     send_control_message(
         tx,
         server_push_response::Payload::Negotiation(DataTransferNegotiation {
@@ -990,18 +1249,7 @@ async fn execute_grpc_fallback(
 
     let stats = receive_fallback_data(stream, module, files_requested).await?;
 
-    send_control_message(
-        tx,
-        server_push_response::Payload::Summary(PushSummary {
-            files_transferred: stats.files_transferred,
-            bytes_transferred: stats.bytes_transferred,
-            bytes_zero_copy: stats.bytes_zero_copy,
-            tcp_fallback_used: true,
-        }),
-    )
-    .await?;
-
-    Ok(())
+    Ok(stats)
 }
 
 async fn stream_pull(
@@ -1145,6 +1393,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
     use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Code, Request};
 
     #[test]
     fn resolve_relative_path_rejects_parent_segments() {
@@ -1209,6 +1458,103 @@ mod tests {
                 rel_path.trim_start_matches('/')
             ))
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn purge_removes_files_and_directories() -> Result<()> {
+        let root = tempdir()?;
+        let file_path = root.path().join("orphan.txt");
+        fs::write(&file_path, b"orphan")?;
+        let dir_path = root.path().join("stale_dir");
+        fs::create_dir_all(dir_path.join("nested"))?;
+        fs::write(dir_path.join("nested").join("ghost.txt"), b"ghost")?;
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "default".to_string(),
+            ModuleConfig {
+                name: "default".to_string(),
+                path: root.path().to_path_buf(),
+                read_only: false,
+                _comment: None,
+                _use_chroot: false,
+            },
+        );
+        let service = BlitService::from_runtime(modules, None, false);
+
+        let response = service
+            .purge(Request::new(PurgeRequest {
+                module: "default".to_string(),
+                paths_to_delete: vec!["orphan.txt".into(), "stale_dir".into()],
+            }))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.files_deleted, 2);
+        assert!(!file_path.exists());
+        assert!(!dir_path.exists());
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn purge_respects_read_only_modules() -> Result<()> {
+        let root = tempdir()?;
+        let file_path = root.path().join("protected.txt");
+        fs::write(&file_path, b"protected")?;
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "readonly".to_string(),
+            ModuleConfig {
+                name: "readonly".to_string(),
+                path: root.path().to_path_buf(),
+                read_only: true,
+                _comment: None,
+                _use_chroot: false,
+            },
+        );
+        let service = BlitService::from_runtime(modules, None, false);
+
+        let err = service
+            .purge(Request::new(PurgeRequest {
+                module: "readonly".to_string(),
+                paths_to_delete: vec!["protected.txt".into()],
+            }))
+            .await
+            .expect_err("read-only module should reject purge");
+
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert!(file_path.exists(), "read-only file should not be removed");
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn purge_extraneous_entries_removes_unexpected_paths() -> Result<()> {
+        let root = tempdir()?;
+        let keep = root.path().join("keep.txt");
+        fs::write(&keep, b"keep")?;
+        let stale = root.path().join("stale.txt");
+        fs::write(&stale, b"stale")?;
+        let orphan_dir = root.path().join("orphan_dir");
+        fs::create_dir_all(orphan_dir.join("nested"))?;
+        fs::write(orphan_dir.join("nested").join("ghost.txt"), b"ghost")?;
+
+        let stats =
+            purge_extraneous_entries(root.path().to_path_buf(), vec![PathBuf::from("keep.txt")])
+                .await?;
+
+        assert_eq!(stats.files, 2);
+        assert_eq!(stats.dirs, 2);
+        assert!(keep.exists(), "expected file should remain");
+        assert!(!stale.exists(), "stale file should be purged");
+        assert!(
+            !orphan_dir.exists(),
+            "orphan directory hierarchy should be removed"
+        );
+
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
