@@ -28,9 +28,13 @@ subscribe to.
 - `scan` and `list` are reserved for Phase 3 remote discovery commands and
   currently return *not implemented* errors.
 
-Remote transfers will reuse `copy`, `mirror`, and `move` once the daemon
-configuration work lands (Phase 3). For now the CLI handles only local
-paths.
+Remote transfers already reuse `copy`, `mirror`, and `move`. Any
+`<SOURCE>` or `<DESTINATION>` may be a local path **or** a remote endpoint
+in the form `host:/module/path` (explicit module export) or
+`host://path` (default root export when configured). Remote-to-remote
+transfers are not yet supported; one side must be local. Default port
+9031 is implied when not specified (`host:port:/module/...` works), and
+paths are always canonicalised using forward slashes.
 
 ## OPTIONS
 - `--dry-run`  

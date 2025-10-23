@@ -10,11 +10,11 @@ blit-daemon - remote transfer daemon for blit v2
 
 ## DESCRIPTION
 `blit-daemon` exposes the gRPC control plane and hybrid transport data services
-used by `blit push` and the forthcoming remote operations. The daemon listens on
-the specified address (default `127.0.0.1:50051`) and, when possible, negotiates
-a TCP data plane for high-throughput file transfers. A debug flag allows
-operators to force the daemon to stay on the gRPC control plane for testing or
-firewalled environments.
+consumed by `blit copy`, `blit mirror`, and the forthcoming admin tooling. The
+daemon listens on the specified address (default `127.0.0.1:50051`) and, when
+possible, negotiates a TCP data plane for high-throughput file transfers. A
+debug flag allows operators to force the daemon to stay on the gRPC control
+plane for testing or firewalled environments.
 
 ## OPTIONS
 - `--bind <ADDR>`  

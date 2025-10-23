@@ -466,12 +466,17 @@ async fn handle_push_stream(
                 if module.is_some() {
                     return Err(Status::invalid_argument("duplicate push header received"));
                 }
-                let config = resolve_module(&modules, &header.module).await?;
+                let mut config = resolve_module(&modules, &header.module).await?;
                 if config.read_only {
                     return Err(Status::permission_denied(format!(
                         "module '{}' is read-only",
                         config.name
                     )));
+                }
+                let dest_path = header.destination_path.trim();
+                if !dest_path.is_empty() {
+                    let rel = resolve_relative_path(dest_path)?;
+                    config.path = config.path.join(rel);
                 }
                 module = Some(config);
                 send_control_message(&tx, server_push_response::Payload::Ack(Ack {})).await?;

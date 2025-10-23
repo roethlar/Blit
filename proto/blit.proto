@@ -60,6 +60,7 @@ message ServerPushResponse {
 message PushHeader {
   string module = 1;
   bool mirror_mode = 2;
+  string destination_path = 3;
   // Note: Other options like checksum type can be added here.
 }
 

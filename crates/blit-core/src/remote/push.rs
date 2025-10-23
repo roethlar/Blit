@@ -82,9 +82,15 @@ impl RemotePushClient {
             }
         };
 
-        if !rel_path.as_os_str().is_empty() {
-            bail!("remote module sub-paths are not supported yet");
-        }
+        let destination_path = if rel_path.as_os_str().is_empty() {
+            String::new()
+        } else {
+            rel_path
+                .iter()
+                .map(|component| component.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        };
 
         // Send header first
         send_payload(
@@ -92,6 +98,7 @@ impl RemotePushClient {
             ClientPayload::Header(PushHeader {
                 module,
                 mirror_mode,
+                destination_path,
             }),
         )
         .await?;

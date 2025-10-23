@@ -215,8 +215,7 @@ pub fn build_plan(
     }
     // Choose chunk size: larger for big transfers dominated by large files
     let large_bytes = bins_bytes[4] + bins_bytes[5];
-    let chunk_bytes = if total_bytes > 1_000_000_000
-        || large_bytes * 100 / total_bytes.max(1) >= 50
+    let chunk_bytes = if total_bytes > 1_000_000_000 || large_bytes * 100 / total_bytes.max(1) >= 50
     {
         32 * 1024 * 1024 // 32 MiB for large transfers or large-file dominance
     } else {

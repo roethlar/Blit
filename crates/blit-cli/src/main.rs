@@ -384,15 +384,7 @@ fn ensure_remote_transfer_supported(args: &TransferArgs) -> Result<()> {
 
 fn ensure_remote_destination_supported(remote: &RemoteEndpoint) -> Result<()> {
     match &remote.path {
-        RemotePath::Module { rel_path, .. } => {
-            if !rel_path.as_os_str().is_empty() {
-                bail!(
-                    "remote module sub-paths are not supported yet ({}).",
-                    format_remote_endpoint(remote)
-                );
-            }
-            Ok(())
-        }
+        RemotePath::Module { .. } => Ok(()),
         RemotePath::Root { .. } => bail!(
             "root exports (server://...) are not supported yet; configure daemon root export first"
         ),

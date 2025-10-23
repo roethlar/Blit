@@ -53,8 +53,8 @@ This is the master checklist. Execute the first unchecked item. After completion
 
 - [x] Hybrid transport control/data plane scaffolding (push/pull) – initial implementation complete.
 - [x] Remote pull integration tests (directory + single-file, forced gRPC path, traversal errors).
-- [ ] Realign CLI verbs (`copy`, `mirror`, `move`, `scan`, `list`) and remove legacy `push`/`pull`.
-- [ ] Update canonical remote URL parser to support `server:/module/...` and `server://...` syntax.
+- [x] Realign CLI verbs (`copy`, `mirror`, `move`, `scan`, `list`) and remove legacy `push`/`pull`. *(2025-10-23: CLI now routes remote copy/mirror via RemotePush/RemotePull; docs/manpages updated.)*
+- [x] Update canonical remote URL parser to support `server:/module/...` and `server://...` syntax. *(Parser already handled the forms; CLI + remote push now accept module sub-paths.)*
 - [x] Implement daemon TOML config loader (modules, root export, mDNS flags) with warnings for implicit working-directory exports. *(2025-10-20: `blit-daemon` loads `/etc/blit/config.toml`/`--config`, supports `--root`, `--bind`, `--port`, `--no-mdns`, `--mdns-name`, and warns on implicit working-directory exports.)*
 - [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.90 s vs tuned rsync 8.56 s on Linux; macOS 10.53 s vs rsync 11.62 s; Windows 60.63 s vs robocopy 218.48 s.)*
 - [x] Investigate mixed workload (512 MiB + 50 k × 2 KiB); target ≥95 % of rsync baseline. *(2025-10-22: Linux blit 2.24 s vs rsync 6.95 s; macOS 6.32 s vs 6.56 s; Windows 31.26 s vs robocopy 110.51 s.)*
