@@ -178,6 +178,8 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 ## 11. Future Work (Post v2 Launch)
 
 - Investigate FSEvents/USN journal integration for incremental planning.
+- Add incremental fast-path that consumes filesystem change journals where available; re-run the 0-change incremental benchmark afterwards to document the delta.
+- Define an automated regression suite for the adaptive predictor (validation of parsing, coefficient updates, accuracy, and runtime overhead).
 - Explore GPU/accelerated hashing for checksum mode.
 - Consider remote performance history opt-in to improve heuristics globally (opt-in only).
 - Revisit `--max-threads` flag usage; deprecate if unused.

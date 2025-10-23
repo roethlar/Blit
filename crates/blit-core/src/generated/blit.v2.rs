@@ -51,6 +51,8 @@ pub struct PushHeader {
     /// Note: Other options like checksum type can be added here.
     #[prost(bool, tag = "2")]
     pub mirror_mode: bool,
+    #[prost(string, tag = "3")]
+    pub destination_path: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

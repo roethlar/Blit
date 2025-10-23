@@ -53,6 +53,21 @@
 | 4.5.2 | Update change log / versioning metadata. | `CHANGELOG.md` (or equivalent) entry. |
 | 4.5.3 | Final QA checklist: run through installation, configuration, transfer, admin tooling on all platforms. | QA report covering pass/fail and follow-up items. |
 
+### 4.6 Security & Reliability Hardening
+| Task | Description | Deliverable |
+|------|-------------|-------------|
+| 4.6.1 | Perform security review: dependency audit, TLS/transport considerations, token handling. | Security report + issue list. |
+| 4.6.2 | Reliability testing under faults (network drops, disk full, permission errors); ensure graceful degradation and actionable errors. | Fault injection test plan + results. |
+| 4.6.3 | User acceptance smoke tests with representative workloads (scripts, interactive). | UAT checklist + feedback log. |
+
+### 4.7 Production Linting & Style
+| Task | Description | Deliverable |
+|------|-------------|-------------|
+| 4.7.1 | Enforce `rustfmt` and `cargo clippy` in CI (fail on warnings). | CI workflow update. |
+| 4.7.2 | Document project code style and lint expectations (README/dev guide). | Style guide section. |
+
+
+
 ---
 
 ## 3. Risks & Mitigations

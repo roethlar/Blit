@@ -45,8 +45,10 @@
 | 3.3.3 | Implement TCP data plane server (zero-copy when available, buffered fallback). | Data-plane module + unit tests. |
 | 3.3.4 | Implement CLI data plane client: token validation, gRPC fallback, progress events. | `blit-cli` transport layer + integration tests. |
 | 3.3.5 | Handle gRPC fallback automatically when TCP negotiation fails; emit warning and continue. | CLI+daemon logs; tests simulating blocked port. |
+| 3.3.6 | Integrate filesystem change journals (USN/FSEvents/inotify) into incremental planner fast-path so no-op mirror runs avoid full enumeration. | Planner hooks + benchmarks demonstrating <200ms mutation on Windows, comparable on macOS/Linux, plus predictor regression test plan. |
 
 ### 3.4 Admin RPCs & blit-utils
+| 3.4.0 | Draft detailed blit-utils plan covering command matrix (see `docs/plan/BLIT_UTILS_PLAN.md`) (`scan`, `list`, `ls`, `rm`, `find`, `du`, `df`, `completions`, `profile`), CLI UX, confirmation flows, and safety prompts. | Design doc + TODO entries. |
 | Task | Description | Deliverable |
 |------|-------------|-------------|
 | 3.4.1 | Implement daemon RPCs for: module listing, directory listing, recursive enumeration (`find`), disk usage (`du`, `df`), remote removal (`rm`). | RPC handlers with read-only/chroot enforcement + tests. |

@@ -25,8 +25,12 @@ subscribe to.
   at the destination.
 - `move` mirrors the source into the destination and then removes the
   original tree.
-- `scan` and `list` are reserved for Phase 3 remote discovery commands and
-  currently return *not implemented* errors.
+- `list` queries a local path or remote daemon and prints directory
+  entries. Invoke with `server:port` (or bare `server`) to enumerate
+  modules, or `server:/module/path` to list within a module. Local paths
+  fall back to a simple directory listing.
+- `scan` remains reserved for Phase 3 mDNS discovery and currently
+  returns *not implemented*.
 
 Remote transfers already reuse `copy`, `mirror`, and `move`. Any
 `<SOURCE>` or `<DESTINATION>` may be a local path **or** a remote endpoint

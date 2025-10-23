@@ -1,0 +1,1 @@
+Added docs/plan/BLIT_UTILS_PLAN.md outlining command matrix and RPC requirements. Updated WORKFLOW_PHASE_3 (blit-utils task detail + predictor test expectations) and WORKFLOW_PHASE_4 (security/linting sections). TODO.md now includes predictor regression suite and perf history migration tasks. CLI manpage documents remote `list` usage; blit-daemon manpage references new surface.

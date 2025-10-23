@@ -59,6 +59,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.90 s vs tuned rsync 8.56 s on Linux; macOS 10.53 s vs rsync 11.62 s; Windows 60.63 s vs robocopy 218.48 s.)*
 - [x] Investigate mixed workload (512 MiB + 50 k × 2 KiB); target ≥95 % of rsync baseline. *(2025-10-22: Linux blit 2.24 s vs rsync 6.95 s; macOS 6.32 s vs 6.56 s; Windows 31.26 s vs robocopy 110.51 s.)*
 - [x] Improve incremental mirror throughput (touch 2 k/delete 1 k/add 1 k); target ≥95 % of rsync baseline. *(2025-10-22: Linux baseline 0.86 s vs rsync 1.32 s, mutation 0.61 s vs 1.23 s; macOS 0.65 s vs 0.69 s; Windows 7.10 s baseline and 6.45 s mutation vs robocopy 20.72 s/6.94 s.)*
+- [ ] Implement filesystem journal-based change detection (USN on Windows, FSEvents on macOS, fanotify/inotify on Linux) to avoid full re-enumeration on no-op incremental runs; re-benchmark 0-change mutation once implemented.
 - [ ] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results.
 - [ ] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove).
 - [ ] Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared clients.
@@ -66,6 +67,8 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback.
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
 - [ ] Capture remote benchmark runs (TCP vs forced gRPC fallback) and log results.
+- [ ] Design adaptive predictor regression test suite (parsing, coefficient updates, accuracy, runtime overhead); automate as part of CI.
+- [ ] Implement performance history schema versioning/migration to handle future format changes without data loss.
 
 ## Phase 4: Production Hardening & Packaging
 

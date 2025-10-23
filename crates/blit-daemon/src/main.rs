@@ -5,8 +5,9 @@ use blit_core::generated::blit_server::{Blit, BlitServer};
 use blit_core::generated::{
     client_push_request, pull_chunk::Payload as PullPayload, server_push_response, Ack,
     ClientPushRequest, CompletionRequest, CompletionResponse, DataTransferNegotiation, FileData,
-    FileHeader, FileList, ListModulesRequest, ListModulesResponse, ListRequest, ListResponse,
-    PullChunk, PullRequest, PurgeRequest, PurgeResponse, PushSummary, ServerPushResponse,
+    FileHeader, FileInfo, FileList, ListModulesRequest, ListModulesResponse, ListRequest,
+    ListResponse, ModuleInfo, PullChunk, PullRequest, PurgeRequest, PurgeResponse, PushSummary,
+    ServerPushResponse,
 };
 use clap::Parser;
 use rand::{rngs::OsRng, RngCore};
@@ -366,8 +367,90 @@ impl Blit for BlitService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn list(&self, _request: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
-        Err(Status::unimplemented("List is not yet implemented"))
+    async fn list(&self, request: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
+        let req = request.into_inner();
+        let module = resolve_module(&self.modules, &req.module).await?;
+
+        let requested = if req.path.trim().is_empty() {
+            PathBuf::from(".")
+        } else {
+            resolve_relative_path(&req.path)?
+        };
+
+        let target = module.path.join(&requested);
+        if !target.exists() {
+            return Err(Status::not_found(format!(
+                "path not found in module '{}': {}",
+                module.name, req.path
+            )));
+        }
+
+        let response_entries =
+            tokio::task::spawn_blocking(move || -> Result<Vec<FileInfo>, Status> {
+                let metadata = std::fs::metadata(&target).map_err(|err| {
+                    Status::internal(format!("stat {}: {}", target.display(), err))
+                })?;
+
+                if metadata.is_file() {
+                    let name = requested
+                        .iter()
+                        .map(|c| c.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    let info = FileInfo {
+                        name: if name.is_empty() {
+                            target
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| ".".to_string())
+                        } else {
+                            name
+                        },
+                        is_dir: false,
+                        size: metadata.len(),
+                        mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+                    };
+                    Ok(vec![info])
+                } else if metadata.is_dir() {
+                    let mut infos = Vec::new();
+                    let entries = std::fs::read_dir(&target).map_err(|err| {
+                        Status::internal(format!("read_dir {}: {}", target.display(), err))
+                    })?;
+                    for entry in entries {
+                        let entry = entry.map_err(|err| {
+                            Status::internal(format!(
+                                "read_dir entry {}: {}",
+                                target.display(),
+                                err
+                            ))
+                        })?;
+                        let path = entry.path();
+                        let meta = entry.metadata().map_err(|err| {
+                            Status::internal(format!("metadata {}: {}", path.display(), err))
+                        })?;
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        infos.push(FileInfo {
+                            name,
+                            is_dir: meta.is_dir(),
+                            size: meta.len(),
+                            mtime_seconds: metadata_mtime_seconds(&meta).unwrap_or(0),
+                        });
+                    }
+                    infos.sort_by(|a, b| a.name.cmp(&b.name));
+                    Ok(infos)
+                } else {
+                    Err(Status::invalid_argument(format!(
+                        "unsupported path type for list: {}",
+                        target.display()
+                    )))
+                }
+            })
+            .await
+            .map_err(|err| Status::internal(format!("list task failed: {}", err)))??;
+
+        Ok(Response::new(ListResponse {
+            entries: response_entries,
+        }))
     }
 
     async fn purge(
@@ -388,7 +471,17 @@ impl Blit for BlitService {
         &self,
         _request: Request<ListModulesRequest>,
     ) -> Result<Response<ListModulesResponse>, Status> {
-        Err(Status::unimplemented("ListModules is not yet implemented"))
+        let guard = self.modules.lock().await;
+        let mut modules: Vec<ModuleInfo> = guard
+            .values()
+            .map(|module| ModuleInfo {
+                name: module.name.clone(),
+                path: module.path.to_string_lossy().into_owned(),
+                read_only: module.read_only,
+            })
+            .collect();
+        modules.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Response::new(ListModulesResponse { modules }))
     }
 }
 
