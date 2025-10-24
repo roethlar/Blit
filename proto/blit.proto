@@ -20,6 +20,15 @@ service Blit {
 
   // Lists the available modules on the server.
   rpc ListModules(ListModulesRequest) returns (ListModulesResponse);
+
+  // Recursively finds files/directories starting at a module path.
+  rpc Find(FindRequest) returns (stream FindEntry);
+
+  // Summarises disk usage for a subtree (du-style).
+  rpc DiskUsage(DiskUsageRequest) returns (stream DiskUsageEntry);
+
+  // Reports module/storage capacity information (df-style).
+  rpc FilesystemStats(FilesystemStatsRequest) returns (FilesystemStatsResponse);
 }
 
 // Optional service for handling authentication if needed in the future.
@@ -113,7 +122,12 @@ message FileInfo {
 message PurgeRequest { string module = 1; repeated string paths_to_delete = 2; }
 message PurgeResponse { uint64 files_deleted = 1; }
 
-message CompletionRequest { string path_prefix = 1; }
+message CompletionRequest {
+  string module = 1;
+  string path_prefix = 2;
+  bool include_files = 3;
+  bool include_directories = 4;
+}
 message CompletionResponse { repeated string completions = 1; }
 
 message ListModulesRequest {}
@@ -122,6 +136,47 @@ message ModuleInfo {
     string name = 1;
     string path = 2;
     bool read_only = 3;
+}
+
+message FindRequest {
+  string module = 1;
+  string start_path = 2;
+  string pattern = 3;
+  bool case_sensitive = 4;
+  bool include_files = 5;
+  bool include_directories = 6;
+  uint32 max_results = 7;
+}
+
+message FindEntry {
+  string relative_path = 1;
+  bool is_dir = 2;
+  uint64 size = 3;
+  int64 mtime_seconds = 4;
+}
+
+message DiskUsageRequest {
+  string module = 1;
+  string start_path = 2;
+  uint32 max_depth = 3;
+}
+
+message DiskUsageEntry {
+  string relative_path = 1;
+  uint64 byte_total = 2;
+  uint64 file_count = 3;
+  uint64 dir_count = 4;
+}
+
+message FilesystemStatsRequest {
+  string module = 1;
+}
+
+message FilesystemStatsResponse {
+  string module = 1;
+  uint64 total_bytes = 2;
+  uint64 used_bytes = 3;
+  uint64 free_bytes = 4;
 }
 
 message AuthRequest { string token = 1; }

@@ -59,10 +59,13 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Investigate small-file performance (100 k × 4 KiB); target ≥95 % of rsync baseline. *(2025-10-21: blit 2.90 s vs tuned rsync 8.56 s on Linux; macOS 10.53 s vs rsync 11.62 s; Windows 60.63 s vs robocopy 218.48 s.)*
 - [x] Investigate mixed workload (512 MiB + 50 k × 2 KiB); target ≥95 % of rsync baseline. *(2025-10-22: Linux blit 2.24 s vs rsync 6.95 s; macOS 6.32 s vs 6.56 s; Windows 31.26 s vs robocopy 110.51 s.)*
 - [x] Improve incremental mirror throughput (touch 2 k/delete 1 k/add 1 k); target ≥95 % of rsync baseline. *(2025-10-22: Linux baseline 0.86 s vs rsync 1.32 s, mutation 0.61 s vs 1.23 s; macOS 0.65 s vs 0.69 s; Windows 7.10 s baseline and 6.45 s mutation vs robocopy 20.72 s/6.94 s.)*
-- [ ] Implement filesystem journal-based change detection (USN on Windows, FSEvents on macOS, fanotify/inotify on Linux) to avoid full re-enumeration on no-op incremental runs; re-benchmark 0-change mutation once implemented.
-- [ ] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results.
-- [ ] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove).
-- [ ] Finish `blit-utils` admin surface: implement `scan`, `find`, `du`, `df`, and `completions` (list/ls/profile/rm implemented; rm wired to Purge on 2025-10-23).
+- [x] Implement filesystem journal-based change detection on Windows (USN) to avoid full re-enumeration on no-op incremental runs; re-benchmark 0-change mutation once implemented.
+- [ ] Re-run Windows incremental 0-change benchmark to capture USN fast-path results (<200 ms target) and log findings in `DEVLOG`.
+- [ ] Implement filesystem journal-based change detection on macOS (FSEvents) to avoid full re-enumeration on no-op incremental runs.
+- [ ] Implement filesystem journal-based change detection on Linux (fanotify/inotify) to avoid full re-enumeration on no-op incremental runs.
+- [x] Enable mDNS advertising by default with opt-out flag; update `blit scan` to consume results. *(2025-10-23: `blit-daemon` advertises `_blit._tcp.local.` unless `--no-mdns`; `blit scan`/`blit-utils scan` list discovered daemons.)*
+- [x] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove). *(2025-10-24: `Find`, `DiskUsage`, `FilesystemStats`, and enhanced `CompletePath` wired through daemon + proto.)*
+- [x] Finish `blit-utils` admin surface: implement `find`, `du`, `df`, and `completions` (scan/list/ls/profile/rm implemented; rm wired to Purge on 2025-10-23). *(2025-10-24: new subcommands stream find/du/df results, completions delegates to daemon.)*
 - [x] Wire remote mirror execution to the Purge RPC so remote mirrors delete extraneous files using the daemon. *(2025-10-23: `handle_push_stream` reuses purge helpers to remove remote extras and reports `entries_deleted` in summary.)*
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
 - [ ] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback.

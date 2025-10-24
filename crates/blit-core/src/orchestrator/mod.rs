@@ -6,6 +6,7 @@ use eyre::{eyre, Context, Result};
 use tokio::runtime::Builder;
 
 use crate::auto_tune::derive_local_plan_tuning;
+use crate::change_journal::{ChangeState, ChangeTracker, ProbeToken};
 use crate::fs_enum::FileFilter;
 use crate::mirror_planner::MirrorPlanner;
 use crate::perf_history::{read_recent_records, TransferMode};
@@ -113,6 +114,10 @@ impl TransferOrchestrator {
 
         let start_time = Instant::now();
 
+        let mut journal_tracker = ChangeTracker::load().ok();
+        let mut journal_tokens: Vec<ProbeToken> = Vec::new();
+        let mut journal_skip = false;
+
         let mut predictor = PerformancePredictor::load().ok();
 
         let copy_config = CopyConfig {
@@ -125,6 +130,77 @@ impl TransferOrchestrator {
                 None
             },
         };
+
+        if options.skip_unchanged && !options.checksum && !options.force_tar {
+            if let Some(tracker) = journal_tracker.as_ref() {
+                match tracker.probe(src_root) {
+                    Ok(src_probe) => {
+                        let dest_probe = if dest_root.exists() {
+                            tracker.probe(dest_root).ok()
+                        } else {
+                            None
+                        };
+
+                        if src_probe.marker.is_some() {
+                            journal_tokens.push(src_probe.clone());
+                        }
+                        if let Some(ref probe) = dest_probe {
+                            if probe.marker.is_some() {
+                                journal_tokens.push(probe.clone());
+                            }
+                        }
+
+                        let src_no_change = matches!(src_probe.state, ChangeState::NoChanges);
+                        let dest_no_change = dest_probe
+                            .as_ref()
+                            .map(|probe| matches!(probe.state, ChangeState::NoChanges))
+                            .unwrap_or(true);
+
+                        if src_no_change && dest_no_change {
+                            journal_skip = true;
+                            if options.verbose {
+                                eprintln!(
+                                    "Filesystem journal indicates no changes since last run; skipping planner."
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if options.verbose {
+                            eprintln!("Filesystem journal probe failed: {err:?}");
+                        }
+                    }
+                }
+            }
+        }
+
+        if journal_skip {
+            if let Some(tracker) = journal_tracker.as_mut() {
+                if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
+                    if options.verbose {
+                        eprintln!("Failed to update journal checkpoint: {err:?}");
+                    }
+                }
+            }
+
+            let summary = LocalMirrorSummary {
+                dry_run: options.dry_run,
+                duration: start_time.elapsed(),
+                ..Default::default()
+            };
+
+            if let Some(record) = record_performance_history(
+                &summary,
+                &options,
+                Some("journal_no_work"),
+                0,
+                summary.duration.as_millis(),
+            ) {
+                update_predictor(&mut predictor, &record, options.verbose);
+            }
+
+            return Ok(summary);
+        }
 
         let fast_path_outcome =
             maybe_select_fast_path(src_root, dest_root, &options, predictor.as_ref())?;
@@ -216,6 +292,14 @@ impl TransferOrchestrator {
                     summary
                 }
             };
+
+            if let Some(tracker) = journal_tracker.as_mut() {
+                if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
+                    if options.verbose {
+                        eprintln!("Failed to update journal checkpoint: {err:?}");
+                    }
+                }
+            }
 
             if options.verbose {
                 eprintln!(
@@ -376,6 +460,14 @@ impl TransferOrchestrator {
             )?;
             summary.deleted_files = deletions.0;
             summary.deleted_dirs = deletions.1;
+        }
+
+        if let Some(tracker) = journal_tracker.as_mut() {
+            if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
+                if options.verbose {
+                    eprintln!("Failed to update journal checkpoint: {err:?}");
+                }
+            }
         }
 
         if options.verbose {

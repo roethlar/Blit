@@ -190,7 +190,13 @@ pub struct PurgeResponse {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CompletionRequest {
     #[prost(string, tag = "1")]
+    pub module: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
     pub path_prefix: ::prost::alloc::string::String,
+    #[prost(bool, tag = "3")]
+    pub include_files: bool,
+    #[prost(bool, tag = "4")]
+    pub include_directories: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -216,6 +222,76 @@ pub struct ModuleInfo {
     pub path: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
     pub read_only: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FindRequest {
+    #[prost(string, tag = "1")]
+    pub module: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub start_path: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub pattern: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub case_sensitive: bool,
+    #[prost(bool, tag = "5")]
+    pub include_files: bool,
+    #[prost(bool, tag = "6")]
+    pub include_directories: bool,
+    #[prost(uint32, tag = "7")]
+    pub max_results: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FindEntry {
+    #[prost(string, tag = "1")]
+    pub relative_path: ::prost::alloc::string::String,
+    #[prost(bool, tag = "2")]
+    pub is_dir: bool,
+    #[prost(uint64, tag = "3")]
+    pub size: u64,
+    #[prost(int64, tag = "4")]
+    pub mtime_seconds: i64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskUsageRequest {
+    #[prost(string, tag = "1")]
+    pub module: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub start_path: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub max_depth: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskUsageEntry {
+    #[prost(string, tag = "1")]
+    pub relative_path: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub byte_total: u64,
+    #[prost(uint64, tag = "3")]
+    pub file_count: u64,
+    #[prost(uint64, tag = "4")]
+    pub dir_count: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FilesystemStatsRequest {
+    #[prost(string, tag = "1")]
+    pub module: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FilesystemStatsResponse {
+    #[prost(string, tag = "1")]
+    pub module: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub total_bytes: u64,
+    #[prost(uint64, tag = "3")]
+    pub used_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub free_bytes: u64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -449,6 +525,78 @@ pub mod blit_client {
             req.extensions_mut().insert(GrpcMethod::new("blit.v2.Blit", "ListModules"));
             self.inner.unary(req, path, codec).await
         }
+        /// Recursively finds files/directories starting at a module path.
+        pub async fn find(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FindRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::FindEntry>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/blit.v2.Blit/Find");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("blit.v2.Blit", "Find"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+        /// Summarises disk usage for a subtree (du-style).
+        pub async fn disk_usage(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DiskUsageRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::DiskUsageEntry>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/blit.v2.Blit/DiskUsage");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("blit.v2.Blit", "DiskUsage"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+        /// Reports module/storage capacity information (df-style).
+        pub async fn filesystem_stats(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FilesystemStatsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FilesystemStatsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/blit.v2.Blit/FilesystemStats",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("blit.v2.Blit", "FilesystemStats"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated client implementations.
@@ -614,6 +762,36 @@ pub mod blit_server {
             request: tonic::Request<super::ListModulesRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListModulesResponse>,
+            tonic::Status,
+        >;
+        /// Server streaming response type for the Find method.
+        type FindStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::FindEntry, tonic::Status>,
+            >
+            + Send
+            + 'static;
+        /// Recursively finds files/directories starting at a module path.
+        async fn find(
+            &self,
+            request: tonic::Request<super::FindRequest>,
+        ) -> std::result::Result<tonic::Response<Self::FindStream>, tonic::Status>;
+        /// Server streaming response type for the DiskUsage method.
+        type DiskUsageStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::DiskUsageEntry, tonic::Status>,
+            >
+            + Send
+            + 'static;
+        /// Summarises disk usage for a subtree (du-style).
+        async fn disk_usage(
+            &self,
+            request: tonic::Request<super::DiskUsageRequest>,
+        ) -> std::result::Result<tonic::Response<Self::DiskUsageStream>, tonic::Status>;
+        /// Reports module/storage capacity information (df-style).
+        async fn filesystem_stats(
+            &self,
+            request: tonic::Request<super::FilesystemStatsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FilesystemStatsResponse>,
             tonic::Status,
         >;
     }
@@ -954,6 +1132,146 @@ pub mod blit_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = ListModulesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/blit.v2.Blit/Find" => {
+                    #[allow(non_camel_case_types)]
+                    struct FindSvc<T: Blit>(pub Arc<T>);
+                    impl<
+                        T: Blit,
+                    > tonic::server::ServerStreamingService<super::FindRequest>
+                    for FindSvc<T> {
+                        type Response = super::FindEntry;
+                        type ResponseStream = T::FindStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FindRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Blit>::find(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = FindSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/blit.v2.Blit/DiskUsage" => {
+                    #[allow(non_camel_case_types)]
+                    struct DiskUsageSvc<T: Blit>(pub Arc<T>);
+                    impl<
+                        T: Blit,
+                    > tonic::server::ServerStreamingService<super::DiskUsageRequest>
+                    for DiskUsageSvc<T> {
+                        type Response = super::DiskUsageEntry;
+                        type ResponseStream = T::DiskUsageStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DiskUsageRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Blit>::disk_usage(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = DiskUsageSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/blit.v2.Blit/FilesystemStats" => {
+                    #[allow(non_camel_case_types)]
+                    struct FilesystemStatsSvc<T: Blit>(pub Arc<T>);
+                    impl<
+                        T: Blit,
+                    > tonic::server::UnaryService<super::FilesystemStatsRequest>
+                    for FilesystemStatsSvc<T> {
+                        type Response = super::FilesystemStatsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FilesystemStatsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Blit>::filesystem_stats(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = FilesystemStatsSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -4,11 +4,13 @@ use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_server::{Blit, BlitServer};
 use blit_core::generated::{
     client_push_request, pull_chunk::Payload as PullPayload, server_push_response, Ack,
-    ClientPushRequest, CompletionRequest, CompletionResponse, DataTransferNegotiation, FileData,
-    FileHeader, FileInfo, FileList, ListModulesRequest, ListModulesResponse, ListRequest,
-    ListResponse, ModuleInfo, PullChunk, PullRequest, PurgeRequest, PurgeResponse, PushSummary,
-    ServerPushResponse,
+    ClientPushRequest, CompletionRequest, CompletionResponse, DataTransferNegotiation,
+    DiskUsageEntry, DiskUsageRequest, FileData, FileHeader, FileInfo, FileList,
+    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, ListModulesRequest,
+    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
+    PurgeRequest, PurgeResponse, PushSummary, ServerPushResponse,
 };
+use blit_core::mdns::{self, AdvertiseOptions, MdnsAdvertiser};
 use clap::Parser;
 use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
@@ -18,6 +20,7 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use sysinfo::Disks;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -28,6 +31,8 @@ use eyre::{eyre, Context, Result};
 
 type PushSender = mpsc::Sender<Result<ServerPushResponse, Status>>;
 type PullSender = mpsc::Sender<Result<PullChunk, Status>>;
+type FindSender = mpsc::Sender<Result<FindEntry, Status>>;
+type DiskUsageSender = mpsc::Sender<Result<DiskUsageEntry, Status>>;
 
 const TOKEN_LEN: usize = 32;
 
@@ -294,6 +299,406 @@ fn delete_rel_paths_sync(
     Ok(stats)
 }
 
+fn split_completion_prefix(raw: &str) -> Result<(PathBuf, String, String), Status> {
+    let trimmed = raw.trim().trim_start_matches("./");
+    let (dir_part, leaf) = if trimmed.is_empty() {
+        ("", "")
+    } else if trimmed.ends_with('/') {
+        (trimmed.trim_end_matches('/'), "")
+    } else if let Some((dir, name)) = trimmed.rsplit_once('/') {
+        (dir, name)
+    } else {
+        ("", trimmed)
+    };
+
+    let rel_path = if dir_part.is_empty() {
+        PathBuf::from(".")
+    } else {
+        resolve_relative_path(dir_part)?
+    };
+
+    let display = if dir_part.is_empty() {
+        String::new()
+    } else {
+        dir_part.replace('\\', "/")
+    };
+
+    Ok((rel_path, display, leaf.to_string()))
+}
+
+fn list_completions(
+    base_path: &Path,
+    display_prefix: &str,
+    prefix: &str,
+    include_files: bool,
+    include_dirs: bool,
+) -> Result<Vec<String>, Status> {
+    let read_dir = match std::fs::read_dir(base_path) {
+        Ok(iter) => iter,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(Status::internal(format!(
+                "read_dir {}: {}",
+                base_path.display(),
+                err
+            )))
+        }
+    };
+
+    let mut results = Vec::new();
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(item) => item,
+            Err(err) => {
+                eprintln!(
+                    "[warn] failed to read completion entry under {}: {}",
+                    base_path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+
+        let name_os = entry.file_name();
+        let name = name_os.to_string_lossy();
+        if !name.starts_with(prefix) {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(err) => {
+                eprintln!(
+                    "[warn] failed to stat completion candidate {}: {}",
+                    entry.path().display(),
+                    err
+                );
+                continue;
+            }
+        };
+
+        let is_dir = metadata.is_dir();
+        if is_dir && !include_dirs {
+            continue;
+        }
+        if !is_dir && !include_files {
+            continue;
+        }
+
+        let mut completion = String::new();
+        if !display_prefix.is_empty() {
+            completion.push_str(display_prefix);
+            if !display_prefix.ends_with('/') {
+                completion.push('/');
+            }
+        }
+        completion.push_str(&name);
+        if is_dir {
+            completion.push('/');
+        }
+        results.push(completion);
+    }
+
+    results.sort();
+    results.dedup();
+    Ok(results)
+}
+
+#[derive(Default)]
+struct UsageAccum {
+    bytes: u64,
+    files: u64,
+    dirs: u64,
+}
+
+fn stream_disk_usage(
+    module_root: PathBuf,
+    start_rel: PathBuf,
+    max_depth: Option<usize>,
+    sender: &DiskUsageSender,
+) -> Result<(), Status> {
+    let start_abs = module_root.join(&start_rel);
+    if !start_abs.exists() {
+        return Err(Status::not_found(format!(
+            "start path not found for disk usage: {}",
+            pathbuf_to_display(&start_rel)
+        )));
+    }
+
+    let mut accum: HashMap<PathBuf, UsageAccum> = HashMap::new();
+    accum.entry(PathBuf::from(".")).or_default();
+
+    let add_file = |accum: &mut HashMap<PathBuf, UsageAccum>,
+                    rel: &Path,
+                    size: u64,
+                    max_depth: Option<usize>| {
+        let prefixes = prefix_paths(rel);
+        for (depth, prefix) in prefixes.into_iter().enumerate() {
+            if let Some(max) = max_depth {
+                if depth > max {
+                    break;
+                }
+            }
+            let entry = accum.entry(prefix).or_default();
+            entry.bytes += size;
+            entry.files += 1;
+        }
+    };
+
+    let add_dir =
+        |accum: &mut HashMap<PathBuf, UsageAccum>, rel: &Path, max_depth: Option<usize>| {
+            let prefixes = prefix_paths(rel);
+            for (depth, prefix) in prefixes.into_iter().enumerate() {
+                if let Some(max) = max_depth {
+                    if depth > max {
+                        break;
+                    }
+                }
+                let entry = accum.entry(prefix).or_default();
+                entry.dirs += 1;
+            }
+        };
+
+    let metadata = start_abs
+        .metadata()
+        .map_err(|err| Status::internal(format!("stat {}: {}", start_abs.display(), err)))?;
+
+    if start_abs.is_file() {
+        add_file(&mut accum, &start_rel, metadata.len(), max_depth);
+    } else {
+        if start_rel != PathBuf::from(".") {
+            add_dir(&mut accum, &start_rel, max_depth);
+        }
+        let enumerator = FileEnumerator::new(FileFilter::default());
+        enumerator
+            .enumerate_local_streaming(&start_abs, |entry| {
+                let rel_from_root = if start_rel == PathBuf::from(".") {
+                    entry.relative_path.clone()
+                } else {
+                    let mut combined = start_rel.clone();
+                    if entry.relative_path != PathBuf::from(".") {
+                        combined.push(&entry.relative_path);
+                    }
+                    combined
+                };
+
+                match entry.kind {
+                    EntryKind::Directory => {
+                        add_dir(&mut accum, &rel_from_root, max_depth);
+                    }
+                    EntryKind::File { size } => {
+                        add_file(&mut accum, &rel_from_root, size, max_depth);
+                    }
+                    EntryKind::Symlink { .. } => {}
+                }
+                Ok(())
+            })
+            .map_err(|err| Status::internal(format!("disk usage enumeration failed: {err}")))?;
+    }
+
+    let mut entries: Vec<(usize, PathBuf, UsageAccum)> = accum
+        .into_iter()
+        .map(|(path, usage)| {
+            let depth = if path == PathBuf::from(".") {
+                0
+            } else {
+                path.components().count()
+            };
+            (depth, path, usage)
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| pathbuf_to_display(&a.1).cmp(&pathbuf_to_display(&b.1)))
+    });
+
+    for (depth, path, usage) in entries {
+        if let Some(max) = max_depth {
+            if depth > max {
+                continue;
+            }
+        }
+        let entry = DiskUsageEntry {
+            relative_path: pathbuf_to_display(&path),
+            byte_total: usage.bytes,
+            file_count: usage.files,
+            dir_count: usage.dirs,
+        };
+        sender
+            .blocking_send(Ok(entry))
+            .map_err(|_| Status::internal("client dropped disk usage stream"))?;
+    }
+
+    Ok(())
+}
+
+fn prefix_paths(rel: &Path) -> Vec<PathBuf> {
+    if rel == Path::new(".") {
+        return vec![PathBuf::from(".")];
+    }
+    let mut prefixes = Vec::new();
+    prefixes.push(PathBuf::from(".")); // root
+    let mut current = PathBuf::new();
+    for component in rel.components() {
+        current.push(component.as_os_str());
+        prefixes.push(current.clone());
+    }
+    prefixes
+}
+fn stream_find_entries(
+    module_root: PathBuf,
+    start_rel: PathBuf,
+    pattern: String,
+    case_sensitive: bool,
+    include_files: bool,
+    include_dirs: bool,
+    max_results: Option<usize>,
+    sender: &FindSender,
+) -> Result<(), Status> {
+    let start_abs = module_root.join(&start_rel);
+    if !start_abs.exists() {
+        return Err(Status::not_found(format!(
+            "start path not found for find: {}",
+            pathbuf_to_display(&start_rel)
+        )));
+    }
+
+    let matcher = if pattern.is_empty() {
+        None
+    } else if case_sensitive {
+        Some(pattern)
+    } else {
+        Some(pattern.to_lowercase())
+    };
+
+    let mut sent = 0usize;
+    let limit = max_results.filter(|&m| m > 0);
+
+    let mut maybe_emit =
+        |rel_path: PathBuf, metadata: std::fs::Metadata, is_dir: bool| -> Result<(), Status> {
+            if let Some(limit) = limit {
+                if sent >= limit {
+                    return Ok(());
+                }
+            }
+            if is_dir && !include_dirs {
+                return Ok(());
+            }
+            if !is_dir && !include_files {
+                return Ok(());
+            }
+
+            let rel_display = pathbuf_to_display(&rel_path);
+            if let Some(ref pat) = matcher {
+                let candidate = if case_sensitive {
+                    rel_display.clone()
+                } else {
+                    rel_display.to_lowercase()
+                };
+                if !candidate.contains(pat) {
+                    return Ok(());
+                }
+            }
+
+            let entry = FindEntry {
+                relative_path: rel_display,
+                is_dir,
+                size: if is_dir { 0 } else { metadata.len() },
+                mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            };
+            sender
+                .blocking_send(Ok(entry))
+                .map_err(|_| Status::internal("client dropped find stream"))?;
+            sent += 1;
+            Ok(())
+        };
+
+    let metadata = start_abs
+        .metadata()
+        .map_err(|err| Status::internal(format!("stat {}: {}", start_abs.display(), err)))?;
+
+    if start_abs.is_file() {
+        maybe_emit(start_rel.clone(), metadata, false)?;
+        return Ok(());
+    }
+
+    if include_dirs && start_rel != PathBuf::from(".") {
+        maybe_emit(start_rel.clone(), metadata, true)?;
+    }
+
+    let enumerator = FileEnumerator::new(FileFilter::default());
+    enumerator
+        .enumerate_local_streaming(&start_abs, |entry| {
+            let rel_from_root = if start_rel == PathBuf::from(".") {
+                entry.relative_path.clone()
+            } else {
+                let mut combined = start_rel.clone();
+                if entry.relative_path != PathBuf::from(".") {
+                    combined.push(&entry.relative_path);
+                }
+                combined
+            };
+            let is_dir = matches!(entry.kind, EntryKind::Directory);
+            maybe_emit(rel_from_root, entry.metadata, is_dir)?;
+            Ok(())
+        })
+        .map_err(|err| Status::internal(format!("find enumeration failed: {err}")))?;
+
+    Ok(())
+}
+
+fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsResponse, Status> {
+    let canonical = fs::canonicalize(path).map_err(|err| {
+        Status::internal(format!(
+            "failed to resolve filesystem stats path {}: {}",
+            path.display(),
+            err
+        ))
+    })?;
+
+    let mut disks = Disks::new_with_refreshed_list();
+    disks.refresh_list();
+    disks.refresh();
+
+    let mut best_match = None;
+    let mut best_len = 0usize;
+    for disk in disks.iter() {
+        let mount = disk.mount_point();
+        if canonical.starts_with(mount) {
+            let depth = mount.components().count();
+            if depth >= best_len {
+                best_len = depth;
+                best_match = Some(disk);
+            }
+        }
+    }
+
+    let disk = best_match.ok_or_else(|| {
+        Status::internal(format!(
+            "no filesystem information available for {}",
+            path.display()
+        ))
+    })?;
+
+    Ok(FilesystemStatsResponse {
+        module: pathbuf_to_display(path),
+        total_bytes: disk.total_space(),
+        used_bytes: disk.total_space().saturating_sub(disk.available_space()),
+        free_bytes: disk.available_space(),
+    })
+}
+
+fn pathbuf_to_display(path: &Path) -> String {
+    if path == Path::new(".") {
+        return ".".to_string();
+    }
+    path.components()
+        .map(|comp| comp.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct RawConfig {
     #[serde(default)]
@@ -553,6 +958,8 @@ impl BlitService {
 impl Blit for BlitService {
     type PushStream = ReceiverStream<Result<ServerPushResponse, Status>>;
     type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullChunk, Status>>;
+    type FindStream = ReceiverStream<Result<FindEntry, Status>>;
+    type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
 
     async fn push(
         &self,
@@ -704,9 +1111,39 @@ impl Blit for BlitService {
 
     async fn complete_path(
         &self,
-        _request: Request<CompletionRequest>,
+        request: Request<CompletionRequest>,
     ) -> Result<Response<CompletionResponse>, Status> {
-        Err(Status::unimplemented("CompletePath is not yet implemented"))
+        let req = request.into_inner();
+        let module = resolve_module(&self.modules, &req.module).await?;
+        if !req.include_files && !req.include_directories {
+            return Err(Status::invalid_argument(
+                "at least one of include_files or include_directories must be true",
+            ));
+        }
+
+        let (dir_rel, display_prefix, leaf_prefix) =
+            split_completion_prefix(req.path_prefix.as_str())?;
+        let search_root = module.path.join(&dir_rel);
+        let include_files = req.include_files;
+        let include_dirs = req.include_directories;
+
+        let display_prefix_owned = display_prefix.clone();
+        let leaf_prefix_owned = leaf_prefix.clone();
+        let entries = tokio::task::spawn_blocking(move || {
+            list_completions(
+                &search_root,
+                &display_prefix_owned,
+                &leaf_prefix_owned,
+                include_files,
+                include_dirs,
+            )
+        })
+        .await
+        .map_err(|err| Status::internal(format!("completion task failed: {}", err)))??;
+
+        Ok(Response::new(CompletionResponse {
+            completions: entries,
+        }))
     }
 
     async fn list_modules(
@@ -724,6 +1161,124 @@ impl Blit for BlitService {
             .collect();
         modules.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(Response::new(ListModulesResponse { modules }))
+    }
+
+    async fn find(
+        &self,
+        request: Request<FindRequest>,
+    ) -> Result<Response<Self::FindStream>, Status> {
+        let req = request.into_inner();
+        if !req.include_files && !req.include_directories {
+            return Err(Status::invalid_argument(
+                "at least one of include_files or include_directories must be true",
+            ));
+        }
+        let module = resolve_module(&self.modules, &req.module).await?;
+        let start_rel = if req.start_path.trim().is_empty() {
+            PathBuf::from(".")
+        } else {
+            resolve_relative_path(req.start_path.trim())?
+        };
+        let pattern = req.pattern.clone();
+        let case_sensitive = req.case_sensitive;
+        let include_files = req.include_files;
+        let include_dirs = req.include_directories;
+        let max_results = if req.max_results == 0 {
+            None
+        } else {
+            Some(req.max_results as usize)
+        };
+
+        let (tx, rx) = mpsc::channel(64);
+        let module_root = module.path.clone();
+        tokio::spawn(async move {
+            let err_sender = tx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                stream_find_entries(
+                    module_root,
+                    start_rel,
+                    pattern,
+                    case_sensitive,
+                    include_files,
+                    include_dirs,
+                    max_results,
+                    &tx,
+                )
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(status)) => {
+                    let _ = err_sender.send(Err(status)).await;
+                }
+                Err(join_err) => {
+                    let _ = err_sender
+                        .send(Err(Status::internal(format!(
+                            "find worker failed: {}",
+                            join_err
+                        ))))
+                        .await;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn disk_usage(
+        &self,
+        request: Request<DiskUsageRequest>,
+    ) -> Result<Response<Self::DiskUsageStream>, Status> {
+        let req = request.into_inner();
+        let module = resolve_module(&self.modules, &req.module).await?;
+        let start_rel = if req.start_path.trim().is_empty() {
+            PathBuf::from(".")
+        } else {
+            resolve_relative_path(req.start_path.trim())?
+        };
+        let max_depth = if req.max_depth == 0 {
+            None
+        } else {
+            Some(req.max_depth as usize)
+        };
+
+        let (tx, rx) = mpsc::channel(32);
+        let module_root = module.path.clone();
+        tokio::spawn(async move {
+            let err_sender = tx.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                stream_disk_usage(module_root, start_rel, max_depth, &tx)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(status)) => {
+                    let _ = err_sender.send(Err(status)).await;
+                }
+                Err(join_err) => {
+                    let _ = err_sender
+                        .send(Err(Status::internal(format!(
+                            "disk usage worker failed: {}",
+                            join_err
+                        ))))
+                        .await;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn filesystem_stats(
+        &self,
+        request: Request<FilesystemStatsRequest>,
+    ) -> Result<Response<FilesystemStatsResponse>, Status> {
+        let req = request.into_inner();
+        let module = resolve_module(&self.modules, &req.module).await?;
+        let stats = filesystem_stats_for_path(&module.path)?;
+        Ok(Response::new(stats))
     }
 }
 
@@ -757,21 +1312,36 @@ async fn main() -> Result<()> {
             if root.use_chroot { " [chroot]" } else { "" }
         );
     }
-    if !mdns.disabled {
+
+    let module_names: Vec<String> = modules.keys().cloned().collect();
+    let mdns_guard: Option<MdnsAdvertiser> = if mdns.disabled {
         if let Some(name) = &mdns.name {
             eprintln!(
-                "[info] mDNS advertising requested for '{}' but not yet implemented; ignoring",
+                "[info] mDNS advertising disabled; instance name '{}' ignored",
                 name
             );
-        } else {
-            eprintln!("[info] mDNS advertising requested but not yet implemented; ignoring");
         }
-    } else if let Some(name) = &mdns.name {
-        eprintln!(
-            "[info] mDNS advertising disabled; instance name '{}' ignored",
-            name
-        );
-    }
+        None
+    } else {
+        match mdns::advertise(AdvertiseOptions {
+            port,
+            instance_name: mdns.name.as_deref(),
+            module_names: &module_names,
+        }) {
+            Ok(handle) => {
+                eprintln!(
+                    "[info] mDNS advertising '{}' on port {}",
+                    handle.instance_name(),
+                    port
+                );
+                Some(handle)
+            }
+            Err(err) => {
+                eprintln!("[warn] failed to advertise mDNS service: {err:?}");
+                None
+            }
+        }
+    };
 
     let service = BlitService::from_runtime(modules, default_root, args.force_grpc_data);
 
@@ -781,6 +1351,8 @@ async fn main() -> Result<()> {
         .add_service(BlitServer::new(service))
         .serve(addr)
         .await?;
+
+    drop(mdns_guard);
 
     Ok(())
 }

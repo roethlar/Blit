@@ -177,7 +177,7 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 
 ## 11. Future Work (Post v2 Launch)
 
-- Investigate FSEvents/USN journal integration for incremental planning.
+- Finish macOS FSEvents and Linux fanotify/inotify integration for incremental planning (Windows USN fast-path shipped 2025-10-24).
 - Add incremental fast-path that consumes filesystem change journals where available; re-run the 0-change incremental benchmark afterwards to document the delta.
 - Define an automated regression suite for the adaptive predictor (validation of parsing, coefficient updates, accuracy, and runtime overhead).
 - Explore GPU/accelerated hashing for checksum mode.

@@ -1,5 +1,6 @@
 pub mod auto_tune;
 pub mod buffer;
+pub mod change_journal;
 pub mod checksum;
 pub mod copy;
 pub mod delete;
@@ -8,6 +9,7 @@ pub mod fs_capability;
 pub mod fs_enum;
 pub mod local_worker;
 pub mod logger;
+pub mod mdns;
 pub mod mirror_planner;
 pub mod orchestrator;
 pub mod perf_history;

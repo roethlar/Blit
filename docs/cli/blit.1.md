@@ -29,8 +29,9 @@ subscribe to.
   entries. Invoke with `server:port` (or bare `server`) to enumerate
   modules, or `server:/module/path` to list within a module. Local paths
   fall back to a simple directory listing.
-- `scan` remains reserved for Phase 3 mDNS discovery and currently
-  returns *not implemented*.
+- `scan` performs an mDNS discovery pass (default wait 2 s) and prints
+  any blit daemons advertising `_blit._tcp.local.`. Use `--wait` to
+  adjust the discovery window.
 
 Remote transfers already reuse `copy`, `mirror`, and `move`. Any
 `<SOURCE>` or `<DESTINATION>` may be a local path **or** a remote endpoint

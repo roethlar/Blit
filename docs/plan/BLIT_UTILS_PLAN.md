@@ -10,15 +10,15 @@ constraints (read-only modules, chroot boundaries).
 
 | Command | Description | Notes |
 |---------|-------------|-------|
-| `blit-utils scan [--wait <s>]` | mDNS discovery of daemons advertising `_blit._tcp.local.` | Shares implementation with `blit scan`; prints table of host, port, mdns name. |
+| `blit-utils scan [--wait <s>]` | mDNS discovery of daemons advertising `_blit._tcp.local.` | Shares implementation with `blit scan`; prints table of host, port, mdns name. *(Implemented 2025-10-23.)* |
 | `blit-utils list-modules <remote>` | Lists modules exported by a daemon (like `blit list server`). | Wrapper around ListModules RPC. |
 | `blit-utils ls <remote[:/module/path]>` | Directory listing within a module or root export. | Human + machine friendly (optional `--json`). |
 | `blit-utils list <remote[:/module/path]>` | Alias of `ls` (compatible with plan v6). | |
-| `blit-utils find <remote:/module/path> [--pattern <glob>]` | Recursive find reporting paths matching criteria. | Streams results, optional JSON. |
-| `blit-utils du <remote:/module/path>` | Summarises disk usage for a subtree. | Displays total size/file count; optional depth parameter. |
-| `blit-utils df <remote>` | Reports module storage metrics (space used/free). | Requires new RPC. |
+| `blit-utils find <remote:/module/path> [--pattern <glob>]` | Recursive find reporting paths matching criteria. | Streams results, optional JSON. *(Implemented 2025-10-24.)* |
+| `blit-utils du <remote:/module/path>` | Summarises disk usage for a subtree. | Displays total size/file count; optional depth parameter. *(Implemented 2025-10-24.)* |
+| `blit-utils df <remote>` | Reports module storage metrics (space used/free). | Backed by FilesystemStats RPC. *(Implemented 2025-10-24.)* |
 | `blit-utils rm <remote:/module/path> [--yes]` | Removes files/dirs remotely (respecting read-only). | Prompts unless `--yes`; requires Purge RPC. Implemented 2025-10-23. |
-| `blit-utils completions <shell>` | Emits shell completion scripts for CLI and utils. | Integrates with canonical URL parser. |
+| `blit-utils completions <remote[:/path]> [--prefix <fragment>]` | Fetches remote path completions for interactive shells. | Uses CompletePath RPC (files/dirs filters supported). *(Implemented 2025-10-24.)* |
 | `blit-utils profile` | Displays local performance history / predictor coefficients. | Reuses existing JSONL + predictor state. |
 
 ## UX Principles

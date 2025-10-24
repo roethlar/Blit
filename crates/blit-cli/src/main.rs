@@ -1,6 +1,7 @@
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::{ListModulesRequest, ListRequest};
+use blit_core::mdns;
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
 use blit_core::perf_history;
 use blit_core::remote::{
@@ -349,8 +350,39 @@ async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 }
 
 async fn run_scan(args: &ScanArgs) -> Result<()> {
-    let _ = args;
-    bail!("`blit scan` is not implemented yet (pending Phase 3 work)");
+    let wait = Duration::from_secs(args.wait);
+    let services = tokio::task::spawn_blocking(move || mdns::discover(wait))
+        .await
+        .context("mDNS discovery task panicked")??;
+
+    if services.is_empty() {
+        println!("No blit daemons discovered within {} second(s).", args.wait);
+        return Ok(());
+    }
+
+    println!("Discovered {} daemon(s):", services.len());
+    for service in &services {
+        println!("- {}", service.instance_name);
+        println!("  Host: {}:{}", service.hostname, service.port);
+        if !service.addresses.is_empty() {
+            let addr_list = service
+                .addresses
+                .iter()
+                .map(|addr| addr.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("  Addresses: {}", addr_list);
+        }
+        if let Some(version) = service.properties.get("version") {
+            println!("  Version: {}", version);
+        }
+        let modules = service.modules();
+        if !modules.is_empty() {
+            println!("  Modules: {}", modules.join(", "));
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_list(args: &ListArgs) -> Result<()> {

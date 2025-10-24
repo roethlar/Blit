@@ -45,19 +45,21 @@
 | 3.3.3 | Implement TCP data plane server (zero-copy when available, buffered fallback). | Data-plane module + unit tests. |
 | 3.3.4 | Implement CLI data plane client: token validation, gRPC fallback, progress events. | `blit-cli` transport layer + integration tests. |
 | 3.3.5 | Handle gRPC fallback automatically when TCP negotiation fails; emit warning and continue. | CLI+daemon logs; tests simulating blocked port. |
-| 3.3.6 | Integrate filesystem change journals (USN/FSEvents/inotify) into incremental planner fast-path so no-op mirror runs avoid full enumeration. | Planner hooks + benchmarks demonstrating <200ms mutation on Windows, comparable on macOS/Linux, plus predictor regression test plan. |
+| 3.3.6 | Integrate Windows USN journal checkpoints into incremental planner fast-path so no-op mirror runs avoid full enumeration. | ✅ 2025-10-24 – planner hooked into USN cache; rerun 0-change benchmark during next perf sweep. |
+| 3.3.7 | Integrate macOS FSEvents checkpoints into incremental planner fast-path. | Planner hooks + macOS benchmark update. |
+| 3.3.8 | Integrate Linux fanotify/inotify (or documented alternative) into incremental planner fast-path. | Planner hooks + Linux benchmark update. |
 
 ### 3.4 Admin RPCs & blit-utils
 | 3.4.0 | Draft detailed blit-utils plan covering command matrix (see `docs/plan/BLIT_UTILS_PLAN.md`) (`scan`, `list`, `ls`, `rm`, `find`, `du`, `df`, `completions`, `profile`), CLI UX, confirmation flows, and safety prompts. | Design doc + TODO entries. |
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 3.4.1 | Implement daemon RPCs for: module listing, directory listing, recursive enumeration (`find`), disk usage (`du`, `df`), remote removal (`rm`). | RPC handlers with read-only/chroot enforcement + tests. |
-| 3.4.2 | Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared client helpers. | `crates/blit-utils/src/main.rs` with subcommands + docs. |
+| 3.4.1 | Implement daemon RPCs for: module listing, directory listing, recursive enumeration (`find`), disk usage (`du`, `df`), remote removal (`rm`). | ✅ RPC handlers live (2025-10-24) with read-only/chroot enforcement + tests. |
+| 3.4.2 | Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared client helpers. | ✅ `crates/blit-utils/src/main.rs` updated; docs + TODO synced (2025-10-24). |
 | 3.4.3 | Provide safety prompts for destructive operations (default confirm, `--yes` bypass). | CLI UX + tests. |
 | 3.4.4 | Expose shell completions using canonical URL syntax (bash/zsh/fish/powershell). | Completion scripts updated. |
 | 3.4.5 | Integrate `profile` command with local performance history (read-only insights). | CLI output + documentation. |
 
-*Status 2025-10-23*: Purge RPC and `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes now reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Remaining admin RPCs (`find`, `du`, `df`, completions, scan discovery) are still pending.
+*Status 2025-10-24*: Purge RPC and `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes now reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Daemon now advertises `_blit._tcp.local.` by default and `blit scan`/`blit-utils scan` consume the results. Admin RPCs (`Find`, `DiskUsage`, `FilesystemStats`, `CompletePath`) and the corresponding `blit-utils` verbs are in place. Windows USN journal checkpoints now drive the incremental fast-path (3.3.6); macOS FSEvents and Linux integration remain pending.
 
 ### 3.5 Testing & Validation
 | Task | Description | Deliverable |
@@ -103,9 +105,9 @@
 
 - [ ] `blit copy/mirror/move` accept canonical remote syntax; hybrid transport + fallback validated.
 - [ ] `blit scan`, `blit list`, `blit ls` operational.
-- [ ] `blit-utils` commands (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) implemented and tested.
+- [x] `blit-utils` commands (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) implemented and tested.
 - [ ] Daemon loads modules/root from TOML, advertises via mDNS (with opt-out), enforces read-only/chroot.
-- [ ] Admin RPCs (list modules, dir listing, recursive search, disk usage, remote remove) implemented.
+- [x] Admin RPCs (list modules, dir listing, recursive search, disk usage, remote remove) implemented.
 - [ ] Integration tests cover remote transfer + admin verbs (TCP + fallback) across platforms.
 - [ ] Documentation (CLI, daemon, utils) updated; DEVLOG/TODO entries recorded.
 - [ ] Remote benchmarks (TCP vs fallback) captured once features stabilize.
