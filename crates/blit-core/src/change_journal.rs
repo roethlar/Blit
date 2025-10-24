@@ -1,4 +1,6 @@
 use crate::perf_history::config_dir;
+#[cfg(windows)]
+use eyre::eyre;
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

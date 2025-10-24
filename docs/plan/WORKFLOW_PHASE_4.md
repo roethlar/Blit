@@ -66,6 +66,13 @@
 | 4.7.1 | Enforce `rustfmt` and `cargo clippy` in CI (fail on warnings). | CI workflow update. |
 | 4.7.2 | Document project code style and lint expectations (README/dev guide). | Style guide section. |
 
+### 4.8 Filesystem Capability Probes *(P1)*
+| Task | Description | Deliverable |
+|------|-------------|-------------|
+| 4.8.1 | Build per-mount capability detector (reflink, sparse files, xattrs, checksum offload) with a curated FS-type table and on-demand probes. | `fs_capability` cache + planner-facing API. |
+| 4.8.2 | Have `blit-daemon` probe during startup/idle windows and persist results per export; surface warnings for unknown filesystems with guidance to run profile. | Daemon capability cache + logs. |
+| 4.8.3 | Extend `blit diagnostics profile` to run local probes and attach results to performance history/telemetry. | CLI profile output updated + docs. |
+
 
 
 ---

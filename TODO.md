@@ -76,6 +76,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 
 ## Phase 4: Production Hardening & Packaging
 
+- [ ] **P1** Implement filesystem capability probes and caching (daemon idle probes + CLI profile hook) so per-mount features like reflink/sparse/xattr are detected automatically and exposed to the planner.
 - [ ] Produce packaging artifacts for supported platforms (Linux, macOS, Windows).
 - [ ] Document installation/configuration (config.toml, `--root`, mDNS, service setup).
 - [ ] Build end-to-end integration/regression suite and integrate with CI.
