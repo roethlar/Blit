@@ -150,6 +150,26 @@ impl TransferOrchestrator {
                             }
                         }
 
+                        if options.verbose {
+                            eprintln!(
+                                "Journal probe src state={:?} marker={} path={}",
+                                src_probe.state,
+                                src_probe.marker.is_some(),
+                                src_probe.canonical_path.display()
+                            );
+                            match dest_probe.as_ref() {
+                                Some(probe) => eprintln!(
+                                    "Journal probe dest state={:?} marker={} path={}",
+                                    probe.state,
+                                    probe.marker.is_some(),
+                                    probe.canonical_path.display()
+                                ),
+                                None => eprintln!(
+                                    "Journal probe dest unavailable or unsupported; treating as unchanged"
+                                ),
+                            }
+                        }
+
                         let src_no_change = matches!(src_probe.state, ChangeState::NoChanges);
                         let dest_no_change = dest_probe
                             .as_ref()
@@ -175,6 +195,11 @@ impl TransferOrchestrator {
         }
 
         if journal_skip {
+            if options.verbose {
+                eprintln!(
+                    "Filesystem journal fast-path: source/destination unchanged; skipping planner."
+                );
+            }
             if let Some(tracker) = journal_tracker.as_mut() {
                 if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
                     if options.verbose {

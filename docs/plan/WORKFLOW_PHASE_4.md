@@ -73,6 +73,13 @@
 | 4.8.2 | Have `blit-daemon` probe during startup/idle windows and persist results per export; surface warnings for unknown filesystems with guidance to run profile. | Daemon capability cache + logs. |
 | 4.8.3 | Extend `blit diagnostics profile` to run local probes and attach results to performance history/telemetry. | CLI profile output updated + docs. |
 
+### 4.9 Telemetry Intelligence Exploration
+| Task | Description | Deliverable |
+|------|-------------|-------------|
+| 4.9.1 | Scope optional AI-powered telemetry analysis (anomaly detection, workload recommendations) leveraging local performance history; ensure privacy and offline guarantees. | Design note outlining MVP + guardrails. |
+| 4.9.2 | Prototype `blit diagnose --ai` or similar opt-in command that summarises recent runs and highlights anomalies. | Experimental CLI command behind feature flag. |
+| 4.9.3 | Document policy for shipping/deferring the feature (e.g., post-v2 toggle, user consent, data retention). | Updated plan/TODO entries. |
+
 
 
 ---

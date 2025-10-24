@@ -32,6 +32,7 @@ pub enum PlatformMarker {
         volume: String,
         journal_id: u64,
         next_usn: i64,
+        root_mtime_epoch_ms: Option<i128>,
     },
     MacOs {
         fsid: u64,
@@ -167,9 +168,7 @@ fn canonicalize(path: &Path) -> Result<PathBuf> {
     {
         let norm = normpath::BasePath::new(std::env::current_dir()?)
             .map_err(|err| eyre!("failed to resolve base path for canonicalisation: {}", err))?;
-        let joined = norm
-            .join(path)
-            .map_err(|err| eyre!("failed to normalise path {}: {}", path.display(), err))?;
+        let joined = norm.join(path);
         return Ok(joined.into_path_buf());
     }
 
@@ -191,23 +190,33 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
+#[cfg(windows)]
+fn system_time_to_epoch_ms(st: SystemTime) -> Result<i128> {
+    let duration = st
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| eyre!("system time before epoch: {err}"))?;
+    Ok(duration.as_millis() as i128)
+}
+
 fn compare_windows(current: &PlatformMarker, previous: &PlatformMarker) -> ChangeState {
     match (current, previous) {
         (
             PlatformMarker::Windows {
                 volume: cur_vol,
                 journal_id: cur_journal,
-                next_usn: cur_usn,
+                root_mtime_epoch_ms: cur_mtime,
+                ..
             },
             PlatformMarker::Windows {
                 volume: prev_vol,
                 journal_id: prev_journal,
-                next_usn: prev_usn,
+                root_mtime_epoch_ms: prev_mtime,
+                ..
             },
         ) => {
             if cur_vol != prev_vol || cur_journal != prev_journal {
                 ChangeState::Changes
-            } else if cur_usn == prev_usn {
+            } else if cur_mtime.is_some() && prev_mtime.is_some() && cur_mtime == prev_mtime {
                 ChangeState::NoChanges
             } else {
                 ChangeState::Changes
@@ -361,10 +370,19 @@ fn capture_windows_marker(path: &Path) -> Result<Option<PlatformMarker>> {
         }
     }
 
+    let root_mtime_epoch_ms = match std::fs::metadata(path) {
+        Ok(md) => md
+            .modified()
+            .ok()
+            .and_then(|st| system_time_to_epoch_ms(st).ok()),
+        Err(_) => None,
+    };
+
     Ok(Some(PlatformMarker::Windows {
         volume: stored_volume,
         journal_id: data.UsnJournalID,
         next_usn: data.NextUsn,
+        root_mtime_epoch_ms,
     }))
 }
 
@@ -413,16 +431,19 @@ mod tests {
             volume: "C:".into(),
             journal_id: 42,
             next_usn: 100,
+            root_mtime_epoch_ms: Some(1234),
         };
         let same = PlatformMarker::Windows {
             volume: "C:".into(),
             journal_id: 42,
             next_usn: 100,
+            root_mtime_epoch_ms: Some(1234),
         };
         let advanced = PlatformMarker::Windows {
             volume: "C:".into(),
             journal_id: 42,
             next_usn: 200,
+            root_mtime_epoch_ms: Some(5678),
         };
 
         assert!(matches!(
