@@ -448,12 +448,9 @@ fn ensure_remote_transfer_supported(args: &TransferArgs) -> Result<()> {
 
 fn ensure_remote_destination_supported(remote: &RemoteEndpoint) -> Result<()> {
     match &remote.path {
-        RemotePath::Module { .. } => Ok(()),
-        RemotePath::Root { .. } => bail!(
-            "root exports (server://...) are not supported yet; configure daemon root export first"
-        ),
+        RemotePath::Module { .. } | RemotePath::Root { .. } => Ok(()),
         RemotePath::Discovery => {
-            bail!("remote destination must include a module (e.g., server:/module/)",)
+            bail!("remote destination must include a module or root (e.g., server:/module/ or server://path)")
         }
     }
 }

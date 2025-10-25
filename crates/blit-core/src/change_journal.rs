@@ -594,10 +594,12 @@ mod tests {
         let prev = MacSnapshot {
             fsid: 7,
             event_id: 10,
+            root_mtime_epoch_ms: Some(1234),
         };
         let cur = MacSnapshot {
             fsid: 7,
             event_id: 11,
+            root_mtime_epoch_ms: Some(5678),
         };
         assert!(matches!(compare_macos(&prev, &cur), ChangeState::Changes));
     }

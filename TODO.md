@@ -68,7 +68,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Finish `blit-utils` admin surface: implement `find`, `du`, `df`, and `completions` (scan/list/ls/profile/rm implemented; rm wired to Purge on 2025-10-23). *(2025-10-24: new subcommands stream find/du/df results, completions delegates to daemon.)*
 - [x] Wire remote mirror execution to the Purge RPC so remote mirrors delete extraneous files using the daemon. *(2025-10-23: `handle_push_stream` reuses purge helpers to remove remote extras and reports `entries_deleted` in summary.)*
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
-- [ ] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback.
+- [x] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback. *(2025-10-25: integration test `remote_tcp_fallback` forces `--force-grpc-data` and verifies CLI output + successful transfer.)*
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
 - [ ] Capture remote benchmark runs (TCP vs forced gRPC fallback) and log results.
 - [ ] Design adaptive predictor regression test suite (parsing, coefficient updates, accuracy, runtime overhead); automate as part of CI.
