@@ -22,14 +22,14 @@ for i in $(seq 1 5000); do
   printf 'payload %05d' "${i}" >"${SRC}/file_$(printf '%05d' "${i}").txt"
 done
 
-candidate_bins=(
+candidates=(
   "${REPO_ROOT}/target/release/blit-cli"
-  "${REPO_ROOT}/target/x86_64-apple-darwin/release/blit-cli"
-  "${REPO_ROOT}/target/aarch64-apple-darwin/release/blit-cli"
+  "${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/blit-cli"
+  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/blit-cli"
 )
 
 BLIT_BIN=""
-for candidate in "${candidate_bins[@]}"; do
+for candidate in "${candidates[@]}"; do
   if [[ -x "${candidate}" ]]; then
     BLIT_BIN="${candidate}"
     break

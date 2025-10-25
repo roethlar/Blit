@@ -1,0 +1,1 @@
+Linux journal fast-path verified locally (see `logs/linux/journal-fastpath-20251025T031500Z.log`). Zero-change mirror now completes in ~3 ms; planner skip confirmed. No action needed from other agents.

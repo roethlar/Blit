@@ -1,4 +1,4 @@
-use crate::perf_history::config_dir;
+use crate::config::config_dir;
 #[cfg(windows)]
 use eyre::eyre;
 use eyre::{Context, Result};
@@ -294,7 +294,7 @@ fn system_time_to_epoch_ms(st: SystemTime) -> Result<i64> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{MacSnapshot, system_time_to_epoch_ms};
+    use super::{system_time_to_epoch_ms, MacSnapshot};
     use eyre::{Context, Result};
     use fsevent_sys::FSEventsGetCurrentEventId;
     use std::ffi::CString;
@@ -337,27 +337,53 @@ mod macos {
     }
 }
 
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux {
+    use super::{system_time_to_epoch_ms, LinuxSnapshot};
+    use eyre::{Context, Result};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    pub(super) fn capture_snapshot(path: &Path) -> Result<Option<LinuxSnapshot>> {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+
+        let root_mtime_epoch_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|st| system_time_to_epoch_ms(st).ok());
+
+        Ok(Some(LinuxSnapshot {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            ctime_sec: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+            root_mtime_epoch_ms,
+        }))
+    }
+}
+
 #[cfg(windows)]
 mod windows {
-    use super::{WindowsSnapshot, system_time_to_epoch_ms};
-    use eyre::{Context, Result, eyre};
+    use super::{system_time_to_epoch_ms, WindowsSnapshot};
+    use eyre::{eyre, Context, Result};
     use std::ffi::OsString;
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
+    use windows::core::{Error as WinError, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_FUNCTION,
         ERROR_JOURNAL_DELETE_IN_PROGRESS, ERROR_JOURNAL_NOT_ACTIVE,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
-        OPEN_EXISTING,
+        CreateFileW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows::Win32::System::IO::DeviceIoControl;
     use windows::Win32::System::Ioctl::{FSCTL_QUERY_USN_JOURNAL, USN_JOURNAL_DATA_V1};
-    use windows::core::{Error as WinError, PCWSTR, PWSTR};
+    use windows::Win32::System::IO::DeviceIoControl;
 
     pub(super) fn capture_snapshot(path: &Path) -> Result<Option<WindowsSnapshot>> {
         let metadata = match std::fs::metadata(path) {

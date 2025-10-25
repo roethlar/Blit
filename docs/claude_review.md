@@ -146,7 +146,7 @@ My original review optimized for "shipping production software on a deadline" an
 **Why This Is Well-Designed**:
 - Privacy-first (no remote performance history) ✅
 - Lightweight (1 MiB cap prevents bloat) ✅
-- Opt-out available (`BLIT_DISABLE_PERF_HISTORY=1`) ✅
+- Opt-out available via CLI (`blit diagnostics perf --disable`) ✅
 - Multiple consumers (predictor, diagnostics) ✅
 
 **Schema Completeness**: Should capture:

@@ -211,9 +211,10 @@ fi
 
 BENCH_CONFIG_DIR="$WORK_ROOT/blit_config"
 mkdir -p "$BENCH_CONFIG_DIR"
-export BLIT_CONFIG_DIR="$BENCH_CONFIG_DIR"
-log "Using isolated config dir at $BLIT_CONFIG_DIR"
-"$BLIT_BIN" diagnostics perf --disable --clear >>"$LOG_FILE" 2>&1 || true
+log "Using isolated config dir at $BENCH_CONFIG_DIR"
+CONFIG_ARGS=(--config-dir "$BENCH_CONFIG_DIR")
+"$BLIT_BIN" "${CONFIG_ARGS[@]}" diagnostics perf --disable --clear \
+  >>"$LOG_FILE" 2>&1 || true
 
 TOOL_NAMES=()
 TOOL_DESTS=()
@@ -247,7 +248,7 @@ run_tool_command() {
   local dest=$2
   case "$tool" in
     blit)
-      "$BLIT_BIN" mirror "$SRC_DIR" "$dest"
+      "$BLIT_BIN" "${CONFIG_ARGS[@]}" mirror "$SRC_DIR" "$dest"
       ;;
     rsync)
       local args=()
@@ -346,5 +347,6 @@ for idx in "${!TOOL_NAMES[@]}"; do
   fi
 done
 
-"$BLIT_BIN" diagnostics perf --enable >>"$LOG_FILE" 2>&1 || true
+"$BLIT_BIN" "${CONFIG_ARGS[@]}" diagnostics perf --enable \
+  >>"$LOG_FILE" 2>&1 || true
 log "Benchmark complete. Full log: $LOG_FILE"

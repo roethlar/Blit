@@ -616,8 +616,15 @@ fn log_probe(label: &str, probe: &ProbeToken) {
                     snap.fsid, snap.event_id
                 );
             }
-            StoredSnapshot::Linux(_) => {
-                eprintln!("  {label} linux: snapshot captured (details pending)");
+            StoredSnapshot::Linux(snap) => {
+                eprintln!(
+                    "  {label} linux: device={} inode={} ctime={}s+{}ns mtime={:?}",
+                    snap.device,
+                    snap.inode,
+                    snap.ctime_sec,
+                    snap.ctime_nsec,
+                    snap.root_mtime_epoch_ms
+                );
             }
         }
     }

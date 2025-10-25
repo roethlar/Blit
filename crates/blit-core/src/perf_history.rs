@@ -2,18 +2,16 @@
 //!
 //! Records summarized run information to a capped JSONL file under the user's
 //! config directory. The data stays on-device and can be toggled via the CLI
-//! (`blit diagnostics perf --enable/--disable`). Environment variables no longer
-//! control the behaviour; configuration is persisted alongside the history file.
+//! (`blit diagnostics perf --enable/--disable`).
 
+use crate::config;
 use std::collections::VecDeque;
-use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use directories::ProjectDirs;
-use eyre::{eyre, Context, Result};
+use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_BYTES: u64 = 1_000_000; // ~1 MiB cap per design docs
@@ -177,15 +175,7 @@ pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("BLIT_CONFIG_DIR") {
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(proj) = ProjectDirs::from("com", "Blit", "Blit") {
-        return Ok(proj.config_dir().to_path_buf());
-    }
-    let home = env::var_os("HOME")
-        .ok_or_else(|| eyre!("cannot determine HOME directory for performance history"))?;
-    Ok(Path::new(&home).join(".config").join("blit"))
+    config::config_dir()
 }
 
 fn history_path() -> Result<PathBuf> {

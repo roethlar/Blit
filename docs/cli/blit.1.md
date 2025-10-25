@@ -82,12 +82,10 @@ history captured by the orchestrator (50 records shown by default).
 These flags operate on the config directory described below; toggling is
 persistent until changed again.
 
-## ENVIRONMENT
-The CLI does not use environment variables for behaviour, but the
-following testing hook is honoured:
-
-- `BLIT_CONFIG_DIR` – overrides the config directory path. Useful for
-  integration tests and benchmark harnesses.
+## CONFIGURATION DIRECTORY
+- `--config-dir <PATH>` overrides the default configuration directory
+  for the current invocation. Useful for integration tests and benchmark
+  harnesses; when omitted, the platform-standard directory is used.
 
 ## FILES
 - `${XDG_CONFIG_HOME:-$HOME/.config}/blit/perf_local.jsonl` – local

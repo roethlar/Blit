@@ -1,20 +1,21 @@
+use blit_core::config;
 use blit_core::orchestrator::{LocalMirrorOptions, TransferOrchestrator};
 use blit_core::perf_history;
 use eyre::Result;
-use std::ffi::OsString;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
 struct ConfigDirGuard {
     temp: tempfile::TempDir,
-    prev: Option<OsString>,
+    prev: Option<PathBuf>,
 }
 
 impl ConfigDirGuard {
     fn new() -> Result<Self> {
         let temp = tempdir()?;
-        let prev = std::env::var_os("BLIT_CONFIG_DIR");
-        std::env::set_var("BLIT_CONFIG_DIR", temp.path());
+        let prev = config::config_dir_override();
+        config::set_config_dir(temp.path());
         Ok(Self { temp, prev })
     }
 }
@@ -22,9 +23,9 @@ impl ConfigDirGuard {
 impl Drop for ConfigDirGuard {
     fn drop(&mut self) {
         if let Some(prev) = &self.prev {
-            std::env::set_var("BLIT_CONFIG_DIR", prev);
+            config::set_config_dir(prev);
         } else {
-            std::env::remove_var("BLIT_CONFIG_DIR");
+            config::clear_config_dir_override();
         }
     }
 }

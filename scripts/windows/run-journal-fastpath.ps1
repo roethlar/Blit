@@ -29,9 +29,13 @@ $dst = Join-Path -Path $workspace -ChildPath "dst"
 New-Item -ItemType Directory -Path $src | Out-Null
 New-Item -ItemType Directory -Path $dst | Out-Null
 
+$configDir = Join-Path -Path $workspace -ChildPath "config"
+New-Item -ItemType Directory -Path $configDir | Out-Null
+
 Write-Host "Workspace     : $workspace"
 Write-Host "Source dir    : $src"
 Write-Host "Destination   : $dst"
+Write-Host "Config dir    : $configDir"
 Write-Host ""
 
 Write-Host "Generating 5000 files..."
@@ -40,9 +44,6 @@ for ($i = 1; $i -le 5000; $i++) {
     $filePath = Join-Path -Path $src -ChildPath $fileName
     Set-Content -LiteralPath $filePath -Value "payload $i" -NoNewline
 }
-
-$env:BLIT_CONFIG_DIR = Join-Path -Path $workspace -ChildPath "config"
-New-Item -ItemType Directory -Path $env:BLIT_CONFIG_DIR | Out-Null
 
 $candidateBinaries = @(
     Join-Path -Path $RepoRoot -ChildPath "target\release\blit-cli.exe"
@@ -63,7 +64,7 @@ function Invoke-BlitMirror {
     )
 
     Write-Host "== $Label =="
-    & $blitCli "mirror" $src $dst "--verbose"
+    & $blitCli "--config-dir" $configDir "mirror" $src $dst "--verbose"
     if ($LASTEXITCODE -ne 0) {
         throw "blit mirror failed during '$Label' run (exit $LASTEXITCODE)."
     }

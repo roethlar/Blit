@@ -1,0 +1,1 @@
+2025-10-25: Implemented Linux change journal snapshot (device/inode/ctime + mtime) and helper script scripts/linux/run-journal-fastpath.sh. Zero-change mirror now skips planning (~3 ms) per logs/linux/journal-fastpath-20251025T031500Z.log. Windows/macOS fast-paths already verified.

@@ -2,6 +2,7 @@ pub mod auto_tune;
 pub mod buffer;
 pub mod change_journal;
 pub mod checksum;
+pub mod config;
 pub mod copy;
 pub mod delete;
 pub mod enumeration;

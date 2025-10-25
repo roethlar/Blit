@@ -21,8 +21,7 @@ exports with `blit scan` or `blit-utils scan`.
 ## OPTIONS
 - `--config <PATH>`  
   Read TOML configuration from `<PATH>` instead of the default
-  `/etc/blit/config.toml` (or the file pointed to by
-  `$BLIT_DAEMON_CONFIG` when set).
+  `/etc/blit/config.toml`.
 
 - `--bind <ADDR>`  
   Bind address for the gRPC control plane (default `127.0.0.1`).

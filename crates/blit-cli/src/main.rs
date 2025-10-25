@@ -1,3 +1,4 @@
+use blit_core::config;
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::{ListModulesRequest, ListRequest};
@@ -41,6 +42,9 @@ impl AppContext {
 #[command(name = "blit")]
 #[command(about = "A fast, AI-built file transfer tool (v2)")]
 struct Cli {
+    /// Override the configuration directory for this invocation
+    #[arg(long, global = true, value_name = "PATH")]
+    config_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -137,6 +141,11 @@ enum Endpoint {
 async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
+
+    if let Some(dir) = cli.config_dir.as_ref() {
+        config::set_config_dir(dir);
+    }
+
     let mut ctx = AppContext::load();
 
     match &cli.command {
