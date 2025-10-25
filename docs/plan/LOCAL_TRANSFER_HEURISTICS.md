@@ -171,13 +171,13 @@ The orchestrator maintains a simple predictor to estimate planning overhead and 
 | Different thresholds for low-powered hardware? | Managed automatically by adaptive predictor; no hard-coded per-hardware rules. |
 | Cross-filesystem performance differences? | Predictor coefficients segmented by source/dest FS profile; transfer engine monitors backpressure to throttle. |
 | Cache mirror deletion plans? | No; correctness risk outweighs gain. |
-| OS-specific event logs (USN journal)? | Future optimization. Use opportunistically as fast-path once baseline is stable. |
+| OS-specific event logs (USN journal)? | Windows USN fast-path shipped 2025-10-25 (planner skips 0-change mirrors). macOS FSEvents snapshot added 2025-10-25 (verification pending); Linux fanotify integration still TODO. |
 
 ---
 
 ## 11. Future Work (Post v2 Launch)
 
-- Finish macOS FSEvents and Linux fanotify/inotify integration for incremental planning (Windows USN fast-path shipped 2025-10-24).
+- Finalise macOS FSEvents verification and implement Linux fanotify/inotify integration for incremental planning (Windows USN fast-path shipped 2025-10-25).
 - Add incremental fast-path that consumes filesystem change journals where available; re-run the 0-change incremental benchmark afterwards to document the delta.
 - Define an automated regression suite for the adaptive predictor (validation of parsing, coefficient updates, accuracy, and runtime overhead).
 - Explore GPU/accelerated hashing for checksum mode.

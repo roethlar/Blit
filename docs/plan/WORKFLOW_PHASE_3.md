@@ -45,8 +45,8 @@
 | 3.3.3 | Implement TCP data plane server (zero-copy when available, buffered fallback). | Data-plane module + unit tests. |
 | 3.3.4 | Implement CLI data plane client: token validation, gRPC fallback, progress events. | `blit-cli` transport layer + integration tests. |
 | 3.3.5 | Handle gRPC fallback automatically when TCP negotiation fails; emit warning and continue. | CLI+daemon logs; tests simulating blocked port. |
-| 3.3.6 | Integrate Windows USN journal checkpoints into incremental planner fast-path so no-op mirror runs avoid full enumeration. | ✅ 2025-10-24 – planner hooked into USN cache; rerun 0-change benchmark during next perf sweep. |
-| 3.3.7 | Integrate macOS FSEvents checkpoints into incremental planner fast-path. | Planner hooks + macOS benchmark update. |
+| 3.3.6 | Integrate Windows USN journal checkpoints into incremental planner fast-path so no-op mirror runs avoid full enumeration. | ✅ 2025-10-25 – cache reprobe+comparison relaxed; zero-change NTFS mirror completes in 28 ms (wingpt-53). |
+| 3.3.7 | Integrate macOS FSEvents checkpoints into incremental planner fast-path. | ⚠️ 2025-10-25 – snapshot capture landed (`MacSnapshot` stores FSID/event ID/mtime); macOS verification run pending (`scripts/macos/run-journal-fastpath.sh`). |
 | 3.3.8 | Integrate Linux fanotify/inotify (or documented alternative) into incremental planner fast-path. | Planner hooks + Linux benchmark update. |
 
 ### 3.4 Admin RPCs & blit-utils

@@ -228,13 +228,7 @@ fn delete_rel_paths_sync(
         let target = module_path.join(&rel);
         #[cfg(windows)]
         {
-            if let Err(err) = blit_core::win_fs::clear_readonly_recursive(&target) {
-                return Err(Status::internal(format!(
-                    "failed to clear read-only flag on {}: {}",
-                    target.display(),
-                    err
-                )));
-            }
+            blit_core::win_fs::clear_readonly_recursive(&target);
         }
         match std::fs::remove_file(&target) {
             Ok(_) => {
@@ -273,13 +267,7 @@ fn delete_rel_paths_sync(
         let target = module_path.join(&rel);
         #[cfg(windows)]
         {
-            if let Err(err) = blit_core::win_fs::clear_readonly_recursive(&target) {
-                return Err(Status::internal(format!(
-                    "failed to clear read-only flag on {}: {}",
-                    target.display(),
-                    err
-                )));
-            }
+            blit_core::win_fs::clear_readonly_recursive(&target);
         }
         match std::fs::remove_dir_all(&target) {
             Ok(_) => {

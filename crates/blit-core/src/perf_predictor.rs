@@ -125,6 +125,7 @@ impl ProfileKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PredictorState {
     version: u32,
+    #[serde(with = "profile_map")]
     profiles: HashMap<ProfileKey, PredictorProfile>,
 }
 
@@ -240,6 +241,48 @@ impl PerformancePredictor {
             records = records[len - limit..].to_vec();
         }
         Ok(records)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ProfileEntry {
+    key: ProfileKey,
+    value: PredictorProfile,
+}
+
+mod profile_map {
+    use super::{PredictorProfile, ProfileEntry, ProfileKey};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S>(
+        map: &HashMap<ProfileKey, PredictorProfile>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let entries: Vec<ProfileEntry> = map
+            .iter()
+            .map(|(key, value)| ProfileEntry {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<HashMap<ProfileKey, PredictorProfile>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries: Vec<ProfileEntry> = Vec::deserialize(deserializer)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect())
     }
 }
 

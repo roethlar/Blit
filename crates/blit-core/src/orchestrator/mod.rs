@@ -6,7 +6,7 @@ use eyre::{eyre, Context, Result};
 use tokio::runtime::Builder;
 
 use crate::auto_tune::derive_local_plan_tuning;
-use crate::change_journal::{ChangeState, ChangeTracker, ProbeToken};
+use crate::change_journal::{ChangeState, ChangeTracker, ProbeToken, StoredSnapshot};
 use crate::fs_enum::FileFilter;
 use crate::mirror_planner::MirrorPlanner;
 use crate::perf_history::{read_recent_records, TransferMode};
@@ -141,32 +141,23 @@ impl TransferOrchestrator {
                             None
                         };
 
-                        if src_probe.marker.is_some() {
+                        if src_probe.snapshot.is_some() {
                             journal_tokens.push(src_probe.clone());
                         }
                         if let Some(ref probe) = dest_probe {
-                            if probe.marker.is_some() {
+                            if probe.snapshot.is_some() {
                                 journal_tokens.push(probe.clone());
                             }
                         }
 
                         if options.verbose {
-                            eprintln!(
-                                "Journal probe src state={:?} marker={} path={}",
-                                src_probe.state,
-                                src_probe.marker.is_some(),
-                                src_probe.canonical_path.display()
-                            );
-                            match dest_probe.as_ref() {
-                                Some(probe) => eprintln!(
-                                    "Journal probe dest state={:?} marker={} path={}",
-                                    probe.state,
-                                    probe.marker.is_some(),
-                                    probe.canonical_path.display()
-                                ),
-                                None => eprintln!(
-                                    "Journal probe dest unavailable or unsupported; treating as unchanged"
-                                ),
+                            log_probe("src", &src_probe);
+                            if let Some(probe) = dest_probe.as_ref() {
+                                log_probe("dest", probe);
+                            } else {
+                                eprintln!(
+                                    "Journal probe dest unsupported or missing; treating as unchanged"
+                                );
                             }
                         }
 
@@ -178,11 +169,6 @@ impl TransferOrchestrator {
 
                         if src_no_change && dest_no_change {
                             journal_skip = true;
-                            if options.verbose {
-                                eprintln!(
-                                    "Filesystem journal indicates no changes since last run; skipping planner."
-                                );
-                            }
                         }
                     }
                     Err(err) => {
@@ -201,11 +187,11 @@ impl TransferOrchestrator {
                 );
             }
             if let Some(tracker) = journal_tracker.as_mut() {
-                if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
-                    if options.verbose {
-                        eprintln!("Failed to update journal checkpoint: {err:?}");
-                    }
-                }
+                persist_journal_checkpoints(
+                    tracker,
+                    journal_tokens.as_mut_slice(),
+                    options.verbose,
+                );
             }
 
             let summary = LocalMirrorSummary {
@@ -319,11 +305,11 @@ impl TransferOrchestrator {
             };
 
             if let Some(tracker) = journal_tracker.as_mut() {
-                if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
-                    if options.verbose {
-                        eprintln!("Failed to update journal checkpoint: {err:?}");
-                    }
-                }
+                persist_journal_checkpoints(
+                    tracker,
+                    journal_tokens.as_mut_slice(),
+                    options.verbose,
+                );
             }
 
             if options.verbose {
@@ -488,11 +474,7 @@ impl TransferOrchestrator {
         }
 
         if let Some(tracker) = journal_tracker.as_mut() {
-            if let Err(err) = tracker.refresh_and_persist(&journal_tokens) {
-                if options.verbose {
-                    eprintln!("Failed to update journal checkpoint: {err:?}");
-                }
-            }
+            persist_journal_checkpoints(tracker, journal_tokens.as_mut_slice(), options.verbose);
         }
 
         if options.verbose {
@@ -578,6 +560,66 @@ impl TransferOrchestrator {
         }
 
         Ok(summary)
+    }
+}
+
+fn persist_journal_checkpoints(
+    tracker: &mut ChangeTracker,
+    tokens: &mut [ProbeToken],
+    verbose: bool,
+) {
+    if tokens.is_empty() {
+        return;
+    }
+
+    for token in tokens.iter_mut() {
+        match tracker.reprobe_canonical(&token.canonical_path) {
+            Ok(snapshot) => token.snapshot = snapshot,
+            Err(err) => {
+                token.snapshot = None;
+                if verbose {
+                    eprintln!(
+                        "Failed to refresh journal snapshot for {}: {err:?}",
+                        token.canonical_path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    if let Err(err) = tracker.refresh_and_persist(tokens) {
+        if verbose {
+            eprintln!("Failed to update journal checkpoint: {err:?}");
+        }
+    }
+}
+
+fn log_probe(label: &str, probe: &ProbeToken) {
+    eprintln!(
+        "Journal probe {label} state={:?} snapshot={} path={}",
+        probe.state,
+        probe.snapshot.is_some(),
+        probe.canonical_path.display()
+    );
+
+    if let Some(snapshot) = &probe.snapshot {
+        match snapshot {
+            StoredSnapshot::Windows(snap) => {
+                eprintln!(
+                    "  {label} windows: volume={} journal_id={} next_usn={} mtime={:?}",
+                    snap.volume, snap.journal_id, snap.next_usn, snap.root_mtime_epoch_ms
+                );
+            }
+            StoredSnapshot::MacOs(snap) => {
+                eprintln!(
+                    "  {label} macOS: fsid={} event_id={}",
+                    snap.fsid, snap.event_id
+                );
+            }
+            StoredSnapshot::Linux(_) => {
+                eprintln!("  {label} linux: snapshot captured (details pending)");
+            }
+        }
     }
 }
 
