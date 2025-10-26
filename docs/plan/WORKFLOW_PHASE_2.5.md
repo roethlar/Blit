@@ -64,7 +64,12 @@ If NO-GO, typical remediation includes tuning CopyFileEx heuristics, adjusting p
 - **Large sequential workloads (✅ complete)**  
   - Linux: `logs/linux/bench_local_size512_20251020T222233Z/bench.log` (512 MiB average 3.85 s vs rsync 6.61 s) and `logs/linux/bench_local_size2048_20251020T222342Z/bench.log` (2 GiB average 9.37 s vs rsync 10.19 s).  
   - macOS: `logs/macos/bench-local-mirror-size512-20251020T220548Z/bench.log` (0.397 s vs rsync 1.234 s) and `logs/macos/bench-local-mirror-size2048-20251020T220703Z/bench.log` (1.597 s vs 5.009 s).  
-  - Windows: `logs/wingpt/bench-512mb-20251020.log` (0.775 s vs robocopy 0.727 s) and `logs/wingpt/bench-2048mb-20251020.log` (4.10 s vs 4.19 s).
+  - Windows: `logs/wingpt/bench-512mb-20251020.log` (0.775 s vs robocopy 0.727 s) and `logs/wingpt/bench-2048mb-20251020.log` (4.10 s vs 4.19 s).  
+  - 2025-10-25 rerun (post journal fast-path integration):  
+    - Linux 1 GiB: `logs/linux/bench_local_linux_20251025T230101Z.log` → blit 1.427 s vs rsync 3.206 s (~225 %).  
+    - macOS 1 GiB/4 GiB: `logs/macos/bench_local_20251025T231137Z/bench.log` (0.712 s vs 2.427 s) and `logs/macos/bench_local_20251025T235415Z/bench.log` (2.823 s vs 9.721 s).  
+    - Windows 1 GiB NTFS: `logs/windows/bench_local_windows_20251025T233442Z.log` (1.619 s vs robocopy 1.516 s, ~107 %).  
+    - Windows 4 GiB ReFS: `logs/windows/bench_local_windows_4gb_20251025T235715Z.log` (0.374 s vs robocopy 0.155 s, ~41 %); gap tracked via TODO item (`Investigate ReFS mirror throughput`).
 - **Tiny manifest sanity checks (✅ complete)**  
   - Linux/macOS: `logs/linux/bench_local_size000_20251020T221948Z/bench.log`, `logs/macos/bench-local-mirror-size0-20251020T220501Z/bench.log` (rsync still faster, expected).  
   - Windows: `logs/wingpt/bench-0mb-20251020.log` (robocopy faster; planner overhead dominates).

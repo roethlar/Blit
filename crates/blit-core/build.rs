@@ -9,6 +9,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir = manifest_dir.join("..").join("..").join("proto");
     let proto_file = proto_dir.join("blit.proto");
 
+    println!("cargo:rerun-if-changed={}", proto_file.display());
+
     tonic_build::configure()
         .build_server(true)
         .build_client(true)

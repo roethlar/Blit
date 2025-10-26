@@ -57,6 +57,10 @@ paths are always canonicalised using forward slashes.
   the CLI prints only the final summary so that scripting and logging
   stay clean.
 
+- `--force-grpc`  
+  Bypass the TCP data plane negotiation and stream payloads over gRPC.
+  Useful when the client cannot open outbound TCP ports to the daemon.
+
 These options apply to `copy`, `mirror`, and `move`.
 
 ## DEBUG OPTIONS

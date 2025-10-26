@@ -70,6 +70,7 @@ message PushHeader {
   string module = 1;
   bool mirror_mode = 2;
   string destination_path = 3;
+  bool force_grpc = 4;
   // Note: Other options like checksum type can be added here.
 }
 
@@ -100,6 +101,7 @@ message PushSummary {
 message PullRequest {
   string module = 1;
   string path = 2;
+  bool force_grpc = 3;
 }
 
 message PullChunk {

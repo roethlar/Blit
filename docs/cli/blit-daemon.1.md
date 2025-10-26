@@ -11,7 +11,7 @@ blit-daemon - remote transfer daemon for blit v2
 ## DESCRIPTION
 `blit-daemon` exposes the gRPC control plane and hybrid transport data services
 consumed by `blit copy`, `blit mirror`, and the forthcoming admin tooling. The
-daemon listens on the specified address (default `127.0.0.1:9031`) and, when
+daemon listens on the specified address (default `0.0.0.0:9031`) and, when
 possible, negotiates a TCP data plane for high-throughput file transfers. A
 debug flag allows operators to force the daemon to stay on the gRPC control
 plane for testing or firewalled environments. Unless disabled, the daemon
@@ -24,7 +24,7 @@ exports with `blit scan` or `blit-utils scan`.
   `/etc/blit/config.toml`.
 
 - `--bind <ADDR>`  
-  Bind address for the gRPC control plane (default `127.0.0.1`).
+  Bind address for the gRPC control plane (default `0.0.0.0`).
 
 - `--port <PORT>`  
   Port number for the gRPC control plane (default `9031`).

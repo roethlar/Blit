@@ -756,7 +756,7 @@ fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         .bind
         .clone()
         .or_else(|| raw.daemon.bind.clone())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+        .unwrap_or_else(|| "0.0.0.0".to_string());
     let port = args.port.or(raw.daemon.port).unwrap_or(9031);
 
     let motd = raw.daemon.motd.clone();
@@ -916,7 +916,7 @@ struct DaemonArgs {
 
 pub struct BlitService {
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
-    _default_root: Option<RootExport>,
+    default_root: Option<RootExport>,
     force_grpc_data: bool,
 }
 
@@ -928,7 +928,7 @@ impl BlitService {
     ) -> Self {
         Self {
             modules: Arc::new(Mutex::new(modules)),
-            _default_root: default_root,
+            default_root,
             force_grpc_data,
         }
     }
@@ -957,10 +957,11 @@ impl Blit for BlitService {
         let (tx, rx) = mpsc::channel(32);
         let stream = request.into_inner();
         let force_grpc_data = self.force_grpc_data;
+        let default_root = self.default_root.clone();
 
         tokio::spawn(async move {
             if let Err(status) =
-                handle_push_stream(modules, stream, tx.clone(), force_grpc_data).await
+                handle_push_stream(modules, default_root, stream, tx.clone(), force_grpc_data).await
             {
                 let _ = tx.send(Err(status)).await;
             }
@@ -974,7 +975,7 @@ impl Blit for BlitService {
         request: Request<PullRequest>,
     ) -> Result<Response<Self::PullStream>, Status> {
         let req = request.into_inner();
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
 
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
@@ -988,7 +989,7 @@ impl Blit for BlitService {
 
     async fn list(&self, request: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
         let req = request.into_inner();
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
 
         let requested = if req.path.trim().is_empty() {
             PathBuf::from(".")
@@ -1077,7 +1078,7 @@ impl Blit for BlitService {
         request: Request<PurgeRequest>,
     ) -> Result<Response<PurgeResponse>, Status> {
         let req = request.into_inner();
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         if module.read_only {
             return Err(Status::permission_denied(format!(
                 "module '{}' is read-only",
@@ -1102,7 +1103,7 @@ impl Blit for BlitService {
         request: Request<CompletionRequest>,
     ) -> Result<Response<CompletionResponse>, Status> {
         let req = request.into_inner();
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         if !req.include_files && !req.include_directories {
             return Err(Status::invalid_argument(
                 "at least one of include_files or include_directories must be true",
@@ -1161,7 +1162,7 @@ impl Blit for BlitService {
                 "at least one of include_files or include_directories must be true",
             ));
         }
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         let start_rel = if req.start_path.trim().is_empty() {
             PathBuf::from(".")
         } else {
@@ -1219,7 +1220,7 @@ impl Blit for BlitService {
         request: Request<DiskUsageRequest>,
     ) -> Result<Response<Self::DiskUsageStream>, Status> {
         let req = request.into_inner();
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         let start_rel = if req.start_path.trim().is_empty() {
             PathBuf::from(".")
         } else {
@@ -1264,7 +1265,7 @@ impl Blit for BlitService {
         request: Request<FilesystemStatsRequest>,
     ) -> Result<Response<FilesystemStatsResponse>, Status> {
         let req = request.into_inner();
-        let module = resolve_module(&self.modules, &req.module).await?;
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         let stats = filesystem_stats_for_path(&module.path)?;
         Ok(Response::new(stats))
     }
@@ -1347,6 +1348,7 @@ async fn main() -> Result<()> {
 
 async fn handle_push_stream(
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
+    default_root: Option<RootExport>,
     mut stream: Streaming<ClientPushRequest>,
     tx: PushSender,
     force_grpc_data: bool,
@@ -1356,6 +1358,7 @@ async fn handle_push_stream(
     let mut manifest_complete = false;
     let mut mirror_mode = false;
     let mut expected_rel_files: Vec<PathBuf> = Vec::new();
+    let mut force_grpc_client = false;
 
     while let Some(request) = stream.message().await? {
         match request.payload {
@@ -1363,7 +1366,8 @@ async fn handle_push_stream(
                 if module.is_some() {
                     return Err(Status::invalid_argument("duplicate push header received"));
                 }
-                let mut config = resolve_module(&modules, &header.module).await?;
+                let mut config =
+                    resolve_module(&modules, default_root.as_ref(), &header.module).await?;
                 if config.read_only {
                     return Err(Status::permission_denied(format!(
                         "module '{}' is read-only",
@@ -1371,6 +1375,7 @@ async fn handle_push_stream(
                     )));
                 }
                 mirror_mode = header.mirror_mode;
+                force_grpc_client = header.force_grpc;
                 let dest_path = header.destination_path.trim();
                 if !dest_path.is_empty() {
                     let rel = resolve_relative_path(dest_path)?;
@@ -1419,7 +1424,9 @@ async fn handle_push_stream(
     )
     .await?;
 
-    let (transfer_stats, tcp_fallback_used) = if files_requested.is_empty() || force_grpc_data {
+    let force_grpc_effective = force_grpc_data || force_grpc_client;
+    let (transfer_stats, tcp_fallback_used) = if files_requested.is_empty() || force_grpc_effective
+    {
         (
             execute_grpc_fallback(&tx, &mut stream, &module, files_requested.clone()).await?,
             true,
@@ -1496,8 +1503,25 @@ async fn handle_push_stream(
 
 async fn resolve_module(
     modules: &Arc<Mutex<HashMap<String, ModuleConfig>>>,
+    default_root: Option<&RootExport>,
     name: &str,
 ) -> Result<ModuleConfig, Status> {
+    if name.trim().is_empty() {
+        if let Some(root) = default_root {
+            return Ok(ModuleConfig {
+                name: "default".to_string(),
+                path: root.path.clone(),
+                read_only: root.read_only,
+                _comment: None,
+                _use_chroot: root.use_chroot,
+            });
+        } else {
+            return Err(Status::not_found(
+                "default root is not configured on the remote daemon",
+            ));
+        }
+    }
+
     let guard = modules.lock().await;
     guard
         .get(name)

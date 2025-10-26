@@ -67,6 +67,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove). *(2025-10-24: `Find`, `DiskUsage`, `FilesystemStats`, and enhanced `CompletePath` wired through daemon + proto.)*
 - [x] Finish `blit-utils` admin surface: implement `find`, `du`, `df`, and `completions` (scan/list/ls/profile/rm implemented; rm wired to Purge on 2025-10-23). *(2025-10-24: new subcommands stream find/du/df results, completions delegates to daemon.)*
 - [x] Wire remote mirror execution to the Purge RPC so remote mirrors delete extraneous files using the daemon. *(2025-10-23: `handle_push_stream` reuses purge helpers to remove remote extras and reports `entries_deleted` in summary.)*
+- [ ] Investigate edge-case filesystem mirror gaps (ReFS 4 GiB: blit 0.374 s vs robocopy 0.155 s per `logs/windows/bench_local_windows_4gb_20251025T235715Z.log`; ZFS benchmark pending). Profile planner/IO behaviour and stage follow-up tuning once ZFS results captured.
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
 - [x] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback. *(2025-10-25: integration test `remote_tcp_fallback` forces `--force-grpc-data` and verifies CLI output + successful transfer.)*
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.

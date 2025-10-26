@@ -167,6 +167,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         .arg("--config-dir")
         .arg(&config_dir)
         .arg("mirror")
+        .arg("--force-grpc")
         .arg(&src_dir)
         .arg(&dest_remote)
         .output()

@@ -50,7 +50,7 @@ Blit v2 continues under the Feature Completeness & Transport plan (v6). Core-loc
 
 ### Phase 2.5 – Performance Validation (In Progress)
 - Benchmark harnesses (`scripts/bench_local_mirror.sh`, Windows PowerShell equivalent) exist.
-- Need incremental benchmark improvements + macOS/Windows reruns; large/small/mixed logged on 2025-10-21.
+- Latest reruns (2025-10-25) captured 1 GiB/4 GiB numbers across Linux/macOS/Windows; ReFS 4 GiB mirror shows blit ~41 % of robocopy throughput and needs follow-up.
 
 ### Phase 3 – Remote Operations (In Progress)
 - **Delivered**:  

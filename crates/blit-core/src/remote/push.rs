@@ -50,6 +50,7 @@ impl RemotePushClient {
         source_root: &Path,
         filter: &FileFilter,
         mirror_mode: bool,
+        force_grpc: bool,
     ) -> Result<RemotePushReport> {
         if !source_root.exists() {
             bail!("source path does not exist: {}", source_root.display());
@@ -74,9 +75,7 @@ impl RemotePushClient {
 
         let (module, rel_path) = match &self.endpoint.path {
             RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
-            RemotePath::Root { .. } => {
-                bail!("remote destination requires a module path (server:/module/...)");
-            }
+            RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
             RemotePath::Discovery => {
                 bail!("remote destination missing module specification");
             }
@@ -99,6 +98,7 @@ impl RemotePushClient {
                 module,
                 mirror_mode,
                 destination_path,
+                force_grpc,
             }),
         )
         .await?;
@@ -111,7 +111,7 @@ impl RemotePushClient {
 
         let mut files_requested: Vec<String> = Vec::new();
         let mut data_port: Option<u32> = None;
-        let mut fallback_used = true;
+        let mut fallback_used = force_grpc;
         let mut summary: Option<PushSummary> = None;
 
         while let Some(message) = response_stream.message().await.map_err(map_status)? {

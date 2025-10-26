@@ -111,6 +111,9 @@ struct TransferArgs {
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]
     workers: Option<usize>,
+    /// Force gRPC control-plane data path instead of hybrid TCP
+    #[arg(long)]
+    force_grpc: bool,
 }
 
 #[derive(Args)]
@@ -457,12 +460,9 @@ fn ensure_remote_destination_supported(remote: &RemoteEndpoint) -> Result<()> {
 
 fn ensure_remote_source_supported(remote: &RemoteEndpoint) -> Result<()> {
     match remote.path {
-        RemotePath::Module { .. } => Ok(()),
-        RemotePath::Root { .. } => bail!(
-            "root exports (server://...) are not supported yet; configure daemon root export first"
-        ),
+        RemotePath::Module { .. } | RemotePath::Root { .. } => Ok(()),
         RemotePath::Discovery => {
-            bail!("remote source must include a module (e.g., server:/module/)")
+            bail!("remote source must include a module or root (e.g., server:/module/ or server://path)")
         }
     }
 }
@@ -473,7 +473,7 @@ fn format_remote_endpoint(remote: &RemoteEndpoint) -> String {
 
 async fn run_remote_push_transfer(
     _ctx: &AppContext,
-    _args: &TransferArgs,
+    args: &TransferArgs,
     source_path: &Path,
     remote: RemoteEndpoint,
     mirror_mode: bool,
@@ -484,7 +484,7 @@ async fn run_remote_push_transfer(
 
     let filter = FileFilter::default();
     let report = client
-        .push(source_path, &filter, mirror_mode)
+        .push(source_path, &filter, mirror_mode, args.force_grpc)
         .await
         .with_context(|| {
             format!(
@@ -500,7 +500,7 @@ async fn run_remote_push_transfer(
 
 async fn run_remote_pull_transfer(
     _ctx: &AppContext,
-    _args: &TransferArgs,
+    args: &TransferArgs,
     remote: RemoteEndpoint,
     dest_root: &Path,
 ) -> Result<()> {
@@ -508,13 +508,16 @@ async fn run_remote_pull_transfer(
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
-    let report = client.pull(dest_root).await.with_context(|| {
-        format!(
-            "pulling from {} into {}",
-            format_remote_endpoint(&remote),
-            dest_root.display()
-        )
-    })?;
+    let report = client
+        .pull(dest_root, args.force_grpc)
+        .await
+        .with_context(|| {
+            format!(
+                "pulling from {} into {}",
+                format_remote_endpoint(&remote),
+                dest_root.display()
+            )
+        })?;
 
     describe_pull_result(&report, dest_root);
     Ok(())
@@ -641,53 +644,59 @@ async fn run_remote_list(remote: RemoteEndpoint) -> Result<()> {
             Ok(())
         }
         RemotePath::Module { module, rel_path } => {
-            let path_str = if rel_path.as_os_str().is_empty() {
-                String::new()
-            } else {
-                rel_path
-                    .iter()
-                    .map(|component| component.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/")
-            };
-            let response = client
-                .list(ListRequest {
-                    module: module.clone(),
-                    path: path_str.clone(),
-                })
-                .await
-                .map_err(|status| eyre!(status.message().to_string()))?
-                .into_inner();
-            if response.entries.is_empty() {
-                println!(
-                    "No entries under {}:/{}",
-                    module,
-                    if path_str.is_empty() { "" } else { &path_str }
-                );
-            } else {
-                println!(
-                    "Listing {}:/{}:",
-                    module,
-                    if path_str.is_empty() { "" } else { &path_str }
-                );
-                for entry in response.entries {
-                    let indicator = if entry.is_dir { "DIR " } else { "FILE" };
-                    println!(
-                        "{} {:>12} {}",
-                        indicator,
-                        if entry.is_dir {
-                            "-".to_string()
-                        } else {
-                            format_bytes(entry.size)
-                        },
-                        entry.name
-                    );
-                }
-            }
-            Ok(())
+            list_remote_path(&mut client, &remote, module.clone(), rel_path.clone()).await
         }
-        RemotePath::Root { .. } => bail!("listing root exports is not supported yet"),
+        RemotePath::Root { rel_path } => {
+            list_remote_path(&mut client, &remote, String::new(), rel_path.clone()).await
+        }
     }
+}
+
+async fn list_remote_path(
+    client: &mut BlitClient<tonic::transport::Channel>,
+    endpoint: &RemoteEndpoint,
+    module: String,
+    rel_path: PathBuf,
+) -> Result<()> {
+    let path_str = if rel_path.as_os_str().is_empty() {
+        String::new()
+    } else {
+        rel_path
+            .iter()
+            .map(|component| component.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+
+    let response = client
+        .list(ListRequest {
+            module,
+            path: path_str.clone(),
+        })
+        .await
+        .map_err(|status| eyre!(status.message().to_string()))?
+        .into_inner();
+
+    if response.entries.is_empty() {
+        println!("No entries under {}", endpoint.display());
+    } else {
+        println!("Listing {}:", endpoint.display());
+        for entry in response.entries {
+            let indicator = if entry.is_dir { "DIR " } else { "FILE" };
+            println!(
+                "{} {:>12} {}",
+                indicator,
+                if entry.is_dir {
+                    "-".to_string()
+                } else {
+                    format_bytes(entry.size)
+                },
+                entry.name
+            );
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_local_transfer(

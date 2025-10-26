@@ -29,7 +29,7 @@ impl RemotePullClient {
         Ok(Self { endpoint, client })
     }
 
-    pub async fn pull(&mut self, dest_root: &Path) -> Result<RemotePullReport> {
+    pub async fn pull(&mut self, dest_root: &Path, force_grpc: bool) -> Result<RemotePullReport> {
         if !dest_root.exists() {
             fs::create_dir_all(dest_root).await.with_context(|| {
                 format!("creating destination directory {}", dest_root.display())
@@ -38,9 +38,7 @@ impl RemotePullClient {
 
         let (module, rel_path) = match &self.endpoint.path {
             RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
-            RemotePath::Root { .. } => {
-                bail!("root exports (server://...) are not supported yet; configure daemon root");
-            }
+            RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
             RemotePath::Discovery => {
                 bail!("remote source must specify a module (server:/module/...)");
             }
@@ -55,6 +53,7 @@ impl RemotePullClient {
         let pull_request = PullRequest {
             module,
             path: path_str,
+            force_grpc,
         };
 
         let mut stream = self
