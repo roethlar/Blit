@@ -274,7 +274,7 @@ run_tool_command() {
   local dest=$2
   case "$tool" in
     blit)
-      "$BLIT_BIN" "${CONFIG_ARGS[@]}" mirror "$SRC_DIR" "$dest"
+      "$BLIT_BIN" "${CONFIG_ARGS[@]}" mirror "$SRC_DIR" "$dest" 2>&1
       ;;
     rsync)
       local args=()
@@ -298,7 +298,7 @@ run_tool_command() {
         args+=(--timeout "$RSYNC_TIMEOUT")
       fi
       log "[rsync] args: ${args[*]}"
-      rsync "${args[@]}" "$SRC_DIR/" "$dest/"
+      rsync "${args[@]}" "$SRC_DIR/" "$dest/" 2>&1
       ;;
     *)
       echo "unknown tool: $tool" >&2

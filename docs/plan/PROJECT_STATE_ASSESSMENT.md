@@ -106,6 +106,7 @@ No hard blockers at this moment; focus is aligning implementation with plan v6 r
    - Implement remote transfer support using new CLI verbs (hybrid transport + fallback).  
    - Expose admin RPCs for `find`, `du`, `df`, `rm`, etc.  
    - Add remote integration tests (Linux/Windows/macOS) covering CLI + blit-utils flows.
+   - Streaming manifest/need-list landed (2025-10-26); follow-up: add large-manifest stress tests + document memory/throughput results.
 
 5. **Documentation Sweep**  
    - Update all workflow docs (`WORKFLOW_PHASE_2/2.5/3/4.md`) to match plan v6 terminology and deliverables.  

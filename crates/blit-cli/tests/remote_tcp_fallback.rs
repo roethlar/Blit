@@ -103,12 +103,10 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         bin_dir.join(name)
     };
     if !daemon_bin.exists() {
-        let target_triple = bin_dir
+        let maybe_target = bin_dir
             .parent()
             .and_then(|p| p.file_name())
-            .expect("target triple directory")
-            .to_string_lossy()
-            .to_string();
+            .map(|component| component.to_string_lossy().to_string());
 
         let mut build = Command::new("cargo");
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -121,9 +119,12 @@ fn remote_push_falls_back_to_grpc_when_forced() {
             .arg("-p")
             .arg("blit-daemon")
             .arg("--bin")
-            .arg("blit-daemon")
-            .arg("--target")
-            .arg(&target_triple);
+            .arg("blit-daemon");
+        if let Some(triple) = maybe_target {
+            if triple != "target" {
+                build.arg("--target").arg(triple);
+            }
+        }
         let output = build.output().expect("invoke cargo build for blit-daemon");
         assert!(
             output.status.success(),

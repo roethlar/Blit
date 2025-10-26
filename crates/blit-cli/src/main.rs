@@ -906,6 +906,7 @@ mod tests {
             verbose: false,
             progress: false,
             workers: None,
+            force_grpc: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -933,6 +934,7 @@ mod tests {
             verbose: false,
             progress: false,
             workers: None,
+            force_grpc: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

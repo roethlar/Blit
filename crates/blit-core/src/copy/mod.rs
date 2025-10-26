@@ -4,6 +4,8 @@
 use eyre::{eyre, Context, Result};
 use parking_lot::Mutex;
 use rayon::prelude::*;
+#[cfg(windows)]
+use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 #[cfg(windows)]
@@ -156,7 +158,20 @@ pub fn copy_file(
     if !is_network {
         match windows_copyfile(src, dst) {
             Ok(bytes) => {
-                preserve_metadata(src, dst)?;
+                let clone_succeeded = windows::take_last_block_clone_success();
+                let skip_clone_metadata =
+                    clone_succeeded && env::var_os("BLIT_SKIP_METADATA_ON_CLONE").is_some();
+                if skip_clone_metadata {
+                    log::info!(
+                        "prototype: skipping metadata preservation after block clone for {}",
+                        dst.display()
+                    );
+                } else {
+                    preserve_metadata(src, dst)?;
+                }
+                if clone_succeeded {
+                    println!("block clone {} ({} bytes)", dst.display(), bytes);
+                }
                 logger.copy_done(src, dst, bytes);
                 return Ok(bytes);
             }
@@ -226,6 +241,11 @@ pub fn copy_file(
                     match windows::try_block_clone_with_handles(&src_file, &dst_file, file_size)? {
                         windows::BlockCloneOutcome::Cloned => {
                             clone_success = true;
+                            log::info!("block clone {} ({} bytes)", dst.display(), file_size);
+                            if !log::log_enabled!(log::Level::Info) {
+                                eprintln!("block clone {} ({} bytes)", dst.display(), file_size);
+                            }
+                            println!("block clone {} ({} bytes)", dst.display(), file_size);
                         }
                         windows::BlockCloneOutcome::Unsupported { code } => {
                             crate::fs_capability::mark_block_clone_unsupported(src, dst);

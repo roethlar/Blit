@@ -35,6 +35,68 @@ type FindSender = mpsc::Sender<Result<FindEntry, Status>>;
 type DiskUsageSender = mpsc::Sender<Result<DiskUsageEntry, Status>>;
 
 const TOKEN_LEN: usize = 32;
+const FILE_LIST_BATCH_TARGET_BYTES: usize = 3 * 1024 * 1024;
+const FILE_LIST_BATCH_MAX_ENTRIES: usize = 2048;
+
+struct FileListBatcher {
+    tx: PushSender,
+    batch: Vec<String>,
+    batch_bytes: usize,
+    sent_any: bool,
+}
+
+impl FileListBatcher {
+    fn new(tx: PushSender) -> Self {
+        Self {
+            tx,
+            batch: Vec::new(),
+            batch_bytes: 0,
+            sent_any: false,
+        }
+    }
+
+    async fn push(&mut self, path: String) -> Result<(), Status> {
+        let entry_bytes = path.as_bytes().len();
+        let would_exceed_size = self.batch_bytes + entry_bytes + 1 > FILE_LIST_BATCH_TARGET_BYTES;
+        let would_exceed_count = self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES;
+
+        if !self.batch.is_empty() && (would_exceed_size || would_exceed_count) {
+            self.flush().await?;
+        }
+
+        self.batch_bytes = self.batch_bytes.saturating_add(entry_bytes + 1);
+        self.batch.push(path);
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<(), Status> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+
+        self.sent_any = true;
+        let payload = server_push_response::Payload::FilesToUpload(FileList {
+            relative_paths: std::mem::take(&mut self.batch),
+        });
+        self.batch_bytes = 0;
+        send_control_message(&self.tx, payload).await
+    }
+
+    async fn finish(mut self) -> Result<(), Status> {
+        if !self.batch.is_empty() {
+            self.flush().await?;
+        } else if !self.sent_any {
+            send_control_message(
+                &self.tx,
+                server_push_response::Payload::FilesToUpload(FileList {
+                    relative_paths: Vec::new(),
+                }),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ModuleConfig {
@@ -1354,11 +1416,12 @@ async fn handle_push_stream(
     force_grpc_data: bool,
 ) -> Result<(), Status> {
     let mut module: Option<ModuleConfig> = None;
-    let mut manifest: Vec<FileHeader> = Vec::new();
+    let mut files_to_upload: Vec<FileHeader> = Vec::new();
     let mut manifest_complete = false;
     let mut mirror_mode = false;
     let mut expected_rel_files: Vec<PathBuf> = Vec::new();
     let mut force_grpc_client = false;
+    let mut need_list_sender = FileListBatcher::new(tx.clone());
 
     while let Some(request) = stream.message().await? {
         match request.payload {
@@ -1384,10 +1447,19 @@ async fn handle_push_stream(
                 module = Some(config);
                 send_control_message(&tx, server_push_response::Payload::Ack(Ack {})).await?;
             }
-            Some(client_push_request::Payload::FileManifest(file)) => {
+            Some(client_push_request::Payload::FileManifest(mut file)) => {
+                let module_ref = module.as_ref().ok_or_else(|| {
+                    Status::failed_precondition("push manifest received before header")
+                })?;
                 let rel = resolve_relative_path(&file.relative_path)?;
-                expected_rel_files.push(rel);
-                manifest.push(file);
+                expected_rel_files.push(rel.clone());
+                let sanitized = rel.to_string_lossy().to_string();
+
+                if file_requires_upload(module_ref, &rel, &file)? {
+                    file.relative_path = sanitized.clone();
+                    need_list_sender.push(sanitized).await?;
+                    files_to_upload.push(file);
+                }
             }
             Some(client_push_request::Payload::ManifestComplete(_)) => {
                 manifest_complete = true;
@@ -1412,17 +1484,8 @@ async fn handle_push_stream(
         ));
     }
 
-    let files_requested = compute_need_list(&module, &manifest)?;
-    let relative_paths: Vec<String> = files_requested
-        .iter()
-        .map(|header| header.relative_path.clone())
-        .collect();
-
-    send_control_message(
-        &tx,
-        server_push_response::Payload::FilesToUpload(FileList { relative_paths }),
-    )
-    .await?;
+    need_list_sender.finish().await?;
+    let files_requested = files_to_upload;
 
     let force_grpc_effective = force_grpc_data || force_grpc_client;
     let (transfer_stats, tcp_fallback_used) = if files_requested.is_empty() || force_grpc_effective
@@ -1540,40 +1603,27 @@ async fn send_control_message(
     .map_err(|_| Status::internal("failed to send push response"))
 }
 
-#[allow(clippy::result_large_err)]
-fn compute_need_list(
+fn file_requires_upload(
     module: &ModuleConfig,
-    manifest: &[FileHeader],
-) -> Result<Vec<FileHeader>, Status> {
-    let mut needs = Vec::new();
-    for file in manifest {
-        let rel = resolve_relative_path(&file.relative_path)?;
-        let sanitized = rel.to_string_lossy().to_string();
-        let full_path = module.path.join(&rel);
-
-        let requires_upload = match fs::metadata(&full_path) {
-            Ok(meta) => {
-                if !meta.is_file() {
-                    true
-                } else {
-                    let same_size = meta.len() == file.size;
-                    let same_mtime = metadata_mtime_seconds(&meta)
-                        .map(|seconds| seconds == file.mtime_seconds)
-                        .unwrap_or(false);
-                    !(same_size && same_mtime)
-                }
+    rel: &Path,
+    header: &FileHeader,
+) -> Result<bool, Status> {
+    let full_path = module.path.join(rel);
+    let requires_upload = match fs::metadata(&full_path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                true
+            } else {
+                let same_size = meta.len() == header.size;
+                let same_mtime = metadata_mtime_seconds(&meta)
+                    .map(|seconds| seconds == header.mtime_seconds)
+                    .unwrap_or(false);
+                !(same_size && same_mtime)
             }
-            Err(_) => true,
-        };
-
-        if requires_upload {
-            let mut header = file.clone();
-            header.relative_path = sanitized;
-            needs.push(header);
         }
-    }
-
-    Ok(needs)
+        Err(_) => true,
+    };
+    Ok(requires_upload)
 }
 
 #[allow(clippy::result_large_err)]
@@ -1749,26 +1799,33 @@ async fn receive_fallback_data(
         .map(|header| (header.relative_path.clone(), header))
         .collect();
 
-    let mut current: Option<FileHeader> = None;
+    struct ActiveFile {
+        header: FileHeader,
+        file: tokio::fs::File,
+        remaining: u64,
+        dest_path: PathBuf,
+    }
+
+    let mut current: Option<ActiveFile> = None;
     let mut stats = TransferStats::default();
 
     while let Some(req) = stream.message().await? {
         match req.payload {
             Some(client_push_request::Payload::FileManifest(header)) => {
-                if !pending.contains_key(&header.relative_path) {
-                    return Err(Status::invalid_argument(format!(
+                if current.is_some() {
+                    return Err(Status::failed_precondition(
+                        "received new file manifest before completing prior file",
+                    ));
+                }
+
+                let expected = pending.remove(&header.relative_path).ok_or_else(|| {
+                    Status::invalid_argument(format!(
                         "unexpected fallback file manifest '{}'",
                         header.relative_path
-                    )));
-                }
-                current = Some(header);
-            }
-            Some(client_push_request::Payload::FileData(data)) => {
-                let header = current.take().ok_or_else(|| {
-                    Status::invalid_argument("file data received before file manifest")
+                    ))
                 })?;
 
-                let rel_path = resolve_relative_path(&header.relative_path)?;
+                let rel_path = resolve_relative_path(&expected.relative_path)?;
                 let dest_path = module.path.join(&rel_path);
                 if let Some(parent) = dest_path.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|err| {
@@ -1776,17 +1833,47 @@ async fn receive_fallback_data(
                     })?;
                 }
 
-                let mut file = tokio::fs::File::create(&dest_path).await.map_err(|err| {
+                let file = tokio::fs::File::create(&dest_path).await.map_err(|err| {
                     Status::internal(format!("create file {}: {}", dest_path.display(), err))
                 })?;
-                file.write_all(&data.content).await.map_err(|err| {
-                    Status::internal(format!("write {}: {}", dest_path.display(), err))
+
+                if expected.size == 0 {
+                    stats.files_transferred += 1;
+                    continue;
+                }
+
+                let size = expected.size;
+                current = Some(ActiveFile {
+                    header: expected,
+                    file,
+                    remaining: size,
+                    dest_path,
+                });
+            }
+            Some(client_push_request::Payload::FileData(data)) => {
+                let active = current.as_mut().ok_or_else(|| {
+                    Status::invalid_argument("file data received before file manifest")
                 })?;
 
-                stats.files_transferred += 1;
-                stats.bytes_transferred += data.content.len() as u64;
+                let chunk_len = data.content.len() as u64;
+                if chunk_len > active.remaining {
+                    return Err(Status::invalid_argument(format!(
+                        "received {} bytes for '{}' but only {} bytes remain",
+                        chunk_len, active.header.relative_path, active.remaining
+                    )));
+                }
 
-                pending.remove(&header.relative_path);
+                active.file.write_all(&data.content).await.map_err(|err| {
+                    Status::internal(format!("write {}: {}", active.dest_path.display(), err))
+                })?;
+
+                active.remaining -= chunk_len;
+                stats.bytes_transferred += chunk_len;
+
+                if active.remaining == 0 {
+                    stats.files_transferred += 1;
+                    current = None;
+                }
             }
             Some(client_push_request::Payload::UploadComplete(_)) => break,
             Some(_) => {
@@ -1798,10 +1885,11 @@ async fn receive_fallback_data(
         }
     }
 
-    if current.is_some() {
-        return Err(Status::invalid_argument(
-            "fallback transfer ended mid-file (missing data block)",
-        ));
+    if let Some(active) = current {
+        return Err(Status::invalid_argument(format!(
+            "fallback transfer ended mid-file ({} bytes remaining for '{}')",
+            active.remaining, active.header.relative_path
+        )));
     }
 
     if !pending.is_empty() {
@@ -2155,7 +2243,7 @@ mod tests {
 
         let endpoint = module_endpoint(addr, "")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(dest.path()).await;
+        let pull_result = client.pull(dest.path(), false).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -2188,7 +2276,7 @@ mod tests {
 
         let endpoint = module_endpoint(addr, "")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(dest.path()).await;
+        let pull_result = client.pull(dest.path(), true).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -2220,7 +2308,7 @@ mod tests {
 
         let endpoint = module_endpoint(addr, "nested/beta.txt")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(dest.path()).await;
+        let pull_result = client.pull(dest.path(), false).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -2245,7 +2333,7 @@ mod tests {
 
         let endpoint = module_endpoint(addr, "../secret")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(dest.path()).await;
+        let pull_result = client.pull(dest.path(), false).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -2274,7 +2362,7 @@ mod tests {
 
         let endpoint = module_endpoint(addr, "missing.txt")?;
         let mut client = RemotePullClient::connect(endpoint).await?;
-        let pull_result = client.pull(dest.path()).await;
+        let pull_result = client.pull(dest.path(), false).await;
         drop(client);
         let _ = shutdown.send(());
         server.await.unwrap().unwrap();
@@ -2294,7 +2382,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_need_list_detects_missing_and_outdated_files() {
+    fn file_requires_upload_detects_missing_and_outdated_files() {
         let dir = tempdir().unwrap();
         let module = ModuleConfig {
             name: "default".to_string(),
@@ -2331,21 +2419,19 @@ mod tests {
             permissions: 0,
         };
 
-        let manifest = vec![match_header, missing_header.clone(), stale_header.clone()];
-        let needs = compute_need_list(&module, &manifest).unwrap();
-        let requested: Vec<String> = needs.into_iter().map(|h| h.relative_path).collect();
+        let needs_match =
+            file_requires_upload(&module, Path::new("match.txt"), &match_header).unwrap();
+        assert!(
+            !needs_match,
+            "identical file should not be requested for upload"
+        );
 
-        assert!(
-            requested.iter().any(|rel| rel == "missing.txt"),
-            "missing file should be requested"
-        );
-        assert!(
-            requested.iter().any(|rel| rel == "stale.txt"),
-            "stale file should be requested"
-        );
-        assert!(
-            !requested.iter().any(|rel| rel == "match.txt"),
-            "identical file should not be requested"
-        );
+        let needs_missing =
+            file_requires_upload(&module, Path::new("missing.txt"), &missing_header).unwrap();
+        assert!(needs_missing, "missing file should be requested");
+
+        let needs_stale =
+            file_requires_upload(&module, Path::new("stale.txt"), &stale_header).unwrap();
+        assert!(needs_stale, "stale file should be requested");
     }
 }

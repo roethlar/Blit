@@ -48,8 +48,9 @@
 | 3.3.6 | Integrate Windows USN journal checkpoints into incremental planner fast-path so no-op mirror runs avoid full enumeration. | ✅ 2025-10-25 – cache reprobe+comparison relaxed; zero-change NTFS mirror completes in 28 ms (wingpt-53). |
 | 3.3.7 | Integrate macOS FSEvents checkpoints into incremental planner fast-path. | ⚠️ 2025-10-25 – snapshot capture landed (`MacSnapshot` stores FSID/event ID/mtime); macOS verification run pending (`scripts/macos/run-journal-fastpath.sh`). |
 | 3.3.8 | Integrate Linux fanotify/inotify (or documented alternative) into incremental planner fast-path. | ✅ 2025-10-25 – metadata snapshot (device/inode/ctime) powers no-op fast-path; further fanotify work optional. |
+| 3.3.9 | Stream manifest and need-list negotiation so remote pushes do not allocate manifest/need-list Vecs (see Blocker 3.4.4). | ✅ 2025-10-26 – CLI streams manifests via bounded channel, daemon batches need lists with back-pressure. |
 
-### 3.4 Admin RPCs & blit-utils
+### 3.4 Admin RPCs, Utilities, and Streaming Need List
 | 3.4.0 | Draft detailed blit-utils plan covering command matrix (see `docs/plan/BLIT_UTILS_PLAN.md`) (`scan`, `list`, `ls`, `rm`, `find`, `du`, `df`, `completions`, `profile`), CLI UX, confirmation flows, and safety prompts. | Design doc + TODO entries. |
 | Task | Description | Deliverable |
 |------|-------------|-------------|
@@ -57,9 +58,10 @@
 | 3.4.2 | Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared client helpers. | ✅ `crates/blit-utils/src/main.rs` updated; docs + TODO synced (2025-10-24). |
 | 3.4.3 | Provide safety prompts for destructive operations (default confirm, `--yes` bypass). | CLI UX + tests. |
 | 3.4.4 | Expose shell completions using canonical URL syntax (bash/zsh/fish/powershell). | Completion scripts updated. |
+| 3.4.6 | Stream manifest/need-list handling to avoid materialising large payloads (blocker). | ✅ 2025-10-26 – Remote push manifest streaming + chunked gRPC fallback landed; stress-test follow-up tracked in TODO. |
 | 3.4.5 | Integrate `profile` command with local performance history (read-only insights). | CLI output + documentation. |
 
-*Status 2025-10-24*: Purge RPC and `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes now reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Daemon now advertises `_blit._tcp.local.` by default and `blit scan`/`blit-utils scan` consume the results. Admin RPCs (`Find`, `DiskUsage`, `FilesystemStats`, `CompletePath`) and the corresponding `blit-utils` verbs are in place. Windows USN journal checkpoints now drive the incremental fast-path (3.3.6); macOS FSEvents and Linux integration remain pending.
+*Status 2025-10-26*: Remote push manifest/need-list streaming now avoids Vec allocation and feeds the daemon incrementally; gRPC fallback streams file data in 1 MiB chunks. Purge RPC + `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Daemon advertises `_blit._tcp.local.` by default and `blit scan`/`blit-utils scan` consume the results. Admin RPCs (`Find`, `DiskUsage`, `FilesystemStats`, `CompletePath`) and the corresponding `blit-utils` verbs are in place. Windows USN journal checkpoints drive the incremental fast-path (3.3.6); macOS FSEvents verification remains pending.
 
 ### 3.5 Testing & Validation
 | Task | Description | Deliverable |
@@ -105,6 +107,7 @@
 
 - [ ] `blit copy/mirror/move` accept canonical remote syntax; hybrid transport + fallback validated.
 - [ ] `blit scan`, `blit list`, `blit ls` operational.
+- [x] Remote push/pull streaming manifest + need list (no in-memory exhaustion). *(Push implemented with streaming manifest + chunked fallback; add pull stress test if future workloads demand it.)*
 - [x] `blit-utils` commands (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) implemented and tested.
 - [ ] Daemon loads modules/root from TOML, advertises via mDNS (with opt-out), enforces read-only/chroot.
 - [x] Admin RPCs (list modules, dir listing, recursive search, disk usage, remote remove) implemented.

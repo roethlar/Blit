@@ -281,14 +281,30 @@ try {
         switch ($Tool) {
             "blit" {
                 $args = @("--config-dir", $configDir, "mirror", $Source, $Destination)
-                $output = & $Binary @args 2>&1
+                & $Binary @args 2>&1 | ForEach-Object {
+                    if ($null -ne $_) {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                            Write-Log ($_.ToString())
+                        } else {
+                            Write-Log ([string]$_)
+                        }
+                    }
+                }
                 $exitCode = $LASTEXITCODE
             }
             "robocopy" {
                 $exe = if ($Binary -and (Test-Path $Binary)) { $Binary } else { "robocopy" }
                 $args = @($Source, $Destination) + $robocopyFlags
                 Write-Log ("[robocopy] args: {0}" -f ($args -join ' '))
-                $output = & $exe @args 2>&1
+                & $exe @args 2>&1 | ForEach-Object {
+                    if ($null -ne $_) {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                            Write-Log ($_.ToString())
+                        } else {
+                            Write-Log ([string]$_)
+                        }
+                    }
+                }
                 $code = $LASTEXITCODE
                 $exitCode = if ($code -ge 8) { $code } else { 0 }
             }
@@ -297,10 +313,7 @@ try {
             }
         }
 
-        return [pscustomobject]@{
-            Output = $output
-            ExitCode = $exitCode
-        }
+        return $exitCode
     }
 
     function Invoke-ToolRun {
@@ -341,20 +354,11 @@ try {
             $binToUse = $Binary
         }
 
-        $result = Invoke-ToolCommand -Tool $Tool -Source $Source -Destination $Destination -Binary $binToUse
+        $exitCode = Invoke-ToolCommand -Tool $Tool -Source $Source -Destination $Destination -Binary $binToUse
         $sw.Stop()
 
-        if ($result.Output) {
-            foreach ($line in $result.Output) {
-                if ($null -ne $line) {
-                    Write-Host $line
-                    Add-Content -Path $logFile -Value $line
-                }
-            }
-        }
-
-        if ($result.ExitCode -ne 0) {
-            throw "$label exited with $($result.ExitCode) during $Phase run $Index."
+        if ($exitCode -ne 0) {
+            throw "$label exited with $exitCode during $Phase run $Index."
         }
 
         $elapsed = $sw.Elapsed.TotalSeconds

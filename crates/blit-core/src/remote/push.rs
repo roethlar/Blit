@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use base64::{engine::general_purpose, Engine as _};
@@ -8,6 +8,7 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Status;
 
@@ -18,7 +19,7 @@ use crate::generated::client_push_request::Payload as ClientPayload;
 use crate::generated::server_push_response::Payload as ServerPayload;
 use crate::generated::{
     ClientPushRequest, FileData, FileHeader, ManifestComplete, PushHeader, PushSummary,
-    UploadComplete,
+    ServerPushResponse, UploadComplete,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 
@@ -29,6 +30,8 @@ pub struct RemotePushReport {
     pub data_port: Option<u32>,
     pub summary: PushSummary,
 }
+
+const CONTROL_PLANE_CHUNK_SIZE: usize = 1 * 1024 * 1024;
 
 pub struct RemotePushClient {
     endpoint: RemoteEndpoint,
@@ -56,22 +59,38 @@ impl RemotePushClient {
             bail!("source path does not exist: {}", source_root.display());
         }
 
-        let manifest = enumerate_manifest(source_root, filter)
-            .with_context(|| format!("enumerating {}", source_root.display()))?;
-        let manifest_lookup: HashMap<String, FileHeader> = manifest
-            .iter()
-            .map(|header| (header.relative_path.clone(), header.clone()))
-            .collect();
+        let mut manifest_lookup: HashMap<String, FileHeader> = HashMap::new();
 
         let (tx, rx) = mpsc::channel(32);
         let outbound = ReceiverStream::new(rx);
 
-        let mut response_stream = self
+        let response_stream = self
             .client
             .push(outbound)
             .await
             .map_err(map_status)?
             .into_inner();
+        let (response_tx, mut response_rx) =
+            mpsc::channel::<Result<ServerPushResponse, eyre::Report>>(32);
+        let response_task = {
+            let mut stream = response_stream;
+            tokio::spawn(async move {
+                loop {
+                    match stream.message().await {
+                        Ok(Some(msg)) => {
+                            if response_tx.send(Ok(msg)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(status) => {
+                            let _ = response_tx.send(Err(map_status(status))).await;
+                            break;
+                        }
+                    }
+                }
+            })
+        };
 
         let (module, rel_path) = match &self.endpoint.path {
             RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
@@ -103,73 +122,134 @@ impl RemotePushClient {
         )
         .await?;
 
-        for header in &manifest {
-            send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
-        }
+        let (manifest_tx, mut manifest_rx) = mpsc::channel::<FileHeader>(64);
+        let enum_root: PathBuf = source_root.to_path_buf();
+        let enum_filter = filter.clone_without_cache();
 
-        send_payload(&tx, ClientPayload::ManifestComplete(ManifestComplete {})).await?;
+        let manifest_task = task::spawn_blocking(move || -> Result<()> {
+            let enumerator = FileEnumerator::new(enum_filter);
+            enumerator.enumerate_local_streaming(&enum_root, |entry| {
+                if let EntryKind::File { size } = entry.kind {
+                    let rel = normalize_relative_path(&entry.relative_path);
+                    let mtime = unix_seconds(&entry.metadata);
+                    let permissions = permissions_mode(&entry.metadata);
+                    let header = FileHeader {
+                        relative_path: rel,
+                        size,
+                        mtime_seconds: mtime,
+                        permissions,
+                    };
+                    manifest_tx
+                        .blocking_send(header)
+                        .map_err(|_| eyre!("failed to queue manifest entry"))?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        });
 
         let mut files_requested: Vec<String> = Vec::new();
         let mut data_port: Option<u32> = None;
         let mut fallback_used = force_grpc;
         let mut summary: Option<PushSummary> = None;
 
-        while let Some(message) = response_stream.message().await.map_err(map_status)? {
-            match message.payload {
-                Some(ServerPayload::Ack(_)) => {}
-                Some(ServerPayload::FilesToUpload(list)) => {
-                    files_requested = list.relative_paths;
-                }
-                Some(ServerPayload::Negotiation(neg)) => {
-                    fallback_used = neg.tcp_fallback;
-                    if files_requested.is_empty() {
-                        data_port = None;
-                        continue;
-                    }
-
-                    if neg.tcp_fallback {
-                        transfer_files_via_control_plane(
-                            source_root,
-                            files_requested
-                                .iter()
-                                .filter_map(|path| manifest_lookup.get(path).cloned())
-                                .collect(),
-                            tx.clone(),
-                        )
-                        .await?;
-                        continue;
-                    }
-
-                    if neg.tcp_port == 0 {
-                        bail!("server reported zero data port for negotiated transfer");
-                    }
-
-                    let token_bytes = general_purpose::STANDARD_NO_PAD
-                        .decode(neg.one_time_token.as_bytes())
-                        .map_err(|err| eyre!("failed to decode negotiation token: {err}"))?;
-
-                    let headers: Vec<FileHeader> = files_requested
-                        .iter()
-                        .filter_map(|path| manifest_lookup.get(path).cloned())
-                        .collect();
-
-                    transfer_files_via_data_plane(
-                        source_root,
-                        &self.endpoint.host,
-                        neg.tcp_port,
-                        &token_bytes,
-                        &headers,
-                    )
-                    .await?;
-
-                    data_port = Some(neg.tcp_port);
-                }
-                Some(ServerPayload::Summary(s)) => {
-                    summary = Some(s);
-                    break;
-                }
-                None => {}
+        let mut manifest_done = false;
+        loop {
+            if manifest_done && summary.is_some() {
+                break;
             }
+
+            tokio::select! {
+                maybe_header = manifest_rx.recv(), if !manifest_done => {
+                    match maybe_header {
+                        Some(header) => {
+                            let rel = header.relative_path.clone();
+                            send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
+                            manifest_lookup.insert(rel, header);
+                        }
+                        None => {
+                            manifest_done = true;
+                            send_payload(&tx, ClientPayload::ManifestComplete(ManifestComplete {})).await?;
+                        }
+                    }
+                }
+                maybe_message = response_rx.recv() => {
+                    match maybe_message {
+                        Some(Ok(message)) => {
+                            match message.payload {
+                                Some(ServerPayload::Ack(_)) => {}
+                                Some(ServerPayload::FilesToUpload(list)) => {
+                                    files_requested.extend(list.relative_paths);
+                                }
+                                Some(ServerPayload::Negotiation(neg)) => {
+                                    fallback_used = neg.tcp_fallback;
+                                    if files_requested.is_empty() {
+                                        data_port = None;
+                                        continue;
+                                    }
+
+                                    if neg.tcp_fallback {
+                                        transfer_files_via_control_plane(
+                                            source_root,
+                                            files_requested
+                                                .iter()
+                                                .filter_map(|path| manifest_lookup.get(path).cloned())
+                                                .collect(),
+                                            tx.clone(),
+                                        )
+                                        .await?;
+                                        continue;
+                                    }
+
+                                    if neg.tcp_port == 0 {
+                                        bail!("server reported zero data port for negotiated transfer");
+                                    }
+
+                                    let token_bytes = general_purpose::STANDARD_NO_PAD
+                                        .decode(neg.one_time_token.as_bytes())
+                                        .map_err(|err| eyre!("failed to decode negotiation token: {err}"))?;
+
+                                    let headers: Vec<FileHeader> = files_requested
+                                        .iter()
+                                        .filter_map(|path| manifest_lookup.get(path).cloned())
+                                        .collect();
+
+                                    transfer_files_via_data_plane(
+                                        source_root,
+                                        &self.endpoint.host,
+                                        neg.tcp_port,
+                                        &token_bytes,
+                                        &headers,
+                                    )
+                                    .await?;
+
+                                    data_port = Some(neg.tcp_port);
+                                }
+                                Some(ServerPayload::Summary(s)) => {
+                                    summary = Some(s);
+                                    if manifest_done {
+                                        break;
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        Some(Err(err)) => {
+                            response_task.abort();
+                            manifest_task.abort();
+                            return Err(err);
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        manifest_task
+            .await
+            .map_err(|err| eyre!("manifest enumeration task failed: {}", err))??;
+        if let Err(join_err) = response_task.await {
+            return Err(eyre!("response stream task failed: {}", join_err));
         }
 
         let summary = summary.ok_or_else(|| eyre!("push stream ended without summary"))?;
@@ -189,29 +269,6 @@ async fn send_payload(tx: &mpsc::Sender<ClientPushRequest>, payload: ClientPaylo
     })
     .await
     .map_err(|_| eyre!("failed to send push request payload"))
-}
-
-fn enumerate_manifest(source_root: &Path, filter: &FileFilter) -> Result<Vec<FileHeader>> {
-    let enumerator = FileEnumerator::new(filter.clone_without_cache());
-    let entries = enumerator.enumerate_local(source_root)?;
-
-    let mut headers = Vec::new();
-    for entry in entries {
-        if let EntryKind::File { size } = entry.kind {
-            let rel = normalize_relative_path(&entry.relative_path);
-            let mtime = unix_seconds(&entry.metadata);
-            let permissions = permissions_mode(&entry.metadata);
-
-            headers.push(FileHeader {
-                relative_path: rel,
-                size,
-                mtime_seconds: mtime,
-                permissions,
-            });
-        }
-    }
-
-    Ok(headers)
 }
 
 async fn transfer_files_via_data_plane(
@@ -309,29 +366,50 @@ async fn transfer_files_via_control_plane(
     files: Vec<FileHeader>,
     tx: mpsc::Sender<ClientPushRequest>,
 ) -> Result<()> {
+    let mut buffer = vec![0u8; CONTROL_PLANE_CHUNK_SIZE];
+
     for header in files {
         let header_clone = header.clone();
         send_payload(&tx, ClientPayload::FileManifest(header_clone)).await?;
 
-        let data = read_file_bytes(source_root, &header).await?;
-        send_payload(&tx, ClientPayload::FileData(FileData { content: data })).await?;
+        if header.size == 0 {
+            continue;
+        }
+
+        let path = source_root.join(&header.relative_path);
+        let mut file = fs::File::open(&path)
+            .await
+            .with_context(|| format!("opening {}", path.display()))?;
+
+        let mut remaining = header.size;
+        while remaining > 0 {
+            let to_read = buffer.len().min(remaining as usize);
+            let chunk = file
+                .read(&mut buffer[..to_read])
+                .await
+                .with_context(|| format!("reading {}", path.display()))?;
+            if chunk == 0 {
+                bail!(
+                    "unexpected EOF while reading {} ({} bytes remaining)",
+                    path.display(),
+                    remaining
+                );
+            }
+
+            send_payload(
+                &tx,
+                ClientPayload::FileData(FileData {
+                    content: buffer[..chunk].to_vec(),
+                }),
+            )
+            .await?;
+            remaining -= chunk as u64;
+        }
     }
 
     send_payload(&tx, ClientPayload::UploadComplete(UploadComplete {})).await?;
 
     Ok(())
-}
-
-async fn read_file_bytes(source_root: &Path, header: &FileHeader) -> Result<Vec<u8>> {
-    let path = source_root.join(&header.relative_path);
-    let mut file = fs::File::open(&path)
-        .await
-        .with_context(|| format!("opening {}", path.display()))?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content)
-        .await
-        .with_context(|| format!("reading {}", path.display()))?;
-    Ok(content)
 }
 
 fn map_status(status: Status) -> eyre::Report {

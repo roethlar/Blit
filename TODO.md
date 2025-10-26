@@ -67,8 +67,11 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Implement admin RPCs (module list, directory list, recursive find, du/df metrics, remote remove). *(2025-10-24: `Find`, `DiskUsage`, `FilesystemStats`, and enhanced `CompletePath` wired through daemon + proto.)*
 - [x] Finish `blit-utils` admin surface: implement `find`, `du`, `df`, and `completions` (scan/list/ls/profile/rm implemented; rm wired to Purge on 2025-10-23). *(2025-10-24: new subcommands stream find/du/df results, completions delegates to daemon.)*
 - [x] Wire remote mirror execution to the Purge RPC so remote mirrors delete extraneous files using the daemon. *(2025-10-23: `handle_push_stream` reuses purge helpers to remove remote extras and reports `entries_deleted` in summary.)*
-- [x] Investigate edge-case filesystem mirror gaps (ReFS clone path delivered but still ~35% slower than robocopy; follow-up benchmark `logs/windows/bench_local_windows_4gb_clone_20251026T020337Z.log`; ZFS baseline logged at `logs/truenas/bench_local_zfs_20251026T004021Z.log`).
+- [x] Investigate edge-case filesystem mirror gaps (ReFS clone path delivered but still ~35% slower than robocopy; follow-up benchmark `logs/windows/bench_local_windows_4gb_clone_20251026T020337Z.log`; ZFS baseline logged at `logs/truenas/bench_local_zfs_20251026T004021Z.log`). *(2025-10-26: Captured ReFS ETW profile `logs/windows/refs_clone_profile_20251026T022401Z.etl` plus bench log `bench_local_windows_4gb_clone_profile_20251026T022401Z.log`; manual `blit mirror --workers 1` runs (~0.28 s) show remaining ~1.7× gap vs robocopy 0.17 s is not purely task fan-out.)*
 - [x] Update benchmark harnesses to honour `BLIT_BENCH_ROOT` (or similar) so Windows runs stay on the intended filesystem; document TEMP/TMP requirement in workflow docs. *(2025-10-26: scripts respect BLIT_BENCH_ROOT; workflow tip added.)*
+- [ ] Prototype clone-only metadata fast path on Windows (skip redundant attribute sync + reduce IOCTL overhead) and compare against robocopy using ETW traces (`logs/windows/refs_clone_profile_20251026T022401Z.etl`).
+- [x] Implement streaming manifest/need-list for remote push so arbitrarily large file sets do not exhaust RAM (see memory `manifest_streaming_plan`). *(2025-10-26: CLI streams manifests over mpsc channel with back-pressure; daemon batches need list incrementally; control-plane fallback reads files in 1 MiB chunks.)*
+- [ ] Add large-manifest stress test (≥1 M entries) to validate streaming push memory footprint and throughput; capture logs/metrics.
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
 - [x] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback. *(2025-10-25: integration test `remote_tcp_fallback` forces `--force-grpc-data` and verifies CLI output + successful transfer.)*
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
@@ -89,3 +92,5 @@ This is the master checklist. Execute the first unchecked item. After completion
 ## Phase 3.5: RDMA Enablement (post-release)
 
 - [ ] Track deferred RDMA/RoCE work (control-plane negotiation, transport abstraction, benchmarking) for future planning.
+
+- [ ] Investigate SeManageVolumePrivilege requirement for ReFS block clone on dev machine; backups showing CopyFileEx fallback (~0.6 s). Need elevated shell or alternative clone mechanism to validate fast path.

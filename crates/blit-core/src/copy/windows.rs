@@ -2,6 +2,7 @@ use crate::fs_capability::{mark_block_clone_unsupported, supports_block_clone_sa
 use crate::win_fs::enable_manage_volume_privilege;
 use eyre::{Context, Result};
 use once_cell::sync::OnceCell;
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io;
@@ -10,7 +11,9 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED};
+use windows::Win32::Foundation::{
+    ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_PRIVILEGE_NOT_HELD,
+};
 use windows::Win32::Storage::FileSystem::CopyFileExW;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
@@ -21,6 +24,22 @@ const WINDOWS_NO_BUFFERING_SMALL_FILE_MAX: u64 = 512 * 1024 * 1024; // always ca
 const COPY_FILE_NO_BUFFERING_FLAG: u32 = 0x0000_1000; // per CopyFileExW docs
 
 static MANAGE_VOLUME_PRIVILEGE: OnceCell<bool> = OnceCell::new();
+
+thread_local! {
+    static LAST_BLOCK_CLONE_SUCCESS: Cell<bool> = Cell::new(false);
+}
+
+fn set_last_block_clone_success(value: bool) {
+    LAST_BLOCK_CLONE_SUCCESS.with(|flag| flag.set(value));
+}
+
+pub(crate) fn take_last_block_clone_success() -> bool {
+    LAST_BLOCK_CLONE_SUCCESS.with(|flag| {
+        let value = flag.get();
+        flag.set(false);
+        value
+    })
+}
 
 #[derive(Debug)]
 pub(crate) enum BlockCloneOutcome {
@@ -140,9 +159,9 @@ fn ensure_manage_volume_privilege_once() -> bool {
 }
 
 fn duplicate_extents(src: &File, dst: &File, file_size: u64) -> Result<BlockCloneOutcome> {
-    if !ensure_manage_volume_privilege_once() {
-        log::trace!("block clone: SeManageVolumePrivilege unavailable");
-        return Ok(BlockCloneOutcome::PrivilegeUnavailable);
+    let manage_privilege = ensure_manage_volume_privilege_once();
+    if !manage_privilege {
+        log::trace!("block clone: SeManageVolumePrivilege unavailable (attempting anyway)");
     }
 
     use core::ffi::c_void;
@@ -222,6 +241,11 @@ fn duplicate_extents(src: &File, dst: &File, file_size: u64) -> Result<BlockClon
     } else {
         let err = std::io::Error::last_os_error();
         if let Some(code) = err.raw_os_error() {
+            if code == ERROR_PRIVILEGE_NOT_HELD.0 as i32 {
+                return Ok(BlockCloneOutcome::PrivilegeUnavailable);
+            }
+        }
+        if let Some(code) = err.raw_os_error() {
             if code == ERROR_INVALID_FUNCTION.0 as i32 || code == ERROR_NOT_SUPPORTED.0 as i32 {
                 return Ok(BlockCloneOutcome::Unsupported { code });
             }
@@ -235,7 +259,13 @@ pub(crate) fn try_block_clone_with_handles(
     dst: &File,
     file_size: u64,
 ) -> Result<BlockCloneOutcome> {
-    duplicate_extents(src, dst, file_size)
+    let outcome = duplicate_extents(src, dst, file_size)?;
+    if matches!(outcome, BlockCloneOutcome::Cloned) {
+        set_last_block_clone_success(true);
+    } else {
+        set_last_block_clone_success(false);
+    }
+    Ok(outcome)
 }
 
 pub(crate) fn try_block_clone_same_volume(
@@ -243,6 +273,7 @@ pub(crate) fn try_block_clone_same_volume(
     dst: &Path,
     file_size: u64,
 ) -> Result<Option<u64>> {
+    set_last_block_clone_success(false);
     if !supports_block_clone_same_volume(src, dst)? {
         return Ok(None);
     }
@@ -266,10 +297,16 @@ pub(crate) fn try_block_clone_same_volume(
 
     match duplicate_extents(&src_file, &dst_file, file_size)? {
         BlockCloneOutcome::Cloned => {
+            set_last_block_clone_success(true);
             log::info!("block clone {} ({} bytes)", dst.display(), file_size);
+            if !log::log_enabled!(log::Level::Info) {
+                eprintln!("block clone {} ({} bytes)", dst.display(), file_size);
+            }
+            println!("block clone {} ({} bytes)", dst.display(), file_size);
             Ok(Some(file_size))
         }
         BlockCloneOutcome::PrivilegeUnavailable => {
+            set_last_block_clone_success(false);
             log::trace!(
                 "block clone: missing SeManageVolumePrivilege for {}; falling back",
                 dst.display()
@@ -277,6 +314,7 @@ pub(crate) fn try_block_clone_same_volume(
             Ok(None)
         }
         BlockCloneOutcome::Unsupported { code } => {
+            set_last_block_clone_success(false);
             log::debug!(
                 "block clone unsupported on volume for {} (error code {code}); caching fallback",
                 dst.display()
@@ -285,6 +323,7 @@ pub(crate) fn try_block_clone_same_volume(
             Ok(None)
         }
         BlockCloneOutcome::Failed(err) => {
+            set_last_block_clone_success(false);
             log::debug!("block clone failed for {} ({err})", dst.display());
             Ok(None)
         }
