@@ -191,18 +191,26 @@ PY
   fi
 }
 
-log "Building blit-cli (release) into $TARGET_DIR..."
-(
-  cd "$REPO_ROOT"
-  cargo build --release --package blit-cli --bin blit-cli
-) >>"$LOG_FILE" 2>&1
+if [[ -n "${BLIT_BIN:-}" ]]; then
+  if [[ ! -x "$BLIT_BIN" ]]; then
+    log "error: BLIT_BIN is set to '$BLIT_BIN' but the file is not executable"
+    exit 1
+  fi
+  log "Using prebuilt blit-cli at $BLIT_BIN"
+else
+  log "Building blit-cli (release) into $TARGET_DIR..."
+  (
+    cd "$REPO_ROOT"
+    cargo build --release --package blit-cli --bin blit-cli
+  ) >>"$LOG_FILE" 2>&1
 
-BLIT_BIN="$TARGET_DIR/release/blit-cli"
-if [[ ! -x "$BLIT_BIN" ]]; then
-  log "error: expected binary not found at $BLIT_BIN"
-  exit 1
+  BLIT_BIN="$TARGET_DIR/release/blit-cli"
+  if [[ ! -x "$BLIT_BIN" ]]; then
+    log "error: expected binary not found at $BLIT_BIN"
+    exit 1
+  fi
+  log "Binary ready: $BLIT_BIN"
 fi
-log "Binary ready: $BLIT_BIN"
 
 if ! [[ "$RUNS" =~ ^[0-9]+$ && "$WARMUP" =~ ^[0-9]+$ ]]; then
   log "error: RUNS and WARMUP must be non-negative integers"

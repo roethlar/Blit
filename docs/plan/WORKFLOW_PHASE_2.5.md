@@ -69,7 +69,8 @@ If NO-GO, typical remediation includes tuning CopyFileEx heuristics, adjusting p
     - Linux 1 GiB: `logs/linux/bench_local_linux_20251025T230101Z.log` → blit 1.427 s vs rsync 3.206 s (~225 %).  
     - macOS 1 GiB/4 GiB: `logs/macos/bench_local_20251025T231137Z/bench.log` (0.712 s vs 2.427 s) and `logs/macos/bench_local_20251025T235415Z/bench.log` (2.823 s vs 9.721 s).  
     - Windows 1 GiB NTFS: `logs/windows/bench_local_windows_20251025T233442Z.log` (1.619 s vs robocopy 1.516 s, ~107 %).  
-    - Windows 4 GiB ReFS: `logs/windows/bench_local_windows_4gb_20251025T235715Z.log` (0.374 s vs robocopy 0.155 s, ~41 %); gap tracked via TODO item (`Investigate ReFS mirror throughput`).
+    - Windows 4 GiB ReFS: `logs/windows/bench_local_windows_4gb_20251025T235715Z.log` (0.374 s vs robocopy 0.155 s, ~41 %); gap tracked via TODO item (`Investigate edge-case filesystem mirror gaps`). Early hypothesis: robocopy’s win stems from ReFS block cloning when source/dest share the volume, whereas blit currently streams via CopyFileEx.  
+    - TrueNAS ZFS 4 GiB: `logs/truenas/bench_local_zfs_20251026T004021Z.log` (0.879 s vs rsync 18.309 s, ~2082 %).
 - **Tiny manifest sanity checks (✅ complete)**  
   - Linux/macOS: `logs/linux/bench_local_size000_20251020T221948Z/bench.log`, `logs/macos/bench-local-mirror-size0-20251020T220501Z/bench.log` (rsync still faster, expected).  
   - Windows: `logs/wingpt/bench-0mb-20251020.log` (robocopy faster; planner overhead dominates).
