@@ -103,10 +103,10 @@ struct TransferArgs {
     #[arg(long)]
     checksum: bool,
     /// Keep verbose logs from the orchestrator
-    #[arg(long)]
+    #[arg(long, short = 'v')]
     verbose: bool,
     /// Show an interactive progress indicator
-    #[arg(long)]
+    #[arg(long, short = 'p')]
     progress: bool,
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]
@@ -290,6 +290,43 @@ fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()> {
 async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let dst_endpoint = parse_transfer_endpoint(&args.destination)?;
+
+    let operation = match mode {
+        TransferKind::Copy => "copy",
+        TransferKind::Mirror => "mirror",
+    };
+    let transfer_scope = match (&src_endpoint, &dst_endpoint) {
+        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
+            format!("{} -> {}", src_path.display(), dst_path.display())
+        }
+        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
+            format!(
+                "{} -> {}",
+                src_path.display(),
+                format_remote_endpoint(remote)
+            )
+        }
+        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
+            format!(
+                "{} -> {}",
+                format_remote_endpoint(remote),
+                dst_path.display()
+            )
+        }
+        (Endpoint::Remote(a), Endpoint::Remote(b)) => {
+            format!(
+                "{} -> {}",
+                format_remote_endpoint(a),
+                format_remote_endpoint(b)
+            )
+        }
+    };
+    println!(
+        "blit v{}: starting {} {}",
+        env!("CARGO_PKG_VERSION"),
+        operation,
+        transfer_scope
+    );
 
     match (src_endpoint, dst_endpoint) {
         (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {

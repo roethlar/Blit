@@ -43,6 +43,7 @@ struct FileListBatcher {
     batch: Vec<String>,
     batch_bytes: usize,
     sent_any: bool,
+    last_flush: Instant,
 }
 
 impl FileListBatcher {
@@ -52,6 +53,7 @@ impl FileListBatcher {
             batch: Vec::new(),
             batch_bytes: 0,
             sent_any: false,
+            last_flush: Instant::now(),
         }
     }
 
@@ -64,8 +66,19 @@ impl FileListBatcher {
             self.flush().await?;
         }
 
+        if self.batch.is_empty() {
+            self.last_flush = Instant::now();
+        }
+
         self.batch_bytes = self.batch_bytes.saturating_add(entry_bytes + 1);
         self.batch.push(path);
+
+        let elapsed = self.last_flush.elapsed();
+        if !self.batch.is_empty()
+            && (!self.sent_any || elapsed >= Duration::from_secs(1) || self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES)
+        {
+            self.flush().await?;
+        }
         Ok(())
     }
 
@@ -79,6 +92,7 @@ impl FileListBatcher {
             relative_paths: std::mem::take(&mut self.batch),
         });
         self.batch_bytes = 0;
+        self.last_flush = Instant::now();
         send_control_message(&self.tx, payload).await
     }
 

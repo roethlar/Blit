@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Context, Result};
@@ -126,8 +126,11 @@ impl RemotePushClient {
         let enum_root: PathBuf = source_root.to_path_buf();
         let enum_filter = filter.clone_without_cache();
 
-        let manifest_task = task::spawn_blocking(move || -> Result<()> {
+        let manifest_task = task::spawn_blocking(move || -> Result<u64> {
             let enumerator = FileEnumerator::new(enum_filter);
+            let start = Instant::now();
+            let mut last_log = start;
+            let mut enumerated: u64 = 0;
             enumerator.enumerate_local_streaming(&enum_root, |entry| {
                 if let EntryKind::File { size } = entry.kind {
                     let rel = normalize_relative_path(&entry.relative_path);
@@ -142,10 +145,20 @@ impl RemotePushClient {
                     manifest_tx
                         .blocking_send(header)
                         .map_err(|_| eyre!("failed to queue manifest entry"))?;
+                    enumerated += 1;
+                    if last_log.elapsed() >= Duration::from_secs(1) {
+                        println!("Enumerated {} entries… (streaming manifest)", enumerated);
+                        last_log = Instant::now();
+                    }
                 }
                 Ok(())
             })?;
-            Ok(())
+            println!(
+                "Manifest enumeration complete in {:.2?} ({} entries)",
+                start.elapsed(),
+                enumerated
+            );
+            Ok(enumerated)
         });
 
         let mut files_requested: Vec<String> = Vec::new();
