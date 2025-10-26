@@ -24,6 +24,7 @@ impl MacOSCapability {
                 acls: false, // ACLs exist but not commonly used
                 sendfile: false,
                 copy_file_range: false, // Not available on macOS
+                block_clone_same_volume: false,
             },
         }
     }

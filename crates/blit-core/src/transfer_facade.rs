@@ -114,12 +114,32 @@ impl TransferFacade {
         let (tx, rx) = unbounded_channel();
 
         let handle = thread::spawn(move || -> Result<LocalPlanFinal> {
+            let block_clone_same_volume = {
+                #[cfg(windows)]
+                {
+                    crate::fs_capability::supports_block_clone_same_volume(&src_root, &dest_root)
+                        .unwrap_or_else(|err| {
+                            log::debug!(
+                                "planner: block clone probe failed for {} -> {}: {err}",
+                                src_root.display(),
+                                dest_root.display()
+                            );
+                            false
+                        })
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = (&src_root, &dest_root);
+                    false
+                }
+            };
+
             let mut entries = Vec::new();
             let mut copy_jobs = Vec::new();
             let mut total_bytes = 0u64;
             let mut enumerated_files = 0usize;
 
-            let mut aggregator = TaskAggregator::new(plan_options);
+            let mut aggregator = TaskAggregator::new(plan_options, block_clone_same_volume);
 
             enumerator.enumerate_local_streaming(&src_root, |entry| {
                 let kind = entry.kind.clone();
@@ -302,10 +322,11 @@ struct TaskAggregator {
     chunk_bytes: usize,
     options: PlanOptions,
     stats: PlanTaskStats,
+    block_clone_same_volume: bool,
 }
 
 impl TaskAggregator {
-    fn new(options: PlanOptions) -> Self {
+    fn new(options: PlanOptions, block_clone_same_volume: bool) -> Self {
         let small_target = options.small_target.unwrap_or(8 * 1024 * 1024);
         let medium_target = options.medium_target.unwrap_or(128 * 1024 * 1024);
         let medium_max = (medium_target as f64 * 1.25) as u64;
@@ -327,6 +348,7 @@ impl TaskAggregator {
             chunk_bytes,
             options,
             stats: PlanTaskStats::default(),
+            block_clone_same_volume,
         }
     }
 
@@ -373,6 +395,15 @@ impl TaskAggregator {
     }
 
     fn push(&mut self, rel: PathBuf, size: u64, tx: &UnboundedSender<PlannerEvent>) -> Result<()> {
+        if self.block_clone_same_volume {
+            self.chunk_bytes = self.chunk_bytes.max(8 * 1024 * 1024);
+            self.stats.raw_bundle_tasks = self.stats.raw_bundle_tasks.saturating_add(1);
+            self.stats.raw_bundle_files = self.stats.raw_bundle_files.saturating_add(1);
+            self.stats.raw_bundle_bytes = self.stats.raw_bundle_bytes.saturating_add(size);
+            self.emit_task(tx, TransferTask::RawBundle(vec![rel]))?;
+            return Ok(());
+        }
+
         const LARGE_THRESHOLD: u64 = 256 * 1024 * 1024;
         if size >= LARGE_THRESHOLD {
             self.chunk_bytes = 32 * 1024 * 1024;
@@ -487,7 +518,7 @@ mod tests {
     #[test]
     fn tiny_files_emit_tar_shards() {
         let options = PlanOptions::default();
-        let mut aggregator = TaskAggregator::new(options);
+        let mut aggregator = TaskAggregator::new(options, false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         for idx in 0..2048 {
@@ -509,7 +540,7 @@ mod tests {
     #[test]
     fn handful_of_small_files_stay_raw() {
         let options = PlanOptions::default();
-        let mut aggregator = TaskAggregator::new(options);
+        let mut aggregator = TaskAggregator::new(options, false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         for idx in 0..4 {
@@ -523,6 +554,28 @@ mod tests {
         match &tasks[0] {
             TransferTask::RawBundle(paths) => assert_eq!(paths.len(), 4),
             other => panic!("expected raw bundle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_clone_paths_emit_single_raw_tasks() {
+        let options = PlanOptions::default();
+        let mut aggregator = TaskAggregator::new(options, true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        for idx in 0..8 {
+            let rel = PathBuf::from(format!("clone-{idx}"));
+            aggregator.push(rel, 128 * 1024, &tx).unwrap();
+        }
+        aggregator.flush_remaining(&tx).unwrap();
+
+        let tasks = drain_tasks(&mut rx);
+        assert_eq!(tasks.len(), 8);
+        for task in tasks {
+            match task {
+                TransferTask::RawBundle(paths) => assert_eq!(paths.len(), 1),
+                other => panic!("expected raw bundle task, got {other:?}"),
+            }
         }
     }
 }

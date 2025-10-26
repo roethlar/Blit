@@ -1,9 +1,16 @@
+use crate::fs_capability::{mark_block_clone_unsupported, supports_block_clone_same_volume};
+use crate::win_fs::enable_manage_volume_privilege;
 use eyre::{Context, Result};
+use once_cell::sync::OnceCell;
 use std::ffi::OsStr;
+use std::fs::{self, File};
+use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED};
 use windows::Win32::Storage::FileSystem::CopyFileExW;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
@@ -12,6 +19,16 @@ const WINDOWS_NO_BUFFERING_FLOOR: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB baselin
 const WINDOWS_NO_BUFFERING_HEADROOM: u64 = 512 * 1024 * 1024; // leave 512 MiB for cache
 const WINDOWS_NO_BUFFERING_SMALL_FILE_MAX: u64 = 512 * 1024 * 1024; // always cache ≤512 MiB
 const COPY_FILE_NO_BUFFERING_FLAG: u32 = 0x0000_1000; // per CopyFileExW docs
+
+static MANAGE_VOLUME_PRIVILEGE: OnceCell<bool> = OnceCell::new();
+
+#[derive(Debug)]
+pub(crate) enum BlockCloneOutcome {
+    Cloned,
+    PrivilegeUnavailable,
+    Unsupported { code: i32 },
+    Failed(io::Error),
+}
 
 #[derive(Clone, Copy, Debug)]
 struct MemorySnapshot {
@@ -118,9 +135,163 @@ fn should_use_copyfile_no_buffering_inner(
     }
 }
 
-pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
-    use std::fs;
+fn ensure_manage_volume_privilege_once() -> bool {
+    *MANAGE_VOLUME_PRIVILEGE.get_or_init(|| enable_manage_volume_privilege())
+}
 
+fn duplicate_extents(src: &File, dst: &File, file_size: u64) -> Result<BlockCloneOutcome> {
+    if !ensure_manage_volume_privilege_once() {
+        log::trace!("block clone: SeManageVolumePrivilege unavailable");
+        return Ok(BlockCloneOutcome::PrivilegeUnavailable);
+    }
+
+    use core::ffi::c_void;
+    type HANDLE = isize;
+    type DWORD = u32;
+    type BOOL = i32;
+    type LPVOID = *mut c_void;
+    type LPOVERLAPPED = *mut c_void;
+
+    #[link(name = "Kernel32")]
+    extern "system" {
+        fn DeviceIoControl(
+            hDevice: HANDLE,
+            dwIoControlCode: DWORD,
+            lpInBuffer: LPVOID,
+            nInBufferSize: DWORD,
+            lpOutBuffer: LPVOID,
+            nOutBufferSize: DWORD,
+            lpBytesReturned: *mut DWORD,
+            lpOverlapped: LPOVERLAPPED,
+        ) -> BOOL;
+    }
+
+    const FILE_DEVICE_FILE_SYSTEM: DWORD = 0x0000_0009;
+    const METHOD_BUFFERED: DWORD = 0;
+    const FILE_WRITE_ACCESS: DWORD = 0x0002;
+    const fn ctl_code(device_type: DWORD, function: DWORD, method: DWORD, access: DWORD) -> DWORD {
+        (device_type << 16) | (access << 14) | (function << 2) | method
+    }
+    const FSCTL_DUPLICATE_EXTENTS_TO_FILE: DWORD = ctl_code(
+        FILE_DEVICE_FILE_SYSTEM,
+        623,
+        METHOD_BUFFERED,
+        FILE_WRITE_ACCESS,
+    );
+
+    #[repr(C)]
+    struct LARGE_INTEGER {
+        QuadPart: i64,
+    }
+    #[repr(C)]
+    struct DUPLICATE_EXTENTS_DATA {
+        FileHandle: HANDLE,
+        SourceFileOffset: LARGE_INTEGER,
+        TargetFileOffset: LARGE_INTEGER,
+        ByteCount: LARGE_INTEGER,
+    }
+
+    dst.set_len(file_size)?;
+
+    let src_h = src.as_raw_handle() as HANDLE;
+    let dst_h = dst.as_raw_handle() as HANDLE;
+    let mut data = DUPLICATE_EXTENTS_DATA {
+        FileHandle: src_h,
+        SourceFileOffset: LARGE_INTEGER { QuadPart: 0 },
+        TargetFileOffset: LARGE_INTEGER { QuadPart: 0 },
+        ByteCount: LARGE_INTEGER {
+            QuadPart: file_size as i64,
+        },
+    };
+    let mut bytes_returned: DWORD = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            dst_h,
+            FSCTL_DUPLICATE_EXTENTS_TO_FILE,
+            (&mut data as *mut DUPLICATE_EXTENTS_DATA).cast(),
+            std::mem::size_of::<DUPLICATE_EXTENTS_DATA>() as DWORD,
+            core::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            core::ptr::null_mut(),
+        ) != 0
+    };
+
+    if ok {
+        Ok(BlockCloneOutcome::Cloned)
+    } else {
+        let err = std::io::Error::last_os_error();
+        if let Some(code) = err.raw_os_error() {
+            if code == ERROR_INVALID_FUNCTION.0 as i32 || code == ERROR_NOT_SUPPORTED.0 as i32 {
+                return Ok(BlockCloneOutcome::Unsupported { code });
+            }
+        }
+        Ok(BlockCloneOutcome::Failed(err))
+    }
+}
+
+pub(crate) fn try_block_clone_with_handles(
+    src: &File,
+    dst: &File,
+    file_size: u64,
+) -> Result<BlockCloneOutcome> {
+    duplicate_extents(src, dst, file_size)
+}
+
+pub(crate) fn try_block_clone_same_volume(
+    src: &Path,
+    dst: &Path,
+    file_size: u64,
+) -> Result<Option<u64>> {
+    if !supports_block_clone_same_volume(src, dst)? {
+        return Ok(None);
+    }
+
+    if file_size == 0 {
+        log::debug!(
+            "block clone: zero-length file {} treated as cloned",
+            dst.display()
+        );
+        return Ok(Some(0));
+    }
+
+    let src_file =
+        File::open(src).with_context(|| format!("open {} for block clone", src.display()))?;
+    let dst_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(dst)
+        .with_context(|| format!("open {} for block clone", dst.display()))?;
+
+    match duplicate_extents(&src_file, &dst_file, file_size)? {
+        BlockCloneOutcome::Cloned => {
+            log::info!("block clone {} ({} bytes)", dst.display(), file_size);
+            Ok(Some(file_size))
+        }
+        BlockCloneOutcome::PrivilegeUnavailable => {
+            log::trace!(
+                "block clone: missing SeManageVolumePrivilege for {}; falling back",
+                dst.display()
+            );
+            Ok(None)
+        }
+        BlockCloneOutcome::Unsupported { code } => {
+            log::debug!(
+                "block clone unsupported on volume for {} (error code {code}); caching fallback",
+                dst.display()
+            );
+            mark_block_clone_unsupported(src, dst);
+            Ok(None)
+        }
+        BlockCloneOutcome::Failed(err) => {
+            log::debug!("block clone failed for {} ({err})", dst.display());
+            Ok(None)
+        }
+    }
+}
+
+pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
     // Ensure destination directory exists
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
@@ -128,6 +299,10 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
     }
 
     let file_size = fs::metadata(src)?.len();
+
+    if let Some(bytes) = try_block_clone_same_volume(src, dst, file_size)? {
+        return Ok(bytes);
+    }
 
     let to_wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain(std::iter::once(0)).collect() };
     let src_w = to_wide(src.as_os_str());

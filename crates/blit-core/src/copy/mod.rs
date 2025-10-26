@@ -1,7 +1,6 @@
 //! Optimized copy operations for Windows
 //! Focus on 10GbE saturation with minimal overhead
 
-use crate::logger::Logger;
 use eyre::{eyre, Context, Result};
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -15,7 +14,7 @@ use std::time::SystemTime;
 
 use crate::buffer::BufferSizer;
 use crate::checksum::{self, ChecksumType};
-use crate::fs_enum::FileEntry;
+use crate::{fs_enum::FileEntry, logger::Logger};
 
 #[cfg(windows)]
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
@@ -222,7 +221,34 @@ pub fn copy_file(
         let total_bytes = {
             #[cfg(windows)]
             {
-                if attempt_block_clone_windows(&src_file, &dst_file, file_size).unwrap_or(false) {
+                let mut clone_success = false;
+                if crate::fs_capability::supports_block_clone_same_volume(src, dst)? {
+                    match windows::try_block_clone_with_handles(&src_file, &dst_file, file_size)? {
+                        windows::BlockCloneOutcome::Cloned => {
+                            clone_success = true;
+                        }
+                        windows::BlockCloneOutcome::Unsupported { code } => {
+                            crate::fs_capability::mark_block_clone_unsupported(src, dst);
+                            log::debug!(
+                                "block clone unsupported for {} (error code {code}); falling back",
+                                dst.display()
+                            );
+                        }
+                        windows::BlockCloneOutcome::PrivilegeUnavailable => {
+                            log::trace!(
+                                "block clone privilege unavailable for {}; falling back",
+                                dst.display()
+                            );
+                        }
+                        windows::BlockCloneOutcome::Failed(err) => {
+                            log::debug!(
+                                "block clone streaming fallback for {} ({err})",
+                                dst.display()
+                            );
+                        }
+                    }
+                }
+                if clone_success {
                     file_size
                 } else {
                     // Sparse-aware streaming copy on Windows
@@ -278,91 +304,6 @@ pub fn copy_file(
             Err(e)
         }
     }
-}
-
-#[cfg(windows)]
-fn attempt_block_clone_windows(src: &File, dst: &File, file_size: u64) -> Result<bool> {
-    use std::mem::size_of;
-    use std::os::windows::io::AsRawHandle;
-    type HANDLE = isize;
-    type DWORD = u32;
-    type BOOL = i32;
-    type LPVOID = *mut core::ffi::c_void;
-    type LPOVERLAPPED = *mut core::ffi::c_void;
-
-    #[link(name = "Kernel32")]
-    extern "system" {
-        fn DeviceIoControl(
-            hDevice: HANDLE,
-            dwIoControlCode: DWORD,
-            lpInBuffer: LPVOID,
-            nInBufferSize: DWORD,
-            lpOutBuffer: LPVOID,
-            nOutBufferSize: DWORD,
-            lpBytesReturned: *mut DWORD,
-            lpOverlapped: LPOVERLAPPED,
-        ) -> BOOL;
-    }
-
-    const FILE_DEVICE_FILE_SYSTEM: DWORD = 0x00000009;
-    const METHOD_BUFFERED: DWORD = 0;
-    const FILE_ANY_ACCESS: DWORD = 0;
-    const FILE_SPECIAL_ACCESS: DWORD = FILE_ANY_ACCESS;
-    const FILE_WRITE_ACCESS: DWORD = 0x0002;
-    const fn ctl_code(device_type: DWORD, function: DWORD, method: DWORD, access: DWORD) -> DWORD {
-        (device_type << 16) | (access << 14) | (function << 2) | method
-    }
-    const FSCTL_DUPLICATE_EXTENTS_TO_FILE: DWORD = ctl_code(
-        FILE_DEVICE_FILE_SYSTEM,
-        623,
-        METHOD_BUFFERED,
-        FILE_WRITE_ACCESS,
-    );
-
-    #[allow(non_camel_case_types, non_snake_case)]
-    #[repr(C)]
-    struct LARGE_INTEGER {
-        QuadPart: i64,
-    }
-    #[allow(non_camel_case_types, non_snake_case)]
-    #[repr(C)]
-    struct DUPLICATE_EXTENTS_DATA {
-        FileHandle: HANDLE,
-        SourceFileOffset: LARGE_INTEGER,
-        TargetFileOffset: LARGE_INTEGER,
-        ByteCount: LARGE_INTEGER,
-    }
-
-    // Ensure destination length matches so clone can extend to size
-    dst.set_len(file_size)?;
-
-    let src_h = src.as_raw_handle() as isize;
-    let dst_h = dst.as_raw_handle() as isize;
-    let mut data = DUPLICATE_EXTENTS_DATA {
-        FileHandle: src_h,
-        SourceFileOffset: LARGE_INTEGER { QuadPart: 0 },
-        TargetFileOffset: LARGE_INTEGER { QuadPart: 0 },
-        ByteCount: LARGE_INTEGER {
-            QuadPart: file_size as i64,
-        },
-    };
-    let mut bytes: DWORD = 0;
-    // SAFETY: `dst_h` and `data` come from live `File` handles and stack storage scoped to this
-    // call; the buffer length passed matches the struct size and DeviceIoControl writes only
-    // through the provided pointer when the FSCTL succeeds.
-    let ok = unsafe {
-        DeviceIoControl(
-            dst_h,
-            FSCTL_DUPLICATE_EXTENTS_TO_FILE,
-            (&mut data as *mut DUPLICATE_EXTENTS_DATA).cast(),
-            size_of::<DUPLICATE_EXTENTS_DATA>() as DWORD,
-            core::ptr::null_mut(),
-            0,
-            &mut bytes,
-            core::ptr::null_mut(),
-        ) != 0
-    };
-    Ok(ok)
 }
 
 #[cfg(target_os = "macos")]

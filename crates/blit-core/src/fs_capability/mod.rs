@@ -13,6 +13,9 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
+#[cfg(windows)]
+pub(crate) use windows::{mark_block_clone_unsupported, supports_block_clone_same_volume};
+
 #[cfg(target_os = "macos")]
 pub use macos::MacOSCapability as PlatformCapability;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -51,6 +54,7 @@ pub struct Capabilities {
     pub acls: bool,
     pub sendfile: bool,
     pub copy_file_range: bool,
+    pub block_clone_same_volume: bool,
 }
 
 /// Result of fast copy attempt

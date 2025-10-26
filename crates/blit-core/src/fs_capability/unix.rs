@@ -18,6 +18,7 @@ impl UnixCapability {
                 acls: false,  // ACLs exist but complex to preserve correctly
                 sendfile: true,
                 copy_file_range: true, // Linux 4.5+
+                block_clone_same_volume: false,
             },
         }
     }

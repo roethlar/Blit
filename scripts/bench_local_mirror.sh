@@ -8,7 +8,19 @@ SIZE_MB=${SIZE_MB:-256}
 RUNS=${RUNS:-5}
 WARMUP=${WARMUP:-1}
 KEEP_WORK=${KEEP_BENCH_DIR:-1}
-WORK_ROOT=${BENCH_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/blit_v2_bench.XXXXXX")}
+
+# Honour BENCH_ROOT for backwards compatibility; otherwise allow BLIT_BENCH_ROOT
+# to specify the filesystem that should host the benchmark workspace.
+if [[ -n "${BENCH_ROOT:-}" ]]; then
+  WORK_ROOT="$BENCH_ROOT"
+else
+  if [[ -n "${BLIT_BENCH_ROOT:-}" ]]; then
+    mkdir -p "$BLIT_BENCH_ROOT"
+    WORK_ROOT=$(mktemp -d "${BLIT_BENCH_ROOT%/}/blit_v2_bench.XXXXXX")
+  else
+    WORK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/blit_v2_bench.XXXXXX")
+  fi
+fi
 
 TARGET_DIR=${CARGO_TARGET_DIR:-"$REPO_ROOT/target"}
 export CARGO_TARGET_DIR="$TARGET_DIR"
@@ -32,8 +44,14 @@ INCREMENTAL_ADD_COUNT=${INCREMENTAL_ADD_COUNT:-0}
 INCREMENTAL_ADD_BYTES=${INCREMENTAL_ADD_BYTES:-1024}
 _INCREMENTAL_APPLIED=0
 
-SRC_DIR=${SOURCE_DIR:?env SOURCE_DIR must point to the benchmark source directory}
-DEST_ROOT=${DEST_DIR:?env DEST_DIR must point to the benchmark destination root}
+if [[ -z "${SOURCE_DIR:-}" ]]; then
+  SOURCE_DIR="$WORK_ROOT/src"
+fi
+if [[ -z "${DEST_DIR:-}" ]]; then
+  DEST_DIR="$WORK_ROOT/dest"
+fi
+SRC_DIR="$SOURCE_DIR"
+DEST_ROOT="$DEST_DIR"
 LOG_FILE="$WORK_ROOT/bench.log"
 : >"$LOG_FILE"
 set -o pipefail

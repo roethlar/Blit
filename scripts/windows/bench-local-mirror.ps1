@@ -17,8 +17,34 @@ $RepoRoot = (Resolve-Path $RepoRoot).Path
 
 # Prepare workspace
 $guid = [Guid]::NewGuid().ToString("N")
-$workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("blit_v2_bench_$guid")
-[System.IO.Directory]::CreateDirectory($workRoot) | Out-Null
+
+function Resolve-BenchRoot {
+    param([string]$InputPath)
+    if ([string]::IsNullOrWhiteSpace($InputPath)) {
+        return $null
+    }
+    try {
+        return (Resolve-Path -Path $InputPath -ErrorAction Stop).Path
+    } catch {
+        [System.IO.Directory]::CreateDirectory($InputPath) | Out-Null
+        return (Resolve-Path -Path $InputPath).Path
+    }
+}
+
+$benchRoot = $null
+if (-not [string]::IsNullOrWhiteSpace($env:BENCH_ROOT)) {
+    $benchRoot = Resolve-BenchRoot $env:BENCH_ROOT
+} elseif (-not [string]::IsNullOrWhiteSpace($env:BLIT_BENCH_ROOT)) {
+    $benchRoot = Resolve-BenchRoot $env:BLIT_BENCH_ROOT
+}
+
+if ($benchRoot) {
+    $workRoot = Join-Path $benchRoot ("blit_v2_bench_$guid")
+    [System.IO.Directory]::CreateDirectory($workRoot) | Out-Null
+} else {
+    $workRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("blit_v2_bench_$guid")
+    [System.IO.Directory]::CreateDirectory($workRoot) | Out-Null
+}
 
 $srcDir = Join-Path $workRoot "src"
 $logFile = Join-Path $workRoot "bench.log"

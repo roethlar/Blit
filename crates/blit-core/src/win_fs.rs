@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{CloseHandle, HANDLE, LUID},
+        Foundation::{CloseHandle, GetLastError, HANDLE, LUID, WIN32_ERROR},
         Security::{
-            PrivilegeCheck, LUID_AND_ATTRIBUTES, PRIVILEGE_SET, SE_PRIVILEGE_ENABLED, TOKEN_QUERY,
+            AdjustTokenPrivileges, LookupPrivilegeValueW, PrivilegeCheck, LUID_AND_ATTRIBUTES,
+            PRIVILEGE_SET, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+            TOKEN_QUERY,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
@@ -105,8 +107,7 @@ pub fn has_symlink_privilege() -> bool {
 
         let privilege_name: PCWSTR = windows::core::w!("SeCreateSymbolicLinkPrivilege");
         let mut luid = LUID::default();
-        if windows::Win32::Security::LookupPrivilegeValueW(None, privilege_name, &mut luid).is_err()
-        {
+        if LookupPrivilegeValueW(None, privilege_name, &mut luid).is_err() {
             let _ = CloseHandle(token);
             return false;
         }
@@ -127,6 +128,44 @@ pub fn has_symlink_privilege() -> bool {
         let _ = CloseHandle(token);
 
         ok && has_privilege.as_bool()
+    }
+}
+
+/// Attempt to enable the `SeManageVolumePrivilege` required for block clone operations.
+///
+/// Returns `true` if the privilege is enabled or already present.
+pub fn enable_manage_volume_privilege() -> bool {
+    unsafe {
+        let mut token = HANDLE::default();
+        let desired_access = TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES;
+        if OpenProcessToken(GetCurrentProcess(), desired_access, &mut token).is_err() {
+            return false;
+        }
+
+        let privilege_name: PCWSTR = windows::core::w!("SeManageVolumePrivilege");
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(None, privilege_name, &mut luid).is_err() {
+            let _ = CloseHandle(token);
+            return false;
+        }
+
+        let mut privileges = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+
+        if AdjustTokenPrivileges(token, false, Some(&mut privileges), 0, None, None).is_err() {
+            let _ = CloseHandle(token);
+            return false;
+        }
+
+        let last_error = GetLastError();
+        let _ = CloseHandle(token);
+
+        last_error == WIN32_ERROR(0)
     }
 }
 
