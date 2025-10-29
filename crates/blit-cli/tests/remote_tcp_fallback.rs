@@ -140,7 +140,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         daemon_bin.display()
     );
 
-    let mut daemon = Command::new(&daemon_bin)
+    let daemon_child = Command::new(&daemon_bin)
         .arg("--config")
         .arg(&config_path)
         .arg("--force-grpc-data")
@@ -153,6 +153,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn daemon");
+    let mut daemon = ChildGuard::new(daemon_child);
 
     let mut ready = false;
     for _ in 0..50 {
@@ -175,8 +176,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         .arg(&dest_remote);
     let output = run_with_timeout(cli_cmd, Duration::from_secs(120));
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    daemon.terminate();
 
     if !output.status.success() {
         panic!(
@@ -218,6 +218,34 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Output
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+        }
+    }
+}
+
+struct ChildGuard {
+    child: Option<std::process::Child>,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self {
+            child: Some(child),
+        }
+    }
+
+    fn terminate(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
