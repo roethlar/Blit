@@ -7,6 +7,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 
 use serde::Serialize;
+use wait_timeout::ChildExt;
 
 #[derive(Serialize)]
 struct DaemonConfig {
@@ -164,15 +165,15 @@ fn remote_push_falls_back_to_grpc_when_forced() {
     assert!(ready, "daemon failed to listen on {port}");
 
     let dest_remote = format!("127.0.0.1:{}:/test/", port);
-    let output = Command::new(&cli_bin)
+    let mut cli_cmd = Command::new(&cli_bin);
+    cli_cmd
         .arg("--config-dir")
         .arg(&config_dir)
         .arg("mirror")
         .arg("--force-grpc")
         .arg(&src_dir)
-        .arg(&dest_remote)
-        .output()
-        .expect("run blit-cli");
+        .arg(&dest_remote);
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(120));
 
     let _ = daemon.kill();
     let _ = daemon.wait();
@@ -196,4 +197,27 @@ fn remote_push_falls_back_to_grpc_when_forced() {
     assert!(dest_file.exists(), "remote file missing");
     let bytes = fs::read(&dest_file).expect("read remote file");
     assert_eq!(bytes, b"fallback-test");
+}
+
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Output {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn command");
+
+    match child.wait_timeout(timeout).expect("wait for process") {
+        Some(_status) => child
+            .wait_with_output()
+            .expect("collect command output after completion"),
+        None => {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("collect output after killing command");
+            panic!(
+                "command timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
+                timeout,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

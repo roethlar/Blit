@@ -15,19 +15,22 @@ use clap::Parser;
 use rand::{rngs::OsRng, RngCore};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::convert::TryFrom;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{Cursor, ErrorKind};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use sysinfo::Disks;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 
 use eyre::{eyre, Context, Result};
+use tar::Archive;
 
 type PushSender = mpsc::Sender<Result<ServerPushResponse, Status>>;
 type PullSender = mpsc::Sender<Result<PullChunk, Status>>;
@@ -35,8 +38,8 @@ type FindSender = mpsc::Sender<Result<FindEntry, Status>>;
 type DiskUsageSender = mpsc::Sender<Result<DiskUsageEntry, Status>>;
 
 const TOKEN_LEN: usize = 32;
-const FILE_LIST_BATCH_TARGET_BYTES: usize = 3 * 1024 * 1024;
-const FILE_LIST_BATCH_MAX_ENTRIES: usize = 2048;
+const FILE_LIST_BATCH_MAX_ENTRIES: usize = 16 * 1024;
+const FILE_UPLOAD_CHANNEL_CAPACITY: usize = FILE_LIST_BATCH_MAX_ENTRIES * 16;
 
 struct FileListBatcher {
     tx: PushSender,
@@ -57,29 +60,16 @@ impl FileListBatcher {
         }
     }
 
-    async fn push(&mut self, path: String) -> Result<(), Status> {
+    async fn push(&mut self, path: String) -> Result<bool, Status> {
         let entry_bytes = path.as_bytes().len();
-        let would_exceed_size = self.batch_bytes + entry_bytes + 1 > FILE_LIST_BATCH_TARGET_BYTES;
-        let would_exceed_count = self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES;
-
-        if !self.batch.is_empty() && (would_exceed_size || would_exceed_count) {
-            self.flush().await?;
-        }
-
         if self.batch.is_empty() {
             self.last_flush = Instant::now();
         }
 
         self.batch_bytes = self.batch_bytes.saturating_add(entry_bytes + 1);
         self.batch.push(path);
-
-        let elapsed = self.last_flush.elapsed();
-        if !self.batch.is_empty()
-            && (!self.sent_any || elapsed >= Duration::from_secs(1) || self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES)
-        {
-            self.flush().await?;
-        }
-        Ok(())
+        self.flush().await?;
+        Ok(true)
     }
 
     async fn flush(&mut self) -> Result<(), Status> {
@@ -1436,6 +1426,12 @@ async fn handle_push_stream(
     let mut expected_rel_files: Vec<PathBuf> = Vec::new();
     let mut force_grpc_client = false;
     let mut need_list_sender = FileListBatcher::new(tx.clone());
+    let (upload_tx, upload_rx) = mpsc::channel::<FileHeader>(FILE_UPLOAD_CHANNEL_CAPACITY);
+    let mut upload_rx_opt = Some(upload_rx);
+    let mut data_plane_handle: Option<tokio::task::JoinHandle<Result<TransferStats, Status>>> =
+        None;
+    let mut force_grpc_effective = force_grpc_data;
+    let mut fallback_used = false;
 
     while let Some(request) = stream.message().await? {
         match request.payload {
@@ -1453,6 +1449,7 @@ async fn handle_push_stream(
                 }
                 mirror_mode = header.mirror_mode;
                 force_grpc_client = header.force_grpc;
+                force_grpc_effective = force_grpc_data || force_grpc_client;
                 let dest_path = header.destination_path.trim();
                 if !dest_path.is_empty() {
                     let rel = resolve_relative_path(dest_path)?;
@@ -1460,6 +1457,15 @@ async fn handle_push_stream(
                 }
                 module = Some(config);
                 send_control_message(&tx, server_push_response::Payload::Ack(Ack {})).await?;
+            }
+            Some(
+                client_push_request::Payload::TarShardHeader(_)
+                | client_push_request::Payload::TarShardChunk(_)
+                | client_push_request::Payload::TarShardComplete(_),
+            ) => {
+                return Err(Status::failed_precondition(
+                    "tar shard payload received before manifest enumeration completed",
+                ));
             }
             Some(client_push_request::Payload::FileManifest(mut file)) => {
                 let module_ref = module.as_ref().ok_or_else(|| {
@@ -1471,8 +1477,87 @@ async fn handle_push_stream(
 
                 if file_requires_upload(module_ref, &rel, &file)? {
                     file.relative_path = sanitized.clone();
-                    need_list_sender.push(sanitized).await?;
+                    upload_tx.send(file.clone()).await.map_err(|_| {
+                        eprintln!(
+                            "upload_tx send failed for {} (mirror_mode={})",
+                            sanitized, mirror_mode
+                        );
+                        Status::internal("failed to enqueue upload header")
+                    })?;
+                    let flushed = need_list_sender.push(sanitized).await?;
                     files_to_upload.push(file);
+                    if flushed && data_plane_handle.is_none() {
+                        if force_grpc_effective {
+                            fallback_used = true;
+                            send_control_message(
+                                &tx,
+                                server_push_response::Payload::Negotiation(
+                                    DataTransferNegotiation {
+                                        tcp_port: 0,
+                                        one_time_token: String::new(),
+                                        tcp_fallback: true,
+                                    },
+                                ),
+                            )
+                            .await?;
+                        } else {
+                            let listener = match bind_data_plane_listener().await {
+                                Ok(l) => l,
+                                Err(_) => {
+                                    fallback_used = true;
+                                    force_grpc_effective = true;
+                                    send_control_message(
+                                        &tx,
+                                        server_push_response::Payload::Negotiation(
+                                            DataTransferNegotiation {
+                                                tcp_port: 0,
+                                                one_time_token: String::new(),
+                                                tcp_fallback: true,
+                                            },
+                                        ),
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                            };
+
+                            let port = listener
+                                .local_addr()
+                                .map_err(|err| {
+                                    Status::internal(format!("querying listener addr: {}", err))
+                                })?
+                                .port();
+
+                            let token = generate_token();
+                            let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
+
+                            let module_for_transfer = module_ref.clone();
+
+                            let upload_rx =
+                                upload_rx_opt.take().expect("upload receiver already taken");
+
+                            let transfer_task = tokio::spawn(accept_data_connection_stream(
+                                listener,
+                                token.clone(),
+                                module_for_transfer,
+                                upload_rx,
+                            ));
+
+                            send_control_message(
+                                &tx,
+                                server_push_response::Payload::Negotiation(
+                                    DataTransferNegotiation {
+                                        tcp_port: port as u32,
+                                        one_time_token: token_string,
+                                        tcp_fallback: false,
+                                    },
+                                ),
+                            )
+                            .await?;
+
+                            data_plane_handle = Some(transfer_task);
+                        }
+                    }
                 }
             }
             Some(client_push_request::Payload::ManifestComplete(_)) => {
@@ -1498,62 +1583,53 @@ async fn handle_push_stream(
         ));
     }
 
+    drop(upload_tx);
     need_list_sender.finish().await?;
-    let files_requested = files_to_upload;
 
-    let force_grpc_effective = force_grpc_data || force_grpc_client;
-    let (transfer_stats, tcp_fallback_used) = if files_requested.is_empty() || force_grpc_effective
-    {
-        (
-            execute_grpc_fallback(&tx, &mut stream, &module, files_requested.clone()).await?,
-            true,
-        )
+    let force_grpc_effective = force_grpc_effective || force_grpc_client;
+
+    let transfer_stats = if files_to_upload.is_empty() {
+        TransferStats::default()
+    } else if force_grpc_effective {
+        fallback_used = true;
+        execute_grpc_fallback(&tx, &mut stream, &module, files_to_upload.clone()).await?
     } else {
-        match bind_data_plane_listener().await {
-            Ok(listener) => {
-                let port = listener
-                    .local_addr()
-                    .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
-                    .port();
+        if data_plane_handle.is_none() {
+            let listener = bind_data_plane_listener()
+                .await
+                .map_err(|err| Status::internal(format!("failed to bind data plane: {}", err)))?;
+            let port = listener
+                .local_addr()
+                .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
+                .port();
+            let token = generate_token();
+            let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
+            let upload_rx = upload_rx_opt.take().expect("upload receiver already taken");
+            let module_for_transfer = module.clone();
+            let transfer_task = tokio::spawn(accept_data_connection_stream(
+                listener,
+                token.clone(),
+                module_for_transfer,
+                upload_rx,
+            ));
+            send_control_message(
+                &tx,
+                server_push_response::Payload::Negotiation(DataTransferNegotiation {
+                    tcp_port: port as u32,
+                    one_time_token: token_string,
+                    tcp_fallback: false,
+                }),
+            )
+            .await?;
+            data_plane_handle = Some(transfer_task);
+        }
 
-                let token = generate_token();
-                let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
-
-                let (summary_tx, summary_rx) = oneshot::channel();
-                let module_for_transfer = module.clone();
-                let files_for_transfer = files_requested.clone();
-
-                tokio::spawn(async move {
-                    let result = accept_data_connection(
-                        listener,
-                        token,
-                        module_for_transfer,
-                        files_for_transfer,
-                    )
-                    .await;
-                    let _ = summary_tx.send(result);
-                });
-
-                send_control_message(
-                    &tx,
-                    server_push_response::Payload::Negotiation(DataTransferNegotiation {
-                        tcp_port: port as u32,
-                        one_time_token: token_string,
-                        tcp_fallback: false,
-                    }),
-                )
-                .await?;
-
-                let stats = summary_rx
-                    .await
-                    .map_err(|_| Status::internal("data plane task cancelled"))??;
-
-                (stats, false)
-            }
-            Err(_) => (
-                execute_grpc_fallback(&tx, &mut stream, &module, files_requested.clone()).await?,
-                true,
-            ),
+        if let Some(handle) = data_plane_handle.take() {
+            handle
+                .await
+                .map_err(|_| Status::internal("data plane task cancelled"))??
+        } else {
+            TransferStats::default()
         }
     };
 
@@ -1569,7 +1645,7 @@ async fn handle_push_stream(
             files_transferred: transfer_stats.files_transferred,
             bytes_transferred: transfer_stats.bytes_transferred,
             bytes_zero_copy: transfer_stats.bytes_zero_copy,
-            tcp_fallback_used,
+            tcp_fallback_used: fallback_used,
             entries_deleted,
         }),
     )
@@ -1712,11 +1788,11 @@ fn generate_token() -> Vec<u8> {
     buf
 }
 
-async fn accept_data_connection(
+async fn accept_data_connection_stream(
     listener: TcpListener,
     expected_token: Vec<u8>,
     module: ModuleConfig,
-    files: Vec<FileHeader>,
+    mut files: mpsc::Receiver<FileHeader>,
 ) -> Result<TransferStats, Status> {
     let (mut socket, _) = listener
         .accept()
@@ -1732,11 +1808,7 @@ async fn accept_data_connection(
         return Err(Status::permission_denied("invalid data plane token"));
     }
 
-    let mut pending: HashMap<String, FileHeader> = files
-        .into_iter()
-        .map(|header| (header.relative_path.clone(), header))
-        .collect();
-
+    let mut cache: HashMap<String, FileHeader> = HashMap::new();
     let mut stats = TransferStats::default();
 
     loop {
@@ -1753,9 +1825,31 @@ async fn accept_data_connection(
         let rel_string = String::from_utf8(path_bytes)
             .map_err(|_| Status::invalid_argument("data plane path not valid UTF-8"))?;
 
-        let header = pending
-            .remove(&rel_string)
-            .ok_or_else(|| Status::invalid_argument(format!("unexpected file '{}'", rel_string)))?;
+        let header = loop {
+            if let Some(header) = cache.remove(&rel_string) {
+                break header;
+            }
+            match files.recv().await {
+                Some(next) => {
+                    if next.relative_path == rel_string {
+                        break next;
+                    } else {
+                        cache.insert(next.relative_path.clone(), next);
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "data plane missing manifest entry for {} (cache len {})",
+                        rel_string,
+                        cache.len()
+                    );
+                    return Err(Status::invalid_argument(format!(
+                        "unexpected file '{}' with no manifest entry",
+                        rel_string
+                    )));
+                }
+            }
+        };
 
         let file_size = read_u64(&mut socket).await?;
         if file_size != header.size {
@@ -1792,8 +1886,8 @@ async fn accept_data_connection(
         stats.bytes_transferred += bytes_copied;
     }
 
-    if !pending.is_empty() {
-        let missing: Vec<String> = pending.into_keys().collect();
+    if !cache.is_empty() {
+        let missing: Vec<String> = cache.into_keys().collect();
         return Err(Status::internal(format!(
             "transfer incomplete; missing files: {:?}",
             missing
@@ -1820,15 +1914,25 @@ async fn receive_fallback_data(
         dest_path: PathBuf,
     }
 
-    let mut current: Option<ActiveFile> = None;
+    enum ActiveTransfer {
+        File(ActiveFile),
+        Tar {
+            headers: Vec<FileHeader>,
+            expected_size: u64,
+            received: u64,
+            buffer: Vec<u8>,
+        },
+    }
+
+    let mut active: Option<ActiveTransfer> = None;
     let mut stats = TransferStats::default();
 
     while let Some(req) = stream.message().await? {
         match req.payload {
             Some(client_push_request::Payload::FileManifest(header)) => {
-                if current.is_some() {
+                if active.is_some() {
                     return Err(Status::failed_precondition(
-                        "received new file manifest before completing prior file",
+                        "received new file manifest while another transfer is active",
                     ));
                 }
 
@@ -1838,6 +1942,13 @@ async fn receive_fallback_data(
                         header.relative_path
                     ))
                 })?;
+
+                if expected.size != header.size {
+                    return Err(Status::invalid_argument(format!(
+                        "size mismatch for '{}' (declared {}, expected {})",
+                        header.relative_path, header.size, expected.size
+                    )));
+                }
 
                 let rel_path = resolve_relative_path(&expected.relative_path)?;
                 let dest_path = module.path.join(&rel_path);
@@ -1856,40 +1967,160 @@ async fn receive_fallback_data(
                     continue;
                 }
 
-                let size = expected.size;
-                current = Some(ActiveFile {
+                let remaining = expected.size;
+                active = Some(ActiveTransfer::File(ActiveFile {
                     header: expected,
                     file,
-                    remaining: size,
+                    remaining,
                     dest_path,
+                }));
+            }
+            Some(client_push_request::Payload::FileData(data)) => match active.as_mut() {
+                Some(ActiveTransfer::File(active_file)) => {
+                    let chunk_len = data.content.len() as u64;
+                    if chunk_len > active_file.remaining {
+                        return Err(Status::invalid_argument(format!(
+                            "received {} bytes for '{}' but only {} bytes remain",
+                            chunk_len, active_file.header.relative_path, active_file.remaining
+                        )));
+                    }
+
+                    active_file
+                        .file
+                        .write_all(&data.content)
+                        .await
+                        .map_err(|err| {
+                            Status::internal(format!(
+                                "write {}: {}",
+                                active_file.dest_path.display(),
+                                err
+                            ))
+                        })?;
+
+                    active_file.remaining -= chunk_len;
+                    stats.bytes_transferred += chunk_len;
+
+                    if active_file.remaining == 0 {
+                        stats.files_transferred += 1;
+                        active = None;
+                    }
+                }
+                Some(ActiveTransfer::Tar { .. }) => {
+                    return Err(Status::invalid_argument(
+                        "file data received while a tar shard is active",
+                    ));
+                }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "file data received before file manifest",
+                    ));
+                }
+            },
+            Some(client_push_request::Payload::TarShardHeader(shard)) => {
+                if active.is_some() {
+                    return Err(Status::failed_precondition(
+                        "received tar shard header while another transfer is active",
+                    ));
+                }
+                if shard.files.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "tar shard header contained no files",
+                    ));
+                }
+
+                let mut headers: Vec<FileHeader> = Vec::with_capacity(shard.files.len());
+                for file_header in shard.files {
+                    let expected = pending.remove(&file_header.relative_path).ok_or_else(|| {
+                        Status::invalid_argument(format!(
+                            "tar shard referenced unexpected file '{}'",
+                            file_header.relative_path
+                        ))
+                    })?;
+                    if expected.size != file_header.size {
+                        return Err(Status::invalid_argument(format!(
+                            "tar shard size mismatch for '{}' (declared {}, expected {})",
+                            file_header.relative_path, file_header.size, expected.size
+                        )));
+                    }
+                    headers.push(expected);
+                }
+
+                let capacity = usize::try_from(shard.archive_size)
+                    .unwrap_or(usize::MAX)
+                    .min(8 * 1024 * 1024);
+                active = Some(ActiveTransfer::Tar {
+                    headers,
+                    expected_size: shard.archive_size,
+                    received: 0,
+                    buffer: Vec::with_capacity(capacity),
                 });
             }
-            Some(client_push_request::Payload::FileData(data)) => {
-                let active = current.as_mut().ok_or_else(|| {
-                    Status::invalid_argument("file data received before file manifest")
-                })?;
-
-                let chunk_len = data.content.len() as u64;
-                if chunk_len > active.remaining {
-                    return Err(Status::invalid_argument(format!(
-                        "received {} bytes for '{}' but only {} bytes remain",
-                        chunk_len, active.header.relative_path, active.remaining
-                    )));
+            Some(client_push_request::Payload::TarShardChunk(chunk)) => match active.as_mut() {
+                Some(ActiveTransfer::Tar {
+                    buffer,
+                    received,
+                    expected_size,
+                    ..
+                }) => {
+                    let chunk_len = chunk.content.len() as u64;
+                    let new_total = received.saturating_add(chunk_len);
+                    if *expected_size != 0 && new_total > *expected_size {
+                        return Err(Status::invalid_argument(format!(
+                            "tar shard chunk exceeds declared size ({} > {})",
+                            new_total, expected_size
+                        )));
+                    }
+                    buffer.extend_from_slice(&chunk.content);
+                    *received = new_total;
                 }
-
-                active.file.write_all(&data.content).await.map_err(|err| {
-                    Status::internal(format!("write {}: {}", active.dest_path.display(), err))
-                })?;
-
-                active.remaining -= chunk_len;
-                stats.bytes_transferred += chunk_len;
-
-                if active.remaining == 0 {
-                    stats.files_transferred += 1;
-                    current = None;
+                Some(ActiveTransfer::File(_)) => {
+                    return Err(Status::invalid_argument(
+                        "tar shard chunk received during file transfer",
+                    ));
                 }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "tar shard chunk received with no active shard",
+                    ));
+                }
+            },
+            Some(client_push_request::Payload::TarShardComplete(_)) => match active.take() {
+                Some(ActiveTransfer::Tar {
+                    headers,
+                    expected_size,
+                    received,
+                    buffer,
+                }) => {
+                    if expected_size != 0 && expected_size != received {
+                        return Err(Status::invalid_argument(format!(
+                            "tar shard ended with {} bytes received (expected {})",
+                            received, expected_size
+                        )));
+                    }
+                    let tar_stats = apply_tar_shard(module.clone(), headers, buffer).await?;
+                    stats.files_transferred += tar_stats.files_transferred;
+                    stats.bytes_transferred += tar_stats.bytes_transferred;
+                    stats.bytes_zero_copy += tar_stats.bytes_zero_copy;
+                }
+                Some(ActiveTransfer::File(_)) => {
+                    return Err(Status::invalid_argument(
+                        "tar shard complete received during file transfer",
+                    ));
+                }
+                None => {
+                    return Err(Status::invalid_argument(
+                        "tar shard complete received with no active shard",
+                    ));
+                }
+            },
+            Some(client_push_request::Payload::UploadComplete(_)) => {
+                if active.is_some() {
+                    return Err(Status::invalid_argument(
+                        "upload complete received while a transfer is still active",
+                    ));
+                }
+                break;
             }
-            Some(client_push_request::Payload::UploadComplete(_)) => break,
             Some(_) => {
                 return Err(Status::invalid_argument(
                     "unexpected message during fallback transfer",
@@ -1899,11 +2130,19 @@ async fn receive_fallback_data(
         }
     }
 
-    if let Some(active) = current {
-        return Err(Status::invalid_argument(format!(
-            "fallback transfer ended mid-file ({} bytes remaining for '{}')",
-            active.remaining, active.header.relative_path
-        )));
+    match active {
+        Some(ActiveTransfer::File(active_file)) => {
+            return Err(Status::invalid_argument(format!(
+                "fallback transfer ended mid-file ({} bytes remaining for '{}')",
+                active_file.remaining, active_file.header.relative_path
+            )));
+        }
+        Some(ActiveTransfer::Tar { .. }) => {
+            return Err(Status::invalid_argument(
+                "fallback transfer ended mid tar shard",
+            ));
+        }
+        None => {}
     }
 
     if !pending.is_empty() {
@@ -1936,6 +2175,72 @@ async fn execute_grpc_fallback(
     let stats = receive_fallback_data(stream, module, files_requested).await?;
 
     Ok(stats)
+}
+
+async fn apply_tar_shard(
+    module: ModuleConfig,
+    headers: Vec<FileHeader>,
+    buffer: Vec<u8>,
+) -> Result<TransferStats, Status> {
+    tokio::task::spawn_blocking(move || -> Result<TransferStats, Status> {
+        let mut expected: HashMap<String, FileHeader> = headers
+            .into_iter()
+            .map(|header| (header.relative_path.clone(), header))
+            .collect();
+
+        let mut archive = Archive::new(Cursor::new(buffer));
+        let mut stats = TransferStats::default();
+
+        let entries = archive
+            .entries()
+            .map_err(|err| Status::internal(format!("tar shard entries: {}", err)))?;
+        for entry_result in entries {
+            let mut entry = entry_result
+                .map_err(|err| Status::internal(format!("tar shard entry error: {}", err)))?;
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+
+            let rel_path = entry
+                .path()
+                .map_err(|err| Status::internal(format!("tar shard path error: {}", err)))?;
+            let rel_string = rel_path.to_string_lossy().replace('\\', "/");
+
+            let header = expected.remove(&rel_string).ok_or_else(|| {
+                Status::invalid_argument(format!(
+                    "tar shard produced unexpected entry '{}'",
+                    rel_string
+                ))
+            })?;
+
+            let resolved = resolve_relative_path(&rel_string)?;
+            let dest_path = module.path.join(&resolved);
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    Status::internal(format!("create dir {}: {}", parent.display(), err))
+                })?;
+            }
+
+            entry.unpack(&dest_path).map_err(|err| {
+                Status::internal(format!("unpack {}: {}", dest_path.display(), err))
+            })?;
+
+            stats.files_transferred += 1;
+            stats.bytes_transferred += header.size;
+        }
+
+        if !expected.is_empty() {
+            let missing: Vec<String> = expected.into_keys().collect();
+            return Err(Status::internal(format!(
+                "tar shard missing expected entries: {:?}",
+                missing
+            )));
+        }
+
+        Ok(stats)
+    })
+    .await
+    .map_err(|err| Status::internal(format!("tar shard worker failed: {}", err)))?
 }
 
 async fn stream_pull(

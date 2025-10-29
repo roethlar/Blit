@@ -54,6 +54,9 @@ message ClientPushRequest {
     ManifestComplete manifest_complete = 3;
     FileData file_data = 4;
     UploadComplete upload_complete = 5;
+    TarShardHeader tar_shard_header = 6;
+    TarShardChunk tar_shard_chunk = 7;
+    TarShardComplete tar_shard_complete = 8;
   }
 }
 
@@ -84,6 +87,17 @@ message FileHeader {
 message FileData {
   bytes content = 1;
 }
+
+message TarShardHeader {
+  repeated FileHeader files = 1;
+  uint64 archive_size = 2;
+}
+
+message TarShardChunk {
+  bytes content = 1;
+}
+
+message TarShardComplete {}
 
 message ManifestComplete {}
 message UploadComplete {}
