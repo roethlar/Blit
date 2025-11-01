@@ -206,7 +206,11 @@ async fn run_remote_push_transfer(
             )
         })?;
 
-    describe_push_result(&report, &format_remote_endpoint(&remote));
+    describe_push_result(
+        &report,
+        &format_remote_endpoint(&remote),
+        args.progress || args.verbose,
+    );
     Ok(())
 }
 
@@ -244,7 +248,7 @@ fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
     );
 }
 
-fn describe_push_result(report: &RemotePushReport, destination: &str) {
+fn describe_push_result(report: &RemotePushReport, destination: &str, show_first_payload: bool) {
     let file_count = report.files_requested.len();
     if file_count == 0 {
         println!(
@@ -280,6 +284,11 @@ fn describe_push_result(report: &RemotePushReport, destination: &str) {
             ""
         }
     );
+    if show_first_payload {
+        if let Some(elapsed) = report.first_payload_elapsed {
+            println!("First payload dispatched after {:.2?}.", elapsed);
+        }
+    }
     if summary.entries_deleted > 0 {
         let plural = if summary.entries_deleted == 1 {
             ""

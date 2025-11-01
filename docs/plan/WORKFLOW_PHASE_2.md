@@ -11,6 +11,7 @@
 - Planner flushes batches incrementally; stall detector aborts with clear messaging after 10 s of inactivity.
 - CLI remains quiet by default; orchestrator exposes progress events for GUIs/verbose listeners.
 - Telemetry log and `blit diagnostics perf` work; predictor adjusts routing automatically.
+- Remote transfers expose first-payload latency via `--progress`/`--verbose` so benchmarks can confirm < 1 s start.
 - All unit/integration tests (including new fast-path scenarios) pass; benchmarks meet Phase 2.5 targets.
 
 ## Guiding Principles

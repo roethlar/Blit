@@ -16,6 +16,7 @@ use crate::remote::endpoint::RemoteEndpoint;
 use eyre::{bail, Result};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -49,6 +50,9 @@ impl RemotePushClient {
         if !source_root.exists() {
             bail!("source path does not exist: {}", source_root.display());
         }
+
+        let start = Instant::now();
+        let mut first_payload_elapsed: Option<Duration> = None;
 
         let mut manifest_lookup: HashMap<String, FileHeader> = HashMap::new();
 
@@ -129,15 +133,20 @@ impl RemotePushClient {
                                     match transfer_mode {
                                         TransferMode::Fallback => {
                                             if need_list_received {
-                                                let sent = stream_fallback_from_queue(
+                                                let result = stream_fallback_from_queue(
                                                     source_root,
                                                     &mut pending_queue,
                                                     &manifest_lookup,
                                                     &tx,
                                                 ).await?;
-                                                if sent > 0 {
+                                                if result.files_sent > 0 {
                                                     fallback_files_sent =
-                                                        fallback_files_sent.saturating_add(sent);
+                                                        fallback_files_sent.saturating_add(result.files_sent);
+                                                }
+                                                if result.payloads_dispatched
+                                                    && first_payload_elapsed.is_none()
+                                                {
+                                                    first_payload_elapsed = Some(start.elapsed());
                                                 }
                                             }
                                         }
@@ -151,6 +160,9 @@ impl RemotePushClient {
                                                     if !payloads.is_empty() {
                                                         let sent = payload_file_count(&payloads);
                                                         session.send_payloads(source_root, payloads).await?;
+                                                        if sent > 0 && first_payload_elapsed.is_none() {
+                                                            first_payload_elapsed = Some(start.elapsed());
+                                                        }
                                                         data_plane_outstanding =
                                                             data_plane_outstanding.saturating_sub(sent);
                                                     }
@@ -166,15 +178,20 @@ impl RemotePushClient {
                                         transfer_mode = TransferMode::Fallback;
 
                                         if need_list_received {
-                                            let sent = stream_fallback_from_queue(
+                                            let result = stream_fallback_from_queue(
                                                 source_root,
                                                 &mut pending_queue,
                                                 &manifest_lookup,
                                                 &tx,
                                             ).await?;
-                                            if sent > 0 {
+                                            if result.files_sent > 0 {
                                                 fallback_files_sent =
-                                                    fallback_files_sent.saturating_add(sent);
+                                                    fallback_files_sent.saturating_add(result.files_sent);
+                                            }
+                                            if result.payloads_dispatched
+                                                && first_payload_elapsed.is_none()
+                                            {
+                                                first_payload_elapsed = Some(start.elapsed());
                                             }
                                         }
 
@@ -207,6 +224,9 @@ impl RemotePushClient {
                                                 if !payloads.is_empty() {
                                                     let sent = payload_file_count(&payloads);
                                                     session.send_payloads(source_root, payloads).await?;
+                                                    if sent > 0 && first_payload_elapsed.is_none() {
+                                                        first_payload_elapsed = Some(start.elapsed());
+                                                    }
                                                     data_plane_outstanding =
                                                         data_plane_outstanding.saturating_sub(sent);
                                                 }
@@ -217,16 +237,19 @@ impl RemotePushClient {
                                         } else if let Some(session) = data_plane_session.as_mut() {
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
-                                            if !headers.is_empty() {
-                                                let payloads =
-                                                    plan_transfer_payloads(headers, source_root)?;
-                                                if !payloads.is_empty() {
-                                                    let sent = payload_file_count(&payloads);
-                                                    session.send_payloads(source_root, payloads).await?;
-                                                    data_plane_outstanding =
-                                                        data_plane_outstanding.saturating_sub(sent);
+                                        if !headers.is_empty() {
+                                            let payloads =
+                                                plan_transfer_payloads(headers, source_root)?;
+                                            if !payloads.is_empty() {
+                                                let sent = payload_file_count(&payloads);
+                                                session.send_payloads(source_root, payloads).await?;
+                                                if sent > 0 && first_payload_elapsed.is_none() {
+                                                    first_payload_elapsed = Some(start.elapsed());
                                                 }
+                                                data_plane_outstanding =
+                                                    data_plane_outstanding.saturating_sub(sent);
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -250,15 +273,20 @@ impl RemotePushClient {
                             match transfer_mode {
                                 TransferMode::Fallback => {
                                     if need_list_received {
-                                        let sent = stream_fallback_from_queue(
+                                        let result = stream_fallback_from_queue(
                                             source_root,
                                             &mut pending_queue,
                                             &manifest_lookup,
                                             &tx,
                                         ).await?;
-                                        if sent > 0 {
+                                        if result.files_sent > 0 {
                                             fallback_files_sent =
-                                                fallback_files_sent.saturating_add(sent);
+                                                fallback_files_sent.saturating_add(result.files_sent);
+                                        }
+                                        if result.payloads_dispatched
+                                            && first_payload_elapsed.is_none()
+                                        {
+                                            first_payload_elapsed = Some(start.elapsed());
                                         }
                                     }
                                 }
@@ -272,6 +300,9 @@ impl RemotePushClient {
                                             if !payloads.is_empty() {
                                                 let sent = payload_file_count(&payloads);
                                                 session.send_payloads(source_root, payloads).await?;
+                                                if sent > 0 && first_payload_elapsed.is_none() {
+                                                    first_payload_elapsed = Some(start.elapsed());
+                                                }
                                                 data_plane_outstanding =
                                                     data_plane_outstanding.saturating_sub(sent);
                                             }
@@ -336,6 +367,7 @@ impl RemotePushClient {
             fallback_used,
             data_port,
             summary,
+            first_payload_elapsed,
         })
     }
 }
@@ -345,19 +377,37 @@ async fn stream_fallback_from_queue(
     pending_queue: &mut VecDeque<String>,
     manifest_lookup: &HashMap<String, FileHeader>,
     tx: &mpsc::Sender<ClientPushRequest>,
-) -> Result<usize> {
+) -> Result<FallbackStreamResult> {
     let headers = drain_pending_headers(pending_queue, manifest_lookup);
     if headers.is_empty() {
-        return Ok(0);
+        return Ok(FallbackStreamResult::empty());
     }
 
     let payloads = plan_transfer_payloads(headers, source_root)?;
     if payloads.is_empty() {
-        return Ok(0);
+        return Ok(FallbackStreamResult::empty());
     }
 
     let sent = payload_file_count(&payloads);
     transfer_payloads_via_control_plane(source_root, payloads, tx, false).await?;
 
-    Ok(sent)
+    Ok(FallbackStreamResult {
+        files_sent: sent,
+        payloads_dispatched: true,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FallbackStreamResult {
+    files_sent: usize,
+    payloads_dispatched: bool,
+}
+
+impl FallbackStreamResult {
+    fn empty() -> Self {
+        Self {
+            files_sent: 0,
+            payloads_dispatched: false,
+        }
+    }
 }
