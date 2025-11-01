@@ -98,15 +98,25 @@ No hard blockers at this moment; focus is aligning implementation with plan v6 r
   - Wire mDNS advertising + discovery on top of the new config loader.
 
 3. **Phase 2 Finishing Work**  
-   - Complete CLI progress UX clean-up and debugging messages.  
-   - Expand integration tests and document planner/predictor behaviour.  
-   - Run benchmark warm-up experiments and log results.
+ - Complete CLI progress UX clean-up and debugging messages.  
+  - Expand integration tests and document planner/predictor behaviour.  
+  - Run benchmark warm-up experiments and log results.
+  - ✅ Daemon service/data plane modules extracted (`runtime.rs` + `service.rs`) so `main.rs` now just boots config/mdns/server (2025-10-27).  
+  - ✅ CLI split into dedicated modules (`cli.rs`, `context.rs`, `diagnostics.rs`, `scan.rs`, `list.rs`, `transfers.rs`) leaving `main.rs` as a thin dispatcher (2025-10-27).  
+  - ✅ Utilities binary modularised (`cli.rs`, `util.rs`, and per-verb modules) so `blit-utils/src/main.rs` only dispatches commands (2025-10-27).  
+  - ✅ Core copy subsystem refactored (`compare.rs`, `file_copy.rs`, `parallel.rs`, `stats.rs`) with platform helpers isolated; public API re-exported from a slim `mod.rs` (2025-10-27).  
+  - ✅ Change journal reorganised into `change_journal/{types,snapshot,tracker,util}.rs`, keeping platform probes and persistence manageable (2025-10-28).  
+  - ✅ Transfer facade rewritten under `transfer_facade/{types,aggregator,planner}.rs`, leaving only re-exports in `mod.rs` (2025-10-28).  
+  - ✅ Remote push client split across `client/{mod,types,helpers}` plus shared tasks (2025-10-28).  
+  - ✅ Remote push streaming now flushes need-list batches immediately; gRPC fallback streams file data mid-manifest to satisfy the <1 s first-byte requirement (2025-10-28).  
+  - ☐ Capture cross-platform benchmarks validating the sub-second start guarantee and document the procedure in Phase 2 workflow docs.
 
 4. **Phase 3 Expansion**  
-   - Implement remote transfer support using new CLI verbs (hybrid transport + fallback).  
-   - Expose admin RPCs for `find`, `du`, `df`, `rm`, etc.  
-   - Add remote integration tests (Linux/Windows/macOS) covering CLI + blit-utils flows.
-   - Streaming manifest/need-list landed (2025-10-26); follow-up: add large-manifest stress tests + document memory/throughput results.
+  - Implement remote transfer support using new CLI verbs (hybrid transport + fallback).  
+  - Expose admin RPCs for `find`, `du`, `df`, `rm`, etc.  
+  - Add remote integration tests (Linux/Windows/macOS) covering CLI + blit-utils flows.
+  - Remote data plane + fallback now batch small files into tar shards (2025-10-27); verify large-manifest stress tests once implemented.
+  - Streaming manifest/need-list landed (2025-10-26); follow-up: add large-manifest stress tests + document memory/throughput results.
 
 5. **Documentation Sweep**  
    - Update all workflow docs (`WORKFLOW_PHASE_2/2.5/3/4.md`) to match plan v6 terminology and deliverables.  

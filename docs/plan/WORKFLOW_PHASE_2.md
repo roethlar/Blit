@@ -92,6 +92,8 @@
 - [x] CLI progress indicator + flag cleanup in place.
 - [ ] New unit/integration tests pass.
     - Local run: `cargo test --all-targets` (2025-10-18)
+    - Local run: `cargo test -p blit-core`; `cargo test -p blit-cli` (2025-10-27)
     - Remote CI pending (runs once repo is hosted)
 - [ ] Benchmarks executed and recorded in Phase 2.5 doc.
+- [ ] Remote push streaming validated (<1 s first-byte) across Linux/macOS/Windows with logs captured.
 - [ ] DEVLOG and docs updated with outcomes.

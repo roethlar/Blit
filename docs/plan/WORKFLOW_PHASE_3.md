@@ -41,7 +41,7 @@
 | Task | Description | Deliverable |
 |------|-------------|-------------|
 | 3.3.1 | Finalise `proto/blit.proto` to include hybrid transport negotiation (`DataTransferNegotiation`, summary fields) and admin RPCs (`ListModules`, directory listing, recursive enumeration, disk usage, remote remove). | Updated proto + regenerated Rust code. |
-| 3.3.2 | Implement daemon-side control plane: accept negotiates, spawn TCP listener, issue secure tokens, enforce read-only/chroot, stream Pull responses. | `blit-daemon/src/main.rs` updated; tests for negotiation + fallback. |
+| 3.3.2 | Implement daemon-side control plane: accept negotiates, spawn TCP listener, issue secure tokens, enforce read-only/chroot, stream Pull responses. | ✅ Logic now lives in `service.rs` (split out of `main.rs` on 2025-10-27); tests cover negotiation + fallback. |
 | 3.3.3 | Implement TCP data plane server (zero-copy when available, buffered fallback). | Data-plane module + unit tests. |
 | 3.3.4 | Implement CLI data plane client: token validation, gRPC fallback, progress events. | `blit-cli` transport layer + integration tests. |
 | 3.3.5 | Handle gRPC fallback automatically when TCP negotiation fails; emit warning and continue. | ✅ 2025-10-25 – integration test (`remote_tcp_fallback`) forces client `--force-grpc` and asserts CLI reports `[gRPC fallback]` with files mirrored. |
@@ -61,7 +61,7 @@
 | 3.4.6 | Stream manifest/need-list handling to avoid materialising large payloads (blocker). | ✅ 2025-10-26 – Remote push manifest streaming + chunked gRPC fallback landed; stress-test follow-up tracked in TODO. |
 | 3.4.5 | Integrate `profile` command with local performance history (read-only insights). | CLI output + documentation. |
 
-*Status 2025-10-26*: Remote push manifest/need-list streaming now avoids Vec allocation and feeds the daemon incrementally; gRPC fallback streams file data in 1 MiB chunks. Purge RPC + `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Daemon advertises `_blit._tcp.local.` by default and `blit scan`/`blit-utils scan` consume the results. Admin RPCs (`Find`, `DiskUsage`, `FilesystemStats`, `CompletePath`) and the corresponding `blit-utils` verbs are in place. Windows USN journal checkpoints drive the incremental fast-path (3.3.6); macOS FSEvents verification remains pending.
+*Status 2025-10-27*: Remote push manifest/need-list streaming now avoids Vec allocation and feeds the daemon incrementally; both the TCP data plane and gRPC fallback batch small files into tar shards, removing per-file overhead. Purge RPC + `blit-utils rm` landed (with confirmation prompts). Remote mirror pushes reuse the purge helper to delete extraneous files (summary reports `entries_deleted`). Daemon advertises `_blit._tcp.local.` by default and `blit scan`/`blit-utils scan` consume the results. Admin RPCs (`Find`, `DiskUsage`, `FilesystemStats`, `CompletePath`) and the corresponding `blit-utils` verbs are in place. Windows USN journal checkpoints drive the incremental fast-path (3.3.6); macOS FSEvents verification remains pending. CLI and utilities entrypoints refactored into dedicated modules so each `main.rs` is now a thin dispatcher.
 
 ### 3.5 Testing & Validation
 | Task | Description | Deliverable |

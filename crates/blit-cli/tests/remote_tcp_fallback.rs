@@ -103,37 +103,35 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         };
         bin_dir.join(name)
     };
-    if !daemon_bin.exists() {
-        let maybe_target = bin_dir
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|component| component.to_string_lossy().to_string());
+    let maybe_target = bin_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|component| component.to_string_lossy().to_string());
 
-        let mut build = Command::new("cargo");
-        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        build.current_dir(workspace_root);
-        build
-            .arg("build")
-            .arg("-p")
-            .arg("blit-daemon")
-            .arg("--bin")
-            .arg("blit-daemon");
-        if let Some(triple) = maybe_target {
-            if triple != "target" {
-                build.arg("--target").arg(triple);
-            }
+    let mut build = Command::new("cargo");
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    build.current_dir(workspace_root);
+    build
+        .arg("build")
+        .arg("-p")
+        .arg("blit-daemon")
+        .arg("--bin")
+        .arg("blit-daemon");
+    if let Some(triple) = maybe_target {
+        if triple != "target" {
+            build.arg("--target").arg(triple);
         }
-        let output = build.output().expect("invoke cargo build for blit-daemon");
-        assert!(
-            output.status.success(),
-            "cargo build blit-daemon failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
+    let output = build.output().expect("invoke cargo build for blit-daemon");
+    assert!(
+        output.status.success(),
+        "cargo build blit-daemon failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         daemon_bin.exists(),
         "expected daemon binary at {}",
@@ -228,9 +226,7 @@ struct ChildGuard {
 
 impl ChildGuard {
     fn new(child: std::process::Child) -> Self {
-        Self {
-            child: Some(child),
-        }
+        Self { child: Some(child) }
     }
 
     fn terminate(&mut self) {

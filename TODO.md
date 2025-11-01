@@ -71,8 +71,19 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [x] Update benchmark harnesses to honour `BLIT_BENCH_ROOT` (or similar) so Windows runs stay on the intended filesystem; document TEMP/TMP requirement in workflow docs. *(2025-10-26: scripts respect BLIT_BENCH_ROOT; workflow tip added.)*
 - [ ] Prototype clone-only metadata fast path on Windows (skip redundant attribute sync + reduce IOCTL overhead) and compare against robocopy using ETW traces (`logs/windows/refs_clone_profile_20251026T022401Z.etl`).
 - [x] Implement streaming manifest/need-list for remote push so arbitrarily large file sets do not exhaust RAM (see memory `manifest_streaming_plan`). *(2025-10-26: CLI streams manifests over mpsc channel with back-pressure; daemon batches need list incrementally; control-plane fallback reads files in 1 MiB chunks.)*
-- [ ] Add large-manifest stress test (≥1 M entries) to validate streaming push memory footprint and throughput; capture logs/metrics.
+- [x] Bundle remote transfers (TCP data plane + gRPC fallback) into tar shards so small files aren't shipped one-by-one. *(2025-10-27: Extended proto with `TarShard{Header,Chunk,Complete}`; CLI plans shard batches, TCP data plane streams them with new record types, daemon unpacks incrementally; `remote_tcp_fallback` test now time-bounded.)*
+- [ ] Add large-manifest stress test (≥1 M entries) to validate streaming push memory footprint, <1 s transfer start, and throughput; capture logs/metrics with CLI/daemon traces.
+- [ ] Benchmark remote fallback + data-plane streaming on Linux/macOS/Windows to confirm sub-second first-byte timings and document results in workflows.
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
+- [ ] Refactor oversized sources into AI-manageable modules:
+    - [x] Split `crates/blit-daemon/src/main.rs` (service wiring, data plane handlers, admin RPCs). *(2025-10-27: introduced `runtime.rs` for config/args and `service.rs` for gRPC/data plane; main now only boots the server.)*
+    - [x] Break down `crates/blit-cli/src/main.rs` (argument parsing vs command execution). *(2025-10-27: extracted `cli.rs`, `context.rs`, `diagnostics.rs`, `scan.rs`, `list.rs`, and `transfers.rs`; main now wires modules only.)*
+    - [x] Decompose `crates/blit-core/src/copy/` (move platform-specific helpers into submodules). *(2025-10-27: split into `compare.rs`, `file_copy.rs`, `parallel.rs`, `stats.rs`, keeping platform helpers isolated; `mod.rs` now re-exports public API.)*
+    - [x] Split `crates/blit-utils/src/main.rs` (verb dispatch vs helpers). *(2025-10-27: introduced `cli.rs`, `util.rs`, and verb modules `scan/list_modules/ls/find/du/df/completions/rm/profile`; main now dispatches only.)*
+    - [ ] Extract helpers from `crates/blit-core/src/change_journal.rs`, `transfer_facade.rs`, and `remote/push/client.rs` below 500 lines.
+        - [x] `change_journal` split into `types/snapshot/tracker/util` (2025-10-28).
+        - [x] `transfer_facade` modularised into `types/aggregator/planner` (2025-10-28).
+        - [x] `remote/push/client.rs` reorganised into `client/{mod,types,helpers}` with spawn helpers (2025-10-28).
 - [x] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback. *(2025-10-25: integration test `remote_tcp_fallback` forces `--force-grpc-data` and verifies CLI output + successful transfer.)*
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
 - [ ] Capture remote benchmark runs (TCP vs forced gRPC fallback) and log results.
