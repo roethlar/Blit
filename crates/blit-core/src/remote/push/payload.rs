@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eyre::{bail, eyre, Context, Result};
+use futures::{stream, StreamExt};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
@@ -13,6 +14,7 @@ use crate::generated::{
     ClientPushRequest, FileData, FileHeader, TarShardChunk, TarShardComplete, TarShardHeader,
     UploadComplete,
 };
+use crate::remote::push::client::RemotePushProgress;
 use crate::transfer_plan::{self, PlanOptions, TransferTask};
 use tar::{Builder, EntryType, Header};
 
@@ -23,6 +25,35 @@ pub(crate) enum TransferPayload {
     File(FileHeader),
     TarShard { headers: Vec<FileHeader> },
 }
+
+pub(crate) async fn prepare_payload(
+    payload: TransferPayload,
+    source_root: PathBuf,
+) -> Result<PreparedPayload> {
+    match payload {
+        TransferPayload::File(header) => Ok(PreparedPayload::File(header)),
+        TransferPayload::TarShard { headers } => {
+            let headers_clone = headers.clone();
+            let source_root_clone = source_root.clone();
+            let data =
+                task::spawn_blocking(move || build_tar_shard(&source_root_clone, &headers_clone))
+                    .await
+                    .map_err(|err| eyre!("tar shard worker failed: {err}"))??;
+            Ok(PreparedPayload::TarShard { headers, data })
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PreparedPayload {
+    File(FileHeader),
+    TarShard {
+        headers: Vec<FileHeader>,
+        data: Vec<u8>,
+    },
+}
+
+pub(crate) const PAYLOAD_PREFETCH: usize = 8;
 
 pub(crate) fn plan_transfer_payloads(
     headers: Vec<FileHeader>,
@@ -106,15 +137,26 @@ pub(crate) async fn transfer_payloads_via_control_plane(
     payloads: Vec<TransferPayload>,
     tx: &mpsc::Sender<ClientPushRequest>,
     finish: bool,
+    progress: Option<&RemotePushProgress>,
 ) -> Result<()> {
     let mut buffer = vec![0u8; CONTROL_PLANE_CHUNK_SIZE];
+    let root_buf = source_root.to_path_buf();
 
-    for payload in payloads {
-        match payload {
-            TransferPayload::File(header) => {
+    let mut prepared_stream = stream::iter(payloads.into_iter().map(|payload| {
+        let root = root_buf.clone();
+        async move { prepare_payload(payload, root).await }
+    }))
+    .buffered(PAYLOAD_PREFETCH);
+
+    while let Some(prepared) = prepared_stream.next().await {
+        match prepared? {
+            PreparedPayload::File(header) => {
                 send_payload(tx, ClientPayload::FileManifest(header.clone())).await?;
 
                 if header.size == 0 {
+                    if let Some(progress) = progress {
+                        progress.report_payload(1, 0);
+                    }
                     continue;
                 }
 
@@ -145,17 +187,16 @@ pub(crate) async fn transfer_payloads_via_control_plane(
                         }),
                     )
                     .await?;
+                    if let Some(progress) = progress {
+                        progress.report_payload(0, chunk as u64);
+                    }
                     remaining -= chunk as u64;
                 }
+                if let Some(progress) = progress {
+                    progress.report_payload(1, 0);
+                }
             }
-            TransferPayload::TarShard { headers } => {
-                let source_root = source_root.to_path_buf();
-                let headers_clone = headers.clone();
-                let data =
-                    task::spawn_blocking(move || build_tar_shard(&source_root, &headers_clone))
-                        .await
-                        .map_err(|err| eyre!("tar shard worker failed: {err}"))??;
-
+            PreparedPayload::TarShard { headers, data } => {
                 send_payload(
                     tx,
                     ClientPayload::TarShardHeader(TarShardHeader {
@@ -173,9 +214,15 @@ pub(crate) async fn transfer_payloads_via_control_plane(
                         }),
                     )
                     .await?;
+                    if let Some(progress) = progress {
+                        progress.report_payload(0, chunk.len() as u64);
+                    }
                 }
 
                 send_payload(tx, ClientPayload::TarShardComplete(TarShardComplete {})).await?;
+                if let Some(progress) = progress {
+                    progress.report_payload(headers.len(), 0);
+                }
             }
         }
     }

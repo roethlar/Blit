@@ -2,4 +2,4 @@ mod client;
 mod data_plane;
 mod payload;
 
-pub use client::{RemotePushClient, RemotePushReport};
+pub use client::{ProgressEvent, RemotePushClient, RemotePushProgress, RemotePushReport};

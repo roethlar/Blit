@@ -110,6 +110,7 @@ No hard blockers at this moment; focus is aligning implementation with plan v6 r
   - ✅ Remote push client split across `client/{mod,types,helpers}` plus shared tasks (2025-10-28).  
   - ✅ Remote push streaming now flushes need-list batches immediately; gRPC fallback streams file data mid-manifest to satisfy the <1 s first-byte requirement (2025-10-28).  
   - ✅ Remote push instrumentation reports first-payload latency (visible with `--progress`/`--verbose`) to support benchmark capture (2025-10-28).  
+  - ✅ CLI `-p/--progress` stream now shows remote throughput (manifest counts, MiB totals, avg/current MiB/s) so long enumerations still surface data movement (2025-10-28).  
   - ☐ Capture cross-platform benchmarks validating the sub-second start guarantee and document the procedure in Phase 2 workflow docs.
 
 4. **Phase 3 Expansion**  

@@ -1,7 +1,7 @@
 mod helpers;
 mod types;
 
-pub use types::{RemotePushReport, TransferMode};
+pub use types::{ProgressEvent, RemotePushProgress, RemotePushReport, TransferMode};
 
 use self::helpers::{
     decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
@@ -46,6 +46,7 @@ impl RemotePushClient {
         filter: &FileFilter,
         mirror_mode: bool,
         force_grpc: bool,
+        progress: Option<&RemotePushProgress>,
     ) -> Result<RemotePushReport> {
         if !source_root.exists() {
             bail!("source path does not exist: {}", source_root.display());
@@ -130,6 +131,12 @@ impl RemotePushClient {
                                             data_plane_outstanding.saturating_add(newly_requested);
                                     }
 
+                                    if let Some(progress) = progress {
+                                        if newly_requested > 0 {
+                                            progress.report_manifest_batch(newly_requested);
+                                        }
+                                    }
+
                                     match transfer_mode {
                                         TransferMode::Fallback => {
                                             if need_list_received {
@@ -138,6 +145,7 @@ impl RemotePushClient {
                                                     &mut pending_queue,
                                                     &manifest_lookup,
                                                     &tx,
+                                                    progress,
                                                 ).await?;
                                                 if result.files_sent > 0 {
                                                     fallback_files_sent =
@@ -159,7 +167,9 @@ impl RemotePushClient {
                                                         plan_transfer_payloads(headers, source_root)?;
                                                     if !payloads.is_empty() {
                                                         let sent = payload_file_count(&payloads);
-                                                        session.send_payloads(source_root, payloads).await?;
+                                                        session
+                                                            .send_payloads(source_root, payloads)
+                                                            .await?;
                                                         if sent > 0 && first_payload_elapsed.is_none() {
                                                             first_payload_elapsed = Some(start.elapsed());
                                                         }
@@ -178,12 +188,13 @@ impl RemotePushClient {
                                         transfer_mode = TransferMode::Fallback;
 
                                         if need_list_received {
-                                            let result = stream_fallback_from_queue(
-                                                source_root,
-                                                &mut pending_queue,
-                                                &manifest_lookup,
-                                                &tx,
-                                            ).await?;
+                                        let result = stream_fallback_from_queue(
+                                            source_root,
+                                            &mut pending_queue,
+                                            &manifest_lookup,
+                                            &tx,
+                                            progress,
+                                        ).await?;
                                             if result.files_sent > 0 {
                                                 fallback_files_sent =
                                                     fallback_files_sent.saturating_add(result.files_sent);
@@ -223,7 +234,9 @@ impl RemotePushClient {
                                                     plan_transfer_payloads(headers, source_root)?;
                                                 if !payloads.is_empty() {
                                                     let sent = payload_file_count(&payloads);
-                                                    session.send_payloads(source_root, payloads).await?;
+                                                    session
+                                                        .send_payloads(source_root, payloads)
+                                                        .await?;
                                                     if sent > 0 && first_payload_elapsed.is_none() {
                                                         first_payload_elapsed = Some(start.elapsed());
                                                     }
@@ -242,7 +255,9 @@ impl RemotePushClient {
                                                 plan_transfer_payloads(headers, source_root)?;
                                             if !payloads.is_empty() {
                                                 let sent = payload_file_count(&payloads);
-                                                session.send_payloads(source_root, payloads).await?;
+                                                session
+                                                    .send_payloads(source_root, payloads)
+                                                    .await?;
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
@@ -278,6 +293,7 @@ impl RemotePushClient {
                                             &mut pending_queue,
                                             &manifest_lookup,
                                             &tx,
+                                            progress,
                                         ).await?;
                                         if result.files_sent > 0 {
                                             fallback_files_sent =
@@ -299,7 +315,9 @@ impl RemotePushClient {
                                                 plan_transfer_payloads(headers, source_root)?;
                                             if !payloads.is_empty() {
                                                 let sent = payload_file_count(&payloads);
-                                                session.send_payloads(source_root, payloads).await?;
+                                                session
+                                                    .send_payloads(source_root, payloads)
+                                                    .await?;
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
@@ -327,7 +345,14 @@ impl RemotePushClient {
                     && pending_queue.is_empty()
                     && (files_requested.is_empty() || fallback_files_sent >= files_requested.len())
                 {
-                    transfer_payloads_via_control_plane(source_root, Vec::new(), &tx, true).await?;
+                    transfer_payloads_via_control_plane(
+                        source_root,
+                        Vec::new(),
+                        &tx,
+                        true,
+                        progress,
+                    )
+                    .await?;
                     fallback_upload_complete_sent = true;
                 }
             }
@@ -377,6 +402,7 @@ async fn stream_fallback_from_queue(
     pending_queue: &mut VecDeque<String>,
     manifest_lookup: &HashMap<String, FileHeader>,
     tx: &mpsc::Sender<ClientPushRequest>,
+    progress: Option<&RemotePushProgress>,
 ) -> Result<FallbackStreamResult> {
     let headers = drain_pending_headers(pending_queue, manifest_lookup);
     if headers.is_empty() {
@@ -389,7 +415,7 @@ async fn stream_fallback_from_queue(
     }
 
     let sent = payload_file_count(&payloads);
-    transfer_payloads_via_control_plane(source_root, payloads, tx, false).await?;
+    transfer_payloads_via_control_plane(source_root, payloads, tx, false, progress).await?;
 
     Ok(FallbackStreamResult {
         files_sent: sent,
