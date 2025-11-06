@@ -6,6 +6,8 @@
 
 **2025-10-27 23:59:00Z** - **ACTION**: Refactored `blit-core::copy` to keep files under 500 LOC. Moved comparison helpers to `compare.rs`, copy execution to `file_copy.rs`, parallel orchestration to `parallel.rs`, and stats into `stats.rs`; `mod.rs` now just re-exports and the existing `windows.rs` remains for platform hooks. Ensured high-level functions (`copy_file`, `chunked_copy_file`, `mmap_copy_file`, `parallel_copy_files`, `file_needs_copy*`) retain their public API. Updated TODO/state docs. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
 
+**2025-10-28 22:05:00Z** - **ACTION**: Parallelised daemon tar-shard handling so streaming mirrors no longer block while unpacking. Introduced `TarShardExecutor` (bounded `JoinSet` with semaphore) that decodes shards on `spawn_blocking`, accumulates stats as workers finish, and reuses the same path for gRPC fallback. Throughput validation on `skippy`/`mycroft` still pending once new binaries are deployed. **Tests**: `cargo fmt`; `cargo check -p blit-daemon`.
+
 **2025-10-28 00:10:00Z** - **ACTION**: Modularised the change journal. Split the single file into `change_journal/{mod,types,snapshot,tracker,util}.rs`, isolating platform capture logic per OS and keeping `ChangeTracker` implementation focused on persistence + probing. Orchestrator now consumes the same re-exported API. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
 
 **2025-10-28 00:18:00Z** - **ACTION**: Refactored `transfer_facade` into directory modules. Added `types.rs` for plan structures/streams, `aggregator.rs` for task batching + tests, and `planner.rs` housing the `TransferFacade` impl; `mod.rs` now re-exports the public surface. **Tests**: `cargo fmt`; `cargo check -p blit-core`.

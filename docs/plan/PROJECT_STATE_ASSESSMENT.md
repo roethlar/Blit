@@ -58,6 +58,7 @@ Blit v2 continues under the Feature Completeness & Transport plan (v6). Core-loc
   - Remote pull end-to-end (daemon streams files; CLI writes to destination) with forced gRPC fallback tests (Windows/macOS).  
   - Proto extensions (`DataTransferNegotiation`, enriched summaries).  
   - Windows CopyFileEx improvements validated via wingpt logs.  
+  - Remote push manifest/need-list streaming with tar-shard batching, now backed by the daemon-side `TarShardExecutor` so shard decode happens in parallel while the TCP stream continues.  
 - **Outstanding relative to Plan v6**:  
   - CLI verb realignment (remove `push`/`pull`, restore `copy`/`mirror`/`move` remote paths, `scan`, `list`).  
   - Canonical URL parser updates to `server:/module/...` / `server://...`.  
@@ -66,6 +67,7 @@ Blit v2 continues under the Feature Completeness & Transport plan (v6). Core-loc
   - mDNS advertisement integration + discovery tests.  
   - Admin RPCs backing the utilities (list modules/paths, recursive enumeration, disk usage, remote delete).  
   - Integration tests covering remote transfer + admin verbs.  
+  - Benchmark the parallel tar-shard path on Linux/Windows/macOS targets (skippy/mycroft) and capture logs to prove sub-second first-byte + line-rate throughput.  
 
 ### Phase 4 – Production Hardening (Not Started)
 - Tasks to plan: packaging, platform docs, integration suites, service installation guidance.

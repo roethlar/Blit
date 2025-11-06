@@ -24,7 +24,8 @@ use sysinfo::Disks;
 use tar::Archive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::task::JoinSet;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -39,6 +40,88 @@ const FILE_UPLOAD_CHANNEL_CAPACITY: usize = FILE_LIST_BATCH_MAX_ENTRIES * 16;
 const DATA_PLANE_RECORD_FILE: u8 = 0;
 const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
 const DATA_PLANE_RECORD_END: u8 = 0xFF;
+const MAX_PARALLEL_TAR_TASKS: usize = 4;
+
+struct TarShardExecutor {
+    semaphore: Arc<Semaphore>,
+    tasks: JoinSet<Result<TransferStats, Status>>,
+}
+
+impl TarShardExecutor {
+    fn new(max_parallel: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(max_parallel)),
+            tasks: JoinSet::new(),
+        }
+    }
+
+    async fn spawn(
+        &mut self,
+        module: ModuleConfig,
+        headers: Vec<FileHeader>,
+        buffer: Vec<u8>,
+    ) -> Result<(), Status> {
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|err| {
+                Status::internal(format!("tar shard semaphore closed unexpectedly: {}", err))
+            })?;
+
+        self.tasks.spawn(async move {
+            let _permit = permit;
+            tokio::task::spawn_blocking(move || apply_tar_shard_sync(module, headers, buffer))
+                .await
+                .map_err(|err| Status::internal(format!("tar shard worker panicked: {}", err)))?
+        });
+
+        Ok(())
+    }
+
+    fn drain_ready(&mut self, stats: &mut TransferStats) -> Result<(), Status> {
+        while let Some(join_result) = self.tasks.try_join_next() {
+            let shard_stats = convert_join_result(join_result)?;
+            accumulate_transfer_stats(stats, &shard_stats);
+        }
+        Ok(())
+    }
+
+    async fn finish(mut self, stats: &mut TransferStats) -> Result<(), Status> {
+        while self.tasks.len() > 0 {
+            self.collect_next(stats).await?;
+        }
+        Ok(())
+    }
+
+    async fn collect_next(&mut self, stats: &mut TransferStats) -> Result<(), Status> {
+        if let Some(join_result) = self.tasks.join_next().await {
+            let shard_stats = convert_join_result(join_result)?;
+            accumulate_transfer_stats(stats, &shard_stats);
+        }
+        Ok(())
+    }
+}
+
+fn convert_join_result(
+    join_result: Result<Result<TransferStats, Status>, tokio::task::JoinError>,
+) -> Result<TransferStats, Status> {
+    match join_result {
+        Ok(Ok(stats)) => Ok(stats),
+        Ok(Err(status)) => Err(status),
+        Err(err) => Err(Status::internal(format!(
+            "tar shard worker panicked: {}",
+            err
+        ))),
+    }
+}
+
+fn accumulate_transfer_stats(target: &mut TransferStats, shard: &TransferStats) {
+    target.files_transferred += shard.files_transferred;
+    target.bytes_transferred += shard.bytes_transferred;
+    target.bytes_zero_copy += shard.bytes_zero_copy;
+}
 
 struct FileListBatcher {
     tx: PushSender,
@@ -1474,8 +1557,11 @@ async fn accept_data_connection_stream(
 
     let mut cache: HashMap<String, FileHeader> = HashMap::new();
     let mut stats = TransferStats::default();
+    let mut tar_executor = TarShardExecutor::new(MAX_PARALLEL_TAR_TASKS);
 
     loop {
+        tar_executor.drain_ready(&mut stats)?;
+
         let mut kind_buf = [0u8; 1];
         if let Err(err) = socket.read_exact(&mut kind_buf).await {
             return Err(Status::internal(format!(
@@ -1572,10 +1658,8 @@ async fn accept_data_connection_stream(
                     Status::internal(format!("failed to read tar shard bytes: {}", err))
                 })?;
 
-                let shard_stats = apply_tar_shard(module.clone(), headers, buffer).await?;
-                stats.files_transferred += shard_stats.files_transferred;
-                stats.bytes_transferred += shard_stats.bytes_transferred;
-                stats.bytes_zero_copy += shard_stats.bytes_zero_copy;
+                tar_executor.spawn(module.clone(), headers, buffer).await?;
+                tar_executor.drain_ready(&mut stats)?;
             }
             DATA_PLANE_RECORD_END => break,
             other => {
@@ -1586,6 +1670,8 @@ async fn accept_data_connection_stream(
             }
         }
     }
+
+    tar_executor.finish(&mut stats).await?;
 
     if !cache.is_empty() {
         let missing: Vec<String> = cache.into_keys().collect();
@@ -1650,8 +1736,10 @@ async fn receive_fallback_data(
 
     let mut active: Option<ActiveTransfer> = None;
     let mut stats = TransferStats::default();
+    let mut tar_executor = TarShardExecutor::new(MAX_PARALLEL_TAR_TASKS);
 
     while let Some(req) = stream.message().await? {
+        tar_executor.drain_ready(&mut stats)?;
         match req.payload {
             Some(client_push_request::Payload::FileManifest(header)) => {
                 if active.is_some() {
@@ -1821,10 +1909,8 @@ async fn receive_fallback_data(
                             received, expected_size
                         )));
                     }
-                    let tar_stats = apply_tar_shard(module.clone(), headers, buffer).await?;
-                    stats.files_transferred += tar_stats.files_transferred;
-                    stats.bytes_transferred += tar_stats.bytes_transferred;
-                    stats.bytes_zero_copy += tar_stats.bytes_zero_copy;
+                    tar_executor.spawn(module.clone(), headers, buffer).await?;
+                    tar_executor.drain_ready(&mut stats)?;
                 }
                 Some(ActiveTransfer::File(_)) => {
                     return Err(Status::invalid_argument(
@@ -1853,6 +1939,8 @@ async fn receive_fallback_data(
             None => break,
         }
     }
+
+    tar_executor.finish(&mut stats).await?;
 
     match active {
         Some(ActiveTransfer::File(active_file)) => {
@@ -1901,70 +1989,66 @@ async fn execute_grpc_fallback(
     Ok(stats)
 }
 
-async fn apply_tar_shard(
+fn apply_tar_shard_sync(
     module: ModuleConfig,
     headers: Vec<FileHeader>,
     buffer: Vec<u8>,
 ) -> Result<TransferStats, Status> {
-    tokio::task::spawn_blocking(move || -> Result<TransferStats, Status> {
-        let mut expected: HashMap<String, FileHeader> = headers
-            .into_iter()
-            .map(|header| (header.relative_path.clone(), header))
-            .collect();
+    let mut expected: HashMap<String, FileHeader> = headers
+        .into_iter()
+        .map(|header| (header.relative_path.clone(), header))
+        .collect();
 
-        let mut archive = Archive::new(Cursor::new(buffer));
-        let mut stats = TransferStats::default();
+    let mut archive = Archive::new(Cursor::new(buffer));
+    let mut stats = TransferStats::default();
 
-        let entries = archive
-            .entries()
-            .map_err(|err| Status::internal(format!("tar shard entries: {}", err)))?;
-        for entry_result in entries {
-            let mut entry = entry_result
-                .map_err(|err| Status::internal(format!("tar shard entry error: {}", err)))?;
-            if entry.header().entry_type().is_dir() {
-                continue;
-            }
-
-            let rel_path = entry
-                .path()
-                .map_err(|err| Status::internal(format!("tar shard path error: {}", err)))?;
-            let rel_string = rel_path.to_string_lossy().replace('\\', "/");
-
-            let header = expected.remove(&rel_string).ok_or_else(|| {
-                Status::invalid_argument(format!(
-                    "tar shard produced unexpected entry '{}'",
-                    rel_string
-                ))
-            })?;
-
-            let resolved = resolve_relative_path(&rel_string)?;
-            let dest_path = module.path.join(&resolved);
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    Status::internal(format!("create dir {}: {}", parent.display(), err))
-                })?;
-            }
-
-            entry.unpack(&dest_path).map_err(|err| {
-                Status::internal(format!("unpack {}: {}", dest_path.display(), err))
-            })?;
-
-            stats.files_transferred += 1;
-            stats.bytes_transferred += header.size;
+    let entries = archive
+        .entries()
+        .map_err(|err| Status::internal(format!("tar shard entries: {}", err)))?;
+    for entry_result in entries {
+        let mut entry = entry_result
+            .map_err(|err| Status::internal(format!("tar shard entry error: {}", err)))?;
+        if entry.header().entry_type().is_dir() {
+            continue;
         }
 
-        if !expected.is_empty() {
-            let missing: Vec<String> = expected.into_keys().collect();
-            return Err(Status::internal(format!(
-                "tar shard missing expected entries: {:?}",
-                missing
-            )));
+        let rel_path = entry
+            .path()
+            .map_err(|err| Status::internal(format!("tar shard path error: {}", err)))?;
+        let rel_string = rel_path.to_string_lossy().replace('\\', "/");
+
+        let header = expected.remove(&rel_string).ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "tar shard produced unexpected entry '{}'",
+                rel_string
+            ))
+        })?;
+
+        let resolved = resolve_relative_path(&rel_string)?;
+        let dest_path = module.path.join(&resolved);
+        if let Some(parent) = dest_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                Status::internal(format!("create dir {}: {}", parent.display(), err))
+            })?;
         }
 
-        Ok(stats)
-    })
-    .await
-    .map_err(|err| Status::internal(format!("tar shard worker failed: {}", err)))?
+        entry
+            .unpack(&dest_path)
+            .map_err(|err| Status::internal(format!("unpack {}: {}", dest_path.display(), err)))?;
+
+        stats.files_transferred += 1;
+        stats.bytes_transferred += header.size;
+    }
+
+    if !expected.is_empty() {
+        let missing: Vec<String> = expected.into_keys().collect();
+        return Err(Status::internal(format!(
+            "tar shard missing expected entries: {:?}",
+            missing
+        )));
+    }
+
+    Ok(stats)
 }
 
 async fn stream_pull(
