@@ -110,6 +110,9 @@ No hard blockers at this moment; focus is aligning implementation with plan v6 r
   - ✅ Change journal reorganised into `change_journal/{types,snapshot,tracker,util}.rs`, keeping platform probes and persistence manageable (2025-10-28).  
   - ✅ Transfer facade rewritten under `transfer_facade/{types,aggregator,planner}.rs`, leaving only re-exports in `mod.rs` (2025-10-28).  
   - ✅ Remote push client split across `client/{mod,types,helpers}` plus shared tasks (2025-10-28).  
+  - ✅ Daemon service split across `service/{core,push,pull,admin,util}` with a dedicated data-plane helper (2025-10-28).  
+  - ✅ CLI transfer orchestration moved into `transfers/{mod,endpoints,remote,local}` (2025-10-28).  
+  - ✅ `copy/file_copy` broken into `file_copy/{clone,metadata,mmap,chunked}` while re-exporting the same public API (2025-10-28).  
   - ✅ Remote push streaming now flushes need-list batches immediately; gRPC fallback streams file data mid-manifest to satisfy the <1 s first-byte requirement (2025-10-28).  
   - ✅ Remote push instrumentation reports first-payload latency (visible with `--progress`/`--verbose`) to support benchmark capture (2025-10-28).  
   - ✅ CLI `-p/--progress` stream now shows remote throughput (manifest counts, MiB totals, avg/current MiB/s) so long enumerations still surface data movement (2025-10-28).  

@@ -8,6 +8,8 @@
 
 **2025-10-28 22:05:00Z** - **ACTION**: Parallelised daemon tar-shard handling so streaming mirrors no longer block while unpacking. Introduced `TarShardExecutor` (bounded `JoinSet` with semaphore) that decodes shards on `spawn_blocking`, accumulates stats as workers finish, and reuses the same path for gRPC fallback. Throughput validation on `skippy`/`mycroft` still pending once new binaries are deployed. **Tests**: `cargo fmt`; `cargo check -p blit-daemon`.
 
+**2025-10-28 23:20:00Z** - **ACTION**: Split `blit-daemon` service logic into modules (`core`, `push`, `pull`, `admin`, `util`, plus a `push::data_plane` helper). `main.rs` still instantiates `BlitService`, but each file now stays well under 400 LOC and the TCP/GPRC handling is easier to navigate. **Tests**: `cargo fmt`; `cargo check -p blit-daemon`.
+
 **2025-10-28 00:10:00Z** - **ACTION**: Modularised the change journal. Split the single file into `change_journal/{mod,types,snapshot,tracker,util}.rs`, isolating platform capture logic per OS and keeping `ChangeTracker` implementation focused on persistence + probing. Orchestrator now consumes the same re-exported API. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
 
 **2025-10-28 00:18:00Z** - **ACTION**: Refactored `transfer_facade` into directory modules. Added `types.rs` for plan structures/streams, `aggregator.rs` for task batching + tests, and `planner.rs` housing the `TransferFacade` impl; `mod.rs` now re-exports the public surface. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
@@ -68,3 +70,8 @@
 **2025-10-28 01:55:00Z** - **ACTION**: Instrumented remote push to capture first-payload latency. `RemotePushReport` now records the elapsed time to the first transferred payload (data-plane or fallback), and `blit-cli` prints the metric when `--progress` or `--verbose` is supplied. This supports the Phase 2 requirement to document <1 s first-byte delivery across platforms. **Tests**: `cargo fmt -p blit-core -p blit-cli`; `cargo check -p blit-core`; `cargo check -p blit-cli`.
 
 **2025-10-28 02:20:00Z** - **ACTION**: Added live throughput output for remote transfers. When CLI runs with `-p/--progress` (or `-v`), the new progress channel streams manifest batches and payload byte counts, letting the CLI print rolling MiB totals plus average/current MiB/s while data moves. Works for both TCP data-plane and gRPC fallback paths. **Tests**: `cargo fmt -p blit-core -p blit-cli`; `cargo check -p blit-core`; `cargo check -p blit-cli`; `timeout 120s cargo test -p blit-cli remote_tcp_fallback -- --nocapture`.
+**2025-10-28 23:35:00Z** - **ACTION**: Broke the CLI transfer handler into modules. `crates/blit-cli/src/transfers/` now holds `mod.rs` plus focused `endpoints`, `remote`, and `local` helpers, keeping each file <250 LOC and preserving the existing tests. **Tests**: `cargo fmt`; `cargo check -p blit-cli`.
+
+**2025-10-28 23:40:00Z** - **ACTION**: Split the orchestrator into `options.rs`, `summary.rs`, and `orchestrator.rs`. The public API stays the same (`TransferOrchestrator`, `LocalMirrorOptions`, `LocalMirrorSummary`) while fast-path/history modules remain untouched. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
+
+**2025-10-28 23:45:00Z** - **ACTION**: Refactored `copy/file_copy.rs` into submodules (`clone`, `metadata`, `mmap`, `chunked`) so the streaming copy logic, metadata helpers, and platform-specific code are easier to reason about. `copy_file`, `mmap_copy_file`, and `chunked_copy_file` re-export unchanged. **Tests**: `cargo fmt`; `cargo check -p blit-core`.

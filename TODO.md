@@ -82,9 +82,12 @@ This is the master checklist. Execute the first unchecked item. After completion
     - [x] Decompose `crates/blit-core/src/copy/` (move platform-specific helpers into submodules). *(2025-10-27: split into `compare.rs`, `file_copy.rs`, `parallel.rs`, `stats.rs`, keeping platform helpers isolated; `mod.rs` now re-exports public API.)*
     - [x] Split `crates/blit-utils/src/main.rs` (verb dispatch vs helpers). *(2025-10-27: introduced `cli.rs`, `util.rs`, and verb modules `scan/list_modules/ls/find/du/df/completions/rm/profile`; main now dispatches only.)*
     - [ ] Extract helpers from `crates/blit-core/src/change_journal.rs`, `transfer_facade.rs`, and `remote/push/client.rs` below 500 lines.
-        - [x] `change_journal` split into `types/snapshot/tracker/util` (2025-10-28).
-        - [x] `transfer_facade` modularised into `types/aggregator/planner` (2025-10-28).
-        - [x] `remote/push/client.rs` reorganised into `client/{mod,types,helpers}` with spawn helpers (2025-10-28).
+    - [x] `change_journal` split into `types/snapshot/tracker/util` (2025-10-28).
+    - [x] `transfer_facade` modularised into `types/aggregator/planner` (2025-10-28).
+    - [x] `remote/push/client.rs` reorganised into `client/{mod,types,helpers}` with spawn helpers (2025-10-28).
+    - [x] Break `crates/blit-cli/src/transfers.rs` into module directory (`mod.rs` + `endpoints`, `remote`, `local`, `mmap`) to keep files under 400 LOC (2025-10-28).
+    - [x] Split `crates/blit-core/src/orchestrator/mod.rs` into `options.rs`, `summary.rs`, and `orchestrator.rs` alongside existing helpers (2025-10-28).
+    - [x] Restructure `crates/blit-core/src/copy/file_copy.rs` into submodules (`clone`, `metadata`, `mmap`, `chunked`) so each stays <300 LOC (2025-10-28).
 - [x] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback. *(2025-10-25: integration test `remote_tcp_fallback` forces `--force-grpc-data` and verifies CLI output + successful transfer.)*
 - [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
 - [ ] Capture remote benchmark runs (TCP vs forced gRPC fallback) and log results.
