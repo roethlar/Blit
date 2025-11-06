@@ -155,8 +155,6 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub use remote::{describe_pull_result, describe_push_result};
-
 #[cfg(test)]
 mod tests {
     use super::*;
