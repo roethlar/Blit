@@ -16,11 +16,13 @@ use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tonic::{Status, Streaming};
 
 const FILE_LIST_BATCH_MAX_ENTRIES: usize = 16 * 1024;
+const FILE_LIST_BATCH_MAX_BYTES: usize = 512 * 1024;
+const FILE_LIST_BATCH_MAX_DELAY: Duration = Duration::from_millis(25);
 const FILE_UPLOAD_CHANNEL_CAPACITY: usize = FILE_LIST_BATCH_MAX_ENTRIES * 16;
 
 pub(crate) async fn handle_push_stream(
@@ -290,8 +292,13 @@ impl FileListBatcher {
 
         self.batch_bytes = self.batch_bytes.saturating_add(entry_bytes + 1);
         self.batch.push(path);
-        self.flush().await?;
-        Ok(true)
+
+        if self.should_flush() {
+            self.flush().await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     async fn flush(&mut self) -> Result<(), Status> {
@@ -321,6 +328,12 @@ impl FileListBatcher {
             .await?;
         }
         Ok(())
+    }
+
+    fn should_flush(&self) -> bool {
+        self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES
+            || self.batch_bytes >= FILE_LIST_BATCH_MAX_BYTES
+            || (!self.batch.is_empty() && self.last_flush.elapsed() >= FILE_LIST_BATCH_MAX_DELAY)
     }
 }
 

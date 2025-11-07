@@ -132,6 +132,17 @@ pub(crate) fn payload_file_count(payloads: &[TransferPayload]) -> usize {
         .sum()
 }
 
+pub(crate) fn prepared_payload_stream(
+    payloads: Vec<TransferPayload>,
+    source_root: PathBuf,
+) -> impl futures::Stream<Item = Result<PreparedPayload>> {
+    stream::iter(payloads.into_iter().map(move |payload| {
+        let root = source_root.clone();
+        async move { prepare_payload(payload, root).await }
+    }))
+    .buffered(PAYLOAD_PREFETCH)
+}
+
 pub(crate) async fn transfer_payloads_via_control_plane(
     source_root: &Path,
     payloads: Vec<TransferPayload>,
@@ -140,13 +151,7 @@ pub(crate) async fn transfer_payloads_via_control_plane(
     progress: Option<&RemotePushProgress>,
 ) -> Result<()> {
     let mut buffer = vec![0u8; CONTROL_PLANE_CHUNK_SIZE];
-    let root_buf = source_root.to_path_buf();
-
-    let mut prepared_stream = stream::iter(payloads.into_iter().map(|payload| {
-        let root = root_buf.clone();
-        async move { prepare_payload(payload, root).await }
-    }))
-    .buffered(PAYLOAD_PREFETCH);
+    let mut prepared_stream = prepared_payload_stream(payloads, source_root.to_path_buf());
 
     while let Some(prepared) = prepared_stream.next().await {
         match prepared? {

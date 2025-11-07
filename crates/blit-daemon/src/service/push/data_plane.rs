@@ -52,10 +52,11 @@ pub(crate) async fn accept_data_connection_stream(
     module: ModuleConfig,
     mut files: mpsc::Receiver<FileHeader>,
 ) -> Result<TransferStats, Status> {
-    let (mut socket, _) = listener
+    let (mut socket, addr) = listener
         .accept()
         .await
         .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
+    eprintln!("[data-plane] accepted connection from {}", addr);
 
     let mut token_buf = vec![0u8; expected_token.len()];
     socket
@@ -63,6 +64,7 @@ pub(crate) async fn accept_data_connection_stream(
         .await
         .map_err(|err| Status::internal(format!("failed to read data plane token: {}", err)))?;
     if token_buf != expected_token {
+        eprintln!("[data-plane] invalid token from {}", addr);
         return Err(Status::permission_denied("invalid data plane token"));
     }
 
@@ -75,6 +77,7 @@ pub(crate) async fn accept_data_connection_stream(
 
         let mut kind_buf = [0u8; 1];
         if let Err(err) = socket.read_exact(&mut kind_buf).await {
+            eprintln!("[data-plane] read tag error: {}", err);
             return Err(Status::internal(format!(
                 "failed to read data plane record tag: {}",
                 err
@@ -86,6 +89,7 @@ pub(crate) async fn accept_data_connection_stream(
                 let path_len = read_u32(&mut socket).await?;
                 let mut path_bytes = vec![0u8; path_len as usize];
                 socket.read_exact(&mut path_bytes).await.map_err(|err| {
+                    eprintln!("[data-plane] read path bytes error: {}", err);
                     Status::internal(format!("failed to read path bytes: {}", err))
                 })?;
                 let rel_string = String::from_utf8(path_bytes)
@@ -95,6 +99,10 @@ pub(crate) async fn accept_data_connection_stream(
 
                 let file_size = read_u64(&mut socket).await?;
                 if file_size != header.size {
+                    eprintln!(
+                        "[data-plane] size mismatch for {} (declared {}, expected {})",
+                        rel_string, file_size, header.size
+                    );
                     return Err(Status::invalid_argument(format!(
                         "size mismatch for {} (declared {}, expected {})",
                         rel_string, file_size, header.size
@@ -105,11 +113,13 @@ pub(crate) async fn accept_data_connection_stream(
 
                 if let Some(parent) = dest_path.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|err| {
+                        eprintln!("[data-plane] create dir {}: {}", parent.display(), err);
                         Status::internal(format!("create dir {}: {}", parent.display(), err))
                     })?;
                 }
 
                 let mut file = tokio::fs::File::create(&dest_path).await.map_err(|err| {
+                    eprintln!("[data-plane] create file {}: {}", dest_path.display(), err);
                     Status::internal(format!("create file {}: {}", dest_path.display(), err))
                 })?;
 
@@ -118,9 +128,14 @@ pub(crate) async fn accept_data_connection_stream(
                     tokio::io::copy(&mut limited, &mut file)
                         .await
                         .map_err(|err| {
+                            eprintln!("[data-plane] writing {}: {}", dest_path.display(), err);
                             Status::internal(format!("writing {}: {}", dest_path.display(), err))
                         })?;
                 if bytes_copied != file_size {
+                    eprintln!(
+                        "[data-plane] short transfer for {} (expected {} bytes, received {})",
+                        rel_string, file_size, bytes_copied
+                    );
                     return Err(Status::internal(format!(
                         "short transfer for {} (expected {} bytes, received {})",
                         rel_string, file_size, bytes_copied
@@ -138,6 +153,7 @@ pub(crate) async fn accept_data_connection_stream(
                     let path_len = read_u32(&mut socket).await?;
                     let mut path_bytes = vec![0u8; path_len as usize];
                     socket.read_exact(&mut path_bytes).await.map_err(|err| {
+                        eprintln!("[data-plane] read shard path bytes error: {}", err);
                         Status::internal(format!("failed to read shard path bytes: {}", err))
                     })?;
                     let rel_string = String::from_utf8(path_bytes)
@@ -154,6 +170,10 @@ pub(crate) async fn accept_data_connection_stream(
                         || header.mtime_seconds != expected_mtime
                         || header.permissions != expected_permissions
                     {
+                        eprintln!(
+                            "[data-plane] tar shard metadata mismatch for '{}'",
+                            rel_string
+                        );
                         return Err(Status::invalid_argument(format!(
                             "tar shard metadata mismatch for '{}'",
                             rel_string
@@ -166,6 +186,7 @@ pub(crate) async fn accept_data_connection_stream(
                 let tar_len = read_u64(&mut socket).await?;
                 let mut buffer = vec![0u8; tar_len as usize];
                 socket.read_exact(&mut buffer).await.map_err(|err| {
+                    eprintln!("[data-plane] read tar shard bytes error: {}", err);
                     Status::internal(format!("failed to read tar shard bytes: {}", err))
                 })?;
 
@@ -174,10 +195,11 @@ pub(crate) async fn accept_data_connection_stream(
             }
             DATA_PLANE_RECORD_END => break,
             other => {
+                eprintln!("[data-plane] unknown record type: {}", other);
                 return Err(Status::invalid_argument(format!(
                     "unknown data plane record type: {}",
                     other
-                )))
+                )));
             }
         }
     }
@@ -211,9 +233,14 @@ pub(crate) async fn next_data_plane_header(
         cache.insert(header.relative_path.clone(), header);
     }
 
-    Err(Status::internal(
-        "data plane received unexpected file entry",
-    ))
+    eprintln!(
+        "[data-plane] unexpected file entry '{}' (upload queue drained before payload)",
+        rel_string
+    );
+    Err(Status::internal(format!(
+        "data plane received unexpected file entry '{}'",
+        rel_string
+    )))
 }
 
 pub(crate) async fn receive_fallback_data(
@@ -551,11 +578,20 @@ fn convert_join_result(
 ) -> Result<TransferStats, Status> {
     match join_result {
         Ok(Ok(stats)) => Ok(stats),
-        Ok(Err(status)) => Err(status),
-        Err(err) => Err(Status::internal(format!(
-            "tar shard worker panicked: {}",
-            err
-        ))),
+        Ok(Err(status)) => {
+            eprintln!(
+                "[data-plane] tar shard worker returned error: {}",
+                status.message()
+            );
+            Err(status)
+        }
+        Err(err) => {
+            eprintln!("[data-plane] tar shard worker panicked: {}", err);
+            Err(Status::internal(format!(
+                "tar shard worker panicked: {}",
+                err
+            )))
+        }
     }
 }
 
@@ -652,4 +688,93 @@ fn apply_tar_shard_sync(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tar::{Builder, EntryType, Header};
+    use tempfile::tempdir;
+
+    #[test]
+    fn apply_tar_shard_handles_long_paths() {
+        let source_root = tempdir().expect("source tempdir");
+        let dest_root = tempdir().expect("dest tempdir");
+
+        let rel = long_relative_path();
+        let content = b"tar shard payload for very long path";
+
+        let absolute_source = source_root.path().join(Path::new(&rel));
+        if let Some(parent) = absolute_source.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        std::fs::write(&absolute_source, content).expect("write source file");
+
+        let header = FileHeader {
+            relative_path: rel.clone(),
+            size: content.len() as u64,
+            mtime_seconds: 0,
+            permissions: 0o644,
+        };
+
+        let module = ModuleConfig {
+            name: "test".into(),
+            path: dest_root.path().to_path_buf(),
+            read_only: false,
+            _comment: None,
+            _use_chroot: false,
+        };
+
+        let tar_data = build_tar_bytes(source_root.path(), &header);
+        let stats = apply_tar_shard_sync(module.clone(), vec![header.clone()], tar_data)
+            .expect("tar shard applies");
+
+        assert_eq!(stats.files_transferred, 1);
+        assert_eq!(stats.bytes_transferred, content.len() as u64);
+
+        let dest_path = dest_root.path().join(Path::new(&rel));
+        let written = std::fs::read(dest_path).expect("read written file");
+        assert_eq!(written, content);
+    }
+
+    fn build_tar_bytes(root: &Path, header: &FileHeader) -> Vec<u8> {
+        let mut builder = Builder::new(Vec::new());
+        let rel_path = Path::new(&header.relative_path);
+        let mut file =
+            std::fs::File::open(root.join(rel_path)).expect("open source file for tar shard");
+
+        let mut tar_header = Header::new_gnu();
+        tar_header.set_entry_type(EntryType::Regular);
+        let mode = if header.permissions == 0 {
+            0o644
+        } else {
+            header.permissions
+        };
+        tar_header.set_mode(mode.into());
+        tar_header.set_size(header.size);
+        let mtime = if header.mtime_seconds >= 0 {
+            header.mtime_seconds as u64
+        } else {
+            0
+        };
+        tar_header.set_mtime(mtime);
+        tar_header.set_uid(0);
+        tar_header.set_gid(0);
+        tar_header.set_cksum();
+
+        builder
+            .append_data(&mut tar_header, rel_path, &mut file)
+            .expect("append tar entry");
+        builder.finish().expect("finish tar shard");
+        builder.into_inner().expect("tar buffer")
+    }
+
+    fn long_relative_path() -> String {
+        let mut segments = Vec::new();
+        for idx in 0..10 {
+            segments.push(format!("segment_{:02}_{}", idx, "x".repeat(24)));
+        }
+        format!("{}/{}", segments.join("/"), "deep_file.txt")
+    }
 }

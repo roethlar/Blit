@@ -76,6 +76,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Add large-manifest stress test (≥1 M entries) to validate streaming push memory footprint, <1 s transfer start, and throughput; capture logs/metrics with CLI/daemon traces.
 - [ ] Benchmark remote fallback + data-plane streaming on Linux/macOS/Windows to confirm sub-second first-byte timings and document results in workflows.
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
+- [ ] Diagnose TCP data-plane resets during remote push (upload_tx channel closes while streaming tar shards; see `crates/blit-daemon/src/service/push/data_plane.rs`). Reproduce with `blit-cli mirror -v -p ~/ skippy://elphaba/home`, capture daemon `[data-plane]` logs, and fix underlying disk/write/mismatch issue so the connection no longer drops mid-transfer.
 - [ ] Refactor oversized sources into AI-manageable modules:
     - [x] Split `crates/blit-daemon/src/main.rs` (service wiring, data plane handlers, admin RPCs). *(2025-10-27: introduced `runtime.rs` for config/args and `service.rs` for gRPC/data plane; main now only boots the server.)*
     - [x] Break down `crates/blit-cli/src/main.rs` (argument parsing vs command execution). *(2025-10-27: extracted `cli.rs`, `context.rs`, `diagnostics.rs`, `scan.rs`, `list.rs`, and `transfers.rs`; main now wires modules only.)*

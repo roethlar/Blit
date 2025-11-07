@@ -1,14 +1,14 @@
 use std::path::Path;
 
 use eyre::{bail, Context, Result};
+use futures::StreamExt;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::task;
 
 use crate::generated::FileHeader;
 
-use super::payload::{build_tar_shard, TransferPayload};
+use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
 
 pub(crate) const CONTROL_PLANE_CHUNK_SIZE: usize = 1 * 1024 * 1024;
 pub(crate) const DATA_PLANE_RECORD_FILE: u8 = 0;
@@ -43,13 +43,14 @@ impl DataPlaneSession {
         source_root: &Path,
         payloads: Vec<TransferPayload>,
     ) -> Result<()> {
-        for payload in payloads {
-            match payload {
-                TransferPayload::File(header) => {
+        let mut stream = prepared_payload_stream(payloads, source_root.to_path_buf());
+        while let Some(prepared) = stream.next().await {
+            match prepared? {
+                PreparedPayload::File(header) => {
                     self.send_file(source_root, &header).await?;
                 }
-                TransferPayload::TarShard { headers } => {
-                    self.send_tar_shard(source_root, headers).await?;
+                PreparedPayload::TarShard { headers, data } => {
+                    self.send_prepared_tar_shard(headers, &data).await?;
                 }
             }
         }
@@ -134,13 +135,11 @@ impl DataPlaneSession {
         Ok(())
     }
 
-    async fn send_tar_shard(&mut self, source_root: &Path, headers: Vec<FileHeader>) -> Result<()> {
-        let source_root = source_root.to_path_buf();
-        let header_clone = headers.clone();
-        let data = task::spawn_blocking(move || build_tar_shard(&source_root, &header_clone))
-            .await
-            .map_err(|err| eyre::eyre!("tar shard worker failed: {err}"))??;
-
+    async fn send_prepared_tar_shard(
+        &mut self,
+        headers: Vec<FileHeader>,
+        data: &[u8],
+    ) -> Result<()> {
         self.stream
             .write_all(&[DATA_PLANE_RECORD_TAR_SHARD])
             .await
@@ -185,7 +184,7 @@ impl DataPlaneSession {
             .await
             .context("writing tar shard length")?;
         self.stream
-            .write_all(&data)
+            .write_all(data)
             .await
             .context("writing tar shard payload")?;
 

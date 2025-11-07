@@ -3,4 +3,4 @@ set -euo pipefail
 source ~/source/venvs/superclaude/bin/activate  
 sudo npm install -g @openai/codex
 pipx upgrade SuperClaude
-codex resume 0199f419-b5b4-7422-839b-3be13b973ea8 -s danger-full-access -a never
+codex resume 019a5ba3-6704-7bc3-996b-0e76a3944199 -s danger-full-access -a never

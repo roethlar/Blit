@@ -10,6 +10,8 @@
 
 **2025-10-28 23:20:00Z** - **ACTION**: Split `blit-daemon` service logic into modules (`core`, `push`, `pull`, `admin`, `util`, plus a `push::data_plane` helper). `main.rs` still instantiates `BlitService`, but each file now stays well under 400 LOC and the TCP/GPRC handling is easier to navigate. **Tests**: `cargo fmt`; `cargo check -p blit-daemon`.
 
+**2025-10-28 23:55:00Z** - **ACTION**: Began throughput push tuning. CLI now pipelines tar-shard preparation (data plane shares the same buffered stream as control-plane fallback) and the daemon batches need-list flushes instead of emitting single-file requests. Added verbose `[data-plane] …` logging around the daemon’s TCP handler to catch the “Connection reset by peer” root cause (currently seeing `upload_tx send failed` when the channel closes). **Tests**: `cargo fmt`; `cargo check -p blit-core`; `cargo check -p blit-daemon`.
+
 **2025-10-28 00:10:00Z** - **ACTION**: Modularised the change journal. Split the single file into `change_journal/{mod,types,snapshot,tracker,util}.rs`, isolating platform capture logic per OS and keeping `ChangeTracker` implementation focused on persistence + probing. Orchestrator now consumes the same re-exported API. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
 
 **2025-10-28 00:18:00Z** - **ACTION**: Refactored `transfer_facade` into directory modules. Added `types.rs` for plan structures/streams, `aggregator.rs` for task batching + tests, and `planner.rs` housing the `TransferFacade` impl; `mod.rs` now re-exports the public surface. **Tests**: `cargo fmt`; `cargo check -p blit-core`.
