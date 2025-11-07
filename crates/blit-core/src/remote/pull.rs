@@ -12,6 +12,7 @@ use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 pub struct RemotePullReport {
     pub files_transferred: usize,
     pub bytes_transferred: u64,
+    pub downloaded_paths: Vec<PathBuf>,
 }
 
 pub struct RemotePullClient {
@@ -29,7 +30,12 @@ impl RemotePullClient {
         Ok(Self { endpoint, client })
     }
 
-    pub async fn pull(&mut self, dest_root: &Path, force_grpc: bool) -> Result<RemotePullReport> {
+    pub async fn pull(
+        &mut self,
+        dest_root: &Path,
+        force_grpc: bool,
+        track_paths: bool,
+    ) -> Result<RemotePullReport> {
         if !dest_root.exists() {
             fs::create_dir_all(dest_root).await.with_context(|| {
                 format!("creating destination directory {}", dest_root.display())
@@ -86,6 +92,10 @@ impl RemotePullClient {
                     let file = File::create(&dest_path)
                         .await
                         .with_context(|| format!("creating {}", dest_path.display()))?;
+
+                    if track_paths {
+                        report.downloaded_paths.push(relative_path.clone());
+                    }
 
                     active_file = Some((file, dest_path));
                     report.files_transferred += 1;

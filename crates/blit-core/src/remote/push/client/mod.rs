@@ -47,6 +47,7 @@ impl RemotePushClient {
         mirror_mode: bool,
         force_grpc: bool,
         progress: Option<&RemotePushProgress>,
+        trace_data_plane: bool,
     ) -> Result<RemotePushReport> {
         if !source_root.exists() {
             bail!("source path does not exist: {}", source_root.display());
@@ -225,6 +226,7 @@ impl RemotePushClient {
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
                                                 &token_bytes,
+                                                trace_data_plane,
                                             )
                                             .await?;
                                             let headers =

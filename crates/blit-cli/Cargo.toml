@@ -12,6 +12,7 @@ eyre = "0.6"
 color-eyre = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 indicatif = "0.17"
+walkdir = "2.5"
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,18 +3,19 @@ use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
 };
+use filetime::{set_file_mtime, FileTime};
 use rand::{rngs::OsRng, RngCore};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tar::Archive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
-use tokio::task::JoinSet;
+use tokio::task::{self, JoinSet};
 use tonic::{Status, Streaming};
 
 use super::super::util::resolve_relative_path;
@@ -67,6 +68,12 @@ pub(crate) async fn accept_data_connection_stream(
         eprintln!("[data-plane] invalid token from {}", addr);
         return Err(Status::permission_denied("invalid data plane token"));
     }
+    eprintln!(
+        "[data-plane] token accepted from {} (module='{}', root={})",
+        addr,
+        module.name,
+        module.path.display()
+    );
 
     let mut cache: HashMap<String, FileHeader> = HashMap::new();
     let mut stats = TransferStats::default();
@@ -83,6 +90,7 @@ pub(crate) async fn accept_data_connection_stream(
                 err
             )));
         }
+        eprintln!("[data-plane] received record tag 0x{:02X}", kind_buf[0]);
 
         match kind_buf[0] {
             DATA_PLANE_RECORD_FILE => {
@@ -96,6 +104,10 @@ pub(crate) async fn accept_data_connection_stream(
                     .map_err(|_| Status::invalid_argument("data plane path not valid UTF-8"))?;
 
                 let header = next_data_plane_header(&mut files, &mut cache, &rel_string).await?;
+                eprintln!(
+                    "[data-plane] starting file '{}' ({} bytes expected)",
+                    rel_string, header.size
+                );
 
                 let file_size = read_u64(&mut socket).await?;
                 if file_size != header.size {
@@ -142,12 +154,21 @@ pub(crate) async fn accept_data_connection_stream(
                     )));
                 }
 
+                apply_stream_file_metadata(&dest_path, &header).await?;
                 stats.files_transferred += 1;
                 stats.bytes_transferred += bytes_copied;
+                eprintln!(
+                    "[data-plane] finished file '{}' ({} bytes transferred)",
+                    rel_string, bytes_copied
+                );
             }
             DATA_PLANE_RECORD_TAR_SHARD => {
                 let file_count = read_u32(&mut socket).await? as usize;
                 let mut headers = Vec::with_capacity(file_count);
+                eprintln!(
+                    "[data-plane] starting tar shard header ({} entries)",
+                    file_count
+                );
 
                 for _ in 0..file_count {
                     let path_len = read_u32(&mut socket).await?;
@@ -185,6 +206,10 @@ pub(crate) async fn accept_data_connection_stream(
 
                 let tar_len = read_u64(&mut socket).await?;
                 let mut buffer = vec![0u8; tar_len as usize];
+                eprintln!(
+                    "[data-plane] receiving tar shard payload ({} bytes)",
+                    tar_len
+                );
                 socket.read_exact(&mut buffer).await.map_err(|err| {
                     eprintln!("[data-plane] read tar shard bytes error: {}", err);
                     Status::internal(format!("failed to read tar shard bytes: {}", err))
@@ -193,7 +218,10 @@ pub(crate) async fn accept_data_connection_stream(
                 tar_executor.spawn(module.clone(), headers, buffer).await?;
                 tar_executor.drain_ready(&mut stats)?;
             }
-            DATA_PLANE_RECORD_END => break,
+            DATA_PLANE_RECORD_END => {
+                eprintln!("[data-plane] received transfer terminator");
+                break;
+            }
             other => {
                 eprintln!("[data-plane] unknown record type: {}", other);
                 return Err(Status::invalid_argument(format!(
@@ -214,6 +242,10 @@ pub(crate) async fn accept_data_connection_stream(
         )));
     }
 
+    eprintln!(
+        "[data-plane] transfer complete: files={}, bytes={}",
+        stats.files_transferred, stats.bytes_transferred
+    );
     Ok(stats)
 }
 
@@ -599,6 +631,38 @@ fn accumulate_transfer_stats(target: &mut TransferStats, shard: &TransferStats) 
     target.files_transferred += shard.files_transferred;
     target.bytes_transferred += shard.bytes_transferred;
     target.bytes_zero_copy += shard.bytes_zero_copy;
+}
+
+async fn apply_stream_file_metadata(path: &Path, header: &FileHeader) -> Result<(), Status> {
+    if header.permissions != 0 {
+        set_stream_permissions(path, header.permissions).await?;
+    }
+
+    let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
+    let path_buf = path.to_path_buf();
+    let display_path = path_buf.clone();
+    task::spawn_blocking(move || set_file_mtime(&path_buf, ft))
+        .await
+        .map_err(|err| Status::internal(format!("set mtime task panicked: {}", err)))?
+        .map_err(|err| {
+            Status::internal(format!("set mtime {}: {}", display_path.display(), err))
+        })?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn set_stream_permissions(path: &Path, mode: u32) -> Result<(), Status> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(mode);
+    tokio::fs::set_permissions(path, perms)
+        .await
+        .map_err(|err| Status::internal(format!("set permissions {}: {}", path.display(), err)))
+}
+
+#[cfg(not(unix))]
+async fn set_stream_permissions(_path: &Path, _mode: u32) -> Result<(), Status> {
+    Ok(())
 }
 
 pub(crate) async fn read_u32(stream: &mut TcpStream) -> Result<u32, Status> {

@@ -74,6 +74,9 @@ pub struct TransferArgs {
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]
     pub workers: Option<usize>,
+    /// Emit verbose TCP data-plane diagnostics (advanced debugging only)
+    #[arg(long, hide = true)]
+    pub trace_data_plane: bool,
     /// Force gRPC control-plane data path instead of hybrid TCP
     #[arg(long)]
     pub force_grpc: bool,

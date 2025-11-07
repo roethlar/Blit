@@ -93,12 +93,16 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             .await
         }
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
-            if matches!(mode, TransferKind::Mirror) {
-                bail!("remote-to-local mirror is not supported yet");
-            }
             ensure_remote_transfer_supported(args)?;
             ensure_remote_source_supported(&remote)?;
-            run_remote_pull_transfer(ctx, args, remote, &dst_path).await
+            run_remote_pull_transfer(
+                ctx,
+                args,
+                remote,
+                &dst_path,
+                matches!(mode, TransferKind::Mirror),
+            )
+            .await
         }
         (Endpoint::Remote(_), Endpoint::Remote(_)) => {
             bail!("remote-to-remote transfers are not supported yet")
@@ -186,6 +190,7 @@ mod tests {
             verbose: false,
             progress: false,
             workers: None,
+            trace_data_plane: false,
             force_grpc: false,
         };
 
@@ -214,6 +219,7 @@ mod tests {
             verbose: false,
             progress: false,
             workers: None,
+            trace_data_plane: false,
             force_grpc: false,
         };
 

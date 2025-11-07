@@ -18,11 +18,23 @@ pub(crate) const DATA_PLANE_RECORD_END: u8 = 0xFF;
 pub(crate) struct DataPlaneSession {
     stream: TcpStream,
     buffer: Vec<u8>,
+    trace: bool,
+}
+
+macro_rules! trace_client {
+    ($session:expr, $($arg:tt)*) => {
+        if $session.trace {
+            eprintln!("[data-plane-client] {}", format_args!($($arg)*));
+        }
+    };
 }
 
 impl DataPlaneSession {
-    pub(crate) async fn connect(host: &str, port: u32, token: &[u8]) -> Result<Self> {
+    pub(crate) async fn connect(host: &str, port: u32, token: &[u8], trace: bool) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
+        if trace {
+            eprintln!("[data-plane-client] connecting to {}", addr);
+        }
         let mut stream = TcpStream::connect(addr.clone())
             .await
             .with_context(|| format!("connecting to data plane {}", addr))?;
@@ -35,6 +47,7 @@ impl DataPlaneSession {
         Ok(Self {
             stream,
             buffer: vec![0u8; 64 * 1024],
+            trace,
         })
     }
 
@@ -72,6 +85,7 @@ impl DataPlaneSession {
     async fn send_file(&mut self, source_root: &Path, header: &FileHeader) -> Result<()> {
         let rel = &header.relative_path;
         let path = source_root.join(rel);
+        trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
 
         let path_bytes = rel.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
@@ -132,6 +146,8 @@ impl DataPlaneSession {
             remaining -= chunk as u64;
         }
 
+        trace_client!(self, "file '{}' sent ({} bytes)", rel, header.size);
+
         Ok(())
     }
 
@@ -140,6 +156,18 @@ impl DataPlaneSession {
         headers: Vec<FileHeader>,
         data: &[u8],
     ) -> Result<()> {
+        let shard_len = headers.len();
+        let preview = headers
+            .first()
+            .map(|h| h.relative_path.as_str())
+            .unwrap_or("<empty>");
+        trace_client!(
+            self,
+            "sending tar shard with {} file(s), {} bytes (first='{}')",
+            shard_len,
+            data.len(),
+            preview
+        );
         self.stream
             .write_all(&[DATA_PLANE_RECORD_TAR_SHARD])
             .await
@@ -187,6 +215,12 @@ impl DataPlaneSession {
             .write_all(data)
             .await
             .context("writing tar shard payload")?;
+        trace_client!(
+            self,
+            "tar shard payload sent ({} file(s), {} bytes)",
+            shard_len,
+            data.len()
+        );
 
         Ok(())
     }

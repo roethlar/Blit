@@ -1,7 +1,7 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
-use eyre::{Context, Result};
-use std::path::Path;
+use eyre::{eyre, Context, Result};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
@@ -122,6 +122,7 @@ pub async fn run_remote_push_transfer(
             mirror_mode,
             args.force_grpc,
             progress_handle.as_ref(),
+            args.trace_data_plane,
         )
         .await
         .with_context(|| {
@@ -148,13 +149,14 @@ pub async fn run_remote_pull_transfer(
     args: &TransferArgs,
     remote: RemoteEndpoint,
     dest_root: &Path,
+    mirror_mode: bool,
 ) -> Result<()> {
     let mut client = RemotePullClient::connect(remote.clone())
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
     let report = client
-        .pull(dest_root, args.force_grpc)
+        .pull(dest_root, args.force_grpc, mirror_mode)
         .await
         .with_context(|| {
             format!(
@@ -165,7 +167,87 @@ pub async fn run_remote_pull_transfer(
         })?;
 
     describe_pull_result(&report, dest_root);
+
+    if mirror_mode {
+        let stats = purge_extraneous_local(dest_root, &report.downloaded_paths).await?;
+        println!(
+            "Mirror purge removed {} file(s) and {} directorie(s).",
+            stats.files_deleted, stats.dirs_deleted
+        );
+    }
+
     Ok(())
+}
+
+struct LocalPurgeStats {
+    files_deleted: u64,
+    dirs_deleted: u64,
+}
+
+async fn purge_extraneous_local(
+    dest_root: &Path,
+    keep_paths: &[PathBuf],
+) -> Result<LocalPurgeStats> {
+    use std::collections::HashSet;
+    use walkdir::WalkDir;
+
+    let keep_set: HashSet<PathBuf> = keep_paths.iter().cloned().collect();
+    let root = dest_root.to_path_buf();
+
+    let extraneous_files = tokio::task::spawn_blocking(move || {
+        let mut extras = Vec::new();
+        for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                if let Ok(rel) = entry.path().strip_prefix(&root) {
+                    if keep_set.is_empty() || !keep_set.contains(rel) {
+                        extras.push(entry.path().to_path_buf());
+                    }
+                }
+            }
+        }
+        extras
+    })
+    .await
+    .map_err(|err| eyre!("enumeration task failed: {}", err))?;
+
+    let mut stats = LocalPurgeStats {
+        files_deleted: 0,
+        dirs_deleted: 0,
+    };
+
+    for file_path in extraneous_files {
+        if tokio::fs::remove_file(&file_path).await.is_ok() {
+            stats.files_deleted += 1;
+        }
+    }
+
+    let root_for_dirs = dest_root.to_path_buf();
+    let dirs = tokio::task::spawn_blocking(move || {
+        let mut dirs = Vec::new();
+        for entry in WalkDir::new(&root_for_dirs)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_dir() {
+                dirs.push(entry.path().to_path_buf());
+            }
+        }
+        dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+        dirs
+    })
+    .await
+    .map_err(|err| eyre!("enumeration task failed: {}", err))?;
+
+    for dir in dirs {
+        if dir == dest_root {
+            continue;
+        }
+        if tokio::fs::remove_dir(&dir).await.is_ok() {
+            stats.dirs_deleted += 1;
+        }
+    }
+
+    Ok(stats)
 }
 
 pub fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
