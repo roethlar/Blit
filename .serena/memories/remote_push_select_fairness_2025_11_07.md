@@ -1,0 +1,1 @@
+Remote push client loop no longer uses `tokio::select! { biased; ... }` and now opportunistically drains the manifest channel via `try_recv()` after every server response. The manifest handling logic was moved into `process_manifest_entry` so queued headers are flushed promptly even under heavy ACK/need-list traffic, preventing the 64-entry channel from stalling enumeration.

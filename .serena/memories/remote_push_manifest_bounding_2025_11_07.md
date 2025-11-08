@@ -1,0 +1,1 @@
+Bound the remote push manifest lookup so memory no longer grows with the entire enumerated set. `drain_pending_headers` now removes entries from the `manifest_lookup` HashMap once tasks are dispatched, and `stream_fallback_from_queue` accepts a mutable map reference to consume headers. This keeps outstanding metadata proportional to pending transfers instead of the full manifest.

@@ -1,0 +1,1 @@
+`RemotePushReport` now tracks the total number of files requested as a `usize` instead of storing every relative path. The CLI reads the count directly, eliminating a Vec clone per run and keeping report serialization lightweight.
