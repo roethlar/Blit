@@ -1,0 +1,23 @@
+  Build Failures
+
+  - crates/blit-core/src/change_journal/snapshot.rs:161-223 still targets pre-0.57 windows APIs: it imports the
+    non-existent FILE_ACCESS_FLAGS, pulls DeviceIoControl from the wrong module, and uses associated consts like
+    FILE_SHARE_MODE::FILE_SHARE_READ that no longer exist. More importantly, CreateFileW, GetFileInformationByHandle,
+    DeviceIoControl, and CloseHandle now return/accept windows_core::Result, but the code still treats them as
+    raw HANDLE/BOOL, leading to the cascade of E0308, E0271, and E0277 errors in the log. This module needs to
+    unwrap the Result handles (e.g., let handle = unsafe { CreateFileW(...) }?;) and propagate errors instead of
+    calling .as_bool().
+  - crates/blit-core/src/change_journal/snapshot.rs:176 depends on widestring::U16CString, but widestring is no longer
+    listed in blit-core/Cargo.toml. Add the crate back or switch to the windows-provided UTF-16 helpers; otherwise the
+    compiler stops with E0433.
+  - crates/blit-core/src/copy/file_copy/clone.rs:190-193 still imports from winapi, which has been removed from
+    Cargo.toml. Either reintroduce the dependency or port mark_file_sparse to the windows crate so the winapi symbols
+    disappear. The same file’s sparse_copy_windows signature takes dst: &File (line 219) but then calls seek/write_all,
+    which require a mutable reference, causing E0596.
+  - crates/blit-core/src/copy/file_copy/mod.rs:13,19 imports the Write trait twice (use std::io::{..., Write} on both
+    lines), triggering E0252 before the compiler can proceed; drop one of the imports (and clean up the unused ones
+    noted in the warnings) to unblock the rest of the build.
+
+  Full compiler output is captured in build-fail.log if you need to cross-check line references. Fixing the Windows
+  snapshot module (imports + Result handling + UTF‑16 helper), migrating the remaining winapi usage, and correcting the
+  file-copy module imports/signature should get cargo build green again.
