@@ -16,8 +16,6 @@ use std::path::Path;
 #[cfg(windows)]
 use std::env;
 #[cfg(windows)]
-use std::io::{Read, Seek, SeekFrom, Write};
-#[cfg(windows)]
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 #[cfg(windows)]
 use crate::copy::windows;
@@ -91,7 +89,7 @@ pub fn copy_file(
         let src_file = File::open(src)?;
 
         #[cfg(windows)]
-        let dst_file = {
+        let mut dst_file = {
             std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -140,7 +138,7 @@ pub fn copy_file(
                 if clone_success {
                     file_size
                 } else {
-                    clone::sparse_copy_windows(src_file, &dst_file, buffer_size, file_size)?
+                    clone::sparse_copy_windows(src_file, &mut dst_file, buffer_size, file_size)?
                 }
             }
             #[cfg(target_os = "macos")]

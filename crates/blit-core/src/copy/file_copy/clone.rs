@@ -187,38 +187,37 @@ pub(crate) fn attempt_sparse_copy_unix(
 #[cfg(windows)]
 pub(crate) fn mark_file_sparse(file: &File) -> bool {
     use std::os::windows::io::AsRawHandle;
-    use winapi::shared::minwindef::{BOOL, DWORD};
-    use winapi::um::ioapiset::DeviceIoControl;
-    use winapi::um::winioctl::FSCTL_SET_SPARSE;
-    use winapi::um::winnt::HANDLE;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+    use windows::Win32::System::IO::DeviceIoControl;
 
-    #[allow(non_camel_case_types)]
     #[repr(C)]
     struct FILE_SET_SPARSE_BUFFER {
         SetSparse: u8,
     }
 
-    let h = file.as_raw_handle() as HANDLE;
+    let handle = HANDLE(file.as_raw_handle() as isize);
     let mut inbuf = FILE_SET_SPARSE_BUFFER { SetSparse: 1 };
-    let mut bytes: DWORD = 0;
+    let mut bytes: u32 = 0;
     unsafe {
         DeviceIoControl(
-            h,
+            handle,
             FSCTL_SET_SPARSE,
-            (&mut inbuf as *mut FILE_SET_SPARSE_BUFFER).cast(),
-            std::mem::size_of::<FILE_SET_SPARSE_BUFFER>() as DWORD,
-            std::ptr::null_mut(),
+            Some((&mut inbuf as *mut FILE_SET_SPARSE_BUFFER).cast()),
+            std::mem::size_of::<FILE_SET_SPARSE_BUFFER>() as u32,
+            None,
             0,
-            &mut bytes,
-            std::ptr::null_mut(),
-        ) != 0
+            Some(&mut bytes),
+            None,
+        )
+        .is_ok()
     }
 }
 
 #[cfg(windows)]
 pub(crate) fn sparse_copy_windows(
     src: File,
-    dst: &File,
+    dst: &mut File,
     buffer_size: usize,
     file_size: u64,
 ) -> Result<u64> {

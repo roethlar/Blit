@@ -152,20 +152,23 @@ mod linux {
 #[cfg(windows)]
 mod windows {
     use super::{system_time_to_epoch_ms, WindowsSnapshot};
-    use eyre::{Context, Result};
-    use std::mem::MaybeUninit;
+    use eyre::{eyre, Context, Result};
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
-    use std::ptr::null_mut;
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, FILE_ACCESS_FLAGS, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_MODE, OPEN_EXISTING,
+        CreateFileW, GetFileInformationByHandle, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows::Win32::System::Ioctl::{
-        DeviceIoControl, FSCTL_QUERY_USN_JOURNAL, USN_JOURNAL_DATA_V1,
-    };
+    use windows::Win32::System::Ioctl::{FSCTL_QUERY_USN_JOURNAL, USN_JOURNAL_DATA_V1};
+    use windows::Win32::System::IO::DeviceIoControl;
 
     pub(super) fn capture_snapshot(path: &Path) -> Result<Option<WindowsSnapshot>> {
+        use windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
+
         let metadata = std::fs::metadata(path)
             .with_context(|| format!("failed to stat {}", path.display()))?;
         let root_mtime_epoch_ms = metadata
@@ -173,59 +176,63 @@ mod windows {
             .ok()
             .and_then(|st| system_time_to_epoch_ms(st).ok());
 
-        let wide_path = widestring::U16CString::from_os_str(path.as_os_str())
-            .map_err(|_| eyre::eyre!("path contains interior null bytes: {}", path.display()))?;
-
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        if wide_path.is_empty() {
+            return Err(eyre!(
+                "path conversion produced empty buffer for {}",
+                path.display()
+            ));
+        }
         let handle = unsafe {
             CreateFileW(
-                wide_path.as_ptr(),
-                FILE_ACCESS_FLAGS::default(),
-                FILE_SHARE_MODE::FILE_SHARE_READ
-                    | FILE_SHARE_MODE::FILE_SHARE_WRITE
-                    | FILE_SHARE_MODE::FILE_SHARE_DELETE,
+                PCWSTR(wide_path.as_ptr()),
+                FILE_GENERIC_READ.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
                 OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                None,
+                HANDLE::default(),
             )
-        };
-        if handle == HANDLE::default() {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("CreateFileW {}", path.display()));
+        }
+        .map_err(|err| eyre!("CreateFileW {} failed: {err}", path.display()))?;
+
+        let mut volume_info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            GetFileInformationByHandle(handle, &mut volume_info).map_err(|err| {
+                eyre!(
+                    "GetFileInformationByHandle {} failed: {err}",
+                    path.display()
+                )
+            })?;
         }
 
-        let mut volume_info = MaybeUninit::uninit();
-        let info_rc = unsafe { GetFileInformationByHandle(handle, volume_info.as_mut_ptr()) };
-        let volume_info = unsafe { volume_info.assume_init() };
-        if info_rc.as_bool() == false {
-            unsafe {
-                CloseHandle(handle);
-            }
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("GetFileInformationByHandle {}", path.display()));
-        }
-
-        let mut journal_info = MaybeUninit::<USN_JOURNAL_DATA_V1>::uninit();
+        let mut journal_info = USN_JOURNAL_DATA_V1::default();
         let mut bytes_returned = 0u32;
-        let io_rc = unsafe {
+        let io_result = unsafe {
             DeviceIoControl(
                 handle,
                 FSCTL_QUERY_USN_JOURNAL,
                 None,
                 0,
-                journal_info.as_mut_ptr().cast(),
+                Some((&mut journal_info as *mut USN_JOURNAL_DATA_V1).cast::<c_void>()),
                 std::mem::size_of::<USN_JOURNAL_DATA_V1>() as u32,
-                &mut bytes_returned,
+                Some(&mut bytes_returned),
                 None,
             )
         };
+
         unsafe {
-            CloseHandle(handle);
+            CloseHandle(handle)
+                .map_err(|err| eyre!("CloseHandle {} failed: {err}", path.display()))?;
         }
-        if io_rc.as_bool() == false {
+
+        if io_result.is_err() {
             return Ok(None);
         }
-        let journal_info = unsafe { journal_info.assume_init() };
 
         let volume_id = format!(
             "{}:{}",
