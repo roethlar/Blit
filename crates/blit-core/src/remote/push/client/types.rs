@@ -1,5 +1,5 @@
 use crate::generated::PushSummary;
-use crate::remote::transfer::progress::{ProgressEvent, RemoteTransferProgress};
+use crate::remote::transfer::progress::RemoteTransferProgress;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]

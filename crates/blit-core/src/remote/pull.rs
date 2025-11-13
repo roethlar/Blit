@@ -1,19 +1,30 @@
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Context, Result};
+use tar::Archive;
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use crate::generated::blit_client::BlitClient;
-use crate::generated::{pull_chunk, FileData, PullRequest};
+use crate::generated::{pull_chunk, DataTransferNegotiation, FileData, PullRequest, PullSummary};
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
+use crate::remote::transfer::data_plane::{
+    DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD,
+};
+use crate::remote::transfer::progress::RemoteTransferProgress;
 
 #[derive(Debug, Default, Clone)]
 pub struct RemotePullReport {
     pub files_transferred: usize,
     pub bytes_transferred: u64,
     pub downloaded_paths: Vec<PathBuf>,
+    pub summary: Option<PullSummary>,
 }
+
+pub type RemotePullProgress = RemoteTransferProgress;
 
 pub struct RemotePullClient {
     endpoint: RemoteEndpoint,
@@ -35,6 +46,7 @@ impl RemotePullClient {
         dest_root: &Path,
         force_grpc: bool,
         track_paths: bool,
+        progress: Option<&RemotePullProgress>,
     ) -> Result<RemotePullReport> {
         if !dest_root.exists() {
             fs::create_dir_all(dest_root).await.with_context(|| {
@@ -71,6 +83,7 @@ impl RemotePullClient {
 
         let mut report = RemotePullReport::default();
         let mut active_file: Option<(File, PathBuf)> = None;
+        let mut used_data_plane = false;
 
         while let Some(chunk) = stream
             .message()
@@ -79,7 +92,7 @@ impl RemotePullClient {
         {
             match chunk.payload {
                 Some(pull_chunk::Payload::FileHeader(header)) => {
-                    finalize_active_file(&mut active_file).await?;
+                    finalize_active_file(&mut active_file, progress).await?;
 
                     let relative_path = sanitize_relative_path(&header.relative_path)?;
                     let dest_path = dest_root.join(&relative_path);
@@ -108,22 +121,286 @@ impl RemotePullClient {
                         .await
                         .with_context(|| format!("writing {}", path.display()))?;
                     report.bytes_transferred += content.len() as u64;
+                    if let Some(progress) = progress {
+                        progress.report_payload(0, content.len() as u64);
+                    }
+                }
+                Some(pull_chunk::Payload::Negotiation(neg)) => {
+                    if neg.tcp_fallback {
+                        continue;
+                    }
+                    self.handle_data_plane_negotiation(
+                        neg,
+                        dest_root,
+                        track_paths,
+                        progress,
+                        &mut report,
+                    )
+                    .await?;
+                    used_data_plane = true;
+                }
+                Some(pull_chunk::Payload::Summary(summary)) => {
+                    report.summary = Some(summary);
                 }
                 None => {}
             }
         }
 
-        finalize_active_file(&mut active_file).await?;
+        finalize_active_file(&mut active_file, progress).await?;
+
+        if used_data_plane && report.summary.is_none() {
+            eprintln!("[pull] data plane completed without summary payload");
+        }
 
         Ok(report)
     }
+
+    async fn handle_data_plane_negotiation(
+        &self,
+        negotiation: DataTransferNegotiation,
+        dest_root: &Path,
+        track_paths: bool,
+        progress: Option<&RemotePullProgress>,
+        report: &mut RemotePullReport,
+    ) -> Result<()> {
+        if negotiation.tcp_port == 0 {
+            bail!("server provided zero data-plane port for pull");
+        }
+        let token = general_purpose::STANDARD_NO_PAD
+            .decode(negotiation.one_time_token.as_bytes())
+            .map_err(|err| eyre!("failed to decode pull data-plane token: {err}"))?;
+        receive_data_plane_stream(
+            &self.endpoint.host,
+            negotiation.tcp_port,
+            &token,
+            dest_root,
+            track_paths,
+            progress,
+            report,
+        )
+        .await
+    }
 }
 
-async fn finalize_active_file(active: &mut Option<(File, PathBuf)>) -> Result<()> {
+async fn finalize_active_file(
+    active: &mut Option<(File, PathBuf)>,
+    progress: Option<&RemotePullProgress>,
+) -> Result<()> {
     if let Some((file, _)) = active.take() {
         file.sync_all().await?;
+        if let Some(progress) = progress {
+            progress.report_payload(1, 0);
+        }
     }
     Ok(())
+}
+
+async fn receive_data_plane_stream(
+    host: &str,
+    port: u32,
+    token: &[u8],
+    dest_root: &Path,
+    track_paths: bool,
+    progress: Option<&RemotePullProgress>,
+    report: &mut RemotePullReport,
+) -> Result<()> {
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(addr.clone())
+        .await
+        .with_context(|| format!("connecting pull data plane {}", addr))?;
+    stream
+        .write_all(token)
+        .await
+        .context("writing pull data-plane token")?;
+
+    loop {
+        let mut tag = [0u8; 1];
+        stream
+            .read_exact(&mut tag)
+            .await
+            .context("reading pull data-plane record tag")?;
+        match tag[0] {
+            DATA_PLANE_RECORD_FILE => {
+                handle_file_record(&mut stream, dest_root, track_paths, progress, report).await?;
+            }
+            DATA_PLANE_RECORD_TAR_SHARD => {
+                handle_tar_shard_record(&mut stream, dest_root, track_paths, progress, report)
+                    .await?;
+            }
+            DATA_PLANE_RECORD_END => break,
+            other => bail!("unknown pull data-plane record: {}", other),
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_file_record(
+    stream: &mut TcpStream,
+    dest_root: &Path,
+    track_paths: bool,
+    progress: Option<&RemotePullProgress>,
+    report: &mut RemotePullReport,
+) -> Result<()> {
+    let rel_string = read_string(stream).await?;
+    let relative_path = sanitize_relative_path(&rel_string)?;
+    let file_size = read_u64(stream).await?;
+    let dest_path = dest_root.join(&relative_path);
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+
+    let mut file = File::create(&dest_path)
+        .await
+        .with_context(|| format!("creating {}", dest_path.display()))?;
+    let mut remaining = file_size;
+    let mut buffer = vec![0u8; 64 * 1024];
+    while remaining > 0 {
+        let to_read = buffer.len().min(remaining as usize);
+        let read = stream
+            .read(&mut buffer[..to_read])
+            .await
+            .context("reading pull data-plane file chunk")?;
+        if read == 0 {
+            bail!(
+                "unexpected EOF while receiving {} ({} bytes remaining)",
+                dest_path.display(),
+                remaining
+            );
+        }
+        file.write_all(&buffer[..read])
+            .await
+            .with_context(|| format!("writing {}", dest_path.display()))?;
+        remaining -= read as u64;
+        if let Some(progress) = progress {
+            progress.report_payload(0, read as u64);
+        }
+    }
+    file.sync_all()
+        .await
+        .with_context(|| format!("syncing {}", dest_path.display()))?;
+
+    report.files_transferred += 1;
+    report.bytes_transferred += file_size;
+    if track_paths {
+        report.downloaded_paths.push(relative_path);
+    }
+    if let Some(progress) = progress {
+        progress.report_payload(1, 0);
+    }
+    Ok(())
+}
+
+async fn handle_tar_shard_record(
+    stream: &mut TcpStream,
+    dest_root: &Path,
+    track_paths: bool,
+    progress: Option<&RemotePullProgress>,
+    report: &mut RemotePullReport,
+) -> Result<()> {
+    let file_count = read_u32(stream).await? as usize;
+    let mut files = Vec::with_capacity(file_count);
+    for _ in 0..file_count {
+        let rel_string = read_string(stream).await?;
+        let relative_path = sanitize_relative_path(&rel_string)?;
+        let size = read_u64(stream).await?;
+        let _mtime = read_i64(stream).await?;
+        let _permissions = read_u32(stream).await?;
+        files.push((relative_path, size));
+    }
+    let tar_size = read_u64(stream).await?;
+    let mut buffer = vec![0u8; tar_size as usize];
+    stream
+        .read_exact(&mut buffer)
+        .await
+        .context("reading pull tar shard payload")?;
+    if let Some(progress) = progress {
+        progress.report_payload(0, tar_size);
+    }
+
+    let dest_root_path = dest_root.to_path_buf();
+    let extracted = extract_tar_shard(buffer, files.clone(), dest_root_path).await?;
+
+    if track_paths {
+        report.downloaded_paths.extend(extracted);
+    }
+    report.files_transferred += files.len();
+    let shard_bytes: u64 = files.iter().map(|(_, size)| *size).sum();
+    report.bytes_transferred += shard_bytes;
+    if let Some(progress) = progress {
+        progress.report_payload(files.len(), 0);
+    }
+
+    Ok(())
+}
+
+async fn extract_tar_shard(
+    data: Vec<u8>,
+    files: Vec<(PathBuf, u64)>,
+    dest_root: PathBuf,
+) -> Result<Vec<PathBuf>> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
+        let cursor = Cursor::new(data);
+        let mut archive = Archive::new(cursor);
+        let mut extracted = Vec::new();
+        for (idx, entry) in archive.entries()?.enumerate() {
+            let mut tar_entry = entry.context("reading tar shard entry")?;
+            let (relative_path, _) = files
+                .get(idx)
+                .ok_or_else(|| eyre!("tar shard entry count mismatch"))?;
+            let dest_path = dest_root.join(relative_path);
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            tar_entry
+                .unpack(&dest_path)
+                .with_context(|| format!("extracting {}", dest_path.display()))?;
+            extracted.push(relative_path.clone());
+        }
+        Ok(extracted)
+    })
+    .await
+    .map_err(|err| eyre!("tar shard extraction task failed: {}", err))?
+}
+
+async fn read_u32(stream: &mut TcpStream) -> Result<u32> {
+    let mut buf = [0u8; 4];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .context("reading u32 from pull data plane")?;
+    Ok(u32::from_be_bytes(buf))
+}
+
+async fn read_u64(stream: &mut TcpStream) -> Result<u64> {
+    let mut buf = [0u8; 8];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .context("reading u64 from pull data plane")?;
+    Ok(u64::from_be_bytes(buf))
+}
+
+async fn read_i64(stream: &mut TcpStream) -> Result<i64> {
+    let mut buf = [0u8; 8];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .context("reading i64 from pull data plane")?;
+    Ok(i64::from_be_bytes(buf))
+}
+
+async fn read_string(stream: &mut TcpStream) -> Result<String> {
+    let len = read_u32(stream).await? as usize;
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .context("reading string from pull data plane")?;
+    String::from_utf8(buf).map_err(|err| eyre!("pull data-plane path not UTF-8: {err}"))
 }
 
 fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {

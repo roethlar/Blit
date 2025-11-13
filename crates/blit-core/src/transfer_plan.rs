@@ -27,6 +27,7 @@ pub struct PlanOptions {
     pub small_target: Option<u64>,
     pub small_count_target: Option<usize>,
     pub medium_target: Option<u64>,
+    pub chunk_bytes_override: Option<usize>,
 }
 
 impl PlanOptions {
@@ -36,6 +37,7 @@ impl PlanOptions {
             small_target: None,
             small_count_target: None,
             medium_target: None,
+            chunk_bytes_override: None,
         }
     }
 }
@@ -221,6 +223,7 @@ pub fn build_plan(
     } else {
         16 * 1024 * 1024 // 16 MiB default
     };
+    let chunk_bytes = options.chunk_bytes_override.unwrap_or(chunk_bytes);
     Plan { tasks, chunk_bytes }
 }
 

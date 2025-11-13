@@ -55,12 +55,21 @@ pub enum PreparedPayload {
 
 pub const PAYLOAD_PREFETCH: usize = 8;
 
+pub struct PlannedPayloads {
+    pub payloads: Vec<TransferPayload>,
+    pub chunk_bytes: usize,
+}
+
 pub fn plan_transfer_payloads(
     headers: Vec<FileHeader>,
     source_root: &Path,
-) -> Result<Vec<TransferPayload>> {
+    options: PlanOptions,
+) -> Result<PlannedPayloads> {
     if headers.is_empty() {
-        return Ok(Vec::new());
+        return Ok(PlannedPayloads {
+            payloads: Vec::new(),
+            chunk_bytes: 0,
+        });
     }
 
     let mut entries: Vec<FileEntry> = Vec::with_capacity(headers.len());
@@ -79,7 +88,7 @@ pub fn plan_transfer_payloads(
         .map(|header| (header.relative_path.clone(), header))
         .collect();
 
-    let plan = transfer_plan::build_plan(&entries, source_root, PlanOptions::default());
+    let plan = transfer_plan::build_plan(&entries, source_root, options);
     let mut payloads: Vec<TransferPayload> = Vec::new();
 
     for task in plan.tasks {
@@ -119,7 +128,10 @@ pub fn plan_transfer_payloads(
         payloads.push(TransferPayload::File(header));
     }
 
-    Ok(payloads)
+    Ok(PlannedPayloads {
+        payloads,
+        chunk_bytes: plan.chunk_bytes,
+    })
 }
 
 pub fn payload_file_count(payloads: &[TransferPayload]) -> usize {
@@ -161,8 +173,10 @@ pub async fn transfer_payloads_via_control_plane(
     tx: &mpsc::Sender<ClientPushRequest>,
     finish: bool,
     progress: Option<&RemoteTransferProgress>,
+    chunk_bytes: usize,
 ) -> Result<()> {
-    let mut buffer = vec![0u8; CONTROL_PLANE_CHUNK_SIZE];
+    let chunk_size = chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE);
+    let mut buffer = vec![0u8; chunk_size];
     let mut prepared_stream = prepared_payload_stream(payloads, source_root.to_path_buf());
 
     while let Some(prepared) = prepared_stream.next().await {
@@ -223,7 +237,7 @@ pub async fn transfer_payloads_via_control_plane(
                 )
                 .await?;
 
-                for chunk in data.chunks(CONTROL_PLANE_CHUNK_SIZE) {
+                for chunk in data.chunks(chunk_size) {
                     send_payload(
                         tx,
                         ClientPayload::TarShardChunk(TarShardChunk {

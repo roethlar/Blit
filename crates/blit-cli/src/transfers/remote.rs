@@ -4,16 +4,102 @@ use eyre::{eyre, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
 use blit_core::fs_enum::FileFilter;
-use blit_core::remote::push::ProgressEvent;
+use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
-    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushProgress,
-    RemotePushReport,
+    RemoteEndpoint, RemotePullClient, RemotePullProgress, RemotePullReport, RemotePushClient,
+    RemotePushProgress, RemotePushReport,
 };
 
 use super::endpoints::format_remote_endpoint;
+
+fn spawn_progress_monitor(
+    enabled: bool,
+) -> (Option<RemoteTransferProgress>, Option<JoinHandle<()>>) {
+    if !enabled {
+        return (None, None);
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
+    let progress = RemoteTransferProgress::new(tx);
+    let join = tokio::spawn(async move {
+        let start = Instant::now();
+        let mut total_manifest = 0usize;
+        let mut total_files = 0usize;
+        let mut total_bytes = 0u64;
+        let mut prev_bytes = 0u64;
+        let mut prev_instant = start;
+        let mut started = false;
+        let mut ticker = interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                biased;
+                event = rx.recv() => {
+                    match event {
+                        Some(ProgressEvent::ManifestBatch { files }) => {
+                            total_manifest = total_manifest.saturating_add(files);
+                        }
+                        Some(ProgressEvent::Payload { files, bytes }) => {
+                            if files > 0 {
+                                total_files = total_files.saturating_add(files);
+                            }
+                            if bytes > 0 {
+                                total_bytes = total_bytes.saturating_add(bytes);
+                                started = true;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = ticker.tick() => {
+                    if started {
+                        let now = Instant::now();
+                        let elapsed = now.duration_since(start).as_secs_f64().max(1e-6);
+                        let window_elapsed = now.duration_since(prev_instant).as_secs_f64().max(1e-6);
+                        let window_bytes = total_bytes.saturating_sub(prev_bytes);
+                        let avg_mib = (total_bytes as f64 / 1024.0 / 1024.0) / elapsed;
+                        let current_mib = (window_bytes as f64 / 1024.0 / 1024.0) / window_elapsed;
+                        println!(
+                            "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
+                            total_files,
+                            total_manifest,
+                            total_bytes as f64 / (1024.0 * 1024.0),
+                            avg_mib,
+                            current_mib,
+                        );
+                        prev_instant = now;
+                        prev_bytes = total_bytes;
+                    } else if total_manifest > 0 {
+                        println!(
+                            "[progress] manifest enumerated {} file(s)\u{2026}",
+                            total_manifest
+                        );
+                    }
+                }
+            }
+        }
+
+        if started {
+            let elapsed = start.elapsed().as_secs_f64().max(1e-6);
+            let avg_mib = (total_bytes as f64 / 1024.0 / 1024.0) / elapsed;
+            println!(
+                "[progress] final: {} file(s) transferred \u{2022} {:.2} MiB total \u{2022} {:.2} MiB/s avg",
+                total_files,
+                total_bytes as f64 / (1024.0 * 1024.0),
+                avg_mib,
+            );
+        } else if total_manifest > 0 {
+            println!("[progress] manifest enumerated {} file(s)", total_manifest);
+        }
+    });
+
+    (Some(progress), Some(join))
+}
 
 pub async fn run_remote_push_transfer(
     _ctx: &AppContext,
@@ -27,92 +113,7 @@ pub async fn run_remote_push_transfer(
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
     let show_progress = args.progress || args.verbose;
-    let mut progress_handle = None;
-    let mut progress_task = None;
-
-    if show_progress {
-        let (tx, mut rx) = mpsc::unbounded_channel::<ProgressEvent>();
-        let progress = RemotePushProgress::new(tx);
-        let join = tokio::spawn(async move {
-            let start = Instant::now();
-            let mut total_manifest = 0usize;
-            let mut total_files = 0usize;
-            let mut total_bytes = 0u64;
-            let mut prev_bytes = 0u64;
-            let mut prev_instant = start;
-            let mut started = false;
-            let mut ticker = interval(Duration::from_secs(1));
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    biased;
-                    event = rx.recv() => {
-                        match event {
-                            Some(ProgressEvent::ManifestBatch { files }) => {
-                                total_manifest = total_manifest.saturating_add(files);
-                            }
-                            Some(ProgressEvent::Payload { files, bytes }) => {
-                                if files > 0 {
-                                    total_files = total_files.saturating_add(files);
-                                }
-                                if bytes > 0 {
-                                    total_bytes = total_bytes.saturating_add(bytes);
-                                    started = true;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = ticker.tick() => {
-                        if started {
-                            let now = Instant::now();
-                            let elapsed = now.duration_since(start).as_secs_f64().max(1e-6);
-                            let window_elapsed = now
-                                .duration_since(prev_instant)
-                                .as_secs_f64()
-                                .max(1e-6);
-                            let window_bytes = total_bytes.saturating_sub(prev_bytes);
-                            let avg_mib = (total_bytes as f64 / 1024.0 / 1024.0) / elapsed;
-                            let current_mib =
-                                (window_bytes as f64 / 1024.0 / 1024.0) / window_elapsed;
-                            println!(
-                                "[progress] {}/{} files • {:.2} MiB copied • {:.2} MiB/s avg • {:.2} MiB/s current",
-                                total_files,
-                                total_manifest,
-                                total_bytes as f64 / (1024.0 * 1024.0),
-                                avg_mib,
-                                current_mib,
-                            );
-                            prev_instant = now;
-                            prev_bytes = total_bytes;
-                        } else if total_manifest > 0 {
-                            println!(
-                                "[progress] manifest enumerated {} file(s)…",
-                                total_manifest
-                            );
-                        }
-                    }
-                }
-            }
-
-            if started {
-                let elapsed = start.elapsed().as_secs_f64().max(1e-6);
-                let avg_mib = (total_bytes as f64 / 1024.0 / 1024.0) / elapsed;
-                println!(
-                    "[progress] final: {} file(s) transferred • {:.2} MiB total • {:.2} MiB/s avg",
-                    total_files,
-                    total_bytes as f64 / (1024.0 * 1024.0),
-                    avg_mib,
-                );
-            } else if total_manifest > 0 {
-                println!("[progress] manifest enumerated {} file(s)", total_manifest);
-            }
-        });
-
-        progress_handle = Some(progress);
-        progress_task = Some(join);
-    }
+    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
 
     let filter = FileFilter::default();
     let push_result = client
@@ -155,8 +156,16 @@ pub async fn run_remote_pull_transfer(
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
+    let show_progress = args.progress || args.verbose;
+    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
+
     let report = client
-        .pull(dest_root, args.force_grpc, mirror_mode)
+        .pull(
+            dest_root,
+            args.force_grpc,
+            mirror_mode,
+            progress_handle.as_ref(),
+        )
         .await
         .with_context(|| {
             format!(
@@ -165,6 +174,11 @@ pub async fn run_remote_pull_transfer(
                 dest_root.display()
             )
         })?;
+
+    drop(progress_handle);
+    if let Some(task) = progress_task {
+        let _ = task.await;
+    }
 
     describe_pull_result(&report, dest_root);
 
@@ -251,12 +265,27 @@ async fn purge_extraneous_local(
 }
 
 pub fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
-    println!(
-        "Pull complete: {} file(s), {} bytes written to {}.",
-        report.files_transferred,
-        report.bytes_transferred,
-        dest_root.display()
-    );
+    if let Some(summary) = &report.summary {
+        println!(
+            "Pull complete: {} file(s), {} bytes (zero-copy {} bytes){} -> {}.",
+            summary.files_transferred,
+            summary.bytes_transferred,
+            summary.bytes_zero_copy,
+            if summary.tcp_fallback_used {
+                " [gRPC fallback]"
+            } else {
+                ""
+            },
+            dest_root.display()
+        );
+    } else {
+        println!(
+            "Pull complete: {} file(s), {} bytes written to {}.",
+            report.files_transferred,
+            report.bytes_transferred,
+            dest_root.display()
+        );
+    }
 }
 
 pub fn describe_push_result(

@@ -1,18 +1,23 @@
 mod helpers;
 mod types;
 
-pub use types::{ProgressEvent, RemotePushProgress, RemotePushReport, TransferMode};
+pub use crate::remote::transfer::progress::ProgressEvent;
+pub use types::{RemotePushProgress, RemotePushReport, TransferMode};
 
 use self::helpers::{
     decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
     send_manifest_complete, send_payload, spawn_manifest_task, spawn_response_task,
 };
+use crate::auto_tune::TuningParams;
 use crate::fs_enum::FileFilter;
 use crate::generated::client_push_request::Payload as ClientPayload;
 use crate::generated::server_push_response::Payload as ServerPayload;
 use crate::generated::ClientPushRequest;
 use crate::generated::{FileHeader, PushSummary};
 use crate::remote::endpoint::RemoteEndpoint;
+use crate::remote::transfer::CONTROL_PLANE_CHUNK_SIZE;
+use crate::remote::tuning::determine_remote_tuning;
+use crate::transfer_plan::PlanOptions;
 use eyre::{bail, Result};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -24,6 +29,27 @@ use super::data_plane::DataPlaneSession;
 use super::payload::{
     payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
 };
+
+fn ensure_remote_tuning(
+    remote_tuning: &mut Option<TuningParams>,
+    plan_options: &mut PlanOptions,
+    size_hint: u64,
+) -> TuningParams {
+    if remote_tuning.is_none() {
+        let tuning = determine_remote_tuning(size_hint);
+        plan_options.chunk_bytes_override = Some(tuning.chunk_bytes);
+        *remote_tuning = Some(tuning);
+    }
+    remote_tuning.as_ref().cloned().unwrap()
+}
+
+fn effective_size_hint(requested: u64, manifest_bytes: u64) -> u64 {
+    if requested > 0 {
+        requested
+    } else {
+        manifest_bytes.max(1)
+    }
+}
 
 pub struct RemotePushClient {
     endpoint: RemoteEndpoint,
@@ -57,6 +83,10 @@ impl RemotePushClient {
         let mut first_payload_elapsed: Option<Duration> = None;
 
         let mut manifest_lookup: HashMap<String, FileHeader> = HashMap::new();
+        let mut plan_options = PlanOptions::default();
+        let mut remote_tuning: Option<TuningParams> = None;
+        let mut manifest_total_bytes: u64 = 0;
+        let mut transfer_size_hint: u64 = 0;
 
         let (tx, rx) = mpsc::channel(32);
         let outbound = ReceiverStream::new(rx);
@@ -124,7 +154,16 @@ impl RemotePushClient {
                                     let mut rels = list.relative_paths;
                                     files_requested.extend(rels.iter().cloned());
                                     let newly_requested = rels.len();
+                                    let mut batch_bytes = 0u64;
+                                    for rel in &rels {
+                                        if let Some(header) = manifest_lookup.get(rel) {
+                                            batch_bytes =
+                                                batch_bytes.saturating_add(header.size);
+                                        }
+                                    }
                                     pending_queue.extend(rels.drain(..));
+                                    transfer_size_hint =
+                                        transfer_size_hint.saturating_add(batch_bytes);
                                     need_list_received = true;
 
                                     if !matches!(transfer_mode, TransferMode::Fallback) {
@@ -141,12 +180,23 @@ impl RemotePushClient {
                                     match transfer_mode {
                                         TransferMode::Fallback => {
                                             if need_list_received {
+                                                let size_hint = effective_size_hint(
+                                                    transfer_size_hint,
+                                                    manifest_total_bytes,
+                                                );
+                                                let tuning = ensure_remote_tuning(
+                                                    &mut remote_tuning,
+                                                    &mut plan_options,
+                                                    size_hint,
+                                                );
                                                 let result = stream_fallback_from_queue(
                                                     source_root,
                                                     &mut pending_queue,
                                                     &manifest_lookup,
                                                     &tx,
                                                     progress,
+                                                    plan_options,
+                                                    tuning.chunk_bytes,
                                                 ).await?;
                                                 if result.files_sent > 0 {
                                                     fallback_files_sent =
@@ -164,12 +214,21 @@ impl RemotePushClient {
                                                 let headers =
                                                     drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                                 if !headers.is_empty() {
-                                                    let payloads =
-                                                        plan_transfer_payloads(headers, source_root)?;
-                                                    if !payloads.is_empty() {
-                                                        let sent = payload_file_count(&payloads);
+                                                    let size_hint = effective_size_hint(
+                                                        transfer_size_hint,
+                                                        manifest_total_bytes,
+                                                    );
+                                                    let _ = ensure_remote_tuning(
+                                                        &mut remote_tuning,
+                                                        &mut plan_options,
+                                                        size_hint,
+                                                    );
+                                                    let planned =
+                                                        plan_transfer_payloads(headers, source_root, plan_options)?;
+                                                    if !planned.payloads.is_empty() {
+                                                        let sent = payload_file_count(&planned.payloads);
                                                         session
-                                                            .send_payloads(source_root, payloads)
+                                                            .send_payloads(source_root, planned.payloads)
                                                             .await?;
                                                         if sent > 0 && first_payload_elapsed.is_none() {
                                                             first_payload_elapsed = Some(start.elapsed());
@@ -189,13 +248,24 @@ impl RemotePushClient {
                                         transfer_mode = TransferMode::Fallback;
 
                                         if need_list_received {
-                                        let result = stream_fallback_from_queue(
-                                            source_root,
-                                            &mut pending_queue,
-                                            &manifest_lookup,
-                                            &tx,
-                                            progress,
-                                        ).await?;
+                                            let size_hint = effective_size_hint(
+                                                transfer_size_hint,
+                                                manifest_total_bytes,
+                                            );
+                                            let tuning = ensure_remote_tuning(
+                                                &mut remote_tuning,
+                                                &mut plan_options,
+                                                size_hint,
+                                            );
+                                            let result = stream_fallback_from_queue(
+                                                source_root,
+                                                &mut pending_queue,
+                                                &manifest_lookup,
+                                                &tx,
+                                                progress,
+                                                plan_options,
+                                                tuning.chunk_bytes,
+                                            ).await?;
                                             if result.files_sent > 0 {
                                                 fallback_files_sent =
                                                     fallback_files_sent.saturating_add(result.files_sent);
@@ -221,23 +291,36 @@ impl RemotePushClient {
                                         }
 
                                         let token_bytes = decode_token(&neg.one_time_token)?;
+                                        let size_hint = effective_size_hint(
+                                            transfer_size_hint,
+                                            manifest_total_bytes,
+                                        );
+                                        let tuning = ensure_remote_tuning(
+                                            &mut remote_tuning,
+                                            &mut plan_options,
+                                            size_hint,
+                                        );
                                         if data_plane_session.is_none() {
                                             let mut session = DataPlaneSession::connect(
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
                                                 &token_bytes,
+                                                tuning.chunk_bytes,
                                                 trace_data_plane,
                                             )
                                             .await?;
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                             if !headers.is_empty() {
-                                                let payloads =
-                                                    plan_transfer_payloads(headers, source_root)?;
-                                                if !payloads.is_empty() {
-                                                    let sent = payload_file_count(&payloads);
+                                                let planned = plan_transfer_payloads(
+                                                    headers,
+                                                    source_root,
+                                                    plan_options,
+                                                )?;
+                                                if !planned.payloads.is_empty() {
+                                                    let sent = payload_file_count(&planned.payloads);
                                                     session
-                                                        .send_payloads(source_root, payloads)
+                                                        .send_payloads(source_root, planned.payloads)
                                                         .await?;
                                                     if sent > 0 && first_payload_elapsed.is_none() {
                                                         first_payload_elapsed = Some(start.elapsed());
@@ -252,21 +335,24 @@ impl RemotePushClient {
                                         } else if let Some(session) = data_plane_session.as_mut() {
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
-                                        if !headers.is_empty() {
-                                            let payloads =
-                                                plan_transfer_payloads(headers, source_root)?;
-                                            if !payloads.is_empty() {
-                                                let sent = payload_file_count(&payloads);
-                                                session
-                                                    .send_payloads(source_root, payloads)
-                                                    .await?;
-                                                if sent > 0 && first_payload_elapsed.is_none() {
-                                                    first_payload_elapsed = Some(start.elapsed());
+                                            if !headers.is_empty() {
+                                                let planned = plan_transfer_payloads(
+                                                    headers,
+                                                    source_root,
+                                                    plan_options,
+                                                )?;
+                                                if !planned.payloads.is_empty() {
+                                                    let sent = payload_file_count(&planned.payloads);
+                                                    session
+                                                        .send_payloads(source_root, planned.payloads)
+                                                        .await?;
+                                                    if sent > 0 && first_payload_elapsed.is_none() {
+                                                        first_payload_elapsed = Some(start.elapsed());
+                                                    }
+                                                    data_plane_outstanding =
+                                                        data_plane_outstanding.saturating_sub(sent);
                                                 }
-                                                data_plane_outstanding =
-                                                    data_plane_outstanding.saturating_sub(sent);
                                             }
-                                        }
                                         }
                                     }
                                 }
@@ -284,18 +370,31 @@ impl RemotePushClient {
                     match maybe_header {
                         Some(header) => {
                             let rel = header.relative_path.clone();
+                            manifest_total_bytes =
+                                manifest_total_bytes.saturating_add(header.size);
                             send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
                             manifest_lookup.insert(rel.clone(), header);
 
                             match transfer_mode {
                                 TransferMode::Fallback => {
                                     if need_list_received {
+                                        let size_hint = effective_size_hint(
+                                            transfer_size_hint,
+                                            manifest_total_bytes,
+                                        );
+                                        let tuning = ensure_remote_tuning(
+                                            &mut remote_tuning,
+                                            &mut plan_options,
+                                            size_hint,
+                                        );
                                         let result = stream_fallback_from_queue(
                                             source_root,
                                             &mut pending_queue,
                                             &manifest_lookup,
                                             &tx,
                                             progress,
+                                            plan_options,
+                                            tuning.chunk_bytes,
                                         ).await?;
                                         if result.files_sent > 0 {
                                             fallback_files_sent =
@@ -313,12 +412,21 @@ impl RemotePushClient {
                                         let headers =
                                             drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                         if !headers.is_empty() {
-                                            let payloads =
-                                                plan_transfer_payloads(headers, source_root)?;
-                                            if !payloads.is_empty() {
-                                                let sent = payload_file_count(&payloads);
+                                            let size_hint = effective_size_hint(
+                                                transfer_size_hint,
+                                                manifest_total_bytes,
+                                            );
+                                            let tuning = ensure_remote_tuning(
+                                                &mut remote_tuning,
+                                                &mut plan_options,
+                                                size_hint,
+                                            );
+                                            let planned =
+                                                plan_transfer_payloads(headers, source_root, plan_options)?;
+                                            if !planned.payloads.is_empty() {
+                                                let sent = payload_file_count(&planned.payloads);
                                                 session
-                                                    .send_payloads(source_root, payloads)
+                                                    .send_payloads(source_root, planned.payloads)
                                                     .await?;
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
@@ -353,6 +461,10 @@ impl RemotePushClient {
                         &tx,
                         true,
                         progress,
+                        remote_tuning
+                            .as_ref()
+                            .map(|t| t.chunk_bytes)
+                            .unwrap_or(CONTROL_PLANE_CHUNK_SIZE),
                     )
                     .await?;
                     fallback_upload_complete_sent = true;
@@ -405,19 +517,34 @@ async fn stream_fallback_from_queue(
     manifest_lookup: &HashMap<String, FileHeader>,
     tx: &mpsc::Sender<ClientPushRequest>,
     progress: Option<&RemotePushProgress>,
+    plan_options: PlanOptions,
+    chunk_bytes: usize,
 ) -> Result<FallbackStreamResult> {
     let headers = drain_pending_headers(pending_queue, manifest_lookup);
     if headers.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }
 
-    let payloads = plan_transfer_payloads(headers, source_root)?;
-    if payloads.is_empty() {
+    let planned = plan_transfer_payloads(headers, source_root, plan_options)?;
+    if planned.payloads.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }
 
-    let sent = payload_file_count(&payloads);
-    transfer_payloads_via_control_plane(source_root, payloads, tx, false, progress).await?;
+    let sent = payload_file_count(&planned.payloads);
+    let control_chunk = if chunk_bytes == 0 {
+        planned.chunk_bytes
+    } else {
+        chunk_bytes
+    };
+    transfer_payloads_via_control_plane(
+        source_root,
+        planned.payloads,
+        tx,
+        false,
+        progress,
+        control_chunk,
+    )
+    .await?;
 
     Ok(FallbackStreamResult {
         files_sent: sent,

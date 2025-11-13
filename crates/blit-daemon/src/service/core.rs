@@ -86,9 +86,10 @@ impl Blit for BlitService {
         let req = request.into_inner();
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
 
+        let force_grpc = req.force_grpc || self.force_grpc_data;
         let (tx, rx) = mpsc::channel(32);
         tokio::spawn(async move {
-            if let Err(status) = stream_pull(module, req.path, tx.clone()).await {
+            if let Err(status) = stream_pull(module, req.path, force_grpc, tx.clone()).await {
                 let _ = tx.send(Err(status)).await;
             }
         });

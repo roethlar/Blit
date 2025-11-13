@@ -19,6 +19,7 @@ pub struct DataPlaneSession {
     stream: TcpStream,
     buffer: Vec<u8>,
     trace: bool,
+    chunk_bytes: usize,
 }
 
 macro_rules! trace_client {
@@ -30,7 +31,23 @@ macro_rules! trace_client {
 }
 
 impl DataPlaneSession {
-    pub async fn connect(host: &str, port: u32, token: &[u8], trace: bool) -> Result<Self> {
+    pub fn from_stream(stream: TcpStream, trace: bool, chunk_bytes: usize) -> Self {
+        let buffer_len = chunk_bytes.max(64 * 1024);
+        Self {
+            stream,
+            buffer: vec![0u8; buffer_len],
+            trace,
+            chunk_bytes: buffer_len,
+        }
+    }
+
+    pub async fn connect(
+        host: &str,
+        port: u32,
+        token: &[u8],
+        chunk_bytes: usize,
+        trace: bool,
+    ) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
         if trace {
             eprintln!("[data-plane-client] connecting to {}", addr);
@@ -44,11 +61,7 @@ impl DataPlaneSession {
             .await
             .context("writing negotiation token")?;
 
-        Ok(Self {
-            stream,
-            buffer: vec![0u8; 64 * 1024],
-            trace,
-        })
+        Ok(Self::from_stream(stream, trace, chunk_bytes))
     }
 
     pub async fn send_payloads(
@@ -211,10 +224,12 @@ impl DataPlaneSession {
             .write_all(&(data.len() as u64).to_be_bytes())
             .await
             .context("writing tar shard length")?;
-        self.stream
-            .write_all(data)
-            .await
-            .context("writing tar shard payload")?;
+        for chunk in data.chunks(self.chunk_bytes.max(1)) {
+            self.stream
+                .write_all(chunk)
+                .await
+                .context("writing tar shard payload")?;
+        }
         trace_client!(
             self,
             "tar shard payload sent ({} file(s), {} bytes)",
