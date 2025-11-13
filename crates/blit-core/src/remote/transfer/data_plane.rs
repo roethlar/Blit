@@ -20,6 +20,7 @@ pub struct DataPlaneSession {
     buffer: Vec<u8>,
     trace: bool,
     chunk_bytes: usize,
+    payload_prefetch: usize,
 }
 
 macro_rules! trace_client {
@@ -31,13 +32,20 @@ macro_rules! trace_client {
 }
 
 impl DataPlaneSession {
-    pub fn from_stream(stream: TcpStream, trace: bool, chunk_bytes: usize) -> Self {
+    pub fn from_stream(
+        stream: TcpStream,
+        trace: bool,
+        chunk_bytes: usize,
+        payload_prefetch: usize,
+    ) -> Self {
+        let payload_prefetch = payload_prefetch.max(1);
         let buffer_len = chunk_bytes.max(64 * 1024);
         Self {
             stream,
             buffer: vec![0u8; buffer_len],
             trace,
             chunk_bytes: buffer_len,
+            payload_prefetch,
         }
     }
 
@@ -46,6 +54,7 @@ impl DataPlaneSession {
         port: u32,
         token: &[u8],
         chunk_bytes: usize,
+        payload_prefetch: usize,
         trace: bool,
     ) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
@@ -61,7 +70,12 @@ impl DataPlaneSession {
             .await
             .context("writing negotiation token")?;
 
-        Ok(Self::from_stream(stream, trace, chunk_bytes))
+        Ok(Self::from_stream(
+            stream,
+            trace,
+            chunk_bytes,
+            payload_prefetch,
+        ))
     }
 
     pub async fn send_payloads(
@@ -69,7 +83,8 @@ impl DataPlaneSession {
         source_root: &Path,
         payloads: Vec<TransferPayload>,
     ) -> Result<()> {
-        let mut stream = prepared_payload_stream(payloads, source_root.to_path_buf());
+        let mut stream =
+            prepared_payload_stream(payloads, source_root.to_path_buf(), self.payload_prefetch);
         while let Some(prepared) = stream.next().await {
             match prepared? {
                 PreparedPayload::File(header) => {

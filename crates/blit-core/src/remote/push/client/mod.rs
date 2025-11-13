@@ -6,7 +6,8 @@ pub use types::{RemotePushProgress, RemotePushReport, TransferMode};
 
 use self::helpers::{
     decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
-    send_manifest_complete, send_payload, spawn_manifest_task, spawn_response_task,
+    record_unreadable_entry, send_manifest_complete, send_payload, spawn_manifest_task,
+    spawn_response_task,
 };
 use crate::auto_tune::TuningParams;
 use crate::fs_enum::FileFilter;
@@ -18,16 +19,20 @@ use crate::remote::endpoint::RemoteEndpoint;
 use crate::remote::transfer::CONTROL_PLANE_CHUNK_SIZE;
 use crate::remote::tuning::determine_remote_tuning;
 use crate::transfer_plan::PlanOptions;
-use eyre::{bail, Result};
+use eyre::{bail, eyre, Result};
 use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::fs;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::data_plane::DataPlaneSession;
 use super::payload::{
     payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
+    DEFAULT_PAYLOAD_PREFETCH,
 };
 
 fn ensure_remote_tuning(
@@ -113,8 +118,13 @@ impl RemotePushClient {
         )
         .await?;
 
-        let (manifest_rx, manifest_task) =
-            spawn_manifest_task(source_root.to_path_buf(), filter.clone_without_cache());
+        let unreadable_paths = Arc::new(Mutex::new(Vec::new()));
+
+        let (manifest_rx, manifest_task) = spawn_manifest_task(
+            source_root.to_path_buf(),
+            filter.clone_without_cache(),
+            Arc::clone(&unreadable_paths),
+        );
 
         let mut manifest_rx = manifest_rx;
 
@@ -197,6 +207,7 @@ impl RemotePushClient {
                                                     progress,
                                                     plan_options,
                                                     tuning.chunk_bytes,
+                                                    tuning.initial_streams,
                                                 ).await?;
                                                 if result.files_sent > 0 {
                                                     fallback_files_sent =
@@ -265,6 +276,7 @@ impl RemotePushClient {
                                                 progress,
                                                 plan_options,
                                                 tuning.chunk_bytes,
+                                                tuning.initial_streams,
                                             ).await?;
                                             if result.files_sent > 0 {
                                                 fallback_files_sent =
@@ -306,6 +318,7 @@ impl RemotePushClient {
                                                 neg.tcp_port,
                                                 &token_bytes,
                                                 tuning.chunk_bytes,
+                                                tuning.max_streams,
                                                 trace_data_plane,
                                             )
                                             .await?;
@@ -370,6 +383,29 @@ impl RemotePushClient {
                     match maybe_header {
                         Some(header) => {
                             let rel = header.relative_path.clone();
+                            let abs_path = source_root.join(&rel);
+                            match fs::File::open(&abs_path).await {
+                                Ok(file) => drop(file),
+                                Err(err) => {
+                                    match err.kind() {
+                                        ErrorKind::PermissionDenied => {
+                                            record_unreadable_entry(&unreadable_paths, &rel, "permission denied");
+                                            continue;
+                                        }
+                                        ErrorKind::NotFound => {
+                                            record_unreadable_entry(&unreadable_paths, &rel, "not found");
+                                            continue;
+                                        }
+                                        _ => {
+                                            return Err(eyre!(format!(
+                                                "failed to open {} while preparing manifest: {}",
+                                                abs_path.display(),
+                                                err
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
                             manifest_total_bytes =
                                 manifest_total_bytes.saturating_add(header.size);
                             send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
@@ -395,6 +431,7 @@ impl RemotePushClient {
                                             progress,
                                             plan_options,
                                             tuning.chunk_bytes,
+                                            tuning.initial_streams,
                                         ).await?;
                                         if result.files_sent > 0 {
                                             fallback_files_sent =
@@ -416,7 +453,7 @@ impl RemotePushClient {
                                                 transfer_size_hint,
                                                 manifest_total_bytes,
                                             );
-                                            let tuning = ensure_remote_tuning(
+                                            let _ = ensure_remote_tuning(
                                                 &mut remote_tuning,
                                                 &mut plan_options,
                                                 size_hint,
@@ -465,6 +502,10 @@ impl RemotePushClient {
                             .as_ref()
                             .map(|t| t.chunk_bytes)
                             .unwrap_or(CONTROL_PLANE_CHUNK_SIZE),
+                        remote_tuning
+                            .as_ref()
+                            .map(|t| t.initial_streams)
+                            .unwrap_or(DEFAULT_PAYLOAD_PREFETCH),
                     )
                     .await?;
                     fallback_upload_complete_sent = true;
@@ -501,6 +542,23 @@ impl RemotePushClient {
 
         let summary = summary.ok_or_else(|| eyre::eyre!("push stream ended without summary"))?;
 
+        let unreadable = unreadable_paths
+            .lock()
+            .map_err(|err| eyre!("manifest warnings poisoned: {}", err))?;
+        if !unreadable.is_empty() {
+            let preview: Vec<_> = unreadable.iter().take(5).cloned().collect();
+            let mut message = format!(
+                "{} file(s) were skipped due to permission or access errors: {}",
+                unreadable.len(),
+                preview.join(", ")
+            );
+            if unreadable.len() > preview.len() {
+                let remaining = unreadable.len() - preview.len();
+                message.push_str(&format!(" (and {} more)", remaining));
+            }
+            return Err(eyre!(message));
+        }
+
         Ok(RemotePushReport {
             files_requested,
             fallback_used,
@@ -519,6 +577,7 @@ async fn stream_fallback_from_queue(
     progress: Option<&RemotePushProgress>,
     plan_options: PlanOptions,
     chunk_bytes: usize,
+    payload_prefetch: usize,
 ) -> Result<FallbackStreamResult> {
     let headers = drain_pending_headers(pending_queue, manifest_lookup);
     if headers.is_empty() {
@@ -543,6 +602,7 @@ async fn stream_fallback_from_queue(
         false,
         progress,
         control_chunk,
+        payload_prefetch,
     )
     .await?;
 

@@ -100,6 +100,7 @@ pub(crate) async fn stream_pull(
         module_path,
         planned.payloads,
         tuning.chunk_bytes,
+        tuning.max_streams,
     ));
 
     transfer_task
@@ -258,6 +259,7 @@ async fn accept_pull_data_connection(
     module_root: PathBuf,
     payloads: Vec<TransferPayload>,
     chunk_bytes: usize,
+    payload_prefetch: usize,
 ) -> Result<(), Status> {
     let (mut socket, addr) = listener
         .accept()
@@ -279,6 +281,7 @@ async fn accept_pull_data_connection(
         socket,
         false,
         chunk_bytes,
+        payload_prefetch,
     );
 
     session

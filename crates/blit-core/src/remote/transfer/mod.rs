@@ -9,6 +9,6 @@ pub use data_plane::{
 pub use payload::{
     build_tar_shard, payload_file_count, plan_transfer_payloads, prepare_payload,
     prepared_payload_stream, transfer_payloads_via_control_plane, PlannedPayloads, PreparedPayload,
-    TransferPayload,
+    TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
 pub use progress::{ProgressEvent, RemoteTransferProgress};

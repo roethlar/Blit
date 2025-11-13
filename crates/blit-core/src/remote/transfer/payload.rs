@@ -53,7 +53,7 @@ pub enum PreparedPayload {
     },
 }
 
-pub const PAYLOAD_PREFETCH: usize = 8;
+pub const DEFAULT_PAYLOAD_PREFETCH: usize = 8;
 
 pub struct PlannedPayloads {
     pub payloads: Vec<TransferPayload>,
@@ -159,12 +159,14 @@ fn normalize_relative_path(path: &Path) -> String {
 pub fn prepared_payload_stream(
     payloads: Vec<TransferPayload>,
     source_root: PathBuf,
+    prefetch: usize,
 ) -> impl futures::Stream<Item = Result<PreparedPayload>> {
+    let capacity = prefetch.max(1);
     stream::iter(payloads.into_iter().map(move |payload| {
         let root = source_root.clone();
         async move { prepare_payload(payload, root).await }
     }))
-    .buffered(PAYLOAD_PREFETCH)
+    .buffered(capacity)
 }
 
 pub async fn transfer_payloads_via_control_plane(
@@ -174,10 +176,12 @@ pub async fn transfer_payloads_via_control_plane(
     finish: bool,
     progress: Option<&RemoteTransferProgress>,
     chunk_bytes: usize,
+    payload_prefetch: usize,
 ) -> Result<()> {
     let chunk_size = chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE);
     let mut buffer = vec![0u8; chunk_size];
-    let mut prepared_stream = prepared_payload_stream(payloads, source_root.to_path_buf());
+    let mut prepared_stream =
+        prepared_payload_stream(payloads, source_root.to_path_buf(), payload_prefetch);
 
     while let Some(prepared) = prepared_stream.next().await {
         match prepared? {

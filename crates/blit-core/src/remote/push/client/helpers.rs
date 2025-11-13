@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Result};
 use std::collections::{HashMap, VecDeque};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task;
@@ -90,6 +92,7 @@ pub fn decode_token(token: &str) -> Result<Vec<u8>> {
 pub fn spawn_manifest_task(
     root: PathBuf,
     filter: FileFilter,
+    unreadable: Arc<Mutex<Vec<String>>>,
 ) -> (mpsc::Receiver<FileHeader>, task::JoinHandle<Result<u64>>) {
     let (manifest_tx, manifest_rx) = mpsc::channel::<FileHeader>(64);
     let handle = task::spawn_blocking(move || -> Result<u64> {
@@ -97,9 +100,32 @@ pub fn spawn_manifest_task(
         let start = Instant::now();
         let mut last_log = start;
         let mut enumerated: u64 = 0;
+        let unreadable = unreadable;
         enumerator.enumerate_local_streaming(&root, |entry| {
             if let EntryKind::File { size } = entry.kind {
                 let rel = normalize_relative_path(&entry.relative_path);
+                let absolute = entry.absolute_path.clone();
+
+                if let Err(err) = std::fs::File::open(&absolute) {
+                    match err.kind() {
+                        ErrorKind::PermissionDenied => {
+                            record_unreadable_entry(&unreadable, &rel, "permission denied");
+                            return Ok(());
+                        }
+                        ErrorKind::NotFound => {
+                            record_unreadable_entry(&unreadable, &rel, "not found");
+                            return Ok(());
+                        }
+                        _ => {
+                            return Err(eyre!(format!(
+                                "manifest open {}: {}",
+                                absolute.display(),
+                                err
+                            )));
+                        }
+                    }
+                }
+
                 let mtime = unix_seconds(&entry.metadata);
                 let permissions = permissions_mode(&entry.metadata);
                 let header = FileHeader {
@@ -128,6 +154,13 @@ pub fn spawn_manifest_task(
     });
 
     (manifest_rx, handle)
+}
+
+pub fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &str) {
+    eprintln!("[push] skipping '{}' ({})", rel, reason);
+    if let Ok(mut guard) = list.lock() {
+        guard.push(format!("{} ({})", rel, reason));
+    }
 }
 
 pub fn spawn_response_task(
