@@ -14,20 +14,23 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
 
 #[cfg(windows)]
-use std::env;
-#[cfg(windows)]
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 #[cfg(windows)]
 use crate::copy::windows;
 
 /// Copy a single file with optimal buffer size
+pub struct FileCopyOutcome {
+    pub bytes_copied: u64,
+    pub clone_succeeded: bool,
+}
+
 pub fn copy_file(
     src: &Path,
     dst: &Path,
     buffer_sizer: &BufferSizer,
     is_network: bool,
     logger: &dyn Logger,
-) -> Result<u64> {
+) -> Result<FileCopyOutcome> {
     logger.start(src, dst);
 
     #[cfg(windows)]
@@ -35,21 +38,19 @@ pub fn copy_file(
         match windows::windows_copyfile(src, dst) {
             Ok(bytes) => {
                 let clone_succeeded = windows::take_last_block_clone_success();
-                let skip_clone_metadata =
-                    clone_succeeded && env::var_os("BLIT_SKIP_METADATA_ON_CLONE").is_some();
-                if skip_clone_metadata {
-                    log::info!(
-                        "prototype: skipping metadata preservation after block clone for {}",
+                if !clone_succeeded {
+                    metadata::preserve_metadata(src, dst)?;
+                } else {
+                    log::debug!(
+                        "block clone preserved metadata automatically for {}",
                         dst.display()
                     );
-                } else {
-                    metadata::preserve_metadata(src, dst)?;
-                }
-                if clone_succeeded {
-                    println!("block clone {} ({} bytes)", dst.display(), bytes);
                 }
                 logger.copy_done(src, dst, bytes);
-                return Ok(bytes);
+                return Ok(FileCopyOutcome {
+                    bytes_copied: bytes,
+                    clone_succeeded,
+                });
             }
             Err(err) => {
                 log::warn!(
@@ -61,7 +62,7 @@ pub fn copy_file(
         }
     }
 
-    let result: Result<u64> = (|| {
+    let result: Result<FileCopyOutcome> = (|| {
         let metadata = fs::metadata(src)?;
         let file_size = metadata.len();
 
@@ -100,7 +101,7 @@ pub fn copy_file(
         #[cfg(not(windows))]
         let dst_file = File::create(dst)?;
 
-        let total_bytes = {
+        let (total_bytes, clone_succeeded) = {
             #[cfg(windows)]
             {
                 let mut clone_success = false;
@@ -136,23 +137,29 @@ pub fn copy_file(
                     }
                 }
                 if clone_success {
-                    file_size
+                    (file_size, true)
                 } else {
-                    clone::sparse_copy_windows(src_file, &mut dst_file, buffer_size, file_size)?
+                    let copied = clone::sparse_copy_windows(
+                        src_file,
+                        &mut dst_file,
+                        buffer_size,
+                        file_size,
+                    )?;
+                    (copied, false)
                 }
             }
             #[cfg(target_os = "macos")]
             {
-                if clone::attempt_clonefile_macos(src, dst).unwrap_or(false)
-                    || clone::attempt_fcopyfile_macos(src, dst).unwrap_or(false)
-                {
-                    file_size
+                let cloned = clone::attempt_clonefile_macos(src, dst).unwrap_or(false)
+                    || clone::attempt_fcopyfile_macos(src, dst).unwrap_or(false);
+                if cloned {
+                    (file_size, true)
                 } else {
                     let mut reader = BufReader::with_capacity(buffer_size, src_file);
                     let mut writer = BufWriter::with_capacity(buffer_size, dst_file);
                     let n = io::copy(&mut reader, &mut writer)?;
                     writer.flush()?;
-                    n
+                    (n, false)
                 }
             }
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -163,29 +170,34 @@ pub fn copy_file(
                         || clone::attempt_sendfile_linux(&src_file, &dst_file, file_size)
                             .unwrap_or(false);
                 if fast_linux {
-                    file_size
+                    (file_size, true)
                 } else if let Some(n) =
                     clone::attempt_sparse_copy_unix(&src_file, &dst_file, file_size)?
                 {
-                    n
+                    (n, false)
                 } else {
                     let mut reader = BufReader::with_capacity(buffer_size, src_file);
                     let mut writer = BufWriter::with_capacity(buffer_size, dst_file);
                     let n = io::copy(&mut reader, &mut writer)?;
                     writer.flush()?;
-                    n
+                    (n, false)
                 }
             }
         };
-        metadata::preserve_metadata(src, dst)?;
+        if !clone_succeeded {
+            metadata::preserve_metadata(src, dst)?;
+        }
 
-        Ok(total_bytes)
+        Ok(FileCopyOutcome {
+            bytes_copied: total_bytes,
+            clone_succeeded,
+        })
     })();
 
     match result {
-        Ok(bytes) => {
-            logger.copy_done(src, dst, bytes);
-            Ok(bytes)
+        Ok(outcome) => {
+            logger.copy_done(src, dst, outcome.bytes_copied);
+            Ok(outcome)
         }
         Err(e) => {
             logger.error("copy", src, &e.to_string());

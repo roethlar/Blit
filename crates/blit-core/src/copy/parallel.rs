@@ -29,9 +29,11 @@ pub fn parallel_copy_files(
 
     pairs.par_iter().for_each(|(entry, dst)| {
         match copy_file(&entry.path, dst, &buffer_sizer, is_network, logger) {
-            Ok(bytes) => {
+            Ok(outcome) => {
                 stats.files.fetch_add(1, Ordering::Relaxed);
-                stats.bytes.fetch_add(bytes, Ordering::Relaxed);
+                stats
+                    .bytes
+                    .fetch_add(outcome.bytes_copied, Ordering::Relaxed);
             }
             Err(e) => {
                 let mut errs = stats.errors.lock();

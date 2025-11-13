@@ -316,15 +316,22 @@ fn copy_path_maybe(
         return Ok(());
     }
 
+    let mut copy_outcome = None;
     if file_needs_copy_with_checksum_type(&src, &dst, config.checksum)? {
-        let _ = copy_file(&src, &dst, sizer, false, logger)?;
+        copy_outcome = Some(copy_file(&src, &dst, sizer, false, logger)?);
     }
 
     if config.preserve_times {
-        if let Ok(meta) = std::fs::metadata(&src) {
-            if let Ok(modified) = meta.modified() {
-                let ft = FileTime::from_system_time(modified);
-                let _ = filetime::set_file_mtime(&dst, ft);
+        let should_preserve = copy_outcome
+            .as_ref()
+            .map(|outcome| !outcome.clone_succeeded)
+            .unwrap_or(true);
+        if should_preserve {
+            if let Ok(meta) = std::fs::metadata(&src) {
+                if let Ok(modified) = meta.modified() {
+                    let ft = FileTime::from_system_time(modified);
+                    let _ = filetime::set_file_mtime(&dst, ft);
+                }
             }
         }
     }
