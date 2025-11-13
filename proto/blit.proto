@@ -122,7 +122,16 @@ message PullChunk {
   oneof payload {
     FileHeader file_header = 1;
     FileData file_data = 2;
+    DataTransferNegotiation negotiation = 3;
+    PullSummary summary = 4;
   }
+}
+
+message PullSummary {
+  uint64 files_transferred = 1;
+  uint64 bytes_transferred = 2;
+  uint64 bytes_zero_copy = 3;
+  bool tcp_fallback_used = 4;
 }
 
 // Other Operations

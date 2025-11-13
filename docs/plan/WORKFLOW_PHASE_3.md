@@ -40,7 +40,7 @@
 ### 3.3 Hybrid Transport Completion
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 3.3.1 | Finalise `proto/blit.proto` to include hybrid transport negotiation (`DataTransferNegotiation`, summary fields) and admin RPCs (`ListModules`, directory listing, recursive enumeration, disk usage, remote remove). | Updated proto + regenerated Rust code. |
+| 3.3.1 | Finalise `proto/blit.proto` to include hybrid transport negotiation (`DataTransferNegotiation`, summary fields) and admin RPCs (`ListModules`, directory listing, recursive enumeration, disk usage, remote remove). *(2025-11-10: shared `remote::transfer::{payload,progress,data_plane}` modules extracted and push updated to use them; PullChunk/daemon pull wiring still pending.)* | Updated proto + regenerated Rust code. |
 | 3.3.2 | Implement daemon-side control plane: accept negotiates, spawn TCP listener, issue secure tokens, enforce read-only/chroot, stream Pull responses. | ✅ Logic now lives in `service.rs` (split out of `main.rs` on 2025-10-27); tests cover negotiation + fallback. |
 | 3.3.3 | Implement TCP data plane server (zero-copy when available, buffered fallback). | Data-plane module + unit tests. |
 | 3.3.4 | Implement CLI data plane client: token validation, gRPC fallback, progress events. | `blit-cli` transport layer + integration tests. |

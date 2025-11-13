@@ -79,7 +79,7 @@ This is the master checklist. Execute the first unchecked item. After completion
 - [ ] Ensure destructive operations prompt unless `--yes` is supplied.
 - [ ] Document that remote transfers rely on operator-provided secure networks or SSH tunnels (no built-in TLS); update CLI/daemon help text and plan docs accordingly.
 - [ ] **P0** Remote transfer parity refactor (see `docs/plan/REMOTE_TRANSFER_PARITY.md`):
-    - [ ] Extract shared modules `remote::transfer::{payload, progress, data_plane}` and migrate push/pull to use them, wiring `auto_tune::determine_tuning` outputs into `SchedulerOptions` so both directions adopt v1’s warmup-driven stream/chunk sizing.
+    - [x] Extract shared modules `remote::transfer::{payload, progress, data_plane}` and migrate push to use them, wiring the common planner through remote push. *(2025-11-10: Added `remote::transfer` with shared payload/progress/data-plane logic and refactored push to consume it; pull wiring + auto-tune hookup still pending.)*
     - [ ] Extend `PullChunk` proto with negotiation + summary messages; regenerate bindings.
     - [ ] Rebuild daemon pull pipeline to reuse hybrid transport + TCP data plane (with `--force-grpc` fallback) and enlarge data-plane buffers / zero-copy paths to match v1’s 10 GbE throughput.
     - [ ] Rewrite CLI / `RemotePullClient` to use the shared transport, emit progress (`-p/-v`), and connect to the data plane with the auto-tuned scheduler.

@@ -14,9 +14,9 @@ Achieve “absolute parity” across every transfer direction (local→remote, r
 - CLI pull path does not wire `-p` / `-v` progress reporting.
 - Push refactors (payload planning, data-plane negotiation, tar sharding) live entirely under `remote::push`, so future work keeps drifting toward the push direction only.
 
-## Current Status (2025-11-07)
+## Current Status (2025-11-10)
 
-- ✅ Push path already uses hybrid transport + tar shards; lacks shared module but functions at 9–10 Gbps when tuned manually.
+- ✅ Push path already uses hybrid transport + tar shards. Shared `remote::transfer::{payload, progress, data_plane}` modules now exist and the push client/server import them, so future work reuses the same planner/progress/TCP code.
 - ⚠️ Pull path is still gRPC-only with 64 KiB buffers and no progress output, so throughput stalls (~400 Mbps observed).
 - ⚠️ Auto-tuning module exists but is unused by the CLI/transfer engine; stream counts/chunk sizes stay at conservative defaults.
 - ⚠️ No integration tests cover remote pull parity, so regressions slipped in unnoticed.
@@ -25,7 +25,7 @@ Achieve “absolute parity” across every transfer direction (local→remote, r
 
 | Step | Description | Deliverables / Files |
 |------|-------------|----------------------|
-| 1. Shared Transfer Modules + Auto-Tune | Move payload planning, tar shard builder, control-plane streaming, and progress types into `crates/blit-core/src/remote/transfer/{payload,progress,data_plane}.rs`. Export via `remote::transfer`. While here, wire `auto_tune::determine_tuning` back into both push and pull schedulers so stream counts/chunk sizes react to warmup probes (mirroring v1). | New module files + `remote::push`/`transfer_engine` updates |
+| 1. Shared Transfer Modules + Auto-Tune | Move payload planning, tar shard builder, control-plane streaming, and progress types into `crates/blit-core/src/remote/transfer/{payload,progress,data_plane}.rs`. Export via `remote::transfer`. While here, wire `auto_tune::determine_tuning` back into both push and pull schedulers so stream counts/chunk sizes react to warmup probes (mirroring v1). | ✅ Shared modules added 2025-11-10 (`remote::transfer`); push path updated. Still need to hook auto-tune + pull into them. |
 | 2. Protocol Updates | Extend `PullChunk` to include `DataTransferNegotiation` + `PullSummary` so pull can negotiate the TCP data plane just like push. Update rust proto bindings. | `proto/blit.proto`, generated bindings |
 | 3. Daemon Pull Pipeline | Rebuild `crates/blit-daemon/src/service/pull.rs` so it enumerates manifests once, plans payloads via shared module, sends negotiation (unless `force_grpc`), and streams files/tar shards over TCP using the existing push data-plane listener. Keep gRPC fallback behind `force_grpc`, but increase data-plane buffers / enable zero-copy just as v1 does so each record can saturate 10 GbE. | `service/pull.rs`, shared listener wiring |
 | 4. CLI/Client Pull Rewrite | Update `RemotePullClient` to consume negotiation messages, connect to the TCP data plane, and stream tar shards locally (mirroring push). Wire `run_remote_pull_transfer` to the shared `RemoteTransferProgress` channel so `-p`/`-v` behave identically, and ensure auto-tuned stream counts/chunk sizes flow through `SchedulerOptions`. | `crates/blit-core/src/remote/pull.rs`, `crates/blit-cli/src/transfers/remote.rs` |
