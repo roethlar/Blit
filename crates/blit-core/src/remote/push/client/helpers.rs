@@ -1,10 +1,12 @@
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Result};
+use owo_colors::OwoColorize;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
+use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::task;
 use tonic::Status;
@@ -157,10 +159,47 @@ pub fn spawn_manifest_task(
 }
 
 pub fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &str) {
-    eprintln!("[push] skipping '{}' ({})", rel, reason);
+    eprintln!(
+        "{}",
+        format!("[push] skipping '{}' ({})", rel, reason).red()
+    );
     if let Ok(mut guard) = list.lock() {
         guard.push(format!("{} ({})", rel, reason));
     }
+}
+
+pub async fn filter_readable_headers(
+    source_root: &Path,
+    headers: Vec<FileHeader>,
+    unreadable: &Arc<Mutex<Vec<String>>>,
+) -> Result<Vec<FileHeader>> {
+    let mut filtered = Vec::with_capacity(headers.len());
+    for header in headers {
+        let rel = header.relative_path.clone();
+        let path = source_root.join(&rel);
+        match fs::File::open(&path).await {
+            Ok(file) => drop(file),
+            Err(err) => match err.kind() {
+                ErrorKind::PermissionDenied => {
+                    record_unreadable_entry(unreadable, &rel, "permission denied");
+                    continue;
+                }
+                ErrorKind::NotFound => {
+                    record_unreadable_entry(unreadable, &rel, "not found");
+                    continue;
+                }
+                _ => {
+                    return Err(eyre!(format!(
+                        "opening {} during payload planning: {}",
+                        path.display(),
+                        err
+                    )));
+                }
+            },
+        }
+        filtered.push(header);
+    }
+    Ok(filtered)
 }
 
 pub fn spawn_response_task(

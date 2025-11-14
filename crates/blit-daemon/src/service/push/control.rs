@@ -23,6 +23,9 @@ use tonic::{Status, Streaming};
 const FILE_LIST_BATCH_MAX_ENTRIES: usize = 16 * 1024;
 const FILE_LIST_BATCH_MAX_BYTES: usize = 512 * 1024;
 const FILE_LIST_BATCH_MAX_DELAY: Duration = Duration::from_millis(25);
+const FILE_LIST_EARLY_FLUSH_ENTRIES: usize = 128;
+const FILE_LIST_EARLY_FLUSH_BYTES: usize = 64 * 1024;
+const FILE_LIST_EARLY_FLUSH_DELAY: Duration = Duration::from_millis(5);
 const FILE_UPLOAD_CHANNEL_CAPACITY: usize = FILE_LIST_BATCH_MAX_ENTRIES * 16;
 
 pub(crate) async fn handle_push_stream(
@@ -331,9 +334,22 @@ impl FileListBatcher {
     }
 
     fn should_flush(&self) -> bool {
+        if self.batch.is_empty() {
+            return false;
+        }
+
+        if !self.sent_any {
+            if self.batch.len() >= FILE_LIST_EARLY_FLUSH_ENTRIES
+                || self.batch_bytes >= FILE_LIST_EARLY_FLUSH_BYTES
+                || self.last_flush.elapsed() >= FILE_LIST_EARLY_FLUSH_DELAY
+            {
+                return true;
+            }
+        }
+
         self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES
             || self.batch_bytes >= FILE_LIST_BATCH_MAX_BYTES
-            || (!self.batch.is_empty() && self.last_flush.elapsed() >= FILE_LIST_BATCH_MAX_DELAY)
+            || self.last_flush.elapsed() >= FILE_LIST_BATCH_MAX_DELAY
     }
 }
 

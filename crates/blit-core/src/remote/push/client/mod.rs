@@ -5,9 +5,9 @@ pub use crate::remote::transfer::progress::ProgressEvent;
 pub use types::{RemotePushProgress, RemotePushReport, TransferMode};
 
 use self::helpers::{
-    decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
-    record_unreadable_entry, send_manifest_complete, send_payload, spawn_manifest_task,
-    spawn_response_task,
+    decode_token, destination_path, drain_pending_headers, filter_readable_headers, map_status,
+    module_and_path, record_unreadable_entry, send_manifest_complete, send_payload,
+    spawn_manifest_task, spawn_response_task,
 };
 use crate::auto_tune::TuningParams;
 use crate::fs_enum::FileFilter;
@@ -24,9 +24,10 @@ use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex, Notify};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::data_plane::DataPlaneSession;
@@ -208,6 +209,7 @@ impl RemotePushClient {
                                                     plan_options,
                                                     tuning.chunk_bytes,
                                                     tuning.initial_streams,
+                                                    &unreadable_paths,
                                                 ).await?;
                                                 if result.files_sent > 0 {
                                                     fallback_files_sent =
@@ -225,6 +227,15 @@ impl RemotePushClient {
                                                 let headers =
                                                     drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                                 if !headers.is_empty() {
+                                                    let headers = filter_readable_headers(
+                                                        source_root,
+                                                        headers,
+                                                        &unreadable_paths,
+                                                    )
+                                                    .await?;
+                                                    if headers.is_empty() {
+                                                        continue;
+                                                    }
                                                     let size_hint = effective_size_hint(
                                                         transfer_size_hint,
                                                         manifest_total_bytes,
@@ -258,11 +269,11 @@ impl RemotePushClient {
                                         fallback_used = true;
                                         transfer_mode = TransferMode::Fallback;
 
-                                        if need_list_received {
-                                            let size_hint = effective_size_hint(
-                                                transfer_size_hint,
-                                                manifest_total_bytes,
-                                            );
+                                            if need_list_received {
+                                                let size_hint = effective_size_hint(
+                                                    transfer_size_hint,
+                                                    manifest_total_bytes,
+                                                );
                                             let tuning = ensure_remote_tuning(
                                                 &mut remote_tuning,
                                                 &mut plan_options,
@@ -277,6 +288,7 @@ impl RemotePushClient {
                                                 plan_options,
                                                 tuning.chunk_bytes,
                                                 tuning.initial_streams,
+                                                &unreadable_paths,
                                             ).await?;
                                             if result.files_sent > 0 {
                                                 fallback_files_sent =
@@ -325,6 +337,15 @@ impl RemotePushClient {
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                             if !headers.is_empty() {
+                                                let headers = filter_readable_headers(
+                                                    source_root,
+                                                    headers,
+                                                    &unreadable_paths,
+                                                )
+                                                .await?;
+                                                if headers.is_empty() {
+                                                    continue;
+                                                }
                                                 let planned = plan_transfer_payloads(
                                                     headers,
                                                     source_root,
@@ -349,6 +370,15 @@ impl RemotePushClient {
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                             if !headers.is_empty() {
+                                                let headers = filter_readable_headers(
+                                                    source_root,
+                                                    headers,
+                                                    &unreadable_paths,
+                                                )
+                                                .await?;
+                                                if headers.is_empty() {
+                                                    continue;
+                                                }
                                                 let planned = plan_transfer_payloads(
                                                     headers,
                                                     source_root,
@@ -432,6 +462,7 @@ impl RemotePushClient {
                                             plan_options,
                                             tuning.chunk_bytes,
                                             tuning.initial_streams,
+                                            &unreadable_paths,
                                         ).await?;
                                         if result.files_sent > 0 {
                                             fallback_files_sent =
@@ -449,6 +480,15 @@ impl RemotePushClient {
                                         let headers =
                                             drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                         if !headers.is_empty() {
+                                            let headers = filter_readable_headers(
+                                                source_root,
+                                                headers,
+                                                &unreadable_paths,
+                                            )
+                                            .await?;
+                                            if headers.is_empty() {
+                                                continue;
+                                            }
                                             let size_hint = effective_size_hint(
                                                 transfer_size_hint,
                                                 manifest_total_bytes,
@@ -578,8 +618,14 @@ async fn stream_fallback_from_queue(
     plan_options: PlanOptions,
     chunk_bytes: usize,
     payload_prefetch: usize,
+    unreadable: &Arc<Mutex<Vec<String>>>,
 ) -> Result<FallbackStreamResult> {
     let headers = drain_pending_headers(pending_queue, manifest_lookup);
+    if headers.is_empty() {
+        return Ok(FallbackStreamResult::empty());
+    }
+
+    let headers = filter_readable_headers(source_root, headers, unreadable).await?;
     if headers.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }
