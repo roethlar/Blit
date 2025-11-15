@@ -23,6 +23,7 @@ use eyre::{bail, eyre, Result};
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::fs;
@@ -40,6 +41,7 @@ struct MultiStreamSender {
     workers: Vec<mpsc::Sender<Option<Vec<TransferPayload>>>>,
     handles: Vec<JoinHandle<Result<StreamStats>>>,
     next_worker: usize,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl MultiStreamSender {
@@ -74,6 +76,7 @@ impl MultiStreamSender {
             workers,
             handles,
             next_worker: 0,
+            cancelled: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -83,6 +86,9 @@ impl MultiStreamSender {
         }
         let idx = self.next_worker;
         self.next_worker = (self.next_worker + 1) % self.workers.len();
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(eyre!("data plane transfer cancelled"));
+        }
         self.workers[idx]
             .send(Some(payloads))
             .await
