@@ -6,6 +6,7 @@ use blit_core::remote::transfer::{plan_transfer_payloads, TransferPayload};
 use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tonic::Status;
@@ -266,7 +267,9 @@ async fn accept_pull_data_connection(
     payload_prefetch: usize,
     stream_count: u32,
 ) -> Result<(), Status> {
+    let start = Instant::now();
     let streams = stream_count.max(1) as usize;
+    let total_bytes: u64 = payloads.iter().map(|p| payload_bytes(p)).sum();
     let mut handles = Vec::with_capacity(streams);
     let chunked = chunk_transfer_payloads(payloads, streams);
 
@@ -298,6 +301,15 @@ async fn accept_pull_data_connection(
         handle.await.map_err(|err| {
             Status::internal(format!("pull data plane worker cancelled: {}", err))
         })??;
+    }
+
+    let elapsed = start.elapsed().as_secs_f64().max(1e-6);
+    if total_bytes > 0 {
+        let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
+        eprintln!(
+            "[pull-data-plane] aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
+            gbps, total_bytes, elapsed
+        );
     }
 
     Ok(())
@@ -389,4 +401,11 @@ fn chunk_transfer_payloads(
         chunks[idx % buckets].push(payload);
     }
     chunks
+}
+
+fn payload_bytes(payload: &TransferPayload) -> u64 {
+    match payload {
+        TransferPayload::File(header) => header.size,
+        TransferPayload::TarShard { headers } => headers.iter().map(|h| h.size).sum(),
+    }
 }

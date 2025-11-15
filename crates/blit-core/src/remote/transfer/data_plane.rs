@@ -21,6 +21,7 @@ pub struct DataPlaneSession {
     trace: bool,
     chunk_bytes: usize,
     payload_prefetch: usize,
+    bytes_sent: u64,
 }
 
 macro_rules! trace_client {
@@ -46,6 +47,7 @@ impl DataPlaneSession {
             trace,
             chunk_bytes: buffer_len,
             payload_prefetch,
+            bytes_sent: 0,
         }
     }
 
@@ -89,9 +91,12 @@ impl DataPlaneSession {
             match prepared? {
                 PreparedPayload::File(header) => {
                     self.send_file(source_root, &header).await?;
+                    self.bytes_sent = self.bytes_sent.saturating_add(header.size);
                 }
                 PreparedPayload::TarShard { headers, data } => {
+                    let shard_bytes: u64 = headers.iter().map(|h| h.size).sum();
                     self.send_prepared_tar_shard(headers, &data).await?;
+                    self.bytes_sent = self.bytes_sent.saturating_add(shard_bytes);
                 }
             }
         }
@@ -108,6 +113,10 @@ impl DataPlaneSession {
             .flush()
             .await
             .context("flushing data plane stream")
+    }
+
+    pub fn bytes_sent(&self) -> u64 {
+        self.bytes_sent
     }
 
     async fn send_file(&mut self, source_root: &Path, header: &FileHeader) -> Result<()> {

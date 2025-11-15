@@ -1,6 +1,7 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Context, Result};
@@ -27,11 +28,24 @@ pub struct RemotePullReport {
 
 pub type RemotePullProgress = RemoteTransferProgress;
 
-#[derive(Default)]
 struct PullWorkerStats {
+    start: Instant,
     files_transferred: u64,
     bytes_transferred: u64,
     downloaded_paths: Vec<PathBuf>,
+    bytes: u64,
+}
+
+impl PullWorkerStats {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            files_transferred: 0,
+            bytes_transferred: 0,
+            downloaded_paths: Vec::new(),
+            bytes: 0,
+        }
+    }
 }
 
 pub struct RemotePullClient {
@@ -215,7 +229,7 @@ async fn receive_data_plane_streams(
     report: &mut RemotePullReport,
 ) -> Result<()> {
     if stream_count <= 1 {
-        let mut stats = PullWorkerStats::default();
+        let mut stats = PullWorkerStats::new();
         receive_data_plane_stream_inner(
             host,
             port,
@@ -251,7 +265,7 @@ async fn receive_data_plane_streams(
         let dest_root_clone = dest_root.clone();
         let progress_clone = progress.cloned();
         handles.push(tokio::spawn(async move {
-            let mut stats = PullWorkerStats::default();
+            let mut stats = PullWorkerStats::new();
             receive_data_plane_stream_inner(
                 &host_clone,
                 port,
@@ -281,6 +295,12 @@ async fn receive_data_plane_streams(
                 .downloaded_paths
                 .extend(stats.downloaded_paths.into_iter());
         }
+        let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
+        let gbps = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
+        eprintln!(
+            "[pull-data-plane] stream {:.2} Gbps ({} bytes in {:.2}s)",
+            gbps, stats.bytes, elapsed
+        );
     }
 
     Ok(())
@@ -375,6 +395,7 @@ async fn handle_file_record(
 
     stats.files_transferred = stats.files_transferred.saturating_add(1);
     stats.bytes_transferred = stats.bytes_transferred.saturating_add(file_size);
+    stats.bytes = stats.bytes.saturating_add(file_size);
     if track_paths {
         stats.downloaded_paths.push(relative_path);
     }
@@ -420,6 +441,7 @@ async fn handle_tar_shard_record(
     stats.files_transferred = stats.files_transferred.saturating_add(files.len() as u64);
     let shard_bytes: u64 = files.iter().map(|(_, size)| *size).sum();
     stats.bytes_transferred = stats.bytes_transferred.saturating_add(shard_bytes);
+    stats.bytes = stats.bytes.saturating_add(shard_bytes);
     if let Some(progress) = progress {
         progress.report_payload(files.len(), 0);
     }

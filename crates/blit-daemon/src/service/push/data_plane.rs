@@ -11,6 +11,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use tar::Archive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -54,6 +55,7 @@ pub(crate) async fn accept_data_connection_stream(
     files: mpsc::Receiver<FileHeader>,
     stream_count: u32,
 ) -> Result<TransferStats, Status> {
+    let start = Instant::now();
     let streams = stream_count.max(1) as usize;
     let files = Arc::new(AsyncMutex::new(files));
     let cache = Arc::new(AsyncMutex::new(HashMap::new()));
@@ -89,6 +91,13 @@ pub(crate) async fn accept_data_connection_stream(
         accumulate_transfer_stats(&mut final_stats, &stats);
     }
 
+    let elapsed = start.elapsed().as_secs_f64().max(1e-6);
+    let gbps = (final_stats.bytes_transferred as f64 * 8.0) / elapsed / 1e9;
+    eprintln!(
+        "[data-plane] aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
+        gbps, final_stats.bytes_transferred, elapsed
+    );
+
     Ok(final_stats)
 }
 
@@ -99,6 +108,7 @@ async fn handle_data_plane_stream(
     files: Arc<AsyncMutex<mpsc::Receiver<FileHeader>>>,
     cache: Arc<AsyncMutex<HashMap<String, FileHeader>>>,
 ) -> Result<TransferStats, Status> {
+    let start = Instant::now();
     let mut token_buf = vec![0u8; expected_token.len()];
     socket
         .read_exact(&mut token_buf)
@@ -271,9 +281,11 @@ async fn handle_data_plane_stream(
 
     tar_executor.finish(&mut stats).await?;
 
+    let elapsed = start.elapsed().as_secs_f64().max(1e-6);
+    let gbps = (stats.bytes_transferred as f64 * 8.0) / elapsed / 1e9;
     eprintln!(
-        "[data-plane] stream complete: files={}, bytes={}",
-        stats.files_transferred, stats.bytes_transferred
+        "[data-plane] stream complete: files={}, bytes={} ({:.2} Gbps)",
+        stats.files_transferred, stats.bytes_transferred, gbps
     );
     Ok(stats)
 }

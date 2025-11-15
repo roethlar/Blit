@@ -38,7 +38,7 @@ use super::payload::{
 
 struct MultiStreamSender {
     workers: Vec<mpsc::Sender<Option<Vec<TransferPayload>>>>,
-    handles: Vec<JoinHandle<Result<()>>>,
+    handles: Vec<JoinHandle<Result<StreamStats>>>,
     next_worker: usize,
 }
 
@@ -96,20 +96,39 @@ impl MultiStreamSender {
                 .await
                 .map_err(|_| eyre!("data plane worker channel closed"))?;
         }
+        let mut total_bytes = 0u64;
         for handle in self.handles.drain(..) {
-            handle
+            let stats = handle
                 .await
                 .map_err(|err| eyre!(format!("data plane worker panicked: {}", err)))??;
+            let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
+            let throughput = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
+            eprintln!(
+                "[data-plane-client] stream {:.2} Gbps ({:.2} MiB in {:.2}s)",
+                throughput.max(0.0),
+                stats.bytes as f64 / 1024.0 / 1024.0,
+                elapsed
+            );
+            total_bytes = total_bytes.saturating_add(stats.bytes);
+        }
+        if total_bytes > 0 {
+            eprintln!("[data-plane-client] total bytes sent {}", total_bytes);
         }
         Ok(())
     }
+}
+
+struct StreamStats {
+    start: Instant,
+    bytes: u64,
 }
 
 async fn data_plane_worker(
     mut session: DataPlaneSession,
     mut rx: mpsc::Receiver<Option<Vec<TransferPayload>>>,
     source_root: Arc<PathBuf>,
-) -> Result<()> {
+) -> Result<StreamStats> {
+    let start = Instant::now();
     while let Some(batch) = rx.recv().await {
         match batch {
             Some(payloads) => {
@@ -120,7 +139,11 @@ async fn data_plane_worker(
             None => break,
         }
     }
-    session.finish().await
+    session.finish().await?;
+    Ok(StreamStats {
+        start,
+        bytes: session.bytes_sent(),
+    })
 }
 
 fn ensure_remote_tuning(
