@@ -22,19 +22,106 @@ use crate::transfer_plan::PlanOptions;
 use eyre::{bail, eyre, Result};
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::fs;
-use tokio::sync::{mpsc, Mutex as AsyncMutex, Notify};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::data_plane::DataPlaneSession;
 use super::payload::{
     payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
-    DEFAULT_PAYLOAD_PREFETCH,
+    TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
+
+struct MultiStreamSender {
+    workers: Vec<mpsc::Sender<Option<Vec<TransferPayload>>>>,
+    handles: Vec<JoinHandle<Result<()>>>,
+    next_worker: usize,
+}
+
+impl MultiStreamSender {
+    async fn connect(
+        host: &str,
+        port: u32,
+        token: &[u8],
+        chunk_bytes: usize,
+        payload_prefetch: usize,
+        stream_count: usize,
+        trace: bool,
+        source_root: &Path,
+    ) -> Result<Self> {
+        let streams = stream_count.max(1);
+        let mut workers = Vec::with_capacity(streams);
+        let mut handles = Vec::with_capacity(streams);
+        let root = Arc::new(source_root.to_path_buf());
+
+        for _ in 0..streams {
+            let session =
+                DataPlaneSession::connect(host, port, token, chunk_bytes, payload_prefetch, trace)
+                    .await?;
+            let (tx, rx) = mpsc::channel::<Option<Vec<TransferPayload>>>(4);
+            let root_clone = Arc::clone(&root);
+            let handle =
+                tokio::spawn(async move { data_plane_worker(session, rx, root_clone).await });
+            workers.push(tx);
+            handles.push(handle);
+        }
+
+        Ok(Self {
+            workers,
+            handles,
+            next_worker: 0,
+        })
+    }
+
+    async fn queue(&mut self, payloads: Vec<TransferPayload>) -> Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let idx = self.next_worker;
+        self.next_worker = (self.next_worker + 1) % self.workers.len();
+        self.workers[idx]
+            .send(Some(payloads))
+            .await
+            .map_err(|_| eyre!("data plane worker channel closed"))?;
+        Ok(())
+    }
+
+    async fn finish(mut self) -> Result<()> {
+        for tx in &self.workers {
+            tx.send(None)
+                .await
+                .map_err(|_| eyre!("data plane worker channel closed"))?;
+        }
+        for handle in self.handles.drain(..) {
+            handle
+                .await
+                .map_err(|err| eyre!(format!("data plane worker panicked: {}", err)))??;
+        }
+        Ok(())
+    }
+}
+
+async fn data_plane_worker(
+    mut session: DataPlaneSession,
+    mut rx: mpsc::Receiver<Option<Vec<TransferPayload>>>,
+    source_root: Arc<PathBuf>,
+) -> Result<()> {
+    while let Some(batch) = rx.recv().await {
+        match batch {
+            Some(payloads) => {
+                session
+                    .send_payloads(source_root.as_path(), payloads)
+                    .await?;
+            }
+            None => break,
+        }
+    }
+    session.finish().await
+}
 
 fn ensure_remote_tuning(
     remote_tuning: &mut Option<TuningParams>,
@@ -134,9 +221,8 @@ impl RemotePushClient {
         let mut fallback_upload_complete_sent = false;
         let mut fallback_files_sent: usize = 0;
         let mut need_list_received = false;
-        let mut data_plane_session: Option<DataPlaneSession> = None;
+        let mut data_plane_sender: Option<MultiStreamSender> = None;
         let mut data_plane_outstanding: usize = 0;
-        let mut data_plane_finished = false;
         let mut data_port: Option<u32> = None;
         let mut fallback_used = force_grpc;
         let mut summary: Option<PushSummary> = None;
@@ -223,7 +309,7 @@ impl RemotePushClient {
                                             }
                                         }
                                         TransferMode::DataPlane => {
-                                            if let Some(session) = data_plane_session.as_mut() {
+                                            if let Some(sender) = data_plane_sender.as_mut() {
                                                 let headers =
                                                     drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                                 if !headers.is_empty() {
@@ -249,9 +335,7 @@ impl RemotePushClient {
                                                         plan_transfer_payloads(headers, source_root, plan_options)?;
                                                     if !planned.payloads.is_empty() {
                                                         let sent = payload_file_count(&planned.payloads);
-                                                        session
-                                                            .send_payloads(source_root, planned.payloads)
-                                                            .await?;
+                                                        sender.queue(planned.payloads).await?;
                                                         if sent > 0 && first_payload_elapsed.is_none() {
                                                             first_payload_elapsed = Some(start.elapsed());
                                                         }
@@ -302,13 +386,9 @@ impl RemotePushClient {
                                         }
 
                                         data_plane_outstanding = 0;
-                                        if let Some(session) = data_plane_session.as_mut() {
-                                            if !data_plane_finished {
-                                                session.finish().await?;
-                                                data_plane_finished = true;
-                                            }
+                                        if let Some(sender) = data_plane_sender.take() {
+                                            sender.finish().await?;
                                         }
-                                        data_plane_session = None;
                                     } else {
                                         if neg.tcp_port == 0 {
                                             eyre::bail!("server reported zero data port for negotiated transfer");
@@ -324,49 +404,28 @@ impl RemotePushClient {
                                             &mut plan_options,
                                             size_hint,
                                         );
-                                        if data_plane_session.is_none() {
-                                            let mut session = DataPlaneSession::connect(
+                                        if data_plane_sender.is_none() {
+                                            let stream_target = neg
+                                                .stream_count
+                                                .max(1)
+                                                .min(tuning.max_streams as u32) as usize;
+                                            let payload_prefetch = tuning.initial_streams.max(1);
+                                            let sender = MultiStreamSender::connect(
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
                                                 &token_bytes,
                                                 tuning.chunk_bytes,
-                                                tuning.max_streams,
+                                                payload_prefetch,
+                                                stream_target,
                                                 trace_data_plane,
+                                                source_root,
                                             )
                                             .await?;
-                                            let headers =
-                                                drain_pending_headers(&mut pending_queue, &manifest_lookup);
-                                            if !headers.is_empty() {
-                                                let headers = filter_readable_headers(
-                                                    source_root,
-                                                    headers,
-                                                    &unreadable_paths,
-                                                )
-                                                .await?;
-                                                if headers.is_empty() {
-                                                    continue;
-                                                }
-                                                let planned = plan_transfer_payloads(
-                                                    headers,
-                                                    source_root,
-                                                    plan_options,
-                                                )?;
-                                                if !planned.payloads.is_empty() {
-                                                    let sent = payload_file_count(&planned.payloads);
-                                                    session
-                                                        .send_payloads(source_root, planned.payloads)
-                                                        .await?;
-                                                    if sent > 0 && first_payload_elapsed.is_none() {
-                                                        first_payload_elapsed = Some(start.elapsed());
-                                                    }
-                                                    data_plane_outstanding =
-                                                        data_plane_outstanding.saturating_sub(sent);
-                                                }
-                                            }
-                                            data_plane_session = Some(session);
+                                            data_plane_sender = Some(sender);
                                             data_port = Some(neg.tcp_port);
-                                            transfer_mode = TransferMode::DataPlane;
-                                        } else if let Some(session) = data_plane_session.as_mut() {
+                                        }
+
+                                        if let Some(sender) = data_plane_sender.as_mut() {
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                             if !headers.is_empty() {
@@ -386,9 +445,7 @@ impl RemotePushClient {
                                                 )?;
                                                 if !planned.payloads.is_empty() {
                                                     let sent = payload_file_count(&planned.payloads);
-                                                    session
-                                                        .send_payloads(source_root, planned.payloads)
-                                                        .await?;
+                                                    sender.queue(planned.payloads).await?;
                                                     if sent > 0 && first_payload_elapsed.is_none() {
                                                         first_payload_elapsed = Some(start.elapsed());
                                                     }
@@ -397,6 +454,7 @@ impl RemotePushClient {
                                                 }
                                             }
                                         }
+                                        transfer_mode = TransferMode::DataPlane;
                                     }
                                 }
                                 Some(ServerPayload::Summary(push_summary)) => {
@@ -476,7 +534,7 @@ impl RemotePushClient {
                                     }
                                 }
                                 TransferMode::DataPlane => {
-                                    if let Some(session) = data_plane_session.as_mut() {
+                                    if let Some(sender) = data_plane_sender.as_mut() {
                                         let headers =
                                             drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                         if !headers.is_empty() {
@@ -502,9 +560,7 @@ impl RemotePushClient {
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
                                             if !planned.payloads.is_empty() {
                                                 let sent = payload_file_count(&planned.payloads);
-                                                session
-                                                    .send_payloads(source_root, planned.payloads)
-                                                    .await?;
+                                                sender.queue(planned.payloads).await?;
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
@@ -553,14 +609,9 @@ impl RemotePushClient {
             }
 
             if matches!(transfer_mode, TransferMode::DataPlane) {
-                if let Some(session) = data_plane_session.as_mut() {
-                    if manifest_done
-                        && pending_queue.is_empty()
-                        && data_plane_outstanding == 0
-                        && !data_plane_finished
-                    {
-                        session.finish().await?;
-                        data_plane_finished = true;
+                if pending_queue.is_empty() && manifest_done && data_plane_outstanding == 0 {
+                    if let Some(sender) = data_plane_sender.take() {
+                        sender.finish().await?;
                     }
                 }
             }
@@ -570,10 +621,8 @@ impl RemotePushClient {
             .await
             .map_err(|err| eyre::eyre!("manifest enumeration task failed: {}", err))??;
 
-        if let Some(mut session) = data_plane_session.take() {
-            if !data_plane_finished {
-                session.finish().await?;
-            }
+        if let Some(sender) = data_plane_sender.take() {
+            sender.finish().await?;
         }
 
         if let Err(join_err) = response_task.await {

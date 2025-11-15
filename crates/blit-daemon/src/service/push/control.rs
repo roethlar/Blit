@@ -112,6 +112,7 @@ pub(crate) async fn handle_push_stream(
                                         tcp_port: 0,
                                         one_time_token: String::new(),
                                         tcp_fallback: true,
+                                        stream_count: 0,
                                     },
                                 ),
                             )
@@ -129,6 +130,7 @@ pub(crate) async fn handle_push_stream(
                                                 tcp_port: 0,
                                                 one_time_token: String::new(),
                                                 tcp_fallback: true,
+                                                stream_count: 0,
                                             },
                                         ),
                                     )
@@ -152,11 +154,13 @@ pub(crate) async fn handle_push_stream(
                             let upload_rx =
                                 upload_rx_opt.take().expect("upload receiver already taken");
 
+                            let stream_target = desired_streams(&files_to_upload);
                             let transfer_task = tokio::spawn(accept_data_connection_stream(
                                 listener,
                                 token.clone(),
                                 module_for_transfer,
                                 upload_rx,
+                                stream_target,
                             ));
 
                             send_control_message(
@@ -166,6 +170,7 @@ pub(crate) async fn handle_push_stream(
                                         tcp_port: port as u32,
                                         one_time_token: token_string,
                                         tcp_fallback: false,
+                                        stream_count: stream_target,
                                     },
                                 ),
                             )
@@ -220,11 +225,13 @@ pub(crate) async fn handle_push_stream(
             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
             let upload_rx = upload_rx_opt.take().expect("upload receiver already taken");
             let module_for_transfer = module.clone();
+            let stream_target = desired_streams(&files_to_upload);
             let transfer_task = tokio::spawn(accept_data_connection_stream(
                 listener,
                 token.clone(),
                 module_for_transfer,
                 upload_rx,
+                stream_target,
             ));
             send_control_message(
                 &tx,
@@ -232,6 +239,7 @@ pub(crate) async fn handle_push_stream(
                     tcp_port: port as u32,
                     one_time_token: token_string,
                     tcp_fallback: false,
+                    stream_count: stream_target,
                 }),
             )
             .await?;
@@ -385,4 +393,23 @@ fn file_requires_upload(
         Err(_) => true,
     };
     Ok(requires_upload)
+}
+
+fn desired_streams(files: &[FileHeader]) -> u32 {
+    if files.is_empty() {
+        return 1;
+    }
+    let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+    let file_count = files.len();
+    if total_bytes >= 4 * 1024 * 1024 * 1024 || file_count >= 50_000 {
+        8
+    } else if total_bytes >= 512 * 1024 * 1024 || file_count >= 10_000 {
+        6
+    } else if total_bytes >= 128 * 1024 * 1024 || file_count >= 2_000 {
+        4
+    } else if total_bytes >= 32 * 1024 * 1024 || file_count >= 256 {
+        2
+    } else {
+        1
+    }
 }

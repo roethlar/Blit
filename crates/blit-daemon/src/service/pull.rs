@@ -7,7 +7,7 @@ use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tonic::Status;
 
 use super::push::{bind_data_plane_listener, generate_token, TransferStats};
@@ -83,11 +83,14 @@ pub(crate) async fn stream_pull(
     let token = generate_token();
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
+    let stream_target = pull_stream_count(total_bytes, tuning.max_streams as usize);
+
     tx.send(Ok(PullChunk {
         payload: Some(PullPayload::Negotiation(DataTransferNegotiation {
             tcp_port: port as u32,
             one_time_token: token_string,
             tcp_fallback: false,
+            stream_count: stream_target,
         })),
     }))
     .await
@@ -101,6 +104,7 @@ pub(crate) async fn stream_pull(
         planned.payloads,
         tuning.chunk_bytes,
         tuning.max_streams,
+        stream_target,
     ));
 
     transfer_task
@@ -260,20 +264,60 @@ async fn accept_pull_data_connection(
     payloads: Vec<TransferPayload>,
     chunk_bytes: usize,
     payload_prefetch: usize,
+    stream_count: u32,
 ) -> Result<(), Status> {
-    let (mut socket, addr) = listener
-        .accept()
-        .await
-        .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
-    eprintln!("[pull-data-plane] accepted connection from {}", addr);
+    let streams = stream_count.max(1) as usize;
+    let mut handles = Vec::with_capacity(streams);
+    let chunked = chunk_transfer_payloads(payloads, streams);
 
+    for (idx, payload_chunk) in chunked.into_iter().enumerate() {
+        let (socket, addr) = listener
+            .accept()
+            .await
+            .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
+        eprintln!(
+            "[pull-data-plane] accepted connection {} from {}",
+            idx, addr
+        );
+        let expected_token = expected_token.clone();
+        let module_root = module_root.clone();
+        handles.push(tokio::spawn(async move {
+            handle_pull_stream(
+                socket,
+                expected_token,
+                module_root,
+                payload_chunk,
+                chunk_bytes,
+                payload_prefetch,
+            )
+            .await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.map_err(|err| {
+            Status::internal(format!("pull data plane worker cancelled: {}", err))
+        })??;
+    }
+
+    Ok(())
+}
+
+async fn handle_pull_stream(
+    mut socket: TcpStream,
+    expected_token: Vec<u8>,
+    module_root: PathBuf,
+    payloads: Vec<TransferPayload>,
+    chunk_bytes: usize,
+    payload_prefetch: usize,
+) -> Result<(), Status> {
     let mut token_buf = vec![0u8; expected_token.len()];
     socket
         .read_exact(&mut token_buf)
         .await
         .map_err(|err| Status::internal(format!("failed to read pull token: {}", err)))?;
     if token_buf != expected_token {
-        eprintln!("[pull-data-plane] invalid token from {}", addr);
+        eprintln!("[pull-data-plane] invalid token");
         return Err(Status::permission_denied("invalid pull data plane token"));
     }
 
@@ -284,14 +328,35 @@ async fn accept_pull_data_connection(
         payload_prefetch,
     );
 
-    session
-        .send_payloads(&module_root, payloads)
-        .await
-        .map_err(|err| Status::internal(format!("sending pull data plane payloads: {}", err)))?;
+    for payload in payloads {
+        session
+            .send_payloads(&module_root, vec![payload])
+            .await
+            .map_err(|err| {
+                Status::internal(format!("sending pull data plane payloads: {}", err))
+            })?;
+    }
+
     session
         .finish()
         .await
         .map_err(|err| Status::internal(format!("finishing pull data plane: {}", err)))
+}
+
+fn pull_stream_count(total_bytes: u64, tuning_max: usize) -> u32 {
+    let mut streams = if total_bytes >= 4 * 1024 * 1024 * 1024 {
+        8
+    } else if total_bytes >= 512 * 1024 * 1024 {
+        6
+    } else if total_bytes >= 128 * 1024 * 1024 {
+        4
+    } else if total_bytes >= 32 * 1024 * 1024 {
+        2
+    } else {
+        1
+    } as usize;
+    streams = streams.min(tuning_max.max(1));
+    streams as u32
 }
 
 async fn send_summary(
@@ -309,4 +374,19 @@ async fn send_summary(
     }))
     .await
     .map_err(|_| Status::internal("failed to send pull summary"))
+}
+
+fn chunk_transfer_payloads(
+    payloads: Vec<TransferPayload>,
+    streams: usize,
+) -> Vec<Vec<TransferPayload>> {
+    if streams <= 1 || payloads.is_empty() {
+        return vec![payloads];
+    }
+    let buckets = streams.min(payloads.len());
+    let mut chunks = vec![Vec::new(); buckets];
+    for (idx, payload) in payloads.into_iter().enumerate() {
+        chunks[idx % buckets].push(payload);
+    }
+    chunks
 }

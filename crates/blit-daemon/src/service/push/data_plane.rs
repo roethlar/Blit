@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tar::Archive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 use tokio::task::{self, JoinSet};
 use tonic::{Status, Streaming};
 
@@ -51,31 +51,69 @@ pub(crate) async fn accept_data_connection_stream(
     listener: TcpListener,
     expected_token: Vec<u8>,
     module: ModuleConfig,
-    mut files: mpsc::Receiver<FileHeader>,
+    files: mpsc::Receiver<FileHeader>,
+    stream_count: u32,
 ) -> Result<TransferStats, Status> {
-    let (mut socket, addr) = listener
-        .accept()
-        .await
-        .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
-    eprintln!("[data-plane] accepted connection from {}", addr);
+    let streams = stream_count.max(1) as usize;
+    let files = Arc::new(AsyncMutex::new(files));
+    let cache = Arc::new(AsyncMutex::new(HashMap::new()));
+    let mut handles = Vec::with_capacity(streams);
 
+    for idx in 0..streams {
+        let (socket, addr) = listener
+            .accept()
+            .await
+            .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
+        eprintln!("[data-plane] accepted connection {} from {}", idx, addr);
+        let expected_token = expected_token.clone();
+        let module_clone = module.clone();
+        let files_clone = Arc::clone(&files);
+        let cache_clone = Arc::clone(&cache);
+        handles.push(tokio::spawn(async move {
+            handle_data_plane_stream(
+                socket,
+                expected_token,
+                module_clone,
+                files_clone,
+                cache_clone,
+            )
+            .await
+        }));
+    }
+
+    let mut final_stats = TransferStats::default();
+    for handle in handles {
+        let stats = handle
+            .await
+            .map_err(|_| Status::internal("data plane worker cancelled"))??;
+        accumulate_transfer_stats(&mut final_stats, &stats);
+    }
+
+    Ok(final_stats)
+}
+
+async fn handle_data_plane_stream(
+    mut socket: TcpStream,
+    expected_token: Vec<u8>,
+    module: ModuleConfig,
+    files: Arc<AsyncMutex<mpsc::Receiver<FileHeader>>>,
+    cache: Arc<AsyncMutex<HashMap<String, FileHeader>>>,
+) -> Result<TransferStats, Status> {
     let mut token_buf = vec![0u8; expected_token.len()];
     socket
         .read_exact(&mut token_buf)
         .await
         .map_err(|err| Status::internal(format!("failed to read data plane token: {}", err)))?;
     if token_buf != expected_token {
-        eprintln!("[data-plane] invalid token from {}", addr);
+        eprintln!("[data-plane] invalid token");
         return Err(Status::permission_denied("invalid data plane token"));
     }
     eprintln!(
-        "[data-plane] token accepted from {} (module='{}', root={})",
-        addr,
+        "[data-plane] token accepted (module='{}', root={})",
         module.name,
         module.path.display()
     );
 
-    let mut cache: HashMap<String, FileHeader> = HashMap::new();
     let mut stats = TransferStats::default();
     let mut tar_executor = TarShardExecutor::new(MAX_PARALLEL_TAR_TASKS);
 
@@ -103,7 +141,7 @@ pub(crate) async fn accept_data_connection_stream(
                 let rel_string = String::from_utf8(path_bytes)
                     .map_err(|_| Status::invalid_argument("data plane path not valid UTF-8"))?;
 
-                let header = next_data_plane_header(&mut files, &mut cache, &rel_string).await?;
+                let header = next_data_plane_header(&files, &cache, &rel_string).await?;
                 eprintln!(
                     "[data-plane] starting file '{}' ({} bytes expected)",
                     rel_string, header.size
@@ -184,8 +222,7 @@ pub(crate) async fn accept_data_connection_stream(
                     let expected_mtime = read_i64(&mut socket).await?;
                     let expected_permissions = read_u32(&mut socket).await?;
 
-                    let header =
-                        next_data_plane_header(&mut files, &mut cache, &rel_string).await?;
+                    let header = next_data_plane_header(&files, &cache, &rel_string).await?;
 
                     if header.size != expected_size
                         || header.mtime_seconds != expected_mtime
@@ -234,35 +271,40 @@ pub(crate) async fn accept_data_connection_stream(
 
     tar_executor.finish(&mut stats).await?;
 
-    if !cache.is_empty() {
-        let missing: Vec<String> = cache.into_keys().collect();
-        return Err(Status::internal(format!(
-            "transfer incomplete; missing files: {:?}",
-            missing
-        )));
-    }
-
     eprintln!(
-        "[data-plane] transfer complete: files={}, bytes={}",
+        "[data-plane] stream complete: files={}, bytes={}",
         stats.files_transferred, stats.bytes_transferred
     );
     Ok(stats)
 }
 
 pub(crate) async fn next_data_plane_header(
-    files: &mut mpsc::Receiver<FileHeader>,
-    cache: &mut HashMap<String, FileHeader>,
+    files: &Arc<AsyncMutex<mpsc::Receiver<FileHeader>>>,
+    cache: &Arc<AsyncMutex<HashMap<String, FileHeader>>>,
     rel_string: &str,
 ) -> Result<FileHeader, Status> {
-    if let Some(header) = cache.remove(rel_string) {
-        return Ok(header);
-    }
-
-    while let Some(header) = files.recv().await {
-        if header.relative_path == rel_string {
+    {
+        let mut guard = cache.lock().await;
+        if let Some(header) = guard.remove(rel_string) {
             return Ok(header);
         }
-        cache.insert(header.relative_path.clone(), header);
+    }
+
+    loop {
+        let next = {
+            let mut files_guard = files.lock().await;
+            files_guard.recv().await
+        };
+        match next {
+            Some(header) => {
+                if header.relative_path == rel_string {
+                    return Ok(header);
+                }
+                let mut guard = cache.lock().await;
+                guard.insert(header.relative_path.clone(), header);
+            }
+            None => break,
+        }
     }
 
     eprintln!(
@@ -534,6 +576,7 @@ pub(crate) async fn execute_grpc_fallback(
             tcp_port: 0,
             one_time_token: String::new(),
             tcp_fallback: true,
+            stream_count: 0,
         }),
     )
     .await?;

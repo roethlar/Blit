@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Context, Result};
@@ -25,6 +26,13 @@ pub struct RemotePullReport {
 }
 
 pub type RemotePullProgress = RemoteTransferProgress;
+
+#[derive(Default)]
+struct PullWorkerStats {
+    files_transferred: u64,
+    bytes_transferred: u64,
+    downloaded_paths: Vec<PathBuf>,
+}
 
 pub struct RemotePullClient {
     endpoint: RemoteEndpoint,
@@ -169,10 +177,11 @@ impl RemotePullClient {
         let token = general_purpose::STANDARD_NO_PAD
             .decode(negotiation.one_time_token.as_bytes())
             .map_err(|err| eyre!("failed to decode pull data-plane token: {err}"))?;
-        receive_data_plane_stream(
+        receive_data_plane_streams(
             &self.endpoint.host,
             negotiation.tcp_port,
             &token,
+            negotiation.stream_count.max(1) as usize,
             dest_root,
             track_paths,
             progress,
@@ -195,14 +204,96 @@ async fn finalize_active_file(
     Ok(())
 }
 
-async fn receive_data_plane_stream(
+async fn receive_data_plane_streams(
+    host: &str,
+    port: u32,
+    token: &[u8],
+    stream_count: usize,
+    dest_root: &Path,
+    track_paths: bool,
+    progress: Option<&RemotePullProgress>,
+    report: &mut RemotePullReport,
+) -> Result<()> {
+    if stream_count <= 1 {
+        let mut stats = PullWorkerStats::default();
+        receive_data_plane_stream_inner(
+            host,
+            port,
+            token,
+            dest_root,
+            track_paths,
+            progress,
+            &mut stats,
+        )
+        .await?;
+        report.files_transferred = report
+            .files_transferred
+            .saturating_add(stats.files_transferred as usize);
+        report.bytes_transferred = report
+            .bytes_transferred
+            .saturating_add(stats.bytes_transferred);
+        if track_paths {
+            report
+                .downloaded_paths
+                .extend(stats.downloaded_paths.into_iter());
+        }
+        return Ok(());
+    }
+
+    let host = host.to_owned();
+    let token = Arc::new(token.to_vec());
+    let dest_root = dest_root.to_path_buf();
+
+    let mut handles = Vec::with_capacity(stream_count);
+    for _ in 0..stream_count {
+        let host_clone = host.clone();
+        let token_clone = Arc::clone(&token);
+        let dest_root_clone = dest_root.clone();
+        let progress_clone = progress.cloned();
+        handles.push(tokio::spawn(async move {
+            let mut stats = PullWorkerStats::default();
+            receive_data_plane_stream_inner(
+                &host_clone,
+                port,
+                &token_clone,
+                &dest_root_clone,
+                track_paths,
+                progress_clone.as_ref(),
+                &mut stats,
+            )
+            .await?;
+            Ok::<_, eyre::Report>(stats)
+        }));
+    }
+
+    for handle in handles {
+        let stats = handle
+            .await
+            .map_err(|err| eyre!(format!("pull data-plane worker panicked: {}", err)))??;
+        report.files_transferred = report
+            .files_transferred
+            .saturating_add(stats.files_transferred as usize);
+        report.bytes_transferred = report
+            .bytes_transferred
+            .saturating_add(stats.bytes_transferred);
+        if track_paths {
+            report
+                .downloaded_paths
+                .extend(stats.downloaded_paths.into_iter());
+        }
+    }
+
+    Ok(())
+}
+
+async fn receive_data_plane_stream_inner(
     host: &str,
     port: u32,
     token: &[u8],
     dest_root: &Path,
     track_paths: bool,
     progress: Option<&RemotePullProgress>,
-    report: &mut RemotePullReport,
+    stats: &mut PullWorkerStats,
 ) -> Result<()> {
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect(addr.clone())
@@ -221,10 +312,10 @@ async fn receive_data_plane_stream(
             .context("reading pull data-plane record tag")?;
         match tag[0] {
             DATA_PLANE_RECORD_FILE => {
-                handle_file_record(&mut stream, dest_root, track_paths, progress, report).await?;
+                handle_file_record(&mut stream, dest_root, track_paths, progress, stats).await?;
             }
             DATA_PLANE_RECORD_TAR_SHARD => {
-                handle_tar_shard_record(&mut stream, dest_root, track_paths, progress, report)
+                handle_tar_shard_record(&mut stream, dest_root, track_paths, progress, stats)
                     .await?;
             }
             DATA_PLANE_RECORD_END => break,
@@ -240,7 +331,7 @@ async fn handle_file_record(
     dest_root: &Path,
     track_paths: bool,
     progress: Option<&RemotePullProgress>,
-    report: &mut RemotePullReport,
+    stats: &mut PullWorkerStats,
 ) -> Result<()> {
     let rel_string = read_string(stream).await?;
     let relative_path = sanitize_relative_path(&rel_string)?;
@@ -282,10 +373,10 @@ async fn handle_file_record(
         .await
         .with_context(|| format!("syncing {}", dest_path.display()))?;
 
-    report.files_transferred += 1;
-    report.bytes_transferred += file_size;
+    stats.files_transferred = stats.files_transferred.saturating_add(1);
+    stats.bytes_transferred = stats.bytes_transferred.saturating_add(file_size);
     if track_paths {
-        report.downloaded_paths.push(relative_path);
+        stats.downloaded_paths.push(relative_path);
     }
     if let Some(progress) = progress {
         progress.report_payload(1, 0);
@@ -298,7 +389,7 @@ async fn handle_tar_shard_record(
     dest_root: &Path,
     track_paths: bool,
     progress: Option<&RemotePullProgress>,
-    report: &mut RemotePullReport,
+    stats: &mut PullWorkerStats,
 ) -> Result<()> {
     let file_count = read_u32(stream).await? as usize;
     let mut files = Vec::with_capacity(file_count);
@@ -324,11 +415,11 @@ async fn handle_tar_shard_record(
     let extracted = extract_tar_shard(buffer, files.clone(), dest_root_path).await?;
 
     if track_paths {
-        report.downloaded_paths.extend(extracted);
+        stats.downloaded_paths.extend(extracted);
     }
-    report.files_transferred += files.len();
+    stats.files_transferred = stats.files_transferred.saturating_add(files.len() as u64);
     let shard_bytes: u64 = files.iter().map(|(_, size)| *size).sum();
-    report.bytes_transferred += shard_bytes;
+    stats.bytes_transferred = stats.bytes_transferred.saturating_add(shard_bytes);
     if let Some(progress) = progress {
         progress.report_payload(files.len(), 0);
     }
