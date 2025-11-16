@@ -1,6 +1,7 @@
-[Sat 19:57] michael> H:\apps\blit\blit-cli.exe mirror -p -v D:\SteamLibrary\steamapps\common\Chernobylite\ skippy://Steam/steamapps/common/Chernobylite
+
+[Sat 20:15] michael> H:\apps\blit\blit-cli.exe mirror -p -v D:\SteamLibrary\steamapps\common\Chernobylite\ skippy://Steam/steamapps/common/Chernobylite
 blit v0.1.0: starting mirror D:\SteamLibrary\steamapps\common\Chernobylite\ -> skippy://Steam/steamapps/common/Chernobylite
-Manifest enumeration complete in 7.77ms (221 entries)
+Manifest enumeration complete in 8.38ms (221 entries)
 [push] need-list includes ChernobylGame/Content/Movies/Fables/3_Pan_Kotskiy_V1-0017.mov
 [push] need-list includes ChernobylGame/Content/Movies/Fables/3_Pan_Kotskiy_V1-0018.mov
 [push] need-list includes ChernobylGame/Content/Movies/Fables/4_Wise_Girl_V1-0019.mov
@@ -25,97 +26,15 @@ Manifest enumeration complete in 7.77ms (221 entries)
 [push] need-list includes ChernobylGame/Content/Movies/Fables/9_Ironnose_Old_Lady_V1-0060.mov
 [push] need-list includes ChernobylGame/Content/Movies/splashmataboo.mp4
 [push] need-list includes ChernobylGame/Content/Movies/splashreality51.mp4
-[push] need-list includes ChernobylGame/Content/Movies/splashscreen.mp4
-[push] need-list includes ChernobylGame/Content/Movies/splashthefarm51.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TatianaVideos/Tatiana klatka schodowa.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TatianaVideos/Tatiana_video_01.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TatianaVideos/Tatiana_video_02.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TatianaVideos/Tatiana_video_04.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TatianaVideos/Tatiana_video_05.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector1.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector2.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector3.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector4.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector5.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector6.mp4
-[push] need-list includes ChernobylGame/Content/Movies/tatiana_projector7.mp4
-[push] need-list includes ChernobylGame/Content/Movies/Title_logo.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TransitionalVideos/Tunnel_P10_Base.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TransitionalVideos/Tunnel_P1_generic_01.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TransitionalVideos/Tunnel_P2_Moscow_Eye..mp4
-[push] need-list includes ChernobylGame/Content/Movies/TransitionalVideos/Tunnel_P3_Tatyana.mp4
-[push] need-list includes ChernobylGame/Content/Movies/TransitionalVideos/Tunnel_P4_MoscowEye.mp4
-[push] need-list includes ChernobylGame/Content/Paks/pakchunk1-WindowsNoEditor.pak
-[push] need-list includes ChernobylGame/Content/Paks/pakchunk10-WindowsNoEditor.pak
-[push] need-list includes ChernobylGame/Content/Paks/pakchunk3-WindowsNoEditor.pak
-[push] need-list includes ChernobylGame/Content/Paks/pakchunk7-WindowsNoEditor.pak
-[push] need-list includes ChernobylGame/Content/Paks/pakchunk9-WindowsNoEditor.pak
-[push] need-list includes ChernobylGame/Content/Splash/Splash.bmp
-[push] need-list includes ChernobylGame/Plugins/CgSDK/Binaries/CgSDKLibrary/Win64/CgSDK.x64_2017.dll
-[push] need-list includes ChernobylGame/Plugins/OnlineSubsystemEOS/Source/ThirdParty/EpicOnlineSubsystemSDK/Bin/EOSSDK-Win64-Shipping.dll
-[push] need-list includes ChernobylGame/Plugins/OnlineSubsystemGOG/Source/ThirdParty/GalaxySDK/Libraries/Galaxy64.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkAudioInput.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkCompressor.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkConvolutionReverb.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkDelay.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkExpander.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkFlanger.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkGain.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkGuitarDistortion.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkHarmonizer.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkMatrixReverb.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkMotion.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkParametricEQ.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkPeakLimiter.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkPitchShifter.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkRecorder.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkReflect.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkRoomVerb.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkSilenceGenerator.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkSineTone.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkSoundEngineDLL.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkSoundSeedAir.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkSoundSeedImpact.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkStereoDelay.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkSynthOne.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkTimeStretch.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkToneGen.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/AkTremolo.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/Auro.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/MasteringSuite.dll
-[push] need-list includes ChernobylGame/Plugins/Wwise/ThirdParty/x64_vc160/Release/bin/McDSP.dll
-[push] need-list includes ChernobylGame.exe
-[push] need-list includes Chernobylite_Digital_Artbook.pdf
-[push] need-list includes Engine/Binaries/ThirdParty/DbgHelp/dbghelp.dll
-[push] need-list includes Engine/Binaries/ThirdParty/NVIDIA/NVaftermath/Win64/GFSDK_Aftermath_Lib.x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/Ogg/Win64/VS2015/libogg_64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/ApexFramework_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/ApexFramework_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/APEX_Clothing_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/APEX_Clothing_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/APEX_Legacy_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/APEX_Legacy_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/NvCloth_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/NvCloth_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PhysX3Common_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PhysX3Common_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PhysX3Cooking_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PhysX3Cooking_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PhysX3_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PhysX3_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PxFoundation_x64.dll
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PxFoundation_x64.pdb
-[push] need-list includes Engine/Binaries/ThirdParty/PhysX3/Win64/VS2015/PxPvdSDK_x64.dll
-[progress] manifest enumerated 105 file(s)
+[progress] manifest enumerated 24 file(s)
 Error:
    0: negotiating push manifest for D:\SteamLibrary\steamapps\common\Chernobylite\ -> skippy://Steam/steamapps/common/Chernobylite
-   1: sending ChernobylGame/Content/Paks/pakchunk1-WindowsNoEditor.pak
-   2: sending D:\SteamLibrary\steamapps\common\Chernobylite\ChernobylGame/Content/Paks/pakchunk1-WindowsNoEditor.pak
+   1: sending ChernobylGame/Content/Movies/Fables/3_Pan_Kotskiy_V1-0017.mov
+   2: writing path length
    3: An existing connection was forcibly closed by the remote host. (os error 10054)
 
 Location:
-   C:\Users\michael\Dev\blit_v2\crates\blit-core\src\remote\transfer\data_plane.rs:186
+   C:\Users\michael\Dev\blit_v2\crates\blit-core\src\remote\transfer\data_plane.rs:143
 
 Backtrace omitted. Run with RUST_BACKTRACE=1 environment variable to display it.
-Run with RUST_BACKTRACE=full to include source snippets.
-[Sat 20:07] michael>
+Run with RUST_BACKTRACE=

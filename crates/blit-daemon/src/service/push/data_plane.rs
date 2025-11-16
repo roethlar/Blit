@@ -318,11 +318,17 @@ pub(crate) async fn next_data_plane_header(
                     return Ok(header);
                 }
                 let mut guard = cache.lock().await;
+                let header_path = header.relative_path.clone();
                 eprintln!(
                     "[push-server] deferring {} while waiting for {}",
-                    header.relative_path, rel_string
+                    header_path, rel_string
                 );
-                guard.insert(header.relative_path.clone(), header);
+                guard.insert(header_path.clone(), header);
+                eprintln!(
+                    "[push-server] cached {} (pending {:?})",
+                    header_path,
+                    guard.keys().collect::<Vec<_>>()
+                );
             }
             None => break,
         }
@@ -332,6 +338,10 @@ pub(crate) async fn next_data_plane_header(
         "[data-plane] unexpected file entry '{}' (upload queue drained before payload)",
         rel_string
     );
+    let pending_guard = cache.lock().await;
+    let pending: Vec<_> = pending_guard.keys().cloned().collect();
+    drop(pending_guard);
+    eprintln!("[push-server] pending headers: {:?}", pending);
     Err(Status::internal(format!(
         "data plane received unexpected file entry '{}'",
         rel_string
