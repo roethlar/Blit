@@ -90,12 +90,16 @@ impl DataPlaneSession {
         while let Some(prepared) = stream.next().await {
             match prepared? {
                 PreparedPayload::File(header) => {
-                    self.send_file(source_root, &header).await?;
+                    if let Err(err) = self.send_file(source_root, &header).await {
+                        return Err(err.wrap_err(format!("sending {}", header.relative_path)));
+                    }
                     self.bytes_sent = self.bytes_sent.saturating_add(header.size);
                 }
                 PreparedPayload::TarShard { headers, data } => {
                     let shard_bytes: u64 = headers.iter().map(|h| h.size).sum();
-                    self.send_prepared_tar_shard(headers, &data).await?;
+                    if let Err(err) = self.send_prepared_tar_shard(headers, &data).await {
+                        return Err(err.wrap_err("sending tar shard"));
+                    }
                     self.bytes_sent = self.bytes_sent.saturating_add(shard_bytes);
                 }
             }
