@@ -14,12 +14,12 @@ Achieve “absolute parity” across every transfer direction (local→remote, r
 - CLI pull path does not wire `-p` / `-v` progress reporting.
 - Push refactors (payload planning, data-plane negotiation, tar sharding) live entirely under `remote::push`, so future work keeps drifting toward the push direction only.
 
-## Current Status (2025-11-10)
+## Current Status (2025-11-15)
 
-- ✅ Push path already uses hybrid transport + tar shards. Shared `remote::transfer::{payload, progress, data_plane}` modules now exist and the push client/server import them, so future work reuses the same planner/progress/TCP code.
-- ⚠️ Pull path is still gRPC-only with 64 KiB buffers and no progress output, so throughput stalls (~400 Mbps observed).
-- ⚠️ Auto-tuning module exists but is unused by the CLI/transfer engine; stream counts/chunk sizes stay at conservative defaults.
-- ⚠️ No integration tests cover remote pull parity, so regressions slipped in unnoticed.
+- ✅ Push path already uses hybrid transport + tar shards. Shared `remote::transfer::{payload, progress, data_plane}` modules now exist and the push client/server import them, so future work reuses the same planner/progress/TCP code. As of 2025-11-15 the CLI data-plane sender also slices payloads into 32–512 MiB batches so every negotiated TCP stream receives work.
+- ✅ Pull path now mirrors the hybrid transport: negotiation + multi-stream TCP data plane (with `--force-grpc` fallback) and shared progress reporting are live in both CLI and daemon.
+- ⚠️ We still need end-to-end performance validation + documentation once the new batching ships to the field, along with the remote↔remote (server-to-server) orchestration so every src/dst combination has parity.
+- ⚠️ No integration tests cover remote transfer parity yet, so regressions can still slip in unnoticed.
 
 ## Refactor Overview
 

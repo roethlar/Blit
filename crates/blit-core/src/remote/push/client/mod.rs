@@ -37,11 +37,27 @@ use super::payload::{
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
 
+const MIN_STREAM_BATCH_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_STREAM_BATCH_BYTES: u64 = 512 * 1024 * 1024;
+
+fn calculate_batch_target(chunk_bytes: usize) -> u64 {
+    let chunk_bytes = chunk_bytes.max(1) as u64;
+    (chunk_bytes.saturating_mul(4)).clamp(MIN_STREAM_BATCH_BYTES, MAX_STREAM_BATCH_BYTES)
+}
+
+fn estimated_payload_bytes(payload: &TransferPayload) -> u64 {
+    match payload {
+        TransferPayload::File(header) => header.size,
+        TransferPayload::TarShard { headers } => headers.iter().map(|h| h.size).sum(),
+    }
+}
+
 struct MultiStreamSender {
     workers: Vec<mpsc::Sender<Option<Vec<TransferPayload>>>>,
     handles: Vec<JoinHandle<Result<StreamStats>>>,
     next_worker: usize,
     cancelled: Arc<AtomicBool>,
+    batch_bytes_target: u64,
 }
 
 impl MultiStreamSender {
@@ -77,10 +93,41 @@ impl MultiStreamSender {
             handles,
             next_worker: 0,
             cancelled: Arc::new(AtomicBool::new(false)),
+            batch_bytes_target: calculate_batch_target(chunk_bytes),
         })
     }
 
     async fn queue(&mut self, payloads: Vec<TransferPayload>) -> Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+
+        if self.workers.len() == 1 {
+            self.dispatch_batch(payloads).await?;
+            return Ok(());
+        }
+
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0u64;
+        let target = self.batch_bytes_target;
+        for payload in payloads {
+            batch_bytes = batch_bytes.saturating_add(estimated_payload_bytes(&payload));
+            batch.push(payload);
+            if batch_bytes >= target && !batch.is_empty() {
+                let to_send = std::mem::take(&mut batch);
+                batch_bytes = 0;
+                self.dispatch_batch(to_send).await?;
+            }
+        }
+
+        if !batch.is_empty() {
+            self.dispatch_batch(batch).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn dispatch_batch(&mut self, payloads: Vec<TransferPayload>) -> Result<()> {
         if payloads.is_empty() {
             return Ok(());
         }
@@ -92,8 +139,7 @@ impl MultiStreamSender {
         self.workers[idx]
             .send(Some(payloads))
             .await
-            .map_err(|_| eyre!("data plane worker channel closed"))?;
-        Ok(())
+            .map_err(|_| eyre!("data plane worker channel closed"))
     }
 
     async fn finish(mut self) -> Result<()> {
