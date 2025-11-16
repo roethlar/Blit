@@ -372,6 +372,7 @@ impl RemotePushClient {
                                             batch_bytes =
                                                 batch_bytes.saturating_add(header.size);
                                         }
+                                        eprintln!("[push] need-list includes {}", rel);
                                     }
                                     pending_queue.extend(rels.drain(..));
                                     transfer_size_hint =
@@ -446,9 +447,27 @@ impl RemotePushClient {
                                                         &mut plan_options,
                                                         size_hint,
                                                     );
-                                                    let planned =
-                                                        plan_transfer_payloads(headers, source_root, plan_options)?;
-                                                    if !planned.payloads.is_empty() {
+                                            let mut planned =
+                                                plan_transfer_payloads(headers, source_root, plan_options)?;
+                                            for payload in &planned.payloads {
+                                                match payload {
+                                                    TransferPayload::File(header) => {
+                                                        eprintln!(
+                                                            "[push] enqueue {} for TCP stream",
+                                                            header.relative_path
+                                                        );
+                                                    }
+                                                    TransferPayload::TarShard { headers } => {
+                                                        for header in headers {
+                                                            eprintln!(
+                                                                "[push] enqueue {} via tar shard",
+                                                                header.relative_path
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if !planned.payloads.is_empty() {
                                                         let sent = payload_file_count(&planned.payloads);
                                                         sender.queue(planned.payloads).await?;
                                                         if sent > 0 && first_payload_elapsed.is_none() {
@@ -692,6 +711,24 @@ impl RemotePushClient {
                                                     "[push] daemon did not request {} payload file(s); skipping",
                                                     skipped
                                                 );
+                                            }
+                                            for payload in &planned.payloads {
+                                                match payload {
+                                                    TransferPayload::File(header) => {
+                                                        eprintln!(
+                                                            "[push] enqueue {} for TCP stream",
+                                                            header.relative_path
+                                                        );
+                                                    }
+                                                    TransferPayload::TarShard { headers } => {
+                                                        for header in headers {
+                                                            eprintln!(
+                                                                "[push] enqueue {} via tar shard",
+                                                                header.relative_path
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                             }
                                             if !planned.payloads.is_empty() {
                                                 let sent = payload_file_count(&planned.payloads);

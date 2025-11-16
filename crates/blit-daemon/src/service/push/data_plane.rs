@@ -145,7 +145,10 @@ async fn handle_data_plane_stream(
                 let path_len = read_u32(&mut socket).await?;
                 let mut path_bytes = vec![0u8; path_len as usize];
                 socket.read_exact(&mut path_bytes).await.map_err(|err| {
-                    eprintln!("[data-plane] read path bytes error: {}", err);
+                    eprintln!(
+                        "[data-plane] read path bytes error: {} (expected len {})",
+                        err, path_len
+                    );
                     Status::internal(format!("failed to read path bytes: {}", err))
                 })?;
                 let rel_string = String::from_utf8(path_bytes)
