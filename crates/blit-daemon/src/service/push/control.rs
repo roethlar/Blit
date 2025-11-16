@@ -100,6 +100,7 @@ pub(crate) async fn handle_push_stream(
                         );
                         Status::internal("failed to enqueue upload header")
                     })?;
+                    eprintln!("[push-server] queued {}", sanitized);
                     let flushed = need_list_sender.push(sanitized).await?;
                     files_to_upload.push(file);
                     if flushed && data_plane_handle.is_none() {

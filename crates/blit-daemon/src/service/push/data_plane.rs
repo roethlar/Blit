@@ -301,6 +301,7 @@ pub(crate) async fn next_data_plane_header(
     {
         let mut guard = cache.lock().await;
         if let Some(header) = guard.remove(rel_string) {
+            eprintln!("[push-server] cache hit for {}", rel_string);
             return Ok(header);
         }
     }
@@ -313,9 +314,14 @@ pub(crate) async fn next_data_plane_header(
         match next {
             Some(header) => {
                 if header.relative_path == rel_string {
+                    eprintln!("[push-server] matched {}", rel_string);
                     return Ok(header);
                 }
                 let mut guard = cache.lock().await;
+                eprintln!(
+                    "[push-server] deferring {} while waiting for {}",
+                    header.relative_path, rel_string
+                );
                 guard.insert(header.relative_path.clone(), header);
             }
             None => break,
