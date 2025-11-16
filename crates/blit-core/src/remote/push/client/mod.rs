@@ -20,7 +20,7 @@ use crate::remote::transfer::CONTROL_PLANE_CHUNK_SIZE;
 use crate::remote::tuning::determine_remote_tuning;
 use crate::transfer_plan::PlanOptions;
 use eyre::{bail, eyre, Result};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -219,6 +219,44 @@ fn effective_size_hint(requested: u64, manifest_bytes: u64) -> u64 {
     }
 }
 
+fn prune_unrequested_payloads(
+    payloads: &mut Vec<TransferPayload>,
+    requested: &mut HashSet<String>,
+) -> usize {
+    let mut filtered: Vec<TransferPayload> = Vec::with_capacity(payloads.len());
+    let mut skipped = 0usize;
+
+    for payload in payloads.drain(..) {
+        match payload {
+            TransferPayload::File(header) => {
+                if requested.remove(header.relative_path.as_str()) {
+                    filtered.push(TransferPayload::File(header));
+                } else {
+                    skipped += 1;
+                }
+            }
+            TransferPayload::TarShard { headers } => {
+                let mut kept_headers = Vec::with_capacity(headers.len());
+                for header in headers {
+                    if requested.remove(header.relative_path.as_str()) {
+                        kept_headers.push(header);
+                    } else {
+                        skipped += 1;
+                    }
+                }
+                if !kept_headers.is_empty() {
+                    filtered.push(TransferPayload::TarShard {
+                        headers: kept_headers,
+                    });
+                }
+            }
+        }
+    }
+
+    payloads.extend(filtered.into_iter());
+    skipped
+}
+
 pub struct RemotePushClient {
     endpoint: RemoteEndpoint,
     client: crate::generated::blit_client::BlitClient<tonic::transport::Channel>,
@@ -251,6 +289,7 @@ impl RemotePushClient {
         let mut first_payload_elapsed: Option<Duration> = None;
 
         let mut manifest_lookup: HashMap<String, FileHeader> = HashMap::new();
+        let mut requested_files: HashSet<String> = HashSet::new();
         let mut plan_options = PlanOptions::default();
         let mut remote_tuning: Option<TuningParams> = None;
         let mut manifest_total_bytes: u64 = 0;
@@ -328,6 +367,7 @@ impl RemotePushClient {
                                     let newly_requested = rels.len();
                                     let mut batch_bytes = 0u64;
                                     for rel in &rels {
+                                        requested_files.insert(rel.clone());
                                         if let Some(header) = manifest_lookup.get(rel) {
                                             batch_bytes =
                                                 batch_bytes.saturating_add(header.size);
@@ -513,17 +553,27 @@ impl RemotePushClient {
                                                 if headers.is_empty() {
                                                     continue;
                                                 }
-                                                let planned = plan_transfer_payloads(
-                                                    headers,
-                                                    source_root,
-                                                    plan_options,
-                                                )?;
-                                                if !planned.payloads.is_empty() {
-                                                    let sent = payload_file_count(&planned.payloads);
-                                                    sender.queue(planned.payloads).await?;
-                                                    if sent > 0 && first_payload_elapsed.is_none() {
-                                                        first_payload_elapsed = Some(start.elapsed());
-                                                    }
+                                            let mut planned = plan_transfer_payloads(
+                                                headers,
+                                                source_root,
+                                                plan_options,
+                                            )?;
+                                            let skipped = prune_unrequested_payloads(
+                                                &mut planned.payloads,
+                                                &mut requested_files,
+                                            );
+                                            if skipped > 0 {
+                                                eprintln!(
+                                                    "[push] daemon did not request {} payload file(s); skipping",
+                                                    skipped
+                                                );
+                                            }
+                                            if !planned.payloads.is_empty() {
+                                                let sent = payload_file_count(&planned.payloads);
+                                                sender.queue(planned.payloads).await?;
+                                                if sent > 0 && first_payload_elapsed.is_none() {
+                                                    first_payload_elapsed = Some(start.elapsed());
+                                                }
                                                     data_plane_outstanding =
                                                         data_plane_outstanding.saturating_sub(sent);
                                                 }
@@ -631,8 +681,18 @@ impl RemotePushClient {
                                                 &mut plan_options,
                                                 size_hint,
                                             );
-                                            let planned =
+                                            let mut planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
+                                            let skipped = prune_unrequested_payloads(
+                                                &mut planned.payloads,
+                                                &mut requested_files,
+                                            );
+                                            if skipped > 0 {
+                                                eprintln!(
+                                                    "[push] daemon did not request {} payload file(s); skipping",
+                                                    skipped
+                                                );
+                                            }
                                             if !planned.payloads.is_empty() {
                                                 let sent = payload_file_count(&planned.payloads);
                                                 sender.queue(planned.payloads).await?;
