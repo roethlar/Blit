@@ -401,10 +401,14 @@ fn desired_streams(files: &[FileHeader]) -> u32 {
     }
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
     let file_count = files.len();
-    if total_bytes >= 4 * 1024 * 1024 * 1024 || file_count >= 50_000 {
-        8
+    if total_bytes >= 32 * 1024 * 1024 * 1024 || file_count >= 200_000 {
+        16
+    } else if total_bytes >= 8 * 1024 * 1024 * 1024 || file_count >= 80_000 {
+        12
+    } else if total_bytes >= 2 * 1024 * 1024 * 1024 || file_count >= 50_000 {
+        10
     } else if total_bytes >= 512 * 1024 * 1024 || file_count >= 10_000 {
-        6
+        8
     } else if total_bytes >= 128 * 1024 * 1024 || file_count >= 2_000 {
         4
     } else if total_bytes >= 32 * 1024 * 1024 || file_count >= 256 {

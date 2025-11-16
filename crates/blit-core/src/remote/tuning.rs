@@ -9,5 +9,22 @@ pub fn determine_remote_tuning(total_bytes: u64) -> TuningParams {
     } else {
         8 * 1024 * 1024
     };
-    determine_tuning(default_chunk_bytes, None)
+
+    let mut tuning = determine_tuning(default_chunk_bytes, None);
+    let (initial_streams, max_streams) = if total_bytes >= 32 * 1024 * 1024 * 1024 {
+        (14, 18)
+    } else if total_bytes >= 8 * 1024 * 1024 * 1024 {
+        (12, 16)
+    } else if total_bytes >= 2 * 1024 * 1024 * 1024 {
+        (10, 14)
+    } else if total_bytes >= 512 * 1024 * 1024 {
+        (8, 12)
+    } else if total_bytes >= 128 * 1024 * 1024 {
+        (6, 10)
+    } else {
+        (4, 8)
+    };
+    tuning.initial_streams = initial_streams;
+    tuning.max_streams = max_streams;
+    tuning
 }

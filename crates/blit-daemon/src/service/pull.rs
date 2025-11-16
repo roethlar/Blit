@@ -356,10 +356,14 @@ async fn handle_pull_stream(
 }
 
 fn pull_stream_count(total_bytes: u64, tuning_max: usize) -> u32 {
-    let mut streams = if total_bytes >= 4 * 1024 * 1024 * 1024 {
-        8
+    let mut streams = if total_bytes >= 32 * 1024 * 1024 * 1024 {
+        16
+    } else if total_bytes >= 8 * 1024 * 1024 * 1024 {
+        12
+    } else if total_bytes >= 2 * 1024 * 1024 * 1024 {
+        10
     } else if total_bytes >= 512 * 1024 * 1024 {
-        6
+        8
     } else if total_bytes >= 128 * 1024 * 1024 {
         4
     } else if total_bytes >= 32 * 1024 * 1024 {
