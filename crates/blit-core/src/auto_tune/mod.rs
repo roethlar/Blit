@@ -14,6 +14,10 @@ pub struct TuningParams {
     pub max_streams: usize,
     /// Detected bandwidth (if warmup succeeded)
     pub warmup_gbps: Option<f64>,
+    /// TCP buffer size (SO_SNDBUF/SO_RCVBUF)
+    pub tcp_buffer_size: Option<usize>,
+    /// Number of payloads to prefetch
+    pub prefetch_count: Option<usize>,
 }
 
 /// Analyze warmup results and determine optimal chunk size
@@ -50,11 +54,25 @@ pub fn determine_tuning(
         2
     };
 
+    let (tcp_buffer_size, prefetch_count) = if let Some(gbps) = warmup_gbps {
+        if gbps > 8.0 {
+            (Some(8 * 1024 * 1024), Some(32)) // 10GbE
+        } else if gbps > 3.0 {
+            (Some(4 * 1024 * 1024), Some(16)) // Multi-gig
+        } else {
+            (Some(1 * 1024 * 1024), Some(8)) // Gigabit
+        }
+    } else {
+        (None, None)
+    };
+
     TuningParams {
         chunk_bytes,
         initial_streams,
         max_streams: 8,
         warmup_gbps,
+        tcp_buffer_size,
+        prefetch_count,
     }
 }
 

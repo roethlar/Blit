@@ -1,5 +1,8 @@
-use super::{PullPayload, PullSender};
+use super::PullPayload;
+use blit_core::remote::transfer::source::FsTransferSource;
 use crate::runtime::ModuleConfig;
+use crate::service::PullSender;
+use std::sync::Arc;
 use base64::{engine::general_purpose, Engine as _};
 use blit_core::generated::{DataTransferNegotiation, FileData, FileHeader, PullChunk, PullSummary};
 use blit_core::remote::transfer::{plan_transfer_payloads, TransferPayload};
@@ -20,6 +23,7 @@ pub(crate) async fn stream_pull(
     module: ModuleConfig,
     requested_path: String,
     force_grpc: bool,
+    metadata_only: bool,
     tx: PullSender,
 ) -> Result<(), Status> {
     let requested = if requested_path.trim().is_empty() {
@@ -46,8 +50,8 @@ pub(crate) async fn stream_pull(
 
     let total_bytes: u64 = entries.iter().map(|entry| entry.header.size).sum();
 
-    if force_grpc {
-        stream_via_grpc(&module, &entries, &tx).await?;
+    if force_grpc || metadata_only {
+        stream_via_grpc(&module, &entries, &tx, metadata_only).await?;
         send_summary(
             &tx,
             TransferStats {
@@ -202,10 +206,11 @@ async fn stream_via_grpc(
     module: &ModuleConfig,
     entries: &[PullEntry],
     tx: &PullSender,
+    metadata_only: bool,
 ) -> Result<(), Status> {
     for entry in entries {
         let abs_path = entry.absolute_path(&module.path);
-        stream_single_file(tx, &entry.relative_path, &abs_path).await?;
+        stream_single_file(tx, &entry.relative_path, &abs_path, metadata_only).await?;
     }
     Ok(())
 }
@@ -214,6 +219,7 @@ async fn stream_single_file(
     tx: &PullSender,
     relative: &Path,
     abs_path: &Path,
+    metadata_only: bool,
 ) -> Result<(), Status> {
     let metadata = tokio::fs::metadata(abs_path)
         .await
@@ -231,6 +237,10 @@ async fn stream_single_file(
     }))
     .await
     .map_err(|_| Status::internal("failed to send pull header"))?;
+
+    if metadata_only {
+        return Ok(());
+    }
 
     let mut file = tokio::fs::File::open(abs_path)
         .await
@@ -342,7 +352,7 @@ async fn handle_pull_stream(
 
     for payload in payloads {
         session
-            .send_payloads(&module_root, vec![payload])
+            .send_payloads(Arc::new(FsTransferSource::new(module_root.clone())), vec![payload])
             .await
             .map_err(|err| {
                 Status::internal(format!("sending pull data plane payloads: {}", err))

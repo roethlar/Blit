@@ -86,7 +86,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             run_remote_push_transfer(
                 ctx,
                 args,
-                &src_path,
+                Endpoint::Local(src_path),
                 remote,
                 matches!(mode, TransferKind::Mirror),
             )
@@ -104,8 +104,18 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             )
             .await
         }
-        (Endpoint::Remote(_), Endpoint::Remote(_)) => {
-            bail!("remote-to-remote transfers are not supported yet")
+        (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
+            ensure_remote_transfer_supported(args)?;
+            ensure_remote_source_supported(&src)?;
+            ensure_remote_destination_supported(&dst)?;
+            run_remote_push_transfer(
+                ctx,
+                args,
+                Endpoint::Remote(src),
+                dst,
+                matches!(mode, TransferKind::Mirror),
+            )
+            .await
         }
     }
 }

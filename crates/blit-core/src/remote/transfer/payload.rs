@@ -19,6 +19,8 @@ use tar::{Builder, EntryType, Header};
 
 use super::data_plane::CONTROL_PLANE_CHUNK_SIZE;
 use super::progress::RemoteTransferProgress;
+use crate::remote::transfer::source::TransferSource;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum TransferPayload {
@@ -158,19 +160,19 @@ fn normalize_relative_path(path: &Path) -> String {
 
 pub fn prepared_payload_stream(
     payloads: Vec<TransferPayload>,
-    source_root: PathBuf,
+    source: Arc<dyn TransferSource>,
     prefetch: usize,
 ) -> impl futures::Stream<Item = Result<PreparedPayload>> {
     let capacity = prefetch.max(1);
     stream::iter(payloads.into_iter().map(move |payload| {
-        let root = source_root.clone();
-        async move { prepare_payload(payload, root).await }
+        let source = source.clone();
+        async move { source.prepare_payload(payload).await }
     }))
     .buffered(capacity)
 }
 
 pub async fn transfer_payloads_via_control_plane(
-    source_root: &Path,
+    source: Arc<dyn TransferSource>,
     payloads: Vec<TransferPayload>,
     tx: &mpsc::Sender<ClientPushRequest>,
     finish: bool,
@@ -181,7 +183,7 @@ pub async fn transfer_payloads_via_control_plane(
     let chunk_size = chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE);
     let mut buffer = vec![0u8; chunk_size];
     let mut prepared_stream =
-        prepared_payload_stream(payloads, source_root.to_path_buf(), payload_prefetch);
+        prepared_payload_stream(payloads, source.clone(), payload_prefetch);
 
     while let Some(prepared) = prepared_stream.next().await {
         match prepared? {
@@ -195,10 +197,10 @@ pub async fn transfer_payloads_via_control_plane(
                     continue;
                 }
 
-                let path = source_root.join(&header.relative_path);
-                let mut file = fs::File::open(&path)
+                let mut file = source
+                    .open_file(&header)
                     .await
-                    .with_context(|| format!("opening {}", path.display()))?;
+                    .with_context(|| format!("opening {}", header.relative_path))?;
 
                 let mut remaining = header.size;
                 while remaining > 0 {
@@ -206,11 +208,11 @@ pub async fn transfer_payloads_via_control_plane(
                     let chunk = file
                         .read(&mut buffer[..to_read])
                         .await
-                        .with_context(|| format!("reading {}", path.display()))?;
+                        .with_context(|| format!("reading {}", header.relative_path))?;
                     if chunk == 0 {
                         bail!(
                             "unexpected EOF while reading {} ({} bytes remaining)",
-                            path.display(),
+                            header.relative_path,
                             remaining
                         );
                     }

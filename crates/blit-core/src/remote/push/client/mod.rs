@@ -1,4 +1,4 @@
-mod helpers;
+pub mod helpers;
 mod types;
 
 pub use crate::remote::transfer::progress::ProgressEvent;
@@ -36,6 +36,7 @@ use super::payload::{
     payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
+use crate::remote::transfer::source::TransferSource;
 
 const MIN_STREAM_BATCH_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_STREAM_BATCH_BYTES: u64 = 512 * 1024 * 1024;
@@ -69,21 +70,21 @@ impl MultiStreamSender {
         payload_prefetch: usize,
         stream_count: usize,
         trace: bool,
-        source_root: &Path,
+        source: Arc<dyn TransferSource>,
+        tcp_buffer_size: Option<usize>,
     ) -> Result<Self> {
         let streams = stream_count.max(1);
         let mut workers = Vec::with_capacity(streams);
         let mut handles = Vec::with_capacity(streams);
-        let root = Arc::new(source_root.to_path_buf());
 
         for _ in 0..streams {
             let session =
-                DataPlaneSession::connect(host, port, token, chunk_bytes, payload_prefetch, trace)
+                DataPlaneSession::connect(host, port, token, chunk_bytes, payload_prefetch, trace, tcp_buffer_size)
                     .await?;
             let (tx, rx) = mpsc::channel::<Option<Vec<TransferPayload>>>(4);
-            let root_clone = Arc::clone(&root);
+            let source_clone = Arc::clone(&source);
             let handle =
-                tokio::spawn(async move { data_plane_worker(session, rx, root_clone).await });
+                tokio::spawn(async move { data_plane_worker(session, rx, source_clone).await });
             workers.push(tx);
             handles.push(handle);
         }
@@ -178,14 +179,14 @@ struct StreamStats {
 async fn data_plane_worker(
     mut session: DataPlaneSession,
     mut rx: mpsc::Receiver<Option<Vec<TransferPayload>>>,
-    source_root: Arc<PathBuf>,
+    source: Arc<dyn TransferSource>,
 ) -> Result<StreamStats> {
     let start = Instant::now();
     while let Some(batch) = rx.recv().await {
         match batch {
             Some(payloads) => {
                 session
-                    .send_payloads(source_root.as_path(), payloads)
+                    .send_payloads(source.clone(), payloads)
                     .await?;
             }
             None => break,
@@ -274,16 +275,16 @@ impl RemotePushClient {
 
     pub async fn push(
         &mut self,
-        source_root: &Path,
+        source: Arc<dyn TransferSource>,
         filter: &FileFilter,
         mirror_mode: bool,
         force_grpc: bool,
         progress: Option<&RemotePushProgress>,
         trace_data_plane: bool,
     ) -> Result<RemotePushReport> {
-        if !source_root.exists() {
-            bail!("source path does not exist: {}", source_root.display());
-        }
+        let source_root = source.root();
+        // We don't check source_root.exists() here because source might be remote/virtual.
+        // If it's FsTransferSource, it should have been checked before creation or we trust it.
 
         let start = Instant::now();
         let mut first_payload_elapsed: Option<Duration> = None;
@@ -320,11 +321,10 @@ impl RemotePushClient {
         )
         .await?;
 
-        let unreadable_paths = Arc::new(Mutex::new(Vec::new()));
+        let unreadable_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let (manifest_rx, manifest_task) = spawn_manifest_task(
-            source_root.to_path_buf(),
-            filter.clone_without_cache(),
+        let (manifest_rx, manifest_task) = source.scan(
+            Some(filter.clone_without_cache()),
             Arc::clone(&unreadable_paths),
         );
 
@@ -403,7 +403,7 @@ impl RemotePushClient {
                                                     size_hint,
                                                 );
                                                 let result = stream_fallback_from_queue(
-                                                    source_root,
+                                                    source.clone(),
                                                     &mut pending_queue,
                                                     &manifest_lookup,
                                                     &tx,
@@ -429,10 +429,9 @@ impl RemotePushClient {
                                                 let headers =
                                                     drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                                 if !headers.is_empty() {
-                                                    let headers = filter_readable_headers(
-                                                        source_root,
+                                                    let headers = source.check_availability(
                                                         headers,
-                                                        &unreadable_paths,
+                                                        Arc::clone(&unreadable_paths),
                                                     )
                                                     .await?;
                                                     if headers.is_empty() {
@@ -498,14 +497,14 @@ impl RemotePushClient {
                                                 size_hint,
                                             );
                                             let result = stream_fallback_from_queue(
-                                                source_root,
+                                                source.clone(),
                                                 &mut pending_queue,
                                                 &manifest_lookup,
                                                 &tx,
                                                 progress,
                                                 plan_options,
                                                 tuning.chunk_bytes,
-                                                tuning.initial_streams,
+                                                tuning.prefetch_count.unwrap_or_else(|| tuning.initial_streams.max(1)),
                                                 &unreadable_paths,
                                             ).await?;
                                             if result.files_sent > 0 {
@@ -543,7 +542,9 @@ impl RemotePushClient {
                                                 .stream_count
                                                 .max(1)
                                                 .min(tuning.max_streams as u32) as usize;
-                                            let payload_prefetch = tuning.initial_streams.max(1);
+                                            let payload_prefetch = tuning
+                                                .prefetch_count
+                                                .unwrap_or_else(|| tuning.initial_streams.max(1));
                                             let sender = MultiStreamSender::connect(
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
@@ -552,7 +553,8 @@ impl RemotePushClient {
                                                 payload_prefetch,
                                                 stream_target,
                                                 trace_data_plane,
-                                                source_root,
+                                                source.clone(),
+                                                tuning.tcp_buffer_size,
                                             )
                                             .await?;
                                             data_plane_sender = Some(sender);
@@ -563,12 +565,9 @@ impl RemotePushClient {
                                             let headers =
                                                 drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                             if !headers.is_empty() {
-                                                let headers = filter_readable_headers(
-                                                    source_root,
-                                                    headers,
-                                                    &unreadable_paths,
-                                                )
-                                                .await?;
+                                                let headers = source
+                                                    .check_availability(headers, unreadable_paths.clone())
+                                                    .await?;
                                                 if headers.is_empty() {
                                                     continue;
                                                 }
@@ -614,30 +613,21 @@ impl RemotePushClient {
                 maybe_header = manifest_rx.recv(), if !manifest_done => {
                     match maybe_header {
                         Some(header) => {
-                            let rel = header.relative_path.clone();
-                            let abs_path = source_root.join(&rel);
-                            match fs::File::open(&abs_path).await {
-                                Ok(file) => drop(file),
-                                Err(err) => {
-                                    match err.kind() {
-                                        ErrorKind::PermissionDenied => {
-                                            record_unreadable_entry(&unreadable_paths, &rel, "permission denied");
-                                            continue;
-                                        }
-                                        ErrorKind::NotFound => {
-                                            record_unreadable_entry(&unreadable_paths, &rel, "not found");
-                                            continue;
-                                        }
-                                        _ => {
-                                            return Err(eyre!(format!(
-                                                "failed to open {} while preparing manifest: {}",
-                                                abs_path.display(),
-                                                err
-                                            )));
-                                        }
-                                    }
-                                }
+                            // Normalize path to ensure consistency with server requests
+                            let rel = if header.relative_path.starts_with("./") {
+                                header.relative_path[2..].to_string()
+                            } else {
+                                header.relative_path.clone()
+                            };
+                            let mut header = header;
+                            header.relative_path = rel.clone();
+
+                            // Check availability via the source abstraction
+                            let available = source.check_availability(vec![header.clone()], Arc::clone(&unreadable_paths)).await?;
+                            if available.is_empty() {
+                                continue;
                             }
+
                             manifest_total_bytes =
                                 manifest_total_bytes.saturating_add(header.size);
                             send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
@@ -656,7 +646,7 @@ impl RemotePushClient {
                                             size_hint,
                                         );
                                         let result = stream_fallback_from_queue(
-                                            source_root,
+                                            source.clone(),
                                             &mut pending_queue,
                                             &manifest_lookup,
                                             &tx,
@@ -682,10 +672,9 @@ impl RemotePushClient {
                                         let headers =
                                             drain_pending_headers(&mut pending_queue, &manifest_lookup);
                                         if !headers.is_empty() {
-                                            let headers = filter_readable_headers(
-                                                source_root,
+                                            let headers = source.check_availability(
                                                 headers,
-                                                &unreadable_paths,
+                                                Arc::clone(&unreadable_paths),
                                             )
                                             .await?;
                                             if headers.is_empty() {
@@ -761,7 +750,7 @@ impl RemotePushClient {
                     && (files_requested.is_empty() || fallback_files_sent >= files_requested.len())
                 {
                     transfer_payloads_via_control_plane(
-                        source_root,
+                        source.clone(),
                         Vec::new(),
                         &tx,
                         true,
@@ -831,7 +820,7 @@ impl RemotePushClient {
 }
 
 async fn stream_fallback_from_queue(
-    source_root: &Path,
+    source: Arc<dyn TransferSource>,
     pending_queue: &mut VecDeque<String>,
     manifest_lookup: &HashMap<String, FileHeader>,
     tx: &mpsc::Sender<ClientPushRequest>,
@@ -846,12 +835,12 @@ async fn stream_fallback_from_queue(
         return Ok(FallbackStreamResult::empty());
     }
 
-    let headers = filter_readable_headers(source_root, headers, unreadable).await?;
+    let headers = source.check_availability(headers, Arc::clone(unreadable)).await?;
     if headers.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }
 
-    let planned = plan_transfer_payloads(headers, source_root, plan_options)?;
+    let planned = plan_transfer_payloads(headers, source.root(), plan_options)?;
     if planned.payloads.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }
@@ -863,7 +852,7 @@ async fn stream_fallback_from_queue(
         chunk_bytes
     };
     transfer_payloads_via_control_plane(
-        source_root,
+        source,
         planned.payloads,
         tx,
         false,

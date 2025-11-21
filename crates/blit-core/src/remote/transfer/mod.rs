@@ -1,6 +1,7 @@
 pub mod data_plane;
 pub mod payload;
 pub mod progress;
+pub mod source;
 
 pub use data_plane::{
     DataPlaneSession, CONTROL_PLANE_CHUNK_SIZE, DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE,

@@ -5,10 +5,13 @@ use futures::StreamExt;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use socket2::Socket;
 
 use crate::generated::FileHeader;
 
 use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
+use crate::remote::transfer::source::TransferSource;
+use std::sync::Arc;
 
 pub const CONTROL_PLANE_CHUNK_SIZE: usize = 1 * 1024 * 1024;
 pub const DATA_PLANE_RECORD_FILE: u8 = 0;
@@ -58,14 +61,27 @@ impl DataPlaneSession {
         chunk_bytes: usize,
         payload_prefetch: usize,
         trace: bool,
+        tcp_buffer_size: Option<usize>,
     ) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
         if trace {
             eprintln!("[data-plane-client] connecting to {}", addr);
         }
-        let mut stream = TcpStream::connect(addr.clone())
+        let stream = TcpStream::connect(addr.clone())
             .await
             .with_context(|| format!("connecting to data plane {}", addr))?;
+
+        let std_stream = stream.into_std().context("converting to std stream")?;
+        let socket = Socket::from(std_stream);
+        socket.set_tcp_nodelay(true).context("setting TCP_NODELAY")?;
+        
+        if let Some(size) = tcp_buffer_size {
+            let _ = socket.set_send_buffer_size(size);
+            let _ = socket.set_recv_buffer_size(size);
+        }
+        
+        let std_stream: std::net::TcpStream = socket.into();
+        let mut stream = TcpStream::from_std(std_stream).context("converting back to tokio stream")?;
 
         stream
             .write_all(token)
@@ -82,15 +98,15 @@ impl DataPlaneSession {
 
     pub async fn send_payloads(
         &mut self,
-        source_root: &Path,
+        source: Arc<dyn TransferSource>,
         payloads: Vec<TransferPayload>,
     ) -> Result<()> {
         let mut stream =
-            prepared_payload_stream(payloads, source_root.to_path_buf(), self.payload_prefetch);
+            prepared_payload_stream(payloads, source.clone(), self.payload_prefetch);
         while let Some(prepared) = stream.next().await {
             match prepared? {
                 PreparedPayload::File(header) => {
-                    if let Err(err) = self.send_file(source_root, &header).await {
+                    if let Err(err) = self.send_file(source.clone(), &header).await {
                         return Err(err.wrap_err(format!("sending {}", header.relative_path)));
                     }
                     self.bytes_sent = self.bytes_sent.saturating_add(header.size);
@@ -123,9 +139,8 @@ impl DataPlaneSession {
         self.bytes_sent
     }
 
-    async fn send_file(&mut self, source_root: &Path, header: &FileHeader) -> Result<()> {
+    async fn send_file(&mut self, source: Arc<dyn TransferSource>, header: &FileHeader) -> Result<()> {
         let rel = &header.relative_path;
-        let path = source_root.join(rel);
         trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
 
         let path_bytes = rel.as_bytes();
@@ -146,44 +161,36 @@ impl DataPlaneSession {
             .await
             .context("writing path bytes")?;
 
-        let metadata = fs::metadata(&path)
-            .await
-            .with_context(|| format!("stat {}", path.display()))?;
-        if metadata.len() != header.size {
-            bail!(
-                "source file {} changed size (expected {}, found {})",
-                path.display(),
-                header.size,
-                metadata.len()
-            );
-        }
+        // We skip metadata check here as TransferSource abstracts the file.
+        // The read loop will verify we get enough bytes.
 
         self.stream
-            .write_all(&metadata.len().to_be_bytes())
+            .write_all(&header.size.to_be_bytes())
             .await
             .context("writing file size")?;
 
-        let mut file = fs::File::open(&path)
+        let mut file = source
+            .open_file(header)
             .await
-            .with_context(|| format!("opening {}", path.display()))?;
+            .with_context(|| format!("opening {}", rel))?;
 
-        let mut remaining = metadata.len();
+        let mut remaining = header.size;
         while remaining > 0 {
             let chunk = file
                 .read(&mut self.buffer)
                 .await
-                .with_context(|| format!("reading {}", path.display()))?;
+                .with_context(|| format!("reading {}", header.relative_path))?;
             if chunk == 0 {
                 bail!(
                     "unexpected EOF while reading {} ({} bytes remaining)",
-                    path.display(),
+                    header.relative_path,
                     remaining
                 );
             }
             self.stream
                 .write_all(&self.buffer[..chunk])
                 .await
-                .with_context(|| format!("sending {}", path.display()))?;
+                .with_context(|| format!("sending {}", rel))?;
             remaining -= chunk as u64;
         }
 

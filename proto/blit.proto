@@ -117,6 +117,7 @@ message PullRequest {
   string module = 1;
   string path = 2;
   bool force_grpc = 3;
+  bool metadata_only = 4;
 }
 
 message PullChunk {

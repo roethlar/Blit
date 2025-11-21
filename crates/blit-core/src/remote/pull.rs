@@ -11,7 +11,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::generated::blit_client::BlitClient;
-use crate::generated::{pull_chunk, DataTransferNegotiation, FileData, PullRequest, PullSummary};
+use crate::generated::{
+    pull_chunk, DataTransferNegotiation, FileData, FileHeader, PullChunk, PullRequest, PullSummary,
+};
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::data_plane::{
     DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD,
@@ -48,6 +50,7 @@ impl PullWorkerStats {
     }
 }
 
+#[derive(Clone)]
 pub struct RemotePullClient {
     endpoint: RemoteEndpoint,
     client: BlitClient<tonic::transport::Channel>,
@@ -94,6 +97,7 @@ impl RemotePullClient {
             module,
             path: path_str,
             force_grpc,
+            metadata_only: false,
         };
 
         let mut stream = self
@@ -141,7 +145,7 @@ impl RemotePullClient {
                         .ok_or_else(|| eyre!("received file data without a preceding header"))?;
                     file.write_all(&content)
                         .await
-                        .with_context(|| format!("writing {}", path.display()))?;
+                        .with_context(|| format!("reading {}", path.display()))?;
                     report.bytes_transferred += content.len() as u64;
                     if let Some(progress) = progress {
                         progress.report_payload(0, content.len() as u64);
@@ -202,6 +206,138 @@ impl RemotePullClient {
             report,
         )
         .await
+    }
+    pub async fn scan_remote_files(
+        &mut self,
+        path: &Path,
+    ) -> Result<Vec<FileHeader>> {
+        let (module, rel_path) = match &self.endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.join(path)),
+            RemotePath::Root { rel_path } => (String::new(), rel_path.join(path)),
+            RemotePath::Discovery => bail!("remote source must specify a module"),
+        };
+
+        let path_str = normalize_for_request(&rel_path);
+        let pull_request = PullRequest {
+            module,
+            path: path_str,
+            force_grpc: true, // Force gRPC to get headers in the control stream
+            metadata_only: true,
+        };
+
+        let mut stream = self
+            .client
+            .pull(pull_request)
+            .await
+            .map_err(|status| eyre!(status.message().to_string()))?
+            .into_inner();
+
+        let mut headers = Vec::new();
+        while let Some(chunk) = stream
+            .message()
+            .await
+            .map_err(|status| eyre!(status.message().to_string()))?
+        {
+            if let Some(pull_chunk::Payload::FileHeader(header)) = chunk.payload {
+                headers.push(header);
+            }
+        }
+        Ok(headers)
+    }
+
+    pub async fn open_remote_file(
+        &self,
+        path: &Path,
+    ) -> Result<impl tokio::io::AsyncRead + Unpin + Send> {
+        let (module, rel_path) = match &self.endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.join(path)),
+            RemotePath::Root { rel_path } => (String::new(), rel_path.join(path)),
+            RemotePath::Discovery => bail!("remote source must specify a module"),
+        };
+
+        let path_str = normalize_for_request(&rel_path);
+        let pull_request = PullRequest {
+            module,
+            path: path_str,
+            force_grpc: true, // Force gRPC to get data in the control stream for single file
+            metadata_only: false,
+        };
+
+        // Clone client to use in async block if needed, but here we need to return a stream.
+        // We can't easily return the stream directly because it's a gRPC stream.
+        // We need to wrap it in an AsyncRead adapter.
+        let mut client = self.client.clone();
+        let stream = client
+            .pull(pull_request)
+            .await
+            .map_err(|status| eyre!(status.message().to_string()))?
+            .into_inner();
+
+        Ok(RemoteFileStream::new(stream))
+    }
+}
+
+use std::pin::Pin;
+use std::task::Poll;
+use tokio_stream::Stream;
+use tonic::Streaming;
+
+struct RemoteFileStream {
+    stream: Streaming<PullChunk>,
+    buffer: Vec<u8>,
+    position: usize,
+}
+
+impl RemoteFileStream {
+    fn new(stream: Streaming<PullChunk>) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+            position: 0,
+        }
+    }
+}
+
+impl tokio::io::AsyncRead for RemoteFileStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.position < self.buffer.len() {
+            let len = std::cmp::min(buf.remaining(), self.buffer.len() - self.position);
+            buf.put_slice(&self.buffer[self.position..self.position + len]);
+            self.position += len;
+            return Poll::Ready(Ok(()));
+        }
+
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                match chunk.payload {
+                    Some(pull_chunk::Payload::FileData(data)) => {
+                        self.buffer = data.content;
+                        self.position = 0;
+                        // Recurse to copy data to buf
+                        self.poll_read(cx, buf)
+                    }
+                    Some(pull_chunk::Payload::FileHeader(_)) => {
+                        // Skip headers in data stream
+                        self.poll_read(cx, buf)
+                    }
+                    _ => {
+                        // Ignore other messages or treat as EOF?
+                        // Treat as EOF for now if we don't get FileData
+                         Poll::Ready(Ok(()))
+                    }
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))),
+            Poll::Ready(None) => Poll::Ready(Ok(())),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -377,7 +513,7 @@ async fn handle_file_record(
         if read == 0 {
             bail!(
                 "unexpected EOF while receiving {} ({} bytes remaining)",
-                dest_path.display(),
+                relative_path.display(),
                 remaining
             );
         }
@@ -537,7 +673,12 @@ fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
         );
     }
 
-    Ok(path.to_path_buf())
+    let normalized: PathBuf = path
+        .components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect();
+
+    Ok(normalized)
 }
 
 fn normalize_for_request(path: &Path) -> String {

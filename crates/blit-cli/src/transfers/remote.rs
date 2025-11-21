@@ -13,8 +13,10 @@ use blit_core::remote::{
     RemoteEndpoint, RemotePullClient, RemotePullProgress, RemotePullReport, RemotePushClient,
     RemotePushProgress, RemotePushReport,
 };
+use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
+use std::sync::Arc;
 
-use super::endpoints::format_remote_endpoint;
+use super::endpoints::{format_remote_endpoint, Endpoint};
 
 fn spawn_progress_monitor(
     enabled: bool,
@@ -104,7 +106,7 @@ fn spawn_progress_monitor(
 pub async fn run_remote_push_transfer(
     _ctx: &AppContext,
     args: &TransferArgs,
-    source_path: &Path,
+    source: Endpoint,
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<()> {
@@ -116,9 +118,21 @@ pub async fn run_remote_push_transfer(
     let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
 
     let filter = FileFilter::default();
+    let transfer_source: Arc<dyn TransferSource> = match source {
+        Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
+        Endpoint::Remote(endpoint) => {
+            let client = RemotePullClient::connect(endpoint.clone())
+                .await
+                .with_context(|| format!("connecting to source {}", endpoint.control_plane_uri()))?;
+            // Use a dummy root for now, or derive from endpoint path
+            let root = PathBuf::from(format!("remote:/{}", endpoint.host)); 
+            Arc::new(RemoteTransferSource::new(client, root))
+        }
+    };
+
     let push_result = client
         .push(
-            source_path,
+            transfer_source.clone(),
             &filter,
             mirror_mode,
             args.force_grpc,
@@ -129,7 +143,7 @@ pub async fn run_remote_push_transfer(
         .with_context(|| {
             format!(
                 "negotiating push manifest for {} -> {}",
-                source_path.display(),
+                transfer_source.root().display(),
                 format_remote_endpoint(&remote)
             )
         });

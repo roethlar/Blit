@@ -55,17 +55,35 @@ pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
     }
 
     use std::path::Component;
-    if path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
-    {
-        return Err(Status::invalid_argument(format!(
-            "parent directory segments not allowed: {}",
-            rel
-        )));
+    let mut components = path.components();
+    let mut normalized = PathBuf::new();
+    
+    // Skip leading '.' components
+    while let Some(Component::CurDir) = components.as_path().components().next() {
+        components.next();
     }
 
-    Ok(path.to_path_buf())
+    for component in components {
+        match component {
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "invalid path segment: {:?}",
+                    component
+                )));
+            }
+            Component::CurDir => {} // Skip internal '.'
+            Component::RootDir => {
+                 return Err(Status::invalid_argument("absolute paths not allowed"));
+            }
+            Component::Normal(c) => normalized.push(c),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Ok(PathBuf::from("."));
+    }
+
+    Ok(normalized)
 }
 
 pub(crate) fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
