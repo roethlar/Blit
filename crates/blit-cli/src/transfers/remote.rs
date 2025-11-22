@@ -124,8 +124,12 @@ pub async fn run_remote_push_transfer(
             let client = RemotePullClient::connect(endpoint.clone())
                 .await
                 .with_context(|| format!("connecting to source {}", endpoint.control_plane_uri()))?;
-            // Use a dummy root for now, or derive from endpoint path
-            let root = PathBuf::from(format!("remote:/{}", endpoint.host)); 
+            // Use the relative path from the endpoint as the root
+            let root = match &endpoint.path {
+                blit_core::remote::RemotePath::Module { rel_path, .. } => rel_path.clone(),
+                blit_core::remote::RemotePath::Root { rel_path } => rel_path.clone(),
+                blit_core::remote::RemotePath::Discovery => PathBuf::from("."),
+            };
             Arc::new(RemoteTransferSource::new(client, root))
         }
     };
