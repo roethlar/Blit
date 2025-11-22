@@ -15,6 +15,8 @@ use endpoints::{
 };
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
+use crate::admin::delete_remote_path;
+use blit_core::remote::RemotePath;
 
 #[derive(Copy, Clone)]
 pub enum TransferKind {
@@ -143,10 +145,64 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             }
             Ok(())
         }
-        (Endpoint::Remote(_), Endpoint::Remote(_))
-        | (Endpoint::Remote(_), Endpoint::Local(_))
-        | (Endpoint::Local(_), Endpoint::Remote(_)) => {
-            bail!("remote moves are not supported yet")
+        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
+            ensure_remote_transfer_supported(args)?;
+            ensure_remote_source_supported(&remote)?;
+            run_remote_pull_transfer(ctx, args, remote.clone(), &dst_path, false).await?;
+
+            // Delete remote source
+            let rel_path = match &remote.path {
+                RemotePath::Module { rel_path, .. } => rel_path.to_string_lossy().into_owned(),
+                _ => bail!("unsupported remote source for move"),
+            };
+            delete_remote_path(&remote, &rel_path).await?;
+            Ok(())
+        }
+        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
+            if !src_path.exists() {
+                bail!("source path does not exist: {}", src_path.display());
+            }
+            ensure_remote_transfer_supported(args)?;
+            ensure_remote_destination_supported(&remote)?;
+            run_remote_push_transfer(
+                ctx,
+                args,
+                Endpoint::Local(src_path.clone()),
+                remote.clone(),
+                false,
+            )
+            .await?;
+
+            // Delete local source
+            if src_path.is_dir() {
+                fs::remove_dir_all(&src_path)
+                    .with_context(|| format!("removing {}", src_path.display()))?;
+            } else if src_path.is_file() {
+                fs::remove_file(&src_path)
+                    .with_context(|| format!("removing {}", src_path.display()))?;
+            }
+            Ok(())
+        }
+        (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
+            ensure_remote_transfer_supported(args)?;
+            ensure_remote_source_supported(&src)?;
+            ensure_remote_destination_supported(&dst)?;
+            run_remote_push_transfer(
+                ctx,
+                args,
+                Endpoint::Remote(src.clone()),
+                dst,
+                false,
+            )
+            .await?;
+
+            // Delete remote source
+            let rel_path = match &src.path {
+                RemotePath::Module { rel_path, .. } => rel_path.to_string_lossy().into_owned(),
+                _ => bail!("unsupported remote source for move"),
+            };
+            delete_remote_path(&src, &rel_path).await?;
+            Ok(())
         }
     }
 }

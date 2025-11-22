@@ -1,3 +1,4 @@
+mod admin;
 mod cli;
 mod context;
 mod diagnostics;
@@ -5,6 +6,7 @@ mod list;
 mod scan;
 mod transfers;
 
+use crate::admin::{run_df, run_du, run_find, run_rm};
 use crate::cli::{Cli, Commands, DiagnosticsCommand};
 use crate::context::AppContext;
 use crate::diagnostics::run_diagnostics_perf;
@@ -35,6 +37,10 @@ async fn main() -> Result<()> {
         Commands::Move(args) => run_move(&ctx, &args).await?,
         Commands::Scan(args) => run_scan(&args).await?,
         Commands::List(args) => run_list(&args).await?,
+        Commands::Du(args) => run_du(&ctx, &args).await?,
+        Commands::Df(args) => run_df(&ctx, &args).await?,
+        Commands::Rm(args) => run_rm(&ctx, &args).await?,
+        Commands::Find(args) => run_find(&ctx, &args).await?,
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
         },

@@ -138,7 +138,8 @@ impl TransferSource for RemoteTransferSource {
             // If self.root is "remote:/module/path", we might want to scan "." relative to that.
             // scan_remote_files takes a path relative to the client's endpoint path.
             // If client endpoint is "remote:/module", and we want to scan ".", we pass ".".
-            let headers = client.scan_remote_files(Path::new(".")).await?;
+            // Use self.root to scope the scan to the requested subpath
+            let headers = client.scan_remote_files(&root).await?;
             let count = headers.len() as u64;
             for header in headers {
                 if tx.send(header).await.is_err() {
@@ -160,8 +161,11 @@ impl TransferSource for RemoteTransferSource {
             TransferPayload::TarShard { headers } => {
                 let mut builder = tar::Builder::new(Vec::new());
                 for header in headers.clone() {
+                    // Read file into memory to append to tar builder.
+                    // TODO: Use tokio-tar to avoid double-buffering (file vec + tar vec).
+                    // For now, this is acceptable as prepare_payload is only used for small files (tar shards).
                     let mut stream = self.client.open_remote_file(Path::new(&header.relative_path)).await?;
-                    let mut data = Vec::new();
+                    let mut data = Vec::with_capacity(header.size as usize);
                     stream.read_to_end(&mut data).await?;
                     
                     let mut tar_header = tar::Header::new_gnu();

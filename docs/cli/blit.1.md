@@ -1,6 +1,6 @@
 # BLIT(1) blit Manual
 % Blit v2 Team
-% 2025-10-20
+% 2025-11-21
 
 ## NAME
 blit – local and hybrid-transport file transfer CLI
@@ -11,91 +11,88 @@ blit – local and hybrid-transport file transfer CLI
 `blit move [OPTIONS] <SOURCE> <DESTINATION>`  
 `blit scan [--wait <SECONDS>]`  
 `blit list <REMOTE>`  
+`blit du [--max-depth <N>] [--json] <REMOTE>`  
+`blit df [--json] <REMOTE>`  
+`blit rm [--yes] <REMOTE>`  
+`blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`  
 `blit diagnostics perf [--limit <N>] [--enable|--disable] [--clear]`
 
 ## DESCRIPTION
-`blit` drives the v2 streaming transfer engine. Local commands stay quiet
-by default so that terminal output never throttles the transfer, yet they
-still emit structured progress events that future GUI surfaces can
-subscribe to.
+`blit` drives the v2 streaming transfer engine. It supports local transfers and
+remote operations via a hybrid TCP/gRPC transport.
 
-- `copy` copies a local `<SOURCE>` into `<DESTINATION>` without deleting
-  extraneous files.
-- `mirror` performs the same copy but removes files that are only present
-  at the destination.
-- `move` mirrors the source into the destination and then removes the
-  original tree.
-- `list` queries a local path or remote daemon and prints directory
-  entries. Invoke with `server:port` (or bare `server`) to enumerate
-  modules, or `server:/module/path` to list within a module. Local paths
-  fall back to a simple directory listing.
-- `scan` performs an mDNS discovery pass (default wait 2 s) and prints
-  any blit daemons advertising `_blit._tcp.local.`. Use `--wait` to
-  adjust the discovery window.
+### Transfer Commands
+- `copy` copies a `<SOURCE>` into `<DESTINATION>` without deleting extraneous files.
+- `mirror` performs the same copy but removes files that are only present at the destination.
+- `move` mirrors the source into the destination and then removes the original tree.
 
-Remote transfers already reuse `copy`, `mirror`, and `move`. Any
-`<SOURCE>` or `<DESTINATION>` may be a local path **or** a remote endpoint
-in the form `host:/module/path` (explicit module export) or
-`host://path` (default root export when configured). Remote-to-remote
-transfers are not yet supported; one side must be local. Default port
-9031 is implied when not specified (`host:port:/module/...` works), and
-paths are always canonicalised using forward slashes.
+Any `<SOURCE>` or `<DESTINATION>` may be a local path or a remote endpoint:
+- `server:/module/path` (explicit module export)
+- `server://path` (default root export, if configured)
+- `server` (implies default root)
+
+Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server2:/mod/B`).
+
+### Admin Commands
+- `scan` discovers blit daemons on the local network via mDNS.
+- `list` lists modules (on a bare host) or directory contents (on a module path).
+- `du` shows disk usage for a remote path.
+- `df` shows filesystem statistics (total/used/free) for a remote module.
+- `rm` removes a file or directory on a remote daemon.
+- `find` searches for files on a remote daemon.
 
 ## OPTIONS
+### Transfer Options
 - `--dry-run`  
   Enumerate and plan the transfer without modifying the destination.
 
 - `--checksum`  
-  Force checksum validation for changed files (metadata comparison is the
-  default).
+  Force checksum validation for changed files (metadata comparison is the default).
 
 - `--verbose`  
   Emit planner heartbeat messages and fast-path decisions to stderr.
 
 - `--progress`  
-  Show an interactive ASCII spinner while the transfer runs. When omitted
-  the CLI prints only the final summary so that scripting and logging
-  stay clean.
+  Show an interactive ASCII spinner while the transfer runs.
 
 - `--force-grpc`  
   Bypass the TCP data plane negotiation and stream payloads over gRPC.
-  Useful when the client cannot open outbound TCP ports to the daemon.
 
-These options apply to `copy`, `mirror`, and `move`.
+### Admin Options
+- `--wait <SECONDS>` (scan)  
+  Duration to wait for mDNS responses (default: 2).
 
-## DEBUG OPTIONS
-- `--workers <N>` *(hidden)*  
-  Caps the planner at `N` worker threads for diagnostic runs. When this
-  limiter is active the CLI prints  
-  `[DEBUG] Worker limiter active – FAST planner auto-tuning capped to N thread(s).`  
-  The transfer still succeeds, but throughput guarantees are suspended.
-  This flag exists solely for engineering analysis; remove it for
-  production runs.
+- `--max-depth <N>` (du)  
+  Limit traversal depth (0 = unlimited).
 
-Planner tuning is otherwise automatic. There are no other CLI tunables or
-environment variables that affect worker selection.
+- `--json` (du, df)  
+  Output results as JSON.
+
+- `--yes` (rm)  
+  Skip confirmation prompt.
+
+- `--pattern <GLOB>` (find)  
+  Glob pattern to match (e.g., "*.txt").
+
+- `--case-insensitive` (find)  
+  Enable case-insensitive pattern matching.
+
+- `--limit <N>` (find)  
+  Limit number of results.
 
 ## DIAGNOSTICS
-`blit diagnostics perf` inspects and manages the local performance
-history captured by the orchestrator (50 records shown by default).
+`blit diagnostics perf` inspects and manages the local performance history.
 
 - `--limit <N>` shows the most recent `N` entries (0 = all).
-- `--enable` / `--disable` toggle capture in the on-disk settings file.
-- `--clear` removes the stored JSONL history file.
-
-These flags operate on the config directory described below; toggling is
-persistent until changed again.
+- `--enable` / `--disable` toggle capture.
+- `--clear` removes the stored history file.
 
 ## CONFIGURATION DIRECTORY
-- `--config-dir <PATH>` overrides the default configuration directory
-  for the current invocation. Useful for integration tests and benchmark
-  harnesses; when omitted, the platform-standard directory is used.
+- `--config-dir <PATH>` overrides the default configuration directory.
 
 ## FILES
-- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/perf_local.jsonl` – local
-  performance history captured after each run.
-- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/settings.json` – persisted CLI
-  settings (currently just the performance-history toggle).
+- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/perf_local.jsonl` – local performance history.
+- `${XDG_CONFIG_HOME:-$HOME/.config}/blit/settings.json` – persisted CLI settings.
 
 ## SEE ALSO
-`docs/plan/LOCAL_TRANSFER_HEURISTICS.md`, `docs/plan/MASTER_WORKFLOW.md`
+`blit-daemon(1)`

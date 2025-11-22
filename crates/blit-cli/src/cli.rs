@@ -24,6 +24,14 @@ pub enum Commands {
     Scan(ScanArgs),
     /// List modules or paths on a remote daemon
     List(ListArgs),
+    /// Show disk usage for a remote path
+    Du(DuArgs),
+    /// Show filesystem statistics for a remote module
+    Df(DfArgs),
+    /// Remove a file or directory on a remote daemon
+    Rm(RmArgs),
+    /// Search for files on a remote daemon
+    Find(FindArgs),
     /// Diagnostics and tooling commands
     Diagnostics {
         #[command(subcommand)]
@@ -93,4 +101,58 @@ pub struct ScanArgs {
 pub struct ListArgs {
     /// Remote location to list (e.g., server:/module/, server:/module/path, server)
     pub target: String,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct DuArgs {
+    /// Remote path to check (e.g., server:/module/path)
+    pub target: String,
+    /// Max depth to traverse (0 = unlimited)
+    #[arg(long)]
+    pub max_depth: Option<u32>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct DfArgs {
+    /// Remote module to check (e.g., server:/module/)
+    pub remote: String,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RmArgs {
+    /// Remote path to delete (e.g., server:/module/path)
+    pub target: String,
+    /// Skip confirmation prompt
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct FindArgs {
+    /// Remote path to search (e.g., server:/module/path)
+    pub target: String,
+    /// Glob pattern to match (e.g., "*.txt")
+    #[arg(long, short = 'n')]
+    pub pattern: Option<String>,
+    /// Case-insensitive pattern matching
+    #[arg(long, short = 'i')]
+    pub case_insensitive: bool,
+    /// Include files in results (default: true)
+    #[arg(long, default_value_t = true)]
+    pub files: bool,
+    /// Include directories in results (default: true)
+    #[arg(long, default_value_t = true)]
+    pub dirs: bool,
+    /// Limit number of results
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
