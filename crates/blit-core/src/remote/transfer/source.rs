@@ -196,7 +196,6 @@ impl TransferSource for RemoteTransferSource {
         &self,
         header: &FileHeader,
     ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-        eprintln!("DEBUG: RemoteTransferSource opening remote file {}", header.relative_path);
         let stream = self.client.open_remote_file(Path::new(&header.relative_path)).await?;
         Ok(Box::new(stream))
     }

@@ -79,6 +79,9 @@ pub struct TransferArgs {
     /// Show an interactive progress indicator
     #[arg(long, short = 'p')]
     pub progress: bool,
+    /// Skip confirmation prompt for destructive operations (mirror deletions, move)
+    #[arg(long, short = 'y')]
+    pub yes: bool,
     /// Limit worker threads (advanced debugging only)
     #[arg(long, hide = true)]
     pub workers: Option<usize>,

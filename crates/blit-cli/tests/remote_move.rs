@@ -19,9 +19,10 @@ fn test_remote_move_local_to_remote() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("move")
+        .arg("--yes")
         .arg(&src_dir)
         .arg(&dest_remote);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit move failed");
 
@@ -54,9 +55,10 @@ fn test_remote_move_remote_to_local() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("move")
+        .arg("--yes")
         .arg(&src_remote)
         .arg(&dest_dir);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit move failed");
 

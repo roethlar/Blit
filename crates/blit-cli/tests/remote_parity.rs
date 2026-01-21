@@ -19,10 +19,11 @@ fn test_push_tcp_negotiation() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("mirror")
+        .arg("--yes")
         .arg("--trace-data-plane")
         .arg(&src_dir)
         .arg(&dest_remote);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit-cli failed");
 
@@ -54,10 +55,11 @@ fn test_pull_tcp_negotiation() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("mirror")
+        .arg("--yes")
         // .arg("--trace-data-plane") // Not wired for pull yet
         .arg(&src_remote)
         .arg(&dest_dir);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit-cli failed");
 
@@ -98,10 +100,11 @@ fn test_pull_grpc_fallback() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("mirror")
+        .arg("--yes")
         .arg("--force-grpc")
         .arg(&src_remote)
         .arg(&dest_dir);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit-cli failed");
 
@@ -137,10 +140,11 @@ fn test_push_grpc_fallback() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("mirror")
+        .arg("--yes")
         .arg("--force-grpc")
         .arg(&src_dir)
         .arg(&dest_remote);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit-cli failed");
 

@@ -77,5 +77,33 @@ None (configuration is sourced from CLI flags and optional TOML files).
 ## FILES
 - `/etc/blit/config.toml` – default daemon configuration file.
 
+## SECURITY
+The daemon does not implement built-in TLS encryption. All data is transmitted in
+plaintext over the TCP data plane and gRPC control plane. Operators must secure
+remote transfers through external means:
+
+- **Trusted private network**: Deploy daemons only on isolated, trusted networks.
+
+- **SSH tunnel**: Forward the daemon port through SSH from the client:
+  ```
+  ssh -L 9031:localhost:9031 server-host
+  ```
+  Then connect to `localhost:/module/path` from the client.
+
+- **VPN**: Connect clients and servers via an encrypted VPN tunnel.
+
+- **Reverse proxy with TLS**: Place the daemon behind a TLS-terminating reverse
+  proxy (e.g., nginx, Caddy).
+
+By default, the daemon binds to `0.0.0.0:9031`, accepting connections from any
+interface. In untrusted environments:
+- Use `--bind 127.0.0.1` to restrict to localhost only
+- Use firewall rules to limit access to trusted IP ranges
+- Access the daemon via SSH tunnel or VPN
+
+The daemon does not implement authentication. Any client that can reach the daemon
+can access all configured modules. Use network-level access controls to restrict
+who can connect.
+
 ## SEE ALSO
 `blit(1)`

@@ -199,6 +199,7 @@ fn test_remote_to_remote_mirror() {
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("mirror")
+        .arg("--yes") // Skip confirmation prompt
         .arg("--trace-data-plane") // Optional, to see logs
         .arg(&src_remote)
         .arg(&dest_remote);

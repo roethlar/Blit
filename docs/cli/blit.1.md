@@ -6,15 +6,15 @@
 blit – local and hybrid-transport file transfer CLI
 
 ## SYNOPSIS
-`blit copy [OPTIONS] <SOURCE> <DESTINATION>`  
-`blit mirror [OPTIONS] <SOURCE> <DESTINATION>`  
-`blit move [OPTIONS] <SOURCE> <DESTINATION>`  
-`blit scan [--wait <SECONDS>]`  
-`blit list <REMOTE>`  
-`blit du [--max-depth <N>] [--json] <REMOTE>`  
-`blit df [--json] <REMOTE>`  
-`blit rm [--yes] <REMOTE>`  
-`blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`  
+`blit copy [OPTIONS] <SOURCE> <DESTINATION>`
+`blit mirror [OPTIONS] [--yes] <SOURCE> <DESTINATION>`
+`blit move [OPTIONS] [--yes] <SOURCE> <DESTINATION>`
+`blit scan [--wait <SECONDS>]`
+`blit list <REMOTE>`
+`blit du [--max-depth <N>] [--json] <REMOTE>`
+`blit df [--json] <REMOTE>`
+`blit rm [--yes] <REMOTE>`
+`blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`
 `blit diagnostics perf [--limit <N>] [--enable|--disable] [--clear]`
 
 ## DESCRIPTION
@@ -55,8 +55,13 @@ Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server
 - `--progress`  
   Show an interactive ASCII spinner while the transfer runs.
 
-- `--force-grpc`  
+- `--force-grpc`
   Bypass the TCP data plane negotiation and stream payloads over gRPC.
+
+- `--yes`, `-y` (mirror, move)
+  Skip the confirmation prompt for destructive operations. By default, `mirror`
+  prompts before deleting extraneous files at the destination, and `move` prompts
+  before deleting the source after transfer.
 
 ### Admin Options
 - `--wait <SECONDS>` (scan)  
@@ -93,6 +98,28 @@ Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server
 ## FILES
 - `${XDG_CONFIG_HOME:-$HOME/.config}/blit/perf_local.jsonl` – local performance history.
 - `${XDG_CONFIG_HOME:-$HOME/.config}/blit/settings.json` – persisted CLI settings.
+
+## SECURITY
+Remote transfers do not include built-in TLS encryption. Data is transmitted in
+plaintext over the TCP data plane and gRPC control plane. Operators are expected
+to secure remote transfers through one of the following methods:
+
+- **Trusted private network**: Run blit daemons only on isolated, trusted networks
+  where traffic cannot be intercepted.
+
+- **SSH tunnel**: Forward the daemon port through SSH:
+  ```
+  ssh -L 9031:localhost:9031 remote-host
+  blit mirror /local/path localhost:/module/path
+  ```
+
+- **VPN**: Connect clients and servers via an encrypted VPN tunnel.
+
+- **Reverse proxy with TLS**: Place the daemon behind a TLS-terminating reverse
+  proxy (e.g., nginx, Caddy) for encrypted connections.
+
+The daemon binds to `0.0.0.0` by default. In untrusted environments, use
+`--bind 127.0.0.1` and access via SSH tunnel or VPN.
 
 ## SEE ALSO
 `blit-daemon(1)`

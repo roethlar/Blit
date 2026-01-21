@@ -8,6 +8,7 @@ use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use eyre::{bail, Context, Result};
 use std::fs;
+use std::io::{self, Write};
 
 use endpoints::{
     ensure_remote_destination_supported, ensure_remote_source_supported,
@@ -17,6 +18,21 @@ use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
 use crate::admin::delete_remote_path;
 use blit_core::remote::RemotePath;
+
+/// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
+/// Always returns true if `skip_prompt` is true.
+fn confirm_destructive_operation(message: &str, skip_prompt: bool) -> Result<bool> {
+    if skip_prompt {
+        return Ok(true);
+    }
+
+    print!("{} [y/N]: ", message);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let decision = input.trim().to_ascii_lowercase();
+    Ok(decision == "y" || decision == "yes")
+}
 
 #[derive(Copy, Clone)]
 pub enum TransferKind {
@@ -58,6 +74,23 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             )
         }
     };
+
+    // For mirror operations, prompt unless --yes or --dry-run
+    if matches!(mode, TransferKind::Mirror) && !args.dry_run {
+        let dst_display = match &dst_endpoint {
+            Endpoint::Local(p) => p.display().to_string(),
+            Endpoint::Remote(r) => format_remote_endpoint(r),
+        };
+        let prompt = format!(
+            "Mirror will delete extraneous files at destination '{}'. Continue?",
+            dst_display
+        );
+        if !confirm_destructive_operation(&prompt, args.yes)? {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
     println!(
         "blit v{}: starting {} {}",
         env!("CARGO_PKG_VERSION"),
@@ -126,11 +159,37 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let dst_endpoint = parse_transfer_endpoint(&args.destination)?;
 
+    if args.dry_run {
+        bail!("move does not support --dry-run");
+    }
+
+    // Prompt for confirmation before move (which deletes source)
+    let src_display = match &src_endpoint {
+        Endpoint::Local(p) => p.display().to_string(),
+        Endpoint::Remote(r) => format_remote_endpoint(r),
+    };
+    let dst_display = match &dst_endpoint {
+        Endpoint::Local(p) => p.display().to_string(),
+        Endpoint::Remote(r) => format_remote_endpoint(r),
+    };
+    let prompt = format!(
+        "Move will transfer '{}' to '{}' and delete the source. Continue?",
+        src_display, dst_display
+    );
+    if !confirm_destructive_operation(&prompt, args.yes)? {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    println!(
+        "blit v{}: starting move {} -> {}",
+        env!("CARGO_PKG_VERSION"),
+        src_display,
+        dst_display
+    );
+
     match (src_endpoint, dst_endpoint) {
         (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
-            if args.dry_run {
-                bail!("move does not support --dry-run");
-            }
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
@@ -255,6 +314,7 @@ mod tests {
             checksum: false,
             verbose: false,
             progress: false,
+            yes: true, // Skip prompts in tests
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
@@ -284,6 +344,7 @@ mod tests {
             checksum: false,
             verbose: false,
             progress: false,
+            yes: true, // Skip prompts in tests
             workers: None,
             trace_data_plane: false,
             force_grpc: false,

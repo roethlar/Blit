@@ -169,6 +169,7 @@ fn remote_pull_mirror_purges_extraneous_local_files() {
         .arg("--config-dir")
         .arg(&config_dir)
         .arg("mirror")
+        .arg("--yes")
         .arg(&remote_src)
         .arg(&dest_dir);
     let output = run_with_timeout(cli_cmd, Duration::from_secs(120));
