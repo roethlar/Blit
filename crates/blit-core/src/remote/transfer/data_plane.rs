@@ -1,12 +1,10 @@
-use std::path::Path;
-
 use eyre::{bail, Context, Result};
 use futures::StreamExt;
-use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use socket2::Socket;
 
+use crate::buffer::BufferPool;
 use crate::generated::FileHeader;
 
 use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
@@ -20,7 +18,7 @@ pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 
 pub struct DataPlaneSession {
     stream: TcpStream,
-    buffer: Vec<u8>,
+    pool: Arc<BufferPool>,
     trace: bool,
     chunk_bytes: usize,
     payload_prefetch: usize,
@@ -36,24 +34,27 @@ macro_rules! trace_client {
 }
 
 impl DataPlaneSession {
-    pub fn from_stream(
+    /// Create a session from an existing stream with buffer pooling.
+    pub async fn from_stream(
         stream: TcpStream,
         trace: bool,
         chunk_bytes: usize,
         payload_prefetch: usize,
+        pool: Arc<BufferPool>,
     ) -> Self {
         let payload_prefetch = payload_prefetch.max(1);
-        let buffer_len = chunk_bytes.max(64 * 1024);
+        let chunk_bytes = chunk_bytes.max(64 * 1024);
         Self {
             stream,
-            buffer: vec![0u8; buffer_len],
+            pool,
             trace,
-            chunk_bytes: buffer_len,
+            chunk_bytes,
             payload_prefetch,
             bytes_sent: 0,
         }
     }
 
+    /// Connect to a data plane endpoint with buffer pooling.
     pub async fn connect(
         host: &str,
         port: u32,
@@ -62,6 +63,7 @@ impl DataPlaneSession {
         payload_prefetch: usize,
         trace: bool,
         tcp_buffer_size: Option<usize>,
+        pool: Arc<BufferPool>,
     ) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
         if trace {
@@ -74,12 +76,12 @@ impl DataPlaneSession {
         let std_stream = stream.into_std().context("converting to std stream")?;
         let socket = Socket::from(std_stream);
         socket.set_tcp_nodelay(true).context("setting TCP_NODELAY")?;
-        
+
         if let Some(size) = tcp_buffer_size {
             let _ = socket.set_send_buffer_size(size);
             let _ = socket.set_recv_buffer_size(size);
         }
-        
+
         let std_stream: std::net::TcpStream = socket.into();
         let mut stream = TcpStream::from_std(std_stream).context("converting back to tokio stream")?;
 
@@ -88,12 +90,7 @@ impl DataPlaneSession {
             .await
             .context("writing negotiation token")?;
 
-        Ok(Self::from_stream(
-            stream,
-            trace,
-            chunk_bytes,
-            payload_prefetch,
-        ))
+        Ok(Self::from_stream(stream, trace, chunk_bytes, payload_prefetch, pool).await)
     }
 
     pub async fn send_payloads(
@@ -161,9 +158,6 @@ impl DataPlaneSession {
             .await
             .context("writing path bytes")?;
 
-        // We skip metadata check here as TransferSource abstracts the file.
-        // The read loop will verify we get enough bytes.
-
         self.stream
             .write_all(&header.size.to_be_bytes())
             .await
@@ -174,28 +168,84 @@ impl DataPlaneSession {
             .await
             .with_context(|| format!("opening {}", rel))?;
 
-        let mut remaining = header.size;
-        while remaining > 0 {
-            let chunk = file
-                .read(&mut self.buffer)
-                .await
-                .with_context(|| format!("reading {}", header.relative_path))?;
-            if chunk == 0 {
-                bail!(
-                    "unexpected EOF while reading {} ({} bytes remaining)",
-                    header.relative_path,
-                    remaining
-                );
-            }
-            self.stream
-                .write_all(&self.buffer[..chunk])
-                .await
-                .with_context(|| format!("sending {}", rel))?;
-            remaining -= chunk as u64;
-        }
+        // Double-buffered I/O: overlaps disk reads with network writes
+        self.send_file_double_buffered(&mut file, header, rel).await?;
 
         trace_client!(self, "file '{}' sent ({} bytes)", rel, header.size);
 
+        Ok(())
+    }
+
+    /// Double-buffered file sending: overlaps disk reads with network writes.
+    /// Uses two buffers from the pool to enable concurrent I/O operations.
+    ///
+    /// Pattern: While buffer A is being written to network, buffer B is filled from disk.
+    /// This hides disk latency behind network latency for improved throughput.
+    async fn send_file_double_buffered(
+        &mut self,
+        file: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        header: &FileHeader,
+        rel: &str,
+    ) -> Result<()> {
+        let mut remaining = header.size;
+        if remaining == 0 {
+            return Ok(());
+        }
+
+        // Acquire two buffers for double-buffering
+        let mut buf_a = self.pool.acquire().await;
+        let mut buf_b = self.pool.acquire().await;
+
+        // Initial read into buf_a
+        let mut bytes_a = file
+            .read(buf_a.as_mut_slice())
+            .await
+            .with_context(|| format!("reading {}", rel))?;
+
+        if bytes_a == 0 {
+            bail!(
+                "unexpected EOF while reading {} ({} bytes remaining)",
+                rel,
+                remaining
+            );
+        }
+        remaining -= bytes_a as u64;
+
+        // Main loop: write buf_a while reading into buf_b
+        while remaining > 0 {
+            // Overlap: write from buf_a, read into buf_b concurrently
+            let (write_result, read_result) = tokio::join!(
+                self.stream.write_all(&buf_a.as_slice()[..bytes_a]),
+                file.read(buf_b.as_mut_slice())
+            );
+
+            write_result.with_context(|| format!("sending {}", rel))?;
+
+            let bytes_b = read_result.with_context(|| format!("reading {}", rel))?;
+
+            if bytes_b == 0 && remaining > 0 {
+                bail!(
+                    "unexpected EOF while reading {} ({} bytes remaining)",
+                    rel,
+                    remaining
+                );
+            }
+            remaining -= bytes_b as u64;
+
+            // Swap roles: buf_b becomes the write buffer, buf_a becomes read buffer
+            std::mem::swap(&mut buf_a, &mut buf_b);
+            bytes_a = bytes_b;
+        }
+
+        // Final write: send the last chunk in buf_a
+        if bytes_a > 0 {
+            self.stream
+                .write_all(&buf_a.as_slice()[..bytes_a])
+                .await
+                .with_context(|| format!("sending {}", rel))?;
+        }
+
+        // Buffers return to pool automatically on drop
         Ok(())
     }
 

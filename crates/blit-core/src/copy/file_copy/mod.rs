@@ -9,8 +9,7 @@ pub use mmap::mmap_copy_file;
 use crate::buffer::BufferSizer;
 use crate::logger::Logger;
 use eyre::{eyre, Result};
-use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Write};
+use std::fs;
 use std::path::Path;
 
 #[cfg(windows)]

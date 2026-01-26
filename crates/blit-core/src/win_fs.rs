@@ -227,7 +227,6 @@ pub fn is_reserved_name(basename: &OsStr) -> bool {
 /// Ensure a path is suitable for long-path operations by adding the `\\?\` prefix when needed.
 /// UNC paths will be rewritten as `\\?\UNC\server\share\...`.
 pub fn ensure_long_path(p: &Path) -> PathBuf {
-    use std::path::Component;
     let s = p.as_os_str().to_string_lossy();
     // Already verbatim
     if s.starts_with(r"\\?\") {

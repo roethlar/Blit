@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 
 use eyre::{bail, eyre, Context, Result};
 use futures::{stream, StreamExt};
-use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task;

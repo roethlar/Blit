@@ -1,4 +1,5 @@
-use eyre::{Context, Result};
+use eyre::Result;
+#[cfg(windows)]
 use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::path::Path;
@@ -192,6 +193,7 @@ pub(crate) fn mark_file_sparse(file: &File) -> bool {
     use windows::Win32::System::IO::DeviceIoControl;
 
     #[repr(C)]
+    #[allow(non_snake_case)]
     struct FILE_SET_SPARSE_BUFFER {
         SetSparse: u8,
     }

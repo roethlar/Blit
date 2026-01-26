@@ -544,6 +544,18 @@ pub(crate) fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsRe
         ))
     })?;
 
+    // On Windows, fs::canonicalize returns extended-length paths with \\?\ prefix,
+    // but sysinfo::Disks returns mount points without this prefix. Strip it for comparison.
+    #[cfg(windows)]
+    let canonical = {
+        let s = canonical.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
+        } else {
+            canonical
+        }
+    };
+
     let mut disks = Disks::new_with_refreshed_list();
     disks.refresh_list();
     disks.refresh();

@@ -10,8 +10,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use blit_core::fs_enum::FileFilter;
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
-    RemoteEndpoint, RemotePullClient, RemotePullProgress, RemotePullReport, RemotePushClient,
-    RemotePushProgress, RemotePushReport,
+    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
 use std::sync::Arc;

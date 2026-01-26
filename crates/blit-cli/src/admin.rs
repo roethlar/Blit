@@ -4,7 +4,7 @@ use crate::transfers::{parse_transfer_endpoint, Endpoint};
 use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::{DiskUsageRequest, FilesystemStatsRequest, FindRequest, PurgeRequest};
 use blit_core::remote::{RemoteEndpoint, RemotePath};
-use eyre::{bail, eyre, Context, Result};
+use eyre::{bail, Context, Result};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;

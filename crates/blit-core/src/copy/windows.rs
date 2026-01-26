@@ -199,10 +199,12 @@ fn duplicate_extents(src: &File, dst: &File, file_size: u64) -> Result<BlockClon
     );
 
     #[repr(C)]
+    #[allow(non_snake_case)]
     struct LARGE_INTEGER {
         QuadPart: i64,
     }
     #[repr(C)]
+    #[allow(non_snake_case)]
     struct DUPLICATE_EXTENTS_DATA {
         FileHandle: HANDLE,
         SourceFileOffset: LARGE_INTEGER,

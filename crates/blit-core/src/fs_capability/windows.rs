@@ -2,7 +2,7 @@
 
 use super::{Capabilities, FastCopyResult, FilesystemCapability, MetadataPreserved};
 use crate::win_fs::ensure_long_path;
-use eyre::{bail, eyre, Context, Result};
+use eyre::{eyre, Context, Result};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::collections::HashMap;

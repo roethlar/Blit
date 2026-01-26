@@ -1,6 +1,6 @@
-use eyre::Context;
-use eyre::Result;
-use std::fs::{self, File};
+use eyre::{Context, Result};
+#[cfg(unix)]
+use std::fs::File;
 use std::path::Path;
 
 #[cfg(unix)]

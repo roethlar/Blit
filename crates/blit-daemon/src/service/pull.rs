@@ -1,4 +1,5 @@
 use super::PullPayload;
+use blit_core::buffer::BufferPool;
 use blit_core::remote::transfer::source::FsTransferSource;
 use crate::runtime::ModuleConfig;
 use crate::service::PullSender;
@@ -343,12 +344,20 @@ async fn handle_pull_stream(
         return Err(Status::permission_denied("invalid pull data plane token"));
     }
 
+    // Create buffer pool sized for double-buffering with headroom
+    let buffer_size = chunk_bytes.max(64 * 1024);
+    let pool_size = 4; // Single stream needs fewer buffers
+    let memory_budget = buffer_size * pool_size * 2;
+    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+
     let mut session = blit_core::remote::transfer::data_plane::DataPlaneSession::from_stream(
         socket,
         false,
         chunk_bytes,
         payload_prefetch,
-    );
+        pool,
+    )
+    .await;
 
     for payload in payloads {
         session

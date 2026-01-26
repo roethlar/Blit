@@ -5,11 +5,11 @@ pub use crate::remote::transfer::progress::ProgressEvent;
 pub use types::{RemotePushProgress, RemotePushReport, TransferMode};
 
 use self::helpers::{
-    decode_token, destination_path, drain_pending_headers, filter_readable_headers, map_status,
-    module_and_path, record_unreadable_entry, send_manifest_complete, send_payload,
-    spawn_manifest_task, spawn_response_task,
+    decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
+    send_manifest_complete, send_payload, spawn_response_task,
 };
 use crate::auto_tune::TuningParams;
+use crate::buffer::BufferPool;
 use crate::fs_enum::FileFilter;
 use crate::generated::client_push_request::Payload as ClientPayload;
 use crate::generated::server_push_response::Payload as ServerPayload;
@@ -19,14 +19,11 @@ use crate::remote::endpoint::RemoteEndpoint;
 use crate::remote::transfer::CONTROL_PLANE_CHUNK_SIZE;
 use crate::remote::tuning::determine_remote_tuning;
 use crate::transfer_plan::PlanOptions;
-use eyre::{bail, eyre, Result};
+use eyre::{eyre, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::fs;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -77,10 +74,26 @@ impl MultiStreamSender {
         let mut workers = Vec::with_capacity(streams);
         let mut handles = Vec::with_capacity(streams);
 
+        // Create a shared buffer pool for all streams.
+        // Pool size allows for double-buffering per stream plus some headroom.
+        // Memory budget is based on chunk size and stream count.
+        let pool_size = streams * 2 + 4;
+        let buffer_size = chunk_bytes.max(64 * 1024);
+        let memory_budget = buffer_size * pool_size * 2; // Allow 2x pool_size in flight
+        let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+
         for _ in 0..streams {
-            let session =
-                DataPlaneSession::connect(host, port, token, chunk_bytes, payload_prefetch, trace, tcp_buffer_size)
-                    .await?;
+            let session = DataPlaneSession::connect(
+                host,
+                port,
+                token,
+                chunk_bytes,
+                payload_prefetch,
+                trace,
+                tcp_buffer_size,
+                Arc::clone(&pool),
+            )
+            .await?;
             let (tx, rx) = mpsc::channel::<Option<Vec<TransferPayload>>>(4);
             let source_clone = Arc::clone(&source);
             let handle =
@@ -446,7 +459,7 @@ impl RemotePushClient {
                                                         &mut plan_options,
                                                         size_hint,
                                                     );
-                                            let mut planned =
+                                            let planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
                                             for payload in &planned.payloads {
                                                 match payload {
