@@ -7,7 +7,12 @@ service Blit {
   rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
 
   // Streams a file or directory from the server to the client.
+  // DEPRECATED: Use PullSync for incremental/selective transfers.
   rpc Pull(PullRequest) returns (stream PullChunk);
+
+  // Bidirectional pull with manifest comparison for selective transfers.
+  // Client sends local manifest, server compares and sends only needed files.
+  rpc PullSync(stream ClientPullMessage) returns (stream ServerPullMessage);
 
   // Lists contents of a remote directory.
   rpc List(ListRequest) returns (ListResponse);
@@ -126,7 +131,13 @@ message PullChunk {
     FileData file_data = 2;
     DataTransferNegotiation negotiation = 3;
     PullSummary summary = 4;
+    ManifestBatch manifest_batch = 5;
   }
+}
+
+message ManifestBatch {
+  uint64 file_count = 1;
+  uint64 total_bytes = 2;
 }
 
 message PullSummary {
@@ -134,6 +145,35 @@ message PullSummary {
   uint64 bytes_transferred = 2;
   uint64 bytes_zero_copy = 3;
   bool tcp_fallback_used = 4;
+  uint64 entries_deleted = 5; // count of files/dirs removed during mirror purge
+}
+
+// PullSync Operation (bidirectional pull with manifest comparison)
+message ClientPullMessage {
+  oneof payload {
+    PullSyncHeader header = 1;           // Initial request with module/path
+    FileHeader local_file = 2;           // Client's local file metadata
+    ManifestComplete manifest_done = 3;  // Signals end of client manifest
+  }
+}
+
+message ServerPullMessage {
+  oneof payload {
+    Ack ack = 1;                              // Acknowledgment of header
+    FileList files_to_download = 2;           // The "NeedList" - files client should receive
+    DataTransferNegotiation negotiation = 3;  // Data plane setup
+    PullSummary summary = 4;                  // Final summary
+    ManifestBatch manifest_batch = 5;         // Progress: server discovered X files
+    FileHeader file_header = 6;               // For gRPC fallback: file being sent
+    FileData file_data = 7;                   // For gRPC fallback: file content
+  }
+}
+
+message PullSyncHeader {
+  string module = 1;
+  string path = 2;
+  bool force_grpc = 3;
+  bool mirror_mode = 4;  // If true, client wants deletions reported
 }
 
 // Other Operations

@@ -10,6 +10,7 @@ pub mod fs_capability;
 pub mod fs_enum;
 pub mod local_worker;
 pub mod logger;
+pub mod manifest;
 pub mod mdns;
 pub mod mirror_planner;
 pub mod orchestrator;

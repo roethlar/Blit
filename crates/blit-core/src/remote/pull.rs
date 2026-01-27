@@ -9,10 +9,13 @@ use tar::Archive;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
 
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
-    pull_chunk, DataTransferNegotiation, FileData, FileHeader, PullChunk, PullRequest, PullSummary,
+    client_pull_message, pull_chunk, server_pull_message, ClientPullMessage,
+    DataTransferNegotiation, FileData, FileHeader, ManifestComplete, PullChunk, PullRequest,
+    PullSummary, PullSyncHeader,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::data_plane::{
@@ -48,6 +51,13 @@ impl PullWorkerStats {
             bytes: 0,
         }
     }
+}
+
+/// Result from data plane receiver, used to merge with control plane report.
+struct DataPlaneResult {
+    files_transferred: usize,
+    bytes_transferred: u64,
+    downloaded_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -109,7 +119,8 @@ impl RemotePullClient {
 
         let mut report = RemotePullReport::default();
         let mut active_file: Option<(File, PathBuf)> = None;
-        let mut used_data_plane = false;
+        // Store data plane task handle - spawned as background task so control plane can continue
+        let mut data_plane_handle: Option<JoinHandle<Result<DataPlaneResult>>> = None;
 
         while let Some(chunk) = stream
             .message()
@@ -155,18 +166,22 @@ impl RemotePullClient {
                     if neg.tcp_fallback {
                         continue;
                     }
-                    self.handle_data_plane_negotiation(
+                    // Spawn data plane as background task so we can continue processing
+                    // ManifestBatch messages on the control plane
+                    data_plane_handle = Some(self.spawn_data_plane_receiver(
                         neg,
                         dest_root,
                         track_paths,
                         progress,
-                        &mut report,
-                    )
-                    .await?;
-                    used_data_plane = true;
+                    )?);
                 }
                 Some(pull_chunk::Payload::Summary(summary)) => {
                     report.summary = Some(summary);
+                }
+                Some(pull_chunk::Payload::ManifestBatch(batch)) => {
+                    if let Some(progress) = progress {
+                        progress.report_manifest_batch(batch.file_count as usize);
+                    }
                 }
                 None => {}
             }
@@ -174,38 +189,63 @@ impl RemotePullClient {
 
         finalize_active_file(&mut active_file, progress).await?;
 
-        if used_data_plane && report.summary.is_none() {
-            eprintln!("[pull] data plane completed without summary payload");
+        // Wait for data plane to complete and merge results
+        if let Some(handle) = data_plane_handle {
+            let dp_result = handle
+                .await
+                .map_err(|err| eyre!("data plane task panicked: {}", err))??;
+            report.files_transferred = report
+                .files_transferred
+                .saturating_add(dp_result.files_transferred);
+            report.bytes_transferred = report
+                .bytes_transferred
+                .saturating_add(dp_result.bytes_transferred);
+            if track_paths {
+                report.downloaded_paths.extend(dp_result.downloaded_paths);
+            }
+            if report.summary.is_none() {
+                eprintln!("[pull] data plane completed without summary payload");
+            }
         }
 
         Ok(report)
     }
 
-    async fn handle_data_plane_negotiation(
+    /// Spawn data plane receiver as background task, returning JoinHandle.
+    /// This allows the control plane to continue processing ManifestBatch messages.
+    fn spawn_data_plane_receiver(
         &self,
         negotiation: DataTransferNegotiation,
         dest_root: &Path,
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
-        report: &mut RemotePullReport,
-    ) -> Result<()> {
+    ) -> Result<JoinHandle<Result<DataPlaneResult>>> {
         if negotiation.tcp_port == 0 {
             bail!("server provided zero data-plane port for pull");
         }
         let token = general_purpose::STANDARD_NO_PAD
             .decode(negotiation.one_time_token.as_bytes())
             .map_err(|err| eyre!("failed to decode pull data-plane token: {err}"))?;
-        receive_data_plane_streams(
-            &self.endpoint.host,
-            negotiation.tcp_port,
-            &token,
-            negotiation.stream_count.max(1) as usize,
-            dest_root,
-            track_paths,
-            progress,
-            report,
-        )
-        .await
+
+        // Clone/own all values for the spawned task
+        let host = self.endpoint.host.clone();
+        let port = negotiation.tcp_port;
+        let stream_count = negotiation.stream_count.max(1) as usize;
+        let dest_root = dest_root.to_path_buf();
+        let progress = progress.cloned();
+
+        Ok(tokio::spawn(async move {
+            receive_data_plane_streams_owned(
+                host,
+                port,
+                token,
+                stream_count,
+                dest_root,
+                track_paths,
+                progress,
+            )
+            .await
+        }))
     }
     pub async fn scan_remote_files(
         &mut self,
@@ -274,6 +314,184 @@ impl RemotePullClient {
             .into_inner();
 
         Ok(RemoteFileStream::new(stream))
+    }
+
+    /// Pull with manifest synchronization - sends local manifest to server,
+    /// server compares and only sends files that need updating.
+    pub async fn pull_sync(
+        &mut self,
+        dest_root: &Path,
+        local_manifest: Vec<FileHeader>,
+        force_grpc: bool,
+        mirror_mode: bool,
+        track_paths: bool,
+        progress: Option<&RemotePullProgress>,
+    ) -> Result<RemotePullReport> {
+        use tokio_stream::wrappers::ReceiverStream;
+
+        if !dest_root.exists() {
+            fs::create_dir_all(dest_root).await.with_context(|| {
+                format!("creating destination directory {}", dest_root.display())
+            })?;
+        }
+
+        let (module, rel_path) = match &self.endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
+            RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
+            RemotePath::Discovery => {
+                bail!("remote source must specify a module (server:/module/...)");
+            }
+        };
+
+        let path_str = if rel_path.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            normalize_for_request(&rel_path)
+        };
+
+        // Create channel for sending messages to server
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientPullMessage>(32);
+
+        // Send header
+        tx.send(ClientPullMessage {
+            payload: Some(client_pull_message::Payload::Header(PullSyncHeader {
+                module,
+                path: path_str,
+                force_grpc,
+                mirror_mode,
+            })),
+        })
+        .await
+        .map_err(|_| eyre!("failed to send pull sync header"))?;
+
+        // Send local manifest
+        for header in &local_manifest {
+            tx.send(ClientPullMessage {
+                payload: Some(client_pull_message::Payload::LocalFile(header.clone())),
+            })
+            .await
+            .map_err(|_| eyre!("failed to send local file header"))?;
+        }
+
+        // Send manifest done signal
+        tx.send(ClientPullMessage {
+            payload: Some(client_pull_message::Payload::ManifestDone(ManifestComplete {})),
+        })
+        .await
+        .map_err(|_| eyre!("failed to send manifest done"))?;
+
+        // Open bidirectional stream
+        let request_stream = ReceiverStream::new(rx);
+        let mut response_stream = self
+            .client
+            .pull_sync(request_stream)
+            .await
+            .map_err(|status| eyre!(status.message().to_string()))?
+            .into_inner();
+
+        let mut report = RemotePullReport::default();
+        let mut active_file: Option<(File, PathBuf)> = None;
+        let mut data_plane_handle: Option<JoinHandle<Result<DataPlaneResult>>> = None;
+        let mut files_to_delete = 0u64;
+
+        while let Some(msg) = response_stream
+            .message()
+            .await
+            .map_err(|status| eyre!(status.message().to_string()))?
+        {
+            match msg.payload {
+                Some(server_pull_message::Payload::Ack(_)) => {
+                    // Header acknowledged, continue
+                }
+                Some(server_pull_message::Payload::ManifestBatch(batch)) => {
+                    if let Some(progress) = progress {
+                        progress.report_manifest_batch(batch.file_count as usize);
+                    }
+                }
+                Some(server_pull_message::Payload::FilesToDownload(_files)) => {
+                    // Server tells us which files will be sent - for progress tracking
+                    // The actual file count is already handled in ManifestBatch
+                }
+                Some(server_pull_message::Payload::FileHeader(header)) => {
+                    finalize_active_file(&mut active_file, progress).await?;
+
+                    let relative_path = sanitize_relative_path(&header.relative_path)?;
+                    let dest_path = dest_root.join(&relative_path);
+                    if let Some(parent) = dest_path.parent() {
+                        fs::create_dir_all(parent)
+                            .await
+                            .with_context(|| format!("creating directory {}", parent.display()))?;
+                    }
+
+                    let file = File::create(&dest_path)
+                        .await
+                        .with_context(|| format!("creating {}", dest_path.display()))?;
+
+                    if track_paths {
+                        report.downloaded_paths.push(relative_path.clone());
+                    }
+
+                    active_file = Some((file, dest_path));
+                    report.files_transferred += 1;
+                }
+                Some(server_pull_message::Payload::FileData(FileData { content })) => {
+                    let (file, path) = active_file
+                        .as_mut()
+                        .ok_or_else(|| eyre!("received file data without a preceding header"))?;
+                    file.write_all(&content)
+                        .await
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    report.bytes_transferred += content.len() as u64;
+                    if let Some(progress) = progress {
+                        progress.report_payload(0, content.len() as u64);
+                    }
+                }
+                Some(server_pull_message::Payload::Negotiation(neg)) => {
+                    if neg.tcp_fallback {
+                        continue;
+                    }
+                    data_plane_handle = Some(self.spawn_data_plane_receiver(
+                        neg,
+                        dest_root,
+                        track_paths,
+                        progress,
+                    )?);
+                }
+                Some(server_pull_message::Payload::Summary(summary)) => {
+                    files_to_delete = summary.entries_deleted;
+                    report.summary = Some(summary);
+                }
+                None => {}
+            }
+        }
+
+        finalize_active_file(&mut active_file, progress).await?;
+
+        // Wait for data plane to complete and merge results
+        if let Some(handle) = data_plane_handle {
+            let dp_result = handle
+                .await
+                .map_err(|err| eyre!("data plane task panicked: {}", err))??;
+            report.files_transferred = report
+                .files_transferred
+                .saturating_add(dp_result.files_transferred);
+            report.bytes_transferred = report
+                .bytes_transferred
+                .saturating_add(dp_result.bytes_transferred);
+            if track_paths {
+                report.downloaded_paths.extend(dp_result.downloaded_paths);
+            }
+        }
+
+        // Store files_to_delete in report for mirror mode handling
+        if files_to_delete > 0 {
+            // The caller will handle deletion based on mirror_mode
+            if let Some(ref mut summary) = report.summary {
+                summary.entries_deleted = files_to_delete;
+            }
+        }
+
+        Ok(report)
     }
 }
 
@@ -354,52 +572,51 @@ async fn finalize_active_file(
     Ok(())
 }
 
-async fn receive_data_plane_streams(
-    host: &str,
+/// Owned-value version for spawning data plane receiver as background task. for spawning as background task.
+/// This allows the control plane to continue processing ManifestBatch messages.
+async fn receive_data_plane_streams_owned(
+    host: String,
     port: u32,
-    token: &[u8],
+    token: Vec<u8>,
     stream_count: usize,
-    dest_root: &Path,
+    dest_root: PathBuf,
     track_paths: bool,
-    progress: Option<&RemotePullProgress>,
-    report: &mut RemotePullReport,
-) -> Result<()> {
+    progress: Option<RemotePullProgress>,
+) -> Result<DataPlaneResult> {
+    let mut result = DataPlaneResult {
+        files_transferred: 0,
+        bytes_transferred: 0,
+        downloaded_paths: Vec::new(),
+    };
+
     if stream_count <= 1 {
         let mut stats = PullWorkerStats::new();
         receive_data_plane_stream_inner(
-            host,
+            &host,
             port,
-            token,
-            dest_root,
+            &token,
+            &dest_root,
             track_paths,
-            progress,
+            progress.as_ref(),
             &mut stats,
         )
         .await?;
-        report.files_transferred = report
-            .files_transferred
-            .saturating_add(stats.files_transferred as usize);
-        report.bytes_transferred = report
-            .bytes_transferred
-            .saturating_add(stats.bytes_transferred);
+        result.files_transferred = stats.files_transferred as usize;
+        result.bytes_transferred = stats.bytes_transferred;
         if track_paths {
-            report
-                .downloaded_paths
-                .extend(stats.downloaded_paths.into_iter());
+            result.downloaded_paths = stats.downloaded_paths;
         }
-        return Ok(());
+        return Ok(result);
     }
 
-    let host = host.to_owned();
-    let token = Arc::new(token.to_vec());
-    let dest_root = dest_root.to_path_buf();
+    let token = Arc::new(token);
 
     let mut handles = Vec::with_capacity(stream_count);
     for _ in 0..stream_count {
         let host_clone = host.clone();
         let token_clone = Arc::clone(&token);
         let dest_root_clone = dest_root.clone();
-        let progress_clone = progress.cloned();
+        let progress_clone = progress.clone();
         handles.push(tokio::spawn(async move {
             let mut stats = PullWorkerStats::new();
             receive_data_plane_stream_inner(
@@ -420,16 +637,14 @@ async fn receive_data_plane_streams(
         let stats = handle
             .await
             .map_err(|err| eyre!(format!("pull data-plane worker panicked: {}", err)))??;
-        report.files_transferred = report
+        result.files_transferred = result
             .files_transferred
             .saturating_add(stats.files_transferred as usize);
-        report.bytes_transferred = report
+        result.bytes_transferred = result
             .bytes_transferred
             .saturating_add(stats.bytes_transferred);
         if track_paths {
-            report
-                .downloaded_paths
-                .extend(stats.downloaded_paths.into_iter());
+            result.downloaded_paths.extend(stats.downloaded_paths);
         }
         let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
         let gbps = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
@@ -439,7 +654,7 @@ async fn receive_data_plane_streams(
         );
     }
 
-    Ok(())
+    Ok(result)
 }
 
 async fn receive_data_plane_stream_inner(

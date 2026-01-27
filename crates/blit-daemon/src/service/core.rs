@@ -3,6 +3,7 @@ use super::admin::{
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
 use super::pull::stream_pull;
+use super::pull_sync::handle_pull_sync_stream;
 use super::push::handle_push_stream;
 use super::util::{metadata_mtime_seconds, resolve_module, resolve_relative_path};
 use super::{DiskUsageSender, FindSender};
@@ -10,10 +11,10 @@ use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
-    ClientPushRequest, CompletionRequest, CompletionResponse, DiskUsageEntry, DiskUsageRequest,
-    FileInfo, FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest,
-    ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk,
-    PullRequest, PurgeRequest, PurgeResponse, ServerPushResponse,
+    ClientPullMessage, ClientPushRequest, CompletionRequest, CompletionResponse, DiskUsageEntry,
+    DiskUsageRequest, FileInfo, FilesystemStatsRequest, FilesystemStatsResponse, FindEntry,
+    FindRequest, ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo,
+    PullChunk, PullRequest, PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -55,6 +56,7 @@ impl BlitService {
 impl Blit for BlitService {
     type PushStream = ReceiverStream<Result<ServerPushResponse, Status>>;
     type PullStream = ReceiverStream<Result<PullChunk, Status>>;
+    type PullSyncStream = ReceiverStream<Result<ServerPullMessage, Status>>;
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
 
@@ -92,6 +94,28 @@ impl Blit for BlitService {
         tokio::spawn(async move {
             if let Err(status) =
                 stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await
+            {
+                let _ = tx.send(Err(status)).await;
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn pull_sync(
+        &self,
+        request: Request<Streaming<ClientPullMessage>>,
+    ) -> Result<Response<Self::PullSyncStream>, Status> {
+        let modules = Arc::clone(&self.modules);
+        let (tx, rx) = mpsc::channel(32);
+        let stream = request.into_inner();
+        let force_grpc_data = self.force_grpc_data;
+        let default_root = self.default_root.clone();
+
+        tokio::spawn(async move {
+            if let Err(status) =
+                handle_pull_sync_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
+                    .await
             {
                 let _ = tx.send(Err(status)).await;
             }

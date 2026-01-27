@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
 use blit_core::fs_enum::FileFilter;
+use blit_core::generated::FileHeader;
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
     RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
@@ -173,14 +174,20 @@ pub async fn run_remote_pull_transfer(
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
+    // Enumerate local files to build manifest
+    let local_manifest = enumerate_local_manifest(dest_root).await?;
+
     let show_progress = args.progress || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
 
+    // Use PullSync - sends local manifest to server, server compares and only sends what's needed
     let report = client
-        .pull(
+        .pull_sync(
             dest_root,
+            local_manifest,
             args.force_grpc,
             mirror_mode,
+            mirror_mode, // track_paths for mirror mode deletion
             progress_handle.as_ref(),
         )
         .await
@@ -199,15 +206,75 @@ pub async fn run_remote_pull_transfer(
 
     describe_pull_result(&report, dest_root);
 
+    // Handle mirror mode deletions based on server's entries_deleted count
     if mirror_mode {
-        let stats = purge_extraneous_local(dest_root, &report.downloaded_paths).await?;
-        println!(
-            "Mirror purge removed {} file(s) and {} directorie(s).",
-            stats.files_deleted, stats.dirs_deleted
-        );
+        if let Some(ref summary) = report.summary {
+            if summary.entries_deleted > 0 {
+                // The server told us how many files should be deleted locally
+                // We need to delete local files not in the remote manifest
+                let remote_paths: Vec<PathBuf> = report
+                    .downloaded_paths
+                    .iter()
+                    .cloned()
+                    .collect();
+                let stats = purge_extraneous_local(dest_root, &remote_paths).await?;
+                if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
+                    println!(
+                        "Mirror purge removed {} file(s) and {} directorie(s).",
+                        stats.files_deleted, stats.dirs_deleted
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Enumerate local files to build a manifest for comparison with remote.
+async fn enumerate_local_manifest(root: &Path) -> Result<Vec<FileHeader>> {
+    use walkdir::WalkDir;
+
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let root_path = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut manifest = Vec::new();
+        for entry in WalkDir::new(&root_path).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if let Ok(rel) = path.strip_prefix(&root_path) {
+                let relative_path = rel
+                    .iter()
+                    .map(|c| c.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let mtime_seconds = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+
+                    manifest.push(FileHeader {
+                        relative_path,
+                        size: meta.len(),
+                        mtime_seconds,
+                        permissions: 0,
+                    });
+                }
+            }
+        }
+        Ok(manifest)
+    })
+    .await
+    .map_err(|err| eyre!("manifest enumeration task failed: {}", err))?
 }
 
 struct LocalPurgeStats {
