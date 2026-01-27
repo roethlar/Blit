@@ -344,8 +344,4 @@ RUST_LOG=debug blit-daemon --config /etc/blit/config.toml
 
 ## License
 
-[Specify your license here]
-
-## Contributing
-
-[Add contribution guidelines]
+GNU GPLv3
