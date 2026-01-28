@@ -88,6 +88,7 @@ message FileHeader {
   uint64 size = 2;
   int64 mtime_seconds = 3;
   uint32 permissions = 4;
+  bytes checksum = 5;  // Blake3 hash (32 bytes), empty if not computed
 }
 
 message FileData {
@@ -108,6 +109,11 @@ message TarShardComplete {}
 message ManifestComplete {}
 message UploadComplete {}
 message Ack {}
+
+// Acknowledgment for PullSync with server capabilities
+message PullSyncAck {
+  bool server_checksums_enabled = 1;  // Whether daemon computed checksums for manifest
+}
 message FileList { repeated string relative_paths = 1; }
 message PushSummary {
     uint64 files_transferred = 1;
@@ -159,13 +165,14 @@ message ClientPullMessage {
 
 message ServerPullMessage {
   oneof payload {
-    Ack ack = 1;                              // Acknowledgment of header
+    Ack ack = 1;                              // Acknowledgment of header (deprecated, use pull_sync_ack)
     FileList files_to_download = 2;           // The "NeedList" - files client should receive
     DataTransferNegotiation negotiation = 3;  // Data plane setup
     PullSummary summary = 4;                  // Final summary
     ManifestBatch manifest_batch = 5;         // Progress: server discovered X files
     FileHeader file_header = 6;               // For gRPC fallback: file being sent
     FileData file_data = 7;                   // For gRPC fallback: file content
+    PullSyncAck pull_sync_ack = 8;            // Acknowledgment with server capabilities
   }
 }
 

@@ -43,6 +43,8 @@ pub(crate) struct DaemonRuntime {
     pub(crate) mdns: MdnsConfig,
     pub(crate) motd: Option<String>,
     pub(crate) warnings: Vec<String>,
+    /// Server-side checksums enabled (default: true)
+    pub(crate) server_checksums_enabled: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -69,6 +71,9 @@ pub(crate) struct DaemonArgs {
     /// Force the daemon to use the gRPC data plane instead of TCP
     #[arg(long)]
     pub(crate) force_grpc_data: bool,
+    /// Disable server-side checksum computation (clients will transfer files for local verification)
+    #[arg(long)]
+    pub(crate) no_server_checksums: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +96,8 @@ struct RawDaemonSection {
     root_read_only: bool,
     #[serde(default)]
     root_use_chroot: bool,
+    #[serde(default)]
+    no_server_checksums: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +160,13 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
     let mdns = MdnsConfig {
         disabled: mdns_disabled,
         name: mdns_name,
+    };
+
+    // Server checksums: enabled by default, can be disabled via CLI or config
+    let server_checksums_enabled = if args.no_server_checksums {
+        false
+    } else {
+        !raw.daemon.no_server_checksums
     };
 
     let mut modules = HashMap::new();
@@ -263,5 +277,6 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         mdns,
         motd,
         warnings,
+        server_checksums_enabled,
     })
 }

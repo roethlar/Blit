@@ -28,6 +28,7 @@ pub struct BlitService {
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
     default_root: Option<RootExport>,
     force_grpc_data: bool,
+    server_checksums_enabled: bool,
 }
 
 impl BlitService {
@@ -35,11 +36,13 @@ impl BlitService {
         modules: HashMap<String, ModuleConfig>,
         default_root: Option<RootExport>,
         force_grpc_data: bool,
+        server_checksums_enabled: bool,
     ) -> Self {
         Self {
             modules: Arc::new(Mutex::new(modules)),
             default_root,
             force_grpc_data,
+            server_checksums_enabled,
         }
     }
 
@@ -48,7 +51,7 @@ impl BlitService {
         modules: HashMap<String, ModuleConfig>,
         force_grpc_data: bool,
     ) -> Self {
-        Self::from_runtime(modules, None, force_grpc_data)
+        Self::from_runtime(modules, None, force_grpc_data, true)
     }
 }
 
@@ -111,10 +114,11 @@ impl Blit for BlitService {
         let stream = request.into_inner();
         let force_grpc_data = self.force_grpc_data;
         let default_root = self.default_root.clone();
+        let server_checksums_enabled = self.server_checksums_enabled;
 
         tokio::spawn(async move {
             if let Err(status) =
-                handle_pull_sync_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
+                handle_pull_sync_stream(modules, default_root, stream, tx.clone(), force_grpc_data, server_checksums_enabled)
                     .await
             {
                 let _ = tx.send(Err(status)).await;

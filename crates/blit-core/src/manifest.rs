@@ -91,23 +91,23 @@ pub fn compare_manifests(
         ..Default::default()
     };
 
-    // Build lookup from target manifest: path -> (size, mtime)
-    let target_map: HashMap<&str, (u64, i64)> = target
+    // Build lookup from target manifest: path -> (size, mtime, checksum)
+    let target_map: HashMap<&str, (u64, i64, &[u8])> = target
         .iter()
-        .map(|h| (h.relative_path.as_str(), (h.size, h.mtime_seconds)))
+        .map(|h| (h.relative_path.as_str(), (h.size, h.mtime_seconds, h.checksum.as_slice())))
         .collect();
 
     // Compare each source file against target
     for src in source {
         let status = match target_map.get(src.relative_path.as_str()) {
             None => FileStatus::New,
-            Some(&(target_size, target_mtime)) => {
+            Some(&(target_size, target_mtime, target_checksum)) => {
                 // File exists on target
                 if options.ignore_existing {
                     // Skip all existing files regardless of differences
                     FileStatus::SkippedExisting
                 } else {
-                    compare_file(src, target_size, target_mtime, options.mode)
+                    compare_file(src, target_size, target_mtime, target_checksum, options.mode)
                 }
             }
         };
@@ -138,7 +138,13 @@ pub fn compare_manifests(
 }
 
 /// Compare a single file using the specified comparison mode.
-fn compare_file(src: &FileHeader, target_size: u64, target_mtime: i64, mode: CompareMode) -> FileStatus {
+fn compare_file(
+    src: &FileHeader,
+    target_size: u64,
+    target_mtime: i64,
+    target_checksum: &[u8],
+    mode: CompareMode,
+) -> FileStatus {
     match mode {
         CompareMode::IgnoreTimes => {
             // Transfer all files unconditionally
@@ -173,13 +179,19 @@ fn compare_file(src: &FileHeader, target_size: u64, target_mtime: i64, mode: Com
             }
         }
         CompareMode::Checksum => {
-            // Checksum mode: For manifest-based comparison, we transfer if size differs.
-            // Full checksum comparison is done at the file copy level, not manifest level.
-            // This ensures files go through the copy path where checksums are computed.
+            // Checksum mode: Compare using checksums if available
             if src.size != target_size {
                 FileStatus::Modified
+            } else if !src.checksum.is_empty() && !target_checksum.is_empty() {
+                // Both have checksums - compare them
+                if src.checksum == target_checksum {
+                    FileStatus::Unchanged
+                } else {
+                    FileStatus::Modified
+                }
             } else {
-                // Same size - mark as modified to trigger checksum comparison during copy
+                // Checksums not available - must transfer for verification
+                // (This happens when server checksums are disabled)
                 FileStatus::Modified
             }
         }
@@ -204,6 +216,7 @@ mod tests {
             size,
             mtime_seconds: mtime,
             permissions: 0o644,
+            checksum: vec![],
         }
     }
 
@@ -373,5 +386,75 @@ mod tests {
         assert_eq!(diff.files_to_transfer.len(), 2); // modified + new
         assert_eq!(diff.files_to_delete.len(), 1);   // deleted
         assert_eq!(diff.bytes_to_transfer, 500);     // 200 + 300
+    }
+
+    fn header_with_checksum(path: &str, size: u64, mtime: i64, checksum: Vec<u8>) -> FileHeader {
+        FileHeader {
+            relative_path: path.to_string(),
+            size,
+            mtime_seconds: mtime,
+            permissions: 0o644,
+            checksum,
+        }
+    }
+
+    #[test]
+    fn test_checksum_mode_same_checksum_skips() {
+        // Same size and same checksum - should skip
+        let checksum = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let source = vec![header_with_checksum("a.txt", 100, 1000, checksum.clone())];
+        let target = vec![header_with_checksum("a.txt", 100, 2000, checksum)]; // different mtime
+
+        let opts = CompareOptions {
+            mode: CompareMode::Checksum,
+            ..Default::default()
+        };
+        let diff = compare_manifests(&source, &target, &opts);
+        assert!(diff.files_to_transfer.is_empty()); // Checksums match, no transfer
+    }
+
+    #[test]
+    fn test_checksum_mode_different_checksum_transfers() {
+        // Same size but different checksum - should transfer
+        let source = vec![header_with_checksum("a.txt", 100, 1000, vec![1, 2, 3, 4])];
+        let target = vec![header_with_checksum("a.txt", 100, 1000, vec![5, 6, 7, 8])];
+
+        let opts = CompareOptions {
+            mode: CompareMode::Checksum,
+            ..Default::default()
+        };
+        let diff = compare_manifests(&source, &target, &opts);
+        assert_eq!(diff.files_to_transfer.len(), 1);
+        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
+    }
+
+    #[test]
+    fn test_checksum_mode_no_checksums_transfers() {
+        // Same size but no checksums available - should transfer for verification
+        let source = vec![header("a.txt", 100, 1000)]; // empty checksum
+        let target = vec![header("a.txt", 100, 1000)]; // empty checksum
+
+        let opts = CompareOptions {
+            mode: CompareMode::Checksum,
+            ..Default::default()
+        };
+        let diff = compare_manifests(&source, &target, &opts);
+        assert_eq!(diff.files_to_transfer.len(), 1);
+        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
+    }
+
+    #[test]
+    fn test_checksum_mode_size_differs_transfers() {
+        // Different size - should transfer regardless of checksum
+        let checksum = vec![1, 2, 3, 4];
+        let source = vec![header_with_checksum("a.txt", 200, 1000, checksum.clone())];
+        let target = vec![header_with_checksum("a.txt", 100, 1000, checksum)];
+
+        let opts = CompareOptions {
+            mode: CompareMode::Checksum,
+            ..Default::default()
+        };
+        let diff = compare_manifests(&source, &target, &opts);
+        assert_eq!(diff.files_to_transfer.len(), 1);
     }
 }

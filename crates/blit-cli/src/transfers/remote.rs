@@ -176,7 +176,8 @@ pub async fn run_remote_pull_transfer(
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
     // Enumerate local files to build manifest
-    let local_manifest = enumerate_local_manifest(dest_root).await?;
+    // Compute checksums if --checksum mode is requested
+    let local_manifest = enumerate_local_manifest(dest_root, args.checksum).await?;
 
     let show_progress = args.progress || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
@@ -243,7 +244,10 @@ pub async fn run_remote_pull_transfer(
 }
 
 /// Enumerate local files to build a manifest for comparison with remote.
-async fn enumerate_local_manifest(root: &Path) -> Result<Vec<FileHeader>> {
+/// When `compute_checksums` is true, computes Blake3 checksums for each file.
+async fn enumerate_local_manifest(root: &Path, compute_checksums: bool) -> Result<Vec<FileHeader>> {
+    use blit_core::checksum::{hash_file, ChecksumType};
+    use rayon::prelude::*;
     use walkdir::WalkDir;
 
     if !root.exists() {
@@ -252,20 +256,27 @@ async fn enumerate_local_manifest(root: &Path) -> Result<Vec<FileHeader>> {
 
     let root_path = root.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let mut manifest = Vec::new();
-        for entry in WalkDir::new(&root_path).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if let Ok(rel) = path.strip_prefix(&root_path) {
-                let relative_path = rel
-                    .iter()
-                    .map(|c| c.to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
+        // First, collect all file entries
+        let entries: Vec<_> = WalkDir::new(&root_path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .collect();
 
-                if let Ok(meta) = std::fs::metadata(path) {
+        // Process files in parallel when computing checksums
+        let manifest: Vec<FileHeader> = if compute_checksums {
+            entries
+                .into_par_iter()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let rel = path.strip_prefix(&root_path).ok()?;
+                    let relative_path = rel
+                        .iter()
+                        .map(|c| c.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+
+                    let meta = std::fs::metadata(path).ok()?;
                     let mtime_seconds = meta
                         .modified()
                         .ok()
@@ -273,15 +284,50 @@ async fn enumerate_local_manifest(root: &Path) -> Result<Vec<FileHeader>> {
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
 
-                    manifest.push(FileHeader {
+                    // Compute Blake3 checksum
+                    let checksum = hash_file(path, ChecksumType::Blake3).ok()?;
+
+                    Some(FileHeader {
                         relative_path,
                         size: meta.len(),
                         mtime_seconds,
                         permissions: 0,
-                    });
-                }
-            }
-        }
+                        checksum,
+                    })
+                })
+                .collect()
+        } else {
+            // No checksums - use sequential iteration (faster for metadata-only)
+            entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let rel = path.strip_prefix(&root_path).ok()?;
+                    let relative_path = rel
+                        .iter()
+                        .map(|c| c.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+
+                    let meta = std::fs::metadata(path).ok()?;
+                    let mtime_seconds = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+
+                    Some(FileHeader {
+                        relative_path,
+                        size: meta.len(),
+                        mtime_seconds,
+                        permissions: 0,
+                        checksum: vec![],
+                    })
+                })
+                .collect()
+        };
+
         Ok(manifest)
     })
     .await

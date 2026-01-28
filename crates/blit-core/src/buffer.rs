@@ -305,6 +305,32 @@ impl BufferPool {
         self.bytes_through.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Return a Vec directly to the pool for reuse.
+    ///
+    /// This is useful when a buffer was taken via `PoolBuffer::take()` and
+    /// needs to be returned after processing. The buffer will only be cached
+    /// if it has sufficient capacity and the pool has room.
+    pub fn return_vec(&self, mut buffer: Vec<u8>) {
+        // Only cache if we haven't exceeded pool size and buffer has right capacity
+        let should_cache = {
+            let cache = self.cache.lock();
+            cache.len() < self.pool_size
+        };
+
+        if should_cache && buffer.capacity() >= self.buffer_size {
+            // Reset length but keep capacity
+            buffer.clear();
+            buffer.resize(self.buffer_size, 0);
+
+            let mut cache = self.cache.lock();
+            if cache.len() < self.pool_size {
+                cache.push(buffer);
+                return;
+            }
+        }
+        // Otherwise buffer is dropped and memory freed
+    }
+
     /// Get the buffer size for this pool
     pub fn buffer_size(&self) -> usize {
         self.buffer_size

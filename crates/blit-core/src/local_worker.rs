@@ -95,6 +95,7 @@ async fn local_worker_loop(
 
         // Execute task with retry logic
         let mut attempts = 0u8;
+        #[allow(unused_assignments)]
         let mut last_error: Option<eyre::Report> = None;
 
         loop {

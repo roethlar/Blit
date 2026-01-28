@@ -328,6 +328,15 @@ pub(crate) async fn collect_pull_entries(
     root: &Path,
     requested: &Path,
 ) -> Result<Vec<PullEntry>, Status> {
+    collect_pull_entries_with_checksums(module_root, root, requested, false).await
+}
+
+pub(crate) async fn collect_pull_entries_with_checksums(
+    module_root: &Path,
+    root: &Path,
+    requested: &Path,
+    compute_checksums: bool,
+) -> Result<Vec<PullEntry>, Status> {
     if root.is_file() {
         let relative_name = if requested == Path::new(".") {
             root.file_name()
@@ -336,7 +345,7 @@ pub(crate) async fn collect_pull_entries(
         } else {
             requested.to_path_buf()
         };
-        let header = build_file_header(module_root, &relative_name)?;
+        let header = build_file_header(module_root, &relative_name, compute_checksums)?;
         return Ok(vec![PullEntry {
             header,
             relative_path: relative_name,
@@ -351,38 +360,100 @@ pub(crate) async fn collect_pull_entries(
     let requested_clone = requested.to_path_buf();
     let module_root = module_root.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<Vec<PullEntry>, Status> {
+        use rayon::prelude::*;
+
         let enumerator =
             blit_core::enumeration::FileEnumerator::new(blit_core::fs_enum::FileFilter::default());
         let entries = enumerator
             .enumerate_local(&root_clone)
             .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;
-        let mut files = Vec::new();
-        for entry in entries {
-            if matches!(entry.kind, blit_core::enumeration::EntryKind::File { .. }) {
-                let relative_path = requested_clone.join(&entry.relative_path);
-                let header = build_file_header(&module_root, &relative_path)?;
-                files.push(PullEntry {
-                    header,
-                    relative_path,
-                });
-            }
-        }
-        Ok(files)
+
+        // Filter to files only
+        let file_entries: Vec<_> = entries
+            .into_iter()
+            .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
+            .collect();
+
+        // Use parallel iteration when computing checksums for performance
+        let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
+            file_entries
+                .into_par_iter()
+                .map(|entry| {
+                    let relative_path = requested_clone.join(&entry.relative_path);
+                    let header = build_file_header(&module_root, &relative_path, true)?;
+                    Ok(PullEntry {
+                        header,
+                        relative_path,
+                    })
+                })
+                .collect()
+        } else {
+            // Sequential for metadata-only (faster, no I/O-bound work)
+            file_entries
+                .into_iter()
+                .map(|entry| {
+                    let relative_path = requested_clone.join(&entry.relative_path);
+                    let header = build_file_header(&module_root, &relative_path, false)?;
+                    Ok(PullEntry {
+                        header,
+                        relative_path,
+                    })
+                })
+                .collect()
+        };
+
+        files
     })
     .await
     .map_err(|err| Status::internal(format!("enumeration task failed: {}", err)))?
 }
 
-fn build_file_header(base: &Path, relative: &Path) -> Result<FileHeader, Status> {
+fn build_file_header(base: &Path, relative: &Path, compute_checksum: bool) -> Result<FileHeader, Status> {
+    use std::io::Read;
+
     let abs_path = base.join(relative);
-    let metadata = std::fs::metadata(&abs_path)
-        .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
-    Ok(FileHeader {
-        relative_path: normalize_relative_path(relative),
-        size: metadata.len(),
-        mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
-        permissions: permissions_mode(&metadata),
-    })
+
+    if compute_checksum {
+        // Open file once for both metadata and hashing
+        let file = std::fs::File::open(&abs_path)
+            .map_err(|err| Status::internal(format!("open {}: {}", abs_path.display(), err)))?;
+        let metadata = file.metadata()
+            .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
+
+        // Compute Blake3 hash using the already-open file
+        let mut hasher = blake3::Hasher::new();
+        let mut reader = std::io::BufReader::new(file);
+        let mut buf = [0u8; 256 * 1024];
+        loop {
+            let n = reader.read(&mut buf)
+                .map_err(|err| Status::internal(format!("read {}: {}", abs_path.display(), err)))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        let checksum = hasher.finalize().as_bytes().to_vec();
+
+        Ok(FileHeader {
+            relative_path: normalize_relative_path(relative),
+            size: metadata.len(),
+            mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            permissions: permissions_mode(&metadata),
+            checksum,
+        })
+    } else {
+        // Just get metadata, no checksum needed
+        let metadata = std::fs::metadata(&abs_path)
+            .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
+
+        Ok(FileHeader {
+            relative_path: normalize_relative_path(relative),
+            size: metadata.len(),
+            mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            permissions: permissions_mode(&metadata),
+            checksum: vec![],
+        })
+    }
 }
 
 async fn stream_via_grpc(
@@ -416,6 +487,7 @@ async fn stream_single_file(
             size: metadata.len(),
             mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
             permissions: permissions_mode(&metadata),
+            checksum: vec![],
         })),
     }))
     .await
@@ -576,7 +648,7 @@ fn enumerate_to_channel(
         } else {
             requested.clone()
         };
-        let header = build_file_header(&module_root, &relative_name)?;
+        let header = build_file_header(&module_root, &relative_name, false)?;
         let size = header.size;
         let entry = PullEntry {
             header,
@@ -599,7 +671,7 @@ fn enumerate_to_channel(
         .enumerate_local_streaming(&root, |entry| {
             if matches!(entry.kind, EntryKind::File { .. }) {
                 let relative_path = requested.join(&entry.relative_path);
-                let header = build_file_header(&module_root, &relative_path)
+                let header = build_file_header(&module_root, &relative_path, false)
                     .map_err(|e| eyre::eyre!("{}", e.message()))?;
                 let size = header.size;
                 total_files += 1;

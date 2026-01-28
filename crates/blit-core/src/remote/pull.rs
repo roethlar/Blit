@@ -426,7 +426,12 @@ impl RemotePullClient {
         {
             match msg.payload {
                 Some(server_pull_message::Payload::Ack(_)) => {
-                    // Header acknowledged, continue
+                    // Header acknowledged, continue (deprecated, use PullSyncAck)
+                }
+                Some(server_pull_message::Payload::PullSyncAck(ack)) => {
+                    // Server tells us its checksum capability
+                    // TODO: Store ack.server_checksums_enabled for decision making
+                    let _ = ack.server_checksums_enabled;
                 }
                 Some(server_pull_message::Payload::ManifestBatch(batch)) => {
                     if let Some(progress) = progress {

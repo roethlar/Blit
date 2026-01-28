@@ -1,4 +1,5 @@
 use crate::runtime::ModuleConfig;
+use blit_core::buffer::BufferPool;
 use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
@@ -28,6 +29,11 @@ const DATA_PLANE_RECORD_FILE: u8 = 0;
 const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
 const DATA_PLANE_RECORD_END: u8 = 0xFF;
 const MAX_PARALLEL_TAR_TASKS: usize = 4;
+
+/// Default buffer size for pooled tar shard buffers (4 MiB).
+const TAR_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+/// Maximum pooled buffers per connection stream.
+const TAR_BUFFER_POOL_SIZE: usize = 8;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct TransferStats {
@@ -255,10 +261,12 @@ async fn handle_data_plane_stream(
                 }
 
                 let tar_len = read_u64(&mut socket).await?;
-                let mut buffer = vec![0u8; tar_len as usize];
+                // Use pooled buffer for tar shard reception
+                let mut buffer = tar_executor.acquire_buffer(tar_len as usize).await;
                 eprintln!(
-                    "[data-plane] receiving tar shard payload ({} bytes)",
-                    tar_len
+                    "[data-plane] receiving tar shard payload ({} bytes, pooled={})",
+                    tar_len,
+                    buffer.capacity() >= TAR_BUFFER_SIZE
                 );
                 socket.read_exact(&mut buffer).await.map_err(|err| {
                     eprintln!("[data-plane] read tar shard bytes error: {}", err);
@@ -619,7 +627,8 @@ pub(crate) async fn execute_grpc_fallback(
 
 struct TarShardExecutor {
     semaphore: Arc<Semaphore>,
-    tasks: JoinSet<Result<TransferStats, Status>>,
+    tasks: JoinSet<Result<(TransferStats, Option<Vec<u8>>), Status>>,
+    buffer_pool: Arc<BufferPool>,
 }
 
 impl TarShardExecutor {
@@ -627,7 +636,29 @@ impl TarShardExecutor {
         Self {
             semaphore: Arc::new(Semaphore::new(max_parallel)),
             tasks: JoinSet::new(),
+            buffer_pool: Arc::new(BufferPool::new(TAR_BUFFER_SIZE, TAR_BUFFER_POOL_SIZE, None)),
         }
+    }
+
+    /// Acquire a buffer for receiving tar data.
+    /// Uses pooled buffer if size fits, otherwise allocates on demand.
+    async fn acquire_buffer(&self, size: usize) -> Vec<u8> {
+        if size <= self.buffer_pool.buffer_size() {
+            // Use pooled buffer - acquire and take ownership
+            let pool_buf = self.buffer_pool.acquire().await;
+            let mut buf = pool_buf.take();
+            buf.resize(size, 0);
+            buf
+        } else {
+            // Too large for pool - allocate directly
+            vec![0u8; size]
+        }
+    }
+
+    /// Return a buffer to the pool if it fits.
+    fn return_buffer(&self, buffer: Vec<u8>) {
+        self.buffer_pool.record_bytes(buffer.len() as u64);
+        self.buffer_pool.return_vec(buffer);
     }
 
     async fn spawn(
@@ -645,11 +676,15 @@ impl TarShardExecutor {
                 Status::internal(format!("tar shard semaphore closed unexpectedly: {}", err))
             })?;
 
+        let pool_buffer_size = self.buffer_pool.buffer_size();
         self.tasks.spawn(async move {
             let _permit = permit;
-            tokio::task::spawn_blocking(move || apply_tar_shard_sync(module, headers, buffer))
-                .await
-                .map_err(|err| Status::internal(format!("tar shard worker panicked: {}", err)))?
+            let result = tokio::task::spawn_blocking(move || {
+                apply_tar_shard_sync(module, headers, buffer, pool_buffer_size)
+            })
+            .await
+            .map_err(|err| Status::internal(format!("tar shard worker panicked: {}", err)))??;
+            Ok(result)
         });
 
         Ok(())
@@ -657,8 +692,11 @@ impl TarShardExecutor {
 
     fn drain_ready(&mut self, stats: &mut TransferStats) -> Result<(), Status> {
         while let Some(join_result) = self.tasks.try_join_next() {
-            let shard_stats = convert_join_result(join_result)?;
+            let (shard_stats, returned_buffer) = convert_join_result(join_result)?;
             accumulate_transfer_stats(stats, &shard_stats);
+            if let Some(buf) = returned_buffer {
+                self.return_buffer(buf);
+            }
         }
         Ok(())
     }
@@ -667,23 +705,34 @@ impl TarShardExecutor {
         while self.tasks.len() > 0 {
             self.collect_next(stats).await?;
         }
+        // Log pool stats at end of transfer
+        let pool_stats = self.buffer_pool.stats();
+        if pool_stats.total_allocated > 0 {
+            eprintln!(
+                "[data-plane] buffer pool: {} allocated, {} cached, {} bytes through",
+                pool_stats.total_allocated, pool_stats.cached, pool_stats.bytes_through
+            );
+        }
         Ok(())
     }
 
     async fn collect_next(&mut self, stats: &mut TransferStats) -> Result<(), Status> {
         if let Some(join_result) = self.tasks.join_next().await {
-            let shard_stats = convert_join_result(join_result)?;
+            let (shard_stats, returned_buffer) = convert_join_result(join_result)?;
             accumulate_transfer_stats(stats, &shard_stats);
+            if let Some(buf) = returned_buffer {
+                self.return_buffer(buf);
+            }
         }
         Ok(())
     }
 }
 
 fn convert_join_result(
-    join_result: Result<Result<TransferStats, Status>, tokio::task::JoinError>,
-) -> Result<TransferStats, Status> {
+    join_result: Result<Result<(TransferStats, Option<Vec<u8>>), Status>, tokio::task::JoinError>,
+) -> Result<(TransferStats, Option<Vec<u8>>), Status> {
     match join_result {
-        Ok(Ok(stats)) => Ok(stats),
+        Ok(Ok(result)) => Ok(result),
         Ok(Err(status)) => {
             eprintln!(
                 "[data-plane] tar shard worker returned error: {}",
@@ -766,16 +815,20 @@ pub(crate) async fn read_i64(stream: &mut TcpStream) -> Result<i64, Status> {
     Ok(i64::from_be_bytes(buf))
 }
 
+/// Process a tar shard and return stats plus the buffer for potential reuse.
+/// The buffer is returned if its capacity matches the pool size.
 fn apply_tar_shard_sync(
     module: ModuleConfig,
     headers: Vec<FileHeader>,
     buffer: Vec<u8>,
-) -> Result<TransferStats, Status> {
+    pool_buffer_size: usize,
+) -> Result<(TransferStats, Option<Vec<u8>>), Status> {
     let mut expected: HashMap<String, FileHeader> = headers
         .into_iter()
         .map(|header| (header.relative_path.clone(), header))
         .collect();
 
+    let buffer_capacity = buffer.capacity();
     let mut archive = Archive::new(Cursor::new(buffer));
     let mut stats = TransferStats::default();
 
@@ -825,7 +878,18 @@ fn apply_tar_shard_sync(
         )));
     }
 
-    Ok(stats)
+    // Recover the buffer from the archive for potential reuse
+    let cursor = archive.into_inner();
+    let recovered_buffer = cursor.into_inner();
+
+    // Only return buffer for pooling if it matches pool size
+    let return_buffer = if buffer_capacity >= pool_buffer_size {
+        Some(recovered_buffer)
+    } else {
+        None
+    };
+
+    Ok((stats, return_buffer))
 }
 
 #[cfg(test)]
@@ -854,6 +918,7 @@ mod tests {
             size: content.len() as u64,
             mtime_seconds: 0,
             permissions: 0o644,
+            checksum: vec![],
         };
 
         let module = ModuleConfig {
@@ -865,8 +930,9 @@ mod tests {
         };
 
         let tar_data = build_tar_bytes(source_root.path(), &header);
-        let stats = apply_tar_shard_sync(module.clone(), vec![header.clone()], tar_data)
-            .expect("tar shard applies");
+        let (stats, _returned_buf) =
+            apply_tar_shard_sync(module.clone(), vec![header.clone()], tar_data, TAR_BUFFER_SIZE)
+                .expect("tar shard applies");
 
         assert_eq!(stats.files_transferred, 1);
         assert_eq!(stats.bytes_transferred, content.len() as u64);

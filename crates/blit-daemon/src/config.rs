@@ -17,6 +17,9 @@ pub struct DaemonConfig {
     pub no_mdns: bool,
     /// Custom mDNS service name
     pub mdns_name: Option<String>,
+    /// Disable server-side checksum computation (clients will transfer files for local verification)
+    #[serde(default)]
+    pub no_server_checksums: bool,
     /// Module definitions
     #[serde(default)]
     pub modules: HashMap<String, ModuleConfig>,

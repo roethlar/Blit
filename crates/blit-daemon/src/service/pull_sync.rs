@@ -3,7 +3,7 @@
 //! This module implements the PullSync RPC which allows clients to send their
 //! local manifest so the server can compare and only send files that need updating.
 
-use super::pull::{collect_pull_entries, PullEntry};
+use super::pull::{collect_pull_entries_with_checksums, PullEntry};
 use super::push::{bind_data_plane_listener, generate_token, TransferStats};
 use super::util::{resolve_module, resolve_relative_path};
 use super::PullSyncSender;
@@ -11,8 +11,8 @@ use crate::runtime::{ModuleConfig, RootExport};
 
 use base64::{engine::general_purpose, Engine as _};
 use blit_core::generated::{
-    client_pull_message, server_pull_message, Ack, ClientPullMessage, DataTransferNegotiation,
-    FileData, FileHeader, FileList, ManifestBatch, PullSummary, PullSyncHeader, ServerPullMessage,
+    client_pull_message, server_pull_message, ClientPullMessage, DataTransferNegotiation,
+    FileData, FileHeader, FileList, ManifestBatch, PullSummary, PullSyncAck, PullSyncHeader, ServerPullMessage,
 };
 use blit_core::manifest::{compare_manifests, files_needing_transfer, CompareMode, CompareOptions};
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
@@ -34,6 +34,7 @@ pub(crate) async fn handle_pull_sync_stream(
     mut stream: Streaming<ClientPullMessage>,
     tx: PullSyncSender,
     force_grpc_override: bool,
+    server_checksums_enabled: bool,
 ) -> Result<(), Status> {
     // Phase 1: Receive header
     let header = match receive_header(&mut stream).await? {
@@ -46,9 +47,10 @@ pub(crate) async fn handle_pull_sync_stream(
 
     let force_grpc = header.force_grpc || force_grpc_override;
     let mirror_mode = header.mirror_mode;
+    let client_wants_checksum = header.checksum;
 
-    // Acknowledge header
-    send_ack(&tx).await?;
+    // Acknowledge header with server capabilities
+    send_pull_sync_ack(&tx, server_checksums_enabled).await?;
 
     // Resolve path
     let requested = if header.path.trim().is_empty() {
@@ -69,7 +71,9 @@ pub(crate) async fn handle_pull_sync_stream(
     let client_manifest = receive_client_manifest(&mut stream).await?;
 
     // Phase 3: Enumerate server files and compare with client manifest
-    let server_entries = collect_pull_entries(&module.path, &root, &requested).await?;
+    // Compute checksums if client requests checksum mode and server has checksums enabled
+    let compute_checksums = client_wants_checksum && server_checksums_enabled;
+    let server_entries = collect_pull_entries_with_checksums(&module.path, &root, &requested, compute_checksums).await?;
 
     // Convert to FileHeader for comparison
     let server_manifest: Vec<FileHeader> = server_entries
@@ -190,9 +194,11 @@ async fn receive_client_manifest(stream: &mut Streaming<ClientPullMessage>) -> R
     Ok(manifest)
 }
 
-async fn send_ack(tx: &PullSyncSender) -> Result<(), Status> {
+async fn send_pull_sync_ack(tx: &PullSyncSender, server_checksums_enabled: bool) -> Result<(), Status> {
     tx.send(Ok(ServerPullMessage {
-        payload: Some(server_pull_message::Payload::Ack(Ack {})),
+        payload: Some(server_pull_message::Payload::PullSyncAck(PullSyncAck {
+            server_checksums_enabled,
+        })),
     }))
     .await
     .map_err(|_| Status::internal("failed to send ack"))

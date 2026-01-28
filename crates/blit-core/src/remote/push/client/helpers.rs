@@ -135,6 +135,7 @@ pub fn spawn_manifest_task(
                     size,
                     mtime_seconds: mtime,
                     permissions,
+                    checksum: vec![],
                 };
                 manifest_tx
                     .blocking_send(header)
