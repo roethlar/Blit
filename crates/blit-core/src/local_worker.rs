@@ -61,6 +61,7 @@ async fn local_worker_loop(
         active,
         exit_tokens,
         stat_tx,
+        max_retries,
     } = params;
 
     active.fetch_add(1, Relaxed);
@@ -91,17 +92,47 @@ async fn local_worker_loop(
         }
 
         let started = std::time::Instant::now();
-        let result = match &task {
-            TransferTask::TarShard(files) => {
-                handle_tar_shard(&src_root, &dest_root, files, chunk_bytes, &config).await
+
+        // Execute task with retry logic
+        let mut attempts = 0u8;
+        let mut last_error: Option<eyre::Report> = None;
+
+        loop {
+            let result = match &task {
+                TransferTask::TarShard(files) => {
+                    handle_tar_shard(&src_root, &dest_root, files, chunk_bytes, &config).await
+                }
+                TransferTask::RawBundle(files) => {
+                    handle_copy_list(&src_root, &dest_root, files, &config).await
+                }
+                TransferTask::Large { path } => {
+                    handle_large_file(&src_root, &dest_root, path, &config).await
+                }
+            };
+
+            match result {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(err) => {
+                    attempts += 1;
+                    let is_retryable = is_retryable_error(&err);
+
+                    if is_retryable && attempts <= max_retries {
+                        if progress {
+                            eprintln!("[w{idx}] retrying ({}/{}): {err}", attempts, max_retries);
+                        }
+                        // Brief delay before retry to avoid hammering on transient errors
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts as u64)).await;
+                        continue;
+                    }
+
+                    last_error = Some(err);
+                    break;
+                }
             }
-            TransferTask::RawBundle(files) => {
-                handle_copy_list(&src_root, &dest_root, files, &config).await
-            }
-            TransferTask::Large { path } => {
-                handle_large_file(&src_root, &dest_root, path, &config).await
-            }
-        };
+        }
 
         let task_bytes = if config.dry_run {
             0
@@ -114,8 +145,12 @@ async fn local_worker_loop(
             ms: elapsed.as_millis(),
         });
 
-        if let Err(err) = result {
-            eprintln!("[w{idx}] error: {err}");
+        if let Some(err) = last_error {
+            if attempts > 1 {
+                eprintln!("[w{idx}] error after {} attempts: {err}", attempts);
+            } else {
+                eprintln!("[w{idx}] error: {err}");
+            }
         }
 
         remaining.fetch_sub(1, Relaxed);
@@ -123,6 +158,34 @@ async fn local_worker_loop(
 
     active.fetch_sub(1, Relaxed);
     Ok(())
+}
+
+/// Check if an error is retryable (transient I/O errors, not fatal ones).
+fn is_retryable_error(err: &eyre::Report) -> bool {
+    let msg = err.to_string().to_lowercase();
+    // Retryable: temporary conditions that may resolve
+    if msg.contains("resource temporarily unavailable")
+        || msg.contains("interrupted")
+        || msg.contains("would block")
+        || msg.contains("connection reset")
+        || msg.contains("broken pipe")
+        || msg.contains("timed out")
+    {
+        return true;
+    }
+    // Not retryable: permanent conditions
+    if msg.contains("permission denied")
+        || msg.contains("no such file")
+        || msg.contains("not a directory")
+        || msg.contains("is a directory")
+        || msg.contains("no space left")
+        || msg.contains("disk quota")
+        || msg.contains("read-only file system")
+    {
+        return false;
+    }
+    // Default: retry once for unknown errors
+    true
 }
 
 async fn handle_tar_shard(

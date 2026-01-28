@@ -13,6 +13,47 @@ pub enum TransferTask {
     },
 }
 
+/// A transfer task with retry metadata.
+#[derive(Clone, Debug)]
+pub struct RetryableTask {
+    pub task: TransferTask,
+    /// Number of retry attempts made so far.
+    pub attempts: u8,
+    /// Maximum retries allowed for this task.
+    pub max_retries: u8,
+}
+
+impl RetryableTask {
+    /// Create a new retryable task with the given retry limit.
+    pub fn new(task: TransferTask, max_retries: u8) -> Self {
+        Self {
+            task,
+            attempts: 0,
+            max_retries,
+        }
+    }
+
+    /// Check if this task can be retried.
+    pub fn can_retry(&self) -> bool {
+        self.attempts < self.max_retries
+    }
+
+    /// Increment the attempt counter and return self.
+    pub fn with_attempt(mut self) -> Self {
+        self.attempts = self.attempts.saturating_add(1);
+        self
+    }
+
+    /// Get the paths in this task for error reporting.
+    pub fn paths(&self) -> Vec<&PathBuf> {
+        match &self.task {
+            TransferTask::TarShard(files) => files.iter().collect(),
+            TransferTask::RawBundle(files) => files.iter().collect(),
+            TransferTask::Large { path } => vec![path],
+        }
+    }
+}
+
 /// Planned work queue along with the preferred chunk size for streaming.
 #[derive(Clone, Debug)]
 pub struct Plan {

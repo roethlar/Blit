@@ -17,6 +17,8 @@ pub struct LocalMirrorOptions {
     pub workers: usize,
     pub preserve_times: bool,
     pub debug_mode: bool,
+    /// Maximum retries for failed file operations (0-255, default: 1).
+    pub retries: u8,
 }
 
 impl Default for LocalMirrorOptions {
@@ -36,6 +38,7 @@ impl Default for LocalMirrorOptions {
             workers: num_cpus::get().max(1),
             preserve_times: true,
             debug_mode: false,
+            retries: 1,
         }
     }
 }

@@ -22,6 +22,8 @@ pub struct SchedulerOptions {
     pub byte_drain: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
     pub initial_streams: Option<usize>,
     pub max_streams: Option<usize>,
+    /// Maximum retries for failed tasks (default: 1).
+    pub max_retries: u8,
 }
 
 pub struct WorkerParams {
@@ -33,6 +35,8 @@ pub struct WorkerParams {
     pub active: Arc<AtomicUsize>,
     pub exit_tokens: Arc<AtomicUsize>,
     pub stat_tx: mpsc::UnboundedSender<Sample>,
+    /// Maximum retries for individual file operations (used by workers).
+    pub max_retries: u8,
 }
 
 pub trait WorkerFactory: Send + Sync {
@@ -169,6 +173,7 @@ async fn execute_streaming_with_receiver(
             active: Arc::clone(&active),
             exit_tokens: Arc::clone(&exit_tokens),
             stat_tx: stat_tx.clone(),
+            max_retries: options.max_retries,
         };
         handles.push(factory.spawn_worker(params));
     }
@@ -215,6 +220,7 @@ async fn execute_streaming_with_receiver(
                 active: Arc::clone(&active),
                 exit_tokens: Arc::clone(&exit_tokens),
                 stat_tx: stat_tx.clone(),
+                max_retries: options.max_retries,
             };
             handles.push(factory.spawn_worker(params));
         }
@@ -335,6 +341,7 @@ mod tests {
             byte_drain: None,
             initial_streams: Some(2),
             max_streams: Some(2),
+            max_retries: 1,
         };
 
         let result = execute_plan(&factory, plan, 1024 * 1024, opts).await;
@@ -384,6 +391,7 @@ mod tests {
             byte_drain: None,
             initial_streams: Some(5),
             max_streams: Some(5),
+            max_retries: 1,
         };
 
         let result = execute_plan(&factory, plan, 1024 * 1024, opts).await;
@@ -422,6 +430,7 @@ mod tests {
             byte_drain: None,
             initial_streams: Some(3),
             max_streams: Some(3),
+            max_retries: 1,
         };
 
         let result = execute_plan(&factory, plan, 1024 * 1024, opts).await;
@@ -455,6 +464,7 @@ mod tests {
             byte_drain: None,
             initial_streams: Some(100),
             max_streams: Some(100),
+            max_retries: 1,
         };
 
         let result = execute_plan(&factory, plan, 1024 * 1024, opts).await;
@@ -494,6 +504,7 @@ mod tests {
             byte_drain: None,
             initial_streams: Some(20),
             max_streams: Some(20),
+            max_retries: 1,
         };
 
         let result = execute_plan(&factory, plan, 1024 * 1024, opts).await;

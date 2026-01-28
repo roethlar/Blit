@@ -89,6 +89,7 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
         progress: args.progress,
         perf_history: ctx.perf_history_enabled,
         checksum: args.checksum,
+        retries: args.retries,
         ..LocalMirrorOptions::default()
     };
     if let Some(workers) = args.workers {

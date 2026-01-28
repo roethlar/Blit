@@ -23,6 +23,25 @@ use crate::remote::transfer::data_plane::{
 };
 use crate::remote::transfer::progress::RemoteTransferProgress;
 
+/// Options for pull synchronization operations.
+#[derive(Debug, Default, Clone)]
+pub struct PullSyncOptions {
+    /// Force gRPC data plane (no TCP fallback).
+    pub force_grpc: bool,
+    /// Mirror mode: report files to delete.
+    pub mirror_mode: bool,
+    /// Compare only by size, ignore modification time.
+    pub size_only: bool,
+    /// Transfer all files unconditionally.
+    pub ignore_times: bool,
+    /// Skip files that already exist on target.
+    pub ignore_existing: bool,
+    /// Overwrite even if target is newer (dangerous).
+    pub force: bool,
+    /// Force checksum comparison (slower but more accurate).
+    pub checksum: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct RemotePullReport {
     pub files_transferred: usize,
@@ -322,11 +341,12 @@ impl RemotePullClient {
         &mut self,
         dest_root: &Path,
         local_manifest: Vec<FileHeader>,
-        force_grpc: bool,
-        mirror_mode: bool,
+        options: &PullSyncOptions,
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
     ) -> Result<RemotePullReport> {
+        let force_grpc = options.force_grpc;
+        let mirror_mode = options.mirror_mode;
         use tokio_stream::wrappers::ReceiverStream;
 
         if !dest_root.exists() {
@@ -359,6 +379,11 @@ impl RemotePullClient {
                 path: path_str,
                 force_grpc,
                 mirror_mode,
+                size_only: options.size_only,
+                ignore_times: options.ignore_times,
+                ignore_existing: options.ignore_existing,
+                force: options.force,
+                checksum: options.checksum,
             })),
         })
         .await

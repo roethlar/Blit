@@ -14,7 +14,7 @@ use blit_core::generated::{
     client_pull_message, server_pull_message, Ack, ClientPullMessage, DataTransferNegotiation,
     FileData, FileHeader, FileList, ManifestBatch, PullSummary, PullSyncHeader, ServerPullMessage,
 };
-use blit_core::manifest::{compare_manifests, files_needing_transfer};
+use blit_core::manifest::{compare_manifests, files_needing_transfer, CompareMode, CompareOptions};
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::plan_transfer_payloads;
 use blit_core::remote::tuning::determine_remote_tuning;
@@ -81,8 +81,26 @@ pub(crate) async fn handle_pull_sync_stream(
     let total_bytes: u64 = server_manifest.iter().map(|h| h.size).sum();
     send_manifest_batch(&tx, server_manifest.len() as u64, total_bytes).await?;
 
+    // Determine comparison mode based on header flags
+    let compare_mode = if header.ignore_times {
+        CompareMode::IgnoreTimes
+    } else if header.force {
+        CompareMode::Force
+    } else if header.size_only {
+        CompareMode::SizeOnly
+    } else if header.checksum {
+        CompareMode::Checksum
+    } else {
+        CompareMode::Default
+    };
+
     // Compare manifests: server files are source, client files are target
-    let diff = compare_manifests(&server_manifest, &client_manifest, mirror_mode);
+    let compare_opts = CompareOptions {
+        mode: compare_mode,
+        ignore_existing: header.ignore_existing,
+        include_deletions: mirror_mode,
+    };
+    let diff = compare_manifests(&server_manifest, &client_manifest, &compare_opts);
 
     if diff.files_to_transfer.is_empty() && diff.files_to_delete.is_empty() {
         // Nothing to transfer

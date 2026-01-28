@@ -312,6 +312,11 @@ mod tests {
             destination: dest.to_string_lossy().into_owned(),
             dry_run: false,
             checksum: false,
+            size_only: false,
+            ignore_times: false,
+            ignore_existing: false,
+            force: false,
+            retries: 1,
             verbose: false,
             progress: false,
             yes: true, // Skip prompts in tests
@@ -342,6 +347,11 @@ mod tests {
             destination: dest.to_string_lossy().into_owned(),
             dry_run: true,
             checksum: false,
+            size_only: false,
+            ignore_times: false,
+            ignore_existing: false,
+            force: false,
+            retries: 1,
             verbose: false,
             progress: false,
             yes: true, // Skip prompts in tests

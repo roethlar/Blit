@@ -13,6 +13,7 @@ use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
     RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
 };
+use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
 use std::sync::Arc;
 
@@ -180,13 +181,23 @@ pub async fn run_remote_pull_transfer(
     let show_progress = args.progress || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
 
+    // Build comparison options from CLI args
+    let pull_opts = PullSyncOptions {
+        force_grpc: args.force_grpc,
+        mirror_mode,
+        size_only: args.size_only,
+        ignore_times: args.ignore_times,
+        ignore_existing: args.ignore_existing,
+        force: args.force,
+        checksum: args.checksum,
+    };
+
     // Use PullSync - sends local manifest to server, server compares and only sends what's needed
     let report = client
         .pull_sync(
             dest_root,
             local_manifest,
-            args.force_grpc,
-            mirror_mode,
+            &pull_opts,
             mirror_mode, // track_paths for mirror mode deletion
             progress_handle.as_ref(),
         )

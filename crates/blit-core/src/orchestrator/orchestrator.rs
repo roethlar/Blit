@@ -338,6 +338,7 @@ impl TransferOrchestrator {
             byte_drain: None,
             initial_streams: Some(options.workers.clamp(1, 12)),
             max_streams: Some(options.workers.max(1)),
+            max_retries: options.retries,
         };
 
         let chunk_bytes = 16 * 1024 * 1024;

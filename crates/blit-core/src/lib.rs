@@ -6,6 +6,7 @@ pub mod config;
 pub mod copy;
 pub mod delete;
 pub mod enumeration;
+pub mod errors;
 pub mod fs_capability;
 pub mod fs_enum;
 pub mod local_worker;

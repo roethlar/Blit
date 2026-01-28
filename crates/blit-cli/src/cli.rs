@@ -70,9 +70,24 @@ pub struct TransferArgs {
     /// Perform a dry run without making changes
     #[arg(long)]
     pub dry_run: bool,
-    /// Force checksum comparison of files
-    #[arg(long)]
+    /// Force checksum comparison of files (slower but more accurate)
+    #[arg(long, short = 'c')]
     pub checksum: bool,
+    /// Compare only by size, ignoring modification time
+    #[arg(long, conflicts_with = "checksum")]
+    pub size_only: bool,
+    /// Transfer all files unconditionally, ignoring size and modification time
+    #[arg(long, conflicts_with_all = ["checksum", "size_only"])]
+    pub ignore_times: bool,
+    /// Skip files that already exist on the destination (regardless of differences)
+    #[arg(long)]
+    pub ignore_existing: bool,
+    /// Force exact mirror even if destination files are newer (dangerous)
+    #[arg(long)]
+    pub force: bool,
+    /// Number of retries for failed transfers (0-255, default: 1)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8))]
+    pub retries: u8,
     /// Keep verbose logs from the orchestrator
     #[arg(long, short = 'v')]
     pub verbose: bool,
