@@ -15,17 +15,23 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 
 ## Features
 
-- **Modular Core Engine**  
+- **Modular Core Engine**
   Async file enumeration, planner, transfer, and orchestrator modules in `blit-core` for maximum performance and extensibility.
-- **CLI and Daemon Binaries**  
+- **CLI and Daemon Binaries**
   Minimal, ergonomic command-line interface; full daemon/server for automation and concurrent requests.
-- **Platform Optimization**  
+- **Resumable Transfers**
+  Block-level resume with Blake3 hashing (`--resume`). Interrupted transfers continue from where they stopped; only changed blocks are transferred.
+- **Hybrid Transport**
+  TCP data plane for high-throughput transfers (10+ Gbps), with gRPC fallback for diagnostics.
+- **Platform Optimization**
   Windows- and Linux-friendly; dedicated scripts and test logs for platform parity.
-- **gRPC API**  
+- **gRPC API**
   Robust proto definitions in `proto/blit.proto` enable remote orchestration and integrations.
-- **Developer Experience**  
+- **Security Hardened**
+  Path traversal protection, block size limits, token verification. TLS via operator-provided SSH tunnels or VPN.
+- **Developer Experience**
   Utilities for scripting, automated checks, robust tests, and clear repo organization.
-- **Extensive Documentation**  
+- **Extensive Documentation**
   Agent collaboration (`AGENTS.md`), process docs, session logs (`DEVLOG.md`), and roadmap (`TODO.md`).
 
 ---
@@ -78,8 +84,20 @@ scripts/windows/run-blit-tests.ps1
 ```sh
 cargo run -p blit-cli -- --help                # Show available options
 
-# Example: Enumerate and transfer a folder (dummy args)
-cargo run -p blit-cli -- enumerate --src ./input_dir --dest ./output_dir
+# Local mirror (copy + delete extraneous)
+cargo run -p blit-cli -- mirror ./source ./dest --yes
+
+# Remote push to daemon
+cargo run -p blit-cli -- mirror ./local server:/module/ --yes
+
+# Remote pull from daemon
+cargo run -p blit-cli -- mirror server:/module/ ./local --yes
+
+# Resume interrupted transfer (block-level comparison)
+cargo run -p blit-cli -- mirror ./source ./dest --resume
+
+# Show progress
+cargo run -p blit-cli -- copy ./large_file.iso ./dest/ --progress
 ```
 
 ### Running the Daemon
