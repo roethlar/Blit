@@ -14,6 +14,8 @@ use std::sync::Arc;
 pub const CONTROL_PLANE_CHUNK_SIZE: usize = 1 * 1024 * 1024;
 pub const DATA_PLANE_RECORD_FILE: u8 = 0;
 pub const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
+pub const DATA_PLANE_RECORD_BLOCK: u8 = 2;
+pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 
 pub struct DataPlaneSession {
@@ -321,6 +323,75 @@ impl DataPlaneSession {
             shard_len,
             data.len()
         );
+
+        Ok(())
+    }
+
+    /// Send a single block for block-level resume.
+    /// Format: [type:1][path_len:4][path][offset:8][block_len:4][content]
+    pub async fn send_block(&mut self, relative_path: &str, offset: u64, content: &[u8]) -> Result<()> {
+        let path_bytes = relative_path.as_bytes();
+        if path_bytes.len() > u32::MAX as usize {
+            bail!("relative path too long for transfer: {}", relative_path);
+        }
+
+        trace_client!(self, "sending block for '{}' at offset {} ({} bytes)", relative_path, offset, content.len());
+
+        self.stream
+            .write_all(&[DATA_PLANE_RECORD_BLOCK])
+            .await
+            .context("writing block record tag")?;
+        self.stream
+            .write_all(&(path_bytes.len() as u32).to_be_bytes())
+            .await
+            .context("writing path length")?;
+        self.stream
+            .write_all(path_bytes)
+            .await
+            .context("writing path bytes")?;
+        self.stream
+            .write_all(&offset.to_be_bytes())
+            .await
+            .context("writing block offset")?;
+        self.stream
+            .write_all(&(content.len() as u32).to_be_bytes())
+            .await
+            .context("writing block length")?;
+        self.stream
+            .write_all(content)
+            .await
+            .context("writing block content")?;
+
+        self.bytes_sent += content.len() as u64;
+        Ok(())
+    }
+
+    /// Signal that block-level transfer for a file is complete.
+    /// Format: [type:1][path_len:4][path][total_size:8]
+    pub async fn send_block_complete(&mut self, relative_path: &str, total_size: u64) -> Result<()> {
+        let path_bytes = relative_path.as_bytes();
+        if path_bytes.len() > u32::MAX as usize {
+            bail!("relative path too long for transfer: {}", relative_path);
+        }
+
+        trace_client!(self, "sending block complete for '{}' ({} bytes total)", relative_path, total_size);
+
+        self.stream
+            .write_all(&[DATA_PLANE_RECORD_BLOCK_COMPLETE])
+            .await
+            .context("writing block complete record tag")?;
+        self.stream
+            .write_all(&(path_bytes.len() as u32).to_be_bytes())
+            .await
+            .context("writing path length")?;
+        self.stream
+            .write_all(path_bytes)
+            .await
+            .context("writing path bytes")?;
+        self.stream
+            .write_all(&total_size.to_be_bytes())
+            .await
+            .context("writing total size")?;
 
         Ok(())
     }

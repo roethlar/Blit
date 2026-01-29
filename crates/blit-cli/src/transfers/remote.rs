@@ -191,6 +191,8 @@ pub async fn run_remote_pull_transfer(
         ignore_existing: args.ignore_existing,
         force: args.force,
         checksum: args.checksum,
+        resume: args.resume,
+        block_size: 0, // Use default (1 MiB)
     };
 
     // Use PullSync - sends local manifest to server, server compares and only sends what's needed

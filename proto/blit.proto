@@ -160,7 +160,26 @@ message ClientPullMessage {
     PullSyncHeader header = 1;           // Initial request with module/path
     FileHeader local_file = 2;           // Client's local file metadata
     ManifestComplete manifest_done = 3;  // Signals end of client manifest
+    BlockHashList block_hashes = 4;      // Client's block hashes for resume mode
   }
+}
+
+// Block-level resume messages
+message BlockHashList {
+  string relative_path = 1;              // File this applies to
+  uint32 block_size = 2;                 // Size of each block (last may be smaller)
+  repeated bytes hashes = 3;             // Blake3 hashes (32 bytes each), in order
+}
+
+message BlockTransfer {
+  string relative_path = 1;              // File this block belongs to
+  uint64 offset = 2;                     // Byte offset in file
+  bytes content = 3;                     // Block data
+}
+
+message BlockTransferComplete {
+  string relative_path = 1;              // File that's now complete
+  uint64 total_bytes = 2;                // Final file size (for truncation if needed)
 }
 
 message ServerPullMessage {
@@ -173,7 +192,16 @@ message ServerPullMessage {
     FileHeader file_header = 6;               // For gRPC fallback: file being sent
     FileData file_data = 7;                   // For gRPC fallback: file content
     PullSyncAck pull_sync_ack = 8;            // Acknowledgment with server capabilities
+    BlockHashRequest block_hash_request = 9;  // Server requests block hashes for resume
+    BlockTransfer block_transfer = 10;        // Server sends a block for resume
+    BlockTransferComplete block_complete = 11; // Server signals file resume complete
   }
+}
+
+// Server requests block hashes from client for a file it wants to resume
+message BlockHashRequest {
+  string relative_path = 1;              // File to get block hashes for
+  uint32 block_size = 2;                 // Block size to use
 }
 
 message PullSyncHeader {
@@ -187,6 +215,8 @@ message PullSyncHeader {
   bool ignore_existing = 7; // Skip files that already exist on target
   bool force = 8;           // Overwrite even if target is newer (dangerous)
   bool checksum = 9;        // Force checksum comparison (slower but more accurate)
+  bool resume = 10;         // Enable block-level resume for partial/changed files
+  uint32 block_size = 11;   // Block size for resume (0 = default 1 MiB)
 }
 
 // Other Operations

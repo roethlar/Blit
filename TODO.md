@@ -123,7 +123,9 @@ This is the master checklist. Execute the first unchecked item. After completion
     - [x] Add `resume: bool` field to `CopyConfig`. *(2025-01-28)*
     - [x] Modify `local_worker.rs` to use `resume_copy_file` when `config.resume` is true. *(2025-01-28)*
     - [x] Add `--resume` flag to CLI for copy/mirror commands. *(2025-01-28)*
-    - [ ] Extend resume logic for remote transfers (checksum exchange over network).
+    - [x] Extend resume logic for remote transfers (gRPC path - block hash exchange). *(2025-01-28: Protocol extended with BlockHashRequest/BlockHashList/BlockTransfer/BlockTransferComplete; daemon requests block hashes for Modified files, compares Blake3 hashes, sends only differing blocks; client computes hashes and writes blocks at offset.)*
+    - [x] Extend resume logic for remote data plane (primary path). *(2025-01-28: Added DATA_PLANE_RECORD_BLOCK and DATA_PLANE_RECORD_BLOCK_COMPLETE to TCP data plane. `stream_via_data_plane_resume` uses gRPC for block hash exchange, TCP data plane for block transfer. Client handles block records with seek+write. Works with default `--resume` flag.)*
+    - [x] Fix memory vulnerability and protocol inefficiency (code review). *(2025-01-29: Fixed `compute_block_hashes` and daemon-side functions to stream files in chunks instead of loading into memory. Pipelined block hash requests in data plane path to eliminate per-file RTT penalty.)*
 - [ ] **P1** Implement filesystem capability probes and caching (daemon idle probes + CLI profile hook) so per-mount features like reflink/sparse/xattr are detected automatically and exposed to the planner.
 - [ ] Explore optional AI-powered telemetry analysis (anomaly detection, tuning recommendations, diagnostics) using local performance history data; document scope and guardrails.
 - [ ] Produce packaging artifacts for supported platforms (Linux, macOS, Windows).
