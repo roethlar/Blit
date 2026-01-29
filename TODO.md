@@ -118,11 +118,11 @@ This is the master checklist. Execute the first unchecked item. After completion
 
 ## Phase 4: Production Hardening & Packaging
 
-- [ ] **P1** Integrate resumable file copy into transfer flow:
+- [x] **P1** Integrate resumable file copy into transfer flow:
     - [x] Implement `resume_copy_file` with block-level comparison (`copy/file_copy/resume.rs`). *(2025-01-28: Added with 5 unit tests.)*
-    - [ ] Add `resume: bool` field to `CopyConfig`.
-    - [ ] Modify `local_worker.rs` to use `resume_copy_file` when `config.resume` is true.
-    - [ ] Add `--resume` flag to CLI for copy/mirror commands.
+    - [x] Add `resume: bool` field to `CopyConfig`. *(2025-01-28)*
+    - [x] Modify `local_worker.rs` to use `resume_copy_file` when `config.resume` is true. *(2025-01-28)*
+    - [x] Add `--resume` flag to CLI for copy/mirror commands. *(2025-01-28)*
     - [ ] Extend resume logic for remote transfers (checksum exchange over network).
 - [ ] **P1** Implement filesystem capability probes and caching (daemon idle probes + CLI profile hook) so per-mount features like reflink/sparse/xattr are detected automatically and exposed to the planner.
 - [ ] Explore optional AI-powered telemetry analysis (anomaly detection, tuning recommendations, diagnostics) using local performance history data; document scope and guardrails.
