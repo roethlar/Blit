@@ -106,6 +106,9 @@ pub struct TransferArgs {
     /// Force gRPC control-plane data path instead of hybrid TCP
     #[arg(long)]
     pub force_grpc: bool,
+    /// Resume interrupted transfers using block-level comparison
+    #[arg(long)]
+    pub resume: bool,
 }
 
 #[derive(Args, Clone, Debug)]

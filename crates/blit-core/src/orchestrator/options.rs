@@ -19,6 +19,8 @@ pub struct LocalMirrorOptions {
     pub debug_mode: bool,
     /// Maximum retries for failed file operations (0-255, default: 1).
     pub retries: u8,
+    /// Resume interrupted transfers using block-level comparison.
+    pub resume: bool,
 }
 
 impl Default for LocalMirrorOptions {
@@ -39,6 +41,7 @@ impl Default for LocalMirrorOptions {
             preserve_times: true,
             debug_mode: false,
             retries: 1,
+            resume: false,
         }
     }
 }

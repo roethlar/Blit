@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use crate::buffer::BufferSizer;
 #[cfg(all(unix, not(target_os = "macos")))]
 use crate::copy::mmap_copy_file;
-use crate::copy::{copy_file, file_needs_copy_with_checksum_type};
+use crate::copy::{copy_file, file_needs_copy_with_checksum_type, resume_copy_file};
 use crate::logger::{Logger, NoopLogger};
 use crate::tar_stream::tar_stream_transfer_list;
 use crate::tar_stream::TarConfig;
@@ -380,22 +380,25 @@ fn copy_path_maybe(
         return Ok(());
     }
 
-    let mut copy_outcome = None;
-    if file_needs_copy_with_checksum_type(&src, &dst, config.checksum)? {
-        copy_outcome = Some(copy_file(&src, &dst, sizer, false, logger)?);
+    let mut did_copy = false;
+    let mut clone_succeeded = false;
+
+    if config.resume {
+        // Resume mode: use block-level comparison to transfer only differences
+        let outcome = resume_copy_file(&src, &dst, 0)?;
+        did_copy = outcome.bytes_transferred > 0;
+        logger.copy_done(&src, &dst, outcome.bytes_transferred);
+    } else if file_needs_copy_with_checksum_type(&src, &dst, config.checksum)? {
+        let outcome = copy_file(&src, &dst, sizer, false, logger)?;
+        did_copy = true;
+        clone_succeeded = outcome.clone_succeeded;
     }
 
-    if config.preserve_times {
-        let should_preserve = copy_outcome
-            .as_ref()
-            .map(|outcome| !outcome.clone_succeeded)
-            .unwrap_or(true);
-        if should_preserve {
-            if let Ok(meta) = std::fs::metadata(&src) {
-                if let Ok(modified) = meta.modified() {
-                    let ft = FileTime::from_system_time(modified);
-                    let _ = filetime::set_file_mtime(&dst, ft);
-                }
+    if config.preserve_times && did_copy && !clone_succeeded {
+        if let Ok(meta) = std::fs::metadata(&src) {
+            if let Ok(modified) = meta.modified() {
+                let ft = FileTime::from_system_time(modified);
+                let _ = filetime::set_file_mtime(&dst, ft);
             }
         }
     }

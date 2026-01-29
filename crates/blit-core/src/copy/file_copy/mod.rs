@@ -2,15 +2,17 @@ mod chunked;
 mod clone;
 mod metadata;
 mod mmap;
+pub mod resume;
 
 pub use chunked::chunked_copy_file;
 pub use mmap::mmap_copy_file;
+pub use resume::{resume_copy_file, ResumeCopyOutcome};
 
 use crate::buffer::BufferSizer;
 use crate::logger::Logger;
-use eyre::{Context, Result};
+use eyre::{eyre, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(windows)]
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
@@ -23,59 +25,6 @@ pub struct FileCopyOutcome {
     pub clone_succeeded: bool,
 }
 
-
-/// Suffix for temporary files during atomic copy operations.
-const PARTIAL_FILE_SUFFIX: &str = ".blit.partial";
-
-/// Guard that ensures temp files are cleaned up on failure.
-/// Deletes the temp file on drop unless `commit()` is called.
-struct TempFileGuard {
-    temp_path: PathBuf,
-    committed: bool,
-}
-
-impl TempFileGuard {
-    fn new(temp_path: PathBuf) -> Self {
-        Self {
-            temp_path,
-            committed: false,
-        }
-    }
-
-    /// Atomically rename temp file to final destination.
-    /// After commit succeeds, the guard won't delete the file on drop.
-    fn commit(mut self, final_path: &Path) -> Result<()> {
-        // On Windows, rename fails if destination exists, so remove first
-        #[cfg(windows)]
-        {
-            let _ = fs::remove_file(final_path);
-        }
-        fs::rename(&self.temp_path, final_path)
-            .with_context(|| format!("renaming {} to {}", self.temp_path.display(), final_path.display()))?;
-        self.committed = true;
-        Ok(())
-    }
-
-    fn path(&self) -> &Path {
-        &self.temp_path
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let _ = fs::remove_file(&self.temp_path);
-        }
-    }
-}
-
-/// Generate temp path for atomic copy operations.
-fn temp_path_for(dst: &Path) -> PathBuf {
-    let mut temp = dst.as_os_str().to_owned();
-    temp.push(PARTIAL_FILE_SUFFIX);
-    PathBuf::from(temp)
-}
-
 pub fn copy_file(
     src: &Path,
     dst: &Path,
@@ -85,31 +34,19 @@ pub fn copy_file(
 ) -> Result<FileCopyOutcome> {
     logger.start(src, dst);
 
-    // Ensure parent directory exists
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Create temp path and guard for atomic write
-    let temp_path = temp_path_for(dst);
-    let guard = TempFileGuard::new(temp_path.clone());
-
     #[cfg(windows)]
     if !is_network {
-        // Windows fast path: copy to temp file first
-        match windows::windows_copyfile(src, guard.path()) {
+        match windows::windows_copyfile(src, dst) {
             Ok(bytes) => {
                 let clone_succeeded = windows::take_last_block_clone_success();
                 if !clone_succeeded {
-                    metadata::preserve_metadata(src, guard.path())?;
+                    metadata::preserve_metadata(src, dst)?;
                 } else {
                     log::debug!(
                         "block clone preserved metadata automatically for {}",
                         dst.display()
                     );
                 }
-                // Commit: rename temp to final destination
-                guard.commit(dst)?;
                 logger.copy_done(src, dst, bytes);
                 return Ok(FileCopyOutcome {
                     bytes_copied: bytes,
@@ -122,7 +59,6 @@ pub fn copy_file(
                     src.display(),
                     err
                 );
-                // Guard will clean up temp file on drop, continue to fallback
             }
         }
     }
@@ -132,6 +68,15 @@ pub fn copy_file(
         let file_size = metadata.len();
 
         let buffer_size = buffer_sizer.calculate_buffer_size(file_size, is_network);
+
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let parent = dst
+            .parent()
+            .ok_or_else(|| eyre!("destination has no parent: {}", dst.display()))?;
+        fs::create_dir_all(parent)?;
 
         #[cfg(windows)]
         use std::os::windows::fs::OpenOptionsExt;
@@ -145,7 +90,6 @@ pub fn copy_file(
         #[cfg(not(windows))]
         let src_file = File::open(src)?;
 
-        // Open temp file for writing
         #[cfg(windows)]
         let mut dst_file = {
             std::fs::OpenOptions::new()
@@ -153,16 +97,15 @@ pub fn copy_file(
                 .write(true)
                 .truncate(true)
                 .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
-                .open(guard.path())?
+                .open(dst)?
         };
         #[cfg(not(windows))]
-        let dst_file = File::create(guard.path())?;
+        let dst_file = File::create(dst)?;
 
         let (total_bytes, clone_succeeded) = {
             #[cfg(windows)]
             {
                 let mut clone_success = false;
-                // Check block clone support using final destination path for volume check
                 if crate::fs_capability::supports_block_clone_same_volume(src, dst)? {
                     match windows::try_block_clone_with_handles(&src_file, &dst_file, file_size)? {
                         windows::BlockCloneOutcome::Cloned => {
@@ -208,12 +151,9 @@ pub fn copy_file(
             }
             #[cfg(target_os = "macos")]
             {
-                // macOS clonefile/fcopyfile use paths, pass temp path
-                let cloned = clone::attempt_clonefile_macos(src, guard.path()).unwrap_or(false)
-                    || clone::attempt_fcopyfile_macos(src, guard.path()).unwrap_or(false);
+                let cloned = clone::attempt_clonefile_macos(src, dst).unwrap_or(false)
+                    || clone::attempt_fcopyfile_macos(src, dst).unwrap_or(false);
                 if cloned {
-                    // Close dst_file handle since clonefile created a new file
-                    drop(dst_file);
                     (file_size, true)
                 } else {
                     let mut reader = BufReader::with_capacity(buffer_size, src_file);
@@ -245,10 +185,8 @@ pub fn copy_file(
                 }
             }
         };
-        
-        // Preserve metadata on temp file before committing
         if !clone_succeeded {
-            metadata::preserve_metadata(src, guard.path())?;
+            metadata::preserve_metadata(src, dst)?;
         }
 
         Ok(FileCopyOutcome {
@@ -259,13 +197,10 @@ pub fn copy_file(
 
     match result {
         Ok(outcome) => {
-            // Commit: atomically rename temp to final destination
-            guard.commit(dst)?;
             logger.copy_done(src, dst, outcome.bytes_copied);
             Ok(outcome)
         }
         Err(e) => {
-            // Guard drops here and cleans up temp file
             logger.error("copy", src, &e.to_string());
             Err(e)
         }

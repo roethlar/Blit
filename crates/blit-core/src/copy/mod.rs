@@ -6,7 +6,7 @@ mod stats;
 mod windows;
 
 pub use compare::{file_needs_copy, file_needs_copy_with_checksum_type};
-pub use file_copy::{chunked_copy_file, copy_file, mmap_copy_file};
+pub use file_copy::{chunked_copy_file, copy_file, mmap_copy_file, resume_copy_file, ResumeCopyOutcome};
 pub use parallel::parallel_copy_files;
 pub use stats::CopyStats;
 #[cfg(windows)]

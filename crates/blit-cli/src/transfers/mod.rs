@@ -323,6 +323,7 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
+            resume: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -358,6 +359,7 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
+            resume: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

@@ -32,6 +32,7 @@ pub struct CopyConfig {
     pub preserve_times: bool,
     pub dry_run: bool,
     pub checksum: Option<crate::checksum::ChecksumType>,
+    pub resume: bool,
 }
 
 impl Default for CopyConfig {
@@ -41,6 +42,7 @@ impl Default for CopyConfig {
             preserve_times: true,
             dry_run: false,
             checksum: None,
+            resume: false,
         }
     }
 }
