@@ -13,13 +13,14 @@ use tokio::task::JoinHandle;
 
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
-    client_pull_message, pull_chunk, server_pull_message, ClientPullMessage,
+    client_pull_message, pull_chunk, server_pull_message, BlockHashList, ClientPullMessage,
     DataTransferNegotiation, FileData, FileHeader, ManifestComplete, PullChunk, PullRequest,
     PullSummary, PullSyncHeader,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::data_plane::{
-    DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD,
+    DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,
+    DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD,
 };
 use crate::remote::transfer::progress::RemoteTransferProgress;
 
@@ -40,6 +41,10 @@ pub struct PullSyncOptions {
     pub force: bool,
     /// Force checksum comparison (slower but more accurate).
     pub checksum: bool,
+    /// Enable block-level resume for partial/changed files.
+    pub resume: bool,
+    /// Block size for resume (0 = default 1 MiB).
+    pub block_size: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -384,6 +389,8 @@ impl RemotePullClient {
                 ignore_existing: options.ignore_existing,
                 force: options.force,
                 checksum: options.checksum,
+                resume: options.resume,
+                block_size: options.block_size,
             })),
         })
         .await
@@ -491,6 +498,78 @@ impl RemotePullClient {
                     files_to_delete = summary.entries_deleted;
                     report.summary = Some(summary);
                 }
+                Some(server_pull_message::Payload::BlockHashRequest(req)) => {
+                    // Server requests block hashes for resume mode
+                    // Compute Blake3 hashes of local file blocks and send them back
+                    let local_path = dest_root.join(sanitize_relative_path(&req.relative_path)?);
+                    let hashes = compute_block_hashes(&local_path, req.block_size as usize).await?;
+
+                    tx.send(ClientPullMessage {
+                        payload: Some(client_pull_message::Payload::BlockHashes(BlockHashList {
+                            relative_path: req.relative_path,
+                            block_size: req.block_size,
+                            hashes,
+                        })),
+                    })
+                    .await
+                    .map_err(|_| eyre!("failed to send block hashes"))?;
+                }
+                Some(server_pull_message::Payload::BlockTransfer(block)) => {
+                    // Server sends a block for resume - write at specified offset
+                    use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
+                    use std::io::SeekFrom;
+
+                    let relative_path = sanitize_relative_path(&block.relative_path)?;
+                    let dest_path = dest_root.join(&relative_path);
+
+                    // Ensure parent directory exists
+                    if let Some(parent) = dest_path.parent() {
+                        fs::create_dir_all(parent).await.ok();
+                    }
+
+                    // Open file for writing at offset (create if not exists)
+                    let mut file = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .open(&dest_path)
+                        .await
+                        .with_context(|| format!("opening {} for block write", dest_path.display()))?;
+
+                    // Seek to offset and write
+                    file.seek(SeekFrom::Start(block.offset))
+                        .await
+                        .with_context(|| format!("seeking to offset {} in {}", block.offset, dest_path.display()))?;
+
+                    file.write_all(&block.content)
+                        .await
+                        .with_context(|| format!("writing block at offset {} to {}", block.offset, dest_path.display()))?;
+
+                    report.bytes_transferred += block.content.len() as u64;
+                    if let Some(progress) = progress {
+                        progress.report_payload(0, block.content.len() as u64);
+                    }
+                }
+                Some(server_pull_message::Payload::BlockComplete(complete)) => {
+                    // Server signals file resume complete - truncate to final size if needed
+                    let relative_path = sanitize_relative_path(&complete.relative_path)?;
+                    let dest_path = dest_root.join(&relative_path);
+
+                    // Truncate file to the correct final size
+                    let file = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&dest_path)
+                        .await
+                        .with_context(|| format!("opening {} for truncation", dest_path.display()))?;
+
+                    file.set_len(complete.total_bytes)
+                        .await
+                        .with_context(|| format!("truncating {} to {} bytes", dest_path.display(), complete.total_bytes))?;
+
+                    if track_paths {
+                        report.downloaded_paths.push(relative_path);
+                    }
+                    report.files_transferred += 1;
+                }
                 None => {}
             }
         }
@@ -529,6 +608,58 @@ use std::pin::Pin;
 use std::task::Poll;
 use tokio_stream::Stream;
 use tonic::Streaming;
+
+/// Compute Blake3 block hashes for a local file.
+/// Returns a vector of 32-byte hashes, one per block.
+/// Streams the file in chunks to avoid loading the entire file into memory.
+async fn compute_block_hashes(path: &Path, block_size: usize) -> Result<Vec<Vec<u8>>> {
+    use crate::copy::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
+    use tokio::io::AsyncReadExt;
+
+    let block_size = if block_size == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        block_size
+    };
+
+    if block_size > MAX_BLOCK_SIZE {
+        bail!(
+            "server requested unsafe block size: {} (max: {})",
+            block_size,
+            MAX_BLOCK_SIZE
+        );
+    }
+
+    if !path.exists() {
+        // File doesn't exist locally, return empty hashes
+        return Ok(Vec::new());
+    }
+
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("getting metadata for {}", path.display()))?;
+
+    let file_size = metadata.len() as usize;
+    let num_blocks = (file_size + block_size - 1) / block_size;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("opening {} for block hashes", path.display()))?;
+
+    let mut hashes = Vec::with_capacity(num_blocks);
+    let mut buffer = vec![0u8; block_size];
+
+    loop {
+        let bytes_read = file.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        let hash = blake3::hash(&buffer[..bytes_read]);
+        hashes.push(hash.as_bytes().to_vec());
+    }
+
+    Ok(hashes)
+}
 
 struct RemoteFileStream {
     stream: Streaming<PullChunk>,
@@ -719,6 +850,12 @@ async fn receive_data_plane_stream_inner(
                 handle_tar_shard_record(&mut stream, dest_root, track_paths, progress, stats)
                     .await?;
             }
+            DATA_PLANE_RECORD_BLOCK => {
+                handle_block_record(&mut stream, dest_root, progress, stats).await?;
+            }
+            DATA_PLANE_RECORD_BLOCK_COMPLETE => {
+                handle_block_complete_record(&mut stream, dest_root, track_paths, stats).await?;
+            }
             DATA_PLANE_RECORD_END => break,
             other => bail!("unknown pull data-plane record: {}", other),
         }
@@ -826,6 +963,94 @@ async fn handle_tar_shard_record(
     if let Some(progress) = progress {
         progress.report_payload(files.len(), 0);
     }
+
+    Ok(())
+}
+
+/// Handle a block record: write block content at specified offset.
+/// Format: [path_len:4][path][offset:8][block_len:4][content]
+async fn handle_block_record(
+    stream: &mut TcpStream,
+    dest_root: &Path,
+    progress: Option<&RemotePullProgress>,
+    stats: &mut PullWorkerStats,
+) -> Result<()> {
+    use std::io::SeekFrom;
+    use tokio::io::AsyncSeekExt;
+
+    let rel_string = read_string(stream).await?;
+    let relative_path = sanitize_relative_path(&rel_string)?;
+    let offset = read_u64(stream).await?;
+    let block_len = read_u32(stream).await? as usize;
+
+    let dest_path = dest_root.join(&relative_path);
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+
+    // Read block content
+    let mut buffer = vec![0u8; block_len];
+    stream
+        .read_exact(&mut buffer)
+        .await
+        .context("reading block content")?;
+
+    // Open file for writing at offset (create if not exists)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(&dest_path)
+        .await
+        .with_context(|| format!("opening {} for block write", dest_path.display()))?;
+
+    // Seek and write
+    file.seek(SeekFrom::Start(offset))
+        .await
+        .with_context(|| format!("seeking to offset {} in {}", offset, dest_path.display()))?;
+    file.write_all(&buffer)
+        .await
+        .with_context(|| format!("writing block at offset {} to {}", offset, dest_path.display()))?;
+
+    stats.bytes_transferred = stats.bytes_transferred.saturating_add(block_len as u64);
+    stats.bytes = stats.bytes.saturating_add(block_len as u64);
+    if let Some(progress) = progress {
+        progress.report_payload(0, block_len as u64);
+    }
+
+    Ok(())
+}
+
+/// Handle block complete record: truncate file to final size.
+/// Format: [path_len:4][path][total_size:8]
+async fn handle_block_complete_record(
+    stream: &mut TcpStream,
+    dest_root: &Path,
+    track_paths: bool,
+    stats: &mut PullWorkerStats,
+) -> Result<()> {
+    let rel_string = read_string(stream).await?;
+    let relative_path = sanitize_relative_path(&rel_string)?;
+    let total_size = read_u64(stream).await?;
+
+    let dest_path = dest_root.join(&relative_path);
+
+    // Truncate file to final size
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&dest_path)
+        .await
+        .with_context(|| format!("opening {} for truncation", dest_path.display()))?;
+
+    file.set_len(total_size)
+        .await
+        .with_context(|| format!("truncating {} to {} bytes", dest_path.display(), total_size))?;
+
+    if track_paths {
+        stats.downloaded_paths.push(relative_path);
+    }
+    stats.files_transferred = stats.files_transferred.saturating_add(1);
 
     Ok(())
 }

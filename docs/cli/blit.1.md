@@ -49,6 +49,11 @@ Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server
 - `--checksum`  
   Force checksum validation for changed files (metadata comparison is the default).
 
+- `--resume`  
+  Enable block-level resumption for interrupted transfers. Compares source and
+  destination files block-by-block (hashing) and transfers only the changed parts.
+  Useful for resuming large file transfers or updating files with small changes.
+
 - `--verbose`  
   Emit planner heartbeat messages and fast-path decisions to stderr.
 

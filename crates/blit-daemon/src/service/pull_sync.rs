@@ -50,7 +50,9 @@ pub(crate) async fn handle_pull_sync_stream(
     let mirror_mode = header.mirror_mode;
     let client_wants_checksum = header.checksum;
     let resume_mode = header.resume;
-    let block_size = header.block_size;
+    // Clamp block size to safe limit to prevent server OOM
+    use blit_core::copy::MAX_BLOCK_SIZE;
+    let block_size = header.block_size.min(MAX_BLOCK_SIZE as u32);
 
     // Acknowledge header with server capabilities
     send_pull_sync_ack(&tx, server_checksums_enabled).await?;
@@ -434,7 +436,6 @@ async fn stream_via_data_plane_resume(
     use blit_core::buffer::BufferPool;
     use blit_core::copy::DEFAULT_BLOCK_SIZE;
     use blit_core::remote::transfer::data_plane::DataPlaneSession;
-    use std::collections::HashMap;
     use tokio::io::AsyncReadExt;
 
     let block_size = if block_size_param == 0 { DEFAULT_BLOCK_SIZE } else { block_size_param as usize };
