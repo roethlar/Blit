@@ -1,12 +1,12 @@
 use eyre::{Context, Result};
 #[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
 use std::fs::File;
 use std::path::Path;
 
 #[cfg(unix)]
 pub fn mmap_copy_file(src: &Path, dst: &Path) -> Result<u64> {
-    use std::os::unix::io::AsRawFd;
-
     let src_file = File::open(src)?;
     let file_size = src_file.metadata()?.len();
 
@@ -19,6 +19,7 @@ pub fn mmap_copy_file(src: &Path, dst: &Path) -> Result<u64> {
 
     #[cfg(target_os = "linux")]
     {
+        use std::os::unix::io::AsRawFd;
         let src_fd = src_file.as_raw_fd();
         let dst_fd = dst_file.as_raw_fd();
 

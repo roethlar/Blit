@@ -12,6 +12,10 @@ use crate::buffer::BufferSizer;
 use crate::logger::Logger;
 use eyre::{eyre, Result};
 use std::fs;
+#[cfg(not(windows))]
+use std::fs::File;
+#[cfg(unix)]
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::Path;
 
 #[cfg(windows)]

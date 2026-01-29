@@ -1,4 +1,6 @@
 use crate::config::config_dir;
+#[cfg(not(windows))]
+use eyre::Context;
 use eyre::{eyre, Result};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
