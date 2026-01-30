@@ -14,6 +14,12 @@ pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
     match RemoteEndpoint::parse(input) {
         Ok(endpoint) => Ok(Endpoint::Remote(endpoint)),
         Err(err) => {
+            // Check if this is the "use forward slashes" error - propagate it
+            let err_msg = err.to_string();
+            if err_msg.contains("forward slashes") {
+                return Err(err);
+            }
+            // Check for remote-like patterns that failed parsing
             if input.contains("://") || input.contains(":/") {
                 Err(err)
             } else {

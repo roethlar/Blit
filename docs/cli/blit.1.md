@@ -31,6 +31,9 @@ Any `<SOURCE>` or `<DESTINATION>` may be a local path or a remote endpoint:
 - `server://path` (default root export, if configured)
 - `server` (implies default root)
 
+**Note:** Remote paths must use forward slashes (`/`), not backslashes (`\`), regardless of platform.
+Incorrect: `server:\module\path` — Correct: `server:/module/path`
+
 Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server2:/mod/B`).
 
 ### Admin Commands

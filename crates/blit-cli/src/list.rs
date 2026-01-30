@@ -9,7 +9,12 @@ use std::path::{Path, PathBuf};
 pub async fn run_list(args: &ListArgs) -> Result<()> {
     let endpoint = match parse_transfer_endpoint(&args.target) {
         Ok(endpoint) => endpoint,
-        Err(_) => {
+        Err(err) => {
+            // Propagate helpful error messages (like "use forward slashes")
+            let err_msg = err.to_string();
+            if err_msg.contains("forward slashes") {
+                return Err(err);
+            }
             // Treat as local path fallback
             let path = PathBuf::from(&args.target);
             if !path.exists() {

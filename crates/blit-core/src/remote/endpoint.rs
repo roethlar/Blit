@@ -30,8 +30,18 @@ impl RemoteEndpoint {
             bail!("remote location cannot be empty");
         }
 
-        if looks_like_local_path(trimmed) {
-            bail!("input appears to be a local path");
+        match check_local_path(trimmed) {
+            LocalPathCheck::IsLocal => {
+                bail!("input appears to be a local path");
+            }
+            LocalPathCheck::RemoteWithBackslashes => {
+                bail!(
+                    "remote paths must use forward slashes, not backslashes.\n\
+                     Example: server:/module/path or server://path\n\
+                     Got: {}", trimmed
+                );
+            }
+            LocalPathCheck::NotLocal => {}
         }
 
         if let Some(idx) = trimmed.find("://") {
@@ -189,41 +199,69 @@ fn display_host(host: &str) -> String {
     }
 }
 
-fn looks_like_local_path(input: &str) -> bool {
+/// Result of checking if input looks like a local path
+enum LocalPathCheck {
+    /// Definitely a local path
+    IsLocal,
+    /// Looks like a remote path with backslashes - user error
+    RemoteWithBackslashes,
+    /// Not a local path
+    NotLocal,
+}
+
+fn check_local_path(input: &str) -> LocalPathCheck {
     if input.is_empty() {
-        return false;
+        return LocalPathCheck::NotLocal;
     }
 
     let first = input.chars().next().unwrap();
     if matches!(first, '.' | '/' | '\\' | '~') {
-        return true;
+        return LocalPathCheck::IsLocal;
     }
 
+    // UNC paths: \\server\share or //server/share
     if input.starts_with("//") || input.starts_with("\\\\") {
-        return true;
+        return LocalPathCheck::IsLocal;
     }
 
-    if input.contains('\\') {
-        return true;
-    }
-
-    if input.contains('/') && !input.contains(":/") && !input.contains("://") {
-        return true;
-    }
-
+    // Windows drive letter: C:\path or C:/path - check BEFORE backslash handling
     if input.len() >= 3 {
         let mut chars = input.chars();
         let drive = chars.next().unwrap();
         if drive.is_ascii_alphabetic() {
             if let Some(':') = chars.next() {
                 if matches!(chars.next(), Some('\\') | Some('/')) {
-                    return true;
+                    return LocalPathCheck::IsLocal;
                 }
             }
         }
     }
 
-    false
+    // Check for backslashes - but distinguish between local paths and
+    // remote paths where user mistakenly used backslashes
+    if input.contains('\\') {
+        // Pattern like "host:\path" or "host:\\path" suggests user meant remote
+        if let Some(colon_idx) = input.find(':') {
+            let before_colon = &input[..colon_idx];
+            let after_colon = &input[colon_idx + 1..];
+            // If before colon looks like a hostname (no slashes/backslashes)
+            // and after colon starts with backslash, user probably meant remote
+            // But NOT if before_colon is a single letter (Windows drive)
+            if before_colon.len() > 1
+               && !before_colon.contains('/') && !before_colon.contains('\\')
+               && (after_colon.starts_with('\\') || after_colon.starts_with('/'))
+            {
+                return LocalPathCheck::RemoteWithBackslashes;
+            }
+        }
+        return LocalPathCheck::IsLocal;
+    }
+
+    if input.contains('/') && !input.contains(":/") && !input.contains("://") {
+        return LocalPathCheck::IsLocal;
+    }
+
+    LocalPathCheck::NotLocal
 }
 
 #[cfg(test)]
@@ -306,5 +344,29 @@ mod tests {
     #[test]
     fn errors_on_missing_module_slash() {
         assert!(RemoteEndpoint::parse("example.com:/module").is_err());
+    }
+
+    #[test]
+    fn errors_on_backslash_with_helpful_message() {
+        let result = RemoteEndpoint::parse(r"server:\module\path");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("forward slashes"),
+            "error should mention forward slashes, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn errors_on_double_backslash_with_helpful_message() {
+        let result = RemoteEndpoint::parse(r"server:\\");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("forward slashes"),
+            "error should mention forward slashes, got: {}",
+            err
+        );
     }
 }
