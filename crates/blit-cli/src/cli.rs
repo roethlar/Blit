@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "blit")]
 #[command(about = "A fast, AI-built file transfer tool (v2)")]
+#[command(after_help = "Run '<command> --help' for detailed options on each command.")]
 pub struct Cli {
     /// Override the configuration directory for this invocation
     #[arg(long, global = true, value_name = "PATH")]
