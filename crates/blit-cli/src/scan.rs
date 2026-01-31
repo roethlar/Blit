@@ -17,16 +17,21 @@ pub async fn run_scan(args: &ScanArgs) -> Result<()> {
     println!("Discovered {} daemon(s):", services.len());
     for service in &services {
         println!("- {}", service.instance_name);
-        println!("  Host: {}:{}", service.hostname, service.port);
-        if !service.addresses.is_empty() {
-            let addr_list = service
-                .addresses
-                .iter()
-                .map(|addr| addr.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("  Addresses: {}", addr_list);
-        }
+
+        // Build a usable endpoint URL, preferring IP address over hostname
+        let host = if let Some(addr) = service.addresses.first() {
+            addr.to_string()
+        } else {
+            // Strip trailing dot from FQDN if present
+            service.hostname.trim_end_matches('.').to_string()
+        };
+        let endpoint = if service.port == 9031 {
+            format!("{}://", host)
+        } else {
+            format!("{}:{}://", host, service.port)
+        };
+        println!("  Endpoint: {}", endpoint);
+
         if let Some(version) = service.properties.get("version") {
             println!("  Version: {}", version);
         }

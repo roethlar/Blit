@@ -1,4 +1,6 @@
-use eyre::{Result, WrapErr};
+use eyre::Result;
+#[cfg(all(unix, not(target_os = "macos")))]
+use eyre::WrapErr;
 #[cfg(not(target_os = "macos"))]
 use std::fs::File;
 #[cfg(target_os = "macos")]
