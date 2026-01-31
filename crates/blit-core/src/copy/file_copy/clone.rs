@@ -1,5 +1,5 @@
-use eyre::Result;
-#[cfg(windows)]
+use eyre::{Result, WrapErr};
+#[cfg(not(target_os = "macos"))]
 use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::path::Path;
