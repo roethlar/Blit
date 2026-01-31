@@ -339,8 +339,8 @@ async fn stream_via_data_plane(
     let token = generate_token();
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
-    // Calculate stream count based on bytes
-    let stream_count = pull_stream_count(total_bytes, tuning.max_streams as usize);
+    // Single stream for now - multi-stream pull requires accepting multiple connections
+    let stream_count = 1u32;
 
     // Send negotiation
     tx.send(Ok(ServerPullMessage {
@@ -412,12 +412,6 @@ async fn stream_via_data_plane(
         bytes_transferred: total_bytes,
         bytes_zero_copy: 0,
     })
-}
-
-fn pull_stream_count(bytes: u64, max_streams: usize) -> u32 {
-    const BYTES_PER_STREAM: u64 = 256 * 1024 * 1024; // 256 MiB per stream
-    let ideal = ((bytes / BYTES_PER_STREAM) + 1) as usize;
-    ideal.min(max_streams).max(1) as u32
 }
 
 /// Stream files using block-level resume via data plane (primary path).
