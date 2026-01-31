@@ -125,7 +125,8 @@ async fn local_worker_loop(
                             eprintln!("[w{idx}] retrying ({}/{}): {err}", attempts, max_retries);
                         }
                         // Brief delay before retry to avoid hammering on transient errors
-                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts as u64)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts as u64))
+                            .await;
                         continue;
                     }
 

@@ -1,8 +1,8 @@
 use eyre::{bail, Context, Result};
 use futures::StreamExt;
+use socket2::Socket;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use socket2::Socket;
 
 use crate::buffer::BufferPool;
 use crate::generated::FileHeader;
@@ -77,7 +77,9 @@ impl DataPlaneSession {
 
         let std_stream = stream.into_std().context("converting to std stream")?;
         let socket = Socket::from(std_stream);
-        socket.set_tcp_nodelay(true).context("setting TCP_NODELAY")?;
+        socket
+            .set_tcp_nodelay(true)
+            .context("setting TCP_NODELAY")?;
 
         if let Some(size) = tcp_buffer_size {
             let _ = socket.set_send_buffer_size(size);
@@ -85,7 +87,8 @@ impl DataPlaneSession {
         }
 
         let std_stream: std::net::TcpStream = socket.into();
-        let mut stream = TcpStream::from_std(std_stream).context("converting back to tokio stream")?;
+        let mut stream =
+            TcpStream::from_std(std_stream).context("converting back to tokio stream")?;
 
         stream
             .write_all(token)
@@ -100,8 +103,17 @@ impl DataPlaneSession {
         source: Arc<dyn TransferSource>,
         payloads: Vec<TransferPayload>,
     ) -> Result<()> {
-        let mut stream =
-            prepared_payload_stream(payloads, source.clone(), self.payload_prefetch);
+        self.send_payloads_with_progress(source, payloads, None)
+            .await
+    }
+
+    pub async fn send_payloads_with_progress(
+        &mut self,
+        source: Arc<dyn TransferSource>,
+        payloads: Vec<TransferPayload>,
+        progress: Option<&super::progress::RemoteTransferProgress>,
+    ) -> Result<()> {
+        let mut stream = prepared_payload_stream(payloads, source.clone(), self.payload_prefetch);
         while let Some(prepared) = stream.next().await {
             match prepared? {
                 PreparedPayload::File(header) => {
@@ -109,13 +121,22 @@ impl DataPlaneSession {
                         return Err(err.wrap_err(format!("sending {}", header.relative_path)));
                     }
                     self.bytes_sent = self.bytes_sent.saturating_add(header.size);
+                    if let Some(progress) = progress {
+                        progress.report_file_complete(header.relative_path.clone(), header.size);
+                    }
                 }
                 PreparedPayload::TarShard { headers, data } => {
                     let shard_bytes: u64 = headers.iter().map(|h| h.size).sum();
-                    if let Err(err) = self.send_prepared_tar_shard(headers, &data).await {
+                    if let Err(err) = self.send_prepared_tar_shard(headers.clone(), &data).await {
                         return Err(err.wrap_err("sending tar shard"));
                     }
                     self.bytes_sent = self.bytes_sent.saturating_add(shard_bytes);
+                    if let Some(progress) = progress {
+                        for header in &headers {
+                            progress
+                                .report_file_complete(header.relative_path.clone(), header.size);
+                        }
+                    }
                 }
             }
         }
@@ -138,7 +159,11 @@ impl DataPlaneSession {
         self.bytes_sent
     }
 
-    async fn send_file(&mut self, source: Arc<dyn TransferSource>, header: &FileHeader) -> Result<()> {
+    async fn send_file(
+        &mut self,
+        source: Arc<dyn TransferSource>,
+        header: &FileHeader,
+    ) -> Result<()> {
         let rel = &header.relative_path;
         trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
 
@@ -171,7 +196,8 @@ impl DataPlaneSession {
             .with_context(|| format!("opening {}", rel))?;
 
         // Double-buffered I/O: overlaps disk reads with network writes
-        self.send_file_double_buffered(&mut file, header, rel).await?;
+        self.send_file_double_buffered(&mut file, header, rel)
+            .await?;
 
         trace_client!(self, "file '{}' sent ({} bytes)", rel, header.size);
 
@@ -329,13 +355,24 @@ impl DataPlaneSession {
 
     /// Send a single block for block-level resume.
     /// Format: [type:1][path_len:4][path][offset:8][block_len:4][content]
-    pub async fn send_block(&mut self, relative_path: &str, offset: u64, content: &[u8]) -> Result<()> {
+    pub async fn send_block(
+        &mut self,
+        relative_path: &str,
+        offset: u64,
+        content: &[u8],
+    ) -> Result<()> {
         let path_bytes = relative_path.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
             bail!("relative path too long for transfer: {}", relative_path);
         }
 
-        trace_client!(self, "sending block for '{}' at offset {} ({} bytes)", relative_path, offset, content.len());
+        trace_client!(
+            self,
+            "sending block for '{}' at offset {} ({} bytes)",
+            relative_path,
+            offset,
+            content.len()
+        );
 
         self.stream
             .write_all(&[DATA_PLANE_RECORD_BLOCK])
@@ -368,13 +405,22 @@ impl DataPlaneSession {
 
     /// Signal that block-level transfer for a file is complete.
     /// Format: [type:1][path_len:4][path][total_size:8]
-    pub async fn send_block_complete(&mut self, relative_path: &str, total_size: u64) -> Result<()> {
+    pub async fn send_block_complete(
+        &mut self,
+        relative_path: &str,
+        total_size: u64,
+    ) -> Result<()> {
         let path_bytes = relative_path.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
             bail!("relative path too long for transfer: {}", relative_path);
         }
 
-        trace_client!(self, "sending block complete for '{}' ({} bytes total)", relative_path, total_size);
+        trace_client!(
+            self,
+            "sending block complete for '{}' ({} bytes total)",
+            relative_path,
+            total_size
+        );
 
         self.stream
             .write_all(&[DATA_PLANE_RECORD_BLOCK_COMPLETE])

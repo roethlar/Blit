@@ -21,6 +21,7 @@ use super::endpoints::{format_remote_endpoint, Endpoint};
 
 fn spawn_progress_monitor(
     enabled: bool,
+    verbose: bool,
 ) -> (Option<RemoteTransferProgress>, Option<JoinHandle<()>>) {
     if !enabled {
         return (None, None);
@@ -54,6 +55,14 @@ fn spawn_progress_monitor(
                             if bytes > 0 {
                                 total_bytes = total_bytes.saturating_add(bytes);
                                 started = true;
+                            }
+                        }
+                        Some(ProgressEvent::FileComplete { path, bytes }) => {
+                            total_files = total_files.saturating_add(1);
+                            total_bytes = total_bytes.saturating_add(bytes);
+                            started = true;
+                            if verbose {
+                                println!("{}", path);
                             }
                         }
                         None => break,
@@ -116,7 +125,7 @@ pub async fn run_remote_push_transfer(
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
     let show_progress = args.progress || args.verbose;
-    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
+    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress, args.verbose);
 
     let filter = FileFilter::default();
     let transfer_source: Arc<dyn TransferSource> = match source {
@@ -180,7 +189,7 @@ pub async fn run_remote_pull_transfer(
     let local_manifest = enumerate_local_manifest(dest_root, args.checksum).await?;
 
     let show_progress = args.progress || args.verbose;
-    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress);
+    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress, args.verbose);
 
     // Build comparison options from CLI args
     let pull_opts = PullSyncOptions {

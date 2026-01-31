@@ -94,7 +94,12 @@ pub fn compare_manifests(
     // Build lookup from target manifest: path -> (size, mtime, checksum)
     let target_map: HashMap<&str, (u64, i64, &[u8])> = target
         .iter()
-        .map(|h| (h.relative_path.as_str(), (h.size, h.mtime_seconds, h.checksum.as_slice())))
+        .map(|h| {
+            (
+                h.relative_path.as_str(),
+                (h.size, h.mtime_seconds, h.checksum.as_slice()),
+            )
+        })
         .collect();
 
     // Compare each source file against target
@@ -107,7 +112,13 @@ pub fn compare_manifests(
                     // Skip all existing files regardless of differences
                     FileStatus::SkippedExisting
                 } else {
-                    compare_file(src, target_size, target_mtime, target_checksum, options.mode)
+                    compare_file(
+                        src,
+                        target_size,
+                        target_mtime,
+                        target_checksum,
+                        options.mode,
+                    )
                 }
             }
         };
@@ -241,16 +252,16 @@ mod tests {
 
     #[test]
     fn test_all_new_files() {
-        let source = vec![
-            header("a.txt", 100, 1000),
-            header("b.txt", 200, 1000),
-        ];
+        let source = vec![header("a.txt", 100, 1000), header("b.txt", 200, 1000)];
         let target = vec![];
 
         let diff = compare_manifests(&source, &target, &default_opts());
         assert_eq!(diff.files_to_transfer.len(), 2);
         assert_eq!(diff.bytes_to_transfer, 300);
-        assert!(diff.files_to_transfer.iter().all(|f| f.status == FileStatus::New));
+        assert!(diff
+            .files_to_transfer
+            .iter()
+            .all(|f| f.status == FileStatus::New));
     }
 
     #[test]
@@ -358,10 +369,7 @@ mod tests {
     #[test]
     fn test_deletions_for_mirror() {
         let source = vec![header("a.txt", 100, 1000)];
-        let target = vec![
-            header("a.txt", 100, 1000),
-            header("b.txt", 200, 1000),
-        ];
+        let target = vec![header("a.txt", 100, 1000), header("b.txt", 200, 1000)];
 
         let diff = compare_manifests(&source, &target, &opts_with_deletions());
         assert!(diff.files_to_transfer.is_empty());
@@ -384,8 +392,8 @@ mod tests {
 
         let diff = compare_manifests(&source, &target, &opts_with_deletions());
         assert_eq!(diff.files_to_transfer.len(), 2); // modified + new
-        assert_eq!(diff.files_to_delete.len(), 1);   // deleted
-        assert_eq!(diff.bytes_to_transfer, 500);     // 200 + 300
+        assert_eq!(diff.files_to_delete.len(), 1); // deleted
+        assert_eq!(diff.bytes_to_transfer, 500); // 200 + 300
     }
 
     fn header_with_checksum(path: &str, size: u64, mtime: i64, checksum: Vec<u8>) -> FileHeader {

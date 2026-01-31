@@ -4,6 +4,7 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum ProgressEvent {
     ManifestBatch { files: usize },
     Payload { files: usize, bytes: u64 },
+    FileComplete { path: String, bytes: u64 },
 }
 
 #[derive(Clone)]
@@ -22,5 +23,11 @@ impl RemoteTransferProgress {
 
     pub fn report_payload(&self, files: usize, bytes: u64) {
         let _ = self.sender.send(ProgressEvent::Payload { files, bytes });
+    }
+
+    pub fn report_file_complete(&self, path: String, bytes: u64) {
+        let _ = self
+            .sender
+            .send(ProgressEvent::FileComplete { path, bytes });
     }
 }

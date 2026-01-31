@@ -26,10 +26,7 @@ pub trait TransferSource: Send + Sync {
     );
 
     /// Prepares a payload for transfer (e.g. opens a file or builds a tar shard).
-    async fn prepare_payload(
-        &self,
-        payload: TransferPayload,
-    ) -> Result<PreparedPayload>;
+    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload>;
 
     /// Checks if the files in the headers are available for transfer.
     /// Returns a list of available headers.
@@ -77,10 +74,7 @@ impl TransferSource for FsTransferSource {
         )
     }
 
-    async fn prepare_payload(
-        &self,
-        payload: TransferPayload,
-    ) -> Result<PreparedPayload> {
+    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
         use crate::remote::transfer::payload::prepare_payload;
         prepare_payload(payload, self.root.clone()).await
     }
@@ -152,10 +146,7 @@ impl TransferSource for RemoteTransferSource {
         (rx, handle)
     }
 
-    async fn prepare_payload(
-        &self,
-        payload: TransferPayload,
-    ) -> Result<PreparedPayload> {
+    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
         match payload {
             TransferPayload::File(header) => Ok(PreparedPayload::File(header)),
             TransferPayload::TarShard { headers } => {
@@ -164,17 +155,20 @@ impl TransferSource for RemoteTransferSource {
                     // Read file into memory to append to tar builder.
                     // TODO: Use tokio-tar to avoid double-buffering (file vec + tar vec).
                     // For now, this is acceptable as prepare_payload is only used for small files (tar shards).
-                    let mut stream = self.client.open_remote_file(Path::new(&header.relative_path)).await?;
+                    let mut stream = self
+                        .client
+                        .open_remote_file(Path::new(&header.relative_path))
+                        .await?;
                     let mut data = Vec::with_capacity(header.size as usize);
                     stream.read_to_end(&mut data).await?;
-                    
+
                     let mut tar_header = tar::Header::new_gnu();
                     tar_header.set_path(&header.relative_path)?;
                     tar_header.set_size(header.size);
                     tar_header.set_mode(header.permissions);
                     tar_header.set_mtime(header.mtime_seconds as u64);
                     tar_header.set_cksum();
-                    
+
                     builder.append_data(&mut tar_header, &header.relative_path, &data[..])?;
                 }
                 let data = builder.into_inner()?;
@@ -196,7 +190,10 @@ impl TransferSource for RemoteTransferSource {
         &self,
         header: &FileHeader,
     ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-        let stream = self.client.open_remote_file(Path::new(&header.relative_path)).await?;
+        let stream = self
+            .client
+            .open_remote_file(Path::new(&header.relative_path))
+            .await?;
         Ok(Box::new(stream))
     }
 

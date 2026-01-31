@@ -271,10 +271,7 @@ impl RemotePullClient {
             .await
         }))
     }
-    pub async fn scan_remote_files(
-        &mut self,
-        path: &Path,
-    ) -> Result<Vec<FileHeader>> {
+    pub async fn scan_remote_files(&mut self, path: &Path) -> Result<Vec<FileHeader>> {
         let (module, rel_path) = match &self.endpoint.path {
             RemotePath::Module { module, rel_path } => (module.clone(), rel_path.join(path)),
             RemotePath::Root { rel_path } => (String::new(), rel_path.join(path)),
@@ -407,7 +404,9 @@ impl RemotePullClient {
 
         // Send manifest done signal
         tx.send(ClientPullMessage {
-            payload: Some(client_pull_message::Payload::ManifestDone(ManifestComplete {})),
+            payload: Some(client_pull_message::Payload::ManifestDone(
+                ManifestComplete {},
+            )),
         })
         .await
         .map_err(|_| eyre!("failed to send manifest done"))?;
@@ -516,8 +515,8 @@ impl RemotePullClient {
                 }
                 Some(server_pull_message::Payload::BlockTransfer(block)) => {
                     // Server sends a block for resume - write at specified offset
-                    use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
                     use std::io::SeekFrom;
+                    use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
 
                     let relative_path = sanitize_relative_path(&block.relative_path)?;
                     let dest_path = dest_root.join(&relative_path);
@@ -533,16 +532,28 @@ impl RemotePullClient {
                         .create(true)
                         .open(&dest_path)
                         .await
-                        .with_context(|| format!("opening {} for block write", dest_path.display()))?;
+                        .with_context(|| {
+                            format!("opening {} for block write", dest_path.display())
+                        })?;
 
                     // Seek to offset and write
                     file.seek(SeekFrom::Start(block.offset))
                         .await
-                        .with_context(|| format!("seeking to offset {} in {}", block.offset, dest_path.display()))?;
+                        .with_context(|| {
+                            format!(
+                                "seeking to offset {} in {}",
+                                block.offset,
+                                dest_path.display()
+                            )
+                        })?;
 
-                    file.write_all(&block.content)
-                        .await
-                        .with_context(|| format!("writing block at offset {} to {}", block.offset, dest_path.display()))?;
+                    file.write_all(&block.content).await.with_context(|| {
+                        format!(
+                            "writing block at offset {} to {}",
+                            block.offset,
+                            dest_path.display()
+                        )
+                    })?;
 
                     report.bytes_transferred += block.content.len() as u64;
                     if let Some(progress) = progress {
@@ -559,11 +570,17 @@ impl RemotePullClient {
                         .write(true)
                         .open(&dest_path)
                         .await
-                        .with_context(|| format!("opening {} for truncation", dest_path.display()))?;
+                        .with_context(|| {
+                            format!("opening {} for truncation", dest_path.display())
+                        })?;
 
-                    file.set_len(complete.total_bytes)
-                        .await
-                        .with_context(|| format!("truncating {} to {} bytes", dest_path.display(), complete.total_bytes))?;
+                    file.set_len(complete.total_bytes).await.with_context(|| {
+                        format!(
+                            "truncating {} to {} bytes",
+                            dest_path.display(),
+                            complete.total_bytes
+                        )
+                    })?;
 
                     if track_paths {
                         report.downloaded_paths.push(relative_path);
@@ -706,7 +723,7 @@ impl tokio::io::AsyncRead for RemoteFileStream {
                     _ => {
                         // Ignore other messages or treat as EOF?
                         // Treat as EOF for now if we don't get FileData
-                         Poll::Ready(Ok(()))
+                        Poll::Ready(Ok(()))
                     }
                 }
             }
@@ -724,10 +741,11 @@ async fn finalize_active_file(
     active: &mut Option<(File, PathBuf)>,
     progress: Option<&RemotePullProgress>,
 ) -> Result<()> {
-    if let Some((file, _)) = active.take() {
+    if let Some((file, path)) = active.take() {
         file.sync_all().await?;
         if let Some(progress) = progress {
-            progress.report_payload(1, 0);
+            // Bytes already counted by FileData chunks, just report file completion
+            progress.report_file_complete(path.to_string_lossy().into_owned(), 0);
         }
     }
     Ok(())
@@ -914,11 +932,11 @@ async fn handle_file_record(
     stats.files_transferred = stats.files_transferred.saturating_add(1);
     stats.bytes_transferred = stats.bytes_transferred.saturating_add(file_size);
     stats.bytes = stats.bytes.saturating_add(file_size);
+    if let Some(progress) = progress {
+        progress.report_file_complete(relative_path.to_string_lossy().into_owned(), file_size);
+    }
     if track_paths {
         stats.downloaded_paths.push(relative_path);
-    }
-    if let Some(progress) = progress {
-        progress.report_payload(1, 0);
     }
     Ok(())
 }
@@ -961,7 +979,9 @@ async fn handle_tar_shard_record(
     stats.bytes_transferred = stats.bytes_transferred.saturating_add(shard_bytes);
     stats.bytes = stats.bytes.saturating_add(shard_bytes);
     if let Some(progress) = progress {
-        progress.report_payload(files.len(), 0);
+        for (path, size) in &files {
+            progress.report_file_complete(path.to_string_lossy().into_owned(), *size);
+        }
     }
 
     Ok(())
@@ -1009,9 +1029,13 @@ async fn handle_block_record(
     file.seek(SeekFrom::Start(offset))
         .await
         .with_context(|| format!("seeking to offset {} in {}", offset, dest_path.display()))?;
-    file.write_all(&buffer)
-        .await
-        .with_context(|| format!("writing block at offset {} to {}", offset, dest_path.display()))?;
+    file.write_all(&buffer).await.with_context(|| {
+        format!(
+            "writing block at offset {} to {}",
+            offset,
+            dest_path.display()
+        )
+    })?;
 
     stats.bytes_transferred = stats.bytes_transferred.saturating_add(block_len as u64);
     stats.bytes = stats.bytes.saturating_add(block_len as u64);

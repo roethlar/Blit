@@ -38,7 +38,8 @@ impl RemoteEndpoint {
                 bail!(
                     "remote paths must use forward slashes, not backslashes.\n\
                      Example: server:/module/path or server://path\n\
-                     Got: {}", trimmed
+                     Got: {}",
+                    trimmed
                 );
             }
             LocalPathCheck::NotLocal => {}
@@ -248,8 +249,9 @@ fn check_local_path(input: &str) -> LocalPathCheck {
             // and after colon starts with backslash, user probably meant remote
             // But NOT if before_colon is a single letter (Windows drive)
             if before_colon.len() > 1
-               && !before_colon.contains('/') && !before_colon.contains('\\')
-               && (after_colon.starts_with('\\') || after_colon.starts_with('/'))
+                && !before_colon.contains('/')
+                && !before_colon.contains('\\')
+                && (after_colon.starts_with('\\') || after_colon.starts_with('/'))
             {
                 return LocalPathCheck::RemoteWithBackslashes;
             }

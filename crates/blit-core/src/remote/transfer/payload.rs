@@ -181,8 +181,7 @@ pub async fn transfer_payloads_via_control_plane(
 ) -> Result<()> {
     let chunk_size = chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE);
     let mut buffer = vec![0u8; chunk_size];
-    let mut prepared_stream =
-        prepared_payload_stream(payloads, source.clone(), payload_prefetch);
+    let mut prepared_stream = prepared_payload_stream(payloads, source.clone(), payload_prefetch);
 
     while let Some(prepared) = prepared_stream.next().await {
         match prepared? {
@@ -191,7 +190,7 @@ pub async fn transfer_payloads_via_control_plane(
 
                 if header.size == 0 {
                     if let Some(progress) = progress {
-                        progress.report_payload(1, 0);
+                        progress.report_file_complete(header.relative_path.clone(), 0);
                     }
                     continue;
                 }
@@ -229,7 +228,7 @@ pub async fn transfer_payloads_via_control_plane(
                     remaining -= chunk as u64;
                 }
                 if let Some(progress) = progress {
-                    progress.report_payload(1, 0);
+                    progress.report_file_complete(header.relative_path.clone(), header.size);
                 }
             }
             PreparedPayload::TarShard { headers, data } => {
@@ -257,7 +256,9 @@ pub async fn transfer_payloads_via_control_plane(
 
                 send_payload(tx, ClientPayload::TarShardComplete(TarShardComplete {})).await?;
                 if let Some(progress) = progress {
-                    progress.report_payload(headers.len(), 0);
+                    for header in &headers {
+                        progress.report_file_complete(header.relative_path.clone(), header.size);
+                    }
                 }
             }
         }

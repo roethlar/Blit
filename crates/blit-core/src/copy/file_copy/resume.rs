@@ -49,11 +49,7 @@ fn hash_block(data: &[u8]) -> blake3::Hash {
 /// - Resuming interrupted transfers (partial files)
 /// - Updating files with localized changes
 /// - Verifying and fixing corrupted copies
-pub fn resume_copy_file(
-    src: &Path,
-    dst: &Path,
-    block_size: usize,
-) -> Result<ResumeCopyOutcome> {
+pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<ResumeCopyOutcome> {
     let src_meta = std::fs::metadata(src)
         .with_context(|| format!("reading source metadata: {}", src.display()))?;
     let src_len = src_meta.len();
@@ -67,8 +63,8 @@ pub fn resume_copy_file(
             .with_context(|| format!("creating parent directory: {}", parent.display()))?;
     }
 
-    let mut src_file = File::open(src)
-        .with_context(|| format!("opening source: {}", src.display()))?;
+    let mut src_file =
+        File::open(src).with_context(|| format!("opening source: {}", src.display()))?;
 
     let mut dst_file = OpenOptions::new()
         .read(true)

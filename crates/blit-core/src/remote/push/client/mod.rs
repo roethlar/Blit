@@ -33,6 +33,7 @@ use super::payload::{
     payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
+use crate::remote::transfer::progress::RemoteTransferProgress;
 use crate::remote::transfer::source::TransferSource;
 
 const MIN_STREAM_BATCH_BYTES: u64 = 32 * 1024 * 1024;
@@ -69,6 +70,7 @@ impl MultiStreamSender {
         trace: bool,
         source: Arc<dyn TransferSource>,
         tcp_buffer_size: Option<usize>,
+        progress: Option<RemoteTransferProgress>,
     ) -> Result<Self> {
         let streams = stream_count.max(1);
         let mut workers = Vec::with_capacity(streams);
@@ -96,8 +98,10 @@ impl MultiStreamSender {
             .await?;
             let (tx, rx) = mpsc::channel::<Option<Vec<TransferPayload>>>(4);
             let source_clone = Arc::clone(&source);
-            let handle =
-                tokio::spawn(async move { data_plane_worker(session, rx, source_clone).await });
+            let progress_clone = progress.clone();
+            let handle = tokio::spawn(async move {
+                data_plane_worker(session, rx, source_clone, progress_clone).await
+            });
             workers.push(tx);
             handles.push(handle);
         }
@@ -193,13 +197,14 @@ async fn data_plane_worker(
     mut session: DataPlaneSession,
     mut rx: mpsc::Receiver<Option<Vec<TransferPayload>>>,
     source: Arc<dyn TransferSource>,
+    progress: Option<RemoteTransferProgress>,
 ) -> Result<StreamStats> {
     let start = Instant::now();
     while let Some(batch) = rx.recv().await {
         match batch {
             Some(payloads) => {
                 session
-                    .send_payloads(source.clone(), payloads)
+                    .send_payloads_with_progress(source.clone(), payloads, progress.as_ref())
                     .await?;
             }
             None => break,
@@ -568,6 +573,7 @@ impl RemotePushClient {
                                                 trace_data_plane,
                                                 source.clone(),
                                                 tuning.tcp_buffer_size,
+                                                progress.cloned(),
                                             )
                                             .await?;
                                             data_plane_sender = Some(sender);
@@ -848,7 +854,9 @@ async fn stream_fallback_from_queue(
         return Ok(FallbackStreamResult::empty());
     }
 
-    let headers = source.check_availability(headers, Arc::clone(unreadable)).await?;
+    let headers = source
+        .check_availability(headers, Arc::clone(unreadable))
+        .await?;
     if headers.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }

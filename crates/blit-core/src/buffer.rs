@@ -376,7 +376,10 @@ pub struct PoolBuffer {
 impl PoolBuffer {
     /// Get the underlying buffer as a mutable slice
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.data.as_mut().expect("buffer already taken").as_mut_slice()
+        self.data
+            .as_mut()
+            .expect("buffer already taken")
+            .as_mut_slice()
     }
 
     /// Get the underlying buffer as a slice
