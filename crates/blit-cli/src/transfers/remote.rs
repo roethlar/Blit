@@ -11,13 +11,41 @@ use blit_core::fs_enum::FileFilter;
 use blit_core::generated::FileHeader;
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
-    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
+    RemoteEndpoint, RemotePath, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
 };
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
 use std::sync::Arc;
 
 use super::endpoints::{format_remote_endpoint, Endpoint};
+
+/// Compute the actual destination path for a pull operation using rsync-style semantics:
+/// - If dest exists and is a directory, append the source's basename to create dest/basename/
+/// - Otherwise use dest as-is (will be created as the target)
+///
+/// Example: `copy server://path/release ~/Downloads/` -> `~/Downloads/release/`
+fn compute_pull_destination(dest: &Path, remote: &RemoteEndpoint) -> Result<PathBuf> {
+    // Get the source path's basename from the remote endpoint
+    let source_basename = match &remote.path {
+        RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
+            rel_path.file_name().map(|s| s.to_os_string())
+        }
+        RemotePath::Discovery => None,
+    };
+
+    // If dest exists and is a directory, and we have a source basename, append it
+    if dest.is_dir() {
+        if let Some(basename) = source_basename {
+            // Don't append if basename is empty or "."
+            let basename_str = basename.to_string_lossy();
+            if !basename_str.is_empty() && basename_str != "." {
+                return Ok(dest.join(basename));
+            }
+        }
+    }
+
+    Ok(dest.to_path_buf())
+}
 
 fn spawn_progress_monitor(
     enabled: bool,
@@ -184,9 +212,14 @@ pub async fn run_remote_pull_transfer(
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
+    // Compute actual destination path using rsync-style semantics:
+    // - If dest exists and is a directory, append source basename
+    // - Otherwise use dest as-is
+    let actual_dest = compute_pull_destination(dest_root, &remote)?;
+
     // Enumerate local files to build manifest
     // Compute checksums if --checksum mode is requested
-    let local_manifest = enumerate_local_manifest(dest_root, args.checksum).await?;
+    let local_manifest = enumerate_local_manifest(&actual_dest, args.checksum).await?;
 
     let show_progress = args.progress || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor(show_progress, args.verbose);
@@ -207,7 +240,7 @@ pub async fn run_remote_pull_transfer(
     // Use PullSync - sends local manifest to server, server compares and only sends what's needed
     let report = client
         .pull_sync(
-            dest_root,
+            &actual_dest,
             local_manifest,
             &pull_opts,
             mirror_mode, // track_paths for mirror mode deletion
@@ -218,7 +251,7 @@ pub async fn run_remote_pull_transfer(
             format!(
                 "pulling from {} into {}",
                 format_remote_endpoint(&remote),
-                dest_root.display()
+                actual_dest.display()
             )
         })?;
 
@@ -227,7 +260,7 @@ pub async fn run_remote_pull_transfer(
         let _ = task.await;
     }
 
-    describe_pull_result(&report, dest_root);
+    describe_pull_result(&report, &actual_dest);
 
     // Handle mirror mode deletions based on server's entries_deleted count
     if mirror_mode {
@@ -240,7 +273,7 @@ pub async fn run_remote_pull_transfer(
                     .iter()
                     .cloned()
                     .collect();
-                let stats = purge_extraneous_local(dest_root, &remote_paths).await?;
+                let stats = purge_extraneous_local(&actual_dest, &remote_paths).await?;
                 if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
                     println!(
                         "Mirror purge removed {} file(s) and {} directorie(s).",
