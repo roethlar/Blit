@@ -42,6 +42,8 @@ impl WindowsCapability {
                 sendfile: false,
                 copy_file_range: false,
                 block_clone_same_volume: false,
+                filesystem_type: None,
+                reflink: false,
             },
         }
     }

@@ -19,6 +19,8 @@ impl UnixCapability {
                 sendfile: true,
                 copy_file_range: true, // Linux 4.5+
                 block_clone_same_volume: false,
+                filesystem_type: None,
+                reflink: false,
             },
         }
     }

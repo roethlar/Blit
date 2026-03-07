@@ -25,6 +25,8 @@ impl MacOSCapability {
                 sendfile: false,
                 copy_file_range: false, // Not available on macOS
                 block_clone_same_volume: false,
+                filesystem_type: None,
+                reflink: false,
             },
         }
     }
