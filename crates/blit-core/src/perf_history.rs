@@ -17,6 +17,16 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MAX_BYTES: u64 = 1_000_000; // ~1 MiB cap per design docs
 const SETTINGS_FILE: &str = "settings.json";
 
+/// Current schema version for PerformanceRecord.
+///
+/// Bump this when making changes to the record format. Old records without a
+/// version field deserialize as version 0 thanks to `#[serde(default)]`.
+///
+/// Version history:
+///   0 - implicit (records written before versioning was added)
+///   1 - added schema_version field
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 /// High-level category of a transfer run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +49,8 @@ pub struct OptionSnapshot {
 /// Telemetry-free performance record captured after each run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceRecord {
+    #[serde(default)]
+    pub schema_version: u32,
     pub timestamp_epoch_ms: u128,
     pub mode: TransferMode,
     pub source_fs: Option<String>,
@@ -88,6 +100,7 @@ impl PerformanceRecord {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
             timestamp_epoch_ms: now.as_millis(),
             mode,
             source_fs,
@@ -146,13 +159,30 @@ pub fn append_local_record(record: &PerformanceRecord) -> Result<()> {
     Ok(())
 }
 
+/// Migrate a record from an older schema version to the current version.
+///
+/// Returns the record with `schema_version` set to `CURRENT_SCHEMA_VERSION`.
+/// Future migrations (e.g., field renames, type changes) should be added here
+/// as version-gated transformations.
+pub fn migrate_record(mut record: PerformanceRecord) -> PerformanceRecord {
+    // Version 0 → 1: no field changes needed, just stamp the version.
+    // Future migrations would go here, e.g.:
+    //   if record.schema_version < 2 { /* transform fields for v2 */ }
+    record.schema_version = CURRENT_SCHEMA_VERSION;
+    record
+}
+
 pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
     let path = history_path()?;
+    read_records_from_path(&path, limit)
+}
+
+fn read_records_from_path(path: &Path, limit: usize) -> Result<Vec<PerformanceRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let file = File::open(&path)?;
+    let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut records = Vec::new();
 
@@ -162,7 +192,7 @@ pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
             continue;
         }
         if let Ok(record) = serde_json::from_str::<PerformanceRecord>(&line) {
-            records.push(record);
+            records.push(migrate_record(record));
         }
     }
 
@@ -172,6 +202,29 @@ pub fn read_recent_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
 
     let start = records.len().saturating_sub(limit);
     Ok(records[start..].to_vec())
+}
+
+/// Rewrite the history file, migrating all records to the current schema version.
+///
+/// This is safe to call at any time. Records that fail to parse are dropped.
+/// Returns the number of records migrated, or `Ok(0)` if the file doesn't exist.
+pub fn migrate_history_file() -> Result<usize> {
+    let path = history_path()?;
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let records = read_records_from_path(&path, 0)?;
+    let count = records.len();
+
+    let mut file = File::create(&path)
+        .with_context(|| format!("rewriting history file {}", path.display()))?;
+    for record in &records {
+        let line = serde_json::to_string(record).context("serialize migrated record")?;
+        writeln!(file, "{line}")?;
+    }
+
+    Ok(count)
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -309,4 +362,127 @@ fn enforce_size_cap(path: &Path, max_bytes: u64) -> Result<()> {
         writeln!(file, "{line}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_v0_json() -> &'static str {
+        // A record without schema_version (pre-versioning format)
+        r#"{"timestamp_epoch_ms":1700000000000,"mode":"copy","source_fs":null,"dest_fs":null,"file_count":10,"total_bytes":1024,"options":{"dry_run":false,"preserve_symlinks":true,"include_symlinks":false,"skip_unchanged":true,"checksum":false,"workers":4},"fast_path":null,"planner_duration_ms":50,"transfer_duration_ms":200,"stall_events":0,"error_count":0}"#
+    }
+
+    fn sample_v1_json() -> &'static str {
+        r#"{"schema_version":1,"timestamp_epoch_ms":1700000000000,"mode":"mirror","source_fs":"apfs","dest_fs":"apfs","file_count":5,"total_bytes":512,"options":{"dry_run":false,"preserve_symlinks":true,"include_symlinks":false,"skip_unchanged":false,"checksum":true,"workers":2},"fast_path":"tiny","planner_duration_ms":10,"transfer_duration_ms":100,"stall_events":0,"error_count":0,"tar_shard_tasks":1,"tar_shard_files":5,"tar_shard_bytes":512,"raw_bundle_tasks":0,"raw_bundle_files":0,"raw_bundle_bytes":0,"large_tasks":0,"large_bytes":0}"#
+    }
+
+    #[test]
+    fn v0_record_deserializes_with_defaults() {
+        let record: PerformanceRecord =
+            serde_json::from_str(sample_v0_json()).expect("deserialize v0");
+        assert_eq!(record.schema_version, 0);
+        assert_eq!(record.tar_shard_tasks, 0);
+        assert_eq!(record.file_count, 10);
+    }
+
+    #[test]
+    fn v1_record_deserializes_fully() {
+        let record: PerformanceRecord =
+            serde_json::from_str(sample_v1_json()).expect("deserialize v1");
+        assert_eq!(record.schema_version, 1);
+        assert_eq!(record.tar_shard_files, 5);
+        assert_eq!(record.mode, TransferMode::Mirror);
+    }
+
+    #[test]
+    fn migrate_record_stamps_current_version() {
+        let old: PerformanceRecord =
+            serde_json::from_str(sample_v0_json()).expect("deserialize v0");
+        assert_eq!(old.schema_version, 0);
+
+        let migrated = migrate_record(old.clone());
+        assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+        // Data preserved
+        assert_eq!(migrated.file_count, old.file_count);
+        assert_eq!(migrated.total_bytes, old.total_bytes);
+    }
+
+    #[test]
+    fn read_records_migrates_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test_history.jsonl");
+
+        // Write a mix of v0 and v1 records
+        let mut file = File::create(&path).expect("create");
+        writeln!(file, "{}", sample_v0_json()).expect("write v0");
+        writeln!(file, "{}", sample_v1_json()).expect("write v1");
+        drop(file);
+
+        let records = read_records_from_path(&path, 0).expect("read");
+        assert_eq!(records.len(), 2);
+        // Both should be migrated to current version
+        assert_eq!(records[0].schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(records[1].schema_version, CURRENT_SCHEMA_VERSION);
+        // Original data intact
+        assert_eq!(records[0].mode, TransferMode::Copy);
+        assert_eq!(records[1].mode, TransferMode::Mirror);
+    }
+
+    #[test]
+    fn read_records_skips_invalid_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test_history.jsonl");
+
+        let mut file = File::create(&path).expect("create");
+        writeln!(file, "{}", sample_v0_json()).expect("write v0");
+        writeln!(file, "{{not valid json}}").expect("write garbage");
+        writeln!(file, "").expect("write empty");
+        writeln!(file, "{}", sample_v1_json()).expect("write v1");
+        drop(file);
+
+        let records = read_records_from_path(&path, 0).expect("read");
+        assert_eq!(records.len(), 2, "should skip invalid/empty lines");
+    }
+
+    #[test]
+    fn new_record_has_current_version() {
+        let options = OptionSnapshot {
+            dry_run: false,
+            preserve_symlinks: true,
+            include_symlinks: false,
+            skip_unchanged: true,
+            checksum: false,
+            workers: 4,
+        };
+        let record = PerformanceRecord::new(
+            TransferMode::Copy,
+            None,
+            None,
+            1,
+            100,
+            options,
+            None,
+            10,
+            20,
+            0,
+            0,
+        );
+        assert_eq!(record.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn read_records_respects_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test_history.jsonl");
+
+        let mut file = File::create(&path).expect("create");
+        for _ in 0..5 {
+            writeln!(file, "{}", sample_v0_json()).expect("write");
+        }
+        drop(file);
+
+        let records = read_records_from_path(&path, 2).expect("read");
+        assert_eq!(records.len(), 2, "should return only the last 2 records");
+    }
 }

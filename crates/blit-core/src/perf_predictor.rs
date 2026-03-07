@@ -228,12 +228,13 @@ impl PerformancePredictor {
         history_path: &Path,
         limit: usize,
     ) -> Result<Vec<PerformanceRecord>> {
+        use crate::perf_history::migrate_record;
         let file = File::open(history_path)?;
         let reader = BufReader::new(file);
         let mut records = Vec::new();
         for line in reader.lines().map_while(Result::ok) {
             if let Ok(record) = serde_json::from_str::<PerformanceRecord>(&line) {
-                records.push(record);
+                records.push(migrate_record(record));
             }
         }
         let len = records.len();
