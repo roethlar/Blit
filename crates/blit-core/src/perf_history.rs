@@ -47,6 +47,9 @@ pub struct OptionSnapshot {
 }
 
 /// Telemetry-free performance record captured after each run.
+///
+/// The `schema_version` field tracks the format version for migration support.
+/// See [`CURRENT_SCHEMA_VERSION`] for the version history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceRecord {
     #[serde(default)]

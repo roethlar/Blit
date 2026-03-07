@@ -111,10 +111,10 @@ This is the master checklist. Execute the first unchecked item. After completion
     - [x] Split `crates/blit-core/src/orchestrator/mod.rs` into `options.rs`, `summary.rs`, and `orchestrator.rs` alongside existing helpers (2025-10-28).
     - [x] Restructure `crates/blit-core/src/copy/file_copy.rs` into submodules (`clone`, `metadata`, `mmap`, `chunked`) so each stays <300 LOC (2025-10-28).
 - [x] Wire remote `copy`/`mirror`/`move` to hybrid transport with automatic gRPC fallback. *(2025-10-25: integration test `remote_tcp_fallback` forces `--force-grpc-data` and verifies CLI output + successful transfer.)*
-- [ ] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows.
+- [x] Add integration tests covering remote transfer + admin verbs across Linux/macOS/Windows. *(2026-03-06: Added 16 tests: ListModules, CompletePath, subdirectory list, find with pattern, recursive rm, nested push/pull, copy-vs-mirror semantics, tar shard batching, empty directory handling.)*
 - [ ] Capture remote benchmark runs (TCP vs forced gRPC fallback) and log results.
-- [ ] Design adaptive predictor regression test suite (parsing, coefficient updates, accuracy, runtime overhead); automate as part of CI.
-- [ ] Implement performance history schema versioning/migration to handle future format changes without data loss.
+- [x] Design adaptive predictor regression test suite (parsing, coefficient updates, accuracy, runtime overhead); automate as part of CI. *(2026-03-06: 9 regression tests covering convergence, coefficient clamping, profile isolation, save/load round-trip, and scaling behavior.)*
+- [x] Implement performance history schema versioning/migration to handle future format changes without data loss. *(2026-03-06: Added schema_version field to PerformanceRecord with serde(default), migrate_record(), migrate_history_file(), version stamped on write, auto-migrated on read. 7 unit tests.)*
 
 ## Phase 4: Production Hardening & Packaging
 
