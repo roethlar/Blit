@@ -46,6 +46,8 @@ The core library containing all transfer logic, protocols, and platform abstract
 | `remote` | gRPC client implementation |
 | `tar_stream` | Batched small-file transfers |
 | `perf_predictor` | Performance optimization heuristics |
+| `perf_history` | Versioned JSONL performance record storage |
+| `fs_capability` | Per-filesystem capability detection and caching |
 
 ### blit-cli
 
@@ -87,6 +89,26 @@ blit-daemon/
 ### blit-utils
 
 Standalone utilities for daemon administration and diagnostics.
+
+**Structure:**
+```
+blit-utils/
+├── main.rs           # Entry point, dispatches to subcommands
+├── cli.rs            # Clap argument definitions
+├── util.rs           # Shared helpers (endpoint parsing, byte formatting)
+├── scan.rs           # mDNS daemon discovery
+├── list_modules.rs   # ListModules RPC wrapper
+├── ls.rs             # Remote/local directory listing
+├── find.rs           # Recursive remote file search
+├── du.rs             # Remote disk usage summary
+├── df.rs             # Remote filesystem statistics
+├── rm.rs             # Remote file/directory deletion
+├── completions.rs    # Shell path completion via CompletePath RPC
+└── profile.rs        # Local performance history viewer
+```
+
+All remote commands connect via gRPC to a running daemon. Output defaults to
+human-readable tables; `--json` emits machine-parsable JSON for scripting.
 
 ## Data Flow
 
@@ -216,11 +238,28 @@ Platform-specific change detection for incremental sync optimization.
 
 Platform-optimized file copying strategies.
 
-| Platform | Optimization |
-|----------|--------------|
-| Windows | `CopyFileExW`, Block Cloning (ReFS) |
-| macOS | `clonefile()`, `fcopyfile()` |
-| Linux | `copy_file_range()`, `sendfile()` |
+| Platform | Primary | Fallback |
+|----------|---------|----------|
+| macOS | `clonefile()` (APFS CoW) | `fcopyfile()` |
+| Linux | `copy_file_range()` (4.5+) | `sendfile()` |
+| Windows | `CopyFileExW` | Block Cloning (ReFS) |
+
+### Filesystem Capability Probing
+
+Blit detects the filesystem type at runtime and maps it to accurate capability flags.
+
+| Platform | Detection Method |
+|----------|-----------------|
+| macOS | `statfs` → `f_fstypename` |
+| Linux | `statfs` → `f_type` magic number mapping |
+| Windows | `GetVolumeInformationW` → filesystem name |
+
+Detected capabilities (reflink, sparse files, xattrs, sendfile, copy_file_range,
+block cloning) are cached per device ID and used by the planner and copy engine
+to select the optimal transfer strategy.
+
+Supported filesystem types: APFS, HFS+, btrfs, XFS, ext2/3/4, ZFS, tmpfs,
+NFS/CIFS/SMB, NTFS, ReFS.
 
 ### Zero-Copy
 
@@ -367,8 +406,12 @@ Located in each module's source file or adjacent `tests/` directory.
 |----------|---------|
 | `local_transfers` | Local copy/mirror operations |
 | `remote_*` | Remote push/pull with daemon |
-| `admin_verbs` | Administrative commands |
+| `remote_transfer_edges` | Edge cases: nested dirs, empty dirs, many small files |
+| `admin_verbs` | Administrative commands (list-modules, completions, find, rm) |
 | `mirror_planner` | Sync algorithm correctness |
+| `perf_predictor` | Adaptive predictor convergence and stability |
+| `perf_history` | Schema versioning and migration |
+| `fs_capability` | Filesystem detection and capability probing |
 
 ## Future Directions
 

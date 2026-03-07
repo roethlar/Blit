@@ -24,13 +24,15 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **Hybrid Transport**
   TCP data plane for high-throughput transfers (10+ Gbps), with gRPC fallback for diagnostics.
 - **Platform Optimization**
-  Windows- and Linux-friendly; dedicated scripts and test logs for platform parity.
+  Windows, Linux, and macOS optimized; per-filesystem capability detection (reflink, sparse, xattr) with platform-native fast-copy paths (`clonefile`, `copy_file_range`, `CopyFileEx`).
 - **gRPC API**
   Robust proto definitions in `proto/blit.proto` enable remote orchestration and integrations.
 - **Security Hardened**
   Path traversal protection, block size limits, token verification. TLS via operator-provided SSH tunnels or VPN.
+- **Admin Utilities**
+  `blit-utils` provides daemon inspection and maintenance: mDNS discovery, module listing, remote `ls`/`find`/`du`/`df`/`rm`, shell completions, and performance profiling.
 - **Developer Experience**
-  Utilities for scripting, automated checks, robust tests, and clear repo organization.
+  Robust test suite, clear repo organization, and scripting-friendly JSON output across all tools.
 - **Extensive Documentation**
   Agent collaboration (`AGENTS.md`), process docs, session logs (`DEVLOG.md`), and roadmap (`TODO.md`).
 
@@ -65,7 +67,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.56+ (edition 2021)
 - For gRPC: [protoc](https://grpc.io/docs/protoc-installation/) (auto-handled for most workflows)
-- Windows or Linux (see notes below)
+- Windows, Linux, or macOS
 
 ### Building & Testing
 
@@ -79,29 +81,56 @@ cargo test                 # Run all tests
 scripts/windows/run-blit-tests.ps1
 ```
 
-### Running the CLI
+### Usage
 
 ```sh
-cargo run -p blit-cli -- --help                # Show available options
-
 # Local mirror (copy + delete extraneous)
-cargo run -p blit-cli -- mirror ./source ./dest --yes
+blit mirror ./source ./dest --yes
 
 # Remote push to daemon
-cargo run -p blit-cli -- mirror ./local server:/module/ --yes
+blit mirror ./local server:/module/ --yes
 
 # Remote pull from daemon
-cargo run -p blit-cli -- mirror server:/module/ ./local --yes
+blit mirror server:/module/ ./local --yes
 
 # Resume interrupted transfer (block-level comparison)
-cargo run -p blit-cli -- mirror ./source ./dest --resume
+blit mirror ./source ./dest --resume
 
 # Show progress
-cargo run -p blit-cli -- copy ./large_file.iso ./dest/ --progress
+blit copy ./large_file.iso ./dest/ --progress
 ```
 
 ### Running the Daemon
 
 ```sh
-cargo run -p blit-daemon                        # Launch the server for background transfers
-# See API docs in proto/blit.proto or use gRPC client for orchestration
+blit-daemon --config /etc/blit/config.toml
+```
+
+See `docs/cli/blit-daemon.1.md` and `docs/DAEMON_CONFIG.md` for configuration details.
+
+### Admin Utilities
+
+```sh
+# Discover daemons on the local network
+blit-utils scan
+
+# List modules exported by a daemon
+blit-utils list-modules server
+
+# Browse remote directories
+blit-utils ls server:/module/path
+
+# Search for files on a remote daemon
+blit-utils find server:/module/ --pattern ".csv"
+
+# Disk usage summary
+blit-utils du server:/module/path --json
+
+# Filesystem statistics
+blit-utils df server:/module
+
+# Remove remote files (with confirmation)
+blit-utils rm server:/module/path/old-data
+
+# Show local performance history
+blit-utils profile

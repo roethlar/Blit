@@ -128,10 +128,10 @@ This is the master checklist. Execute the first unchecked item. After completion
     - [x] Fix memory vulnerability and protocol inefficiency (code review). *(2025-01-29: Fixed `compute_block_hashes` and daemon-side functions to stream files in chunks instead of loading into memory. Pipelined block hash requests in data plane path to eliminate per-file RTT penalty.)*
 - [x] **P1** Implement filesystem capability probes and caching (daemon idle probes + CLI profile hook) so per-mount features like reflink/sparse/xattr are detected automatically and exposed to the planner. *(2026-03-06: Added `fs_capability/probe.rs` with statfs-based FS type detection on macOS/Linux, per-FS capability mapping for 12+ filesystem types, device-keyed cache, `cached_probe()` API. 7 tests.)*
 - [ ] **P1** blit-utils hardening:
-    - [ ] Fix `edition = "2024"` typo in `crates/blit-utils/Cargo.toml` (should be `"2021"`).
+    - [x] Fix `edition = "2024"` typo in `crates/blit-utils/Cargo.toml` (should be `"2021"`). *(2026-03-06: Fixed.)*
     - [ ] Add integration tests for all 9 commands (scan, list-modules, ls, find, du, df, rm, completions, profile).
     - [ ] Add human-readable byte formatting to `df` output (currently raw bytes only).
-    - [ ] Produce man page (`docs/cli/blit-utils.1.md`) mirroring blit-cli coverage.
+    - [x] Produce man page (`docs/cli/blit-utils.1.md`) mirroring blit-cli coverage. *(2026-03-06: Created with full synopsis, options, examples, and exit codes.)*
 - [ ] Explore optional AI-powered telemetry analysis (anomaly detection, tuning recommendations, diagnostics) using local performance history data; document scope and guardrails.
 - [ ] Produce packaging artifacts for supported platforms (Linux, macOS, Windows).
 - [ ] Document installation/configuration (config.toml, `--root`, mDNS, service setup).

@@ -43,12 +43,12 @@ constraints (read-only modules, chroot boundaries).
 
 ## Implementation Checklist
 
-1. Flesh out `blit_utils` crate skeleton with Clap-based subcommands.
-2. Share endpoint parsing + gRPC client helpers with `blit-cli` via `blit-utils` or a common module.
-3. Implement streaming RPC consumption using `tonic` async clients.
-4. Add local fallbacks where useful (e.g., `profile` reading local JSONL).
-5. Write integration tests calling daemon RPCs (Phase 3.5 test suite).
-6. Update documentation (CLI manpages, quick-start) once commands land.
+1. ~~Flesh out `blit_utils` crate skeleton with Clap-based subcommands.~~ *Done.*
+2. ~~Share endpoint parsing + gRPC client helpers with `blit-cli` via `blit-utils` or a common module.~~ *Done — `util.rs` with `parse_endpoint_or_local`, `module_and_rel_path`.*
+3. ~~Implement streaming RPC consumption using `tonic` async clients.~~ *Done — `find` and `du` use streaming RPCs.*
+4. ~~Add local fallbacks where useful (e.g., `profile` reading local JSONL).~~ *Done — `profile` reads local JSONL, `ls` supports local paths.*
+5. Write integration tests calling daemon RPCs (Phase 3.5 test suite). *Pending.*
+6. ~~Update documentation (CLI manpages, quick-start) once commands land.~~ *Done — `docs/cli/blit-utils.1.md` created 2026-03-06.*
 
 ## Testing Strategy
 
