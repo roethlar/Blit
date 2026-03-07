@@ -300,3 +300,264 @@ impl PerformancePredictor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perf_history::OptionSnapshot;
+
+    fn make_record(
+        mode: TransferMode,
+        file_count: usize,
+        total_bytes: u64,
+        planner_ms: u128,
+    ) -> PerformanceRecord {
+        PerformanceRecord {
+            schema_version: 1,
+            timestamp_epoch_ms: 0,
+            mode,
+            source_fs: None,
+            dest_fs: None,
+            file_count,
+            total_bytes,
+            options: OptionSnapshot {
+                dry_run: false,
+                preserve_symlinks: true,
+                include_symlinks: false,
+                skip_unchanged: true,
+                checksum: false,
+                workers: 4,
+            },
+            fast_path: None,
+            planner_duration_ms: planner_ms,
+            transfer_duration_ms: 0,
+            stall_events: 0,
+            error_count: 0,
+            tar_shard_tasks: 0,
+            tar_shard_files: 0,
+            tar_shard_bytes: 0,
+            raw_bundle_tasks: 0,
+            raw_bundle_files: 0,
+            raw_bundle_bytes: 0,
+            large_tasks: 0,
+            large_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn default_coefficients_produce_positive_prediction() {
+        let coeffs = PredictorCoefficients::default();
+        let prediction = coeffs.predict_ms(100, 10 * 1024 * 1024);
+        assert!(prediction > 0.0, "prediction should be positive");
+    }
+
+    #[test]
+    fn coefficients_never_go_negative() {
+        let mut coeffs = PredictorCoefficients::default();
+        // Observe 0 ms many times — drives coefficients toward zero
+        for _ in 0..10_000 {
+            coeffs.apply_observation(100, 10 * 1024 * 1024, 0.0);
+        }
+        assert!(coeffs.alpha_ms_per_file >= MIN_COEFFICIENT);
+        assert!(coeffs.beta_ms_per_mb >= MIN_COEFFICIENT);
+        assert!(coeffs.gamma_ms >= MIN_COEFFICIENT);
+    }
+
+    #[test]
+    fn predictions_converge_toward_observations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut predictor = PerformancePredictor::for_tests(dir.path());
+
+        // Use small feature values to keep gradient updates stable
+        // (lr=0.0005, files=10 → effective lr per alpha step = 0.005)
+        let target_ms = 200.0;
+        let file_count = 10;
+        let total_bytes = 1024 * 1024; // 1 MiB
+
+        for _ in 0..500 {
+            let record = make_record(TransferMode::Copy, file_count, total_bytes, target_ms as u128);
+            predictor.observe(&record);
+        }
+
+        let prediction = predictor.predict_ms(
+            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
+        );
+        let error_pct = ((prediction - target_ms) / target_ms).abs() * 100.0;
+        assert!(
+            error_pct < 15.0,
+            "prediction {:.1} ms should be within 15% of target {:.1} ms (error: {:.1}%)",
+            prediction,
+            target_ms,
+            error_pct
+        );
+    }
+
+    #[test]
+    fn prediction_improves_with_observations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut predictor = PerformancePredictor::for_tests(dir.path());
+
+        // Small features to avoid gradient explosion
+        let target_ms = 100.0;
+        let file_count = 5;
+        let total_bytes = 512 * 1024; // 0.5 MiB
+
+        // Initial prediction (default coefficients)
+        let initial = predictor.predict_ms(
+            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
+        );
+        let initial_error = (initial - target_ms).abs();
+
+        // Train
+        for _ in 0..200 {
+            let record = make_record(TransferMode::Copy, file_count, total_bytes, target_ms as u128);
+            predictor.observe(&record);
+        }
+
+        let trained = predictor.predict_ms(
+            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
+        );
+        let trained_error = (trained - target_ms).abs();
+
+        assert!(
+            trained_error < initial_error,
+            "trained error ({:.1}) should be less than initial error ({:.1})",
+            trained_error,
+            initial_error
+        );
+    }
+
+    #[test]
+    fn profiles_are_isolated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut predictor = PerformancePredictor::for_tests(dir.path());
+
+        // Small features for gradient stability
+        let file_count = 5;
+        let total_bytes = 256 * 1024;
+
+        // Train copy profile with 50ms
+        for _ in 0..200 {
+            predictor.observe(&make_record(TransferMode::Copy, file_count, total_bytes, 50));
+        }
+
+        // Train mirror profile with 150ms
+        for _ in 0..200 {
+            predictor.observe(&make_record(TransferMode::Mirror, file_count, total_bytes, 150));
+        }
+
+        let copy_pred = predictor.predict_ms(
+            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
+        );
+        let mirror_pred = predictor.predict_ms(
+            &make_record(TransferMode::Mirror, file_count, total_bytes, 0),
+        );
+
+        // Profiles should be independent — mirror trained on higher values
+        assert!(
+            (copy_pred - mirror_pred).abs() > 10.0,
+            "profiles should diverge: copy={:.1}, mirror={:.1}",
+            copy_pred,
+            mirror_pred
+        );
+    }
+
+    #[test]
+    fn save_load_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut predictor = PerformancePredictor::for_tests(dir.path());
+
+        // Train it
+        for _ in 0..50 {
+            predictor.observe(&make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 250));
+        }
+
+        let prediction_before = predictor.predict_ms(
+            &make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 0),
+        );
+
+        // Save and reload
+        predictor.save().expect("save");
+        let mut loaded = PerformancePredictor::for_tests(dir.path());
+        let path = dir.path().join(STATE_FILENAME);
+        let mut file = File::open(&path).expect("open");
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).expect("read");
+        let state: PredictorState = serde_json::from_str(&buf).expect("parse");
+        loaded.state = state;
+
+        let prediction_after = loaded.predict_ms(
+            &make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 0),
+        );
+
+        assert!(
+            (prediction_before - prediction_after).abs() < 0.001,
+            "predictions should match after round-trip: before={:.3}, after={:.3}",
+            prediction_before,
+            prediction_after
+        );
+    }
+
+    #[test]
+    fn predict_planner_ms_returns_none_for_unseen_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let predictor = PerformancePredictor::for_tests(dir.path());
+
+        let result = predictor.predict_planner_ms(
+            TransferMode::Copy,
+            None,
+            true,
+            false,
+            100,
+            1024,
+        );
+        assert!(result.is_none(), "unseen profile should return None");
+    }
+
+    #[test]
+    fn predict_planner_ms_returns_value_after_observation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut predictor = PerformancePredictor::for_tests(dir.path());
+
+        predictor.observe(&make_record(TransferMode::Copy, 100, 1024, 50));
+
+        let result = predictor.predict_planner_ms(
+            TransferMode::Copy,
+            None,
+            true,
+            false,
+            100,
+            1024,
+        );
+        assert!(result.is_some(), "should return prediction after observation");
+        let (ms, obs) = result.unwrap();
+        assert!(ms > 0.0);
+        assert_eq!(obs, 1);
+    }
+
+    #[test]
+    fn prediction_scales_with_file_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut predictor = PerformancePredictor::for_tests(dir.path());
+
+        // Train: more files → more time
+        for _ in 0..100 {
+            predictor.observe(&make_record(TransferMode::Copy, 100, 0, 100));
+            predictor.observe(&make_record(TransferMode::Copy, 1000, 0, 1000));
+        }
+
+        let pred_100 = predictor.predict_ms(
+            &make_record(TransferMode::Copy, 100, 0, 0),
+        );
+        let pred_1000 = predictor.predict_ms(
+            &make_record(TransferMode::Copy, 1000, 0, 0),
+        );
+
+        assert!(
+            pred_1000 > pred_100,
+            "1000 files ({:.1} ms) should predict higher than 100 files ({:.1} ms)",
+            pred_1000,
+            pred_100
+        );
+    }
+}
