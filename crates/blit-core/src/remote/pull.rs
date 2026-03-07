@@ -721,9 +721,8 @@ impl tokio::io::AsyncRead for RemoteFileStream {
                         self.poll_read(cx, buf)
                     }
                     _ => {
-                        // Ignore other messages or treat as EOF?
-                        // Treat as EOF for now if we don't get FileData
-                        Poll::Ready(Ok(()))
+                        // Skip non-data messages (ManifestBatch, Summary, Negotiation, etc.)
+                        self.poll_read(cx, buf)
                     }
                 }
             }

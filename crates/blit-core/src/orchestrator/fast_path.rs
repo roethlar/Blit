@@ -5,15 +5,12 @@ use eyre::Result;
 use crate::enumeration::{EntryKind, FileEnumerator};
 use crate::fs_enum::{CopyJob, FileEntry};
 use crate::mirror_planner::MirrorPlanner;
-use crate::perf_history::TransferMode;
-use crate::perf_predictor::PerformancePredictor;
 
 use super::LocalMirrorOptions;
 
-pub(super) const TINY_FILE_LIMIT: usize = 8;
-pub(super) const TINY_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+pub(super) const TINY_FILE_LIMIT: usize = 256;
+pub(super) const TINY_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 pub(super) const HUGE_SINGLE_BYTES: u64 = 1024 * 1024 * 1024;
-pub(super) const PREDICT_STREAMING_THRESHOLD_MS: f64 = 1_000.0;
 
 #[derive(Clone, Debug)]
 pub(super) enum FastPathDecision {
@@ -25,22 +22,17 @@ pub(super) enum FastPathDecision {
 #[derive(Clone, Debug, Default)]
 pub(super) struct FastPathOutcome {
     pub(super) decision: Option<FastPathDecision>,
-    pub(super) prediction: Option<(f64, u64)>,
 }
 
 impl FastPathOutcome {
-    pub(super) fn fast_path(decision: FastPathDecision, prediction: Option<(f64, u64)>) -> Self {
+    pub(super) fn fast_path(decision: FastPathDecision) -> Self {
         Self {
             decision: Some(decision),
-            prediction,
         }
     }
 
-    pub(super) fn streaming(prediction: Option<(f64, u64)>) -> Self {
-        Self {
-            decision: None,
-            prediction,
-        }
+    pub(super) fn streaming() -> Self {
+        Self { decision: None }
     }
 }
 
@@ -59,10 +51,9 @@ pub(super) fn maybe_select_fast_path(
     src_root: &Path,
     dest_root: &Path,
     options: &LocalMirrorOptions,
-    predictor: Option<&PerformancePredictor>,
 ) -> Result<FastPathOutcome> {
     if options.mirror || options.checksum || options.force_tar {
-        return Ok(FastPathOutcome::streaming(None));
+        return Ok(FastPathOutcome::streaming());
     }
 
     let mut enumerator = FileEnumerator::new(options.filter.clone_without_cache());
@@ -72,12 +63,6 @@ pub(super) fn maybe_select_fast_path(
     if options.include_symlinks {
         enumerator = enumerator.include_symlinks(true);
     }
-
-    let mode = if options.mirror {
-        TransferMode::Mirror
-    } else {
-        TransferMode::Copy
-    };
 
     let planner = MirrorPlanner::new(options.checksum);
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
@@ -135,57 +120,34 @@ pub(super) fn maybe_select_fast_path(
     }
 
     if aborted {
-        return Ok(FastPathOutcome::streaming(None));
+        return Ok(FastPathOutcome::streaming());
     }
 
     if files.is_empty() {
-        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork, None));
+        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork));
     }
 
-    let prediction = predictor.and_then(|p| {
-        p.predict_planner_ms(
-            mode.clone(),
-            None,
-            options.skip_unchanged,
-            options.checksum,
-            files.len(),
-            total_bytes,
-        )
-    });
-
     if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
-        let use_fast_path = prediction
-            .map(|(ms, observations)| observations == 0 || ms > PREDICT_STREAMING_THRESHOLD_MS)
-            .unwrap_or(true);
-        if use_fast_path {
-            return Ok(FastPathOutcome::fast_path(
-                FastPathDecision::Tiny { files },
-                prediction,
-            ));
-        }
+        return Ok(FastPathOutcome::fast_path(FastPathDecision::Tiny { files }));
     }
 
     if let Some((file, size)) = huge_candidate {
         if size >= HUGE_SINGLE_BYTES {
-            return Ok(FastPathOutcome::fast_path(
-                FastPathDecision::Huge { file, size },
-                None,
-            ));
+            return Ok(FastPathOutcome::fast_path(FastPathDecision::Huge { file, size }));
         }
     }
 
-    Ok(FastPathOutcome::streaming(prediction))
+    Ok(FastPathOutcome::streaming())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perf_history::{OptionSnapshot, PerformanceRecord};
     use eyre::Result;
     use tempfile::tempdir;
 
     #[test]
-    fn tiny_fast_path_without_history_prefers_fastpath() -> Result<()> {
+    fn tiny_fast_path_single_file() -> Result<()> {
         let temp = tempdir()?;
         let src = temp.path().join("src");
         let dest = temp.path().join("dest");
@@ -195,7 +157,7 @@ mod tests {
 
         let mut options = LocalMirrorOptions::default();
         options.perf_history = false;
-        let outcome = maybe_select_fast_path(&src, &dest, &options, None)?;
+        let outcome = maybe_select_fast_path(&src, &dest, &options)?;
         assert!(matches!(
             outcome.decision,
             Some(FastPathDecision::Tiny { .. })
@@ -204,47 +166,44 @@ mod tests {
     }
 
     #[test]
-    fn tiny_fast_path_uses_predictor_when_history_exists() -> Result<()> {
+    fn tiny_fast_path_many_small_files() -> Result<()> {
         let temp = tempdir()?;
         let src = temp.path().join("src");
         let dest = temp.path().join("dest");
         std::fs::create_dir_all(&src)?;
         std::fs::create_dir_all(&dest)?;
-        std::fs::write(src.join("file.txt"), b"hello")?;
-
-        let mut predictor = PerformancePredictor::for_tests(temp.path());
-        let snapshot = OptionSnapshot {
-            dry_run: false,
-            preserve_symlinks: true,
-            include_symlinks: true,
-            skip_unchanged: true,
-            checksum: false,
-            workers: 4,
-        };
-        let record = PerformanceRecord::new(
-            TransferMode::Copy,
-            None,
-            None,
-            2,
-            256,
-            snapshot,
-            None,
-            100,
-            1_000,
-            0,
-            0,
-        );
-        predictor.observe(&record);
+        for i in 0..100 {
+            std::fs::write(src.join(format!("file_{i}.txt")), b"data")?;
+        }
 
         let mut options = LocalMirrorOptions::default();
         options.perf_history = false;
-        let outcome = maybe_select_fast_path(&src, &dest, &options, Some(&predictor))?;
+        let outcome = maybe_select_fast_path(&src, &dest, &options)?;
+        assert!(
+            matches!(outcome.decision, Some(FastPathDecision::Tiny { .. })),
+            "100 small files should use fast path"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn streaming_path_when_over_file_limit() -> Result<()> {
+        let temp = tempdir()?;
+        let src = temp.path().join("src");
+        let dest = temp.path().join("dest");
+        std::fs::create_dir_all(&src)?;
+        std::fs::create_dir_all(&dest)?;
+        for i in 0..300 {
+            std::fs::write(src.join(format!("file_{i}.txt")), b"data")?;
+        }
+
+        let mut options = LocalMirrorOptions::default();
+        options.perf_history = false;
+        let outcome = maybe_select_fast_path(&src, &dest, &options)?;
         assert!(
             outcome.decision.is_none(),
-            "predictor should keep streaming path when predicted planning is fast"
+            "300 files should fall through to streaming path"
         );
-        let (pred_ms, _) = outcome.prediction.expect("expected prediction");
-        assert!(pred_ms <= PREDICT_STREAMING_THRESHOLD_MS);
         Ok(())
     }
 }

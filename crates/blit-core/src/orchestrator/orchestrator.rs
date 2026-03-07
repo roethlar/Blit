@@ -19,7 +19,7 @@ use crate::{
     CopyConfig,
 };
 
-use super::fast_path::{maybe_select_fast_path, FastPathDecision, FastPathOutcome};
+use super::fast_path::{maybe_select_fast_path, FastPathDecision};
 use super::history::{record_performance_history, update_predictor};
 use super::options::LocalMirrorOptions;
 use super::planner::drive_planner_events;
@@ -152,14 +152,8 @@ impl TransferOrchestrator {
             return Ok(summary);
         }
 
-        let fast_path_outcome =
-            maybe_select_fast_path(src_root, dest_root, &options, predictor.as_ref())?;
-        let FastPathOutcome {
-            decision,
-            prediction,
-        } = fast_path_outcome;
-        let streaming_prediction = prediction;
-        if let Some(decision) = decision {
+        let fast_path_outcome = maybe_select_fast_path(src_root, dest_root, &options)?;
+        if let Some(decision) = fast_path_outcome.decision {
             let summary = match decision {
                 FastPathDecision::NoWork => {
                     if options.verbose {
@@ -262,19 +256,6 @@ impl TransferOrchestrator {
             }
 
             return Ok(summary);
-        }
-
-        if options.verbose {
-            if let Some((pred_ms, observations)) = streaming_prediction {
-                if pred_ms > 0.0 {
-                    eprintln!(
-                        "Predictor estimate: planning ≈ {:.0} ms ({} observation{})",
-                        pred_ms,
-                        observations,
-                        if observations == 1 { "" } else { "s" }
-                    );
-                }
-            }
         }
 
         let mut filter = options.filter.clone_without_cache();

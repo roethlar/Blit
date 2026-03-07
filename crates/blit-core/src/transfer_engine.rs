@@ -189,8 +189,8 @@ async fn execute_streaming_with_receiver(
             tick_bytes = tick_bytes.saturating_add(drain());
         }
 
-        // Scale to 1-second throughput (tick is 250ms, so multiply by 4)
-        let bytes_per_second = tick_bytes * 4;
+        // Scale to 1-second throughput (tick is 50ms, so multiply by 20)
+        let bytes_per_second = tick_bytes * 20;
         let tick_gbps = (bytes_per_second as f64) * 8.0 / 1e9;
         if tick_gbps > 0.0 {
             ewma_gbps = if ewma_gbps == 0.0 {
@@ -225,7 +225,7 @@ async fn execute_streaming_with_receiver(
             handles.push(factory.spawn_worker(params));
         }
 
-        tokio::time::sleep(Duration::from_millis(250)).await; // Faster scaling response (was 1000ms)
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     // Aggregate errors from all workers instead of stopping at first failure
