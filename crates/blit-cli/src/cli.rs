@@ -110,6 +110,42 @@ pub struct TransferArgs {
     /// Resume interrupted transfers using block-level comparison
     #[arg(long)]
     pub resume: bool,
+
+    /// Exclude files matching this glob pattern (repeatable, evaluated after includes)
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
+
+    /// Include only files matching this glob pattern (repeatable, evaluated before excludes)
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN")]
+    pub include: Vec<String>,
+
+    /// Read ordered filter rules from file (lines: '+ pattern' include, '- pattern' exclude)
+    #[arg(long, value_name = "FILE")]
+    pub filter_from: Option<PathBuf>,
+
+    /// Only transfer files listed in this file (one relative path per line)
+    #[arg(long, value_name = "FILE")]
+    pub files_from: Option<PathBuf>,
+
+    /// Minimum file size to transfer (e.g., 100K, 10M, 1G)
+    #[arg(long, value_name = "SIZE")]
+    pub min_size: Option<String>,
+
+    /// Maximum file size to transfer (e.g., 100K, 10M, 1G)
+    #[arg(long, value_name = "SIZE")]
+    pub max_size: Option<String>,
+
+    /// Only transfer files older than this duration (e.g., 1h, 7d, 30m)
+    #[arg(long, value_name = "DURATION")]
+    pub min_age: Option<String>,
+
+    /// Only transfer files newer than this duration (e.g., 1h, 7d, 30m)
+    #[arg(long, value_name = "DURATION")]
+    pub max_age: Option<String>,
+
+    /// Limit transfer bandwidth in bytes per second (e.g., 10M, 1G, 500K)
+    #[arg(long, value_name = "RATE")]
+    pub bwlimit: Option<String>,
 }
 
 #[derive(Args, Clone, Debug)]

@@ -21,6 +21,7 @@ use crate::buffer::BufferSizer;
 use crate::copy::mmap_copy_file;
 use crate::copy::{copy_file, file_needs_copy_with_checksum_type, resume_copy_file};
 use crate::logger::{Logger, NoopLogger};
+use crate::retry::{classify_error, ErrorClass};
 use crate::tar_stream::tar_stream_transfer_list;
 use crate::tar_stream::TarConfig;
 use crate::transfer_engine::{Sample, WorkerFactory, WorkerParams};
@@ -118,16 +119,21 @@ async fn local_worker_loop(
                 }
                 Err(err) => {
                     attempts += 1;
-                    let is_retryable = is_retryable_error(&err);
+                    let class = classify_error(&err);
 
-                    if is_retryable && attempts <= max_retries {
+                    if class == ErrorClass::Retryable && attempts <= max_retries {
                         if progress {
                             eprintln!("[w{idx}] retrying ({}/{}): {err}", attempts, max_retries);
                         }
-                        // Brief delay before retry to avoid hammering on transient errors
-                        tokio::time::sleep(std::time::Duration::from_millis(100 * attempts as u64))
-                            .await;
+                        let delay = std::time::Duration::from_millis(
+                            500 * (2u64.pow(attempts.saturating_sub(1) as u32)),
+                        );
+                        tokio::time::sleep(delay).await;
                         continue;
+                    }
+
+                    if class == ErrorClass::Fatal {
+                        eprintln!("[w{idx}] fatal error, aborting: {err}");
                     }
 
                     last_error = Some(err);
@@ -160,34 +166,6 @@ async fn local_worker_loop(
 
     active.fetch_sub(1, Relaxed);
     Ok(())
-}
-
-/// Check if an error is retryable (transient I/O errors, not fatal ones).
-fn is_retryable_error(err: &eyre::Report) -> bool {
-    let msg = err.to_string().to_lowercase();
-    // Retryable: temporary conditions that may resolve
-    if msg.contains("resource temporarily unavailable")
-        || msg.contains("interrupted")
-        || msg.contains("would block")
-        || msg.contains("connection reset")
-        || msg.contains("broken pipe")
-        || msg.contains("timed out")
-    {
-        return true;
-    }
-    // Not retryable: permanent conditions
-    if msg.contains("permission denied")
-        || msg.contains("no such file")
-        || msg.contains("not a directory")
-        || msg.contains("is a directory")
-        || msg.contains("no space left")
-        || msg.contains("disk quota")
-        || msg.contains("read-only file system")
-    {
-        return false;
-    }
-    // Default: retry once for unknown errors
-    true
 }
 
 async fn handle_tar_shard(

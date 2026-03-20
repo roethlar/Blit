@@ -1,9 +1,11 @@
+use crate::filter::FilterRules;
 use crate::fs_enum::FileFilter;
 
 /// Options for executing a local mirror/copy operation.
 #[derive(Clone, Debug)]
 pub struct LocalMirrorOptions {
     pub filter: FileFilter,
+    pub filter_rules: Option<FilterRules>,
     pub mirror: bool,
     pub dry_run: bool,
     pub progress: bool,
@@ -21,12 +23,15 @@ pub struct LocalMirrorOptions {
     pub retries: u8,
     /// Resume interrupted transfers using block-level comparison.
     pub resume: bool,
+    /// Bandwidth limit in bytes per second (None = unlimited).
+    pub bwlimit: Option<u64>,
 }
 
 impl Default for LocalMirrorOptions {
     fn default() -> Self {
         Self {
             filter: FileFilter::default(),
+            filter_rules: None,
             mirror: false,
             dry_run: false,
             progress: false,
@@ -42,6 +47,7 @@ impl Default for LocalMirrorOptions {
             debug_mode: false,
             retries: 1,
             resume: false,
+            bwlimit: None,
         }
     }
 }

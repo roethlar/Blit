@@ -4,6 +4,7 @@ use super::types::{
     TransferFacade,
 };
 use crate::enumeration::{EntryKind, FileEnumerator};
+use crate::filter::FilterRules;
 use crate::fs_enum::{CopyJob, FileEntry, FileFilter};
 use crate::mirror_planner::{MirrorPlanner, RemoteEntryState};
 use crate::transfer_plan::PlanOptions;
@@ -29,11 +30,15 @@ impl TransferFacade {
         skip_unchanged: bool,
         planner: MirrorPlanner,
         plan_options: PlanOptions,
+        filter_rules: Option<FilterRules>,
     ) -> Result<LocalPlanStream> {
         let src_root = src_root.to_path_buf();
         let dest_root = dest_root.to_path_buf();
 
         let mut enumerator = FileEnumerator::new(filter.clone_without_cache());
+        if let Some(rules) = filter_rules {
+            enumerator = enumerator.with_filter_rules(rules);
+        }
         if !preserve_links {
             enumerator = enumerator.follow_symlinks(true);
         }

@@ -319,11 +319,20 @@ mod tests {
             retries: 1,
             verbose: false,
             progress: false,
-            yes: true, // Skip prompts in tests
+            yes: true,
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
             resume: false,
+            exclude: vec![],
+            include: vec![],
+            filter_from: None,
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+            bwlimit: None,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -355,11 +364,20 @@ mod tests {
             retries: 1,
             verbose: false,
             progress: false,
-            yes: true, // Skip prompts in tests
+            yes: true,
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
             resume: false,
+            exclude: vec![],
+            include: vec![],
+            filter_from: None,
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+            bwlimit: None,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

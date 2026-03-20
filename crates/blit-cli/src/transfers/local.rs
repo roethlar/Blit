@@ -5,6 +5,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use blit_core::bandwidth::parse_rate;
+use blit_core::filter::{parse_duration, parse_size, FilterRules};
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
 
 use super::format_bytes;
@@ -97,7 +99,61 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
         options.workers = workers.max(1);
         options.debug_mode = true;
     }
+
+    // Build filter rules from CLI args
+    options.filter_rules = build_filter_rules(args).ok();
+
+    // Parse bandwidth limit
+    if let Some(ref rate_str) = args.bwlimit {
+        options.bwlimit = parse_rate(rate_str).ok();
+    }
+
     options
+}
+
+fn build_filter_rules(args: &TransferArgs) -> Result<FilterRules> {
+    let mut rules = FilterRules::new();
+
+    // Include patterns first (evaluated before excludes)
+    for pattern in &args.include {
+        rules = rules.include(pattern)?;
+    }
+
+    // Exclude patterns second
+    for pattern in &args.exclude {
+        rules = rules.exclude(pattern)?;
+    }
+
+    // Load rules from file (appended after CLI rules)
+    if let Some(ref path) = args.filter_from {
+        rules = rules.load_rules_from(path)?;
+    }
+
+    // Size constraints
+    if let Some(ref s) = args.min_size {
+        rules = rules.min_size(parse_size(s)?);
+    }
+    if let Some(ref s) = args.max_size {
+        rules = rules.max_size(parse_size(s)?);
+    }
+
+    // Age constraints
+    if let Some(ref s) = args.min_age {
+        rules = rules.min_age(parse_duration(s)?);
+    }
+    if let Some(ref s) = args.max_age {
+        rules = rules.max_age(parse_duration(s)?);
+    }
+
+    // Explicit file list
+    if let Some(ref path) = args.files_from {
+        rules = rules.files_from(path)?;
+    }
+
+    if rules.is_empty() {
+        return Err(eyre::eyre!("no filter rules configured"));
+    }
+    Ok(rules)
 }
 
 fn print_summary(

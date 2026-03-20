@@ -20,6 +20,12 @@ For up-to-date progress, blockers, and percentages, see [PROJECT_STATE_ASSESSMEN
 - **[greenfield_plan_v4.md](./greenfield_plan_v4.md)** - Older revision (legacy reference only)
 - **[WORKFLOW_V2.md](./WORKFLOW_V2.md)** - High-level phase descriptions (legacy, superseded by phase-specific workflows)
 
+### Feature Plans
+
+- **[RCLONE_FEATURE_INTEGRATION.md](./RCLONE_FEATURE_INTEGRATION.md)** - Phase 5: Operational features adopted from rclone (filtering, bandwidth limiting, retries, check, metrics, dedupe, ncdu, bisync, VFS)
+- **[REMOTE_TRANSFER_PARITY.md](./REMOTE_TRANSFER_PARITY.md)** - Push/pull parity refactor (complete)
+- **[LOCAL_TRANSFER_HEURISTICS.md](./LOCAL_TRANSFER_HEURISTICS.md)** - Local copy path optimization
+
 ### Phase-Specific Workflows
 
 - **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** - Orchestrator & Local Operations (3-4 days)

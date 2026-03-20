@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use crate::filter::FilterRules;
 use crate::fs_enum::{FileEntry, FileFilter};
 
 /// Describes the kind of entry returned by the enumerator.
@@ -32,6 +33,7 @@ pub struct EnumeratedEntry {
 #[derive(Debug, Clone)]
 pub struct FileEnumerator {
     filter: FileFilter,
+    filter_rules: Option<FilterRules>,
     follow_symlinks: bool,
     include_symlinks: bool,
 }
@@ -40,9 +42,16 @@ impl FileEnumerator {
     pub fn new(filter: FileFilter) -> Self {
         Self {
             filter,
+            filter_rules: None,
             follow_symlinks: false,
             include_symlinks: false,
         }
+    }
+
+    /// Set additional filter rules (include/exclude patterns, size/age).
+    pub fn with_filter_rules(mut self, rules: FilterRules) -> Self {
+        self.filter_rules = Some(rules);
+        self
     }
 
     /// Configure whether symlinks should be followed during traversal.
@@ -107,13 +116,22 @@ impl FileEnumerator {
                     continue;
                 }
 
+                let rel = relative_path(root, path);
+
+                if let Some(ref rules) = self.filter_rules {
+                    if !rules.allows_dir(&rel) {
+                        walker.skip_current_dir();
+                        continue;
+                    }
+                }
+
                 let metadata = entry
                     .metadata()
                     .with_context(|| format!("stat directory {}", path.display()))?;
 
                 visit(EnumeratedEntry {
                     absolute_path: path.to_path_buf(),
-                    relative_path: relative_path(root, path),
+                    relative_path: rel,
                     metadata,
                     kind: EntryKind::Directory,
                 })?;
@@ -127,10 +145,17 @@ impl FileEnumerator {
                 }
 
                 let size = metadata.len();
+                let rel = relative_path(root, path);
+
+                if let Some(ref rules) = self.filter_rules {
+                    if !rules.allows_file(&rel, size, metadata.modified().ok()) {
+                        continue;
+                    }
+                }
 
                 visit(EnumeratedEntry {
                     absolute_path: path.to_path_buf(),
-                    relative_path: relative_path(root, path),
+                    relative_path: rel,
                     metadata,
                     kind: EntryKind::File { size },
                 })?;

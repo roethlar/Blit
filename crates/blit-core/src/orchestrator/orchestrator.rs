@@ -301,6 +301,7 @@ impl TransferOrchestrator {
             options.skip_unchanged,
             planner_for_stream,
             plan_options,
+            options.filter_rules.clone(),
         )?;
 
         let (events, plan_handle) = stream.into_parts();
