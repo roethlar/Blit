@@ -36,6 +36,8 @@ pub struct CopyConfig {
     pub dry_run: bool,
     pub checksum: Option<crate::checksum::ChecksumType>,
     pub resume: bool,
+    /// Compute and verify Blake3 hash inline during write.
+    pub verify: bool,
 }
 
 impl Default for CopyConfig {
@@ -46,6 +48,7 @@ impl Default for CopyConfig {
             dry_run: false,
             checksum: None,
             resume: false,
+            verify: false,
         }
     }
 }

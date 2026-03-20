@@ -220,6 +220,62 @@ pub fn partial_hash_first_last(path: &Path, bytes: usize) -> Result<Vec<u8>> {
     Ok(hasher.finalize().as_bytes().to_vec())
 }
 
+/// Writer wrapper that computes a Blake3 hash of all bytes written through it.
+///
+/// Use this to verify file integrity inline during copy operations without
+/// requiring a second pass over the data.
+///
+/// ```ignore
+/// let file = File::create("dest.bin")?;
+/// let mut hw = HashingWriter::new(file);
+/// hw.write_all(data)?;
+/// let hash = hw.finalize_hash();
+/// ```
+pub struct HashingWriter<W> {
+    inner: W,
+    hasher: blake3::Hasher,
+    bytes_written: u64,
+}
+
+impl<W: std::io::Write> HashingWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+            bytes_written: 0,
+        }
+    }
+
+    /// Finalize the hash and return it as a byte vector. Consumes the wrapper,
+    /// returning the inner writer.
+    pub fn finalize(self) -> (W, Vec<u8>) {
+        let hash = self.hasher.finalize().as_bytes().to_vec();
+        (self.inner, hash)
+    }
+
+    /// Get the hash without consuming the writer.
+    pub fn finalize_hash(&self) -> Vec<u8> {
+        self.hasher.finalize().as_bytes().to_vec()
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.bytes_written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +317,42 @@ mod tests {
             let data = vec![0xAAu8; n];
             let _ = rsync_rolling_checksum(&data).unwrap();
         }
+    }
+
+    #[test]
+    fn test_hashing_writer_matches_direct_hash() {
+        use std::io::Write;
+        let data = b"The quick brown fox jumps over the lazy dog";
+
+        // Hash directly
+        let direct = blake3::hash(data).as_bytes().to_vec();
+
+        // Hash through writer
+        let mut hw = HashingWriter::new(Vec::new());
+        hw.write_all(data).unwrap();
+        let (buf, hash) = hw.finalize();
+
+        assert_eq!(hash, direct);
+        assert_eq!(buf, data.to_vec());
+    }
+
+    #[test]
+    fn test_hashing_writer_incremental() {
+        use std::io::Write;
+        let mut hw = HashingWriter::new(Vec::new());
+        hw.write_all(b"hello ").unwrap();
+        hw.write_all(b"world").unwrap();
+
+        let expected = blake3::hash(b"hello world").as_bytes().to_vec();
+        assert_eq!(hw.finalize_hash(), expected);
+        assert_eq!(hw.bytes_written(), 11);
+    }
+
+    #[test]
+    fn test_hashing_writer_empty() {
+        let hw = HashingWriter::new(Vec::<u8>::new());
+        let expected = blake3::hash(b"").as_bytes().to_vec();
+        let (_, hash) = hw.finalize();
+        assert_eq!(hash, expected);
     }
 }

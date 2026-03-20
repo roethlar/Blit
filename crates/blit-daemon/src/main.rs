@@ -1,3 +1,4 @@
+mod metrics;
 mod runtime;
 mod service;
 
@@ -70,6 +71,19 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    // Start metrics server if requested
+    let transfer_metrics = metrics::TransferMetrics::new();
+    if let Some(ref metrics_addr_str) = args.metrics_addr {
+        match metrics_addr_str.parse::<std::net::SocketAddr>() {
+            Ok(metrics_addr) => {
+                metrics::spawn_metrics_server(metrics_addr, transfer_metrics.clone());
+            }
+            Err(e) => {
+                eprintln!("[warn] invalid --metrics-addr '{metrics_addr_str}': {e}");
+            }
+        }
+    }
 
     let service = BlitService::from_runtime(modules, default_root, args.force_grpc_data, server_checksums_enabled);
 

@@ -68,6 +68,7 @@ impl TransferOrchestrator {
                 None
             },
             resume: options.resume,
+            verify: options.verify,
         };
 
         if options.skip_unchanged && !options.checksum && !options.force_tar {

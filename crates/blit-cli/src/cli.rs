@@ -33,6 +33,8 @@ pub enum Commands {
     Rm(RmArgs),
     /// Search for files on a remote daemon
     Find(FindArgs),
+    /// Compare source and destination for integrity verification
+    Check(CheckArgs),
     /// Diagnostics and tooling commands
     Diagnostics {
         #[command(subcommand)]
@@ -146,6 +148,10 @@ pub struct TransferArgs {
     /// Limit transfer bandwidth in bytes per second (e.g., 10M, 1G, 500K)
     #[arg(long, value_name = "RATE")]
     pub bwlimit: Option<String>,
+
+    /// Verify file integrity by computing Blake3 hash during write and comparing with source
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -213,4 +219,39 @@ pub struct FindArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct CheckArgs {
+    /// Source path to compare
+    pub source: String,
+    /// Destination path to compare against
+    pub destination: String,
+    /// Compare files by Blake3 hash instead of size+mtime
+    #[arg(long, short = 'c')]
+    pub checksum: bool,
+    /// Only check that destination has all source files (ignore extras on dest)
+    #[arg(long)]
+    pub one_way: bool,
+    /// Output results as JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Exclude files matching this glob pattern (repeatable)
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN")]
+    pub exclude: Vec<String>,
+    /// Include only files matching this glob pattern (repeatable)
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN")]
+    pub include: Vec<String>,
+    /// Minimum file size to check (e.g., 100K, 10M)
+    #[arg(long, value_name = "SIZE")]
+    pub min_size: Option<String>,
+    /// Maximum file size to check (e.g., 1G, 500M)
+    #[arg(long, value_name = "SIZE")]
+    pub max_size: Option<String>,
+    /// Only check files older than this (e.g., 1h, 7d)
+    #[arg(long, value_name = "DURATION")]
+    pub min_age: Option<String>,
+    /// Only check files newer than this (e.g., 1h, 7d)
+    #[arg(long, value_name = "DURATION")]
+    pub max_age: Option<String>,
 }

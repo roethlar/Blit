@@ -93,6 +93,7 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
         checksum: args.checksum,
         retries: args.retries,
         resume: args.resume,
+        verify: args.verify,
         ..LocalMirrorOptions::default()
     };
     if let Some(workers) = args.workers {

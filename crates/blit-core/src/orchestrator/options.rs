@@ -25,6 +25,8 @@ pub struct LocalMirrorOptions {
     pub resume: bool,
     /// Bandwidth limit in bytes per second (None = unlimited).
     pub bwlimit: Option<u64>,
+    /// Verify file integrity by computing Blake3 hash inline during copy.
+    pub verify: bool,
 }
 
 impl Default for LocalMirrorOptions {
@@ -48,6 +50,7 @@ impl Default for LocalMirrorOptions {
             retries: 1,
             resume: false,
             bwlimit: None,
+            verify: false,
         }
     }
 }

@@ -333,6 +333,7 @@ mod tests {
             min_age: None,
             max_age: None,
             bwlimit: None,
+            verify: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -378,6 +379,7 @@ mod tests {
             min_age: None,
             max_age: None,
             bwlimit: None,
+            verify: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

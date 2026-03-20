@@ -19,6 +19,9 @@ agentcomms/**
 
 # Claude Code specific
 .claude/
+.serena/
+.gemini/
+.codex/
 
 # Debug and test artifacts
 *.log
