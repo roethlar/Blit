@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -30,7 +30,9 @@ pub struct WorkerParams {
     pub idx: usize,
     pub chunk_bytes: usize,
     pub progress: bool,
-    pub rx_shared: Arc<Mutex<mpsc::Receiver<TransferTask>>>,
+    /// Lock-free multi-consumer receiver (flume). Each worker clones and
+    /// races to dequeue — no Mutex contention.
+    pub rx_shared: flume::Receiver<TransferTask>,
     pub remaining: Arc<AtomicUsize>,
     pub active: Arc<AtomicUsize>,
     pub exit_tokens: Arc<AtomicUsize>,
@@ -44,7 +46,7 @@ pub trait WorkerFactory: Send + Sync {
 }
 
 pub struct TaskStreamSender {
-    tx: mpsc::Sender<TransferTask>,
+    tx: flume::Sender<TransferTask>,
     remaining: Arc<AtomicUsize>,
     closed: Arc<AtomicBool>,
 }
@@ -53,14 +55,14 @@ impl TaskStreamSender {
     pub fn send_blocking(&self, task: TransferTask) -> Result<()> {
         self.remaining.fetch_add(1, Ordering::Relaxed);
         self.tx
-            .blocking_send(task)
+            .send(task)
             .map_err(|_| eyre!("transfer task receiver dropped"))
     }
 
     pub async fn send(&self, task: TransferTask) -> Result<()> {
         self.remaining.fetch_add(1, Ordering::Relaxed);
         self.tx
-            .send(task)
+            .send_async(task)
             .await
             .map_err(|_| eyre!("transfer task receiver dropped"))
     }
@@ -80,8 +82,8 @@ impl Drop for TaskStreamSender {
     }
 }
 
-pub fn create_task_stream(capacity: usize) -> (TaskStreamSender, mpsc::Receiver<TransferTask>) {
-    let (tx, rx) = mpsc::channel::<TransferTask>(capacity);
+pub fn create_task_stream(capacity: usize) -> (TaskStreamSender, flume::Receiver<TransferTask>) {
+    let (tx, rx) = flume::bounded::<TransferTask>(capacity);
     let remaining = Arc::new(AtomicUsize::new(0));
     let closed = Arc::new(AtomicBool::new(false));
     (
@@ -125,7 +127,7 @@ pub async fn execute_streaming_plan(
     factory: &dyn WorkerFactory,
     chunk_bytes: usize,
     options: SchedulerOptions,
-    task_receiver: mpsc::Receiver<TransferTask>,
+    task_receiver: flume::Receiver<TransferTask>,
     remaining: Arc<AtomicUsize>,
     closed_flag: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -142,13 +144,13 @@ pub async fn execute_streaming_plan(
 
 async fn execute_streaming_with_receiver(
     factory: &dyn WorkerFactory,
-    rx_tasks: mpsc::Receiver<TransferTask>,
+    rx_tasks: flume::Receiver<TransferTask>,
     chunk_bytes: usize,
     options: SchedulerOptions,
     remaining: Arc<AtomicUsize>,
     closed_flag: Arc<AtomicBool>,
 ) -> Result<()> {
-    let rx_shared = Arc::new(Mutex::new(rx_tasks));
+    let rx_shared = rx_tasks;
     let active = Arc::new(AtomicUsize::new(0));
     let exit_tokens = Arc::new(AtomicUsize::new(0));
     let (stat_tx, mut stat_rx) = mpsc::unbounded_channel::<Sample>();
@@ -168,7 +170,7 @@ async fn execute_streaming_with_receiver(
             idx,
             chunk_bytes,
             progress: options.progress,
-            rx_shared: Arc::clone(&rx_shared),
+            rx_shared: rx_shared.clone(),
             remaining: Arc::clone(&remaining),
             active: Arc::clone(&active),
             exit_tokens: Arc::clone(&exit_tokens),
@@ -215,7 +217,7 @@ async fn execute_streaming_with_receiver(
                 idx,
                 chunk_bytes,
                 progress: options.progress,
-                rx_shared: Arc::clone(&rx_shared),
+                rx_shared: rx_shared.clone(),
                 remaining: Arc::clone(&remaining),
                 active: Arc::clone(&active),
                 exit_tokens: Arc::clone(&exit_tokens),
@@ -300,11 +302,9 @@ mod tests {
             tokio::spawn(async move {
                 params.active.fetch_add(1, Ordering::Relaxed);
                 // Consume all tasks from the channel
-                let mut rx = params.rx_shared.lock().await;
-                while rx.recv().await.is_some() {
+                while params.rx_shared.recv_async().await.is_ok() {
                     params.remaining.fetch_sub(1, Ordering::Relaxed);
                 }
-                drop(rx);
 
                 // Return the predetermined result
                 let outcome = match result {
