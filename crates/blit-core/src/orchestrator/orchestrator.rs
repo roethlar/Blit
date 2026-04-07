@@ -1,28 +1,29 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use eyre::{eyre, Context, Result};
 use tokio::runtime::Builder;
 
 use crate::auto_tune::derive_local_plan_tuning;
 use crate::change_journal::{ChangeState, ChangeTracker, ProbeToken, StoredSnapshot};
+use crate::copy::file_needs_copy_with_checksum_type;
 use crate::fs_enum::FileFilter;
-use crate::mirror_planner::MirrorPlanner;
+use crate::generated::FileHeader;
+use crate::local_worker::{copy_large_blocking, copy_paths_blocking};
 use crate::perf_history::{read_recent_records, TransferMode};
 use crate::perf_predictor::PerformancePredictor;
-use crate::transfer_engine::{create_task_stream, execute_streaming_plan, SchedulerOptions};
-use crate::transfer_facade::TransferFacade;
+use crate::remote::transfer::payload::{plan_transfer_payloads, DEFAULT_PAYLOAD_PREFETCH};
+use crate::remote::transfer::pipeline::execute_sink_pipeline;
+use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink};
+use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::transfer_plan::PlanOptions;
-use crate::{
-    local_worker::{copy_large_blocking, copy_paths_blocking, LocalWorkerFactory},
-    CopyConfig,
-};
+use crate::CopyConfig;
 
 use super::fast_path::{maybe_select_fast_path, FastPathDecision};
 use super::history::{record_performance_history, update_predictor};
 use super::options::LocalMirrorOptions;
-use super::planner::drive_planner_events;
 use super::summary::LocalMirrorSummary;
 
 pub struct TransferOrchestrator;
@@ -258,8 +259,7 @@ impl TransferOrchestrator {
             return Ok(summary);
         }
 
-        let mut filter = options.filter.clone_without_cache();
-        let planner_for_stream = MirrorPlanner::new(options.checksum);
+        // --- Unified pipeline: same path as remote transfers ---
         let mut plan_options = PlanOptions {
             force_tar: options.force_tar,
             ..PlanOptions::default()
@@ -292,98 +292,105 @@ impl TransferOrchestrator {
 
         let planning_start = Instant::now();
 
-        let stream = TransferFacade::stream_local_plan(
-            src_root,
-            dest_root,
-            &mut filter,
-            options.preserve_symlinks,
-            options.include_symlinks,
-            options.skip_unchanged,
-            planner_for_stream,
-            plan_options,
-        )?;
-
-        let (events, plan_handle) = stream.into_parts();
-
-        let (task_sender, task_receiver) = create_task_stream(1024);
-        let remaining = task_sender.remaining();
-        let closed_flag = task_sender.closed_flag();
-
-        let worker_factory = LocalWorkerFactory {
-            src_root: src_root.to_path_buf(),
-            dest_root: dest_root.to_path_buf(),
-            config: copy_config.clone(),
-        };
-
-        let scheduler_opts = SchedulerOptions {
-            progress: options.progress || options.verbose,
-            byte_drain: None,
-            initial_streams: Some(options.workers.clamp(1, 12)),
-            max_streams: Some(options.workers.max(1)),
-            max_retries: options.retries,
-        };
-
-        let chunk_bytes = 16 * 1024 * 1024;
-
         let runtime = Builder::new_multi_thread()
             .worker_threads(options.workers.max(1))
             .enable_all()
             .build()
             .context("build tokio runtime")?;
 
-        let transfer_future = execute_streaming_plan(
-            &worker_factory,
-            chunk_bytes,
-            scheduler_opts,
-            task_receiver,
-            Arc::clone(&remaining),
-            Arc::clone(&closed_flag),
-        );
+        let src_root_buf = src_root.to_path_buf();
+        let dest_root_buf = dest_root.to_path_buf();
+        let filter = options.filter.clone_without_cache();
+        let skip_unchanged = options.skip_unchanged;
+        let checksum_type = if options.checksum {
+            Some(crate::checksum::ChecksumType::Blake3)
+        } else {
+            None
+        };
 
-        let stall_timeout = Duration::from_secs(10);
-        let heartbeat = Duration::from_millis(500);
+        let pipeline_result = runtime.block_on(async {
+            // 1. Scan source via FsTransferSource (same as remote push)
+            let source = Arc::new(FsTransferSource::new(src_root_buf.clone()));
+            let unreadable = Arc::new(Mutex::new(Vec::new()));
+            let (mut header_rx, scan_handle) = source.scan(Some(filter), unreadable);
 
-        let planner_future = drive_planner_events(
-            &options,
-            events,
-            task_sender,
-            Arc::clone(&remaining),
-            Arc::clone(&closed_flag),
-            stall_timeout,
-            heartbeat,
-        );
+            // 2. Collect all headers
+            let mut all_headers = Vec::new();
+            while let Some(h) = header_rx.recv().await {
+                all_headers.push(h);
+            }
+            let _total_scanned = scan_handle.await
+                .context("scan task panicked")?
+                .context("scan failed")?;
 
-        let (transfer_result, planner_stats) =
-            runtime.block_on(async { tokio::join!(transfer_future, planner_future) });
+            // 3. Filter headers that need copying (skip unchanged)
+            let headers_to_copy = if skip_unchanged {
+                let src = src_root_buf.clone();
+                let dst = dest_root_buf.clone();
+                let ck = checksum_type;
+                let all = all_headers.clone();
+                tokio::task::spawn_blocking(move || {
+                    filter_headers_for_copy(&all, &src, &dst, ck)
+                })
+                .await
+                .context("filter task panicked")?
+            } else {
+                all_headers.clone()
+            };
 
-        transfer_result?;
-        let drive_summary = planner_stats?;
-        let plan_final = plan_handle.wait()?;
+            // 4. Plan payloads (same function as remote transfers)
+            let planned = plan_transfer_payloads(
+                headers_to_copy,
+                &src_root_buf,
+                plan_options,
+            )?;
+
+            // 5. Create FsTransferSink and execute unified pipeline
+            let sink = Arc::new(FsTransferSink::new(
+                src_root_buf.clone(),
+                dest_root_buf.clone(),
+                FsSinkConfig {
+                    preserve_times: copy_config.preserve_times,
+                    dry_run: copy_config.dry_run,
+                    checksum: copy_config.checksum,
+                    resume: copy_config.resume,
+                },
+            ));
+
+            let outcome = execute_sink_pipeline(
+                source,
+                vec![sink],
+                planned.payloads,
+                DEFAULT_PAYLOAD_PREFETCH,
+                None,
+            )
+            .await
+            .context("transfer pipeline failed")?;
+
+            Ok::<_, eyre::Report>((all_headers, outcome))
+        })?;
+
+        let (all_headers, pipeline_outcome) = pipeline_result;
         let planner_duration_ms = planning_start.elapsed().as_millis();
 
+        let total_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
         let mut summary = LocalMirrorSummary {
-            planned_files: plan_final.copy_jobs.len(),
-            copied_files: plan_final.copy_jobs.len(),
-            total_bytes: plan_final.total_bytes,
+            planned_files: pipeline_outcome.files_written,
+            copied_files: pipeline_outcome.files_written,
+            total_bytes,
             dry_run: options.dry_run,
             duration: start_time.elapsed(),
             ..Default::default()
         };
-        summary.tar_shard_tasks = plan_final.task_stats.tar_shard_tasks;
-        summary.tar_shard_files = plan_final.task_stats.tar_shard_files;
-        summary.tar_shard_bytes = plan_final.task_stats.tar_shard_bytes;
-        summary.raw_bundle_tasks = plan_final.task_stats.raw_bundle_tasks;
-        summary.raw_bundle_files = plan_final.task_stats.raw_bundle_files;
-        summary.raw_bundle_bytes = plan_final.task_stats.raw_bundle_bytes;
-        summary.large_tasks = plan_final.task_stats.large_tasks;
-        summary.large_bytes = plan_final.task_stats.large_bytes;
 
         if options.mirror {
-            let deletion_planner = MirrorPlanner::new(options.checksum);
-            let deletions = apply_local_deletions(
-                &plan_final.entries,
+            let source_paths: HashSet<String> = all_headers
+                .iter()
+                .map(|h| h.relative_path.clone())
+                .collect();
+            let deletions = apply_mirror_deletions(
+                &source_paths,
                 dest_root,
-                &deletion_planner,
                 &options.filter,
                 !options.dry_run,
                 options.verbose,
@@ -399,7 +406,7 @@ impl TransferOrchestrator {
         if options.verbose {
             eprintln!(
                 "Planning enumerated {} file(s), {} bytes",
-                drive_summary.enumerated_files, drive_summary.total_bytes
+                all_headers.len(), total_bytes
             );
             eprintln!(
                 "Completed local {}: {} file(s), {} bytes in {:.2?}",
@@ -424,19 +431,58 @@ impl TransferOrchestrator {
     }
 }
 
-fn apply_local_deletions(
-    entries: &[crate::enumeration::EnumeratedEntry],
+/// Filter headers to only those that need copying (skip unchanged files).
+fn filter_headers_for_copy(
+    headers: &[FileHeader],
+    src_root: &Path,
+    dst_root: &Path,
+    checksum: Option<crate::checksum::ChecksumType>,
+) -> Vec<FileHeader> {
+    headers
+        .iter()
+        .filter(|h| {
+            let src = src_root.join(&h.relative_path);
+            let dst = dst_root.join(&h.relative_path);
+            file_needs_copy_with_checksum_type(&src, &dst, checksum).unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Delete destination files/dirs not present in the source header set.
+fn apply_mirror_deletions(
+    source_paths: &HashSet<String>,
     dest_root: &Path,
-    planner: &MirrorPlanner,
     filter: &FileFilter,
     perform: bool,
     verbose: bool,
 ) -> Result<(usize, usize)> {
-    let delete_plan = planner.plan_local_deletions_from_entries(entries, dest_root, filter)?;
+    use crate::enumeration::{EntryKind, FileEnumerator};
+
+    let enumerator = FileEnumerator::new(filter.clone_without_cache());
+    let dest_entries = enumerator.enumerate_local(dest_root)?;
+
+    let mut files_to_delete = Vec::new();
+    let mut dirs_to_delete = Vec::new();
+
+    for entry in &dest_entries {
+        let rel = entry.relative_path.to_string_lossy().replace('\\', "/");
+        if !source_paths.contains(&rel) {
+            let abs = dest_root.join(&entry.relative_path);
+            match entry.kind {
+                EntryKind::Directory => dirs_to_delete.push(abs),
+                _ => files_to_delete.push(abs),
+            }
+        }
+    }
+
+    // Sort dirs deepest-first so children are deleted before parents.
+    dirs_to_delete.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+
     let mut deleted_files = 0usize;
     let mut deleted_dirs = 0usize;
 
-    for path in delete_plan.files {
+    for path in files_to_delete {
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(&path);
 
@@ -457,7 +503,7 @@ fn apply_local_deletions(
         }
     }
 
-    for path in delete_plan.dirs {
+    for path in dirs_to_delete {
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(&path);
 
