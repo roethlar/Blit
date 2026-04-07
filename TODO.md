@@ -133,9 +133,9 @@ This is the master checklist. Execute the first unchecked item. After completion
     - [x] Add human-readable byte formatting to `df` output (currently raw bytes only). *(2026-04-07: `df` now shows `format_bytes()` alongside raw bytes.)*
     - [x] Produce man page (`docs/cli/blit-utils.1.md`) mirroring blit-cli coverage. *(2026-03-06: Created with full synopsis, options, examples, and exit codes.)*
 - [ ] Explore optional AI-powered telemetry analysis (anomaly detection, tuning recommendations, diagnostics) using local performance history data; document scope and guardrails.
-- [ ] Produce packaging artifacts for supported platforms (Linux, macOS, Windows).
+- [x] Produce packaging artifacts for supported platforms (Linux, macOS, Windows). *(2026-04-07: Added `scripts/build-release.sh` (Unix) and `scripts/windows/build-release.ps1` with tarball creation. Added `.github/workflows/ci.yml` with check/fmt/clippy, tri-platform tests, and release artifact uploads.)*
 - [x] Document installation/configuration (config.toml, `--root`, mDNS, service setup). *(2026-04-07: Rewrote `docs/DAEMON_CONFIG.md` with accurate TOML format, correct port 9031, `[[module]]` syntax, client config directories, mDNS section, and expanded service installation for Linux/macOS/Windows.)*
-- [ ] Build end-to-end integration/regression suite and integrate with CI.
+- [x] Build end-to-end integration/regression suite and integrate with CI. *(2026-04-07: CI workflow runs `cargo test --workspace` on Linux/macOS/Windows. Integration tests cover admin verbs (10 tests), blit-utils (21 tests), remote transfers, transfer edges, parity, resume, and move.)*
 - [x] Review logging/error output for production readiness. *(2026-04-07: Audited all crates. Removed duplicate println/eprintln debug output from block clone paths. Added expect() messages to bare unwrap() calls. No dbg!()/todo!() found. Remaining eprintln calls in orchestrator/daemon are intentional verbose output. Full migration to structured logging deferred to post-release.)*
 - [ ] Prepare release notes/changelog with benchmark data and support matrix.
 
