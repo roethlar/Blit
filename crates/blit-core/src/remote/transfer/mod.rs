@@ -1,5 +1,6 @@
 pub mod data_plane;
 pub mod payload;
+pub mod pipeline;
 pub mod progress;
 pub mod sink;
 pub mod source;
@@ -14,5 +15,6 @@ pub use payload::{
     prepared_payload_stream, transfer_payloads_via_control_plane, PlannedPayloads, PreparedPayload,
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
+pub use pipeline::execute_sink_pipeline;
 pub use progress::{ProgressEvent, RemoteTransferProgress};
 pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, SinkOutcome, TransferSink};
