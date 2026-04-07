@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_buffer_sizing_small_file() {
         let sizer = BufferSizer::new_with_memory(8_u64 * 1024 * 1024 * 1024); // 8 GiB
-        let size = sizer.calculate_buffer_size(1 * MB as u64, true);
+        let size = sizer.calculate_buffer_size(MB as u64, true);
         assert!(size >= 8 * KB);
         assert!(size <= sizer.max_buffer_size);
     }
@@ -325,7 +325,6 @@ impl BufferPool {
             let mut cache = self.cache.lock();
             if cache.len() < self.pool_size {
                 cache.push(buffer);
-                return;
             }
         }
         // Otherwise buffer is dropped and memory freed

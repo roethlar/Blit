@@ -10,14 +10,14 @@ use eyre::{bail, Context, Result};
 use std::fs;
 use std::io::{self, Write};
 
+use crate::admin::delete_remote_path;
+use blit_core::remote::RemotePath;
 use endpoints::{
     ensure_remote_destination_supported, ensure_remote_source_supported,
     ensure_remote_transfer_supported,
 };
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
-use crate::admin::delete_remote_path;
-use blit_core::remote::RemotePath;
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
 /// Always returns true if `skip_prompt` is true.
@@ -246,14 +246,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             ensure_remote_transfer_supported(args)?;
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(
-                ctx,
-                args,
-                Endpoint::Remote(src.clone()),
-                dst,
-                false,
-            )
-            .await?;
+            run_remote_push_transfer(ctx, args, Endpoint::Remote(src.clone()), dst, false).await?;
 
             // Delete remote source
             let rel_path = match &src.path {

@@ -440,7 +440,7 @@ mod tests {
         let mut file = File::create(&path).expect("create");
         writeln!(file, "{}", sample_v0_json()).expect("write v0");
         writeln!(file, "{{not valid json}}").expect("write garbage");
-        writeln!(file, "").expect("write empty");
+        writeln!(file).expect("write empty");
         writeln!(file, "{}", sample_v1_json()).expect("write v1");
         drop(file);
 

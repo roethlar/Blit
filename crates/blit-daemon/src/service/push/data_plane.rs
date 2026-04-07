@@ -702,7 +702,7 @@ impl TarShardExecutor {
     }
 
     async fn finish(mut self, stats: &mut TransferStats) -> Result<(), Status> {
-        while self.tasks.len() > 0 {
+        while !self.tasks.is_empty() {
             self.collect_next(stats).await?;
         }
         // Log pool stats at end of transfer
@@ -930,9 +930,13 @@ mod tests {
         };
 
         let tar_data = build_tar_bytes(source_root.path(), &header);
-        let (stats, _returned_buf) =
-            apply_tar_shard_sync(module.clone(), vec![header.clone()], tar_data, TAR_BUFFER_SIZE)
-                .expect("tar shard applies");
+        let (stats, _returned_buf) = apply_tar_shard_sync(
+            module.clone(),
+            vec![header.clone()],
+            tar_data,
+            TAR_BUFFER_SIZE,
+        )
+        .expect("tar shard applies");
 
         assert_eq!(stats.files_transferred, 1);
         assert_eq!(stats.bytes_transferred, content.len() as u64);
@@ -955,7 +959,7 @@ mod tests {
         } else {
             header.permissions
         };
-        tar_header.set_mode(mode.into());
+        tar_header.set_mode(mode);
         tar_header.set_size(header.size);
         let mtime = if header.mtime_seconds >= 0 {
             header.mtime_seconds as u64

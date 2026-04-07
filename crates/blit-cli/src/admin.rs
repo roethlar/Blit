@@ -7,7 +7,7 @@ use blit_core::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Context, Result};
 use serde::Serialize;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
 struct DiskUsageJsonRow {
@@ -313,7 +313,7 @@ fn extract_module_and_path(remote: &RemoteEndpoint) -> Result<(String, PathBuf)>
     }
 }
 
-fn rel_path_to_string(path: &PathBuf) -> String {
+fn rel_path_to_string(path: &Path) -> String {
     path.iter()
         .map(|c| c.to_string_lossy())
         .collect::<Vec<_>>()

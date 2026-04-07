@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -43,6 +43,7 @@ fn pick_unused_port() -> u16 {
         .port()
 }
 
+#[allow(dead_code)]
 struct DualDaemonContext {
     _work: tempfile::TempDir,
     workspace: PathBuf,
@@ -63,7 +64,7 @@ impl DualDaemonContext {
 
         let module_a_dir = workspace.join("module_a");
         fs::create_dir_all(&module_a_dir).expect("module a dir");
-        
+
         let module_b_dir = workspace.join("module_b");
         fs::create_dir_all(&module_b_dir).expect("module b dir");
 
@@ -98,7 +99,7 @@ impl DualDaemonContext {
             };
             bin_dir.join(name)
         };
-        
+
         // Ensure daemon is built (shared step)
         let mut build = Command::new("cargo");
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -115,8 +116,10 @@ impl DualDaemonContext {
         let output = build.output().expect("invoke cargo build for blit-daemon");
         assert!(output.status.success(), "cargo build blit-daemon failed");
 
-        let daemon_a = Self::spawn_daemon(&workspace, &daemon_bin, port_a, "daemon_a", &module_a_dir);
-        let daemon_b = Self::spawn_daemon(&workspace, &daemon_bin, port_b, "daemon_b", &module_b_dir);
+        let daemon_a =
+            Self::spawn_daemon(&workspace, &daemon_bin, port_a, "daemon_a", &module_a_dir);
+        let daemon_b =
+            Self::spawn_daemon(&workspace, &daemon_bin, port_b, "daemon_b", &module_b_dir);
 
         Self {
             _work: work,
@@ -132,7 +135,13 @@ impl DualDaemonContext {
         }
     }
 
-    fn spawn_daemon(workspace: &PathBuf, bin: &PathBuf, port: u16, name: &str, module_path: &PathBuf) -> ChildGuard {
+    fn spawn_daemon(
+        workspace: &Path,
+        bin: &Path,
+        port: u16,
+        name: &str,
+        module_path: &Path,
+    ) -> ChildGuard {
         let config = DaemonConfig {
             daemon: DaemonSection {
                 bind: "127.0.0.1".into(),
@@ -141,7 +150,7 @@ impl DualDaemonContext {
             },
             modules: vec![ModuleSection {
                 name: "test".into(),
-                path: module_path.clone(),
+                path: module_path.to_path_buf(),
                 comment: None,
                 read_only: false,
                 use_chroot: false,
@@ -164,7 +173,7 @@ impl DualDaemonContext {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn daemon");
-        
+
         let mut ready = false;
         for _ in 0..50 {
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -183,7 +192,7 @@ impl DualDaemonContext {
 #[test]
 fn test_remote_to_remote_mirror() {
     let ctx = DualDaemonContext::new();
-    
+
     // Setup source file in Daemon A
     let src_file = ctx.module_a_dir.join("remote_src.txt");
     fs::write(&src_file, b"remote-to-remote-payload").expect("write src file");
@@ -203,15 +212,19 @@ fn test_remote_to_remote_mirror() {
         .arg("--trace-data-plane") // Optional, to see logs
         .arg(&src_remote)
         .arg(&dest_remote);
-    
+
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    
+
     println!("STDOUT:\n{}", stdout);
     println!("STDERR:\n{}", stderr);
 
-    assert!(output.status.success(), "blit-cli failed with status: {}", output.status);
+    assert!(
+        output.status.success(),
+        "blit-cli failed with status: {}",
+        output.status
+    );
 
     // Verify file arrived at Daemon B
     let dest_file = ctx.module_b_dir.join("remote_src.txt");
@@ -221,7 +234,7 @@ fn test_remote_to_remote_mirror() {
         let _ = Command::new("ls").arg("-R").arg(&ctx.module_b_dir).status();
         panic!("destination file missing");
     }
-    
+
     let bytes = fs::read(&dest_file).expect("read dest file");
     assert_eq!(bytes, b"remote-to-remote-payload");
 }

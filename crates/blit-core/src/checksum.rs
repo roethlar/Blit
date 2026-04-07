@@ -7,17 +7,12 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Available checksum algorithms
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub enum ChecksumType {
+    #[default]
     Blake3,
     XxHash3,
     Md5, // For compatibility
-}
-
-impl Default for ChecksumType {
-    fn default() -> Self {
-        Self::Blake3
-    }
 }
 
 /// CHAR_OFFSET constant from rsync (for compatibility)

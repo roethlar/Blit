@@ -60,7 +60,7 @@ pub fn determine_tuning(
         } else if gbps > 3.0 {
             (Some(4 * 1024 * 1024), Some(16)) // Multi-gig
         } else {
-            (Some(1 * 1024 * 1024), Some(8)) // Gigabit
+            (Some(1024 * 1024), Some(8)) // Gigabit
         }
     } else {
         (None, None)

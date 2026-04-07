@@ -43,6 +43,7 @@ pub fn pick_unused_port() -> u16 {
         .port()
 }
 
+#[allow(dead_code)]
 pub struct TestContext {
     pub _work: tempfile::TempDir,
     pub workspace: PathBuf,

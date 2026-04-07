@@ -11,7 +11,7 @@ use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
 use crate::remote::transfer::source::TransferSource;
 use std::sync::Arc;
 
-pub const CONTROL_PLANE_CHUNK_SIZE: usize = 1 * 1024 * 1024;
+pub const CONTROL_PLANE_CHUNK_SIZE: usize = 1024 * 1024;
 pub const DATA_PLANE_RECORD_FILE: u8 = 0;
 pub const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
 pub const DATA_PLANE_RECORD_BLOCK: u8 = 2;

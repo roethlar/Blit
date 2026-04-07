@@ -99,7 +99,7 @@ impl TransferFacade {
 
                         aggregator.push(rel, size, &tx)?;
 
-                        if enumerated_files % 256 == 0 {
+                        if enumerated_files.is_multiple_of(256) {
                             let _ = tx.send(PlannerEvent::Progress {
                                 enumerated_files,
                                 total_bytes,

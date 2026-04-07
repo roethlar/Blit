@@ -1,15 +1,17 @@
 use super::PullPayload;
-use blit_core::buffer::BufferPool;
-use blit_core::remote::transfer::source::FsTransferSource;
 use crate::runtime::ModuleConfig;
 use crate::service::PullSender;
-use std::sync::Arc;
 use base64::{engine::general_purpose, Engine as _};
-use blit_core::generated::{DataTransferNegotiation, FileData, FileHeader, ManifestBatch, PullChunk, PullSummary};
+use blit_core::buffer::BufferPool;
+use blit_core::generated::{
+    DataTransferNegotiation, FileData, FileHeader, ManifestBatch, PullChunk, PullSummary,
+};
+use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::remote::transfer::{plan_transfer_payloads, TransferPayload};
 use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -58,7 +60,15 @@ pub(crate) async fn stream_pull(
         }
         let total_bytes: u64 = entries.iter().map(|e| e.header.size).sum();
         send_manifest_batch(&tx, entries.len() as u64, total_bytes).await?;
-        return stream_pull_non_streaming(module, entries, total_bytes, force_grpc, metadata_only, tx).await;
+        return stream_pull_non_streaming(
+            module,
+            entries,
+            total_bytes,
+            force_grpc,
+            metadata_only,
+            tx,
+        )
+        .await;
     }
 
     // For gRPC fallback or metadata-only, use non-streaming path
@@ -113,8 +123,10 @@ async fn stream_pull_non_streaming(
     }
 
     let tuning = determine_remote_tuning(total_bytes);
-    let mut plan_options = PlanOptions::default();
-    plan_options.chunk_bytes_override = Some(tuning.chunk_bytes);
+    let plan_options = PlanOptions {
+        chunk_bytes_override: Some(tuning.chunk_bytes),
+        ..Default::default()
+    };
 
     let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
     let planned = plan_transfer_payloads(headers, &module.path, plan_options)
@@ -128,7 +140,8 @@ async fn stream_pull_non_streaming(
     let listener = bind_data_plane_listener()
         .await
         .map_err(|err| Status::internal(format!("failed to bind data plane: {}", err)))?;
-    let port = listener.local_addr()
+    let port = listener
+        .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
     let token = generate_token();
@@ -189,7 +202,13 @@ async fn stream_pull_streaming(
     let root_clone = root.clone();
     let requested_clone = requested.clone();
     let enum_handle = tokio::task::spawn_blocking(move || {
-        enumerate_to_channel(module_path, root_clone, requested_clone, entry_tx, ENUM_BATCH_SIZE)
+        enumerate_to_channel(
+            module_path,
+            root_clone,
+            requested_clone,
+            entry_tx,
+            ENUM_BATCH_SIZE,
+        )
     });
 
     // Collect first batch(es) to estimate size for tuning
@@ -223,14 +242,17 @@ async fn stream_pull_streaming(
 
     // Determine tuning based on accumulated bytes
     let tuning = determine_remote_tuning(pending_bytes);
-    let mut plan_options = PlanOptions::default();
-    plan_options.chunk_bytes_override = Some(tuning.chunk_bytes);
+    let plan_options = PlanOptions {
+        chunk_bytes_override: Some(tuning.chunk_bytes),
+        ..Default::default()
+    };
 
     // Set up data plane
     let listener = bind_data_plane_listener()
         .await
         .map_err(|err| Status::internal(format!("failed to bind data plane: {}", err)))?;
-    let port = listener.local_addr()
+    let port = listener
+        .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
     let token = generate_token();
@@ -286,8 +308,10 @@ async fn stream_pull_streaming(
 
             // Plan and queue
             let headers: Vec<FileHeader> = batch.iter().map(|e| e.header.clone()).collect();
-            let planned = plan_transfer_payloads(headers, &module_path, plan_options)
-                .map_err(|err| Status::internal(format!("failed to plan pull payloads: {}", err)))?;
+            let planned =
+                plan_transfer_payloads(headers, &module_path, plan_options).map_err(|err| {
+                    Status::internal(format!("failed to plan pull payloads: {}", err))
+                })?;
             if !planned.payloads.is_empty() {
                 payload_tx
                     .send(planned.payloads)
@@ -408,7 +432,11 @@ pub(crate) async fn collect_pull_entries_with_checksums(
     .map_err(|err| Status::internal(format!("enumeration task failed: {}", err)))?
 }
 
-fn build_file_header(base: &Path, relative: &Path, compute_checksum: bool) -> Result<FileHeader, Status> {
+fn build_file_header(
+    base: &Path,
+    relative: &Path,
+    compute_checksum: bool,
+) -> Result<FileHeader, Status> {
     use std::io::Read;
 
     let abs_path = base.join(relative);
@@ -417,7 +445,8 @@ fn build_file_header(base: &Path, relative: &Path, compute_checksum: bool) -> Re
         // Open file once for both metadata and hashing
         let file = std::fs::File::open(&abs_path)
             .map_err(|err| Status::internal(format!("open {}: {}", abs_path.display(), err)))?;
-        let metadata = file.metadata()
+        let metadata = file
+            .metadata()
             .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
 
         // Compute Blake3 hash using the already-open file
@@ -425,7 +454,8 @@ fn build_file_header(base: &Path, relative: &Path, compute_checksum: bool) -> Re
         let mut reader = std::io::BufReader::new(file);
         let mut buf = [0u8; 256 * 1024];
         loop {
-            let n = reader.read(&mut buf)
+            let n = reader
+                .read(&mut buf)
                 .map_err(|err| Status::internal(format!("read {}: {}", abs_path.display(), err)))?;
             if n == 0 {
                 break;
@@ -534,7 +564,7 @@ async fn accept_pull_data_connection(
 ) -> Result<(), Status> {
     let start = Instant::now();
     let streams = stream_count.max(1) as usize;
-    let total_bytes: u64 = payloads.iter().map(|p| payload_bytes(p)).sum();
+    let total_bytes: u64 = payloads.iter().map(payload_bytes).sum();
     let mut handles = Vec::with_capacity(streams);
     let chunked = chunk_transfer_payloads(payloads, streams);
 
@@ -615,7 +645,10 @@ async fn handle_pull_stream(
 
     for payload in payloads {
         session
-            .send_payloads(Arc::new(FsTransferSource::new(module_root.clone())), vec![payload])
+            .send_payloads(
+                Arc::new(FsTransferSource::new(module_root.clone())),
+                vec![payload],
+            )
             .await
             .map_err(|err| {
                 Status::internal(format!("sending pull data plane payloads: {}", err))

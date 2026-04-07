@@ -133,7 +133,10 @@ pub(super) fn maybe_select_fast_path(
 
     if let Some((file, size)) = huge_candidate {
         if size >= HUGE_SINGLE_BYTES {
-            return Ok(FastPathOutcome::fast_path(FastPathDecision::Huge { file, size }));
+            return Ok(FastPathOutcome::fast_path(FastPathDecision::Huge {
+                file,
+                size,
+            }));
         }
     }
 
@@ -155,8 +158,10 @@ mod tests {
         std::fs::create_dir_all(&dest)?;
         std::fs::write(src.join("file.txt"), b"hello")?;
 
-        let mut options = LocalMirrorOptions::default();
-        options.perf_history = false;
+        let options = LocalMirrorOptions {
+            perf_history: false,
+            ..Default::default()
+        };
         let outcome = maybe_select_fast_path(&src, &dest, &options)?;
         assert!(matches!(
             outcome.decision,
@@ -176,8 +181,10 @@ mod tests {
             std::fs::write(src.join(format!("file_{i}.txt")), b"data")?;
         }
 
-        let mut options = LocalMirrorOptions::default();
-        options.perf_history = false;
+        let options = LocalMirrorOptions {
+            perf_history: false,
+            ..Default::default()
+        };
         let outcome = maybe_select_fast_path(&src, &dest, &options)?;
         assert!(
             matches!(outcome.decision, Some(FastPathDecision::Tiny { .. })),
@@ -197,8 +204,10 @@ mod tests {
             std::fs::write(src.join(format!("file_{i}.txt")), b"data")?;
         }
 
-        let mut options = LocalMirrorOptions::default();
-        options.perf_history = false;
+        let options = LocalMirrorOptions {
+            perf_history: false,
+            ..Default::default()
+        };
         let outcome = maybe_select_fast_path(&src, &dest, &options)?;
         assert!(
             outcome.decision.is_none(),

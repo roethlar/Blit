@@ -68,3 +68,6 @@ windows = { version = "0.57", features = [
     "Win32_Security_Authorization",
 ] }
 normpath = "1.1"
+
+[lints]
+workspace = true

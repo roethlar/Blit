@@ -47,6 +47,7 @@ impl BlitService {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn with_modules(
         modules: HashMap<String, ModuleConfig>,
         force_grpc_data: bool,
@@ -117,9 +118,15 @@ impl Blit for BlitService {
         let server_checksums_enabled = self.server_checksums_enabled;
 
         tokio::spawn(async move {
-            if let Err(status) =
-                handle_pull_sync_stream(modules, default_root, stream, tx.clone(), force_grpc_data, server_checksums_enabled)
-                    .await
+            if let Err(status) = handle_pull_sync_stream(
+                modules,
+                default_root,
+                stream,
+                tx.clone(),
+                force_grpc_data,
+                server_checksums_enabled,
+            )
+            .await
             {
                 let _ = tx.send(Err(status)).await;
             }

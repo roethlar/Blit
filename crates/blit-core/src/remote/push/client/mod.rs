@@ -275,7 +275,7 @@ fn prune_unrequested_payloads(
         }
     }
 
-    payloads.extend(filtered.into_iter());
+    payloads.extend(filtered);
     skipped
 }
 
@@ -764,38 +764,39 @@ impl RemotePushClient {
                 }
             }
 
-            if matches!(transfer_mode, TransferMode::Fallback) {
-                if !fallback_upload_complete_sent
-                    && need_list_received
-                    && manifest_done
-                    && pending_queue.is_empty()
-                    && (files_requested.is_empty() || fallback_files_sent >= files_requested.len())
-                {
-                    transfer_payloads_via_control_plane(
-                        source.clone(),
-                        Vec::new(),
-                        &tx,
-                        true,
-                        progress,
-                        remote_tuning
-                            .as_ref()
-                            .map(|t| t.chunk_bytes)
-                            .unwrap_or(CONTROL_PLANE_CHUNK_SIZE),
-                        remote_tuning
-                            .as_ref()
-                            .map(|t| t.initial_streams)
-                            .unwrap_or(DEFAULT_PAYLOAD_PREFETCH),
-                    )
-                    .await?;
-                    fallback_upload_complete_sent = true;
-                }
+            if matches!(transfer_mode, TransferMode::Fallback)
+                && !fallback_upload_complete_sent
+                && need_list_received
+                && manifest_done
+                && pending_queue.is_empty()
+                && (files_requested.is_empty() || fallback_files_sent >= files_requested.len())
+            {
+                transfer_payloads_via_control_plane(
+                    source.clone(),
+                    Vec::new(),
+                    &tx,
+                    true,
+                    progress,
+                    remote_tuning
+                        .as_ref()
+                        .map(|t| t.chunk_bytes)
+                        .unwrap_or(CONTROL_PLANE_CHUNK_SIZE),
+                    remote_tuning
+                        .as_ref()
+                        .map(|t| t.initial_streams)
+                        .unwrap_or(DEFAULT_PAYLOAD_PREFETCH),
+                )
+                .await?;
+                fallback_upload_complete_sent = true;
             }
 
-            if matches!(transfer_mode, TransferMode::DataPlane) {
-                if pending_queue.is_empty() && manifest_done && data_plane_outstanding == 0 {
-                    if let Some(sender) = data_plane_sender.take() {
-                        sender.finish().await?;
-                    }
+            if matches!(transfer_mode, TransferMode::DataPlane)
+                && pending_queue.is_empty()
+                && manifest_done
+                && data_plane_outstanding == 0
+            {
+                if let Some(sender) = data_plane_sender.take() {
+                    sender.finish().await?;
                 }
             }
         }

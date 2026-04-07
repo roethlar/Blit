@@ -530,6 +530,7 @@ impl RemotePullClient {
                     let mut file = tokio::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
+                        .truncate(false)
                         .open(&dest_path)
                         .await
                         .with_context(|| {
@@ -657,7 +658,7 @@ async fn compute_block_hashes(path: &Path, block_size: usize) -> Result<Vec<Vec<
         .with_context(|| format!("getting metadata for {}", path.display()))?;
 
     let file_size = metadata.len() as usize;
-    let num_blocks = (file_size + block_size - 1) / block_size;
+    let num_blocks = file_size.div_ceil(block_size);
 
     let mut file = tokio::fs::File::open(path)
         .await
@@ -726,10 +727,7 @@ impl tokio::io::AsyncRead for RemoteFileStream {
                     }
                 }
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(std::io::Error::other(e.to_string()))),
             Poll::Ready(None) => Poll::Ready(Ok(())),
             Poll::Pending => Poll::Pending,
         }
@@ -1020,6 +1018,7 @@ async fn handle_block_record(
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&dest_path)
         .await
         .with_context(|| format!("opening {} for block write", dest_path.display()))?;

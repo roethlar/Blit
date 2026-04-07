@@ -9,12 +9,13 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::FileHeader;
-use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
-use blit_core::remote::{
-    RemoteEndpoint, RemotePath, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
-};
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
+use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+use blit_core::remote::{
+    RemoteEndpoint, RemotePath, RemotePullClient, RemotePullReport, RemotePushClient,
+    RemotePushReport,
+};
 use std::sync::Arc;
 
 use super::endpoints::{format_remote_endpoint, Endpoint};
@@ -161,7 +162,9 @@ pub async fn run_remote_push_transfer(
         Endpoint::Remote(endpoint) => {
             let client = RemotePullClient::connect(endpoint.clone())
                 .await
-                .with_context(|| format!("connecting to source {}", endpoint.control_plane_uri()))?;
+                .with_context(|| {
+                    format!("connecting to source {}", endpoint.control_plane_uri())
+                })?;
             // Use the relative path from the endpoint as the root
             let root = match &endpoint.path {
                 blit_core::remote::RemotePath::Module { rel_path, .. } => rel_path.clone(),
@@ -268,11 +271,7 @@ pub async fn run_remote_pull_transfer(
             if summary.entries_deleted > 0 {
                 // The server told us how many files should be deleted locally
                 // We need to delete local files not in the remote manifest
-                let remote_paths: Vec<PathBuf> = report
-                    .downloaded_paths
-                    .iter()
-                    .cloned()
-                    .collect();
+                let remote_paths: Vec<PathBuf> = report.downloaded_paths.to_vec();
                 let stats = purge_extraneous_local(&actual_dest, &remote_paths).await?;
                 if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
                     println!(
@@ -431,7 +430,7 @@ async fn purge_extraneous_local(
                 dirs.push(entry.path().to_path_buf());
             }
         }
-        dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+        dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
         dirs
     })
     .await

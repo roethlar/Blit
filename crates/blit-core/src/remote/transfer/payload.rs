@@ -295,7 +295,7 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec
         } else {
             header.permissions
         };
-        tar_header.set_mode(mode.into());
+        tar_header.set_mode(mode);
         tar_header.set_size(header.size);
         let mtime = if header.mtime_seconds >= 0 {
             header.mtime_seconds as u64
@@ -310,8 +310,5 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec
             .with_context(|| format!("adding {} to tar shard", full_path.display()))?;
     }
 
-    builder
-        .into_inner()
-        .context("finalizing tar shard")
-        .map(|buf| buf)
+    builder.into_inner().context("finalizing tar shard")
 }

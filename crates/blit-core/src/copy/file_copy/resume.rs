@@ -70,6 +70,7 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(dst)
         .with_context(|| format!("opening destination: {}", dst.display()))?;
 
@@ -250,8 +251,8 @@ mod tests {
 
         // Create destination with corrupted middle block
         let mut corrupted = data.clone();
-        for i in 3000..4000 {
-            corrupted[i] = 0xFF;
+        for byte in &mut corrupted[3000..4000] {
+            *byte = 0xFF;
         }
         std::fs::write(&dst, &corrupted)?;
 

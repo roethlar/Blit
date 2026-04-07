@@ -22,3 +22,6 @@ tempfile = "3"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 wait-timeout = "0.2"
+
+[lints]
+workspace = true

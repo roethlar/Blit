@@ -355,17 +355,17 @@ pub(crate) fn stream_disk_usage(
     if start_abs.is_file() {
         add_file(&mut accum, &start_rel, metadata.len(), max_depth);
     } else {
-        if start_rel != PathBuf::from(".") {
+        if start_rel != Path::new(".") {
             add_dir(&mut accum, &start_rel, max_depth);
         }
         let enumerator = FileEnumerator::new(FileFilter::default());
         enumerator
             .enumerate_local_streaming(&start_abs, |entry| {
-                let rel_from_root = if start_rel == PathBuf::from(".") {
+                let rel_from_root = if start_rel == Path::new(".") {
                     entry.relative_path.clone()
                 } else {
                     let mut combined = start_rel.clone();
-                    if entry.relative_path != PathBuf::from(".") {
+                    if entry.relative_path != Path::new(".") {
                         combined.push(&entry.relative_path);
                     }
                     combined
@@ -386,7 +386,7 @@ pub(crate) fn stream_disk_usage(
     let mut entries: Vec<(usize, PathBuf, UsageAccum)> = accum
         .into_iter()
         .map(|(path, usage)| {
-            let depth = if path == PathBuf::from(".") {
+            let depth = if path == Path::new(".") {
                 0
             } else {
                 path.components().count()
@@ -510,18 +510,18 @@ pub(crate) fn stream_find_entries(
         return Ok(());
     }
 
-    if include_dirs && start_rel != PathBuf::from(".") {
+    if include_dirs && start_rel != Path::new(".") {
         maybe_emit(start_rel.clone(), metadata, true)?;
     }
 
     let enumerator = FileEnumerator::new(FileFilter::default());
     enumerator
         .enumerate_local_streaming(&start_abs, |entry| {
-            let rel_from_root = if start_rel == PathBuf::from(".") {
+            let rel_from_root = if start_rel == Path::new(".") {
                 entry.relative_path.clone()
             } else {
                 let mut combined = start_rel.clone();
-                if entry.relative_path != PathBuf::from(".") {
+                if entry.relative_path != Path::new(".") {
                     combined.push(&entry.relative_path);
                 }
                 combined

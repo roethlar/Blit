@@ -297,7 +297,7 @@ impl FileListBatcher {
     }
 
     async fn push(&mut self, path: String) -> Result<bool, Status> {
-        let entry_bytes = path.as_bytes().len();
+        let entry_bytes = path.len();
         if self.batch.is_empty() {
             self.last_flush = Instant::now();
         }
@@ -347,13 +347,12 @@ impl FileListBatcher {
             return false;
         }
 
-        if !self.sent_any {
-            if self.batch.len() >= FILE_LIST_EARLY_FLUSH_ENTRIES
+        if !self.sent_any
+            && (self.batch.len() >= FILE_LIST_EARLY_FLUSH_ENTRIES
                 || self.batch_bytes >= FILE_LIST_EARLY_FLUSH_BYTES
-                || self.last_flush.elapsed() >= FILE_LIST_EARLY_FLUSH_DELAY
-            {
-                return true;
-            }
+                || self.last_flush.elapsed() >= FILE_LIST_EARLY_FLUSH_DELAY)
+        {
+            return true;
         }
 
         self.batch.len() >= FILE_LIST_BATCH_MAX_ENTRIES
