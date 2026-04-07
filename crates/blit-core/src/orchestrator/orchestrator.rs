@@ -477,7 +477,7 @@ fn apply_mirror_deletions(
     }
 
     // Sort dirs deepest-first so children are deleted before parents.
-    dirs_to_delete.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+    dirs_to_delete.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
 
     let mut deleted_files = 0usize;
     let mut deleted_dirs = 0usize;
