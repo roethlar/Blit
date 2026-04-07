@@ -159,7 +159,7 @@ impl DataPlaneSession {
         self.bytes_sent
     }
 
-    async fn send_file(
+    pub async fn send_file(
         &mut self,
         source: Arc<dyn TransferSource>,
         header: &FileHeader,
@@ -277,7 +277,7 @@ impl DataPlaneSession {
         Ok(())
     }
 
-    async fn send_prepared_tar_shard(
+    pub async fn send_prepared_tar_shard(
         &mut self,
         headers: Vec<FileHeader>,
         data: &[u8],
