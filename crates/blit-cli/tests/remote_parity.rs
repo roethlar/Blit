@@ -45,7 +45,7 @@ fn test_push_tcp_negotiation() {
 fn test_pull_tcp_negotiation() {
     let ctx = TestContext::new();
     let dest_dir = ctx.workspace.join("dest");
-    
+
     // Setup remote file
     fs::write(ctx.module_dir.join("pull_tcp.txt"), b"pull-tcp-test").expect("write file");
 
@@ -90,7 +90,7 @@ fn test_pull_tcp_negotiation() {
 fn test_pull_grpc_fallback() {
     let ctx = TestContext::new();
     let dest_dir = ctx.workspace.join("dest");
-    
+
     // Setup remote file
     fs::write(ctx.module_dir.join("pull_grpc.txt"), b"pull-grpc-test").expect("write file");
 

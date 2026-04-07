@@ -1,11 +1,11 @@
 use crate::cli::ListArgs;
 use crate::util::{
-    Endpoint, format_bytes, metadata_mtime_seconds, parse_endpoint_or_local, rel_path_to_string,
+    format_bytes, metadata_mtime_seconds, parse_endpoint_or_local, rel_path_to_string, Endpoint,
 };
 use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::{FileInfo, ListRequest};
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use eyre::{Context, Result, bail};
+use eyre::{bail, Context, Result};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;

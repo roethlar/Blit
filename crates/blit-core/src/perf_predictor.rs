@@ -375,13 +375,17 @@ mod tests {
         let total_bytes = 1024 * 1024; // 1 MiB
 
         for _ in 0..500 {
-            let record = make_record(TransferMode::Copy, file_count, total_bytes, target_ms as u128);
+            let record = make_record(
+                TransferMode::Copy,
+                file_count,
+                total_bytes,
+                target_ms as u128,
+            );
             predictor.observe(&record);
         }
 
-        let prediction = predictor.predict_ms(
-            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
-        );
+        let prediction =
+            predictor.predict_ms(&make_record(TransferMode::Copy, file_count, total_bytes, 0));
         let error_pct = ((prediction - target_ms) / target_ms).abs() * 100.0;
         assert!(
             error_pct < 15.0,
@@ -403,20 +407,23 @@ mod tests {
         let total_bytes = 512 * 1024; // 0.5 MiB
 
         // Initial prediction (default coefficients)
-        let initial = predictor.predict_ms(
-            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
-        );
+        let initial =
+            predictor.predict_ms(&make_record(TransferMode::Copy, file_count, total_bytes, 0));
         let initial_error = (initial - target_ms).abs();
 
         // Train
         for _ in 0..200 {
-            let record = make_record(TransferMode::Copy, file_count, total_bytes, target_ms as u128);
+            let record = make_record(
+                TransferMode::Copy,
+                file_count,
+                total_bytes,
+                target_ms as u128,
+            );
             predictor.observe(&record);
         }
 
-        let trained = predictor.predict_ms(
-            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
-        );
+        let trained =
+            predictor.predict_ms(&make_record(TransferMode::Copy, file_count, total_bytes, 0));
         let trained_error = (trained - target_ms).abs();
 
         assert!(
@@ -438,20 +445,32 @@ mod tests {
 
         // Train copy profile with 50ms
         for _ in 0..200 {
-            predictor.observe(&make_record(TransferMode::Copy, file_count, total_bytes, 50));
+            predictor.observe(&make_record(
+                TransferMode::Copy,
+                file_count,
+                total_bytes,
+                50,
+            ));
         }
 
         // Train mirror profile with 150ms
         for _ in 0..200 {
-            predictor.observe(&make_record(TransferMode::Mirror, file_count, total_bytes, 150));
+            predictor.observe(&make_record(
+                TransferMode::Mirror,
+                file_count,
+                total_bytes,
+                150,
+            ));
         }
 
-        let copy_pred = predictor.predict_ms(
-            &make_record(TransferMode::Copy, file_count, total_bytes, 0),
-        );
-        let mirror_pred = predictor.predict_ms(
-            &make_record(TransferMode::Mirror, file_count, total_bytes, 0),
-        );
+        let copy_pred =
+            predictor.predict_ms(&make_record(TransferMode::Copy, file_count, total_bytes, 0));
+        let mirror_pred = predictor.predict_ms(&make_record(
+            TransferMode::Mirror,
+            file_count,
+            total_bytes,
+            0,
+        ));
 
         // Profiles should be independent — mirror trained on higher values
         assert!(
@@ -472,9 +491,8 @@ mod tests {
             predictor.observe(&make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 250));
         }
 
-        let prediction_before = predictor.predict_ms(
-            &make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 0),
-        );
+        let prediction_before =
+            predictor.predict_ms(&make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 0));
 
         // Save and reload
         predictor.save().expect("save");
@@ -486,9 +504,8 @@ mod tests {
         let state: PredictorState = serde_json::from_str(&buf).expect("parse");
         loaded.state = state;
 
-        let prediction_after = loaded.predict_ms(
-            &make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 0),
-        );
+        let prediction_after =
+            loaded.predict_ms(&make_record(TransferMode::Copy, 200, 50 * 1024 * 1024, 0));
 
         assert!(
             (prediction_before - prediction_after).abs() < 0.001,
@@ -503,14 +520,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let predictor = PerformancePredictor::for_tests(dir.path());
 
-        let result = predictor.predict_planner_ms(
-            TransferMode::Copy,
-            None,
-            true,
-            false,
-            100,
-            1024,
-        );
+        let result = predictor.predict_planner_ms(TransferMode::Copy, None, true, false, 100, 1024);
         assert!(result.is_none(), "unseen profile should return None");
     }
 
@@ -521,15 +531,11 @@ mod tests {
 
         predictor.observe(&make_record(TransferMode::Copy, 100, 1024, 50));
 
-        let result = predictor.predict_planner_ms(
-            TransferMode::Copy,
-            None,
-            true,
-            false,
-            100,
-            1024,
+        let result = predictor.predict_planner_ms(TransferMode::Copy, None, true, false, 100, 1024);
+        assert!(
+            result.is_some(),
+            "should return prediction after observation"
         );
-        assert!(result.is_some(), "should return prediction after observation");
         let (ms, obs) = result.unwrap();
         assert!(ms > 0.0);
         assert_eq!(obs, 1);
@@ -546,12 +552,8 @@ mod tests {
             predictor.observe(&make_record(TransferMode::Copy, 1000, 0, 1000));
         }
 
-        let pred_100 = predictor.predict_ms(
-            &make_record(TransferMode::Copy, 100, 0, 0),
-        );
-        let pred_1000 = predictor.predict_ms(
-            &make_record(TransferMode::Copy, 1000, 0, 0),
-        );
+        let pred_100 = predictor.predict_ms(&make_record(TransferMode::Copy, 100, 0, 0));
+        let pred_1000 = predictor.predict_ms(&make_record(TransferMode::Copy, 1000, 0, 0));
 
         assert!(
             pred_1000 > pred_100,

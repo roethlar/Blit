@@ -71,7 +71,12 @@ async fn main() -> Result<()> {
         }
     };
 
-    let service = BlitService::from_runtime(modules, default_root, args.force_grpc_data, server_checksums_enabled);
+    let service = BlitService::from_runtime(
+        modules,
+        default_root,
+        args.force_grpc_data,
+        server_checksums_enabled,
+    );
 
     println!("blitd v2 listening on {}", addr);
 

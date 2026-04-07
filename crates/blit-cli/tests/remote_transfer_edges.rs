@@ -27,14 +27,26 @@ fn test_push_nested_directories() {
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(30));
-    assert!(output.status.success(), "push nested dirs failed:\nstdout: {}\nstderr: {}",
+    assert!(
+        output.status.success(),
+        "push nested dirs failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert_eq!(fs::read(ctx.module_dir.join("root.txt")).unwrap(), b"root");
-    assert_eq!(fs::read(ctx.module_dir.join("a/level1.txt")).unwrap(), b"level1");
-    assert_eq!(fs::read(ctx.module_dir.join("a/b/level2.txt")).unwrap(), b"level2");
-    assert_eq!(fs::read(ctx.module_dir.join("a/b/c/level3.txt")).unwrap(), b"level3");
+    assert_eq!(
+        fs::read(ctx.module_dir.join("a/level1.txt")).unwrap(),
+        b"level1"
+    );
+    assert_eq!(
+        fs::read(ctx.module_dir.join("a/b/level2.txt")).unwrap(),
+        b"level2"
+    );
+    assert_eq!(
+        fs::read(ctx.module_dir.join("a/b/c/level3.txt")).unwrap(),
+        b"level3"
+    );
 }
 
 /// Copy does NOT delete extraneous destination files (unlike mirror).
@@ -62,13 +74,19 @@ fn test_copy_does_not_delete_extraneous() {
     assert!(output.status.success(), "copy failed");
 
     // New file should be transferred
-    assert_eq!(fs::read(ctx.module_dir.join("new.txt")).unwrap(), b"new-content");
+    assert_eq!(
+        fs::read(ctx.module_dir.join("new.txt")).unwrap(),
+        b"new-content"
+    );
     // Existing file should NOT be deleted (copy != mirror)
     assert!(
         ctx.module_dir.join("existing.txt").exists(),
         "copy should not delete extraneous destination files"
     );
-    assert_eq!(fs::read(ctx.module_dir.join("existing.txt")).unwrap(), b"keep-me");
+    assert_eq!(
+        fs::read(ctx.module_dir.join("existing.txt")).unwrap(),
+        b"keep-me"
+    );
 }
 
 /// Pull with nested directories preserves structure locally.
@@ -94,13 +112,19 @@ fn test_pull_nested_directories() {
         .arg(&dest_dir);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(30));
-    assert!(output.status.success(), "pull nested dirs failed:\nstdout: {}\nstderr: {}",
+    assert!(
+        output.status.success(),
+        "pull nested dirs failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert_eq!(fs::read(dest_dir.join("top.bin")).unwrap(), b"top-data");
     assert_eq!(fs::read(dest_dir.join("x/mid.bin")).unwrap(), b"mid-data");
-    assert_eq!(fs::read(dest_dir.join("x/y/deep.bin")).unwrap(), b"deep-data");
+    assert_eq!(
+        fs::read(dest_dir.join("x/y/deep.bin")).unwrap(),
+        b"deep-data"
+    );
 }
 
 /// Push many small files exercises tar shard batching.
@@ -113,8 +137,11 @@ fn test_push_many_small_files() {
 
     let file_count = 50;
     for i in 0..file_count {
-        fs::write(src_dir.join(format!("f_{:04}.dat", i)), format!("content-{}", i))
-            .expect("write small file");
+        fs::write(
+            src_dir.join(format!("f_{:04}.dat", i)),
+            format!("content-{}", i),
+        )
+        .expect("write small file");
     }
 
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
@@ -134,7 +161,12 @@ fn test_push_many_small_files() {
         let name = format!("f_{:04}.dat", i);
         let content = fs::read_to_string(ctx.module_dir.join(&name))
             .unwrap_or_else(|_| panic!("missing {}", name));
-        assert_eq!(content, format!("content-{}", i), "wrong content in {}", name);
+        assert_eq!(
+            content,
+            format!("content-{}", i),
+            "wrong content in {}",
+            name
+        );
     }
 }
 

@@ -138,7 +138,10 @@ fn test_utils_ls_remote() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("hello.txt"), "missing hello.txt in ls output");
+    assert!(
+        stdout.contains("hello.txt"),
+        "missing hello.txt in ls output"
+    );
     assert!(stdout.contains("subdir"), "missing subdir in ls output");
 }
 
@@ -205,10 +208,7 @@ fn test_utils_find() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&utils);
-    cmd.arg("find")
-        .arg(&remote)
-        .arg("--pattern")
-        .arg(".md");
+    cmd.arg("find").arg(&remote).arg("--pattern").arg(".md");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
@@ -220,7 +220,10 @@ fn test_utils_find() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("readme.md"), "missing readme.md");
     assert!(stdout.contains("nested.md"), "missing nested.md");
-    assert!(!stdout.contains("data.csv"), "data.csv should not match .md");
+    assert!(
+        !stdout.contains("data.csv"),
+        "data.csv should not match .md"
+    );
 }
 
 #[test]
@@ -246,7 +249,8 @@ fn test_utils_find_json() {
         .unwrap_or_else(|e| panic!("invalid JSON: {}\noutput: {}", e, stdout));
     let rows = parsed.as_array().expect("expected JSON array");
     assert!(
-        rows.iter().any(|r| r["path"].as_str().unwrap_or("").contains("target.log")),
+        rows.iter()
+            .any(|r| r["path"].as_str().unwrap_or("").contains("target.log")),
         "expected target.log in JSON find output: {}",
         stdout
     );
@@ -287,10 +291,7 @@ fn test_utils_find_limit() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&utils);
-    cmd.arg("find")
-        .arg(&remote)
-        .arg("--limit")
-        .arg("3");
+    cmd.arg("find").arg(&remote).arg("--limit").arg("3");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(output.status.success());
@@ -377,7 +378,10 @@ fn test_utils_df() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Module:"), "expected 'Module:' in df output");
+    assert!(
+        stdout.contains("Module:"),
+        "expected 'Module:' in df output"
+    );
     assert!(stdout.contains("Total:"), "expected 'Total:' in df output");
     assert!(stdout.contains("Free :"), "expected 'Free :' in df output");
     // Verify human-readable formatting is present (e.g. "GiB" or "MiB")
@@ -403,7 +407,10 @@ fn test_utils_df_json() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("invalid JSON: {}\noutput: {}", e, stdout));
-    assert!(parsed["total_bytes"].is_u64(), "expected total_bytes as u64");
+    assert!(
+        parsed["total_bytes"].is_u64(),
+        "expected total_bytes as u64"
+    );
     assert!(parsed["free_bytes"].is_u64(), "expected free_bytes as u64");
     assert!(parsed["module"].is_string(), "expected module as string");
 }
@@ -491,7 +498,10 @@ fn test_utils_completions() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&utils);
-    cmd.arg("completions").arg(&remote).arg("--prefix").arg("foo");
+    cmd.arg("completions")
+        .arg(&remote)
+        .arg("--prefix")
+        .arg("foo");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(

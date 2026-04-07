@@ -1,5 +1,5 @@
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use eyre::{Result, bail};
+use eyre::{bail, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 

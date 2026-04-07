@@ -2,8 +2,8 @@ use crate::cli::ListModulesArgs;
 use eyre::{Context, Result};
 use serde::Serialize;
 
-use blit_core::generated::ListModulesRequest;
 use blit_core::generated::blit_client::BlitClient;
+use blit_core::generated::ListModulesRequest;
 use blit_core::remote::endpoint::RemoteEndpoint;
 
 #[derive(Serialize)]

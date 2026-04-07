@@ -14,11 +14,11 @@ use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
 mod macos;
+mod probe;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod unix;
 #[cfg(windows)]
 mod windows;
-mod probe;
 
 #[cfg(windows)]
 pub(crate) use windows::{mark_block_clone_unsupported, supports_block_clone_same_volume};

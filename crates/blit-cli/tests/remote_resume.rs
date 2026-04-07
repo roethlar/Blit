@@ -37,7 +37,11 @@ fn test_pull_resume_partial_file() {
         .arg(&dest_dir);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "blit-cli failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify the file is now complete
     let result = fs::read(dest_dir.join("large.bin")).expect("read result file");
@@ -70,7 +74,11 @@ fn test_pull_resume_identical_file() {
         .arg(&dest_dir);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "blit-cli failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify file is still correct
     let result = fs::read(dest_dir.join("same.bin")).expect("read result file");
@@ -105,7 +113,11 @@ fn test_pull_resume_grpc_fallback() {
         .arg(&dest_dir);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "blit-cli failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

@@ -1,10 +1,10 @@
 use crate::cli::CompletionArgs;
 use crate::util::{
-    Endpoint, append_completion_prefix, module_and_rel_path, parse_endpoint_or_local,
+    append_completion_prefix, module_and_rel_path, parse_endpoint_or_local, Endpoint,
 };
-use blit_core::generated::CompletionRequest;
 use blit_core::generated::blit_client::BlitClient;
-use eyre::{Context, Result, bail};
+use blit_core::generated::CompletionRequest;
+use eyre::{bail, Context, Result};
 
 pub async fn run_completions(args: CompletionArgs) -> Result<()> {
     let remote = match parse_endpoint_or_local(&args.target) {

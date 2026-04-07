@@ -57,7 +57,7 @@ pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
     use std::path::Component;
     let mut components = path.components();
     let mut normalized = PathBuf::new();
-    
+
     // Skip leading '.' components
     while let Some(Component::CurDir) = components.as_path().components().next() {
         components.next();
@@ -73,7 +73,7 @@ pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
             }
             Component::CurDir => {} // Skip internal '.'
             Component::RootDir => {
-                 return Err(Status::invalid_argument("absolute paths not allowed"));
+                return Err(Status::invalid_argument("absolute paths not allowed"));
             }
             Component::Normal(c) => normalized.push(c),
         }

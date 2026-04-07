@@ -236,12 +236,12 @@ fn detect_filesystem_type_impl(path: &Path) -> Option<String> {
     let fs_name = match stat.f_type as u64 {
         0x9123683E => "btrfs",
         0x58465342 => "xfs",
-        0xEF53 => "ext4",     // ext2/3/4 share the same magic
+        0xEF53 => "ext4", // ext2/3/4 share the same magic
         0x2FC12FC1 => "zfs",
         0x01021994 => "tmpfs",
         0x6969 => "nfs",
         0xFF534D42 => "cifs",
-        0x5346544E => "ntfs",  // NTFS-3G
+        0x5346544E => "ntfs", // NTFS-3G
         0x61756673 => "aufs",
         0x794C7630 => "overlayfs",
         0xF15F => "ecryptfs",

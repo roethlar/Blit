@@ -1,9 +1,9 @@
 use crate::cli::RmArgs;
-use crate::util::{Endpoint, parse_endpoint_or_local};
-use blit_core::generated::PurgeRequest;
+use crate::util::{parse_endpoint_or_local, Endpoint};
 use blit_core::generated::blit_client::BlitClient;
+use blit_core::generated::PurgeRequest;
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use eyre::{Context, Result, bail};
+use eyre::{bail, Context, Result};
 use std::io::{self, Write};
 use std::path::Path;
 

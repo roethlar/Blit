@@ -8,8 +8,8 @@ mod util;
 pub use core::{BlitServer, BlitService};
 
 use blit_core::generated::{
-    pull_chunk::Payload as PullPayload, DiskUsageEntry, FindEntry, PullChunk,
-    ServerPullMessage, ServerPushResponse,
+    pull_chunk::Payload as PullPayload, DiskUsageEntry, FindEntry, PullChunk, ServerPullMessage,
+    ServerPushResponse,
 };
 use tokio::sync::mpsc;
 use tonic::Status;

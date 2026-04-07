@@ -1,8 +1,8 @@
 use crate::cli::DfArgs;
-use crate::util::{Endpoint, format_bytes, module_and_rel_path, parse_endpoint_or_local};
-use blit_core::generated::FilesystemStatsRequest;
+use crate::util::{format_bytes, module_and_rel_path, parse_endpoint_or_local, Endpoint};
 use blit_core::generated::blit_client::BlitClient;
-use eyre::{Context, Result, bail};
+use blit_core::generated::FilesystemStatsRequest;
+use eyre::{bail, Context, Result};
 use serde::Serialize;
 
 #[derive(Serialize)]

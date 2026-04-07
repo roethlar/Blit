@@ -11,13 +11,15 @@ use crate::runtime::{ModuleConfig, RootExport};
 
 use base64::{engine::general_purpose, Engine as _};
 use blit_core::generated::{
-    client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer, BlockTransferComplete,
-    ClientPullMessage, DataTransferNegotiation, FileData, FileHeader, FileList, ManifestBatch,
-    PullSummary, PullSyncAck, PullSyncHeader, ServerPullMessage,
+    client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
+    BlockTransferComplete, ClientPullMessage, DataTransferNegotiation, FileData, FileHeader,
+    FileList, ManifestBatch, PullSummary, PullSyncAck, PullSyncHeader, ServerPullMessage,
 };
-use blit_core::manifest::{compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus};
-use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
+use blit_core::manifest::{
+    compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
+};
 use blit_core::remote::transfer::plan_transfer_payloads;
+use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 
@@ -40,7 +42,11 @@ pub(crate) async fn handle_pull_sync_stream(
     // Phase 1: Receive header
     let header = match receive_header(&mut stream).await? {
         Some(h) => h,
-        None => return Err(Status::invalid_argument("expected PullSyncHeader as first message")),
+        None => {
+            return Err(Status::invalid_argument(
+                "expected PullSyncHeader as first message",
+            ))
+        }
     };
 
     // Resolve module from header
@@ -78,13 +84,13 @@ pub(crate) async fn handle_pull_sync_stream(
     // Phase 3: Enumerate server files and compare with client manifest
     // Compute checksums if client requests checksum mode and server has checksums enabled
     let compute_checksums = client_wants_checksum && server_checksums_enabled;
-    let server_entries = collect_pull_entries_with_checksums(&module.path, &root, &requested, compute_checksums).await?;
+    let server_entries =
+        collect_pull_entries_with_checksums(&module.path, &root, &requested, compute_checksums)
+            .await?;
 
     // Convert to FileHeader for comparison
-    let server_manifest: Vec<FileHeader> = server_entries
-        .iter()
-        .map(|e| e.header.clone())
-        .collect();
+    let server_manifest: Vec<FileHeader> =
+        server_entries.iter().map(|e| e.header.clone()).collect();
 
     // Send manifest batch for progress reporting
     let total_bytes: u64 = server_manifest.iter().map(|h| h.size).sum();
@@ -136,7 +142,13 @@ pub(crate) async fn handle_pull_sync_stream(
         .collect();
 
     if entries_to_send.is_empty() {
-        send_summary(&tx, TransferStats::default(), false, diff.files_to_delete.len() as u64).await?;
+        send_summary(
+            &tx,
+            TransferStats::default(),
+            false,
+            diff.files_to_delete.len() as u64,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -154,7 +166,8 @@ pub(crate) async fn handle_pull_sync_stream(
                 &tx,
                 &mut stream,
                 &resume_eligible,
-            ).await?;
+            )
+            .await?;
             send_summary(&tx, stats, true, diff.files_to_delete.len() as u64).await?;
         } else {
             stream_via_grpc(&module, &entries_to_send, &tx).await?;
@@ -167,7 +180,8 @@ pub(crate) async fn handle_pull_sync_stream(
                 },
                 true,
                 diff.files_to_delete.len() as u64,
-            ).await?;
+            )
+            .await?;
         }
     } else if resume_mode && !resume_eligible.is_empty() {
         // Data plane with block-level resume
@@ -180,7 +194,8 @@ pub(crate) async fn handle_pull_sync_stream(
             &tx,
             &mut stream,
             &resume_eligible,
-        ).await?;
+        )
+        .await?;
         send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
     } else {
         // Data plane transfer (full files)
@@ -191,7 +206,9 @@ pub(crate) async fn handle_pull_sync_stream(
     Ok(())
 }
 
-async fn receive_header(stream: &mut Streaming<ClientPullMessage>) -> Result<Option<PullSyncHeader>, Status> {
+async fn receive_header(
+    stream: &mut Streaming<ClientPullMessage>,
+) -> Result<Option<PullSyncHeader>, Status> {
     match stream.message().await {
         Ok(Some(msg)) => {
             if let Some(client_pull_message::Payload::Header(header)) = msg.payload {
@@ -205,35 +222,43 @@ async fn receive_header(stream: &mut Streaming<ClientPullMessage>) -> Result<Opt
     }
 }
 
-async fn receive_client_manifest(stream: &mut Streaming<ClientPullMessage>) -> Result<Vec<FileHeader>, Status> {
+async fn receive_client_manifest(
+    stream: &mut Streaming<ClientPullMessage>,
+) -> Result<Vec<FileHeader>, Status> {
     let mut manifest = Vec::new();
 
     loop {
         match stream.message().await {
-            Ok(Some(msg)) => {
-                match msg.payload {
-                    Some(client_pull_message::Payload::LocalFile(header)) => {
-                        manifest.push(header);
-                    }
-                    Some(client_pull_message::Payload::ManifestDone(_)) => {
-                        break;
-                    }
-                    _ => {
-                        return Err(Status::invalid_argument(
-                            "unexpected message during manifest phase"
-                        ));
-                    }
+            Ok(Some(msg)) => match msg.payload {
+                Some(client_pull_message::Payload::LocalFile(header)) => {
+                    manifest.push(header);
                 }
-            }
+                Some(client_pull_message::Payload::ManifestDone(_)) => {
+                    break;
+                }
+                _ => {
+                    return Err(Status::invalid_argument(
+                        "unexpected message during manifest phase",
+                    ));
+                }
+            },
             Ok(None) => break,
-            Err(e) => return Err(Status::internal(format!("failed to receive manifest: {}", e))),
+            Err(e) => {
+                return Err(Status::internal(format!(
+                    "failed to receive manifest: {}",
+                    e
+                )))
+            }
         }
     }
 
     Ok(manifest)
 }
 
-async fn send_pull_sync_ack(tx: &PullSyncSender, server_checksums_enabled: bool) -> Result<(), Status> {
+async fn send_pull_sync_ack(
+    tx: &PullSyncSender,
+    server_checksums_enabled: bool,
+) -> Result<(), Status> {
     tx.send(Ok(ServerPullMessage {
         payload: Some(server_pull_message::Payload::PullSyncAck(PullSyncAck {
             server_checksums_enabled,
@@ -243,7 +268,11 @@ async fn send_pull_sync_ack(tx: &PullSyncSender, server_checksums_enabled: bool)
     .map_err(|_| Status::internal("failed to send ack"))
 }
 
-async fn send_manifest_batch(tx: &PullSyncSender, file_count: u64, total_bytes: u64) -> Result<(), Status> {
+async fn send_manifest_batch(
+    tx: &PullSyncSender,
+    file_count: u64,
+    total_bytes: u64,
+) -> Result<(), Status> {
     tx.send(Ok(ServerPullMessage {
         payload: Some(server_pull_message::Payload::ManifestBatch(ManifestBatch {
             file_count,
@@ -293,15 +322,17 @@ async fn stream_via_grpc(
 
         // Send header
         tx.send(Ok(ServerPullMessage {
-            payload: Some(server_pull_message::Payload::FileHeader(entry.header.clone())),
+            payload: Some(server_pull_message::Payload::FileHeader(
+                entry.header.clone(),
+            )),
         }))
         .await
         .map_err(|_| Status::internal("failed to send file header"))?;
 
         // Read and send file data
-        let content = tokio::fs::read(&abs_path)
-            .await
-            .map_err(|e| Status::internal(format!("failed to read {}: {}", abs_path.display(), e)))?;
+        let content = tokio::fs::read(&abs_path).await.map_err(|e| {
+            Status::internal(format!("failed to read {}: {}", abs_path.display(), e))
+        })?;
 
         tx.send(Ok(ServerPullMessage {
             payload: Some(server_pull_message::Payload::FileData(FileData { content })),
@@ -325,8 +356,10 @@ async fn stream_via_data_plane(
 
     // Determine tuning based on total bytes
     let tuning = determine_remote_tuning(total_bytes);
-    let mut plan_options = PlanOptions::default();
-    plan_options.chunk_bytes_override = Some(tuning.chunk_bytes);
+    let plan_options = PlanOptions {
+        chunk_bytes_override: Some(tuning.chunk_bytes),
+        ..Default::default()
+    };
 
     // Set up data plane listener
     let listener = bind_data_plane_listener()
@@ -344,12 +377,14 @@ async fn stream_via_data_plane(
 
     // Send negotiation
     tx.send(Ok(ServerPullMessage {
-        payload: Some(server_pull_message::Payload::Negotiation(DataTransferNegotiation {
-            tcp_port: port as u32,
-            one_time_token: token_string,
-            tcp_fallback: false,
-            stream_count,
-        })),
+        payload: Some(server_pull_message::Payload::Negotiation(
+            DataTransferNegotiation {
+                tcp_port: port as u32,
+                one_time_token: token_string,
+                tcp_fallback: false,
+                stream_count,
+            },
+        )),
     }))
     .await
     .map_err(|_| Status::internal("failed to send negotiation"))?;
@@ -432,7 +467,11 @@ async fn stream_via_data_plane_resume(
     use blit_core::remote::transfer::data_plane::DataPlaneSession;
     use tokio::io::AsyncReadExt;
 
-    let block_size = if block_size_param == 0 { DEFAULT_BLOCK_SIZE } else { block_size_param as usize };
+    let block_size = if block_size_param == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        block_size_param as usize
+    };
 
     // Determine tuning based on total bytes
     let tuning = determine_remote_tuning(total_bytes);
@@ -450,12 +489,14 @@ async fn stream_via_data_plane_resume(
 
     // Send negotiation
     tx.send(Ok(ServerPullMessage {
-        payload: Some(server_pull_message::Payload::Negotiation(DataTransferNegotiation {
-            tcp_port: port as u32,
-            one_time_token: token_string,
-            tcp_fallback: false,
-            stream_count: 1, // Single stream for resume mode
-        })),
+        payload: Some(server_pull_message::Payload::Negotiation(
+            DataTransferNegotiation {
+                tcp_port: port as u32,
+                one_time_token: token_string,
+                tcp_fallback: false,
+                stream_count: 1, // Single stream for resume mode
+            },
+        )),
     }))
     .await
     .map_err(|_| Status::internal("failed to send negotiation"))?;
@@ -485,14 +526,8 @@ async fn stream_via_data_plane_resume(
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
     // Create data plane session
-    let mut session = DataPlaneSession::from_stream(
-        socket,
-        false,
-        tuning.chunk_bytes,
-        8,
-        pool,
-    )
-    .await;
+    let mut session =
+        DataPlaneSession::from_stream(socket, false, tuning.chunk_bytes, 8, pool).await;
 
     let mut stats = TransferStats::default();
 
@@ -501,10 +536,12 @@ async fn stream_via_data_plane_resume(
     for entry in entries.iter() {
         if resume_eligible.contains(&entry.header.relative_path) {
             tx.send(Ok(ServerPullMessage {
-                payload: Some(server_pull_message::Payload::BlockHashRequest(BlockHashRequest {
-                    relative_path: entry.header.relative_path.clone(),
-                    block_size: block_size as u32,
-                })),
+                payload: Some(server_pull_message::Payload::BlockHashRequest(
+                    BlockHashRequest {
+                        relative_path: entry.header.relative_path.clone(),
+                        block_size: block_size as u32,
+                    },
+                )),
             }))
             .await
             .map_err(|_| Status::internal("failed to send block hash request"))?;
@@ -525,7 +562,8 @@ async fn stream_via_data_plane_resume(
         let file_client_hashes = if is_resume_eligible {
             match stream.message().await {
                 Ok(Some(msg)) => {
-                    if let Some(client_pull_message::Payload::BlockHashes(hash_list)) = msg.payload {
+                    if let Some(client_pull_message::Payload::BlockHashes(hash_list)) = msg.payload
+                    {
                         if hash_list.relative_path == *relative_path {
                             Some(hash_list.hashes)
                         } else {
@@ -538,7 +576,11 @@ async fn stream_via_data_plane_resume(
                         return Err(Status::invalid_argument("expected BlockHashes response"));
                     }
                 }
-                Ok(None) => return Err(Status::internal("stream closed before receiving all hash responses")),
+                Ok(None) => {
+                    return Err(Status::internal(
+                        "stream closed before receiving all hash responses",
+                    ))
+                }
                 Err(e) => return Err(Status::internal(format!("receiving block hashes: {}", e))),
             }
         } else {
@@ -546,12 +588,20 @@ async fn stream_via_data_plane_resume(
         };
 
         // Open file for streaming read
-        let mut file = tokio::fs::File::open(&abs_path)
-            .await
-            .map_err(|e| Status::internal(format!("failed to open {}: {}", abs_path.display(), e)))?;
+        let mut file = tokio::fs::File::open(&abs_path).await.map_err(|e| {
+            Status::internal(format!("failed to open {}: {}", abs_path.display(), e))
+        })?;
 
-        let file_size = file.metadata().await
-            .map_err(|e| Status::internal(format!("failed to get metadata for {}: {}", abs_path.display(), e)))?
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "failed to get metadata for {}: {}",
+                    abs_path.display(),
+                    e
+                ))
+            })?
             .len() as usize;
 
         // Process blocks by streaming
@@ -559,8 +609,9 @@ async fn stream_via_data_plane_resume(
         let mut offset = 0usize;
 
         loop {
-            let bytes_read = file.read(&mut buffer).await
-                .map_err(|e| Status::internal(format!("reading block from {}: {}", abs_path.display(), e)))?;
+            let bytes_read = file.read(&mut buffer).await.map_err(|e| {
+                Status::internal(format!("reading block from {}: {}", abs_path.display(), e))
+            })?;
 
             if bytes_read == 0 {
                 break;
@@ -626,7 +677,11 @@ async fn stream_via_block_resume_grpc(
     use blit_core::copy::DEFAULT_BLOCK_SIZE;
     use tokio::io::AsyncReadExt;
 
-    let block_size = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size as usize };
+    let block_size = if block_size == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        block_size as usize
+    };
     let mut stats = TransferStats::default();
 
     for entry in entries {
@@ -635,22 +690,32 @@ async fn stream_via_block_resume_grpc(
         let is_resume_eligible = resume_eligible.contains(relative_path);
 
         // Open file for streaming
-        let mut file = tokio::fs::File::open(&abs_path)
-            .await
-            .map_err(|e| Status::internal(format!("failed to open {}: {}", abs_path.display(), e)))?;
+        let mut file = tokio::fs::File::open(&abs_path).await.map_err(|e| {
+            Status::internal(format!("failed to open {}: {}", abs_path.display(), e))
+        })?;
 
-        let file_size = file.metadata().await
-            .map_err(|e| Status::internal(format!("failed to get metadata for {}: {}", abs_path.display(), e)))?
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "failed to get metadata for {}: {}",
+                    abs_path.display(),
+                    e
+                ))
+            })?
             .len() as usize;
 
         // Get client block hashes if resume-eligible
         let client_hashes: Option<Vec<Vec<u8>>> = if is_resume_eligible {
             // Request block hashes from client
             tx.send(Ok(ServerPullMessage {
-                payload: Some(server_pull_message::Payload::BlockHashRequest(BlockHashRequest {
-                    relative_path: relative_path.clone(),
-                    block_size: block_size as u32,
-                })),
+                payload: Some(server_pull_message::Payload::BlockHashRequest(
+                    BlockHashRequest {
+                        relative_path: relative_path.clone(),
+                        block_size: block_size as u32,
+                    },
+                )),
             }))
             .await
             .map_err(|_| Status::internal("failed to send block hash request"))?;
@@ -658,7 +723,8 @@ async fn stream_via_block_resume_grpc(
             // Wait for client's block hash response
             match stream.message().await {
                 Ok(Some(msg)) => {
-                    if let Some(client_pull_message::Payload::BlockHashes(hash_list)) = msg.payload {
+                    if let Some(client_pull_message::Payload::BlockHashes(hash_list)) = msg.payload
+                    {
                         if hash_list.relative_path == *relative_path {
                             Some(hash_list.hashes)
                         } else {
@@ -681,8 +747,9 @@ async fn stream_via_block_resume_grpc(
         let mut offset = 0usize;
 
         loop {
-            let bytes_read = file.read(&mut buffer).await
-                .map_err(|e| Status::internal(format!("reading block from {}: {}", abs_path.display(), e)))?;
+            let bytes_read = file.read(&mut buffer).await.map_err(|e| {
+                Status::internal(format!("reading block from {}: {}", abs_path.display(), e))
+            })?;
 
             if bytes_read == 0 {
                 break;
@@ -720,10 +787,12 @@ async fn stream_via_block_resume_grpc(
 
         // Signal file complete
         tx.send(Ok(ServerPullMessage {
-            payload: Some(server_pull_message::Payload::BlockComplete(BlockTransferComplete {
-                relative_path: relative_path.clone(),
-                total_bytes: file_size as u64,
-            })),
+            payload: Some(server_pull_message::Payload::BlockComplete(
+                BlockTransferComplete {
+                    relative_path: relative_path.clone(),
+                    total_bytes: file_size as u64,
+                },
+            )),
         }))
         .await
         .map_err(|_| Status::internal("failed to send block complete"))?;
