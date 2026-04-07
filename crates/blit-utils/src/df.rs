@@ -1,5 +1,5 @@
 use crate::cli::DfArgs;
-use crate::util::{Endpoint, module_and_rel_path, parse_endpoint_or_local};
+use crate::util::{Endpoint, format_bytes, module_and_rel_path, parse_endpoint_or_local};
 use blit_core::generated::FilesystemStatsRequest;
 use blit_core::generated::blit_client::BlitClient;
 use eyre::{Context, Result, bail};
@@ -47,9 +47,21 @@ pub async fn run_df(args: DfArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&json)?);
     } else {
         println!("Module: {}", response.module);
-        println!("Total: {} bytes", response.total_bytes);
-        println!("Used : {} bytes", response.used_bytes);
-        println!("Free : {} bytes", response.free_bytes);
+        println!(
+            "Total: {} ({} bytes)",
+            format_bytes(response.total_bytes),
+            response.total_bytes
+        );
+        println!(
+            "Used : {} ({} bytes)",
+            format_bytes(response.used_bytes),
+            response.used_bytes
+        );
+        println!(
+            "Free : {} ({} bytes)",
+            format_bytes(response.free_bytes),
+            response.free_bytes
+        );
     }
 
     Ok(())
