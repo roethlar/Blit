@@ -21,6 +21,7 @@ use crate::remote::tuning::determine_remote_tuning;
 use crate::transfer_plan::PlanOptions;
 use eyre::{eyre, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,9 +32,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::data_plane::DataPlaneSession;
 use super::payload::{
     payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
-    TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
+    PreparedPayload, TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
 use crate::remote::transfer::progress::RemoteTransferProgress;
+use crate::remote::transfer::sink::{DataPlaneSink, TransferSink};
 use crate::remote::transfer::source::TransferSource;
 
 const MIN_STREAM_BATCH_BYTES: u64 = 32 * 1024 * 1024;
@@ -77,12 +79,12 @@ impl MultiStreamSender {
         let mut handles = Vec::with_capacity(streams);
 
         // Create a shared buffer pool for all streams.
-        // Pool size allows for double-buffering per stream plus some headroom.
-        // Memory budget is based on chunk size and stream count.
         let pool_size = streams * 2 + 4;
         let buffer_size = chunk_bytes.max(64 * 1024);
-        let memory_budget = buffer_size * pool_size * 2; // Allow 2x pool_size in flight
+        let memory_budget = buffer_size * pool_size * 2;
         let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+
+        let dst_root = PathBuf::from(format!("{}:{}", host, port));
 
         for _ in 0..streams {
             let session = DataPlaneSession::connect(
@@ -96,11 +98,16 @@ impl MultiStreamSender {
                 Arc::clone(&pool),
             )
             .await?;
+            let sink = Arc::new(DataPlaneSink::new(
+                session,
+                source.clone(),
+                dst_root.clone(),
+            ));
             let (tx, rx) = mpsc::channel::<Option<Vec<TransferPayload>>>(4);
             let source_clone = Arc::clone(&source);
             let progress_clone = progress.clone();
             let handle = tokio::spawn(async move {
-                data_plane_worker(session, rx, source_clone, progress_clone).await
+                data_plane_sink_worker(sink, rx, source_clone, progress_clone).await
             });
             workers.push(tx);
             handles.push(handle);
@@ -193,27 +200,53 @@ struct StreamStats {
     bytes: u64,
 }
 
-async fn data_plane_worker(
-    mut session: DataPlaneSession,
+/// Worker that receives batches of TransferPayloads, prepares them via
+/// the TransferSource, and writes them through a DataPlaneSink.
+async fn data_plane_sink_worker(
+    sink: Arc<DataPlaneSink>,
     mut rx: mpsc::Receiver<Option<Vec<TransferPayload>>>,
     source: Arc<dyn TransferSource>,
     progress: Option<RemoteTransferProgress>,
 ) -> Result<StreamStats> {
     let start = Instant::now();
+    let mut total_bytes = 0u64;
+
     while let Some(batch) = rx.recv().await {
         match batch {
             Some(payloads) => {
-                session
-                    .send_payloads_with_progress(source.clone(), payloads, progress.as_ref())
-                    .await?;
+                for payload in payloads {
+                    let prepared = source.prepare_payload(payload).await?;
+                    let size = match &prepared {
+                        PreparedPayload::File(h) => h.size,
+                        PreparedPayload::TarShard { headers, .. } => {
+                            headers.iter().map(|h| h.size).sum()
+                        }
+                    };
+                    let file_names: Vec<_> = match &prepared {
+                        PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
+                        PreparedPayload::TarShard { headers, .. } => headers
+                            .iter()
+                            .map(|h| (h.relative_path.clone(), h.size))
+                            .collect(),
+                    };
+
+                    sink.write_payload(prepared).await?;
+                    total_bytes = total_bytes.saturating_add(size);
+
+                    if let Some(ref p) = progress {
+                        for (name, sz) in file_names {
+                            p.report_file_complete(name, sz);
+                        }
+                    }
+                }
             }
             None => break,
         }
     }
-    session.finish().await?;
+    sink.finish().await?;
     Ok(StreamStats {
         start,
-        bytes: session.bytes_sent(),
+        bytes: total_bytes,
     })
 }
 
