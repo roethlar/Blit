@@ -1,75 +1,54 @@
 # Blit v2 Planning & Workflow Documentation
 
-This directory contains all planning, workflow, and architectural documentation for the Blit v2 greenfield implementation.
+This directory contains all planning, workflow, and architectural documentation for the Blit v2 implementation.
 
-## 📊 Current Status
+## Current Status
 
-For up-to-date progress, blockers, and percentages, see [PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md). This README now focuses on the document map and workflow references.
+**Feature-complete as of 2026-04-07.** All phases through Phase 4 (Production
+Hardening) are done. Remaining work is benchmarking (needs 10+ GbE hardware)
+and post-release investigations (RDMA, ReFS privilege).
 
-## 📋 Document Index
+See [PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md) for details.
 
-### Executive & Planning
+## Document Index
 
-- **[PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md)** - Current state analysis, blockers, and completion status
-- **[MASTER_WORKFLOW.md](./MASTER_WORKFLOW.md)** - Overall project coordination and phase management
+### Status & Planning
+
+- **[PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md)** — Current state, what's done, what's left, Windows dev guide
+- **[MASTER_WORKFLOW.md](./MASTER_WORKFLOW.md)** — Phase coordination and quality gates
+- **[AI_TELEMETRY_ANALYSIS.md](./AI_TELEMETRY_ANALYSIS.md)** — Scoping doc for optional performance analysis features
 
 ### Architecture & Design
 
-- **[greenfield_plan_v6.md](./greenfield_plan_v6.md)** - Active architectural plan (feature completeness + hybrid transport)
-- **[greenfield_plan_v5.md](./greenfield_plan_v5.md)** - Archived for historical context
-- **[greenfield_plan_v4.md](./greenfield_plan_v4.md)** - Older revision (legacy reference only)
-- **[WORKFLOW_V2.md](./WORKFLOW_V2.md)** - High-level phase descriptions (legacy, superseded by phase-specific workflows)
+- **[greenfield_plan_v6.md](./greenfield_plan_v6.md)** — Active architectural plan
+- **[BLIT_UTILS_PLAN.md](./BLIT_UTILS_PLAN.md)** — Admin utilities command matrix and UX principles
+- **[REMOTE_TRANSFER_PARITY.md](./REMOTE_TRANSFER_PARITY.md)** — Remote push/pull parity refactor (completed)
+- **[LOCAL_TRANSFER_HEURISTICS.md](./LOCAL_TRANSFER_HEURISTICS.md)** — Local transfer optimization decisions
 
-### Phase-Specific Workflows
+### Phase Workflows (Historical)
 
-- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** - Orchestrator & Local Operations (3-4 days)
-- **[WORKFLOW_PHASE_2.5.md](./WORKFLOW_PHASE_2.5.md)** - Performance & Validation Checkpoint (1-2 days) **[CRITICAL GATE]**
-- **[WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md)** - Remote Operations / Hybrid Transport (7-10 days)
-- **[WORKFLOW_PHASE_4.md](./WORKFLOW_PHASE_4.md)** - Production Hardening & Packaging (5-7 days)
+- **[WORKFLOW_PHASE_2.md](./WORKFLOW_PHASE_2.md)** — Orchestrator & Local Operations (complete)
+- **[WORKFLOW_PHASE_2.5.md](./WORKFLOW_PHASE_2.5.md)** — Performance & Validation Checkpoint (complete)
+- **[WORKFLOW_PHASE_3.md](./WORKFLOW_PHASE_3.md)** — Remote Operations / Hybrid Transport (complete)
+- **[WORKFLOW_PHASE_4.md](./WORKFLOW_PHASE_4.md)** — Production Hardening & Packaging (complete)
 
-## 🚀 Quick Start
+### Code Reviews (Historical)
+
+- `review/code_review_phase2.md` — Phase 2 code review findings
+
+## Quick Start
 
 ### If you're new to the project:
-1. Read **PROJECT_STATE_ASSESSMENT.md** to understand current state
-2. Read **MASTER_WORKFLOW.md** for overall strategy
-3. Review **greenfield_plan_v6.md** for architectural vision (v5 retained for historical context)
+1. Read **PROJECT_STATE_ASSESSMENT.md** for current state and architecture overview
+2. Read **greenfield_plan_v6.md** for architectural vision
+3. Check `TODO.md` in project root for remaining items
 
 ### If you're ready to work:
-1. Check **PROJECT_STATE_ASSESSMENT.md** for current blockers
-2. Follow the current phase workflow (currently **WORKFLOW_PHASE_2.md**)
-3. Update **TODO.md** and **DEVLOG.md** in project root as you progress
-
-## 📈 Phase Progression
-
-Phase sequencing and quality gates are defined in [MASTER_WORKFLOW.md](./MASTER_WORKFLOW.md). Refer there for the latest status snapshots.
-
-## 📝 Document Conventions
-
-- **Status Markers**: ✅ Complete | ⚠️ In Progress | ⏳ Not Started | 🔴 Blocked
-- **Priority**: 🔴 Critical | 🟡 Important | 🟢 Nice to have
-- **Effort**: Estimated in hours or days
-- **Quality Gates**: Mandatory checkpoints before phase progression
-
-## 🔄 Keeping Documents Updated
-
-When working on the project:
-
-1. **Before starting work**: Read current phase workflow
-2. **During work**: Update TODO.md checkboxes
-3. **After completing tasks**: Add entry to DEVLOG.md
-4. **At phase boundaries**: Review quality gate checklist
-5. **When making architectural decisions**: Document in DEVLOG.md
-
-## 📖 Recommended Reading Order
-
-1. **greenfield_plan_v6.md** – Architectural vision (active)
-2. **PROJECT_STATE_ASSESSMENT.md** – Current status, blockers, metrics
-3. **MASTER_WORKFLOW.md** – Phase coordination and quality gates
-4. **Current phase workflow** (e.g., `WORKFLOW_PHASE_2.md`)
-5. **Next phase workflow** for upcoming work (e.g., `WORKFLOW_PHASE_3.md`, `WORKFLOW_PHASE_4.md`)
+1. `cargo test --workspace` to verify baseline
+2. Check `TODO.md` for unchecked items
+3. Update `TODO.md` and `DEVLOG.md` as you progress
 
 ---
 
-**Last Updated**: 2025-10-20
-**Project**: Blit v2 Greenfield Implementation
-**Status**: See PROJECT_STATE_ASSESSMENT.md for live phase details
+**Last Updated**: 2026-04-07
+**Project**: Blit v2
