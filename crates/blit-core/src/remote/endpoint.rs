@@ -215,7 +215,7 @@ fn check_local_path(input: &str) -> LocalPathCheck {
         return LocalPathCheck::NotLocal;
     }
 
-    let first = input.chars().next().unwrap();
+    let first = input.chars().next().expect("non-empty input checked above");
     if matches!(first, '.' | '/' | '\\' | '~') {
         return LocalPathCheck::IsLocal;
     }
@@ -228,7 +228,7 @@ fn check_local_path(input: &str) -> LocalPathCheck {
     // Windows drive letter: C:\path or C:/path - check BEFORE backslash handling
     if input.len() >= 3 {
         let mut chars = input.chars();
-        let drive = chars.next().unwrap();
+        let drive = chars.next().expect("len >= 3 checked above");
         if drive.is_ascii_alphabetic() {
             if let Some(':') = chars.next() {
                 if matches!(chars.next(), Some('\\') | Some('/')) {

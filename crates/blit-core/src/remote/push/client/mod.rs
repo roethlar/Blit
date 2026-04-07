@@ -227,7 +227,10 @@ fn ensure_remote_tuning(
         plan_options.chunk_bytes_override = Some(tuning.chunk_bytes);
         *remote_tuning = Some(tuning);
     }
-    remote_tuning.as_ref().cloned().unwrap()
+    remote_tuning
+        .as_ref()
+        .cloned()
+        .expect("remote_tuning set by preceding assignment")
 }
 
 fn effective_size_hint(requested: u64, manifest_bytes: u64) -> u64 {

@@ -134,9 +134,9 @@ This is the master checklist. Execute the first unchecked item. After completion
     - [x] Produce man page (`docs/cli/blit-utils.1.md`) mirroring blit-cli coverage. *(2026-03-06: Created with full synopsis, options, examples, and exit codes.)*
 - [ ] Explore optional AI-powered telemetry analysis (anomaly detection, tuning recommendations, diagnostics) using local performance history data; document scope and guardrails.
 - [ ] Produce packaging artifacts for supported platforms (Linux, macOS, Windows).
-- [ ] Document installation/configuration (config.toml, `--root`, mDNS, service setup).
+- [x] Document installation/configuration (config.toml, `--root`, mDNS, service setup). *(2026-04-07: Rewrote `docs/DAEMON_CONFIG.md` with accurate TOML format, correct port 9031, `[[module]]` syntax, client config directories, mDNS section, and expanded service installation for Linux/macOS/Windows.)*
 - [ ] Build end-to-end integration/regression suite and integrate with CI.
-- [ ] Review logging/error output for production readiness.
+- [x] Review logging/error output for production readiness. *(2026-04-07: Audited all crates. Removed duplicate println/eprintln debug output from block clone paths. Added expect() messages to bare unwrap() calls. No dbg!()/todo!() found. Remaining eprintln calls in orchestrator/daemon are intentional verbose output. Full migration to structured logging deferred to post-release.)*
 - [ ] Prepare release notes/changelog with benchmark data and support matrix.
 
 ## Phase 3.5: RDMA Enablement (post-release)

@@ -115,10 +115,6 @@ pub fn copy_file(
                         windows::BlockCloneOutcome::Cloned => {
                             clone_success = true;
                             log::info!("block clone {} ({} bytes)", dst.display(), file_size);
-                            if !log::log_enabled!(log::Level::Info) {
-                                eprintln!("block clone {} ({} bytes)", dst.display(), file_size);
-                            }
-                            println!("block clone {} ({} bytes)", dst.display(), file_size);
                         }
                         windows::BlockCloneOutcome::Unsupported { code } => {
                             crate::fs_capability::mark_block_clone_unsupported(src, dst);

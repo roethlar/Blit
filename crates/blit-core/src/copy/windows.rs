@@ -301,10 +301,6 @@ pub(crate) fn try_block_clone_same_volume(
         BlockCloneOutcome::Cloned => {
             set_last_block_clone_success(true);
             log::info!("block clone {} ({} bytes)", dst.display(), file_size);
-            if !log::log_enabled!(log::Level::Info) {
-                eprintln!("block clone {} ({} bytes)", dst.display(), file_size);
-            }
-            println!("block clone {} ({} bytes)", dst.display(), file_size);
             Ok(Some(file_size))
         }
         BlockCloneOutcome::PrivilegeUnavailable => {
