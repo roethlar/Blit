@@ -16,7 +16,7 @@ use crate::perf_history::{read_recent_records, TransferMode};
 use crate::perf_predictor::PerformancePredictor;
 use crate::remote::transfer::payload::{plan_transfer_payloads, DEFAULT_PAYLOAD_PREFETCH};
 use crate::remote::transfer::pipeline::execute_sink_pipeline;
-use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink};
+use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, NullSink, TransferSink};
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::transfer_plan::PlanOptions;
 use crate::CopyConfig;
@@ -69,9 +69,10 @@ impl TransferOrchestrator {
                 None
             },
             resume: options.resume,
+            null_sink: options.null_sink,
         };
 
-        if options.skip_unchanged && !options.checksum && !options.force_tar {
+        if options.skip_unchanged && !options.checksum && !options.force_tar && !options.null_sink {
             if let Some(tracker) = journal_tracker.as_ref() {
                 match tracker.probe(src_root) {
                     Ok(src_probe) => {
@@ -153,7 +154,12 @@ impl TransferOrchestrator {
             return Ok(summary);
         }
 
-        let fast_path_outcome = maybe_select_fast_path(src_root, dest_root, &options)?;
+        // Skip fast path when using null sink — it bypasses the sink abstraction.
+        let fast_path_outcome = if options.null_sink {
+            super::fast_path::FastPathOutcome { decision: None }
+        } else {
+            maybe_select_fast_path(src_root, dest_root, &options)?
+        };
         if let Some(decision) = fast_path_outcome.decision {
             let summary = match decision {
                 FastPathDecision::NoWork => {
@@ -345,17 +351,21 @@ impl TransferOrchestrator {
                 plan_options,
             )?;
 
-            // 5. Create FsTransferSink and execute unified pipeline
-            let sink = Arc::new(FsTransferSink::new(
-                src_root_buf.clone(),
-                dest_root_buf.clone(),
-                FsSinkConfig {
-                    preserve_times: copy_config.preserve_times,
-                    dry_run: copy_config.dry_run,
-                    checksum: copy_config.checksum,
-                    resume: copy_config.resume,
-                },
-            ));
+            // 5. Create sink and execute unified pipeline
+            let sink: Arc<dyn TransferSink> = if copy_config.null_sink {
+                Arc::new(NullSink::new())
+            } else {
+                Arc::new(FsTransferSink::new(
+                    src_root_buf.clone(),
+                    dest_root_buf.clone(),
+                    FsSinkConfig {
+                        preserve_times: copy_config.preserve_times,
+                        dry_run: copy_config.dry_run,
+                        checksum: copy_config.checksum,
+                        resume: copy_config.resume,
+                    },
+                ))
+            };
 
             let outcome = execute_sink_pipeline(
                 source,
@@ -417,14 +427,24 @@ impl TransferOrchestrator {
             );
         }
 
+        let fast_path_label = if options.null_sink {
+            Some("null_sink")
+        } else {
+            None
+        };
         if let Some(record) = record_performance_history(
             &summary,
             &options,
-            None,
+            fast_path_label,
             planner_duration_ms,
             summary.duration.as_millis(),
         ) {
-            update_predictor(&mut predictor, &record, options.verbose);
+            // Don't update the predictor from null-sink runs — the zero
+            // write cost would teach it that transfers are faster than
+            // they really are.
+            if !options.null_sink {
+                update_predictor(&mut predictor, &record, options.verbose);
+            }
         }
 
         Ok(summary)

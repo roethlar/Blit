@@ -300,6 +300,200 @@ impl TransferSink for DataPlaneSink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NullSink — discard data, count bytes (for benchmarking)
+// ---------------------------------------------------------------------------
+
+/// Discards all payload data, counting files and bytes.
+///
+/// Useful for benchmarking source + network throughput without destination
+/// I/O as a bottleneck. The pipeline still prepares payloads (reading source
+/// files, building tar shards) so this measures everything except the write.
+pub struct NullSink {
+    label: PathBuf,
+}
+
+impl NullSink {
+    pub fn new() -> Self {
+        Self {
+            label: PathBuf::from("/dev/null"),
+        }
+    }
+}
+
+#[async_trait]
+impl TransferSink for NullSink {
+    async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+        match payload {
+            PreparedPayload::File(header) => Ok(SinkOutcome {
+                files_written: 1,
+                bytes_written: header.size,
+            }),
+            PreparedPayload::TarShard { headers, data } => Ok(SinkOutcome {
+                files_written: headers.len(),
+                bytes_written: data.len() as u64,
+            }),
+        }
+    }
+
+    fn root(&self) -> &Path {
+        &self.label
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GrpcFallbackSink — stream payloads over the gRPC control plane
+// ---------------------------------------------------------------------------
+
+/// Streams payloads to a remote daemon over the gRPC control plane channel.
+///
+/// Used when the TCP data plane is unavailable (`--force-grpc`) or when
+/// negotiation fails. Slower than `DataPlaneSink` but works in restrictive
+/// network environments.
+pub struct GrpcFallbackSink {
+    source: Arc<dyn TransferSource>,
+    tx: tokio::sync::mpsc::Sender<crate::generated::ClientPushRequest>,
+    chunk_bytes: usize,
+    dst_label: PathBuf,
+}
+
+impl GrpcFallbackSink {
+    pub fn new(
+        source: Arc<dyn TransferSource>,
+        tx: tokio::sync::mpsc::Sender<crate::generated::ClientPushRequest>,
+        chunk_bytes: usize,
+        dst_label: PathBuf,
+    ) -> Self {
+        Self {
+            source,
+            tx,
+            chunk_bytes,
+            dst_label,
+        }
+    }
+}
+
+#[async_trait]
+impl TransferSink for GrpcFallbackSink {
+    async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+        use crate::generated::client_push_request::Payload as ClientPayload;
+        use crate::generated::{
+            ClientPushRequest, FileData, TarShardChunk, TarShardComplete, TarShardHeader,
+        };
+        use tokio::io::AsyncReadExt;
+
+        let chunk_size = self
+            .chunk_bytes
+            .max(super::data_plane::CONTROL_PLANE_CHUNK_SIZE);
+
+        match payload {
+            PreparedPayload::File(header) => {
+                let size = header.size;
+
+                self.tx
+                    .send(ClientPushRequest {
+                        payload: Some(ClientPayload::FileManifest(header.clone())),
+                    })
+                    .await
+                    .map_err(|_| eyre::eyre!("gRPC channel closed"))?;
+
+                if size > 0 {
+                    let mut file = self
+                        .source
+                        .open_file(&header)
+                        .await
+                        .with_context(|| format!("opening {}", header.relative_path))?;
+
+                    let mut buffer = vec![0u8; chunk_size];
+                    let mut remaining = size;
+                    while remaining > 0 {
+                        let to_read = buffer.len().min(remaining as usize);
+                        let n = file
+                            .read(&mut buffer[..to_read])
+                            .await
+                            .with_context(|| format!("reading {}", header.relative_path))?;
+                        if n == 0 {
+                            eyre::bail!(
+                                "unexpected EOF reading {} ({} bytes remaining)",
+                                header.relative_path,
+                                remaining
+                            );
+                        }
+                        self.tx
+                            .send(ClientPushRequest {
+                                payload: Some(ClientPayload::FileData(FileData {
+                                    content: buffer[..n].to_vec(),
+                                })),
+                            })
+                            .await
+                            .map_err(|_| eyre::eyre!("gRPC channel closed"))?;
+                        remaining -= n as u64;
+                    }
+                }
+
+                Ok(SinkOutcome {
+                    files_written: 1,
+                    bytes_written: size,
+                })
+            }
+            PreparedPayload::TarShard { headers, data } => {
+                let bytes: u64 = headers.iter().map(|h| h.size).sum();
+                let count = headers.len();
+
+                self.tx
+                    .send(ClientPushRequest {
+                        payload: Some(ClientPayload::TarShardHeader(TarShardHeader {
+                            files: headers,
+                            archive_size: data.len() as u64,
+                        })),
+                    })
+                    .await
+                    .map_err(|_| eyre::eyre!("gRPC channel closed"))?;
+
+                for chunk in data.chunks(chunk_size) {
+                    self.tx
+                        .send(ClientPushRequest {
+                            payload: Some(ClientPayload::TarShardChunk(TarShardChunk {
+                                content: chunk.to_vec(),
+                            })),
+                        })
+                        .await
+                        .map_err(|_| eyre::eyre!("gRPC channel closed"))?;
+                }
+
+                self.tx
+                    .send(ClientPushRequest {
+                        payload: Some(ClientPayload::TarShardComplete(TarShardComplete {})),
+                    })
+                    .await
+                    .map_err(|_| eyre::eyre!("gRPC channel closed"))?;
+
+                Ok(SinkOutcome {
+                    files_written: count,
+                    bytes_written: bytes,
+                })
+            }
+        }
+    }
+
+    async fn finish(&self) -> Result<()> {
+        use crate::generated::client_push_request::Payload as ClientPayload;
+        use crate::generated::{ClientPushRequest, UploadComplete};
+
+        self.tx
+            .send(ClientPushRequest {
+                payload: Some(ClientPayload::UploadComplete(UploadComplete {})),
+            })
+            .await
+            .map_err(|_| eyre::eyre!("gRPC channel closed"))?;
+        Ok(())
+    }
+
+    fn root(&self) -> &Path {
+        &self.dst_label
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +693,117 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(dst.join("a/b/c/deep.txt")).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn null_sink_counts_file() {
+        let sink = NullSink::new();
+        let header = make_file_header("test.bin", 1024);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(header))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, 1024);
+    }
+
+    #[tokio::test]
+    async fn null_sink_counts_tar_shard() {
+        let sink = NullSink::new();
+        let headers = vec![
+            make_file_header("a.txt", 100),
+            make_file_header("b.txt", 200),
+            make_file_header("c.txt", 300),
+        ];
+        let data = vec![0u8; 4096]; // fake tar data
+
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard { headers, data })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_written, 3);
+        assert_eq!(outcome.bytes_written, 4096);
+    }
+
+    #[tokio::test]
+    async fn null_sink_root_is_dev_null() {
+        let sink = NullSink::new();
+        assert_eq!(sink.root(), Path::new("/dev/null"));
+    }
+
+    #[tokio::test]
+    async fn grpc_sink_sends_file() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+        // Create a real source with a file to read
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("hello.txt"), b"world").unwrap();
+
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(
+            src,
+        ));
+        let sink = GrpcFallbackSink::new(
+            source,
+            tx,
+            1024 * 1024,
+            PathBuf::from("remote:/test/"),
+        );
+
+        let header = make_file_header("hello.txt", 5);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(header))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, 5);
+
+        // Verify messages sent: FileManifest + FileData
+        let msg1 = rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                msg1.payload,
+                Some(crate::generated::client_push_request::Payload::FileManifest(_))
+            ),
+            "expected FileManifest"
+        );
+        let msg2 = rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                msg2.payload,
+                Some(crate::generated::client_push_request::Payload::FileData(_))
+            ),
+            "expected FileData"
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_sink_finish_sends_upload_complete() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let tmp = tempdir().unwrap();
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(
+            tmp.path().to_path_buf(),
+        ));
+        let sink = GrpcFallbackSink::new(
+            source,
+            tx,
+            1024 * 1024,
+            PathBuf::from("remote:/test/"),
+        );
+
+        sink.finish().await.unwrap();
+
+        let msg = rx.recv().await.unwrap();
+        assert!(
+            matches!(
+                msg.payload,
+                Some(crate::generated::client_push_request::Payload::UploadComplete(_))
+            ),
+            "expected UploadComplete"
+        );
     }
 }

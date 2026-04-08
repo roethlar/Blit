@@ -17,4 +17,7 @@ pub use payload::{
 };
 pub use pipeline::execute_sink_pipeline;
 pub use progress::{ProgressEvent, RemoteTransferProgress};
-pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, SinkOutcome, TransferSink};
+pub use sink::{
+    DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, NullSink, SinkOutcome,
+    TransferSink,
+};

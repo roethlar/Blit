@@ -110,6 +110,19 @@ pub struct TransferArgs {
     /// Resume interrupted transfers using block-level comparison
     #[arg(long)]
     pub resume: bool,
+    /// Discard all writes (measure source read + pipeline throughput only).
+    ///
+    /// Reads and prepares all source data normally but does not write to the
+    /// destination. Use this to isolate whether a bottleneck is on the source
+    /// or destination side. Example:
+    ///
+    ///   blit copy /data/large-dataset /tmp/unused --null -v
+    ///
+    /// The destination path is still required for planning but nothing is
+    /// written there. Performance records are tagged so the adaptive predictor
+    /// does not learn from null-sink runs.
+    #[arg(long)]
+    pub null: bool,
 }
 
 #[derive(Args, Clone, Debug)]

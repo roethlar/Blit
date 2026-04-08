@@ -21,6 +21,8 @@ pub struct LocalMirrorOptions {
     pub retries: u8,
     /// Resume interrupted transfers using block-level comparison.
     pub resume: bool,
+    /// Discard writes (NullSink). Measures source read + pipeline throughput.
+    pub null_sink: bool,
 }
 
 impl Default for LocalMirrorOptions {
@@ -42,6 +44,7 @@ impl Default for LocalMirrorOptions {
             debug_mode: false,
             retries: 1,
             resume: false,
+            null_sink: false,
         }
     }
 }

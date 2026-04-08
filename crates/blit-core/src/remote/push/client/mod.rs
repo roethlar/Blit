@@ -31,11 +31,11 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::data_plane::DataPlaneSession;
 use super::payload::{
-    payload_file_count, plan_transfer_payloads, transfer_payloads_via_control_plane,
-    PreparedPayload, TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
+    payload_file_count, plan_transfer_payloads, PreparedPayload, TransferPayload,
 };
 use crate::remote::transfer::progress::RemoteTransferProgress;
-use crate::remote::transfer::sink::{DataPlaneSink, TransferSink};
+use crate::remote::transfer::pipeline::execute_sink_pipeline;
+use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, TransferSink};
 use crate::remote::transfer::source::TransferSource;
 
 const MIN_STREAM_BATCH_BYTES: u64 = 32 * 1024 * 1024;
@@ -804,22 +804,14 @@ impl RemotePushClient {
                 && pending_queue.is_empty()
                 && (files_requested.is_empty() || fallback_files_sent >= files_requested.len())
             {
-                transfer_payloads_via_control_plane(
+                // Send UploadComplete via a temporary GrpcFallbackSink.
+                let finish_sink = GrpcFallbackSink::new(
                     source.clone(),
-                    Vec::new(),
-                    &tx,
-                    true,
-                    progress,
-                    remote_tuning
-                        .as_ref()
-                        .map(|t| t.chunk_bytes)
-                        .unwrap_or(CONTROL_PLANE_CHUNK_SIZE),
-                    remote_tuning
-                        .as_ref()
-                        .map(|t| t.initial_streams)
-                        .unwrap_or(DEFAULT_PAYLOAD_PREFETCH),
-                )
-                .await?;
+                    tx.clone(),
+                    CONTROL_PLANE_CHUNK_SIZE,
+                    PathBuf::from("grpc-fallback"),
+                );
+                finish_sink.finish().await?;
                 fallback_upload_complete_sent = true;
             }
 
@@ -909,14 +901,18 @@ async fn stream_fallback_from_queue(
     } else {
         chunk_bytes
     };
-    transfer_payloads_via_control_plane(
-        source,
-        planned.payloads,
-        tx,
-        false,
-        progress,
+    let sink: Arc<dyn TransferSink> = Arc::new(GrpcFallbackSink::new(
+        source.clone(),
+        tx.clone(),
         control_chunk,
+        PathBuf::from("grpc-fallback"),
+    ));
+    execute_sink_pipeline(
+        source,
+        vec![sink],
+        planned.payloads,
         payload_prefetch,
+        progress.map(|p| p as &RemoteTransferProgress),
     )
     .await?;
 

@@ -22,6 +22,7 @@ pub async fn run_local_transfer(
 
     let options = build_local_options(ctx, args, mirror);
     let dry_run = options.dry_run;
+    let null_sink = options.null_sink;
     let verbose = options.verbose;
     let debug_mode = options.debug_mode;
     let workers = options.workers;
@@ -75,7 +76,7 @@ pub async fn run_local_transfer(
 
     let elapsed = start.elapsed();
     print_summary(
-        mirror, dry_run, verbose, debug_mode, workers, &summary, elapsed,
+        mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
     );
 
     Ok(())
@@ -91,6 +92,7 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
         checksum: args.checksum,
         retries: args.retries,
         resume: args.resume,
+        null_sink: args.null,
         ..LocalMirrorOptions::default()
     };
     if let Some(workers) = args.workers {
@@ -103,6 +105,7 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
 fn print_summary(
     mirror: bool,
     dry_run: bool,
+    null_sink: bool,
     verbose: bool,
     debug_mode: bool,
     workers: usize,
@@ -110,6 +113,13 @@ fn print_summary(
     elapsed: Duration,
 ) {
     let operation = if mirror { "Mirror" } else { "Copy" };
+    let suffix = if dry_run {
+        " (dry run)"
+    } else if null_sink {
+        " (null sink — writes discarded)"
+    } else {
+        ""
+    };
     let duration = if summary.duration.is_zero() {
         elapsed
     } else {
@@ -125,7 +135,7 @@ fn print_summary(
     println!(
         "{}{} complete: {} files, {} in {:.2?}",
         operation,
-        if dry_run { " (dry run)" } else { "" },
+        suffix,
         summary.copied_files,
         format_bytes(summary.total_bytes),
         duration
