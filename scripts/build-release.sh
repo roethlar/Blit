@@ -37,7 +37,7 @@ fi
 echo "==> Building release binaries..."
 cargo "${CARGO_ARGS[@]}"
 
-BINARIES=(blit-cli blit-daemon blit-utils)
+BINARIES=(blit-cli blit-daemon)
 
 echo "==> Stripping binaries..."
 for bin in "${BINARIES[@]}"; do

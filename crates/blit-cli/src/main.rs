@@ -1,17 +1,21 @@
-mod admin;
 mod cli;
+mod completions;
 mod context;
+mod df;
 mod diagnostics;
-mod list;
+mod du;
+mod find;
+mod list_modules;
+mod ls;
+mod profile;
+mod rm;
 mod scan;
 mod transfers;
+mod util;
 
-use crate::admin::{run_df, run_du, run_find, run_rm};
 use crate::cli::{Cli, Commands, DiagnosticsCommand};
 use crate::context::AppContext;
 use crate::diagnostics::run_diagnostics_perf;
-use crate::list::run_list;
-use crate::scan::run_scan;
 use crate::transfers::{run_move, run_transfer, TransferKind};
 use blit_core::config;
 use clap::Parser;
@@ -35,12 +39,15 @@ async fn main() -> Result<()> {
         Commands::Copy(args) => run_transfer(&ctx, &args, TransferKind::Copy).await?,
         Commands::Mirror(args) => run_transfer(&ctx, &args, TransferKind::Mirror).await?,
         Commands::Move(args) => run_move(&ctx, &args).await?,
-        Commands::Scan(args) => run_scan(&args).await?,
-        Commands::List(args) => run_list(&args).await?,
-        Commands::Du(args) => run_du(&ctx, &args).await?,
-        Commands::Df(args) => run_df(&ctx, &args).await?,
-        Commands::Rm(args) => run_rm(&ctx, &args).await?,
-        Commands::Find(args) => run_find(&ctx, &args).await?,
+        Commands::Scan(args) => scan::run_scan(args).await?,
+        Commands::ListModules(args) => list_modules::run_list_modules(args).await?,
+        Commands::Ls(args) => ls::run_ls(args).await?,
+        Commands::Du(args) => du::run_du(args).await?,
+        Commands::Df(args) => df::run_df(args).await?,
+        Commands::Rm(args) => rm::run_rm(args).await?,
+        Commands::Find(args) => find::run_find(args).await?,
+        Commands::Completions(args) => completions::run_completions(args).await?,
+        Commands::Profile(args) => profile::run_profile(args)?,
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
         },

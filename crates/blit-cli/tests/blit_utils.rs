@@ -1,60 +1,25 @@
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
 mod common;
 use common::{run_with_timeout, TestContext};
 
-fn utils_bin() -> PathBuf {
-    let exe_path = std::env::current_exe().expect("current_exe");
-    let deps_dir = exe_path.parent().expect("test binary directory");
-    let bin_dir = deps_dir.parent().expect("deps parent directory");
-    let name = if cfg!(windows) {
-        "blit-utils.exe"
-    } else {
-        "blit-utils"
-    };
-    let utils = bin_dir.join(name);
-
-    if !utils.exists() {
-        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root");
-        let output = Command::new("cargo")
-            .current_dir(workspace_root)
-            .arg("build")
-            .arg("-p")
-            .arg("blit-utils")
-            .arg("--bin")
-            .arg("blit-utils")
-            .output()
-            .expect("invoke cargo build for blit-utils");
-        assert!(
-            output.status.success(),
-            "cargo build blit-utils failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    utils
-}
-
 // ── scan ──────────────────────────────────────────────────────────────
 
 #[test]
 fn test_utils_scan() {
-    let utils = utils_bin();
+    let ctx = TestContext::new();
 
     // Run with a very short wait so the test completes quickly.
     // Test daemon has no_mdns: true, so we expect no results — just a clean exit.
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("scan").arg("--wait").arg("1");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils scan failed:\nstderr: {}",
+        "blit scan failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -72,16 +37,15 @@ fn test_utils_scan() {
 #[test]
 fn test_utils_list_modules() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     let remote = format!("127.0.0.1:{}", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("list-modules").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils list-modules failed:\nstderr: {}",
+        "blit list-modules failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -96,10 +60,9 @@ fn test_utils_list_modules() {
 #[test]
 fn test_utils_list_modules_json() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     let remote = format!("127.0.0.1:{}", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("list-modules").arg(&remote).arg("--json");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -121,19 +84,18 @@ fn test_utils_list_modules_json() {
 #[test]
 fn test_utils_ls_remote() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("hello.txt"), "world").expect("write file");
     fs::create_dir(ctx.module_dir.join("subdir")).expect("create subdir");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("ls").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils ls failed:\nstderr: {}",
+        "blit ls failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -147,17 +109,17 @@ fn test_utils_ls_remote() {
 
 #[test]
 fn test_utils_ls_local() {
-    let utils = utils_bin();
+    let ctx = TestContext::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     fs::write(tmp.path().join("local.txt"), "data").expect("write");
 
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("ls").arg(tmp.path());
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils ls (local) failed:\nstderr: {}",
+        "blit ls (local) failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -172,12 +134,11 @@ fn test_utils_ls_local() {
 #[test]
 fn test_utils_ls_json() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("j.txt"), "json").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("ls").arg(&remote).arg("--json");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -199,7 +160,6 @@ fn test_utils_ls_json() {
 #[test]
 fn test_utils_find() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("readme.md"), "# hi").expect("write md");
     fs::write(ctx.module_dir.join("data.csv"), "a,b").expect("write csv");
@@ -207,13 +167,16 @@ fn test_utils_find() {
     fs::write(ctx.module_dir.join("deep/nested.md"), "# deep").expect("write nested");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
-    cmd.arg("find").arg(&remote).arg("--pattern").arg(".md");
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("find")
+        .arg(&remote)
+        .arg("--pattern")
+        .arg(".md");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils find failed:\nstderr: {}",
+        "blit find failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -229,12 +192,11 @@ fn test_utils_find() {
 #[test]
 fn test_utils_find_json() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("target.log"), "log").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("find")
         .arg(&remote)
         .arg("--pattern")
@@ -259,13 +221,12 @@ fn test_utils_find_json() {
 #[test]
 fn test_utils_find_dirs_only() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::create_dir(ctx.module_dir.join("mydir")).expect("mkdir");
     fs::write(ctx.module_dir.join("myfile.txt"), "x").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("find").arg(&remote).arg("--dirs");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -283,15 +244,17 @@ fn test_utils_find_dirs_only() {
 #[test]
 fn test_utils_find_limit() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     for i in 0..10 {
         fs::write(ctx.module_dir.join(format!("item_{}.txt", i)), "x").expect("write");
     }
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
-    cmd.arg("find").arg(&remote).arg("--limit").arg("3");
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("find")
+        .arg(&remote)
+        .arg("--limit")
+        .arg("3");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(output.status.success());
@@ -312,20 +275,19 @@ fn test_utils_find_limit() {
 #[test]
 fn test_utils_du() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("sized.bin"), vec![0u8; 1024]).expect("write");
     fs::create_dir(ctx.module_dir.join("sub")).expect("mkdir");
     fs::write(ctx.module_dir.join("sub/inner.bin"), vec![0u8; 512]).expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("du").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils du failed:\nstderr: {}",
+        "blit du failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -337,12 +299,11 @@ fn test_utils_du() {
 #[test]
 fn test_utils_du_json() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("f.txt"), "hello").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("du").arg(&remote).arg("--json");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -364,16 +325,15 @@ fn test_utils_du_json() {
 #[test]
 fn test_utils_df() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("df").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils df failed:\nstderr: {}",
+        "blit df failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -395,10 +355,9 @@ fn test_utils_df() {
 #[test]
 fn test_utils_df_json() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("df").arg(&remote).arg("--json");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -420,19 +379,18 @@ fn test_utils_df_json() {
 #[test]
 fn test_utils_rm_file() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     let file = ctx.module_dir.join("doomed.txt");
     fs::write(&file, "bye").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/doomed.txt", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("rm").arg("--yes").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils rm failed:\nstderr: {}",
+        "blit rm failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -449,13 +407,12 @@ fn test_utils_rm_file() {
 #[test]
 fn test_utils_rm_directory() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::create_dir_all(ctx.module_dir.join("rmdir/child")).expect("mkdir");
     fs::write(ctx.module_dir.join("rmdir/child/f.txt"), "x").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/rmdir", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("rm").arg("--yes").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -470,11 +427,10 @@ fn test_utils_rm_directory() {
 #[test]
 fn test_utils_rm_refuses_module_root() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     // Attempt to delete the module root — should be refused
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("rm").arg("--yes").arg(&remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -490,14 +446,13 @@ fn test_utils_rm_refuses_module_root() {
 #[test]
 fn test_utils_completions() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("foo.txt"), "f").expect("write");
     fs::write(ctx.module_dir.join("foobar.txt"), "fb").expect("write");
     fs::write(ctx.module_dir.join("baz.txt"), "b").expect("write");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("completions")
         .arg(&remote)
         .arg("--prefix")
@@ -506,7 +461,7 @@ fn test_utils_completions() {
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils completions failed:\nstderr: {}",
+        "blit completions failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -525,13 +480,12 @@ fn test_utils_completions() {
 #[test]
 fn test_utils_completions_dirs_only() {
     let ctx = TestContext::new();
-    let utils = utils_bin();
 
     fs::write(ctx.module_dir.join("file.txt"), "f").expect("write");
     fs::create_dir(ctx.module_dir.join("dirname")).expect("mkdir");
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("completions").arg(&remote).arg("--dirs");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
@@ -552,15 +506,15 @@ fn test_utils_completions_dirs_only() {
 
 #[test]
 fn test_utils_profile() {
-    let utils = utils_bin();
+    let ctx = TestContext::new();
 
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("profile");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
         output.status.success(),
-        "blit-utils profile failed:\nstderr: {}",
+        "blit profile failed:\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -578,9 +532,9 @@ fn test_utils_profile() {
 
 #[test]
 fn test_utils_profile_json() {
-    let utils = utils_bin();
+    let ctx = TestContext::new();
 
-    let mut cmd = Command::new(&utils);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("profile").arg("--json");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));

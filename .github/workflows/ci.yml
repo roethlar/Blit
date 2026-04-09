@@ -84,4 +84,3 @@ jobs:
           path: |
             target/${{ matrix.target }}/release/blit-cli${{ matrix.os == 'windows-latest' && '.exe' || '' }}
             target/${{ matrix.target }}/release/blit-daemon${{ matrix.os == 'windows-latest' && '.exe' || '' }}
-            target/${{ matrix.target }}/release/blit-utils${{ matrix.os == 'windows-latest' && '.exe' || '' }}

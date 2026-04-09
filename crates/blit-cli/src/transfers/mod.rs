@@ -10,7 +10,7 @@ use eyre::{bail, Context, Result};
 use std::fs;
 use std::io::{self, Write};
 
-use crate::admin::delete_remote_path;
+use crate::rm::delete_remote_path;
 use blit_core::remote::RemotePath;
 use endpoints::{
     ensure_remote_destination_supported, ensure_remote_source_supported,
@@ -259,24 +259,6 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     }
 }
 
-pub(crate) fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    if bytes == 0 {
-        return "0 B".to_owned();
-    }
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[unit])
-    } else {
-        format!("{:.2} {}", value, UNITS[unit])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +299,7 @@ mod tests {
             trace_data_plane: false,
             force_grpc: false,
             resume: false,
+            null: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -353,6 +336,7 @@ mod tests {
             trace_data_plane: false,
             force_grpc: false,
             resume: false,
+            null: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

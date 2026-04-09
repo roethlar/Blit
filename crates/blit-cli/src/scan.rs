@@ -3,7 +3,7 @@ use blit_core::mdns;
 use eyre::{Context, Result};
 use std::time::Duration;
 
-pub async fn run_scan(args: &ScanArgs) -> Result<()> {
+pub async fn run_scan(args: ScanArgs) -> Result<()> {
     let wait = Duration::from_secs(args.wait);
     let services = tokio::task::spawn_blocking(move || mdns::discover(wait))
         .await
@@ -22,7 +22,6 @@ pub async fn run_scan(args: &ScanArgs) -> Result<()> {
         let host = if let Some(addr) = service.addresses.first() {
             addr.to_string()
         } else {
-            // Strip trailing dot from FQDN if present
             service.hostname.trim_end_matches('.').to_string()
         };
         let endpoint = if service.port == 9031 {
@@ -31,6 +30,16 @@ pub async fn run_scan(args: &ScanArgs) -> Result<()> {
             format!("{}:{}://", host, service.port)
         };
         println!("  Endpoint: {}", endpoint);
+
+        if service.addresses.len() > 1 {
+            let addr_list = service
+                .addresses
+                .iter()
+                .map(|addr| addr.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("  Addresses: {}", addr_list);
+        }
 
         if let Some(version) = service.properties.get("version") {
             println!("  Version: {}", version);

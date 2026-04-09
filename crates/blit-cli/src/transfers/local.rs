@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
 
-use super::format_bytes;
+use crate::util::format_bytes;
 
 pub async fn run_local_transfer(
     ctx: &AppContext,

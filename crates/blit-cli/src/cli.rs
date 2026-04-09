@@ -23,8 +23,11 @@ pub enum Commands {
     Move(TransferArgs),
     /// Discover daemons advertising via mDNS
     Scan(ScanArgs),
-    /// List modules or paths on a remote daemon
-    List(ListArgs),
+    /// List modules exported by a remote daemon
+    ListModules(ListModulesArgs),
+    /// List directory entries (remote or local)
+    #[command(alias = "list")]
+    Ls(ListArgs),
     /// Show disk usage for a remote path
     Du(DuArgs),
     /// Show filesystem statistics for a remote module
@@ -33,6 +36,10 @@ pub enum Commands {
     Rm(RmArgs),
     /// Search for files on a remote daemon
     Find(FindArgs),
+    /// Fetch remote path completions for interactive shells
+    Completions(CompletionArgs),
+    /// Show local performance history summary
+    Profile(ProfileArgs),
     /// Diagnostics and tooling commands
     Diagnostics {
         #[command(subcommand)]
@@ -42,7 +49,7 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum DiagnosticsCommand {
-    /// Show recent performance history captured locally
+    /// Manage performance history capture (enable/disable/clear)
     Perf(PerfArgs),
 }
 
@@ -133,9 +140,19 @@ pub struct ScanArgs {
 }
 
 #[derive(Args, Clone, Debug)]
+pub struct ListModulesArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
 pub struct ListArgs {
-    /// Remote location to list (e.g., server:/module/, server:/module/path, server)
+    /// Local path or remote endpoint (host:/module/path)
     pub target: String,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -172,22 +189,45 @@ pub struct RmArgs {
 pub struct FindArgs {
     /// Remote path to search (e.g., server:/module/path)
     pub target: String,
-    /// Glob pattern to match (e.g., "*.txt")
-    #[arg(long, short = 'n')]
+    /// Pattern to match (substring match)
+    #[arg(long)]
     pub pattern: Option<String>,
-    /// Case-insensitive pattern matching
-    #[arg(long, short = 'i')]
-    pub case_insensitive: bool,
-    /// Include files in results (default: true)
-    #[arg(long, default_value_t = true)]
+    /// Include only files in results
+    #[arg(long)]
     pub files: bool,
-    /// Include directories in results (default: true)
-    #[arg(long, default_value_t = true)]
+    /// Include only directories in results
+    #[arg(long)]
     pub dirs: bool,
+    /// Case-insensitive pattern matching
+    #[arg(long)]
+    pub case_insensitive: bool,
     /// Limit number of results
     #[arg(long)]
     pub limit: Option<u32>,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct CompletionArgs {
+    /// Remote path (e.g., server:/module/)
+    pub target: String,
+    /// Include only file completions
+    #[arg(long)]
+    pub files: bool,
+    /// Include only directory completions
+    #[arg(long)]
+    pub dirs: bool,
+    /// Additional prefix for filtering
+    #[arg(long)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct ProfileArgs {
+    #[arg(long)]
+    pub json: bool,
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
 }

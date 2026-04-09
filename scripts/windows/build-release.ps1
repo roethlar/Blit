@@ -25,7 +25,7 @@ try {
     & cargo @CargoArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 
-    $Binaries = @("blit-cli.exe", "blit-daemon.exe", "blit-utils.exe")
+    $Binaries = @("blit-cli.exe", "blit-daemon.exe")
 
     Write-Host "==> Release binaries in $OutDir\"
     foreach ($bin in $Binaries) {
