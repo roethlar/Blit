@@ -4,6 +4,7 @@ use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::PurgeRequest;
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Context, Result};
+use serde::Serialize;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -68,17 +69,34 @@ pub async fn run_rm(args: RmArgs) -> Result<()> {
         .map_err(|status| eyre::eyre!(status.message().to_string()))?
         .into_inner();
 
-    match response.files_deleted {
-        0 => println!(
-            "No entries removed for {} on {}; path may already be absent.",
-            module_display, endpoint_display
-        ),
-        1 => println!("Deleted {} on {}.", module_display, endpoint_display),
-        count => println!(
-            "Deleted {} entries under {} on {}.",
-            count, module_display, endpoint_display
-        ),
-    };
+    if args.json {
+        #[derive(Serialize)]
+        struct RmResult {
+            path: String,
+            host: String,
+            port: u16,
+            entries_deleted: u64,
+        }
+        let result = RmResult {
+            path: rel_string,
+            host: remote.host.clone(),
+            port: remote.port,
+            entries_deleted: response.files_deleted,
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        match response.files_deleted {
+            0 => println!(
+                "No entries removed for {} on {}; path may already be absent.",
+                module_display, endpoint_display
+            ),
+            1 => println!("Deleted {} on {}.", module_display, endpoint_display),
+            count => println!(
+                "Deleted {} entries under {} on {}.",
+                count, module_display, endpoint_display
+            ),
+        };
+    }
 
     Ok(())
 }

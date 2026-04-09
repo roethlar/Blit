@@ -137,6 +137,9 @@ pub struct ScanArgs {
     /// Seconds to wait for mDNS responses
     #[arg(long, default_value_t = 2)]
     pub wait: u64,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -183,6 +186,9 @@ pub struct RmArgs {
     /// Skip confirmation prompt
     #[arg(long, short = 'y')]
     pub yes: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]

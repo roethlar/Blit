@@ -1,16 +1,45 @@
 use crate::cli::ScanArgs;
 use blit_core::mdns;
 use eyre::{Context, Result};
+use serde::Serialize;
 use std::time::Duration;
 
+#[derive(Serialize)]
+struct ScanEntryJson {
+    instance_name: String,
+    host: String,
+    port: u16,
+    addresses: Vec<String>,
+    version: Option<String>,
+    modules: Vec<String>,
+}
+
 pub async fn run_scan(args: ScanArgs) -> Result<()> {
-    let wait = Duration::from_secs(args.wait);
+    let json = args.json;
+    let wait_secs = args.wait;
+    let wait = Duration::from_secs(wait_secs);
     let services = tokio::task::spawn_blocking(move || mdns::discover(wait))
         .await
         .context("mDNS discovery task panicked")??;
 
+    if json {
+        let entries: Vec<ScanEntryJson> = services
+            .iter()
+            .map(|s| ScanEntryJson {
+                instance_name: s.instance_name.clone(),
+                host: s.hostname.trim_end_matches('.').to_string(),
+                port: s.port,
+                addresses: s.addresses.iter().map(|a| a.to_string()).collect(),
+                version: s.properties.get("version").cloned(),
+                modules: s.modules(),
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
     if services.is_empty() {
-        println!("No blit daemons discovered within {} second(s).", args.wait);
+        println!("No blit daemons discovered within {} second(s).", wait_secs);
         return Ok(());
     }
 
@@ -18,7 +47,6 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
     for service in &services {
         println!("- {}", service.instance_name);
 
-        // Build a usable endpoint URL, preferring IP address over hostname
         let host = if let Some(addr) = service.addresses.first() {
             addr.to_string()
         } else {
