@@ -4,135 +4,226 @@ Response to `CONSOLIDATION_REQUIREMENTS.md`. All requirements and nice-to-haves 
 
 ---
 
-## Requirement 1: Add `--json` to commands that lack it
+## Summary for Admin UI Developers
 
-| Command | Status | Commit |
-|---------|--------|--------|
-| `blit scan --json` | Added | `3cf283b` — outputs `[{ instance_name, host, port, addresses, version, modules }]` |
-| `blit rm --json` | Added | `3cf283b` — outputs `{ path, host, port, entries_deleted }` |
-| `blit list` | N/A | Replaced by `blit ls --json` (from blit-utils, already had it) |
-
-All query/admin commands now support `--json`.
-
-## Requirement 2: Add missing subcommands from blit-utils
-
-| Command | Approach taken |
-|---------|---------------|
-| `list-modules` | Added as `blit list-modules` (separate subcommand, not folded into `list`) |
-| `ls` | Added as `blit ls` with `list` as alias. Supports local + remote + `--json` |
-| `completions` | Added as `blit completions` (copied from blit-utils) |
-| `profile` | Added as `blit profile` (separate from `diagnostics perf` which manages settings) |
-
-Decision: kept `list-modules` and `ls` as separate subcommands rather than overloading `blit list`. The alias `blit list` maps to `blit ls` for backward compatibility. This is clearer than behavior that changes based on whether the target is a bare host or a module path.
-
-## Requirement 3: Fix `blit df` text output
-
-Done. The merged `df` command uses the blit-utils implementation which outputs:
-```
-Total: 465.63 GiB (499963174912 bytes)
-```
-
-## Requirement 4: Consolidate duplicate `format_bytes()`
-
-Done. The `transfers/mod.rs` version was deleted. All code now uses `util::format_bytes()` (the blit-utils version). `transfers/local.rs` imports from `crate::util::format_bytes`.
-
-## Requirement 5: Remove unused `src/list.rs`
-
-Done. Deleted in commit `305efef`. Replaced by `ls.rs` (from blit-utils).
-
-## Requirement 6: Update error messages
-
-Done. All `"blit-utils ..."` error messages changed to `"blit ..."`:
-- `completions.rs`: `blit-utils completions` -> `blit completions`
-- `find.rs`: `blit-utils find` -> `blit find`
-- `df.rs`: `blit-utils df` -> `blit df`
-- `du.rs`: `blit-utils du` -> `blit du`
-- `rm.rs`: `blit-utils rm` -> `blit rm`
+**One binary: `blit`.** The `blit-utils` crate has been removed. All commands are in `blit-cli`. Every query/admin command supports `--json`. Transfer commands (`copy`, `mirror`, `move`) support `--json` for both structured progress (NDJSON on stderr) and final summary (JSON on stdout).
 
 ---
 
-## Nice-to-haves
+## Complete CLI Surface
 
-### Standardize function signatures
+```
+TRANSFERS
+  blit copy   <SOURCE> <DEST> [--json] [-p] [-v] [-y] [--dry-run] [--checksum] [--resume] [--null] [--force-grpc]
+  blit mirror <SOURCE> <DEST> [--json] [-p] [-v] [-y] [--dry-run] [--checksum] [--resume] [--null] [--force-grpc]
+  blit move   <SOURCE> <DEST> [--json] [-p] [-v] [-y] [--dry-run] [--checksum] [--resume] [--force-grpc]
 
-Kept as-is with a consistent convention:
-- **Ported admin commands** (scan, ls, du, df, find, rm, completions, profile, list-modules): take args **by value**. These are lightweight clap structs consumed once.
-- **Transfer commands** (run_transfer, run_move, run_local_transfer): take `&AppContext` + `&TransferArgs` **by reference**. These pass through multiple layers.
+DISCOVERY & INSPECTION
+  blit scan [--wait <N>] [--json]
+  blit list-modules <REMOTE> [--json]
+  blit ls <TARGET> [--json]                          (alias: list)
+  blit du <REMOTE> [--max-depth <N>] [--json]
+  blit df <REMOTE> [--json]
+  blit find <REMOTE> [--pattern <PAT>] [--files] [--dirs] [--case-insensitive] [--limit <N>] [--json]
 
-### Clean up unused `_ctx` parameters
+ADMIN
+  blit rm <REMOTE> [--yes] [--json]
+  blit completions <REMOTE> [--files] [--dirs] [--prefix <FRAG>]
 
-Done. Removed `_ctx: &AppContext` from:
-- `run_remote_push_transfer` in `transfers/remote.rs`
-- `run_remote_pull_transfer` in `transfers/remote.rs`
-- Removed unused `use crate::context::AppContext` import from `remote.rs`
-- Updated all call sites in `transfers/mod.rs`
+DIAGNOSTICS
+  blit profile [--json] [--limit <N>]
+  blit diagnostics perf [--json] [--limit <N>] [--enable] [--disable] [--clear]
+```
 
-### Add `--json` to `blit diagnostics perf`
+---
 
-Done. `blit diagnostics perf --json` outputs:
+## JSON Response Shapes (verified from source)
+
+### `blit scan --json`
+```json
+[{
+  "instance_name": "blit@myserver",
+  "host": "myserver.local",
+  "port": 9031,
+  "addresses": ["192.168.1.100"],
+  "version": "0.1.0",
+  "modules": ["backup", "media"]
+}]
+```
+
+### `blit list-modules <REMOTE> --json`
+```json
+[{ "name": "backup", "path": "/data/backups", "read_only": false }]
+```
+
+### `blit ls <TARGET> --json`
+```json
+[{ "name": "file.txt", "is_dir": false, "size": 1024, "mtime_seconds": 1712534400 }]
+```
+
+### `blit du <REMOTE> --json`
+```json
+[{ "path": "subdir", "bytes": 10485760, "files": 42, "dirs": 3 }]
+```
+
+### `blit df <REMOTE> --json`
+```json
+{ "module": "backup", "total_bytes": 499963174912, "used_bytes": 312475648000, "free_bytes": 187487526912 }
+```
+
+### `blit find <REMOTE> --json`
+```json
+[{ "path": "data/report.csv", "is_dir": false, "size": 2048, "mtime_seconds": 1712534400 }]
+```
+
+### `blit rm <REMOTE> --yes --json`
+```json
+{ "path": "old-data/archive", "host": "192.168.1.100", "port": 9031, "entries_deleted": 47 }
+```
+
+### `blit profile --json`
+```json
+{ "enabled": true, "records": [...], "predictor_path": "/path/to/predictor.json" }
+```
+
+### `blit diagnostics perf --json`
+```json
+{ "enabled": true, "history_path": "...", "record_count": 5, "records": [...] }
+```
+
+---
+
+## Transfer Progress (NDJSON on stderr)
+
+When running transfers with `-p --json`, progress is emitted as newline-delimited JSON objects to **stderr** (one per second, plus one per file completion). The final transfer summary goes to **stdout** as a single JSON object.
+
+### stderr (NDJSON progress stream)
+
+```
+{"event":"manifest","total_files":150}
+{"event":"progress","files":25,"total_files":150,"bytes_copied":537919488,"avg_bytes_sec":1073741824,"current_bytes_sec":1258291200}
+{"event":"file_complete","path":"data/backup.tar","bytes":1073741824}
+{"event":"progress","files":100,"total_files":150,"bytes_copied":1610612736,"avg_bytes_sec":1006632960,"current_bytes_sec":985661440}
+{"event":"final","files_transferred":150,"total_bytes":2147483648,"avg_bytes_sec":1053818880}
+```
+
+**Event types:**
+
+| Event | Fields | When |
+|-------|--------|------|
+| `manifest` | `total_files` | After manifest enumeration |
+| `progress` | `files`, `total_files`, `bytes_copied`, `avg_bytes_sec`, `current_bytes_sec` | Every ~1 second during transfer |
+| `file_complete` | `path`, `bytes` | After each file finishes |
+| `final` | `files_transferred`, `total_bytes`, `avg_bytes_sec` | Transfer complete |
+
+All numeric values are raw integers (bytes, bytes/sec). No string formatting.
+
+### stdout (final summary)
+
+**Local transfer:**
 ```json
 {
-  "enabled": true,
-  "history_path": "...",
-  "record_count": 5,
-  "records": [...]
+  "operation": "copy",
+  "source": "/data/src",
+  "destination": "/data/dst",
+  "files_transferred": 150,
+  "total_bytes": 2147483648,
+  "deleted_files": 0,
+  "deleted_dirs": 0,
+  "duration_ms": 2038,
+  "dry_run": false
 }
 ```
 
-### Standardize scan text output
+**Remote push:**
+```json
+{
+  "operation": "push",
+  "destination": "server:/module/",
+  "files_requested": 150,
+  "files_transferred": 150,
+  "bytes_transferred": 2147483648,
+  "bytes_zero_copy": 0,
+  "entries_deleted": 0,
+  "tcp_fallback": false,
+  "first_payload_ms": 245
+}
+```
 
-Done. Kept the blit-cli version which produces copy-pasteable endpoint strings and suppresses the default port (9031). Added multi-address display when >1 address is discovered. With `--json` added, the text format matters less for tooling.
-
-### Consider `blit list` subcommand unification
-
-Decision: **not unified**. Instead:
-- `blit list-modules SERVER` — lists modules (clear, single purpose)
-- `blit ls TARGET` — lists directory contents (local or remote, with `--json`)
-- `blit list` is an alias for `blit ls` (backward compat)
-
-This is clearer than a single `blit list` that changes behavior based on argument shape.
+**Remote pull:**
+```json
+{
+  "operation": "pull",
+  "destination": "/local/path",
+  "files_transferred": 150,
+  "bytes_transferred": 2147483648,
+  "bytes_zero_copy": 0,
+  "tcp_fallback": false
+}
+```
 
 ---
 
-## Structural changes
+## Swift Integration Pattern
 
-### Files added to blit-cli
-- `src/completions.rs` — shell path completions (from blit-utils)
-- `src/profile.rs` — performance history viewer (from blit-utils)
-- `src/list_modules.rs` — module listing with `--json` (from blit-utils)
-- `src/ls.rs` — directory listing, local + remote, `--json` (from blit-utils)
-- `src/df.rs` — filesystem stats with human-readable output (from blit-utils)
-- `src/du.rs` — disk usage (from blit-utils)
-- `src/find.rs` — recursive search (from blit-utils)
-- `src/rm.rs` — remote deletion + `delete_remote_path` helper (from blit-utils + admin.rs)
-- `src/util.rs` — shared helpers: `format_bytes`, `parse_endpoint_or_local`, etc. (from blit-utils)
+```swift
+// Read NDJSON progress from stderr
+for await line in process.standardError.lines {
+    let data = Data(line.utf8)
+    let event = try JSONDecoder().decode(ProgressEvent.self, from: data)
+    switch event.event {
+    case "progress":
+        updateProgressBar(files: event.files, total: event.totalFiles, bytes: event.bytesCopied)
+    case "file_complete":
+        appendToLog(event.path)
+    case "final":
+        showCompletionBanner(event.filesTransferred, event.totalBytes)
+    default:
+        break
+    }
+}
 
-### Files removed from blit-cli
-- `src/admin.rs` — replaced by individual command modules (df, du, find, rm)
-- `src/list.rs` — replaced by `ls.rs`
-
-### Workspace changes
-- `crates/blit-utils` removed from `Cargo.toml` workspace members
-- Build scripts (`build-release.sh`, `build-release.ps1`) no longer reference blit-utils
-- CI workflow (`.github/workflows/ci.yml`) no longer builds or uploads blit-utils artifacts
-
-### Command surface (final)
-
-```
-blit copy|mirror|move   — transfer operations
-blit scan [--json]      — mDNS daemon discovery
-blit list-modules [--json] — list daemon modules
-blit ls [--json]        — list directory (local or remote) [alias: list]
-blit du [--json]        — disk usage
-blit df [--json]        — filesystem statistics
-blit find [--json]      — recursive file search
-blit rm [--json] [--yes] — remote file deletion
-blit completions        — shell path completions
-blit profile [--json]   — performance history summary
-blit diagnostics perf [--json] — manage perf history (enable/disable/clear)
+// Read final summary from stdout
+let summaryData = process.standardOutput.readToEnd()
+let summary = try JSONDecoder().decode(TransferSummary.self, from: summaryData)
 ```
 
-### Tests
-- All 31 integration tests updated to use `blit-cli` binary only
-- `admin_verbs.rs` (10 tests): removed `utils_bin()`, uses `ctx.cli_bin` for all commands
-- `blit_utils.rs` (21 tests): all converted from blit-utils binary to blit-cli subcommands
+---
+
+## Requirements Addressed
+
+### Requirement 1: `--json` on all commands
+All query commands plus transfers now support `--json`. Complete.
+
+### Requirement 2: Missing subcommands merged
+`list-modules`, `ls`, `completions`, `profile` added to `blit`. Complete.
+
+### Requirement 3: `blit df` human-readable output
+Uses `format_bytes()`: `Total: 465.63 GiB (499963174912 bytes)`. Complete.
+
+### Requirement 4: Duplicate `format_bytes()`
+Single implementation in `util.rs`. Complete.
+
+### Requirement 5: Unused `list.rs`
+Deleted, replaced by `ls.rs`. Complete.
+
+### Requirement 6: Error messages
+All `"blit-utils ..."` messages changed to `"blit ..."`. Complete.
+
+### Nice-to-have: Unused `_ctx` parameters
+Removed from `run_remote_push_transfer` and `run_remote_pull_transfer`. Complete.
+
+### Nice-to-have: `--json` on `diagnostics perf`
+Added. Outputs `enabled`, `history_path`, `record_count`, and full `records` array. Complete.
+
+### Nice-to-have: Transfer `--json` with NDJSON progress
+Added. `-p --json` emits structured progress to stderr, summary to stdout. Complete.
+
+---
+
+## Workspace Changes
+
+- `crates/blit-utils` removed from workspace members
+- Build scripts reference only `blit-cli` + `blit-daemon`
+- CI workflow builds/tests only `blit-cli` + `blit-daemon`
+- All 31 integration tests use `blit-cli` binary exclusively
