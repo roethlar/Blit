@@ -91,12 +91,14 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
-    println!(
-        "blit v{}: starting {} {}",
-        env!("CARGO_PKG_VERSION"),
-        operation,
-        transfer_scope
-    );
+    if !args.json {
+        println!(
+            "blit v{}: starting {} {}",
+            env!("CARGO_PKG_VERSION"),
+            operation,
+            transfer_scope
+        );
+    }
 
     match (src_endpoint, dst_endpoint) {
         (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
@@ -178,12 +180,14 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "blit v{}: starting move {} -> {}",
-        env!("CARGO_PKG_VERSION"),
-        src_display,
-        dst_display
-    );
+    if !args.json {
+        println!(
+            "blit v{}: starting move {} -> {}",
+            env!("CARGO_PKG_VERSION"),
+            src_display,
+            dst_display
+        );
+    }
 
     match (src_endpoint, dst_endpoint) {
         (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {

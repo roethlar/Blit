@@ -133,6 +133,10 @@ pub struct TransferArgs {
     /// does not learn from null-sink runs.
     #[arg(long)]
     pub null: bool,
+    /// Output as JSON. With -p, emits NDJSON progress to stderr. Final
+    /// transfer summary is written to stdout as a JSON object.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]

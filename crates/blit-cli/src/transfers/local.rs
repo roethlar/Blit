@@ -23,6 +23,7 @@ pub async fn run_local_transfer(
     let options = build_local_options(ctx, args, mirror);
     let dry_run = options.dry_run;
     let null_sink = options.null_sink;
+    let json_output = args.json;
     let verbose = options.verbose;
     let debug_mode = options.debug_mode;
     let workers = options.workers;
@@ -75,9 +76,13 @@ pub async fn run_local_transfer(
     }
 
     let elapsed = start.elapsed();
-    print_summary(
-        mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
-    );
+    if json_output {
+        print_summary_json(mirror, &summary, elapsed, src_path, dest_path);
+    } else {
+        print_summary(
+            mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
+        );
+    }
 
     Ok(())
 }
@@ -177,4 +182,31 @@ fn print_summary(
             );
         }
     }
+}
+
+fn print_summary_json(
+    mirror: bool,
+    summary: &LocalMirrorSummary,
+    elapsed: Duration,
+    src: &Path,
+    dst: &Path,
+) {
+    use serde_json::json;
+    let duration = if summary.duration.is_zero() {
+        elapsed
+    } else {
+        summary.duration
+    };
+    let output = json!({
+        "operation": if mirror { "mirror" } else { "copy" },
+        "source": src.to_string_lossy(),
+        "destination": dst.to_string_lossy(),
+        "files_transferred": summary.copied_files,
+        "total_bytes": summary.total_bytes,
+        "deleted_files": summary.deleted_files,
+        "deleted_dirs": summary.deleted_dirs,
+        "duration_ms": duration.as_millis() as u64,
+        "dry_run": summary.dry_run,
+    });
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }

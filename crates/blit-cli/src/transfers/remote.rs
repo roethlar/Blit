@@ -50,6 +50,7 @@ fn compute_pull_destination(dest: &Path, remote: &RemoteEndpoint) -> Result<Path
 fn spawn_progress_monitor(
     enabled: bool,
     verbose: bool,
+    json: bool,
 ) -> (Option<RemoteTransferProgress>, Option<JoinHandle<()>>) {
     if !enabled {
         return (None, None);
@@ -89,7 +90,13 @@ fn spawn_progress_monitor(
                             total_files = total_files.saturating_add(1);
                             total_bytes = total_bytes.saturating_add(bytes);
                             started = true;
-                            if verbose {
+                            if json {
+                                eprintln!(
+                                    "{{\"event\":\"file_complete\",\"path\":\"{}\",\"bytes\":{}}}",
+                                    path.replace('\\', "\\\\").replace('"', "\\\""),
+                                    bytes
+                                );
+                            } else if verbose {
                                 println!("{}", path);
                             }
                         }
@@ -102,23 +109,39 @@ fn spawn_progress_monitor(
                         let elapsed = now.duration_since(start).as_secs_f64().max(1e-6);
                         let window_elapsed = now.duration_since(prev_instant).as_secs_f64().max(1e-6);
                         let window_bytes = total_bytes.saturating_sub(prev_bytes);
-                        let avg_mib = (total_bytes as f64 / 1024.0 / 1024.0) / elapsed;
-                        let current_mib = (window_bytes as f64 / 1024.0 / 1024.0) / window_elapsed;
-                        println!(
-                            "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
-                            total_files,
-                            total_manifest,
-                            total_bytes as f64 / (1024.0 * 1024.0),
-                            avg_mib,
-                            current_mib,
-                        );
+                        let avg_bps = (total_bytes as f64) / elapsed;
+                        let current_bps = (window_bytes as f64) / window_elapsed;
+                        if json {
+                            eprintln!(
+                                "{{\"event\":\"progress\",\"files\":{},\"total_files\":{},\"bytes_copied\":{},\"avg_bytes_sec\":{:.0},\"current_bytes_sec\":{:.0}}}",
+                                total_files, total_manifest, total_bytes, avg_bps, current_bps
+                            );
+                        } else {
+                            let avg_mib = avg_bps / (1024.0 * 1024.0);
+                            let current_mib = current_bps / (1024.0 * 1024.0);
+                            println!(
+                                "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
+                                total_files,
+                                total_manifest,
+                                total_bytes as f64 / (1024.0 * 1024.0),
+                                avg_mib,
+                                current_mib,
+                            );
+                        }
                         prev_instant = now;
                         prev_bytes = total_bytes;
                     } else if total_manifest > 0 {
-                        println!(
-                            "[progress] manifest enumerated {} file(s)\u{2026}",
-                            total_manifest
-                        );
+                        if json {
+                            eprintln!(
+                                "{{\"event\":\"manifest\",\"total_files\":{}}}",
+                                total_manifest
+                            );
+                        } else {
+                            println!(
+                                "[progress] manifest enumerated {} file(s)\u{2026}",
+                                total_manifest
+                            );
+                        }
                     }
                 }
             }
@@ -126,15 +149,30 @@ fn spawn_progress_monitor(
 
         if started {
             let elapsed = start.elapsed().as_secs_f64().max(1e-6);
-            let avg_mib = (total_bytes as f64 / 1024.0 / 1024.0) / elapsed;
-            println!(
-                "[progress] final: {} file(s) transferred \u{2022} {:.2} MiB total \u{2022} {:.2} MiB/s avg",
-                total_files,
-                total_bytes as f64 / (1024.0 * 1024.0),
-                avg_mib,
-            );
+            let avg_bps = (total_bytes as f64) / elapsed;
+            if json {
+                eprintln!(
+                    "{{\"event\":\"final\",\"files_transferred\":{},\"total_bytes\":{},\"avg_bytes_sec\":{:.0}}}",
+                    total_files, total_bytes, avg_bps
+                );
+            } else {
+                let avg_mib = avg_bps / (1024.0 * 1024.0);
+                println!(
+                    "[progress] final: {} file(s) transferred \u{2022} {:.2} MiB total \u{2022} {:.2} MiB/s avg",
+                    total_files,
+                    total_bytes as f64 / (1024.0 * 1024.0),
+                    avg_mib,
+                );
+            }
         } else if total_manifest > 0 {
-            println!("[progress] manifest enumerated {} file(s)", total_manifest);
+            if json {
+                eprintln!(
+                    "{{\"event\":\"manifest\",\"total_files\":{}}}",
+                    total_manifest
+                );
+            } else {
+                println!("[progress] manifest enumerated {} file(s)", total_manifest);
+            }
         }
     });
 
@@ -152,7 +190,8 @@ pub async fn run_remote_push_transfer(
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
     let show_progress = args.progress || args.verbose;
-    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress, args.verbose);
+    let (progress_handle, progress_task) =
+        spawn_progress_monitor(show_progress, args.verbose, args.json);
 
     let filter = FileFilter::default();
     let transfer_source: Arc<dyn TransferSource> = match source {
@@ -198,7 +237,11 @@ pub async fn run_remote_push_transfer(
 
     let report = push_result?;
 
-    describe_push_result(&report, &format_remote_endpoint(&remote), show_progress);
+    if args.json {
+        print_push_json(&report, &format_remote_endpoint(&remote));
+    } else {
+        describe_push_result(&report, &format_remote_endpoint(&remote), show_progress);
+    }
     Ok(())
 }
 
@@ -222,7 +265,8 @@ pub async fn run_remote_pull_transfer(
     let local_manifest = enumerate_local_manifest(&actual_dest, args.checksum).await?;
 
     let show_progress = args.progress || args.verbose;
-    let (progress_handle, progress_task) = spawn_progress_monitor(show_progress, args.verbose);
+    let (progress_handle, progress_task) =
+        spawn_progress_monitor(show_progress, args.verbose, args.json);
 
     // Build comparison options from CLI args
     let pull_opts = PullSyncOptions {
@@ -260,7 +304,11 @@ pub async fn run_remote_pull_transfer(
         let _ = task.await;
     }
 
-    describe_pull_result(&report, &actual_dest);
+    if args.json {
+        print_pull_json(&report, &actual_dest);
+    } else {
+        describe_pull_result(&report, &actual_dest);
+    }
 
     // Handle mirror mode deletions based on server's entries_deleted count
     if mirror_mode {
@@ -443,6 +491,35 @@ async fn purge_extraneous_local(
     }
 
     Ok(stats)
+}
+
+fn print_pull_json(report: &RemotePullReport, dest_root: &Path) {
+    use serde_json::json;
+    let summary = json!({
+        "operation": "pull",
+        "destination": dest_root.to_string_lossy(),
+        "files_transferred": report.summary.as_ref().map(|s| s.files_transferred).unwrap_or(report.files_transferred as u64),
+        "bytes_transferred": report.summary.as_ref().map(|s| s.bytes_transferred).unwrap_or(report.bytes_transferred),
+        "bytes_zero_copy": report.summary.as_ref().map(|s| s.bytes_zero_copy).unwrap_or(0u64),
+        "tcp_fallback": report.summary.as_ref().map(|s| s.tcp_fallback_used).unwrap_or(false),
+    });
+    println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+}
+
+fn print_push_json(report: &RemotePushReport, destination: &str) {
+    use serde_json::json;
+    let summary = json!({
+        "operation": "push",
+        "destination": destination,
+        "files_requested": report.files_requested.len(),
+        "files_transferred": report.summary.files_transferred,
+        "bytes_transferred": report.summary.bytes_transferred,
+        "bytes_zero_copy": report.summary.bytes_zero_copy,
+        "entries_deleted": report.summary.entries_deleted,
+        "tcp_fallback": report.summary.tcp_fallback_used,
+        "first_payload_ms": report.first_payload_elapsed.map(|d| d.as_millis() as u64),
+    });
+    println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
 
 pub fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
