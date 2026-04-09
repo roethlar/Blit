@@ -67,6 +67,9 @@ pub struct PerfArgs {
     /// Remove the stored performance history file
     #[arg(long)]
     pub clear: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]

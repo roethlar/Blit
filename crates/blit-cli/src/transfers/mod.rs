@@ -119,7 +119,6 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             ensure_remote_transfer_supported(args)?;
             ensure_remote_destination_supported(&remote)?;
             run_remote_push_transfer(
-                ctx,
                 args,
                 Endpoint::Local(src_path),
                 remote,
@@ -131,7 +130,6 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             ensure_remote_transfer_supported(args)?;
             ensure_remote_source_supported(&remote)?;
             run_remote_pull_transfer(
-                ctx,
                 args,
                 remote,
                 &dst_path,
@@ -144,7 +142,6 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             run_remote_push_transfer(
-                ctx,
                 args,
                 Endpoint::Remote(src),
                 dst,
@@ -207,7 +204,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
             ensure_remote_transfer_supported(args)?;
             ensure_remote_source_supported(&remote)?;
-            run_remote_pull_transfer(ctx, args, remote.clone(), &dst_path, false).await?;
+            run_remote_pull_transfer(args, remote.clone(), &dst_path, false).await?;
 
             // Delete remote source
             let rel_path = match &remote.path {
@@ -224,7 +221,6 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             ensure_remote_transfer_supported(args)?;
             ensure_remote_destination_supported(&remote)?;
             run_remote_push_transfer(
-                ctx,
                 args,
                 Endpoint::Local(src_path.clone()),
                 remote.clone(),
@@ -246,7 +242,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             ensure_remote_transfer_supported(args)?;
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(ctx, args, Endpoint::Remote(src.clone()), dst, false).await?;
+            run_remote_push_transfer(args, Endpoint::Remote(src.clone()), dst, false).await?;
 
             // Delete remote source
             let rel_path = match &src.path {

@@ -1,5 +1,4 @@
 use crate::cli::TransferArgs;
-use crate::context::AppContext;
 use eyre::{eyre, Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -143,7 +142,6 @@ fn spawn_progress_monitor(
 }
 
 pub async fn run_remote_push_transfer(
-    _ctx: &AppContext,
     args: &TransferArgs,
     source: Endpoint,
     remote: RemoteEndpoint,
@@ -205,7 +203,6 @@ pub async fn run_remote_push_transfer(
 }
 
 pub async fn run_remote_pull_transfer(
-    _ctx: &AppContext,
     args: &TransferArgs,
     remote: RemoteEndpoint,
     dest_root: &Path,

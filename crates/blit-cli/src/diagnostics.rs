@@ -3,6 +3,7 @@ use crate::context::AppContext;
 use blit_core::perf_history;
 use chrono::{DateTime, Utc};
 use eyre::Result;
+use serde_json::json;
 use std::time::{Duration, UNIX_EPOCH};
 
 pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()> {
@@ -32,6 +33,17 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
 
     let history_path = perf_history::config_dir()?.join("perf_local.jsonl");
     let records = perf_history::read_recent_records(args.limit)?;
+
+    if args.json {
+        let output = json!({
+            "enabled": ctx.perf_history_enabled,
+            "history_path": history_path.to_string_lossy(),
+            "record_count": records.len(),
+            "records": records,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     println!(
         "Performance history (showing up to {} entries): {}",
