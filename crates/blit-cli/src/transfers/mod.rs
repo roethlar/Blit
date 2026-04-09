@@ -212,7 +212,9 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 
             // Delete remote source
             let rel_path = match &remote.path {
-                RemotePath::Module { rel_path, .. } => rel_path.to_string_lossy().into_owned(),
+                RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
+                    rel_path.to_string_lossy().into_owned()
+                }
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&remote, &rel_path).await?;
@@ -250,7 +252,9 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 
             // Delete remote source
             let rel_path = match &src.path {
-                RemotePath::Module { rel_path, .. } => rel_path.to_string_lossy().into_owned(),
+                RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
+                    rel_path.to_string_lossy().into_owned()
+                }
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&src, &rel_path).await?;
@@ -300,6 +304,7 @@ mod tests {
             force_grpc: false,
             resume: false,
             null: false,
+            json: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -337,6 +342,7 @@ mod tests {
             force_grpc: false,
             resume: false,
             null: false,
+            json: false,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

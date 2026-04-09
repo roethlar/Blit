@@ -18,9 +18,7 @@ pub fn parse_endpoint_or_local(input: &str) -> Endpoint {
 pub fn module_and_rel_path(remote: &RemoteEndpoint) -> Result<(String, PathBuf)> {
     match &remote.path {
         RemotePath::Module { module, rel_path } => Ok((module.clone(), rel_path.clone())),
-        RemotePath::Root { .. } => {
-            bail!("module name required (server:/module/...)");
-        }
+        RemotePath::Root { rel_path } => Ok((String::new(), rel_path.clone())),
         RemotePath::Discovery => {
             bail!("remote target must include a module path");
         }

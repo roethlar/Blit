@@ -109,9 +109,7 @@ fn list_local_path(path: &Path, json: bool) -> Result<()> {
 async fn list_remote_path(remote: RemoteEndpoint, json: bool) -> Result<()> {
     let (module, rel_path) = match &remote.path {
         RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
-        RemotePath::Root { .. } => {
-            bail!("listing root exports (server://...) is not supported yet");
-        }
+        RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
         RemotePath::Discovery => {
             bail!("listing a bare host requires `list-modules` or module/path syntax");
         }

@@ -124,9 +124,7 @@ pub async fn delete_remote_path(remote: &RemoteEndpoint, rel_path: &str) -> Resu
 fn extract_module_and_path(remote: &RemoteEndpoint) -> Result<(String, std::path::PathBuf)> {
     match &remote.path {
         RemotePath::Module { module, rel_path } => Ok((module.clone(), rel_path.clone())),
-        RemotePath::Root { .. } => {
-            bail!("removing paths from server:// exports is not supported yet; configure a module")
-        }
+        RemotePath::Root { rel_path } => Ok((String::new(), rel_path.clone())),
         RemotePath::Discovery => {
             bail!("remote removal requires module syntax (e.g., server:/module/path)")
         }
