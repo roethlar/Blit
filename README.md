@@ -5,7 +5,7 @@
 ![Tests](https://img.shields.io/badge/tests-passing-blue)
 ![Windows Supported](https://img.shields.io/badge/Windows-Supported-blue?logo=windows)
 ![Linux Supported](https://img.shields.io/badge/Linux-Supported-brightgreen?logo=linux)
-![Open Source](https://img.shields.io/badge/license-choose_yours-important)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 

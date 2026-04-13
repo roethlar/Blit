@@ -7,6 +7,9 @@ members = [
     "crates/blit-utils",
 ]
 
+[workspace.package]
+license = "MIT"
+
 [workspace.lints.clippy]
 result_large_err = "allow"
 too_many_arguments = "allow"
