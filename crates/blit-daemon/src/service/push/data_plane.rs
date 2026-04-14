@@ -354,14 +354,20 @@ pub(crate) async fn next_data_plane_header(
         }
     }
 
-    eprintln!(
-        "[data-plane] unexpected file entry '{}' (upload queue drained before payload)",
-        rel_string
-    );
-    let pending_guard = cache.lock().await;
-    let pending: Vec<_> = pending_guard.keys().cloned().collect();
-    drop(pending_guard);
-    eprintln!("[push-server] pending headers: {:?}", pending);
+    // Channel exhausted — but another stream may have cached our header
+    // while we were draining. Check the cache one more time.
+    {
+        let mut guard = cache.lock().await;
+        if let Some(header) = guard.remove(rel_string) {
+            eprintln!("[push-server] cache hit (post-drain) for {}", rel_string);
+            return Ok(header);
+        }
+        let pending: Vec<_> = guard.keys().cloned().collect();
+        eprintln!(
+            "[data-plane] unexpected file entry '{}' (upload queue drained before payload, cache has {} entries)",
+            rel_string, pending.len()
+        );
+    }
     Err(Status::internal(format!(
         "data plane received unexpected file entry '{}'",
         rel_string
