@@ -403,10 +403,15 @@ impl RemotePushClient {
         };
 
         let mut manifest_done = false;
+        // Track whether we received new need-list entries this iteration.
+        // Don't finish the data plane until a full iteration passes with
+        // no new entries — this ensures all in-flight gRPC batches arrive.
+        let mut need_list_fresh: bool;
         loop {
             if manifest_done && summary.is_some() {
                 break;
             }
+            need_list_fresh = false;
 
             tokio::select! {
                 biased;
@@ -417,6 +422,7 @@ impl RemotePushClient {
                             match message.payload {
                                 Some(ServerPayload::Ack(_)) => {}
                                 Some(ServerPayload::FilesToUpload(list)) => {
+                                    need_list_fresh = true;
                                     let mut rels = list.relative_paths;
                                     files_requested.extend(rels.iter().cloned());
                                     let newly_requested = rels.len();
@@ -803,6 +809,7 @@ impl RemotePushClient {
 
             if matches!(transfer_mode, TransferMode::Fallback)
                 && !fallback_upload_complete_sent
+                && !need_list_fresh
                 && need_list_received
                 && manifest_done
                 && pending_queue.is_empty()
@@ -820,6 +827,7 @@ impl RemotePushClient {
             }
 
             if matches!(transfer_mode, TransferMode::DataPlane)
+                && !need_list_fresh
                 && pending_queue.is_empty()
                 && manifest_done
                 && data_plane_outstanding == 0
