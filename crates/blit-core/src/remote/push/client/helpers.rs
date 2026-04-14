@@ -21,14 +21,16 @@ pub fn drain_pending_headers(
     lookup: &HashMap<String, FileHeader>,
 ) -> Vec<FileHeader> {
     let mut headers = Vec::new();
-    while let Some(rel) = queue.front() {
-        if let Some(header) = lookup.get(rel) {
+    let mut remaining = VecDeque::new();
+    while let Some(rel) = queue.pop_front() {
+        if let Some(header) = lookup.get(&rel) {
             headers.push(header.clone());
-            queue.pop_front();
         } else {
-            break;
+            // Not in manifest yet — keep for next drain
+            remaining.push_back(rel);
         }
     }
+    *queue = remaining;
     headers
 }
 
