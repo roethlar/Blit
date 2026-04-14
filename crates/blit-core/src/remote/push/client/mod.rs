@@ -391,6 +391,7 @@ impl RemotePushClient {
         let mut need_list_received = false;
         let mut data_plane_sender: Option<MultiStreamSender> = None;
         let mut data_plane_outstanding: usize = 0;
+        let mut data_plane_files_sent: usize = 0;
         let mut data_port: Option<u32> = None;
         let mut fallback_used = force_grpc;
         let mut summary: Option<PushSummary> = None;
@@ -526,6 +527,7 @@ impl RemotePushClient {
                                                         if sent > 0 && first_payload_elapsed.is_none() {
                                                             first_payload_elapsed = Some(start.elapsed());
                                                         }
+                                                        data_plane_files_sent += sent;
                                                         data_plane_outstanding =
                                                             data_plane_outstanding.saturating_sub(sent);
                                                     }
@@ -647,8 +649,9 @@ impl RemotePushClient {
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
-                                                    data_plane_outstanding =
-                                                        data_plane_outstanding.saturating_sub(sent);
+                                                data_plane_files_sent += sent;
+                                                data_plane_outstanding =
+                                                    data_plane_outstanding.saturating_sub(sent);
                                                 }
                                             }
                                         }
@@ -780,6 +783,7 @@ impl RemotePushClient {
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
+                                                data_plane_files_sent += sent;
                                                 data_plane_outstanding =
                                                     data_plane_outstanding.saturating_sub(sent);
                                             }
@@ -819,6 +823,8 @@ impl RemotePushClient {
                 && pending_queue.is_empty()
                 && manifest_done
                 && data_plane_outstanding == 0
+                && (files_requested.is_empty()
+                    || data_plane_files_sent >= files_requested.len())
             {
                 if let Some(sender) = data_plane_sender.take() {
                     sender.finish().await?;
