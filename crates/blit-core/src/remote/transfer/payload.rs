@@ -129,6 +129,14 @@ pub fn plan_transfer_payloads(
         payloads.push(TransferPayload::File(header));
     }
 
+    // Sort payloads: tar shards first (small, distribute well across streams),
+    // then files ascending by size. This ensures all streams stay busy with
+    // small work before a single large file monopolizes one stream's tail.
+    payloads.sort_by_key(|p| match p {
+        TransferPayload::TarShard { .. } => (0, 0),
+        TransferPayload::File(h) => (1, h.size),
+    });
+
     Ok(PlannedPayloads {
         payloads,
         chunk_bytes: plan.chunk_bytes,

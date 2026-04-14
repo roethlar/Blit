@@ -313,11 +313,17 @@ pub struct NullSink {
     label: PathBuf,
 }
 
-impl NullSink {
-    pub fn new() -> Self {
+impl Default for NullSink {
+    fn default() -> Self {
         Self {
             label: PathBuf::from("/dev/null"),
         }
+    }
+}
+
+impl NullSink {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
