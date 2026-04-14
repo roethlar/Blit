@@ -80,6 +80,8 @@ impl DataPlaneSession {
         socket
             .set_tcp_nodelay(true)
             .context("setting TCP_NODELAY")?;
+        // Keep idle connections alive during long transfers on other streams.
+        let _ = socket.set_keepalive(true);
 
         if let Some(size) = tcp_buffer_size {
             let _ = socket.set_send_buffer_size(size);

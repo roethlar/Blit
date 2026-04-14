@@ -68,10 +68,22 @@ pub(crate) async fn accept_data_connection_stream(
     let mut handles = Vec::with_capacity(streams);
 
     for idx in 0..streams {
-        let (socket, addr) = listener
+        let (accepted, addr) = listener
             .accept()
             .await
             .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
+        // Enable nodelay + keepalive to prevent idle stream timeouts
+        // during long transfers on other streams.
+        let socket = {
+            let std_sock = accepted.into_std()
+                .map_err(|err| Status::internal(format!("converting socket: {err}")))?;
+            let s2 = socket2::Socket::from(std_sock);
+            let _ = s2.set_tcp_nodelay(true);
+            let _ = s2.set_keepalive(true);
+            let std_back: std::net::TcpStream = s2.into();
+            TcpStream::from_std(std_back)
+                .map_err(|err| Status::internal(format!("re-wrapping socket: {err}")))?
+        };
         eprintln!("[data-plane] accepted connection {} from {}", idx, addr);
         let expected_token = expected_token.clone();
         let module_clone = module.clone();
