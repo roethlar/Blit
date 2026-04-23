@@ -6,7 +6,6 @@ use blit_core::buffer::BufferPool;
 use blit_core::generated::{
     DataTransferNegotiation, FileData, FileHeader, ManifestBatch, PullChunk, PullSummary,
 };
-#[allow(unused_imports)] // execute_sink_pipeline_streaming used by Phase 4 streaming path (pending)
 use blit_core::remote::transfer::pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_streaming,
 };
@@ -19,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -735,67 +734,13 @@ fn enumerate_to_channel(
     Ok((total_files, total_bytes))
 }
 
-/// Streaming data plane handler that receives payloads via channel.
-async fn handle_pull_stream_streaming(
-    mut socket: TcpStream,
-    expected_token: Vec<u8>,
-    module_root: PathBuf,
-    mut payload_rx: mpsc::Receiver<TransferPayload>,
-    chunk_bytes: usize,
-    payload_prefetch: usize,
-) -> Result<u64, Status> {
-    let mut token_buf = vec![0u8; expected_token.len()];
-    socket
-        .read_exact(&mut token_buf)
-        .await
-        .map_err(|err| Status::internal(format!("failed to read pull token: {}", err)))?;
-    if token_buf != expected_token {
-        eprintln!("[pull-data-plane] invalid token");
-        return Err(Status::permission_denied("invalid pull data plane token"));
-    }
-
-    let buffer_size = chunk_bytes.max(64 * 1024);
-    let pool_size = 4;
-    let memory_budget = buffer_size * pool_size * 2;
-    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
-
-    let mut session = blit_core::remote::transfer::data_plane::DataPlaneSession::from_stream(
-        socket,
-        false,
-        chunk_bytes,
-        payload_prefetch,
-        pool,
-    )
-    .await;
-
-    let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
-        Arc::new(FsTransferSource::new(module_root));
-    let mut bytes_transferred = 0u64;
-
-    while let Some(payload) = payload_rx.recv().await {
-        bytes_transferred += payload_bytes(&payload);
-        session
-            .send_payloads(Arc::clone(&source), vec![payload])
-            .await
-            .map_err(|err| {
-                Status::internal(format!("sending pull data plane payloads: {}", err))
-            })?;
-    }
-
-    session
-        .finish()
-        .await
-        .map_err(|err| Status::internal(format!("finishing pull data plane: {}", err)))?;
-
-    Ok(bytes_transferred)
-}
-
-/// Streaming data plane that distributes payloads across workers as they arrive.
+/// Streaming data plane that routes payloads through the unified pipeline
+/// as they arrive from enumeration.
 async fn accept_pull_data_connection_streaming(
     listener: TcpListener,
     expected_token: Vec<u8>,
     module_root: PathBuf,
-    mut payload_rx: mpsc::Receiver<Vec<TransferPayload>>,
+    mut batch_rx: mpsc::Receiver<Vec<TransferPayload>>,
     chunk_bytes: usize,
     payload_prefetch: usize,
     stream_count: u32,
@@ -803,57 +748,48 @@ async fn accept_pull_data_connection_streaming(
     let start = Instant::now();
     let streams = stream_count.max(1) as usize;
 
-    // Accept all connections and create worker channels
-    let mut workers: Vec<(mpsc::Sender<TransferPayload>, _)> = Vec::with_capacity(streams);
-    for idx in 0..streams {
-        let (socket, addr) = listener
-            .accept()
-            .await
-            .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
-        eprintln!(
-            "[pull-data-plane] accepted connection {} from {}",
-            idx, addr
-        );
+    // Accept N TCP connections, validate tokens, wrap as DataPlaneSinks.
+    let sinks = accept_and_wrap_sinks(
+        &listener,
+        &expected_token,
+        streams,
+        chunk_bytes,
+        payload_prefetch,
+        &module_root,
+    )
+    .await?;
 
-        let (tx, rx) = mpsc::channel::<TransferPayload>(16);
-        let token = expected_token.clone();
-        let root = module_root.clone();
-        let handle = tokio::spawn(async move {
-            handle_pull_stream_streaming(socket, token, root, rx, chunk_bytes, payload_prefetch)
-                .await
-        });
-        workers.push((tx, handle));
-    }
+    // Bridge channel: flatten Vec<TransferPayload> → individual payloads
+    // with byte/file counting along the way.
+    let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(payload_prefetch.max(1));
 
-    // Distribute payloads round-robin as they arrive
-    let mut next_worker = 0;
-    let mut total_bytes = 0u64;
-    let mut total_files = 0u64;
-
-    while let Some(payloads) = payload_rx.recv().await {
-        for payload in payloads {
-            total_bytes += payload_bytes(&payload);
-            total_files += match &payload {
-                TransferPayload::File(_) => 1,
-                TransferPayload::TarShard { headers } => headers.len() as u64,
-            };
-            if workers[next_worker].0.send(payload).await.is_err() {
-                return Err(Status::internal("data plane worker died"));
+    let flatten = tokio::spawn(async move {
+        let mut total_bytes = 0u64;
+        let mut total_files = 0u64;
+        while let Some(batch) = batch_rx.recv().await {
+            for payload in batch {
+                total_bytes += payload_bytes(&payload);
+                total_files += match &payload {
+                    TransferPayload::File(_) => 1,
+                    TransferPayload::TarShard { headers } => headers.len() as u64,
+                };
+                if payload_tx.send(payload).await.is_err() {
+                    return (total_files, total_bytes);
+                }
             }
-            next_worker = (next_worker + 1) % streams;
         }
-    }
+        (total_files, total_bytes)
+    });
 
-    // Close sender channels to signal completion by consuming workers
-    // The into_iter drops the senders, signaling workers to finish
-    let handles: Vec<_> = workers.into_iter().map(|(_, h)| h).collect();
+    let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
+        Arc::new(FsTransferSource::new(module_root));
+    execute_sink_pipeline_streaming(source, sinks, payload_rx, payload_prefetch, None)
+        .await
+        .map_err(|err| Status::internal(format!("pull streaming pipeline: {err}")))?;
 
-    // Wait for all workers to complete
-    for handle in handles {
-        handle
-            .await
-            .map_err(|err| Status::internal(format!("data plane worker panicked: {}", err)))??;
-    }
+    let (total_files, total_bytes) = flatten
+        .await
+        .map_err(|err| Status::internal(format!("pull flatten task panicked: {err}")))?;
 
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     if total_bytes > 0 {
