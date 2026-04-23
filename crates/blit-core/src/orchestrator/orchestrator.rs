@@ -53,6 +53,16 @@ impl TransferOrchestrator {
 
         let start_time = Instant::now();
 
+        // Single-file source: bypass the enumerator/planner/pipeline machinery
+        // entirely and copy the file directly. The destination resolver in the
+        // CLI has already produced the exact target path (accounting for
+        // trailing-slash / existing-dir semantics), so we just invoke copy_file.
+        // Without this short-circuit, the enumerator would skip the depth-0
+        // root entry and the fast-path would report NoWork — silent data loss.
+        if src_root.is_file() {
+            return execute_single_file_copy(src_root, dest_root, &options, start_time);
+        }
+
         let mut journal_tracker = ChangeTracker::load().ok();
         let mut journal_tokens: Vec<ProbeToken> = Vec::new();
         let mut journal_skip = false;
@@ -624,4 +634,89 @@ impl Default for TransferOrchestrator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Copy a single file source directly to `dest_root`, bypassing the
+/// enumerator/planner/pipeline machinery which assumes `src_root` is a
+/// directory. The CLI's destination resolver has already produced the final
+/// target path, so this is a simple `copy_file` call.
+fn execute_single_file_copy(
+    src_root: &Path,
+    dest_root: &Path,
+    options: &LocalMirrorOptions,
+    start_time: Instant,
+) -> Result<LocalMirrorSummary> {
+    use crate::buffer::BufferSizer;
+    use crate::copy::{copy_file, file_needs_copy_with_checksum_type, resume_copy_file};
+    use crate::logger::NoopLogger;
+    use filetime::FileTime;
+
+    let src_meta = std::fs::metadata(src_root)
+        .with_context(|| format!("stat source file {}", src_root.display()))?;
+    let size = src_meta.len();
+
+    let checksum = if options.checksum {
+        Some(crate::checksum::ChecksumType::Blake3)
+    } else {
+        None
+    };
+
+    if options.dry_run {
+        return Ok(LocalMirrorSummary {
+            planned_files: 1,
+            copied_files: 1,
+            total_bytes: size,
+            dry_run: true,
+            duration: start_time.elapsed(),
+            ..Default::default()
+        });
+    }
+
+    if options.null_sink {
+        return Ok(LocalMirrorSummary {
+            planned_files: 1,
+            copied_files: 1,
+            total_bytes: size,
+            duration: start_time.elapsed(),
+            ..Default::default()
+        });
+    }
+
+    let mut did_copy = false;
+    let mut clone_succeeded = false;
+    let mut bytes_copied = 0u64;
+
+    if options.resume {
+        let outcome = resume_copy_file(src_root, dest_root, 0)
+            .with_context(|| format!("resume copy {}", src_root.display()))?;
+        did_copy = outcome.bytes_transferred > 0;
+        bytes_copied = outcome.bytes_transferred;
+    } else {
+        let needs_copy = !options.skip_unchanged
+            || file_needs_copy_with_checksum_type(src_root, dest_root, checksum).unwrap_or(true);
+        if needs_copy {
+            let sizer = BufferSizer::default();
+            let logger = NoopLogger;
+            let outcome = copy_file(src_root, dest_root, &sizer, false, &logger)
+                .with_context(|| format!("copy {}", src_root.display()))?;
+            did_copy = true;
+            clone_succeeded = outcome.clone_succeeded;
+            bytes_copied = outcome.bytes_copied;
+        }
+    }
+
+    if options.preserve_times && did_copy && !clone_succeeded {
+        if let Ok(modified) = src_meta.modified() {
+            let ft = FileTime::from_system_time(modified);
+            let _ = filetime::set_file_mtime(dest_root, ft);
+        }
+    }
+
+    Ok(LocalMirrorSummary {
+        planned_files: 1,
+        copied_files: if did_copy { 1 } else { 0 },
+        total_bytes: bytes_copied,
+        duration: start_time.elapsed(),
+        ..Default::default()
+    })
 }

@@ -22,9 +22,13 @@ blit – local and hybrid-transport file transfer CLI
 remote operations via a hybrid TCP/gRPC transport.
 
 ### Transfer Commands
-- `copy` copies a `<SOURCE>` to `<DESTINATION>` without deleting extraneous files.
+- `copy` copies a `<SOURCE>` (file or directory) to `<DESTINATION>` without deleting extraneous files.
 - `mirror` performs the same copy but removes files that are only present at the destination.
 - `move` mirrors the source into the destination and then removes the original tree.
+
+Both file and directory sources are supported. For files, the destination
+resolution rules (below) determine whether the file is renamed, placed into
+a directory, or treated as an exact target path.
 
 ### Destination Semantics (rsync-style)
 
