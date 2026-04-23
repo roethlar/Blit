@@ -352,6 +352,8 @@ async fn stream_via_data_plane(
 ) -> Result<TransferStats, Status> {
     use blit_core::buffer::BufferPool;
     use blit_core::remote::transfer::data_plane::DataPlaneSession;
+    use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
+    use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
     use blit_core::remote::transfer::payload_file_count;
 
     // Determine tuning based on total bytes
@@ -372,7 +374,7 @@ async fn stream_via_data_plane(
     let token = generate_token();
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
-    // Single stream for now - multi-stream pull requires accepting multiple connections
+    // Single stream for the resume path (multi-stream support lives in pull.rs).
     let stream_count = 1u32;
 
     // Send negotiation
@@ -396,13 +398,11 @@ async fn stream_via_data_plane(
 
     let file_count = payload_file_count(&planned.payloads);
 
-    // Accept connection
+    // Accept connection + verify token
     let (socket, _) = listener
         .accept()
         .await
         .map_err(|e| Status::internal(format!("failed to accept data plane connection: {}", e)))?;
-
-    // Verify token
     let expected_token = token;
     let mut token_buf = vec![0u8; expected_token.len()];
     let mut socket = socket;
@@ -414,33 +414,31 @@ async fn stream_via_data_plane(
         return Err(Status::unauthenticated("invalid data plane token"));
     }
 
-    // Create buffer pool
+    // Wrap the session as a TransferSink and route through the unified pipeline.
     let buffer_size = tuning.chunk_bytes.max(64 * 1024);
     let pool_size = 4;
     let memory_budget = buffer_size * pool_size * 2;
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
-    // Create data plane session and stream payloads
-    let mut session = DataPlaneSession::from_stream(
+    let session = DataPlaneSession::from_stream(
         socket,
         false,
         tuning.chunk_bytes,
-        8, // payload_prefetch
+        8,
         pool,
     )
     .await;
 
     let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(module.path.clone()));
+    let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
+        session,
+        source.clone(),
+        module.path.clone(),
+    ));
 
-    session
-        .send_payloads(source, planned.payloads)
+    execute_sink_pipeline(source, vec![sink], planned.payloads, 8, None)
         .await
-        .map_err(|err| Status::internal(format!("sending pull data plane payloads: {}", err)))?;
-
-    session
-        .finish()
-        .await
-        .map_err(|err| Status::internal(format!("finishing pull data plane: {}", err)))?;
+        .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err}")))?;
 
     Ok(TransferStats {
         files_transferred: file_count as u64,
