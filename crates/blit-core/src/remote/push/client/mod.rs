@@ -22,7 +22,6 @@ use crate::transfer_plan::PlanOptions;
 use eyre::{eyre, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -30,38 +29,23 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::data_plane::DataPlaneSession;
-use super::payload::{
-    payload_file_count, plan_transfer_payloads, PreparedPayload, TransferPayload,
-};
+use super::payload::{payload_file_count, plan_transfer_payloads, TransferPayload};
+use crate::remote::transfer::pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
 use crate::remote::transfer::progress::RemoteTransferProgress;
-use crate::remote::transfer::pipeline::execute_sink_pipeline;
-use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, TransferSink};
+use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, SinkOutcome, TransferSink};
 use crate::remote::transfer::source::TransferSource;
 
-const MIN_STREAM_BATCH_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_STREAM_BATCH_BYTES: u64 = 512 * 1024 * 1024;
-
-fn calculate_batch_target(chunk_bytes: usize) -> u64 {
-    let chunk_bytes = chunk_bytes.max(1) as u64;
-    (chunk_bytes.saturating_mul(4)).clamp(MIN_STREAM_BATCH_BYTES, MAX_STREAM_BATCH_BYTES)
-}
-
-fn estimated_payload_bytes(payload: &TransferPayload) -> u64 {
-    match payload {
-        TransferPayload::File(header) => header.size,
-        TransferPayload::TarShard { headers } => headers.iter().map(|h| h.size).sum(),
-    }
-}
-
+/// Feeds payloads into N TCP data-plane sinks via the unified streaming
+/// pipeline. The event loop pushes payloads as need-list batches arrive;
+/// round-robin distribution across sinks is handled by the pipeline.
 struct MultiStreamSender {
-    workers: Vec<mpsc::Sender<Option<Vec<TransferPayload>>>>,
-    handles: Vec<JoinHandle<Result<StreamStats>>>,
-    next_worker: usize,
-    cancelled: Arc<AtomicBool>,
-    batch_bytes_target: u64,
+    payload_tx: Option<mpsc::Sender<TransferPayload>>,
+    pipeline_handle: JoinHandle<Result<SinkOutcome>>,
+    started: Instant,
 }
 
 impl MultiStreamSender {
+    #[allow(clippy::too_many_arguments)]
     async fn connect(
         host: &str,
         port: u32,
@@ -75,10 +59,8 @@ impl MultiStreamSender {
         progress: Option<RemoteTransferProgress>,
     ) -> Result<Self> {
         let streams = stream_count.max(1);
-        let mut workers = Vec::with_capacity(streams);
-        let mut handles = Vec::with_capacity(streams);
 
-        // Create a shared buffer pool for all streams.
+        // Shared buffer pool across all sinks.
         let pool_size = streams * 2 + 4;
         let buffer_size = chunk_bytes.max(64 * 1024);
         let memory_budget = buffer_size * pool_size * 2;
@@ -86,6 +68,7 @@ impl MultiStreamSender {
 
         let dst_root = PathBuf::from(format!("{}:{}", host, port));
 
+        let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
         for _ in 0..streams {
             let session = DataPlaneSession::connect(
                 host,
@@ -98,156 +81,67 @@ impl MultiStreamSender {
                 Arc::clone(&pool),
             )
             .await?;
-            let sink = Arc::new(DataPlaneSink::new(
+            sinks.push(Arc::new(DataPlaneSink::new(
                 session,
                 source.clone(),
                 dst_root.clone(),
-            ));
-            let (tx, rx) = mpsc::channel::<Option<Vec<TransferPayload>>>(4);
-            let source_clone = Arc::clone(&source);
-            let progress_clone = progress.clone();
-            let handle = tokio::spawn(async move {
-                data_plane_sink_worker(sink, rx, source_clone, progress_clone).await
-            });
-            workers.push(tx);
-            handles.push(handle);
+            )));
         }
 
+        let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(payload_prefetch.max(1));
+
+        let source_clone = source.clone();
+        let prefetch = payload_prefetch.max(1);
+        let pipeline_handle = tokio::spawn(async move {
+            execute_sink_pipeline_streaming(
+                source_clone,
+                sinks,
+                payload_rx,
+                prefetch,
+                progress.as_ref(),
+            )
+            .await
+        });
+
         Ok(Self {
-            workers,
-            handles,
-            next_worker: 0,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            batch_bytes_target: calculate_batch_target(chunk_bytes),
+            payload_tx: Some(payload_tx),
+            pipeline_handle,
+            started: Instant::now(),
         })
     }
 
+    /// Feed one or more payloads to the streaming pipeline.
     async fn queue(&mut self, payloads: Vec<TransferPayload>) -> Result<()> {
-        if payloads.is_empty() {
-            return Ok(());
-        }
-
-        if self.workers.len() == 1 {
-            self.dispatch_batch(payloads).await?;
-            return Ok(());
-        }
-
-        let mut batch = Vec::new();
-        let mut batch_bytes = 0u64;
-        let target = self.batch_bytes_target;
+        let tx = self
+            .payload_tx
+            .as_ref()
+            .ok_or_else(|| eyre!("data plane sender already finished"))?;
         for payload in payloads {
-            batch_bytes = batch_bytes.saturating_add(estimated_payload_bytes(&payload));
-            batch.push(payload);
-            if batch_bytes >= target && !batch.is_empty() {
-                let to_send = std::mem::take(&mut batch);
-                batch_bytes = 0;
-                self.dispatch_batch(to_send).await?;
-            }
+            tx.send(payload)
+                .await
+                .map_err(|_| eyre!("data plane pipeline closed unexpectedly"))?;
         }
-
-        if !batch.is_empty() {
-            self.dispatch_batch(batch).await?;
-        }
-
         Ok(())
     }
 
-    async fn dispatch_batch(&mut self, payloads: Vec<TransferPayload>) -> Result<()> {
-        if payloads.is_empty() {
-            return Ok(());
-        }
-        let idx = self.next_worker;
-        self.next_worker = (self.next_worker + 1) % self.workers.len();
-        if self.cancelled.load(Ordering::SeqCst) {
-            return Err(eyre!("data plane transfer cancelled"));
-        }
-        self.workers[idx]
-            .send(Some(payloads))
-            .await
-            .map_err(|_| eyre!("data plane worker channel closed"))
-    }
-
+    /// Close the payload channel and wait for the pipeline to drain.
     async fn finish(mut self) -> Result<()> {
-        for tx in &self.workers {
-            tx.send(None)
-                .await
-                .map_err(|_| eyre!("data plane worker channel closed"))?;
-        }
-        let mut total_bytes = 0u64;
-        for handle in self.handles.drain(..) {
-            let stats = handle
-                .await
-                .map_err(|err| eyre!(format!("data plane worker panicked: {}", err)))??;
-            let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
-            let throughput = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
-            eprintln!(
-                "[data-plane-client] stream {:.2} Gbps ({:.2} MiB in {:.2}s)",
-                throughput.max(0.0),
-                stats.bytes as f64 / 1024.0 / 1024.0,
-                elapsed
-            );
-            total_bytes = total_bytes.saturating_add(stats.bytes);
-        }
-        if total_bytes > 0 {
-            eprintln!("[data-plane-client] total bytes sent {}", total_bytes);
-        }
+        // Drop the sender so the pipeline sees end-of-stream.
+        drop(self.payload_tx.take());
+        let outcome = self
+            .pipeline_handle
+            .await
+            .map_err(|err| eyre!("data plane pipeline panicked: {err}"))??;
+        let elapsed = self.started.elapsed().as_secs_f64().max(1e-6);
+        let throughput = (outcome.bytes_written as f64 * 8.0) / elapsed / 1e9;
+        eprintln!(
+            "[data-plane-client] aggregate {:.2} Gbps ({:.2} MiB in {:.2}s)",
+            throughput.max(0.0),
+            outcome.bytes_written as f64 / 1024.0 / 1024.0,
+            elapsed
+        );
         Ok(())
     }
-}
-
-struct StreamStats {
-    start: Instant,
-    bytes: u64,
-}
-
-/// Worker that receives batches of TransferPayloads, prepares them via
-/// the TransferSource, and writes them through a DataPlaneSink.
-async fn data_plane_sink_worker(
-    sink: Arc<DataPlaneSink>,
-    mut rx: mpsc::Receiver<Option<Vec<TransferPayload>>>,
-    source: Arc<dyn TransferSource>,
-    progress: Option<RemoteTransferProgress>,
-) -> Result<StreamStats> {
-    let start = Instant::now();
-    let mut total_bytes = 0u64;
-
-    while let Some(batch) = rx.recv().await {
-        match batch {
-            Some(payloads) => {
-                for payload in payloads {
-                    let prepared = source.prepare_payload(payload).await?;
-                    let size = match &prepared {
-                        PreparedPayload::File(h) => h.size,
-                        PreparedPayload::TarShard { headers, .. } => {
-                            headers.iter().map(|h| h.size).sum()
-                        }
-                    };
-                    let file_names: Vec<_> = match &prepared {
-                        PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
-                        PreparedPayload::TarShard { headers, .. } => headers
-                            .iter()
-                            .map(|h| (h.relative_path.clone(), h.size))
-                            .collect(),
-                    };
-
-                    sink.write_payload(prepared).await?;
-                    total_bytes = total_bytes.saturating_add(size);
-
-                    if let Some(ref p) = progress {
-                        for (name, sz) in file_names {
-                            p.report_file_complete(name, sz);
-                        }
-                    }
-                }
-            }
-            None => break,
-        }
-    }
-    sink.finish().await?;
-    Ok(StreamStats {
-        start,
-        bytes: total_bytes,
-    })
 }
 
 fn ensure_remote_tuning(
