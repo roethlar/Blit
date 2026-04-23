@@ -6,6 +6,11 @@ use blit_core::buffer::BufferPool;
 use blit_core::generated::{
     DataTransferNegotiation, FileData, FileHeader, ManifestBatch, PullChunk, PullSummary,
 };
+#[allow(unused_imports)] // execute_sink_pipeline_streaming used by Phase 4 streaming path (pending)
+use blit_core::remote::transfer::pipeline::{
+    execute_sink_pipeline, execute_sink_pipeline_streaming,
+};
+use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::remote::transfer::{plan_transfer_payloads, TransferPayload};
 use blit_core::remote::tuning::determine_remote_tuning;
@@ -565,38 +570,24 @@ async fn accept_pull_data_connection(
     let start = Instant::now();
     let streams = stream_count.max(1) as usize;
     let total_bytes: u64 = payloads.iter().map(payload_bytes).sum();
-    let mut handles = Vec::with_capacity(streams);
-    let chunked = chunk_transfer_payloads(payloads, streams);
 
-    for (idx, payload_chunk) in chunked.into_iter().enumerate() {
-        let (socket, addr) = listener
-            .accept()
-            .await
-            .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
-        eprintln!(
-            "[pull-data-plane] accepted connection {} from {}",
-            idx, addr
-        );
-        let expected_token = expected_token.clone();
-        let module_root = module_root.clone();
-        handles.push(tokio::spawn(async move {
-            handle_pull_stream(
-                socket,
-                expected_token,
-                module_root,
-                payload_chunk,
-                chunk_bytes,
-                payload_prefetch,
-            )
-            .await
-        }));
-    }
+    // Accept N TCP connections and wrap each as a DataPlaneSink.
+    let sinks = accept_and_wrap_sinks(
+        &listener,
+        &expected_token,
+        streams,
+        chunk_bytes,
+        payload_prefetch,
+        &module_root,
+    )
+    .await?;
 
-    for handle in handles {
-        handle.await.map_err(|err| {
-            Status::internal(format!("pull data plane worker cancelled: {}", err))
-        })??;
-    }
+    // All payloads known upfront — use the one-shot form.
+    let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
+        Arc::new(FsTransferSource::new(module_root));
+    execute_sink_pipeline(source, sinks, payloads, payload_prefetch, None)
+        .await
+        .map_err(|err| Status::internal(format!("pull data plane pipeline: {err}")))?;
 
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     if total_bytes > 0 {
@@ -610,55 +601,65 @@ async fn accept_pull_data_connection(
     Ok(())
 }
 
-async fn handle_pull_stream(
-    mut socket: TcpStream,
-    expected_token: Vec<u8>,
-    module_root: PathBuf,
-    payloads: Vec<TransferPayload>,
+/// Accept N TCP connections, validate each token, wrap each in a
+/// `DataPlaneSink` that writes to `module_root` via the TCP wire protocol.
+async fn accept_and_wrap_sinks(
+    listener: &TcpListener,
+    expected_token: &[u8],
+    streams: usize,
     chunk_bytes: usize,
     payload_prefetch: usize,
-) -> Result<(), Status> {
-    let mut token_buf = vec![0u8; expected_token.len()];
-    socket
-        .read_exact(&mut token_buf)
-        .await
-        .map_err(|err| Status::internal(format!("failed to read pull token: {}", err)))?;
-    if token_buf != expected_token {
-        eprintln!("[pull-data-plane] invalid token");
-        return Err(Status::permission_denied("invalid pull data plane token"));
-    }
+    module_root: &Path,
+) -> Result<Vec<Arc<dyn TransferSink>>, Status> {
+    let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
+        Arc::new(FsTransferSource::new(module_root.to_path_buf()));
 
-    // Create buffer pool sized for double-buffering with headroom
+    // Shared buffer pool across all streams.
     let buffer_size = chunk_bytes.max(64 * 1024);
-    let pool_size = 4; // Single stream needs fewer buffers
+    let pool_size = streams * 2 + 4;
     let memory_budget = buffer_size * pool_size * 2;
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
-    let mut session = blit_core::remote::transfer::data_plane::DataPlaneSession::from_stream(
-        socket,
-        false,
-        chunk_bytes,
-        payload_prefetch,
-        pool,
-    )
-    .await;
-
-    for payload in payloads {
-        session
-            .send_payloads(
-                Arc::new(FsTransferSource::new(module_root.clone())),
-                vec![payload],
-            )
+    let dst_root = module_root.to_path_buf();
+    let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
+    for idx in 0..streams {
+        let (mut socket, addr) = listener
+            .accept()
             .await
-            .map_err(|err| {
-                Status::internal(format!("sending pull data plane payloads: {}", err))
-            })?;
+            .map_err(|err| Status::internal(format!("data plane accept failed: {err}")))?;
+        eprintln!(
+            "[pull-data-plane] accepted connection {} from {}",
+            idx, addr
+        );
+
+        // Validate token before handing the socket to a sink.
+        let mut token_buf = vec![0u8; expected_token.len()];
+        socket
+            .read_exact(&mut token_buf)
+            .await
+            .map_err(|err| Status::internal(format!("failed to read pull token: {err}")))?;
+        if token_buf != expected_token {
+            eprintln!("[pull-data-plane] invalid token");
+            return Err(Status::permission_denied("invalid pull data plane token"));
+        }
+
+        let session = blit_core::remote::transfer::data_plane::DataPlaneSession::from_stream(
+            socket,
+            false,
+            chunk_bytes,
+            payload_prefetch,
+            Arc::clone(&pool),
+        )
+        .await;
+
+        sinks.push(Arc::new(DataPlaneSink::new(
+            session,
+            source.clone(),
+            dst_root.clone(),
+        )));
     }
 
-    session
-        .finish()
-        .await
-        .map_err(|err| Status::internal(format!("finishing pull data plane: {}", err)))
+    Ok(sinks)
 }
 
 /// Streaming enumeration that sends entries through a channel as they're discovered.
@@ -921,21 +922,6 @@ async fn send_manifest_batch(
     }))
     .await
     .map_err(|_| Status::internal("failed to send manifest batch"))
-}
-
-fn chunk_transfer_payloads(
-    payloads: Vec<TransferPayload>,
-    streams: usize,
-) -> Vec<Vec<TransferPayload>> {
-    if streams <= 1 || payloads.is_empty() {
-        return vec![payloads];
-    }
-    let buckets = streams.min(payloads.len());
-    let mut chunks = vec![Vec::new(); buckets];
-    for (idx, payload) in payloads.into_iter().enumerate() {
-        chunks[idx % buckets].push(payload);
-    }
-    chunks
 }
 
 fn payload_bytes(payload: &TransferPayload) -> u64 {
