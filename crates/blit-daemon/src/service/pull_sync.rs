@@ -24,7 +24,7 @@ use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
@@ -198,8 +198,9 @@ pub(crate) async fn handle_pull_sync_stream(
         .await?;
         send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
     } else {
-        // Data plane transfer (full files)
-        let stats = stream_via_data_plane(&module, entries_to_send, bytes_to_send, &tx).await?;
+        // Data plane transfer (full files). Pass the enumeration `root`,
+        // not module.path — header.relative_path is relative to `root`.
+        let stats = stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
         send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
     }
 
@@ -345,7 +346,8 @@ async fn stream_via_grpc(
 }
 
 async fn stream_via_data_plane(
-    module: &ModuleConfig,
+    _module: &ModuleConfig,
+    source_root: &Path,
     entries: Vec<PullEntry>,
     total_bytes: u64,
     tx: &PullSyncSender,
@@ -391,9 +393,10 @@ async fn stream_via_data_plane(
     .await
     .map_err(|_| Status::internal("failed to send negotiation"))?;
 
-    // Plan transfer payloads
+    // Plan transfer payloads against the enumeration root — header.relative_path
+    // is relative to source_root (NOT module.path).
     let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
-    let planned = plan_transfer_payloads(headers, &module.path, plan_options)
+    let planned = plan_transfer_payloads(headers, source_root, plan_options)
         .map_err(|err| Status::internal(format!("failed to plan payloads: {}", err)))?;
 
     let file_count = payload_file_count(&planned.payloads);
@@ -429,16 +432,16 @@ async fn stream_via_data_plane(
     )
     .await;
 
-    let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(module.path.clone()));
+    let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(source_root.to_path_buf()));
     let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
         session,
         source.clone(),
-        module.path.clone(),
+        source_root.to_path_buf(),
     ));
 
     execute_sink_pipeline(source, vec![sink], planned.payloads, 8, None)
         .await
-        .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err}")))?;
+        .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
 
     Ok(TransferStats {
         files_transferred: file_count as u64,

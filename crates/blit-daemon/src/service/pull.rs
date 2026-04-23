@@ -66,6 +66,7 @@ pub(crate) async fn stream_pull(
         send_manifest_batch(&tx, entries.len() as u64, total_bytes).await?;
         return stream_pull_non_streaming(
             module,
+            root,
             entries,
             total_bytes,
             force_grpc,
@@ -103,8 +104,14 @@ pub(crate) async fn stream_pull(
 }
 
 /// Non-streaming pull for single files or when data plane is not used.
+///
+/// `source_root` is the absolute path being enumerated (module.path joined
+/// with the requested subpath) — this is what header.relative_path is
+/// relative to, and what the daemon's FsTransferSource uses to locate
+/// source files for reading.
 async fn stream_pull_non_streaming(
     module: ModuleConfig,
+    source_root: PathBuf,
     entries: Vec<PullEntry>,
     total_bytes: u64,
     force_grpc: bool,
@@ -133,7 +140,9 @@ async fn stream_pull_non_streaming(
     };
 
     let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
-    let planned = plan_transfer_payloads(headers, &module.path, plan_options)
+    // Plan against the enumeration root so header.relative_path (which is
+    // relative to the enumeration root, not the module root) resolves correctly.
+    let planned = plan_transfer_payloads(headers, &source_root, plan_options)
         .map_err(|err| Status::internal(format!("failed to plan pull payloads: {}", err)))?;
 
     if planned.payloads.is_empty() {
@@ -163,11 +172,10 @@ async fn stream_pull_non_streaming(
     .await
     .map_err(|_| Status::internal("failed to send pull negotiation"))?;
 
-    let module_path = module.path.clone();
     let transfer_task = tokio::spawn(accept_pull_data_connection(
         listener,
         token,
-        module_path,
+        source_root,
         planned.payloads,
         tuning.chunk_bytes,
         tuning.max_streams,
@@ -278,12 +286,13 @@ async fn stream_pull_streaming(
     // Channel for payloads to data plane
     let (payload_tx, payload_rx) = mpsc::channel::<Vec<TransferPayload>>(4);
 
-    // Start streaming data plane
-    let module_path = module.path.clone();
+    // Start streaming data plane. Source root = enumeration root (`root`),
+    // NOT module.path — header.relative_path is relative to `root`.
+    let source_root = root.clone();
     let data_plane_handle = tokio::spawn(accept_pull_data_connection_streaming(
         listener,
         token,
-        module_path.clone(),
+        source_root.clone(),
         payload_rx,
         tuning.chunk_bytes,
         tuning.max_streams,
@@ -292,7 +301,7 @@ async fn stream_pull_streaming(
 
     // Plan and queue pending entries
     let headers: Vec<FileHeader> = pending_entries.iter().map(|e| e.header.clone()).collect();
-    let planned = plan_transfer_payloads(headers, &module_path, plan_options)
+    let planned = plan_transfer_payloads(headers, &source_root, plan_options)
         .map_err(|err| Status::internal(format!("failed to plan pull payloads: {}", err)))?;
     if !planned.payloads.is_empty() {
         payload_tx
@@ -313,7 +322,7 @@ async fn stream_pull_streaming(
             // Plan and queue
             let headers: Vec<FileHeader> = batch.iter().map(|e| e.header.clone()).collect();
             let planned =
-                plan_transfer_payloads(headers, &module_path, plan_options).map_err(|err| {
+                plan_transfer_payloads(headers, &source_root, plan_options).map_err(|err| {
                     Status::internal(format!("failed to plan pull payloads: {}", err))
                 })?;
             if !planned.payloads.is_empty() {
@@ -366,17 +375,23 @@ pub(crate) async fn collect_pull_entries_with_checksums(
     compute_checksums: bool,
 ) -> Result<Vec<PullEntry>, Status> {
     if root.is_file() {
-        let relative_name = if requested == Path::new(".") {
+        // Single-file root: physical path (for reads) is the requested path
+        // from the module; wire path (in the header, for the client's
+        // dest_root.join) must be empty so the client writes to its
+        // already-resolved dest target — not nested under a basename it
+        // already appended.
+        let physical = if requested == Path::new(".") {
             root.file_name()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."))
         } else {
             requested.to_path_buf()
         };
-        let header = build_file_header(module_root, &relative_name, compute_checksums)?;
+        let mut header = build_file_header(module_root, &physical, compute_checksums)?;
+        header.relative_path = String::new();
         return Ok(vec![PullEntry {
             header,
-            relative_path: relative_name,
+            relative_path: physical,
         }]);
     }
 
@@ -402,29 +417,35 @@ pub(crate) async fn collect_pull_entries_with_checksums(
             .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
             .collect();
 
-        // Use parallel iteration when computing checksums for performance
+        // Physical path (relative to module_root, used for reading) = requested + entry
+        // Wire path (in header.relative_path, used by client for dest_root.join) = entry only
+        // Previously both were set to the joined form, causing the client to double-nest
+        // when the CLI resolver had already appended the basename to dest_root.
         let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
             file_entries
                 .into_par_iter()
                 .map(|entry| {
-                    let relative_path = requested_clone.join(&entry.relative_path);
-                    let header = build_file_header(&module_root, &relative_path, true)?;
+                    let physical = requested_clone.join(&entry.relative_path);
+                    let wire = entry.relative_path.clone();
+                    let mut header = build_file_header(&module_root, &physical, true)?;
+                    header.relative_path = wire.to_string_lossy().replace('\\', "/");
                     Ok(PullEntry {
                         header,
-                        relative_path,
+                        relative_path: physical,
                     })
                 })
                 .collect()
         } else {
-            // Sequential for metadata-only (faster, no I/O-bound work)
             file_entries
                 .into_iter()
                 .map(|entry| {
-                    let relative_path = requested_clone.join(&entry.relative_path);
-                    let header = build_file_header(&module_root, &relative_path, false)?;
+                    let physical = requested_clone.join(&entry.relative_path);
+                    let wire = entry.relative_path.clone();
+                    let mut header = build_file_header(&module_root, &physical, false)?;
+                    header.relative_path = wire.to_string_lossy().replace('\\', "/");
                     Ok(PullEntry {
                         header,
-                        relative_path,
+                        relative_path: physical,
                     })
                 })
                 .collect()
@@ -560,7 +581,7 @@ async fn stream_single_file(
 async fn accept_pull_data_connection(
     listener: TcpListener,
     expected_token: Vec<u8>,
-    module_root: PathBuf,
+    source_root: PathBuf,
     payloads: Vec<TransferPayload>,
     chunk_bytes: usize,
     payload_prefetch: usize,
@@ -577,13 +598,15 @@ async fn accept_pull_data_connection(
         streams,
         chunk_bytes,
         payload_prefetch,
-        &module_root,
+        &source_root,
     )
     .await?;
 
-    // All payloads known upfront — use the one-shot form.
+    // `source_root` is the enumeration root (module.path.join(requested)) —
+    // header.relative_path is relative to this, so source_root.join(header.rel)
+    // locates the physical file on disk.
     let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
-        Arc::new(FsTransferSource::new(module_root));
+        Arc::new(FsTransferSource::new(source_root));
     execute_sink_pipeline(source, sinks, payloads, payload_prefetch, None)
         .await
         .map_err(|err| Status::internal(format!("pull data plane pipeline: {err}")))?;
@@ -601,17 +624,18 @@ async fn accept_pull_data_connection(
 }
 
 /// Accept N TCP connections, validate each token, wrap each in a
-/// `DataPlaneSink` that writes to `module_root` via the TCP wire protocol.
+/// `DataPlaneSink`. `source_root` is the enumeration root (module.path +
+/// requested subpath) — files are read relative to this via header.relative_path.
 async fn accept_and_wrap_sinks(
     listener: &TcpListener,
     expected_token: &[u8],
     streams: usize,
     chunk_bytes: usize,
     payload_prefetch: usize,
-    module_root: &Path,
+    source_root: &Path,
 ) -> Result<Vec<Arc<dyn TransferSink>>, Status> {
     let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
-        Arc::new(FsTransferSource::new(module_root.to_path_buf()));
+        Arc::new(FsTransferSource::new(source_root.to_path_buf()));
 
     // Shared buffer pool across all streams.
     let buffer_size = chunk_bytes.max(64 * 1024);
@@ -619,7 +643,7 @@ async fn accept_and_wrap_sinks(
     let memory_budget = buffer_size * pool_size * 2;
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
-    let dst_root = module_root.to_path_buf();
+    let dst_root = source_root.to_path_buf();
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
     for idx in 0..streams {
         let (mut socket, addr) = listener
@@ -674,18 +698,20 @@ fn enumerate_to_channel(
     use blit_core::fs_enum::FileFilter;
 
     if root.is_file() {
-        let relative_name = if requested == Path::new(".") {
+        // Single-file root: empty wire path so client writes to dest_root directly.
+        let physical = if requested == Path::new(".") {
             root.file_name()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."))
         } else {
             requested.clone()
         };
-        let header = build_file_header(&module_root, &relative_name, false)?;
+        let mut header = build_file_header(&module_root, &physical, false)?;
+        header.relative_path = String::new();
         let size = header.size;
         let entry = PullEntry {
             header,
-            relative_path: relative_name,
+            relative_path: physical,
         };
         let _ = tx.blocking_send(vec![entry]);
         return Ok((1, size));
@@ -703,15 +729,17 @@ fn enumerate_to_channel(
     enumerator
         .enumerate_local_streaming(&root, |entry| {
             if matches!(entry.kind, EntryKind::File { .. }) {
-                let relative_path = requested.join(&entry.relative_path);
-                let header = build_file_header(&module_root, &relative_path, false)
+                let physical = requested.join(&entry.relative_path);
+                let wire = entry.relative_path.clone();
+                let mut header = build_file_header(&module_root, &physical, false)
                     .map_err(|e| eyre::eyre!("{}", e.message()))?;
+                header.relative_path = wire.to_string_lossy().replace('\\', "/");
                 let size = header.size;
                 total_files += 1;
                 total_bytes += size;
                 batch.push(PullEntry {
                     header,
-                    relative_path,
+                    relative_path: physical,
                 });
 
                 if batch.len() >= batch_size {
@@ -739,7 +767,7 @@ fn enumerate_to_channel(
 async fn accept_pull_data_connection_streaming(
     listener: TcpListener,
     expected_token: Vec<u8>,
-    module_root: PathBuf,
+    source_root: PathBuf,
     mut batch_rx: mpsc::Receiver<Vec<TransferPayload>>,
     chunk_bytes: usize,
     payload_prefetch: usize,
@@ -755,7 +783,7 @@ async fn accept_pull_data_connection_streaming(
         streams,
         chunk_bytes,
         payload_prefetch,
-        &module_root,
+        &source_root,
     )
     .await?;
 
@@ -782,7 +810,7 @@ async fn accept_pull_data_connection_streaming(
     });
 
     let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
-        Arc::new(FsTransferSource::new(module_root));
+        Arc::new(FsTransferSource::new(source_root));
     execute_sink_pipeline_streaming(source, sinks, payload_rx, payload_prefetch, None)
         .await
         .map_err(|err| Status::internal(format!("pull streaming pipeline: {err}")))?;

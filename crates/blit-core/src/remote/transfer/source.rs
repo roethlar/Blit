@@ -92,7 +92,16 @@ impl TransferSource for FsTransferSource {
         &self,
         header: &FileHeader,
     ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
-        let path = self.root.join(&header.relative_path);
+        // An empty relative_path means "the root itself" — used when the
+        // enumeration root is a single file. Don't join, because
+        // PathBuf::join with some Path representations can produce a
+        // trailing-slash form that OS interprets as "descend into" and
+        // fails with ENOTDIR when the root is a regular file.
+        let path = if header.relative_path.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(&header.relative_path)
+        };
         let file = fs::File::open(&path).await?;
         Ok(Box::new(file))
     }

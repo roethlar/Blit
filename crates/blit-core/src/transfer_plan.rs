@@ -123,9 +123,12 @@ pub fn build_plan(
         total_small_bytes / small_count as u64
     };
 
+    // Tar shards only make sense for 2+ files (batching) — a single file
+    // gains nothing from tar wrapping and breaks the empty-path case
+    // produced by enumerating a file root directly.
     let use_tar = if options.force_tar {
-        true
-    } else if small_count == 0 {
+        small_count >= 1
+    } else if small_count < 2 {
         false
     } else {
         small_count >= 32 || avg_small_size <= 128 * 1024

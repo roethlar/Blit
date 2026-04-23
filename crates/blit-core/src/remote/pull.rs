@@ -107,10 +107,17 @@ impl RemotePullClient {
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
     ) -> Result<RemotePullReport> {
-        if !dest_root.exists() {
-            fs::create_dir_all(dest_root).await.with_context(|| {
-                format!("creating destination directory {}", dest_root.display())
-            })?;
+        // dest_root is the fully-resolved target. For a directory-source
+        // pull, it's the container dir; for a single-file pull, it's the
+        // final file path. Creating dest_root unconditionally would turn
+        // a file target into a directory. Only ensure the parent exists —
+        // handle_file_record will mkdir sub-directories as files arrive.
+        if let Some(parent) = dest_root.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                fs::create_dir_all(parent).await.with_context(|| {
+                    format!("creating destination parent {}", parent.display())
+                })?;
+            }
         }
 
         let (module, rel_path) = match &self.endpoint.path {
@@ -351,10 +358,15 @@ impl RemotePullClient {
         let mirror_mode = options.mirror_mode;
         use tokio_stream::wrappers::ReceiverStream;
 
-        if !dest_root.exists() {
-            fs::create_dir_all(dest_root).await.with_context(|| {
-                format!("creating destination directory {}", dest_root.display())
-            })?;
+        // Ensure the parent exists; do NOT mkdir dest_root itself — for a
+        // single-file pull it's the target file path, and creating it as
+        // a directory here would cause the subsequent File::create to fail.
+        if let Some(parent) = dest_root.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                fs::create_dir_all(parent).await.with_context(|| {
+                    format!("creating destination parent {}", parent.display())
+                })?;
+            }
         }
 
         let (module, rel_path) = match &self.endpoint.path {
@@ -889,7 +901,7 @@ async fn handle_file_record(
     let rel_string = read_string(stream).await?;
     let relative_path = sanitize_relative_path(&rel_string)?;
     let file_size = read_u64(stream).await?;
-    let dest_path = dest_root.join(&relative_path);
+    let dest_path = resolve_pull_dest(dest_root, &relative_path);
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -1144,9 +1156,23 @@ async fn read_string(stream: &mut TcpStream) -> Result<String> {
     String::from_utf8(buf).map_err(|err| eyre!("pull data-plane path not UTF-8: {err}"))
 }
 
+/// Resolve a pull destination path. An empty relative path means "write to
+/// dest_root directly" (single-file pull) — `dest_root.join("")` in Rust
+/// produces a trailing-slash form that `File::create` rejects as ENOTDIR.
+fn resolve_pull_dest(dest_root: &Path, relative_path: &Path) -> PathBuf {
+    if relative_path.as_os_str().is_empty() {
+        dest_root.to_path_buf()
+    } else {
+        dest_root.join(relative_path)
+    }
+}
+
 fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
+    // Empty path is legitimate: indicates "write to dest_root itself", which
+    // is used when the source is a single file — dest_root is already the
+    // fully-resolved target path, so joining an empty component is a no-op.
     if raw.is_empty() {
-        bail!("server sent empty relative path");
+        return Ok(PathBuf::new());
     }
 
     let path = Path::new(raw);
