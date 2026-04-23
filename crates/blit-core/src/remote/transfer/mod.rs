@@ -15,7 +15,7 @@ pub use payload::{
     prepared_payload_stream, transfer_payloads_via_control_plane, PlannedPayloads, PreparedPayload,
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
-pub use pipeline::execute_sink_pipeline;
+pub use pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
 pub use progress::{ProgressEvent, RemoteTransferProgress};
 pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, NullSink, SinkOutcome,
