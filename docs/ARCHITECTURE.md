@@ -12,12 +12,16 @@ This document describes the high-level architecture of Blit, a high-performance 
 │  (CLI app)  │    (gRPC server)        │   (admin tools)         │
 ├─────────────┴─────────────────────────┴─────────────────────────┤
 │                       blit-core                                  │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │   Unified Transfer Pipeline (execute_sink_pipeline*)        │ │
+│  │   TransferSource → plan_transfer_payloads → TransferSink    │ │
+│  └────────────────────────────────────────────────────────────┘ │
 │  ┌──────────────┬──────────────┬──────────────┬───────────────┐ │
-│  │ Orchestrator │ TransferEng  │ MirrorPlan   │ Remote/gRPC   │ │
+│  │ Orchestrator │ MirrorPlan   │ Remote/gRPC  │ ChangeJournal │ │
 │  ├──────────────┼──────────────┼──────────────┼───────────────┤ │
-│  │ ChangeJournal│ Enumeration  │ Checksum     │ TarStream     │ │
+│  │ Enumeration  │ Checksum     │ TarStream    │ Copy Engine   │ │
 │  ├──────────────┼──────────────┼──────────────┼───────────────┤ │
-│  │ Copy Engine  │ ZeroCopy     │ PerfPredict  │ Config        │ │
+│  │ ZeroCopy     │ PerfPredict  │ Config       │ AutoTune      │ │
 │  └──────────────┴──────────────┴──────────────┴───────────────┘ │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Platform Abstraction                          │
@@ -35,16 +39,20 @@ The core library containing all transfer logic, protocols, and platform abstract
 
 | Module | Responsibility |
 |--------|----------------|
-| `orchestrator` | Coordinates parallel transfer operations |
-| `transfer_engine` | Manages end-to-end transfer lifecycle |
-| `transfer_facade` | Unified interface for local/remote transfers |
+| `remote::transfer::pipeline` | `execute_sink_pipeline` + `execute_sink_pipeline_streaming` — the single entry point for every src→dst combination |
+| `remote::transfer::source` | `TransferSource` trait (read side) + `FsTransferSource`, `RemoteTransferSource` implementations |
+| `remote::transfer::sink` | `TransferSink` trait (write side) + `FsTransferSink`, `DataPlaneSink`, `GrpcFallbackSink`, `NullSink` implementations |
+| `remote::transfer::payload` | `plan_transfer_payloads` — classifies files into tar shards / raw bundles / large-file payloads |
+| `orchestrator` | Local transfer entry: journal fast-path, mirror deletions, perf history; delegates execution to `execute_sink_pipeline` |
+| `remote::push::client` | Push-side negotiation; feeds need-list payloads into `execute_sink_pipeline_streaming` over N `DataPlaneSink`s |
 | `mirror_planner` | Computes file differences for sync operations |
 | `enumeration` | Directory traversal and file discovery |
-| `copy` | Platform-optimized file copying |
+| `copy` | Platform-optimized file copying (zero-copy cascade: copy_file_range, sendfile, clonefile, block clone) |
 | `checksum` | File integrity verification |
-| `change_journal` | OS-specific change detection |
-| `remote` | gRPC client implementation |
+| `change_journal` | OS-specific change detection (USN on Windows, FSEvents on macOS, metadata snapshot on Linux) |
+| `remote` | gRPC control plane + TCP data plane |
 | `tar_stream` | Batched small-file transfers |
+| `auto_tune` | Dynamic tuning of chunk sizes and stream counts based on manifest size |
 | `perf_predictor` | Performance optimization heuristics |
 | `perf_history` | Versioned JSONL performance record storage |
 | `fs_capability` | Per-filesystem capability detection and caching |
@@ -110,71 +118,71 @@ blit-utils/
 All remote commands connect via gRPC to a running daemon. Output defaults to
 human-readable tables; `--json` emits machine-parsable JSON for scripting.
 
-## Data Flow
+## Data Flow: Unified Transfer Pipeline
 
-### Local Transfer
-
-```
-Source Path                          Destination Path
-     │                                      ▲
-     ▼                                      │
-┌─────────────┐                      ┌──────────────┐
-│ Enumeration │──────────────────────│  Copy Engine │
-└─────────────┘                      └──────────────┘
-     │                                      ▲
-     ▼                                      │
-┌─────────────┐    ┌─────────────┐   ┌──────────────┐
-│ChangeJournal│───▶│MirrorPlanner│───│ Orchestrator │
-│ (optional)  │    │             │   │ (parallel)   │
-└─────────────┘    └─────────────┘   └──────────────┘
-```
-
-### Remote Push (Client → Server)
+Every transfer — local→local, local→remote push, remote→local pull, and
+remote→remote — routes through the same pipeline. Only the concrete
+`TransferSource` and `TransferSink` implementations differ per direction.
 
 ```
-Client                                    Server
-┌──────────────┐                    ┌──────────────┐
-│  Enumerate   │                    │ blit-daemon  │
-│  Source Dir  │                    │              │
-└──────┬───────┘                    └──────────────┘
-       │                                   ▲
-       ▼                                   │
-┌──────────────┐    gRPC Stream     ┌──────────────┐
-│ Send Manifest│───────────────────▶│Parse Manifest│
-│ (FileHeaders)│                    │ Build NeedList│
-└──────────────┘                    └──────┬───────┘
-       ▲                                   │
-       │         FileList (need)           │
-       ◀───────────────────────────────────┘
-       │
-       ▼
-┌──────────────┐    TCP Data Plane   ┌──────────────┐
-│ Send Payloads│────────────────────▶│ Write Files  │
-│ (parallel)   │                     │              │
-└──────────────┘                     └──────────────┘
+    TransferSource             plan_transfer_payloads          TransferSink(s)
+    ──────────────             ──────────────────────          ────────────────
+    ┌──────────────┐           ┌────────────────────┐          ┌──────────────┐
+    │ .scan()      │──headers─▶│ classify:          │─payloads▶│ .write_      │
+    │              │           │  tar shards /      │          │   payload()  │
+    │ .prepare_    │──prepared─│  raw bundles /     │          │              │
+    │   payload()  │  payloads │  large files       │          │ .finish()    │
+    │              │           │                    │          │              │
+    │ .open_file() │           │ PlanOptions tunes  │          │ .root()      │
+    └──────────────┘           │  chunk_bytes       │          └──────────────┘
+                               └────────────────────┘
+                                         │
+                                         ▼
+                     execute_sink_pipeline[_streaming]
+                     • round-robin across N sinks
+                     • per-sink preparation prefetch
+                     • aggregated SinkOutcome
 ```
 
-### Remote Pull (Server → Client)
+### Source implementations
 
-```
-Client                                    Server
-┌──────────────┐                    ┌──────────────┐
-│ PullRequest  │────────────────────│ Enumerate    │
-│ (path)       │                    │ Server Path  │
-└──────────────┘                    └──────┬───────┘
-       │                                   │
-       ▼                                   ▼
-┌──────────────┐    gRPC Stream     ┌──────────────┐
-│ Receive      │◀───────────────────│ Stream Files │
-│ File Headers │                    │ (headers+data│
-└──────────────┘                    └──────────────┘
-       │                                   │
-       ▼                            TCP Data Plane
-┌──────────────┐                           │
-│ Write Local  │◀──────────────────────────┘
-│ Files        │
-└──────────────┘
-```
+- **`FsTransferSource`** — reads files from a local path; used for local→local
+  (client side) and for remote pull (daemon side).
+- **`RemoteTransferSource`** — reads files from another daemon via a
+  `RemotePullClient`; used for remote→remote transfers.
+
+### Sink implementations
+
+- **`FsTransferSink`** — writes files to a local path using the zero-copy
+  cascade (`copy_file_range`, `sendfile`, `clonefile`, block clone); used for
+  local→local (client side).
+- **`DataPlaneSink`** — wraps a single TCP `DataPlaneSession`; used for push
+  (client→daemon) and pull (daemon→client). Multi-stream transfers create one
+  sink per TCP connection.
+- **`GrpcFallbackSink`** — sends payloads over the gRPC control plane; used
+  when `--force-grpc` is set or TCP is unavailable.
+- **`NullSink`** — discards all writes, used for benchmarking source read
+  throughput in isolation.
+
+### Per-direction wiring
+
+| Direction | Source | Sink |
+|---|---|---|
+| local → local | `FsTransferSource` | `FsTransferSink` |
+| local → remote (push, TCP) | `FsTransferSource` | N × `DataPlaneSink` |
+| local → remote (push, gRPC fallback) | `FsTransferSource` | `GrpcFallbackSink` |
+| remote → local (pull, TCP) | daemon's `FsTransferSource` | N × `DataPlaneSink` (on daemon) |
+| remote → remote | `RemoteTransferSource` | N × `DataPlaneSink` |
+
+### Destination resolution
+
+Before routing hits the pipeline, `resolve_destination` in
+`crates/blit-cli/src/transfers/mod.rs` applies rsync-style trailing-slash
+semantics uniformly across all directions:
+
+- Source ends with `/`, `/.`, or is exactly `.` → merge contents into dest
+- Dest has trailing slash or is an existing local directory → nest under dest
+- Otherwise → use dest as the exact target (rename-style)
 
 ## Key Abstractions
 

@@ -15,11 +15,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Copy files between local and/or remote locations
+    /// Copy files between local and/or remote locations (rsync-style slash semantics)
     Copy(TransferArgs),
-    /// Mirror a directory (including deletions at destination)
+    /// Mirror a directory, deleting extraneous files at destination (rsync-style slash semantics)
     Mirror(TransferArgs),
-    /// Move a directory or file (mirror + remove source)
+    /// Move files (copy + remove source, rsync-style slash semantics)
     Move(TransferArgs),
     /// Discover daemons advertising via mDNS
     Scan(ScanArgs),
@@ -74,9 +74,16 @@ pub struct PerfArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct TransferArgs {
-    /// Source path for the transfer
+    /// Source path or remote endpoint (host:/module/path).
+    ///
+    /// Trailing slash means "copy contents" (merge). Without a trailing slash,
+    /// the source directory is nested under the destination (if destination is
+    /// a container) or used as the exact target (otherwise).
     pub source: String,
-    /// Destination path for the transfer
+    /// Destination path or remote endpoint.
+    ///
+    /// Trailing slash means "into this directory" (container). See `blit(1)`
+    /// for the full rsync-style resolution rules.
     pub destination: String,
     /// Perform a dry run without making changes
     #[arg(long)]
