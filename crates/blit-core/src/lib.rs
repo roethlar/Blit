@@ -19,8 +19,6 @@ pub mod perf_history;
 pub mod perf_predictor;
 pub mod remote;
 pub mod tar_stream;
-pub mod transfer_engine;
-pub mod transfer_facade;
 pub mod transfer_plan;
 #[cfg(windows)]
 pub mod win_fs;
