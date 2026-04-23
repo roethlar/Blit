@@ -13,6 +13,9 @@ fn test_remote_move_local_to_remote() {
     let src_file = src_dir.join("move_me.txt");
     fs::write(&src_file, "move content").expect("write file");
 
+    // Source has trailing slash -> rsync "merge contents" semantics:
+    // files under src/ land directly in the module root.
+    let src_arg = format!("{}/", src_dir.display());
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
@@ -20,23 +23,20 @@ fn test_remote_move_local_to_remote() {
         .arg(&ctx.config_dir)
         .arg("move")
         .arg("--yes")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(output.status.success(), "blit move failed");
 
-    // Verify destination file exists
+    // Verify destination file exists at module root (merged).
     let dest_file = ctx.module_dir.join("move_me.txt");
     assert!(dest_file.exists(), "remote file missing");
     let bytes = fs::read(&dest_file).expect("read remote file");
     assert_eq!(bytes, b"move content");
 
-    // Verify source file is deleted
+    // Verify source is deleted after the move.
     assert!(!src_file.exists(), "source file should have been deleted");
-    // Verify source directory is deleted (since we moved the dir content, but `blit move src dest` usually moves the dir content if src is a dir)
-    // Wait, `blit move src dest` behavior depends on if src is a file or dir.
-    // If src is a dir, it mirrors the dir content and then deletes the src dir.
     assert!(
         !src_dir.exists(),
         "source directory should have been deleted"

@@ -164,6 +164,8 @@ fn remote_push_falls_back_to_grpc_when_forced() {
     assert!(ready, "daemon failed to listen on {port}");
 
     let dest_remote = format!("127.0.0.1:{}:/test/", port);
+    // Trailing slash on source: merge contents into module root.
+    let src_arg = format!("{}/", src_dir.display());
     let mut cli_cmd = Command::new(&cli_bin);
     cli_cmd
         .arg("--config-dir")
@@ -171,7 +173,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         .arg("mirror")
         .arg("--yes")
         .arg("--force-grpc")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
     let output = run_with_timeout(cli_cmd, Duration::from_secs(120));
 

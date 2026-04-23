@@ -22,9 +22,33 @@ blit – local and hybrid-transport file transfer CLI
 remote operations via a hybrid TCP/gRPC transport.
 
 ### Transfer Commands
-- `copy` copies a `<SOURCE>` into `<DESTINATION>` without deleting extraneous files.
+- `copy` copies a `<SOURCE>` to `<DESTINATION>` without deleting extraneous files.
 - `mirror` performs the same copy but removes files that are only present at the destination.
 - `move` mirrors the source into the destination and then removes the original tree.
+
+### Destination Semantics (rsync-style)
+
+`copy`, `mirror`, and `move` resolve the destination using rsync's
+trailing-slash convention, applied identically regardless of which side is
+local or remote:
+
+| Invocation | Result |
+|---|---|
+| `blit copy SRC DEST/` or `blit copy SRC DEST` when `DEST` is an existing dir | `DEST/<basename(SRC)>/...` (nest) |
+| `blit copy SRC/ DEST` or `blit copy SRC/. DEST` | `DEST/...` (merge contents) |
+| `blit copy SRC DEST` when `DEST` does not exist | `DEST/...` (DEST becomes copy of SRC) |
+| `blit copy file.txt DEST/` | `DEST/file.txt` |
+| `blit copy file.txt renamed.txt` (renamed.txt does not exist) | `renamed.txt` (rename) |
+
+The rule: a trailing slash (or `/.`) on the **source** means "copy the
+contents of this directory". Without a trailing slash, whether the source's
+basename is appended depends on the destination — if the destination has a
+trailing slash or is an existing directory, the source is nested under it;
+otherwise the destination path is used as the exact target.
+
+On Windows, trailing `\` and `\.` are also recognized. For remote
+destinations, only the trailing slash is consulted (no directory probe).
+
 
 Any `<SOURCE>` or `<DESTINATION>` may be a local path or a remote endpoint:
 - `server:/module/path` (explicit module export)

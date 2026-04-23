@@ -72,15 +72,19 @@ impl TransferOrchestrator {
             null_sink: options.null_sink,
         };
 
-        if options.skip_unchanged && !options.checksum && !options.force_tar && !options.null_sink {
+        // Journal fast-path requires BOTH source and destination to exist and
+        // report "no changes". A missing destination obviously needs a full
+        // transfer — treating it as unchanged would silently skip the work.
+        if options.skip_unchanged
+            && !options.checksum
+            && !options.force_tar
+            && !options.null_sink
+            && dest_root.exists()
+        {
             if let Some(tracker) = journal_tracker.as_ref() {
                 match tracker.probe(src_root) {
                     Ok(src_probe) => {
-                        let dest_probe = if dest_root.exists() {
-                            tracker.probe(dest_root).ok()
-                        } else {
-                            None
-                        };
+                        let dest_probe = tracker.probe(dest_root).ok();
 
                         if src_probe.snapshot.is_some() {
                             journal_tokens.push(src_probe.clone());
@@ -97,16 +101,18 @@ impl TransferOrchestrator {
                                 log_probe("dest", probe);
                             } else {
                                 eprintln!(
-                                    "Journal probe dest unsupported or missing; treating as unchanged"
+                                    "Journal probe dest unsupported; cannot take fast-path"
                                 );
                             }
                         }
 
                         let src_no_change = matches!(src_probe.state, ChangeState::NoChanges);
+                        // If dest_probe is None (unsupported FS), we cannot
+                        // assert "no change" — fall through to full planner.
                         let dest_no_change = dest_probe
                             .as_ref()
                             .map(|probe| matches!(probe.state, ChangeState::NoChanges))
-                            .unwrap_or(true);
+                            .unwrap_or(false);
 
                         if src_no_change && dest_no_change {
                             journal_skip = true;

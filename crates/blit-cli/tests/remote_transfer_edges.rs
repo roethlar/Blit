@@ -18,12 +18,14 @@ fn test_push_nested_directories() {
     fs::write(src_dir.join("a/b/c/level3.txt"), b"level3").expect("write level3");
 
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    // Trailing slash on source: merge contents into module root.
+    let src_arg = format!("{}/", src_dir.display());
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("copy")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(30));
@@ -62,12 +64,14 @@ fn test_copy_does_not_delete_extraneous() {
     fs::write(ctx.module_dir.join("existing.txt"), b"keep-me").expect("write existing");
 
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    // Trailing slash: merge contents into module root.
+    let src_arg = format!("{}/", src_dir.display());
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("copy")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(30));
@@ -145,12 +149,14 @@ fn test_push_many_small_files() {
     }
 
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    // Trailing slash: merge contents into module root.
+    let src_arg = format!("{}/", src_dir.display());
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
         .arg("--config-dir")
         .arg(&ctx.config_dir)
         .arg("copy")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(30));

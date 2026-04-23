@@ -183,11 +183,10 @@ impl TaskAggregator {
             return;
         }
         if self.small_count >= 64 {
-            let avg = if self.small_count == 0 {
-                0
-            } else {
-                self.total_small_bytes / self.small_count
-            };
+            let avg = self
+                .total_small_bytes
+                .checked_div(self.small_count)
+                .unwrap_or(0);
             if avg <= 64 * 1024 {
                 self.small_profile = true;
                 self.small_count_target = 1024;

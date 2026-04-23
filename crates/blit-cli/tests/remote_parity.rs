@@ -14,6 +14,8 @@ fn test_push_tcp_negotiation() {
     fs::write(src_dir.join("push_tcp.txt"), b"push-tcp-test").expect("write file");
 
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    // Trailing slash on source: merge contents into module root.
+    let src_arg = format!("{}/", src_dir.display());
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
         .arg("--config-dir")
@@ -21,7 +23,7 @@ fn test_push_tcp_negotiation() {
         .arg("mirror")
         .arg("--yes")
         .arg("--trace-data-plane")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
@@ -135,6 +137,8 @@ fn test_push_grpc_fallback() {
     fs::write(src_dir.join("push_grpc.txt"), b"push-grpc-test").expect("write file");
 
     let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    // Trailing slash on source: merge contents into module root.
+    let src_arg = format!("{}/", src_dir.display());
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
         .arg("--config-dir")
@@ -142,7 +146,7 @@ fn test_push_grpc_fallback() {
         .arg("mirror")
         .arg("--yes")
         .arg("--force-grpc")
-        .arg(&src_dir)
+        .arg(&src_arg)
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
