@@ -1,5 +1,7 @@
 # Bug: `copy`/`mirror`/`move` destination semantics are inconsistent and non-rsync
 
+**Status:** **RESOLVED.** Fixed by adopting rsync's exact trailing-slash algorithm (`flist.c:send_file_list` DOTDIR_NAME + `main.c:get_local_name`) uniformly across all four transport combinations. Resolution happens at the CLI boundary in `crates/blit-cli/src/transfers/mod.rs::resolve_destination`, so local→local, local→remote, remote→local, and remote→remote all see the same resolved destination. Regression tests pin each rule and case: `crates/blit-cli/tests/single_file_copy.rs`, `crates/blit-cli/tests/remote_pull_subpath.rs`, `crates/blit-cli/tests/remote_move.rs`. Manpage section "Destination Semantics (rsync-style)" in `docs/cli/blit.1.md` documents the full table; `blit copy --help` now includes the PATHS summary inline.
+
 **Component:** `blit-cli` (`crates/blit-cli/src/transfers/local.rs`, `crates/blit-cli/src/transfers/remote.rs`), `blit-core` (`crates/blit-core/src/orchestrator/orchestrator.rs`)
 **Severity:** High — silent data placement corruption. Users lose the directory boundary of the thing they copied; contents get merged into the destination parent.
 **Reported against:** `blit-cli` as built from current `main` (binary at `target/release/blit-cli`).

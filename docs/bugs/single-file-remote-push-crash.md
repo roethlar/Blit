@@ -1,5 +1,10 @@
 # Bug: `blit copy <file> server:/mod/` crashes during payload planning
 
+**Status:** **RESOLVED.** Fixed across client and daemon. Regression tests in `crates/blit-cli/tests/remote_push_single_file.rs` pin the container-dir and rename cases. The fix touches both ends because `PathBuf::join("")` preserves a trailing `/` on Unix in multiple places:
+
+1. Client side (`filter_readable_headers`, `build_tar_shard`): handle `rel.is_empty()` by using `source_root` directly instead of joining.
+2. Daemon side: new `resolve_manifest_relative_path()` variant preserves empty-as-empty (the generic `resolve_relative_path` folds empty to ".", which breaks single-file pushes); new `resolve_dest_path()` helper does the same empty-handling when joining destination components.
+
 **Component:** `blit-core` — `crates/blit-core/src/remote/transfer/source.rs` (`FsTransferSource`) and `crates/blit-core/src/remote/push/client/helpers.rs::filter_readable_headers`
 **Severity:** Medium — transfer fails fast with a clear error and non-zero exit, so no silent data loss. But the user-facing form is `blit copy FILE REMOTE/` — a natural command that looks like it should "just work" — and the error message leaks internal terminology ("payload planning") that doesn't help the user recover.
 **Reported against:** `blit-cli` v0.1.0 (confirmed present through commit `fe63b9a` — the local-side single-file fix in `execute_single_file_copy` does not reach the remote-push code path).

@@ -1,5 +1,7 @@
 use super::super::admin::purge_extraneous_entries;
-use super::super::util::{metadata_mtime_seconds, resolve_module, resolve_relative_path};
+use super::super::util::{
+    metadata_mtime_seconds, resolve_manifest_relative_path, resolve_module, resolve_relative_path,
+};
 use super::super::PushSender;
 use super::data_plane::{
     accept_data_connection_stream, bind_data_plane_listener, execute_grpc_fallback, generate_token,
@@ -87,7 +89,7 @@ pub(crate) async fn handle_push_stream(
                 let module_ref = module.as_ref().ok_or_else(|| {
                     Status::failed_precondition("push manifest received before header")
                 })?;
-                let rel = resolve_relative_path(&file.relative_path)?;
+                let rel = resolve_manifest_relative_path(&file.relative_path)?;
                 expected_rel_files.push(rel.clone());
                 let sanitized = rel.to_string_lossy().to_string();
 
@@ -377,7 +379,8 @@ fn file_requires_upload(
     rel: &Path,
     header: &FileHeader,
 ) -> Result<bool, Status> {
-    let full_path = module.path.join(rel);
+    use super::super::util::resolve_dest_path;
+    let full_path = resolve_dest_path(&module.path, rel);
     let requires_upload = match fs::metadata(&full_path) {
         Ok(meta) => {
             if !meta.is_file() {

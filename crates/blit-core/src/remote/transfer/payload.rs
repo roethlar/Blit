@@ -292,7 +292,14 @@ pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec
 
     for header in headers {
         let rel = Path::new(&header.relative_path);
-        let full_path = source_root.join(rel);
+        // Empty relative_path = "root is itself the file" (single-file
+        // source). See FsTransferSource::open_file for context — join("")
+        // can preserve a trailing separator that File::open rejects.
+        let full_path = if header.relative_path.is_empty() {
+            source_root.to_path_buf()
+        } else {
+            source_root.join(rel)
+        };
         let mut file = std::fs::File::open(&full_path)
             .with_context(|| format!("opening {}", full_path.display()))?;
 

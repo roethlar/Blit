@@ -179,7 +179,16 @@ pub async fn filter_readable_headers(
     let mut filtered = Vec::with_capacity(headers.len());
     for header in headers {
         let rel = header.relative_path.clone();
-        let path = source_root.join(&rel);
+        // Empty relative_path means "the root is itself the file" — a
+        // single-file push source. `source_root.join("")` preserves a
+        // trailing separator that `File::open` then rejects as ENOTDIR,
+        // so treat the empty case specially (mirrors the pull-side
+        // handling in `resolve_pull_dest`).
+        let path = if rel.is_empty() {
+            source_root.to_path_buf()
+        } else {
+            source_root.join(&rel)
+        };
         match fs::File::open(&path).await {
             Ok(file) => drop(file),
             Err(err) => match err.kind() {

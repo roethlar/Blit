@@ -86,6 +86,37 @@ pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
     Ok(normalized)
 }
 
+/// Same validation as `resolve_relative_path` but preserves an empty
+/// input as `PathBuf::new()` instead of folding it to ".".
+///
+/// Used for per-file manifest entries during push: a single-file source
+/// legitimately emits `relative_path = ""` to mean "the root is itself
+/// the file". Folding to "." here breaks that — `module.path/file.txt`
+/// vs. `module.path/file.txt/.` are not the same thing when the caller
+/// opens the path (File::create on `.../file.txt/.` fails ENOTDIR).
+#[allow(clippy::result_large_err)]
+pub(crate) fn resolve_manifest_relative_path(rel: &str) -> Result<PathBuf, Status> {
+    let resolved = resolve_relative_path(rel)?;
+    if rel.is_empty() {
+        Ok(PathBuf::new())
+    } else {
+        Ok(resolved)
+    }
+}
+
+/// Resolve a destination file path as `base.join(rel)`, but preserving
+/// `base` verbatim when `rel` is empty. `PathBuf::join("")` appends a
+/// trailing separator on Unix (e.g. `/a/b` + `""` → `/a/b/`), which
+/// `File::create` then rejects with `ENOTDIR` when `base` is itself
+/// the intended file path (single-file push flow).
+pub(crate) fn resolve_dest_path(base: &Path, rel: &Path) -> PathBuf {
+    if rel.as_os_str().is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(rel)
+    }
+}
+
 pub(crate) fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
     use std::time::UNIX_EPOCH;
 

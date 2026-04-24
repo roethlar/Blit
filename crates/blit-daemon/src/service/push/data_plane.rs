@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 use tokio::task::{self, JoinSet};
 use tonic::{Status, Streaming};
 
-use super::super::util::resolve_relative_path;
+use super::super::util::{resolve_dest_path, resolve_manifest_relative_path};
 use super::super::PushSender;
 use super::control::send_control_message;
 
@@ -189,8 +189,8 @@ async fn handle_data_plane_stream(
                         rel_string, file_size, header.size
                     )));
                 }
-                let rel_path = resolve_relative_path(&rel_string)?;
-                let dest_path = module.path.join(&rel_path);
+                let rel_path = resolve_manifest_relative_path(&rel_string)?;
+                let dest_path = resolve_dest_path(&module.path, &rel_path);
 
                 if let Some(parent) = dest_path.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|err| {
@@ -430,8 +430,8 @@ pub(crate) async fn receive_fallback_data(
                     )));
                 }
 
-                let rel_path = resolve_relative_path(&expected.relative_path)?;
-                let dest_path = module.path.join(&rel_path);
+                let rel_path = resolve_manifest_relative_path(&expected.relative_path)?;
+                let dest_path = resolve_dest_path(&module.path, &rel_path);
                 if let Some(parent) = dest_path.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|err| {
                         Status::internal(format!("create dir {}: {}", parent.display(), err))
@@ -872,8 +872,8 @@ fn apply_tar_shard_sync(
             ))
         })?;
 
-        let resolved = resolve_relative_path(&rel_string)?;
-        let dest_path = module.path.join(&resolved);
+        let resolved = resolve_manifest_relative_path(&rel_string)?;
+        let dest_path = resolve_dest_path(&module.path, &resolved);
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent).map_err(|err| {
                 Status::internal(format!("create dir {}: {}", parent.display(), err))

@@ -1,5 +1,7 @@
 # Bug: `blit copy <file> <dest>` silently copies nothing
 
+**Status:** **RESOLVED.** Fixed in commit `6cf07bf` via a dedicated `execute_single_file_copy` branch in the orchestrator that handles file sources without routing through the dir-oriented enumeration pipeline. The "silent no-op" class of error was further guarded in commit `67bde6d` by distinguishing `TransferOutcome::UpToDate`/`SourceEmpty`/`Transferred` so a future regression to "0 files" would print a disambiguated message instead of a false "Copy complete". Regression test: `single_file_copy_idempotent` in `crates/blit-cli/tests/single_file_copy.rs`.
+
 **Component:** `blit-core` (`crates/blit-core/src/enumeration.rs`, `crates/blit-core/src/orchestrator/fast_path.rs`, `crates/blit-core/src/orchestrator/orchestrator.rs`)
 **Severity:** High — silent data loss. Blit reports "Copy complete" with success exit code, but the destination file does not exist. Callers that rely on the exit code (scripts, pipelines) cannot detect the failure.
 **Reported against:** `blit-cli` as built from current `main` (binary at `target/release/blit-cli`, version line reports `blit v0.1.0`). Post-`2a72eb6` (the rsync-destination fix) — that fix resolves the *target path* correctly; this bug is in the *transfer* itself.

@@ -1,5 +1,11 @@
 # Handoff: Remote pull single-file bug + audit follow-ups
 
+**Status:** **RESOLVED.** The handoff items are complete:
+
+1. **Remote-pull subpath double-nest bug** — fixed in commit `e70b21e` via a new `resolve_pull_dest` helper applied at all 7 destination-join sites in `crates/blit-core/src/remote/pull.rs`. Daemon now sends headers relative to the enumeration root (not the module root), so the client's `resolve_destination` no longer double-appends the basename. Regression tests in `crates/blit-cli/tests/remote_pull_subpath.rs` pin four cases (dir subpath, single-file into container, single-file rename, single-file to exact path).
+2. **NoWork diagnostic** — implemented in commit `67bde6d`. `FastPathDecision::NoWork` now carries an `examined` count that the orchestrator uses to emit `TransferOutcome::SourceEmpty` vs `UpToDate`. CLI `print_summary` matches on outcome and prints a distinct, honest message per case.
+3. **Idempotent test strengthening** — commit `67bde6d` strengthened `single_file_copy_idempotent` to pin `Copy complete: 1 files` on first run and `Up to date` on second run.
+
 **Date:** 2026-04-23 (paused for the night)
 **Branch:** master, uncommitted WIP on 5 files
 **Originated from:** validating feedback on the local single-file fix in `6cf07bf`

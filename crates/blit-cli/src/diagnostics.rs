@@ -278,7 +278,7 @@ fn disk_free_total(path: &Path) -> (Option<u64>, Option<u64>) {
         let mp = disk.mount_point();
         if canonical.starts_with(mp) {
             let len = mp.as_os_str().len();
-            if best.map_or(true, |(_, prev_len)| len > prev_len) {
+            if best.is_none_or(|(_, prev_len)| len > prev_len) {
                 best = Some((disk, len));
             }
         }
