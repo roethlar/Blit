@@ -101,27 +101,12 @@ pub struct TransferArgs {
     /// Trailing slash means "into this directory" (container). See `blit(1)`
     /// for the full rsync-style resolution rules.
     pub destination: String,
+
+    // -- Common options (no heading — rendered in the default "Options"
+    // section so first-time users see them at the top).
     /// Perform a dry run without making changes
     #[arg(long)]
     pub dry_run: bool,
-    /// Force checksum comparison of files (slower but more accurate)
-    #[arg(long, short = 'c')]
-    pub checksum: bool,
-    /// Compare only by size, ignoring modification time
-    #[arg(long, conflicts_with = "checksum")]
-    pub size_only: bool,
-    /// Transfer all files unconditionally, ignoring size and modification time
-    #[arg(long, conflicts_with_all = ["checksum", "size_only"])]
-    pub ignore_times: bool,
-    /// Skip files that already exist on the destination (regardless of differences)
-    #[arg(long)]
-    pub ignore_existing: bool,
-    /// Force exact mirror even if destination files are newer (dangerous)
-    #[arg(long)]
-    pub force: bool,
-    /// Number of retries for failed transfers (0-255, default: 1)
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8))]
-    pub retries: u8,
     /// Keep verbose logs from the orchestrator
     #[arg(long, short = 'v')]
     pub verbose: bool,
@@ -136,18 +121,41 @@ pub struct TransferArgs {
     /// Skip confirmation prompt for destructive operations (mirror deletions, move)
     #[arg(long, short = 'y')]
     pub yes: bool,
-    /// Limit worker threads (advanced debugging only)
-    #[arg(long, hide = true)]
-    pub workers: Option<usize>,
-    /// Emit verbose TCP data-plane diagnostics (advanced debugging only)
-    #[arg(long, hide = true)]
-    pub trace_data_plane: bool,
-    /// Force gRPC control-plane data path instead of hybrid TCP
+    /// Output as JSON. With -p, emits NDJSON progress to stderr. Final
+    /// transfer summary is written to stdout as a JSON object.
     #[arg(long)]
-    pub force_grpc: bool,
+    pub json: bool,
+
+    // -- Comparison options: how blit decides which files to transfer.
+    /// Force checksum comparison of files (slower but more accurate)
+    #[arg(long, short = 'c', help_heading = "Comparison")]
+    pub checksum: bool,
+    /// Compare only by size, ignoring modification time
+    #[arg(long, conflicts_with = "checksum", help_heading = "Comparison")]
+    pub size_only: bool,
+    /// Transfer all files unconditionally, ignoring size and modification time
+    #[arg(long, conflicts_with_all = ["checksum", "size_only"], help_heading = "Comparison")]
+    pub ignore_times: bool,
+    /// Skip files that already exist on the destination (regardless of differences)
+    #[arg(long, help_heading = "Comparison")]
+    pub ignore_existing: bool,
+    /// Force exact mirror even if destination files are newer (dangerous)
+    #[arg(long, help_heading = "Comparison")]
+    pub force: bool,
+
+    // -- Reliability options: recovery + retries.
     /// Resume interrupted transfers using block-level comparison
-    #[arg(long)]
+    #[arg(long, help_heading = "Reliability")]
     pub resume: bool,
+    /// Number of retries for failed transfers (0-255, default: 1)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8), help_heading = "Reliability")]
+    pub retries: u8,
+
+    // -- Performance / debug knobs — niche, kept at the bottom so new
+    // users aren't distracted by them.
+    /// Force gRPC control-plane data path instead of hybrid TCP
+    #[arg(long, help_heading = "Performance / debug")]
+    pub force_grpc: bool,
     /// Discard all writes (measure source read + pipeline throughput only).
     ///
     /// Reads and prepares all source data normally but does not write to the
@@ -159,12 +167,16 @@ pub struct TransferArgs {
     /// The destination path is still required for planning but nothing is
     /// written there. Performance records are tagged so the adaptive predictor
     /// does not learn from null-sink runs.
-    #[arg(long)]
+    #[arg(long, help_heading = "Performance / debug")]
     pub null: bool,
-    /// Output as JSON. With -p, emits NDJSON progress to stderr. Final
-    /// transfer summary is written to stdout as a JSON object.
-    #[arg(long)]
-    pub json: bool,
+
+    // -- Hidden flags (don't appear in --help).
+    /// Limit worker threads (advanced debugging only)
+    #[arg(long, hide = true)]
+    pub workers: Option<usize>,
+    /// Emit verbose TCP data-plane diagnostics (advanced debugging only)
+    #[arg(long, hide = true)]
+    pub trace_data_plane: bool,
 }
 
 impl TransferArgs {
