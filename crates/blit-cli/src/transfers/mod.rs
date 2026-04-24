@@ -20,6 +20,32 @@ use endpoints::{
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
 
+/// Render an endpoint for human-facing log lines, collapsing any runs of
+/// `/` into a single `/` in the local-path portion. Filesystems already
+/// ignore `//+`, but users stare at it — our own banner printed
+/// `src//foo` when a script appended `/` to an already-trailing-slash
+/// `$SRC`. This is display-only; the actual path handling is unchanged
+/// so rsync trailing-slash semantics still apply.
+fn display_endpoint(e: &Endpoint) -> String {
+    match e {
+        Endpoint::Local(p) => collapse_slashes(&p.display().to_string()),
+        Endpoint::Remote(r) => format_remote_endpoint(r),
+    }
+}
+
+fn collapse_slashes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_slash = false;
+    for c in s.chars() {
+        let is_slash = c == '/';
+        if !(is_slash && prev_slash) {
+            out.push(c);
+        }
+        prev_slash = is_slash;
+    }
+    out
+}
+
 /// Returns true if the raw CLI source string specifies "copy contents" mode,
 /// matching rsync's DOTDIR_NAME classification from `flist.c:send_file_list`.
 ///
@@ -181,45 +207,18 @@ pub enum TransferKind {
 pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let raw_dst = parse_transfer_endpoint(&args.destination)?;
+    let pre_resolve_display = display_endpoint(&raw_dst);
     let dst_endpoint = resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
 
     let operation = match mode {
         TransferKind::Copy => "copy",
         TransferKind::Mirror => "mirror",
     };
-    let transfer_scope = match (&src_endpoint, &dst_endpoint) {
-        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
-            format!("{} -> {}", src_path.display(), dst_path.display())
-        }
-        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
-            format!(
-                "{} -> {}",
-                src_path.display(),
-                format_remote_endpoint(remote)
-            )
-        }
-        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
-            format!(
-                "{} -> {}",
-                format_remote_endpoint(remote),
-                dst_path.display()
-            )
-        }
-        (Endpoint::Remote(a), Endpoint::Remote(b)) => {
-            format!(
-                "{} -> {}",
-                format_remote_endpoint(a),
-                format_remote_endpoint(b)
-            )
-        }
-    };
+    let src_display = display_endpoint(&src_endpoint);
+    let dst_display = display_endpoint(&dst_endpoint);
 
     // For mirror operations, prompt unless --yes or --dry-run
     if matches!(mode, TransferKind::Mirror) && !args.dry_run {
-        let dst_display = match &dst_endpoint {
-            Endpoint::Local(p) => p.display().to_string(),
-            Endpoint::Remote(r) => format_remote_endpoint(r),
-        };
         let prompt = format!(
             "Mirror will delete extraneous files at destination '{}'. Continue?",
             dst_display
@@ -230,13 +229,17 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
+    // Banner goes to stderr so stdout stays reserved for the summary /
+    // JSON output. Version dropped — `blit --version` is the right place
+    // for that, not every invocation.
     if !args.json {
-        println!(
-            "blit v{}: starting {} {}",
-            env!("CARGO_PKG_VERSION"),
-            operation,
-            transfer_scope
-        );
+        eprintln!("starting {} {} -> {}", operation, src_display, dst_display);
+        if args.verbose && dst_display != pre_resolve_display {
+            eprintln!(
+                "  (destination resolved by rsync trailing-slash rule: {} -> {})",
+                pre_resolve_display, dst_display
+            );
+        }
     }
 
     match (src_endpoint, dst_endpoint) {
@@ -296,6 +299,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
 pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let raw_dst = parse_transfer_endpoint(&args.destination)?;
+    let pre_resolve_display = display_endpoint(&raw_dst);
     let dst_endpoint = resolve_destination(&args.source, &args.destination, &src_endpoint, raw_dst);
 
     if args.dry_run {
@@ -303,14 +307,8 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     }
 
     // Prompt for confirmation before move (which deletes source)
-    let src_display = match &src_endpoint {
-        Endpoint::Local(p) => p.display().to_string(),
-        Endpoint::Remote(r) => format_remote_endpoint(r),
-    };
-    let dst_display = match &dst_endpoint {
-        Endpoint::Local(p) => p.display().to_string(),
-        Endpoint::Remote(r) => format_remote_endpoint(r),
-    };
+    let src_display = display_endpoint(&src_endpoint);
+    let dst_display = display_endpoint(&dst_endpoint);
     let prompt = format!(
         "Move will transfer '{}' to '{}' and delete the source. Continue?",
         src_display, dst_display
@@ -321,12 +319,13 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     }
 
     if !args.json {
-        println!(
-            "blit v{}: starting move {} -> {}",
-            env!("CARGO_PKG_VERSION"),
-            src_display,
-            dst_display
-        );
+        eprintln!("starting move {} -> {}", src_display, dst_display);
+        if args.verbose && dst_display != pre_resolve_display {
+            eprintln!(
+                "  (destination resolved by rsync trailing-slash rule: {} -> {})",
+                pre_resolve_display, dst_display
+            );
+        }
     }
 
     match (src_endpoint, dst_endpoint) {
