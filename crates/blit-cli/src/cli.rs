@@ -1,5 +1,20 @@
 use clap::{Args, Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
+
+/// Appended to `--help` (not `-h`) for copy/mirror/move so the three
+/// semantic rules that bit real users are visible without a manpage trip.
+const PATH_SEMANTICS_HELP: &str = "\
+PATHS (rsync-style trailing-slash semantics):
+  blit copy SRC/  DEST/   merge SRC's contents into DEST (no basename nesting)
+  blit copy SRC   DEST/   nest SRC under DEST  -> DEST/<basename(SRC)>
+  blit copy SRC   DEST    if DEST exists as a dir: nest; else DEST becomes the copy
+  blit copy f.txt DEST/   DEST/f.txt (into the directory)
+  blit copy f.txt new.txt rename (when new.txt does not exist)
+
+A trailing slash on SRC means \"copy the contents\". Without one, the basename is
+appended when DEST is (or ends in) a directory; otherwise DEST is the exact
+target path. See blit(1) for the full table.";
 
 #[derive(Parser)]
 #[command(name = "blit")]
@@ -73,6 +88,7 @@ pub struct PerfArgs {
 }
 
 #[derive(Args, Clone, Debug)]
+#[command(after_long_help = PATH_SEMANTICS_HELP)]
 pub struct TransferArgs {
     /// Source path or remote endpoint (host:/module/path).
     ///
@@ -109,7 +125,12 @@ pub struct TransferArgs {
     /// Keep verbose logs from the orchestrator
     #[arg(long, short = 'v')]
     pub verbose: bool,
-    /// Show an interactive progress indicator
+    /// Show an interactive progress indicator.
+    ///
+    /// Auto-enabled when stdout is a TTY (and --json is not set) so
+    /// interactive users get feedback by default; piping/redirecting
+    /// stdout disables it so scripts aren't affected. Use this flag to
+    /// force-enable when stdout is not a TTY (e.g. under `tee`).
     #[arg(long, short = 'p')]
     pub progress: bool,
     /// Skip confirmation prompt for destructive operations (mirror deletions, move)
@@ -144,6 +165,23 @@ pub struct TransferArgs {
     /// transfer summary is written to stdout as a JSON object.
     #[arg(long)]
     pub json: bool,
+}
+
+impl TransferArgs {
+    /// Effective progress setting: explicit `--progress` wins; otherwise
+    /// enable automatically when stdout is a TTY and `--json` is off. This
+    /// matches rsync/rclone/restic defaults so a first-time interactive
+    /// user isn't staring at a silent terminal for 60+ seconds on a big
+    /// transfer, while piped/redirected stdout keeps scripts unaffected.
+    pub fn effective_progress(&self) -> bool {
+        if self.progress {
+            return true;
+        }
+        if self.json {
+            return false;
+        }
+        std::io::stdout().is_terminal()
+    }
 }
 
 #[derive(Args, Clone, Debug)]

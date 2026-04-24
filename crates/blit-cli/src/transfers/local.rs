@@ -35,7 +35,7 @@ pub async fn run_local_transfer(
         );
     }
 
-    let progress_bar = if !args.progress {
+    let progress_bar = if !args.effective_progress() {
         None
     } else {
         let pb = ProgressBar::new_spinner();
@@ -94,7 +94,7 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
         mirror,
         dry_run: args.dry_run,
         verbose: args.verbose,
-        progress: args.progress,
+        progress: args.effective_progress(),
         perf_history: ctx.perf_history_enabled,
         checksum: args.checksum,
         retries: args.retries,

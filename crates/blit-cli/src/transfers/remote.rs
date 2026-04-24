@@ -160,7 +160,7 @@ pub async fn run_remote_push_transfer(
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
-    let show_progress = args.progress || args.verbose;
+    let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) =
         spawn_progress_monitor(show_progress, args.verbose, args.json);
 
@@ -233,7 +233,7 @@ pub async fn run_remote_pull_transfer(
     // Compute checksums if --checksum mode is requested
     let local_manifest = enumerate_local_manifest(&actual_dest, args.checksum).await?;
 
-    let show_progress = args.progress || args.verbose;
+    let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) =
         spawn_progress_monitor(show_progress, args.verbose, args.json);
 
