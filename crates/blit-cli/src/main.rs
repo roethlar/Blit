@@ -15,7 +15,7 @@ mod util;
 
 use crate::cli::{Cli, Commands, DiagnosticsCommand};
 use crate::context::AppContext;
-use crate::diagnostics::run_diagnostics_perf;
+use crate::diagnostics::{run_diagnostics_dump, run_diagnostics_perf};
 use crate::transfers::{run_move, run_transfer, TransferKind};
 use blit_core::config;
 use clap::Parser;
@@ -50,6 +50,7 @@ async fn main() -> Result<()> {
         Commands::Profile(args) => profile::run_profile(args)?,
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
+            DiagnosticsCommand::Dump(args) => run_diagnostics_dump(&args)?,
         },
     }
 

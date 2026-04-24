@@ -66,6 +66,19 @@ pub enum Commands {
 pub enum DiagnosticsCommand {
     /// Manage performance history capture (enable/disable/clear)
     Perf(PerfArgs),
+    /// Emit a diagnostic snapshot for a SRC -> DEST invocation (no transfer performed)
+    Dump(DiagnosticsDumpArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct DiagnosticsDumpArgs {
+    /// Source path or remote endpoint (same syntax as `blit copy`)
+    pub source: String,
+    /// Destination path or remote endpoint (same syntax as `blit copy`)
+    pub destination: String,
+    /// Emit JSON instead of the default human-readable report
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]

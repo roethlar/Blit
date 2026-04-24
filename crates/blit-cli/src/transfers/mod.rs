@@ -56,7 +56,7 @@ fn collapse_slashes(s: &str) -> String {
 ///
 /// On Windows, `\` and `\.` are also recognized as trailing separators.
 /// On Unix, `\` is a literal filename character and is NOT recognized.
-fn source_is_contents(raw_source: &str) -> bool {
+pub(crate) fn source_is_contents(raw_source: &str) -> bool {
     let s = raw_source.trim_end_matches([' ', '\t']);
     if s.is_empty() {
         return false;
@@ -115,7 +115,7 @@ fn source_basename(src: &Endpoint) -> Option<OsString> {
 ///
 /// Matches rsync's `main.c:get_local_name`: a dest is a container if it
 /// has a trailing slash, or if it already exists as a directory.
-fn dest_is_container(raw_dest: &str, dst: &Endpoint) -> bool {
+pub(crate) fn dest_is_container(raw_dest: &str, dst: &Endpoint) -> bool {
     let s = raw_dest.trim_end_matches([' ', '\t']);
     // Trailing "/" or "/." counts as container ("put into here").
     if s.ends_with('/') || s.ends_with("/.") {

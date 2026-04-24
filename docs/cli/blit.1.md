@@ -16,6 +16,7 @@ blit – local and hybrid-transport file transfer CLI
 `blit rm [--yes] <REMOTE>`
 `blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`
 `blit diagnostics perf [--limit <N>] [--enable|--disable] [--clear]`
+`blit diagnostics dump [--json] <SOURCE> <DESTINATION>`
 
 ## DESCRIPTION
 `blit` drives the v2 streaming transfer engine. It supports local transfers and
@@ -127,6 +128,15 @@ Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server
 - `--limit <N>` shows the most recent `N` entries (0 = all).
 - `--enable` / `--disable` toggle capture.
 - `--clear` removes the stored history file.
+
+`blit diagnostics dump <SOURCE> <DESTINATION>` prints a pasteable snapshot of
+what blit sees for an invocation — parsed endpoints, rsync destination
+resolution, filesystem caps, free/total disk space, and (for local pairs)
+whether source and destination are on the same device. No transfer is
+performed. Intended for bug reports: `blit diagnostics dump SRC DST --json
+> bug.log` captures everything a maintainer needs to reproduce the setup.
+
+- `--json` emits machine-readable JSON instead of the human-readable default.
 
 ## CONFIGURATION DIRECTORY
 - `--config-dir <PATH>` overrides the default configuration directory.
