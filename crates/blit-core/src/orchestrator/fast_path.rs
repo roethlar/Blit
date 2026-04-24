@@ -14,7 +14,11 @@ pub(super) const HUGE_SINGLE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) enum FastPathDecision {
-    NoWork,
+    /// Enumeration produced zero file entries to consider for copying.
+    /// `examined` distinguishes "source was empty / had no enumerable
+    /// files" (examined=0) from "source had N files but all already
+    /// matched the destination under skip_unchanged" (examined>0).
+    NoWork { examined: usize },
     Tiny { files: Vec<(PathBuf, u64)> },
     Huge { file: PathBuf, size: u64 },
 }
@@ -69,9 +73,11 @@ pub(super) fn maybe_select_fast_path(
     let mut total_bytes: u64 = 0;
     let mut aborted = false;
     let mut huge_candidate: Option<(PathBuf, u64)> = None;
+    let mut examined: usize = 0;
 
     let scan_result = enumerator.enumerate_local_streaming(src_root, |entry| {
         if let EntryKind::File { size } = entry.kind {
+            examined += 1;
             let should_copy = if options.skip_unchanged {
                 let job = CopyJob {
                     entry: FileEntry {
@@ -124,7 +130,9 @@ pub(super) fn maybe_select_fast_path(
     }
 
     if files.is_empty() {
-        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork));
+        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork {
+            examined,
+        }));
     }
 
     if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {

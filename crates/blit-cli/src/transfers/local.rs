@@ -5,7 +5,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator};
+use blit_core::orchestrator::{
+    LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator, TransferOutcome,
+};
 
 use crate::util::format_bytes;
 
@@ -107,6 +109,12 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
     options
 }
 
+/// Threshold below which the `• Throughput / Workers used` line is noise:
+/// short transfers (startup-dominated) or single-file copies produce
+/// misleading numbers (e.g. "184 B/s" on an NVMe). Keep it for bulk
+/// transfers where it's meaningful.
+const THROUGHPUT_LINE_MIN_BYTES: u64 = 1024 * 1024; // 1 MiB
+
 fn print_summary(
     mirror: bool,
     dry_run: bool,
@@ -131,11 +139,33 @@ fn print_summary(
         summary.duration
     };
 
-    let throughput = if duration.as_secs_f64() > 0.0 {
-        summary.total_bytes as f64 / duration.as_secs_f64()
-    } else {
-        0.0
-    };
+    // Distinguish the three legitimate zero-files cases from the normal
+    // "transferred N files" case. Previously all four printed identically,
+    // which masked two classes of bugs (rsync-semantics, single-file noop).
+    match summary.outcome {
+        TransferOutcome::JournalSkip => {
+            println!(
+                "Up to date: filesystem journal reports no changes{} (in {:.2?})",
+                suffix, duration
+            );
+            return;
+        }
+        TransferOutcome::UpToDate => {
+            println!(
+                "Up to date: {} files examined, 0 changed{} (in {:.2?})",
+                summary.planned_files, suffix, duration
+            );
+            return;
+        }
+        TransferOutcome::SourceEmpty => {
+            println!(
+                "Source is empty: 0 files copied{} (in {:.2?})",
+                suffix, duration
+            );
+            return;
+        }
+        TransferOutcome::Transferred => {}
+    }
 
     println!(
         "{}{} complete: {} files, {} in {:.2?}",
@@ -153,11 +183,24 @@ fn print_summary(
         );
     }
 
-    println!(
-        "• Throughput: {}/s | Workers used: {}",
-        format_bytes(throughput as u64),
-        workers
-    );
+    // Suppress throughput/workers noise on small transfers where startup
+    // dominates wall time and the numbers are meaningless. Keep it for
+    // bulk transfers where it's actually informative.
+    let show_throughput = verbose
+        || summary.total_bytes >= THROUGHPUT_LINE_MIN_BYTES
+        || summary.copied_files > 1;
+    if show_throughput {
+        let throughput = if duration.as_secs_f64() > 0.0 {
+            summary.total_bytes as f64 / duration.as_secs_f64()
+        } else {
+            0.0
+        };
+        println!(
+            "• Throughput: {}/s | Workers used: {}",
+            format_bytes(throughput as u64),
+            workers
+        );
+    }
     if debug_mode {
         println!("• Debug limiter active – worker cap {} thread(s)", workers);
     }
@@ -197,16 +240,24 @@ fn print_summary_json(
     } else {
         summary.duration
     };
+    let outcome = match summary.outcome {
+        TransferOutcome::Transferred => "transferred",
+        TransferOutcome::JournalSkip => "journal_skip",
+        TransferOutcome::UpToDate => "up_to_date",
+        TransferOutcome::SourceEmpty => "source_empty",
+    };
     let output = json!({
         "operation": if mirror { "mirror" } else { "copy" },
         "source": src.to_string_lossy(),
         "destination": dst.to_string_lossy(),
         "files_transferred": summary.copied_files,
+        "files_examined": summary.planned_files,
         "total_bytes": summary.total_bytes,
         "deleted_files": summary.deleted_files,
         "deleted_dirs": summary.deleted_dirs,
         "duration_ms": duration.as_millis() as u64,
         "dry_run": summary.dry_run,
+        "outcome": outcome,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
 }

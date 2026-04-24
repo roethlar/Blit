@@ -24,7 +24,7 @@ use crate::CopyConfig;
 use super::fast_path::{maybe_select_fast_path, FastPathDecision};
 use super::history::{record_performance_history, update_predictor};
 use super::options::LocalMirrorOptions;
-use super::summary::LocalMirrorSummary;
+use super::summary::{LocalMirrorSummary, TransferOutcome};
 
 pub struct TransferOrchestrator;
 
@@ -154,6 +154,7 @@ impl TransferOrchestrator {
             let summary = LocalMirrorSummary {
                 dry_run: options.dry_run,
                 duration: start_time.elapsed(),
+                outcome: TransferOutcome::JournalSkip,
                 ..Default::default()
             };
 
@@ -178,13 +179,28 @@ impl TransferOrchestrator {
         };
         if let Some(decision) = fast_path_outcome.decision {
             let summary = match decision {
-                FastPathDecision::NoWork => {
+                FastPathDecision::NoWork { examined } => {
+                    let outcome = if examined == 0 {
+                        TransferOutcome::SourceEmpty
+                    } else {
+                        TransferOutcome::UpToDate
+                    };
                     if options.verbose {
-                        eprintln!("Fast-path routing: no work required (all files up to date)");
+                        match outcome {
+                            TransferOutcome::SourceEmpty => {
+                                eprintln!("Fast-path routing: source yielded no file entries")
+                            }
+                            _ => eprintln!(
+                                "Fast-path routing: {} files examined, all up to date",
+                                examined
+                            ),
+                        }
                     }
                     let summary = LocalMirrorSummary {
+                        planned_files: examined,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
+                        outcome,
                         ..Default::default()
                     };
                     if let Some(record) = record_performance_history(
@@ -717,6 +733,11 @@ fn execute_single_file_copy(
         copied_files: if did_copy { 1 } else { 0 },
         total_bytes: bytes_copied,
         duration: start_time.elapsed(),
+        outcome: if did_copy {
+            TransferOutcome::Transferred
+        } else {
+            TransferOutcome::UpToDate
+        },
         ..Default::default()
     })
 }

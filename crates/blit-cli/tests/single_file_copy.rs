@@ -143,16 +143,34 @@ fn single_file_copy_idempotent() {
     fs::create_dir_all(&dst).unwrap();
 
     let dst_arg = format!("{}/", dst.display());
-    // First copy: transfers.
+    // First copy: transfers. Must report "1 files" (Transferred outcome).
     let out1 = run_copy(&[&src.to_string_lossy(), &dst_arg]);
     assert!(out1.status.success());
     assert_eq!(fs::read(dst.join("file.txt")).unwrap(), b"hello world");
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(
+        stdout1.contains("Copy complete: 1 files"),
+        "first run should report 'Copy complete: 1 files', got:\n{}",
+        stdout1
+    );
 
-    // Second copy: skip_unchanged should detect the match and no-op
-    // (but still report success and preserve the file).
+    // Second copy: skip_unchanged should detect the match and emit a
+    // distinct "Up to date" summary — NOT "Copy complete: 0 files",
+    // which is the regression this test guards against.
     let out2 = run_copy(&[&src.to_string_lossy(), &dst_arg]);
     assert!(out2.status.success());
     assert_eq!(fs::read(dst.join("file.txt")).unwrap(), b"hello world");
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(
+        stdout2.contains("Up to date"),
+        "second run should report 'Up to date', got:\n{}",
+        stdout2
+    );
+    assert!(
+        !stdout2.contains("Copy complete: 0 files"),
+        "second run must not print misleading 'Copy complete: 0 files', got:\n{}",
+        stdout2
+    );
 }
 
 #[test]

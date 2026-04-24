@@ -6,4 +6,4 @@ mod summary;
 
 pub use options::LocalMirrorOptions;
 pub use orchestrator::TransferOrchestrator;
-pub use summary::LocalMirrorSummary;
+pub use summary::{LocalMirrorSummary, TransferOutcome};
