@@ -47,6 +47,10 @@ fn test_remote_move_local_to_remote() {
 fn test_remote_move_remote_to_local() {
     let ctx = TestContext::new();
     let dest_dir = ctx.workspace.join("dest");
+    // Pre-create dest as a directory so the rsync resolver treats it as
+    // a container (places `remote_move.txt` inside it) rather than an
+    // exact rename target.
+    fs::create_dir_all(&dest_dir).expect("create dest dir");
 
     // Setup remote file
     let remote_file = ctx.module_dir.join("remote_move.txt");

@@ -163,7 +163,7 @@ impl RemotePullClient {
                     finalize_active_file(&mut active_file, progress).await?;
 
                     let relative_path = sanitize_relative_path(&header.relative_path)?;
-                    let dest_path = dest_root.join(&relative_path);
+                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
                     if let Some(parent) = dest_path.parent() {
                         fs::create_dir_all(parent)
                             .await
@@ -464,7 +464,7 @@ impl RemotePullClient {
                     finalize_active_file(&mut active_file, progress).await?;
 
                     let relative_path = sanitize_relative_path(&header.relative_path)?;
-                    let dest_path = dest_root.join(&relative_path);
+                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
                     if let Some(parent) = dest_path.parent() {
                         fs::create_dir_all(parent)
                             .await
@@ -531,7 +531,7 @@ impl RemotePullClient {
                     use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
 
                     let relative_path = sanitize_relative_path(&block.relative_path)?;
-                    let dest_path = dest_root.join(&relative_path);
+                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
 
                     // Ensure parent directory exists
                     if let Some(parent) = dest_path.parent() {
@@ -576,7 +576,7 @@ impl RemotePullClient {
                 Some(server_pull_message::Payload::BlockComplete(complete)) => {
                     // Server signals file resume complete - truncate to final size if needed
                     let relative_path = sanitize_relative_path(&complete.relative_path)?;
-                    let dest_path = dest_root.join(&relative_path);
+                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
 
                     // Truncate file to the correct final size
                     let file = tokio::fs::OpenOptions::new()
@@ -1012,7 +1012,7 @@ async fn handle_block_record(
     let offset = read_u64(stream).await?;
     let block_len = read_u32(stream).await? as usize;
 
-    let dest_path = dest_root.join(&relative_path);
+    let dest_path = resolve_pull_dest(dest_root, &relative_path);
     if let Some(parent) = dest_path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -1068,7 +1068,7 @@ async fn handle_block_complete_record(
     let relative_path = sanitize_relative_path(&rel_string)?;
     let total_size = read_u64(stream).await?;
 
-    let dest_path = dest_root.join(&relative_path);
+    let dest_path = resolve_pull_dest(dest_root, &relative_path);
 
     // Truncate file to final size
     let file = tokio::fs::OpenOptions::new()
