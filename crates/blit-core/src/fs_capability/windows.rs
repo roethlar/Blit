@@ -241,7 +241,7 @@ fn try_copyfileex(src: &Path, dst: &Path) -> Result<u64> {
             None,
             None,
             None,
-            0,
+            windows::Win32::Storage::FileSystem::COPYFILE_FLAGS(0),
         )
     }
     .context("CopyFileExW failed")?;

@@ -200,7 +200,7 @@ pub(crate) fn mark_file_sparse(file: &File) -> bool {
         SetSparse: u8,
     }
 
-    let handle = HANDLE(file.as_raw_handle() as isize);
+    let handle = HANDLE(file.as_raw_handle() as *mut core::ffi::c_void);
     let mut inbuf = FILE_SET_SPARSE_BUFFER { SetSparse: 1 };
     let mut bytes: u32 = 0;
     unsafe {

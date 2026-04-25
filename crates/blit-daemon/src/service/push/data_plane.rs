@@ -5,7 +5,7 @@ use blit_core::generated::{
     FileHeader,
 };
 use filetime::{set_file_mtime, FileTime};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs;
@@ -50,7 +50,7 @@ pub(crate) async fn bind_data_plane_listener() -> Result<TcpListener, Status> {
 
 pub(crate) fn generate_token() -> Vec<u8> {
     let mut buf = vec![0u8; TOKEN_LEN];
-    OsRng.fill_bytes(&mut buf);
+    SysRng.try_fill_bytes(&mut buf).expect("system RNG failed");
     buf
 }
 

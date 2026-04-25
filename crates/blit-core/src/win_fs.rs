@@ -64,7 +64,7 @@ pub fn create_symlink(target: &Path, link: &Path, is_dir: bool) -> std::io::Resu
             PCWSTR(target_wide.as_ptr()),
             flags,
         );
-        if result.as_bool() {
+        if result {
             Ok(())
         } else {
             Err(std::io::Error::last_os_error())
@@ -121,7 +121,7 @@ pub fn has_symlink_privilege() -> bool {
             }],
         };
 
-        use windows::Win32::Foundation::BOOL;
+        use windows::core::BOOL;
         let mut has_privilege = BOOL(0);
         let ok = PrivilegeCheck(token, &mut privilege_set, &mut has_privilege).is_ok();
 
