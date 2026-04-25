@@ -150,7 +150,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<MdnsDiscoveredService>> {
 
         match receiver.recv_timeout(wait_for) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let entry = build_service_entry(info);
+                let entry = build_service_entry(&info);
                 discovered.insert(entry.fullname.clone(), entry);
             }
             Ok(ServiceEvent::ServiceFound(_, _)) | Ok(ServiceEvent::SearchStarted(_)) => {
@@ -175,7 +175,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<MdnsDiscoveredService>> {
     Ok(entries)
 }
 
-fn build_service_entry(info: Box<ResolvedService>) -> MdnsDiscoveredService {
+fn build_service_entry(info: &ResolvedService) -> MdnsDiscoveredService {
     let properties = info
         .txt_properties
         .iter()
