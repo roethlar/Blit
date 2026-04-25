@@ -357,7 +357,7 @@ pub fn windows_copyfile(src: &Path, dst: &Path) -> Result<u64> {
             None,
             None,
             None,
-            flags,
+            windows::Win32::Storage::FileSystem::COPYFILE_FLAGS(flags),
         )
         .is_ok()
     };

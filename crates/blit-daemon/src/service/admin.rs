@@ -556,9 +556,7 @@ pub(crate) fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsRe
         }
     };
 
-    let mut disks = Disks::new_with_refreshed_list();
-    disks.refresh_list();
-    disks.refresh();
+    let disks = Disks::new_with_refreshed_list();
 
     let mut best_match = None;
     let mut best_len = 0usize;

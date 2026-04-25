@@ -5,15 +5,15 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tonic = "0.11"
+tonic = "0.14"
 clap = { version = "4", features = ["derive"] }
 blit-core = { path = "../blit-core" }
 eyre = "0.6"
 color-eyre = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-indicatif = "0.17"
+indicatif = "0.18"
 walkdir = "2.5"
-rayon = "1.10"
+rayon = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sysinfo = { version = "0.31", default-features = false, features = ["disk"] }
@@ -21,7 +21,7 @@ sysinfo = { version = "0.31", default-features = false, features = ["disk"] }
 [dev-dependencies]
 tempfile = "3"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 wait-timeout = "0.2"
 
 [lints]

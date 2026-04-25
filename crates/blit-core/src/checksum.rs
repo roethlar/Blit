@@ -179,7 +179,7 @@ pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
                 }
                 ctx.consume(&buf[..n]);
             }
-            Ok(ctx.compute().to_vec())
+            Ok(ctx.finalize().to_vec())
         }
     }
 }

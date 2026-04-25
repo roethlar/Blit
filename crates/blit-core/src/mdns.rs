@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -9,7 +9,7 @@ use eyre::{bail, Context, Result};
 use flume::RecvTimeoutError;
 use hostname::get;
 use log::warn;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 /// Service type advertised by blit daemons.
 pub const BLIT_SERVICE_TYPE: &str = "_blit._tcp.local.";
@@ -160,6 +160,7 @@ pub fn discover(timeout: Duration) -> Result<Vec<MdnsDiscoveredService>> {
             Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                 discovered.remove(&fullname);
             }
+            Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -174,26 +175,35 @@ pub fn discover(timeout: Duration) -> Result<Vec<MdnsDiscoveredService>> {
     Ok(entries)
 }
 
-fn build_service_entry(info: ServiceInfo) -> MdnsDiscoveredService {
+fn build_service_entry(info: Box<ResolvedService>) -> MdnsDiscoveredService {
     let properties = info
-        .get_properties()
+        .txt_properties
         .iter()
         .map(|prop| (prop.key().to_string(), prop.val_str().to_string()))
         .collect::<HashMap<_, _>>();
 
     let instance_name = info
-        .get_fullname()
+        .fullname
         .strip_suffix(BLIT_SERVICE_TYPE)
         .map(|s| s.trim_end_matches('.').to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| info.get_fullname().to_string());
+        .unwrap_or_else(|| info.fullname.clone());
+
+    let addresses = info
+        .addresses
+        .iter()
+        .filter_map(|scoped| match scoped.to_ip_addr() {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
 
     MdnsDiscoveredService {
-        fullname: info.get_fullname().to_string(),
+        fullname: info.fullname.clone(),
         instance_name,
-        hostname: info.get_hostname().to_string(),
-        port: info.get_port(),
-        addresses: info.get_addresses().iter().copied().collect(),
+        hostname: info.host.clone(),
+        port: info.port,
+        addresses,
         properties,
     }
 }

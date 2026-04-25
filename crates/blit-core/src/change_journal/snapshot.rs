@@ -195,7 +195,7 @@ mod windows {
                 None,
                 OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                HANDLE::default(),
+                Some(HANDLE::default()),
             )
         }
         .map_err(|err| eyre!("CreateFileW {} failed: {err}", path.display()))?;

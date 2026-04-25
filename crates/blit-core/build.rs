@@ -11,9 +11,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-changed={}", proto_file.display());
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile(&[proto_file.as_path()], &[proto_dir.as_path()])?;
+        .compile_protos(&[proto_file.as_path()], &[proto_dir.as_path()])?;
     Ok(())
 }
