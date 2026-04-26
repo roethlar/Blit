@@ -253,9 +253,16 @@ fn detect_filesystem_type_impl(path: &Path) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn detect_filesystem_type_impl(_path: &Path) -> Option<String> {
-    // Windows detection is handled by the existing windows.rs volume_info_for_path
-    None
+fn detect_filesystem_type_impl(path: &Path) -> Option<String> {
+    // Match the Linux semantic: statfs returns an error for nonexistent
+    // paths, so we return None. (windows::volume_info_for_path otherwise
+    // walks up to the nearest existing ancestor.)
+    if !path.exists() {
+        return None;
+    }
+    super::windows::volume_info_for_path(path)
+        .ok()
+        .map(|info| info.filesystem.to_lowercase())
 }
 
 #[cfg(test)]

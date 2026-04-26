@@ -94,7 +94,10 @@ fn dump_detects_rsync_basename_append() {
     let resolved = v["rsync_resolution"]["resolved_destination"]
         .as_str()
         .unwrap();
-    assert!(resolved.ends_with("/dst/src"), "expected dst/src, got {resolved}");
+    // Normalize separators so the suffix check works on Windows where
+    // the path prefix uses backslashes.
+    let normalized = resolved.replace('\\', "/");
+    assert!(normalized.ends_with("/dst/src"), "expected dst/src, got {resolved}");
 }
 
 #[test]

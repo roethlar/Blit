@@ -23,9 +23,9 @@ enum BlockCloneStatus {
 }
 
 #[derive(Debug, Clone)]
-struct VolumeInfo {
-    serial_number: u32,
-    filesystem: String,
+pub(super) struct VolumeInfo {
+    pub(super) serial_number: u32,
+    pub(super) filesystem: String,
 }
 
 static BLOCK_CLONE_CACHE: Lazy<RwLock<HashMap<u32, BlockCloneStatus>>> =
@@ -165,7 +165,7 @@ fn should_enable_block_clone(src: &VolumeInfo, dst: &VolumeInfo) -> bool {
     src.serial_number == dst.serial_number && is_refs_filesystem(&dst.filesystem)
 }
 
-fn volume_info_for_path(path: &Path) -> Result<VolumeInfo> {
+pub(super) fn volume_info_for_path(path: &Path) -> Result<VolumeInfo> {
     let query_path = path_with_existing_ancestor(path)
         .with_context(|| format!("no existing ancestor found for {}", path.display()))?;
     let query_display = query_path.display().to_string();

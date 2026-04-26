@@ -273,6 +273,10 @@ fn disk_free_total(path: &Path) -> (Option<u64>, Option<u64>) {
     // sysinfo's list of disks is not sorted, so find the longest match.
     let disks = sysinfo::Disks::new_with_refreshed_list();
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // Windows canonicalize returns extended-length paths (\\?\C:\...) but
+    // sysinfo's mount_point is the bare drive (C:\). Strip the prefix so
+    // starts_with matches.
+    let canonical = strip_windows_extended_prefix(&canonical);
     let mut best: Option<(&sysinfo::Disk, usize)> = None;
     for disk in disks.iter() {
         let mp = disk.mount_point();
@@ -289,16 +293,34 @@ fn disk_free_total(path: &Path) -> (Option<u64>, Option<u64>) {
     }
 }
 
+#[cfg(windows)]
+fn strip_windows_extended_prefix(path: &Path) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_windows_extended_prefix(path: &Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
 /// Same-device check: the biggest single predictor of reflink eligibility
 /// and general zero-copy viability on Linux. Remote endpoints short-circuit
 /// to `false` (no shared-device semantics across the wire).
 fn same_device(src: &Endpoint, dst: &Endpoint) -> Option<bool> {
+    // Remote endpoints have no shared-device semantics across the wire,
+    // regardless of host platform.
+    let (Endpoint::Local(s), Endpoint::Local(d)) = (src, dst) else {
+        return Some(false);
+    };
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let (Endpoint::Local(s), Endpoint::Local(d)) = (src, dst) else {
-            return Some(false);
-        };
         // Fall back to parent directory for dest because the resolved
         // path may not exist yet on a fresh target.
         let src_meta = std::fs::metadata(s).ok()?;
@@ -312,7 +334,7 @@ fn same_device(src: &Endpoint, dst: &Endpoint) -> Option<bool> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (src, dst);
+        let _ = (s, d);
         None
     }
 }
