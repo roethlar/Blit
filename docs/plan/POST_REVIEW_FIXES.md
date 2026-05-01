@@ -62,6 +62,59 @@ needed for that aspect. Add a smaller unit test that exercises
 `write_file_stream` against a read-only directory and asserts the
 flush-failure case bubbles up as an `Err` instead of returning Ok.
 
+### 1.1b Surface real pipeline error from `MultiStreamSender::queue`
+
+**File:** `crates/blit-core/src/remote/push/client/mod.rs:122`
+
+When the streaming pipeline dies (sink worker errored, remote daemon
+closed, disk full on dest), the receiver inside
+`execute_sink_pipeline_streaming` is dropped. The next `tx.send().await`
+in `queue()` then fails with the generic:
+
+```
+data plane pipeline closed unexpectedly
+```
+
+— and the *actual* error (the `Err` sitting inside `pipeline_handle`)
+is never surfaced. Real-world hit (2026-05-01):
+`./target/release/blit-cli mirror ~/dev 10.1.10.12:9031://dev -p -v`
+crashed after 712 files / 6.34 MiB with this exact message and no
+underlying cause — the dest module was nowhere near full, and no
+clue what actually went wrong on the daemon side.
+
+Fix: when `tx.send().await` fails in `queue()`, await `pipeline_handle`
+to extract the real error and propagate that instead. Sketch:
+
+```rust
+for payload in payloads {
+    if tx.send(payload).await.is_err() {
+        // Receiver dropped — pipeline died. Drain the handle for the
+        // real error.
+        drop(self.payload_tx.take());
+        let handle = self.pipeline_handle.take().expect("handle present");
+        let err = match handle.await {
+            Ok(Ok(_)) => eyre!("data plane pipeline closed without \
+                                error but channel was closed"),
+            Ok(Err(e)) => e.wrap_err("data plane pipeline failed"),
+            Err(join) => eyre!("data plane pipeline panicked: {join}"),
+        };
+        return Err(err);
+    }
+}
+```
+
+Requires `pipeline_handle` to become `Option<JoinHandle<…>>` so we can
+`take()` it here and in `finish()`. Same trick covers the symmetric
+failure where `finish()` is called and the pipeline already errored.
+
+Add a regression test in `pipeline.rs` that wires a sink which returns
+`Err` on the first `write_payload`, sends payloads via the streaming
+producer, and asserts the producer surfaces the sink's error (not the
+generic "data plane pipeline closed unexpectedly" string).
+
+Also rerun the failing mirror after the fix lands to confirm the real
+cause is now visible.
+
 ### 1.2 Delete `TarShardExecutor` (or document why it stays)
 
 **File:** `crates/blit-daemon/src/service/push/data_plane.rs`
