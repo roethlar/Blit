@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use eyre::Result;
+use eyre::{bail, Result};
 use tokio::fs;
 use tokio::sync::mpsc;
 
@@ -182,6 +182,10 @@ impl TransferSource for RemoteTransferSource {
                 }
                 let data = builder.into_inner()?;
                 Ok(PreparedPayload::TarShard { headers, data })
+            }
+            // Resume payloads originate on the receive side only.
+            TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => {
+                bail!("FileBlock payloads cannot be prepared from a remote source")
             }
         }
     }

@@ -29,3 +29,6 @@ logs/
 
 # OS specific
 Thumbs.db
+
+# Local benchmark/diagnostic results — not for the repo
+testing/

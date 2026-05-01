@@ -800,6 +800,8 @@ async fn accept_pull_data_connection_streaming(
                 total_files += match &payload {
                     TransferPayload::File(_) => 1,
                     TransferPayload::TarShard { headers } => headers.len() as u64,
+                    // Daemon's pull source (filesystem) never produces resume payloads.
+                    TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => 0,
                 };
                 if payload_tx.send(payload).await.is_err() {
                     return (total_files, total_bytes);
@@ -892,5 +894,7 @@ fn payload_bytes(payload: &TransferPayload) -> u64 {
     match payload {
         TransferPayload::File(header) => header.size,
         TransferPayload::TarShard { headers } => headers.iter().map(|h| h.size).sum(),
+        TransferPayload::FileBlock { size, .. } => *size,
+        TransferPayload::FileBlockComplete { .. } => 0,
     }
 }

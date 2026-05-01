@@ -140,6 +140,9 @@ impl DataPlaneSession {
                         }
                     }
                 }
+                PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                    bail!("DataPlaneSession::send_payloads does not handle resume payloads");
+                }
             }
         }
 
@@ -167,6 +170,25 @@ impl DataPlaneSession {
         header: &FileHeader,
     ) -> Result<()> {
         let rel = &header.relative_path;
+        let mut file = source
+            .open_file(header)
+            .await
+            .with_context(|| format!("opening {}", rel))?;
+        self.send_file_from_reader(header, &mut file).await
+    }
+
+    /// Send a file payload whose bytes come from an arbitrary async
+    /// reader (not a local file). Used by `DataPlaneSink` for the
+    /// remote→remote relay case, where bytes arrive from an inbound
+    /// `DataPlaneSource` and need to be forwarded to the next hop.
+    ///
+    /// Same wire format and double-buffered loop as `send_file`.
+    pub async fn send_file_from_reader(
+        &mut self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<()> {
+        let rel = &header.relative_path;
         trace_client!(self, "sending file '{}' ({} bytes)", rel, header.size);
 
         let path_bytes = rel.as_bytes();
@@ -192,14 +214,8 @@ impl DataPlaneSession {
             .await
             .context("writing file size")?;
 
-        let mut file = source
-            .open_file(header)
-            .await
-            .with_context(|| format!("opening {}", rel))?;
-
-        // Double-buffered I/O: overlaps disk reads with network writes
-        self.send_file_double_buffered(&mut file, header, rel)
-            .await?;
+        // Double-buffered I/O: overlaps source reads with network writes
+        self.send_file_double_buffered(reader, header, rel).await?;
 
         trace_client!(self, "file '{}' sent ({} bytes)", rel, header.size);
 
@@ -443,4 +459,99 @@ impl DataPlaneSession {
 
         Ok(())
     }
+}
+
+/// Default buffer size for the symmetric receive path. Matches what the
+/// send side's buffer pool uses for chunk_bytes; large enough that the
+/// per-syscall overhead doesn't dominate at 10 GbE, and that ZFS-style
+/// transactional filesystems can amortize per-write costs.
+///
+/// Empirically, 8 KiB caps push throughput at ~1 Gbps on EPYC/ZFS even
+/// when the network can do 9.4 Gbps and the disk can do 14.76 Gbps.
+/// 1 MiB lets the receiver keep up with the sender's double-buffered
+/// pipeline.
+pub const RECEIVE_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Stream `expected` bytes from an async source into an async sink with
+/// double-buffered I/O — while one buffer drains to disk, the other is
+/// being filled from the wire. Symmetric counterpart of
+/// `DataPlaneSession::send_file_double_buffered`.
+///
+/// Both the daemon's push receiver (writing to disk from a TCP socket)
+/// and the client's pull receiver (same shape, opposite direction) call
+/// this so the receive side has the same throughput characteristics as
+/// the send side. Replacing this with `tokio::io::copy` (8 KiB internal
+/// buffer) caps real-world transfers at ~1 Gbps regardless of network
+/// or disk speed.
+///
+/// Returns the number of bytes copied. Errors on early EOF.
+pub async fn receive_stream_double_buffered<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    expected: u64,
+    buffer_size: usize,
+) -> Result<u64>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    if expected == 0 {
+        return Ok(0);
+    }
+
+    let cap = buffer_size.max(64 * 1024);
+    let mut buf_a = vec![0u8; cap];
+    let mut buf_b = vec![0u8; cap];
+
+    // Initial fill of buf_a.
+    let mut bytes_a = read_up_to(src, &mut buf_a, expected).await?;
+    if bytes_a == 0 {
+        bail!("unexpected EOF: 0 bytes received, {} expected", expected);
+    }
+    let mut total: u64 = bytes_a as u64;
+
+    while total < expected {
+        let want_b = (expected - total).min(buf_b.len() as u64);
+        let (write_res, read_res) = tokio::join!(
+            dst.write_all(&buf_a[..bytes_a]),
+            read_up_to(src, &mut buf_b, want_b),
+        );
+        write_res.context("writing received bytes to disk")?;
+        let bytes_b = read_res?;
+        if bytes_b == 0 && total + bytes_a as u64 != expected {
+            bail!(
+                "unexpected EOF: {} bytes received, {} expected",
+                total + bytes_a as u64,
+                expected
+            );
+        }
+        total += bytes_b as u64;
+        std::mem::swap(&mut buf_a, &mut buf_b);
+        bytes_a = bytes_b;
+    }
+
+    if bytes_a > 0 {
+        dst.write_all(&buf_a[..bytes_a])
+            .await
+            .context("writing final chunk to disk")?;
+    }
+
+    Ok(total)
+}
+
+/// Read up to `cap` bytes (clamped to the slice length) from `src`,
+/// returning how many were read. Returns 0 only on EOF or zero-cap.
+async fn read_up_to<R>(src: &mut R, buf: &mut [u8], cap: u64) -> Result<usize>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+{
+    let take = (buf.len() as u64).min(cap) as usize;
+    if take == 0 {
+        return Ok(0);
+    }
+    let n = src
+        .read(&mut buf[..take])
+        .await
+        .context("reading from data plane stream")?;
+    Ok(n)
 }

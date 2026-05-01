@@ -25,6 +25,17 @@ use std::sync::Arc;
 pub enum TransferPayload {
     File(FileHeader),
     TarShard { headers: Vec<FileHeader> },
+    /// Resume protocol: overwrite a block of an existing file.
+    FileBlock {
+        relative_path: String,
+        offset: u64,
+        size: u64,
+    },
+    /// Resume protocol: finalize a resumed file (truncate to total_size).
+    FileBlockComplete {
+        relative_path: String,
+        total_size: u64,
+    },
 }
 
 pub async fn prepare_payload(
@@ -42,15 +53,48 @@ pub async fn prepare_payload(
                     .map_err(|err| eyre!("tar shard worker failed: {err}"))??;
             Ok(PreparedPayload::TarShard { headers, data })
         }
+        // Resume payloads can only originate on the receive side (parsed
+        // off the wire by DataPlaneSource); the file-system source never
+        // produces them.
+        TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => {
+            bail!("FileBlock payloads cannot be prepared from a filesystem source")
+        }
     }
 }
 
+/// A payload ready for a sink to consume.
+///
+/// `File` and `TarShard` are used by both outbound and inbound paths
+/// (they carry self-contained data). The receive pipeline additionally
+/// uses `FileBlock` / `FileBlockComplete` for the resume protocol.
+///
+/// Streaming file bytes (4 GiB pulls, no point buffering) are NOT a
+/// payload variant — they go through `TransferSink::write_file_stream`
+/// directly so the receiver can hand the sink a borrowed reader without
+/// fighting `'static` trait-object lifetimes.
 #[derive(Debug)]
 pub enum PreparedPayload {
+    /// Whole file, source has it accessible by `src_root.join(relative_path)`.
+    /// The sink performs a (zero-copy when possible) local copy.
     File(FileHeader),
+    /// In-memory tar shard. Already buffered (bounded by the planner's
+    /// shard threshold).
     TarShard {
         headers: Vec<FileHeader>,
         data: Vec<u8>,
+    },
+    /// Resume: write `bytes` at `offset` into the existing file at
+    /// `dst_root.join(relative_path)`.
+    FileBlock {
+        relative_path: String,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
+    /// Resume: finalize the file at `dst_root.join(relative_path)` by
+    /// truncating to `total_size`.
+    FileBlockComplete {
+        relative_path: String,
+        total_size: u64,
     },
 }
 
@@ -132,9 +176,13 @@ pub fn plan_transfer_payloads(
     // Sort payloads: tar shards first (small, distribute well across streams),
     // then files ascending by size. This ensures all streams stay busy with
     // small work before a single large file monopolizes one stream's tail.
+    // Resume variants (FileBlock / FileBlockComplete) are receive-only and
+    // never appear here — plan_transfer_payloads is the outbound planner.
     payloads.sort_by_key(|p| match p {
         TransferPayload::TarShard { .. } => (0, 0),
         TransferPayload::File(h) => (1, h.size),
+        TransferPayload::FileBlock { size, .. } => (2, *size),
+        TransferPayload::FileBlockComplete { .. } => (3, 0),
     });
 
     Ok(PlannedPayloads {
@@ -149,6 +197,9 @@ pub fn payload_file_count(payloads: &[TransferPayload]) -> usize {
         .map(|payload| match payload {
             TransferPayload::File(_) => 1,
             TransferPayload::TarShard { headers } => headers.len(),
+            // Resume payloads patch existing files in-place — they
+            // don't add to the "files transferred" count.
+            TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => 0,
         })
         .sum()
 }
@@ -268,6 +319,12 @@ pub async fn transfer_payloads_via_control_plane(
                         progress.report_file_complete(header.relative_path.clone(), header.size);
                     }
                 }
+            }
+            // Resume variants are receive-only — gRPC control plane is outbound only.
+            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                bail!(
+                    "FileBlock payloads cannot traverse the gRPC control plane (outbound only)"
+                );
             }
         }
     }

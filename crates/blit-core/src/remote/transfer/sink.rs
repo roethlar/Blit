@@ -46,6 +46,25 @@ pub trait TransferSink: Send + Sync {
     /// Write a single prepared payload to the destination.
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome>;
 
+    /// Stream a file payload from a borrowed async reader.
+    ///
+    /// Used by the receive pipeline so file bytes that arrive on a TCP
+    /// wire can be written through the same sink as local copies — no
+    /// double-buffering into a `'static` reader. Sinks that don't
+    /// support inbound streaming (e.g. `GrpcFallbackSink`) inherit the
+    /// default error implementation.
+    async fn write_file_stream(
+        &self,
+        header: &FileHeader,
+        _reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<SinkOutcome> {
+        eyre::bail!(
+            "{} does not support write_file_stream (called for {})",
+            std::any::type_name::<Self>(),
+            header.relative_path
+        )
+    }
+
     /// Signal that all payloads have been sent. Flushes buffers, sends terminators, etc.
     /// Default implementation is a no-op.
     async fn finish(&self) -> Result<()> {
@@ -90,20 +109,90 @@ impl FsTransferSink {
 #[async_trait]
 impl TransferSink for FsTransferSink {
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
-        let src_root = self.src_root.clone();
-        let dst_root = self.dst_root.clone();
-        let config = self.config.clone();
+        // Resume payloads need async I/O (file open + seek + write
+        // through tokio). Local-source payloads (File / TarShard) stay
+        // on a blocking thread so the zero-copy cascade and tar
+        // extraction can use std::fs.
+        match payload {
+            PreparedPayload::FileBlock {
+                relative_path,
+                offset,
+                bytes,
+            } => write_file_block_payload(&self.dst_root, &relative_path, offset, bytes).await,
+            PreparedPayload::FileBlockComplete {
+                relative_path,
+                total_size,
+            } => write_file_block_complete(&self.dst_root, &relative_path, total_size).await,
+            PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
+                let src_root = self.src_root.clone();
+                let dst_root = self.dst_root.clone();
+                let config = self.config.clone();
+                tokio::task::spawn_blocking(move || match payload {
+                    PreparedPayload::File(header) => {
+                        write_file_payload(&src_root, &dst_root, &header, &config)
+                    }
+                    PreparedPayload::TarShard { headers, data } => {
+                        write_tar_shard_payload(&dst_root, &headers, &data, &config)
+                    }
+                    _ => unreachable!("outer match guarantees File or TarShard"),
+                })
+                .await
+                .context("sink worker panicked")?
+            }
+        }
+    }
 
-        tokio::task::spawn_blocking(move || match payload {
-            PreparedPayload::File(header) => {
-                write_file_payload(&src_root, &dst_root, &header, &config)
-            }
-            PreparedPayload::TarShard { headers, data } => {
-                write_tar_shard_payload(&dst_root, &headers, &data, &config)
-            }
+    /// Stream file bytes from the wire to the destination filesystem
+    /// using the same double-buffered helper the send side uses. This
+    /// is what makes push and pull receive symmetric on the FsTransferSink.
+    async fn write_file_stream(
+        &self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<SinkOutcome> {
+        use crate::remote::transfer::data_plane::{
+            receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
+        };
+
+        let dst = self.dst_root.join(&header.relative_path);
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+
+        if self.config.dry_run {
+            // Drain the wire so the protocol stream stays aligned, but
+            // discard the bytes.
+            let mut sink = tokio::io::sink();
+            receive_stream_double_buffered(reader, &mut sink, header.size, RECEIVE_CHUNK_SIZE)
+                .await
+                .with_context(|| format!("draining {} (dry-run)", header.relative_path))?;
+            return Ok(SinkOutcome {
+                files_written: 1,
+                bytes_written: 0,
+            });
+        }
+
+        let mut file = tokio::fs::File::create(&dst)
+            .await
+            .with_context(|| format!("creating {}", dst.display()))?;
+        receive_stream_double_buffered(reader, &mut file, header.size, RECEIVE_CHUNK_SIZE)
+            .await
+            .with_context(|| format!("writing {}", dst.display()))?;
+        file.sync_all()
+            .await
+            .with_context(|| format!("syncing {}", dst.display()))?;
+
+        if self.config.preserve_times && header.mtime_seconds > 0 {
+            let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
+            let _ = filetime::set_file_mtime(&dst, ft);
+        }
+
+        Ok(SinkOutcome {
+            files_written: 1,
+            bytes_written: header.size,
         })
-        .await
-        .context("sink worker panicked")?
     }
 
     fn root(&self) -> &Path {
@@ -231,6 +320,63 @@ fn write_tar_shard_payload(
     })
 }
 
+/// Resume protocol: overwrite a block of an existing file at the given offset.
+async fn write_file_block_payload(
+    dst_root: &Path,
+    relative_path: &str,
+    offset: u64,
+    bytes: Vec<u8>,
+) -> Result<SinkOutcome> {
+    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+
+    let dst = dst_root.join(relative_path);
+    let bytes_len = bytes.len() as u64;
+    // Resume blocks patch existing files at offset; we want to create
+    // if missing but never truncate (subsequent block records share
+    // the file).
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&dst)
+        .await
+        .with_context(|| format!("opening {} for block write", dst.display()))?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .await
+        .with_context(|| format!("seeking {} to offset {}", dst.display(), offset))?;
+    file.write_all(&bytes)
+        .await
+        .with_context(|| format!("writing block to {}", dst.display()))?;
+    Ok(SinkOutcome {
+        files_written: 0, // Resume blocks patch in-place; finalization counts the file.
+        bytes_written: bytes_len,
+    })
+}
+
+/// Resume protocol: finalize a resumed file by truncating to total_size + fsync.
+async fn write_file_block_complete(
+    dst_root: &Path,
+    relative_path: &str,
+    total_size: u64,
+) -> Result<SinkOutcome> {
+    let dst = dst_root.join(relative_path);
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&dst)
+        .await
+        .with_context(|| format!("opening {} for truncation", dst.display()))?;
+    file.set_len(total_size)
+        .await
+        .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
+    file.sync_all()
+        .await
+        .with_context(|| format!("syncing {}", dst.display()))?;
+    Ok(SinkOutcome {
+        files_written: 1,
+        bytes_written: 0,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // DataPlaneSink — TCP data plane writer
 // ---------------------------------------------------------------------------
@@ -287,7 +433,31 @@ impl TransferSink for DataPlaneSink {
                     bytes_written: bytes,
                 })
             }
+            // Resume payloads can't be relayed without a reverse-resume
+            // protocol on the next hop. Reject explicitly.
+            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                eyre::bail!("DataPlaneSink does not relay resume-block payloads")
+            }
         }
+    }
+
+    /// Relay case: bytes arrive on `reader` (e.g. from a DataPlaneSource
+    /// during a remote→remote transfer) and forward to the next hop.
+    async fn write_file_stream(
+        &self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<SinkOutcome> {
+        let size = header.size;
+        let mut session = self.session.lock().await;
+        session
+            .send_file_from_reader(header, reader)
+            .await
+            .with_context(|| format!("relaying {}", header.relative_path))?;
+        Ok(SinkOutcome {
+            files_written: 1,
+            bytes_written: size,
+        })
     }
 
     async fn finish(&self) -> Result<()> {
@@ -339,7 +509,33 @@ impl TransferSink for NullSink {
                 files_written: headers.len(),
                 bytes_written: data.len() as u64,
             }),
+            PreparedPayload::FileBlock { bytes, .. } => Ok(SinkOutcome {
+                files_written: 0,
+                bytes_written: bytes.len() as u64,
+            }),
+            PreparedPayload::FileBlockComplete { .. } => Ok(SinkOutcome::default()),
         }
+    }
+
+    /// Drain the wire so the protocol stream stays aligned, then count
+    /// the bytes. Lets `--null` benchmark the receive path end-to-end
+    /// without paying for disk writes.
+    async fn write_file_stream(
+        &self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<SinkOutcome> {
+        use crate::remote::transfer::data_plane::{
+            receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
+        };
+        let mut sink = tokio::io::sink();
+        let n = receive_stream_double_buffered(reader, &mut sink, header.size, RECEIVE_CHUNK_SIZE)
+            .await
+            .with_context(|| format!("draining {} (null sink)", header.relative_path))?;
+        Ok(SinkOutcome {
+            files_written: 1,
+            bytes_written: n,
+        })
     }
 
     fn root(&self) -> &Path {
@@ -478,6 +674,13 @@ impl TransferSink for GrpcFallbackSink {
                     files_written: count,
                     bytes_written: bytes,
                 })
+            }
+            // gRPC fallback is outbound only; receive-side payloads
+            // shouldn't reach this sink.
+            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                eyre::bail!(
+                    "GrpcFallbackSink does not handle FileBlock payloads (outbound only)"
+                );
             }
         }
     }

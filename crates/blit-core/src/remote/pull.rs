@@ -19,8 +19,8 @@ use crate::generated::{
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::data_plane::{
-    DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,
-    DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD,
+    receive_stream_double_buffered, DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE,
+    DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD, RECEIVE_CHUNK_SIZE,
 };
 use crate::remote::transfer::progress::RemoteTransferProgress;
 
@@ -911,28 +911,15 @@ async fn handle_file_record(
     let mut file = File::create(&dest_path)
         .await
         .with_context(|| format!("creating {}", dest_path.display()))?;
-    let mut remaining = file_size;
-    let mut buffer = vec![0u8; 64 * 1024];
-    while remaining > 0 {
-        let to_read = buffer.len().min(remaining as usize);
-        let read = stream
-            .read(&mut buffer[..to_read])
-            .await
-            .context("reading pull data-plane file chunk")?;
-        if read == 0 {
-            bail!(
-                "unexpected EOF while receiving {} ({} bytes remaining)",
-                relative_path.display(),
-                remaining
-            );
-        }
-        file.write_all(&buffer[..read])
-            .await
-            .with_context(|| format!("writing {}", dest_path.display()))?;
-        remaining -= read as u64;
-        if let Some(progress) = progress {
-            progress.report_payload(0, read as u64);
-        }
+
+    // Use the shared symmetric receive path. Same code as the daemon's
+    // push-side receiver — both directions hit the same throughput.
+    receive_stream_double_buffered(stream, &mut file, file_size, RECEIVE_CHUNK_SIZE)
+        .await
+        .with_context(|| format!("writing {}", dest_path.display()))?;
+
+    if let Some(progress) = progress {
+        progress.report_payload(0, file_size);
     }
     file.sync_all()
         .await

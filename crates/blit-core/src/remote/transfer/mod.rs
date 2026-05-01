@@ -6,9 +6,9 @@ pub mod sink;
 pub mod source;
 
 pub use data_plane::{
-    DataPlaneSession, CONTROL_PLANE_CHUNK_SIZE, DATA_PLANE_RECORD_BLOCK,
-    DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE,
-    DATA_PLANE_RECORD_TAR_SHARD,
+    receive_stream_double_buffered, DataPlaneSession, CONTROL_PLANE_CHUNK_SIZE,
+    DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,
+    DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD, RECEIVE_CHUNK_SIZE,
 };
 pub use payload::{
     build_tar_shard, payload_file_count, plan_transfer_payloads, prepare_payload,

@@ -204,14 +204,22 @@ async fn handle_data_plane_stream(
                     Status::internal(format!("create file {}: {}", dest_path.display(), err))
                 })?;
 
-                let mut limited = (&mut socket).take(file_size);
-                let bytes_copied =
-                    tokio::io::copy(&mut limited, &mut file)
-                        .await
-                        .map_err(|err| {
-                            eprintln!("[data-plane] writing {}: {}", dest_path.display(), err);
-                            Status::internal(format!("writing {}: {}", dest_path.display(), err))
-                        })?;
+                // Use the shared symmetric receive path so push and pull
+                // hit the same throughput. tokio::io::copy's 8 KiB default
+                // capped throughput at ~1 Gbps; double-buffered 1 MiB
+                // chunks restore parity with the sender.
+                let bytes_copied = blit_core::remote::transfer::data_plane::
+                    receive_stream_double_buffered(
+                        &mut socket,
+                        &mut file,
+                        file_size,
+                        blit_core::remote::transfer::data_plane::RECEIVE_CHUNK_SIZE,
+                    )
+                    .await
+                    .map_err(|err| {
+                        eprintln!("[data-plane] writing {}: {}", dest_path.display(), err);
+                        Status::internal(format!("writing {}: {}", dest_path.display(), err))
+                    })?;
                 if bytes_copied != file_size {
                     eprintln!(
                         "[data-plane] short transfer for {} (expected {} bytes, received {})",

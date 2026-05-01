@@ -184,6 +184,11 @@ fn prune_unrequested_payloads(
                     skipped += 1;
                 }
             }
+            // Resume payloads originate on the receive side; the
+            // outbound prune path never sees them.
+            TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => {
+                skipped += 1;
+            }
             TransferPayload::TarShard { headers } => {
                 let mut kept_headers = Vec::with_capacity(headers.len());
                 for header in headers {
@@ -418,6 +423,10 @@ impl RemotePushClient {
                                                                 header.relative_path
                                                             );
                                                         }
+                                                    }
+                                                    TransferPayload::FileBlock { .. }
+                                                    | TransferPayload::FileBlockComplete { .. } => {
+                                                        // Receive-only — never produced by the outbound planner.
                                                     }
                                                 }
                                             }
@@ -674,6 +683,10 @@ impl RemotePushClient {
                                                                 header.relative_path
                                                             );
                                                         }
+                                                    }
+                                                    TransferPayload::FileBlock { .. }
+                                                    | TransferPayload::FileBlockComplete { .. } => {
+                                                        // Receive-only — never produced by the outbound planner.
                                                     }
                                                 }
                                             }
