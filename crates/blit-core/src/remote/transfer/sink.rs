@@ -231,13 +231,26 @@ impl TransferSink for FsTransferSink {
             });
         }
 
-        let mut file = tokio::fs::File::create(&dst)
-            .await
-            .with_context(|| format!("creating {}", dst.display()))?;
-        receive_stream_double_buffered(reader, &mut file, header.size, RECEIVE_CHUNK_SIZE)
-            .await
-            .with_context(|| format!("writing {}", dst.display()))?;
-        // Intentionally no sync_all per file: ZFS commits per fsync are
+        {
+            use tokio::io::AsyncWriteExt as _;
+            let mut file = tokio::fs::File::create(&dst)
+                .await
+                .with_context(|| format!("creating {}", dst.display()))?;
+            receive_stream_double_buffered(reader, &mut file, header.size, RECEIVE_CHUNK_SIZE)
+                .await
+                .with_context(|| format!("writing {}", dst.display()))?;
+            // Flush the tokio File's internal buffer state (does NOT
+            // fsync — just ensures user-space buffering is drained
+            // before we drop the handle and apply mtime). Without
+            // this, set_file_mtime races with deferred writes from
+            // tokio's blocking-thread pool: 5/8 of mtimes were
+            // observed silently bumped to "now" on the receive side.
+            let _ = file.flush().await;
+        }
+        // Handle dropped → kernel close() complete → no further
+        // metadata churn from this file. Now safe to set mtime by path.
+
+        // Intentionally no sync_all: ZFS commits per fsync are
         // multi-second on spinning rust and crater throughput
         // (9.3 → 3.3 Gbps observed). The transfer's durability signal
         // is its END marker plus the OS's own flush; matches rsync's

@@ -377,8 +377,27 @@ impl RemotePullClient {
             normalize_for_request(&rel_path)
         };
 
-        // Create channel for sending messages to server
+        // Create channel for sending messages to server. Capacity is
+        // small (32) — adequate because the gRPC stream is opened
+        // BEFORE we push manifest entries, so the daemon is consuming
+        // continuously and the channel never fills.
+        //
+        // History: for a long time this code pushed all manifest
+        // entries into the channel BEFORE opening the gRPC stream.
+        // For any local manifest with >30 entries that deadlocked at
+        // entry 33 (channel full, no consumer because stream wasn't
+        // open yet). Mirror noop on a populated dest hung silently.
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientPullMessage>(32);
+
+        // Open the bidirectional stream FIRST so the daemon starts
+        // consuming our messages as we push them.
+        let request_stream = ReceiverStream::new(rx);
+        let mut response_stream = self
+            .client
+            .pull_sync(request_stream)
+            .await
+            .map_err(|status| eyre!(status.message().to_string()))?
+            .into_inner();
 
         // Send header
         tx.send(ClientPullMessage {
@@ -399,32 +418,36 @@ impl RemotePullClient {
         .await
         .map_err(|_| eyre!("failed to send pull sync header"))?;
 
-        // Send local manifest
-        for header in &local_manifest {
-            tx.send(ClientPullMessage {
-                payload: Some(client_pull_message::Payload::LocalFile(header.clone())),
-            })
-            .await
-            .map_err(|_| eyre!("failed to send local file header"))?;
-        }
-
-        // Send manifest done signal
-        tx.send(ClientPullMessage {
-            payload: Some(client_pull_message::Payload::ManifestDone(
-                ManifestComplete {},
-            )),
-        })
-        .await
-        .map_err(|_| eyre!("failed to send manifest done"))?;
-
-        // Open bidirectional stream
-        let request_stream = ReceiverStream::new(rx);
-        let mut response_stream = self
-            .client
-            .pull_sync(request_stream)
-            .await
-            .map_err(|status| eyre!(status.message().to_string()))?
-            .into_inner();
+        // Send local manifest. Send in a separate task so we can also
+        // drive response_stream concurrently — for large manifests the
+        // daemon may start emitting need-list / data-plane responses
+        // before we finish enumerating, and we must not block sending
+        // the manifest just because we haven't started reading
+        // responses yet.
+        let local_manifest_clone = local_manifest.clone();
+        let tx_for_manifest = tx.clone();
+        let manifest_send_task = tokio::spawn(async move {
+            for header in &local_manifest_clone {
+                if tx_for_manifest
+                    .send(ClientPullMessage {
+                        payload: Some(client_pull_message::Payload::LocalFile(header.clone())),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Err(eyre!("failed to send local file header"));
+                }
+            }
+            tx_for_manifest
+                .send(ClientPullMessage {
+                    payload: Some(client_pull_message::Payload::ManifestDone(
+                        ManifestComplete {},
+                    )),
+                })
+                .await
+                .map_err(|_| eyre!("failed to send manifest done"))?;
+            Ok::<(), eyre::Report>(())
+        });
 
         let mut report = RemotePullReport::default();
         let mut active_file: Option<(File, PathBuf)> = None;
@@ -599,6 +622,16 @@ impl RemotePullClient {
         }
 
         finalize_active_file(&mut active_file, progress).await?;
+
+        // Wait for the manifest send task to complete (it should have
+        // finished by now — daemon's response stream couldn't have
+        // ended otherwise — but await for error propagation).
+        manifest_send_task
+            .await
+            .map_err(|err| eyre!("manifest send task panicked: {}", err))??;
+        // Drop the original tx so the daemon sees end-of-stream after
+        // any final messages have flushed.
+        drop(tx);
 
         // Wait for data plane to complete and merge results
         if let Some(handle) = data_plane_handle {
