@@ -32,3 +32,6 @@ Thumbs.db
 
 # Local benchmark/diagnostic results — not for the repo
 testing/
+
+# Session export files (one-shot conversation transcripts, ~MB each)
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
