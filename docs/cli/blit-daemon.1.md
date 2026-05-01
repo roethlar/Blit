@@ -106,4 +106,4 @@ can access all configured modules. Use network-level access controls to restrict
 who can connect.
 
 ## SEE ALSO
-`blit(1)`, `blit-utils(1)`
+`blit(1)`

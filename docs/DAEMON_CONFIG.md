@@ -170,7 +170,7 @@ Remote paths must use forward slashes (`/`), not backslashes.
 
 ## Client Configuration
 
-The CLI tools (`blit` and `blit-utils`) store settings and performance data
+The `blit` CLI stores settings and performance data
 in a platform-specific configuration directory:
 
 | Platform | Default Path |
@@ -349,7 +349,7 @@ nssm start BlitDaemon
 
 By default, the daemon advertises itself on the local network via mDNS
 (`_blit._tcp.local.`) so clients can discover it with `blit scan` or
-`blit-utils scan`.
+`blit scan`.
 
 The mDNS TXT record includes:
 - `version` — daemon version
@@ -381,7 +381,7 @@ Log levels: `error`, `warn`, `info` (default), `debug`, `trace`.
 
 ```bash
 # List modules (verifies daemon is responding)
-blit-utils list-modules localhost
+blit list-modules localhost
 
 # Or via blit CLI
 blit list localhost
@@ -398,7 +398,7 @@ blit list localhost
 **Clients can't connect**
 - Verify firewall rules allow port 9031
 - Check bind address — `127.0.0.1` only accepts local connections
-- Test with `blit-utils list-modules localhost` first
+- Test with `blit list-modules localhost` first
 
 **mDNS not working**
 - Ensure `no_mdns` is not set to `true`

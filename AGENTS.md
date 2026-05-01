@@ -2,8 +2,7 @@
 
 ## Project Structure & Module Organization
 - `crates/blit-core/`: Core library (enumeration, planner, transfer engine, orchestrator). Most logic and unit tests live here.
-- `crates/blit-cli/` and `crates/blit-daemon/`: Binaries for the CLI and daemon. Each has a minimal `main.rs` that wires into `blit-core`.
-- `crates/blit-utils/`: Supporting utilities shared across binaries.
+- `crates/blit-cli/` and `crates/blit-daemon/`: Binaries for the CLI and daemon. Each has a minimal `main.rs` that wires into `blit-core`. Admin verbs (scan, ls, find, du, df, rm, completions, profile, list-modules) live in `blit-cli` alongside the transfer commands.
 - `proto/`: gRPC definitions (`blit.proto`); build script in `blit-core` venders `protoc` automatically.
 - `scripts/`: Helper tooling. Notable: `scripts/windows/run-blit-tests.ps1` wraps fmt/check/test with log capture.
 - `tests/`: Workspace-level integration tests when needed.

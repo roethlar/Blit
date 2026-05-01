@@ -168,4 +168,4 @@ The daemon binds to `0.0.0.0` by default. In untrusted environments, use
 `--bind 127.0.0.1` and access via SSH tunnel or VPN.
 
 ## SEE ALSO
-`blit-daemon(1)`, `blit-utils(1)`
+`blit-daemon(1)`

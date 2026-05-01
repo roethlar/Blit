@@ -36,11 +36,12 @@ All notable changes to Blit are documented in this file.
 - Hybrid transport: TCP data plane negotiation with gRPC fallback
 - `--root` default export, `--no-mdns`, `--force-grpc-data`
 
-### Admin Utilities (`blit-utils`)
+### Admin Utilities (built into `blit`)
 - Commands: `scan`, `list-modules`, `ls`, `find`, `du`, `df`, `rm`, `completions`, `profile`
 - `--json` output for all inspection commands
 - Human-readable byte formatting in `df` output
 - Local path support for `ls`
+- Originally a separate `blit-utils` binary; merged into `blit` for a single install/distribution surface
 
 ### Performance History
 - JSONL storage with schema versioning (v0/v1 migration)
@@ -49,14 +50,14 @@ All notable changes to Blit are documented in this file.
 - `blit diagnostics perf` for inspection and management
 
 ### Documentation
-- Man pages: `blit(1)`, `blit-daemon(1)`, `blit-utils(1)`
+- Man pages: `blit(1)`, `blit-daemon(1)`
 - Architecture guide (`docs/ARCHITECTURE.md`)
 - Daemon configuration guide (`docs/DAEMON_CONFIG.md`)
 - Performance roadmap (`docs/PERFORMANCE_ROADMAP.md`)
 - AI telemetry analysis scoping doc
 
 ### Testing
-- Integration tests: admin verbs (10), blit-utils (21), remote transfers, transfer edges, parity, resume, move, remote-to-remote
+- Integration tests: admin verbs (10), admin commands (21, in `crates/blit-cli/tests/blit_utils.rs`), remote transfers, transfer edges, parity, resume, move, remote-to-remote
 - Unit tests: predictor regression (9), schema versioning (7), filesystem probing (7), mirror planner, checksum, enumeration
 - GitHub Actions CI: fmt/clippy checks, tri-platform tests (Linux/macOS/Windows), release artifact builds
 

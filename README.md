@@ -30,7 +30,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 - **Security Hardened**
   Path traversal protection, block size limits, token verification. TLS via operator-provided SSH tunnels or VPN.
 - **Admin Utilities**
-  `blit-utils` provides daemon inspection and maintenance: mDNS discovery, module listing, remote `ls`/`find`/`du`/`df`/`rm`, shell completions, and performance profiling.
+  Built into `blit`: daemon inspection and maintenance via mDNS discovery, module listing, remote `ls`/`find`/`du`/`df`/`rm`, shell completions, and performance profiling.
 - **Developer Experience**
   Robust test suite, clear repo organization, and scripting-friendly JSON output across all tools.
 - **Extensive Documentation**
@@ -42,11 +42,10 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 
 ```
 .
-├── crates/        # Rust workspace: core lib, CLI, daemon, utils
+├── crates/        # Rust workspace: core lib, CLI, daemon
 │   ├── blit-core/
 │   ├── blit-cli/
-│   ├── blit-daemon/
-│   └── blit-utils/
+│   └── blit-daemon/
 ├── proto/         # gRPC (protobuf) definitions
 ├── scripts/       # Helper scripts (Windows, etc.)
 ├── tests/         # Integration test suite
@@ -112,25 +111,25 @@ See `docs/cli/blit-daemon.1.md` and `docs/DAEMON_CONFIG.md` for configuration de
 
 ```sh
 # Discover daemons on the local network
-blit-utils scan
+blit scan
 
 # List modules exported by a daemon
-blit-utils list-modules server
+blit list-modules server
 
 # Browse remote directories
-blit-utils ls server:/module/path
+blit ls server:/module/path
 
 # Search for files on a remote daemon
-blit-utils find server:/module/ --pattern ".csv"
+blit find server:/module/ --pattern ".csv"
 
 # Disk usage summary
-blit-utils du server:/module/path --json
+blit du server:/module/path --json
 
 # Filesystem statistics
-blit-utils df server:/module
+blit df server:/module
 
 # Remove remote files (with confirmation)
-blit-utils rm server:/module/path/old-data
+blit rm server:/module/path/old-data
 
 # Show local performance history
-blit-utils profile
+blit profile
