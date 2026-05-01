@@ -94,6 +94,11 @@ pub struct FsTransferSink {
     src_root: PathBuf,
     dst_root: PathBuf,
     config: FsSinkConfig,
+    /// Optional collector for relative paths of successfully-written
+    /// files. Used by remote pull's mirror flow to know which files to
+    /// keep when purging extraneous local entries. Each successful
+    /// `write_payload`/`write_file_stream` pushes its `relative_path`.
+    path_tracker: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
 }
 
 impl FsTransferSink {
@@ -102,6 +107,27 @@ impl FsTransferSink {
             src_root,
             dst_root,
             config,
+            path_tracker: None,
+        }
+    }
+
+    /// Enable path tracking. After each successful write, the relative
+    /// path of the written file is pushed onto the supplied collector.
+    /// Lets receive callers (e.g. mirror) discover which files survived
+    /// without re-implementing the record dispatch loop.
+    pub fn with_path_tracker(
+        mut self,
+        tracker: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    ) -> Self {
+        self.path_tracker = Some(tracker);
+        self
+    }
+
+    fn track(&self, rel: &str) {
+        if let Some(tracker) = &self.path_tracker {
+            if let Ok(mut guard) = tracker.lock() {
+                guard.push(PathBuf::from(rel));
+            }
         }
     }
 }
@@ -122,12 +148,28 @@ impl TransferSink for FsTransferSink {
             PreparedPayload::FileBlockComplete {
                 relative_path,
                 total_size,
-            } => write_file_block_complete(&self.dst_root, &relative_path, total_size).await,
+            } => {
+                let outcome =
+                    write_file_block_complete(&self.dst_root, &relative_path, total_size).await?;
+                if outcome.files_written > 0 {
+                    self.track(&relative_path);
+                }
+                Ok(outcome)
+            }
             PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
+                // Capture paths for tracking before payload moves into
+                // the spawn_blocking closure.
+                let tracked_paths: Vec<String> = match &payload {
+                    PreparedPayload::File(h) => vec![h.relative_path.clone()],
+                    PreparedPayload::TarShard { headers, .. } => {
+                        headers.iter().map(|h| h.relative_path.clone()).collect()
+                    }
+                    _ => Vec::new(),
+                };
                 let src_root = self.src_root.clone();
                 let dst_root = self.dst_root.clone();
                 let config = self.config.clone();
-                tokio::task::spawn_blocking(move || match payload {
+                let outcome = tokio::task::spawn_blocking(move || match payload {
                     PreparedPayload::File(header) => {
                         write_file_payload(&src_root, &dst_root, &header, &config)
                     }
@@ -137,7 +179,13 @@ impl TransferSink for FsTransferSink {
                     _ => unreachable!("outer match guarantees File or TarShard"),
                 })
                 .await
-                .context("sink worker panicked")?
+                .context("sink worker panicked")??;
+                if outcome.files_written > 0 {
+                    for path in tracked_paths {
+                        self.track(&path);
+                    }
+                }
+                Ok(outcome)
             }
         }
     }
@@ -154,7 +202,15 @@ impl TransferSink for FsTransferSink {
             receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
         };
 
-        let dst = self.dst_root.join(&header.relative_path);
+        // Single-file source emits relative_path="" — destination is
+        // already the full target path. PathBuf::join("") on Unix
+        // appends a trailing separator that File::create rejects with
+        // ENOTDIR, so handle empty as identity.
+        let dst = if header.relative_path.is_empty() {
+            self.dst_root.clone()
+        } else {
+            self.dst_root.join(&header.relative_path)
+        };
         if let Some(parent) = dst.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -188,6 +244,8 @@ impl TransferSink for FsTransferSink {
             let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
             let _ = filetime::set_file_mtime(&dst, ft);
         }
+
+        self.track(&header.relative_path);
 
         Ok(SinkOutcome {
             files_written: 1,

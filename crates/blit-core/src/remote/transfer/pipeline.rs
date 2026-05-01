@@ -219,11 +219,11 @@ pub async fn execute_receive_pipeline(
                 let mut header = read_file_header(socket).await?;
                 let file_size = read_u64(socket).await?;
                 header.size = file_size;
-                // Hand the sink a borrowed view of the next file_size
-                // bytes on the wire. WireReader keeps the borrow scoped
-                // so the loop regains ownership of `socket` after the
-                // sink returns.
-                let mut reader = WireReader::new(socket, file_size);
+                // Use AsyncReadExt::take to give the sink exactly
+                // file_size bytes of the wire. tokio's Take is the
+                // canonical way to limit a borrowed AsyncRead.
+                use tokio::io::AsyncReadExt;
+                let mut reader = (&mut *socket).take(file_size);
                 let outcome = sink
                     .write_file_stream(&header, &mut reader)
                     .await
@@ -277,50 +277,6 @@ pub async fn execute_receive_pipeline(
 
     sink.finish().await.context("finalising sink")?;
     Ok(total)
-}
-
-/// View of a TcpStream limited to `expected` bytes. Borrows `socket`
-/// for the duration of one file payload — when the sink finishes
-/// reading, control returns to `execute_receive_pipeline` which reads
-/// the next record.
-struct WireReader<'a> {
-    socket: &'a mut TcpStream,
-    remaining: u64,
-}
-
-impl<'a> WireReader<'a> {
-    fn new(socket: &'a mut TcpStream, expected: u64) -> Self {
-        Self {
-            socket,
-            remaining: expected,
-        }
-    }
-}
-
-impl<'a> tokio::io::AsyncRead for WireReader<'a> {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        if self.remaining == 0 {
-            return std::task::Poll::Ready(Ok(()));
-        }
-        let max = self.remaining.min(buf.remaining() as u64) as usize;
-        let mut limited = buf.take(max);
-        let pre = limited.filled().len();
-        let socket = std::pin::Pin::new(&mut *self.socket);
-        match socket.poll_read(cx, &mut limited) {
-            std::task::Poll::Ready(Ok(())) => {
-                let new_filled = limited.filled().len();
-                let advanced = new_filled - pre;
-                buf.advance(advanced);
-                self.remaining -= advanced as u64;
-                std::task::Poll::Ready(Ok(()))
-            }
-            other => other,
-        }
-    }
 }
 
 async fn read_u32(socket: &mut TcpStream) -> Result<u32> {

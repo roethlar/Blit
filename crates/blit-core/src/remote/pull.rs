@@ -1,13 +1,11 @@
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Context, Result};
-use tar::Archive;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
@@ -18,10 +16,6 @@ use crate::generated::{
     PullSummary, PullSyncHeader,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
-use crate::remote::transfer::data_plane::{
-    receive_stream_double_buffered, DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE,
-    DATA_PLANE_RECORD_END, DATA_PLANE_RECORD_FILE, DATA_PLANE_RECORD_TAR_SHARD, RECEIVE_CHUNK_SIZE,
-};
 use crate::remote::transfer::progress::RemoteTransferProgress;
 
 /// Options for pull synchronization operations.
@@ -863,284 +857,44 @@ async fn receive_data_plane_stream_inner(
         .await
         .context("writing pull data-plane token")?;
 
-    loop {
-        let mut tag = [0u8; 1];
-        stream
-            .read_exact(&mut tag)
-            .await
-            .context("reading pull data-plane record tag")?;
-        match tag[0] {
-            DATA_PLANE_RECORD_FILE => {
-                handle_file_record(&mut stream, dest_root, track_paths, progress, stats).await?;
-            }
-            DATA_PLANE_RECORD_TAR_SHARD => {
-                handle_tar_shard_record(&mut stream, dest_root, track_paths, progress, stats)
-                    .await?;
-            }
-            DATA_PLANE_RECORD_BLOCK => {
-                handle_block_record(&mut stream, dest_root, progress, stats).await?;
-            }
-            DATA_PLANE_RECORD_BLOCK_COMPLETE => {
-                handle_block_complete_record(&mut stream, dest_root, track_paths, stats).await?;
-            }
-            DATA_PLANE_RECORD_END => break,
-            other => bail!("unknown pull data-plane record: {}", other),
+    // Route the inbound wire through the unified receive pipeline.
+    // Builds an FsTransferSink rooted at the destination, optionally
+    // tracking written paths for mirror's purge phase, and lets
+    // execute_receive_pipeline parse records + dispatch to the sink.
+    use crate::remote::transfer::pipeline::execute_receive_pipeline;
+    use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
+    use std::sync::Arc;
+
+    let config = FsSinkConfig {
+        preserve_times: true,
+        dry_run: false,
+        checksum: None,
+        resume: false,
+    };
+    let mut sink = FsTransferSink::new(PathBuf::new(), dest_root.to_path_buf(), config);
+    let path_tracker = if track_paths {
+        let t = Arc::new(std::sync::Mutex::new(Vec::new()));
+        sink = sink.with_path_tracker(Arc::clone(&t));
+        Some(t)
+    } else {
+        None
+    };
+    let sink: Arc<dyn TransferSink> = Arc::new(sink);
+
+    let outcome = execute_receive_pipeline(&mut stream, sink, progress).await?;
+
+    // Fold the unified outcome into pull's existing stats shape.
+    stats.bytes_transferred = stats.bytes_transferred.saturating_add(outcome.bytes_written);
+    stats.bytes = stats.bytes.saturating_add(outcome.bytes_written);
+    stats.files_transferred = stats
+        .files_transferred
+        .saturating_add(outcome.files_written as u64);
+    if let Some(tracker) = path_tracker {
+        if let Ok(mut paths) = tracker.lock() {
+            stats.downloaded_paths.append(&mut paths);
         }
     }
-
     Ok(())
-}
-
-async fn handle_file_record(
-    stream: &mut TcpStream,
-    dest_root: &Path,
-    track_paths: bool,
-    progress: Option<&RemotePullProgress>,
-    stats: &mut PullWorkerStats,
-) -> Result<()> {
-    let rel_string = read_string(stream).await?;
-    let relative_path = sanitize_relative_path(&rel_string)?;
-    let file_size = read_u64(stream).await?;
-    let dest_path = resolve_pull_dest(dest_root, &relative_path);
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-
-    let mut file = File::create(&dest_path)
-        .await
-        .with_context(|| format!("creating {}", dest_path.display()))?;
-
-    // Use the shared symmetric receive path. Same code as the daemon's
-    // push-side receiver — both directions hit the same throughput.
-    receive_stream_double_buffered(stream, &mut file, file_size, RECEIVE_CHUNK_SIZE)
-        .await
-        .with_context(|| format!("writing {}", dest_path.display()))?;
-
-    if let Some(progress) = progress {
-        progress.report_payload(0, file_size);
-    }
-    file.sync_all()
-        .await
-        .with_context(|| format!("syncing {}", dest_path.display()))?;
-
-    stats.files_transferred = stats.files_transferred.saturating_add(1);
-    stats.bytes_transferred = stats.bytes_transferred.saturating_add(file_size);
-    stats.bytes = stats.bytes.saturating_add(file_size);
-    if let Some(progress) = progress {
-        progress.report_file_complete(relative_path.to_string_lossy().into_owned(), file_size);
-    }
-    if track_paths {
-        stats.downloaded_paths.push(relative_path);
-    }
-    Ok(())
-}
-
-async fn handle_tar_shard_record(
-    stream: &mut TcpStream,
-    dest_root: &Path,
-    track_paths: bool,
-    progress: Option<&RemotePullProgress>,
-    stats: &mut PullWorkerStats,
-) -> Result<()> {
-    let file_count = read_u32(stream).await? as usize;
-    let mut files = Vec::with_capacity(file_count);
-    for _ in 0..file_count {
-        let rel_string = read_string(stream).await?;
-        let relative_path = sanitize_relative_path(&rel_string)?;
-        let size = read_u64(stream).await?;
-        let _mtime = read_i64(stream).await?;
-        let _permissions = read_u32(stream).await?;
-        files.push((relative_path, size));
-    }
-    let tar_size = read_u64(stream).await?;
-    let mut buffer = vec![0u8; tar_size as usize];
-    stream
-        .read_exact(&mut buffer)
-        .await
-        .context("reading pull tar shard payload")?;
-    if let Some(progress) = progress {
-        progress.report_payload(0, tar_size);
-    }
-
-    let dest_root_path = dest_root.to_path_buf();
-    let extracted = extract_tar_shard(buffer, files.clone(), dest_root_path).await?;
-
-    if track_paths {
-        stats.downloaded_paths.extend(extracted);
-    }
-    stats.files_transferred = stats.files_transferred.saturating_add(files.len() as u64);
-    let shard_bytes: u64 = files.iter().map(|(_, size)| *size).sum();
-    stats.bytes_transferred = stats.bytes_transferred.saturating_add(shard_bytes);
-    stats.bytes = stats.bytes.saturating_add(shard_bytes);
-    if let Some(progress) = progress {
-        for (path, size) in &files {
-            progress.report_file_complete(path.to_string_lossy().into_owned(), *size);
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle a block record: write block content at specified offset.
-/// Format: [path_len:4][path][offset:8][block_len:4][content]
-async fn handle_block_record(
-    stream: &mut TcpStream,
-    dest_root: &Path,
-    progress: Option<&RemotePullProgress>,
-    stats: &mut PullWorkerStats,
-) -> Result<()> {
-    use std::io::SeekFrom;
-    use tokio::io::AsyncSeekExt;
-
-    let rel_string = read_string(stream).await?;
-    let relative_path = sanitize_relative_path(&rel_string)?;
-    let offset = read_u64(stream).await?;
-    let block_len = read_u32(stream).await? as usize;
-
-    let dest_path = resolve_pull_dest(dest_root, &relative_path);
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-
-    // Read block content
-    let mut buffer = vec![0u8; block_len];
-    stream
-        .read_exact(&mut buffer)
-        .await
-        .context("reading block content")?;
-
-    // Open file for writing at offset (create if not exists)
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&dest_path)
-        .await
-        .with_context(|| format!("opening {} for block write", dest_path.display()))?;
-
-    // Seek and write
-    file.seek(SeekFrom::Start(offset))
-        .await
-        .with_context(|| format!("seeking to offset {} in {}", offset, dest_path.display()))?;
-    file.write_all(&buffer).await.with_context(|| {
-        format!(
-            "writing block at offset {} to {}",
-            offset,
-            dest_path.display()
-        )
-    })?;
-
-    stats.bytes_transferred = stats.bytes_transferred.saturating_add(block_len as u64);
-    stats.bytes = stats.bytes.saturating_add(block_len as u64);
-    if let Some(progress) = progress {
-        progress.report_payload(0, block_len as u64);
-    }
-
-    Ok(())
-}
-
-/// Handle block complete record: truncate file to final size.
-/// Format: [path_len:4][path][total_size:8]
-async fn handle_block_complete_record(
-    stream: &mut TcpStream,
-    dest_root: &Path,
-    track_paths: bool,
-    stats: &mut PullWorkerStats,
-) -> Result<()> {
-    let rel_string = read_string(stream).await?;
-    let relative_path = sanitize_relative_path(&rel_string)?;
-    let total_size = read_u64(stream).await?;
-
-    let dest_path = resolve_pull_dest(dest_root, &relative_path);
-
-    // Truncate file to final size
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&dest_path)
-        .await
-        .with_context(|| format!("opening {} for truncation", dest_path.display()))?;
-
-    file.set_len(total_size)
-        .await
-        .with_context(|| format!("truncating {} to {} bytes", dest_path.display(), total_size))?;
-
-    if track_paths {
-        stats.downloaded_paths.push(relative_path);
-    }
-    stats.files_transferred = stats.files_transferred.saturating_add(1);
-
-    Ok(())
-}
-
-async fn extract_tar_shard(
-    data: Vec<u8>,
-    files: Vec<(PathBuf, u64)>,
-    dest_root: PathBuf,
-) -> Result<Vec<PathBuf>> {
-    tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
-        let cursor = Cursor::new(data);
-        let mut archive = Archive::new(cursor);
-        let mut extracted = Vec::new();
-        for (idx, entry) in archive.entries()?.enumerate() {
-            let mut tar_entry = entry.context("reading tar shard entry")?;
-            let (relative_path, _) = files
-                .get(idx)
-                .ok_or_else(|| eyre!("tar shard entry count mismatch"))?;
-            let dest_path = dest_root.join(relative_path);
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("creating {}", parent.display()))?;
-            }
-            tar_entry
-                .unpack(&dest_path)
-                .with_context(|| format!("extracting {}", dest_path.display()))?;
-            extracted.push(relative_path.clone());
-        }
-        Ok(extracted)
-    })
-    .await
-    .map_err(|err| eyre!("tar shard extraction task failed: {}", err))?
-}
-
-async fn read_u32(stream: &mut TcpStream) -> Result<u32> {
-    let mut buf = [0u8; 4];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .context("reading u32 from pull data plane")?;
-    Ok(u32::from_be_bytes(buf))
-}
-
-async fn read_u64(stream: &mut TcpStream) -> Result<u64> {
-    let mut buf = [0u8; 8];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .context("reading u64 from pull data plane")?;
-    Ok(u64::from_be_bytes(buf))
-}
-
-async fn read_i64(stream: &mut TcpStream) -> Result<i64> {
-    let mut buf = [0u8; 8];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .context("reading i64 from pull data plane")?;
-    Ok(i64::from_be_bytes(buf))
-}
-
-async fn read_string(stream: &mut TcpStream) -> Result<String> {
-    let len = read_u32(stream).await? as usize;
-    let mut buf = vec![0u8; len];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .context("reading string from pull data plane")?;
-    String::from_utf8(buf).map_err(|err| eyre!("pull data-plane path not UTF-8: {err}"))
 }
 
 /// Resolve a pull destination path. An empty relative path means "write to
