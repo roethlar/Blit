@@ -74,6 +74,10 @@ pub(crate) struct DaemonArgs {
     /// Disable server-side checksum computation (clients will transfer files for local verification)
     #[arg(long)]
     pub(crate) no_server_checksums: bool,
+    /// Address to serve Prometheus metrics on (e.g. 0.0.0.0:9090).
+    /// When unset, the metrics endpoint is not started.
+    #[arg(long, value_name = "ADDR")]
+    pub(crate) metrics_addr: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

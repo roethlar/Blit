@@ -10,9 +10,40 @@ use eyre::{bail, Context, Result};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::rm::delete_remote_path;
+use blit_core::fs_enum::{parse_duration, parse_size, FileFilter};
 use blit_core::remote::RemotePath;
+
+/// Common shape of the filter inputs across commands. Both `TransferArgs`
+/// (copy/mirror/move) and `CheckArgs` (check) populate this. The single
+/// `build_filter_from_inputs` helper consumes it so all commands route
+/// through identical filter semantics.
+pub(crate) struct FilterInputs<'a> {
+    pub include: &'a [String],
+    pub exclude: &'a [String],
+    pub files_from: Option<&'a PathBuf>,
+    pub min_size: Option<&'a str>,
+    pub max_size: Option<&'a str>,
+    pub min_age: Option<&'a str>,
+    pub max_age: Option<&'a str>,
+}
+
+impl<'a> FilterInputs<'a> {
+    pub fn from_transfer(args: &'a TransferArgs) -> Self {
+        Self {
+            include: &args.include,
+            exclude: &args.exclude,
+            files_from: args.files_from.as_ref(),
+            min_size: args.min_size.as_deref(),
+            max_size: args.max_size.as_deref(),
+            min_age: args.min_age.as_deref(),
+            max_age: args.max_age.as_deref(),
+        }
+    }
+}
 use endpoints::{
     ensure_remote_destination_supported, ensure_remote_source_supported,
     ensure_remote_transfer_supported,
@@ -181,6 +212,43 @@ pub(crate) fn resolve_destination(
             Endpoint::Remote(r)
         }
     }
+}
+
+/// Build a `FileFilter` from a transfer command's args. Convenience wrapper
+/// around `build_filter_from_inputs`.
+pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
+    build_filter_from_inputs(&FilterInputs::from_transfer(args))
+}
+
+/// Build a `FileFilter` from filter inputs. Single helper used by all
+/// commands (copy/mirror/move/check) so filter behavior is identical
+/// regardless of which CLI verb invoked it. The orchestrator-side
+/// helper — not the leaf code — is what calculates the filter.
+pub(crate) fn build_filter_from_inputs(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
+    let mut filter = FileFilter::default();
+    filter.include_files = inputs.include.to_vec();
+    filter.exclude_files = inputs.exclude.to_vec();
+    if let Some(s) = inputs.min_size {
+        filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
+    }
+    if let Some(s) = inputs.max_size {
+        filter.max_size = Some(parse_size(s).with_context(|| format!("--max-size {s}"))?);
+    }
+    if let Some(s) = inputs.min_age {
+        filter.min_age = Some(parse_duration(s).with_context(|| format!("--min-age {s}"))?);
+    }
+    if let Some(s) = inputs.max_age {
+        filter.max_age = Some(parse_duration(s).with_context(|| format!("--max-age {s}"))?);
+    }
+    if filter.min_age.is_some() || filter.max_age.is_some() {
+        // Captured once per command invocation — calculated by orchestrator-side
+        // helper, not by leaf code each time `allows_entry` is called.
+        filter.reference_time = Some(SystemTime::now());
+    }
+    if let Some(path) = inputs.files_from {
+        filter.files_from = Some(FileFilter::load_files_from(path)?);
+    }
+    Ok(filter)
 }
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
@@ -445,6 +513,13 @@ mod tests {
             resume: false,
             null: false,
             json: false,
+            exclude: vec![],
+            include: vec![],
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -483,6 +558,13 @@ mod tests {
             resume: false,
             null: false,
             json: false,
+            exclude: vec![],
+            include: vec![],
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

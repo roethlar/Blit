@@ -22,7 +22,7 @@ pub async fn run_local_transfer(
         bail!("source path does not exist: {}", src_path.display());
     }
 
-    let options = build_local_options(ctx, args, mirror);
+    let options = build_local_options(ctx, args, mirror)?;
     let dry_run = options.dry_run;
     let null_sink = options.null_sink;
     let json_output = args.json;
@@ -89,7 +89,7 @@ pub async fn run_local_transfer(
     Ok(())
 }
 
-fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> LocalMirrorOptions {
+fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> Result<LocalMirrorOptions> {
     let mut options = LocalMirrorOptions {
         mirror,
         dry_run: args.dry_run,
@@ -100,13 +100,14 @@ fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> L
         retries: args.retries,
         resume: args.resume,
         null_sink: args.null,
+        filter: super::build_filter(args)?,
         ..LocalMirrorOptions::default()
     };
     if let Some(workers) = args.workers {
         options.workers = workers.max(1);
         options.debug_mode = true;
     }
-    options
+    Ok(options)
 }
 
 /// Threshold below which the `• Throughput / Workers used` line is noise:

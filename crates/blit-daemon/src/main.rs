@@ -1,12 +1,15 @@
+mod metrics;
 mod runtime;
 mod service;
 
+use crate::metrics::{spawn_metrics_server, TransferMetrics};
 use crate::runtime::{load_runtime, DaemonArgs, DaemonRuntime};
 use crate::service::{BlitServer, BlitService};
 use blit_core::mdns::{self, AdvertiseOptions, MdnsAdvertiser};
 use clap::Parser;
 use eyre::Result;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tonic::transport::Server;
 
 #[tokio::main]
@@ -71,11 +74,23 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Metrics counters are owned by the daemon and shared with BlitService;
+    // the optional HTTP endpoint reads the same Arc so scrape responses
+    // reflect live state without any cross-thread copying.
+    let metrics = TransferMetrics::new();
+    if let Some(ref addr_str) = args.metrics_addr {
+        match addr_str.parse::<SocketAddr>() {
+            Ok(metrics_addr) => spawn_metrics_server(metrics_addr, Arc::clone(&metrics)),
+            Err(err) => eprintln!("[warn] invalid --metrics-addr '{addr_str}': {err}"),
+        }
+    }
+
     let service = BlitService::from_runtime(
         modules,
         default_root,
         args.force_grpc_data,
         server_checksums_enabled,
+        metrics,
     );
 
     println!("blitd v2 listening on {}", addr);

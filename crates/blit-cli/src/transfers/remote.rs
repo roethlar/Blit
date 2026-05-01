@@ -6,10 +6,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use blit_core::fs_enum::FileFilter;
 use blit_core::generated::FileHeader;
 use blit_core::remote::pull::PullSyncOptions;
-use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
+use blit_core::remote::transfer::source::{
+    FilteredSource, FsTransferSource, RemoteTransferSource, TransferSource,
+};
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
     RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
@@ -164,8 +165,12 @@ pub async fn run_remote_push_transfer(
     let (progress_handle, progress_task) =
         spawn_progress_monitor(show_progress, args.verbose, args.json);
 
-    let filter = FileFilter::default();
-    let transfer_source: Arc<dyn TransferSource> = match source {
+    // Filter built by orchestrator-side helper from CLI args. The
+    // universal `FilteredSource` wrapper (single chokepoint, see
+    // remote/transfer/source.rs) applies it identically to local→remote,
+    // remote→remote, and local→local — full src/dst combination parity.
+    let filter = super::build_filter(args)?;
+    let inner: Arc<dyn TransferSource> = match source {
         Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
         Endpoint::Remote(endpoint) => {
             let client = RemotePullClient::connect(endpoint.clone())
@@ -182,6 +187,8 @@ pub async fn run_remote_push_transfer(
             Arc::new(RemoteTransferSource::new(client, root))
         }
     };
+    let transfer_source: Arc<dyn TransferSource> =
+        Arc::new(FilteredSource::new(inner, filter.clone()));
 
     let push_result = client
         .push(
@@ -222,6 +229,26 @@ pub async fn run_remote_pull_transfer(
     dest_root: &Path,
     mirror_mode: bool,
 ) -> Result<()> {
+    // Pull-side filtering would need to apply at the daemon's source
+    // enumeration, which requires a proto extension. Filtering the
+    // client's local manifest would falsely tell the daemon "I don't
+    // have these files" and trigger redundant sends. Surface the
+    // limitation explicitly until the proto extension lands.
+    let pull_filter_args = !args.exclude.is_empty()
+        || !args.include.is_empty()
+        || args.files_from.is_some()
+        || args.min_size.is_some()
+        || args.max_size.is_some()
+        || args.min_age.is_some()
+        || args.max_age.is_some();
+    if pull_filter_args {
+        eyre::bail!(
+            "filter flags (--exclude/--include/--min-size/--max-size/--min-age/--max-age/--files-from) \
+             are not yet supported for remote-source transfers; the protocol extension that lets the \
+             daemon honor client filters is pending. Run from the source side (push) for now."
+        );
+    }
+
     let mut client = RemotePullClient::connect(remote.clone())
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;

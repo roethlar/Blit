@@ -17,7 +17,7 @@ use crate::perf_predictor::PerformancePredictor;
 use crate::remote::transfer::payload::{plan_transfer_payloads, DEFAULT_PAYLOAD_PREFETCH};
 use crate::remote::transfer::pipeline::execute_sink_pipeline;
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, NullSink, TransferSink};
-use crate::remote::transfer::source::{FsTransferSource, TransferSource};
+use crate::remote::transfer::source::{FilteredSource, FsTransferSource, TransferSource};
 use crate::transfer_plan::PlanOptions;
 use crate::CopyConfig;
 
@@ -347,10 +347,14 @@ impl TransferOrchestrator {
         };
 
         let pipeline_result = runtime.block_on(async {
-            // 1. Scan source via FsTransferSource (same as remote push)
-            let source = Arc::new(FsTransferSource::new(src_root_buf.clone()));
+            // 1. Scan source via FsTransferSource, wrapped in FilteredSource so
+            //    the user filter applies through the universal pipeline chokepoint
+            //    (identical to push/pull/remote-remote behavior — full parity).
+            let inner: Arc<dyn TransferSource> =
+                Arc::new(FsTransferSource::new(src_root_buf.clone()));
+            let source: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(inner, filter));
             let unreadable = Arc::new(Mutex::new(Vec::new()));
-            let (mut header_rx, scan_handle) = source.scan(Some(filter), unreadable);
+            let (mut header_rx, scan_handle) = source.scan(None, unreadable);
 
             // 2. Collect all headers
             let mut all_headers = Vec::new();

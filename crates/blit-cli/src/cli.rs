@@ -55,6 +55,8 @@ pub enum Commands {
     Completions(CompletionArgs),
     /// Show local performance history summary
     Profile(ProfileArgs),
+    /// Compare two trees by size+mtime or hash (no transfer — read-only verification)
+    Check(CheckArgs),
     /// Diagnostics and tooling commands
     Diagnostics {
         #[command(subcommand)]
@@ -163,6 +165,33 @@ pub struct TransferArgs {
     /// Number of retries for failed transfers (0-255, default: 1)
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8), help_heading = "Reliability")]
     pub retries: u8,
+
+    // -- Filtering: restrict which files are eligible for transfer.
+    // Filters apply identically to all source/destination combinations
+    // (local-local, push, pull, remote-remote) — they live on the
+    // pipeline's TransferSource so every path enforces them.
+    /// Exclude files matching this glob pattern (repeatable)
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
+    pub exclude: Vec<String>,
+    /// Include only files matching this glob pattern (repeatable). When set,
+    /// any include match is required; excludes still apply on top.
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
+    pub include: Vec<String>,
+    /// Only transfer files listed in FILE (one relative path per line, # comments allowed)
+    #[arg(long, value_name = "FILE", help_heading = "Filtering")]
+    pub files_from: Option<PathBuf>,
+    /// Minimum file size to transfer (e.g. 100K, 10M, 1G)
+    #[arg(long, value_name = "SIZE", help_heading = "Filtering")]
+    pub min_size: Option<String>,
+    /// Maximum file size to transfer (e.g. 1G, 500M)
+    #[arg(long, value_name = "SIZE", help_heading = "Filtering")]
+    pub max_size: Option<String>,
+    /// Only transfer files older than this duration (e.g. 1h, 7d, 30m)
+    #[arg(long, value_name = "DURATION", help_heading = "Filtering")]
+    pub min_age: Option<String>,
+    /// Only transfer files newer than this duration (e.g. 1h, 7d, 30m)
+    #[arg(long, value_name = "DURATION", help_heading = "Filtering")]
+    pub max_age: Option<String>,
 
     // -- Performance / debug knobs — niche, kept at the bottom so new
     // users aren't distracted by them.
@@ -313,4 +342,43 @@ pub struct ProfileArgs {
     pub json: bool,
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
+}
+
+/// Arguments for `blit check` — read-only tree comparison.
+///
+/// Reuses the same filter machinery (`FileFilter` + `build_filter`) that
+/// transfers do, so `--exclude '*.tmp'` here behaves identically to
+/// `--exclude '*.tmp'` on `blit copy`.
+#[derive(Args, Clone, Debug)]
+pub struct CheckArgs {
+    /// Source tree to compare from
+    pub source: String,
+    /// Destination tree to compare against
+    pub destination: String,
+    /// Compare by Blake3 hash instead of size+mtime (slower, more accurate)
+    #[arg(long, short = 'c')]
+    pub checksum: bool,
+    /// Only flag files missing on destination (ignore extras on dest)
+    #[arg(long)]
+    pub one_way: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    // Filter flags — same set/semantics as the transfer commands so
+    // verification matches the transfer that produced the destination.
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
+    pub exclude: Vec<String>,
+    #[arg(long, action = clap::ArgAction::Append, value_name = "PATTERN", help_heading = "Filtering")]
+    pub include: Vec<String>,
+    #[arg(long, value_name = "FILE", help_heading = "Filtering")]
+    pub files_from: Option<PathBuf>,
+    #[arg(long, value_name = "SIZE", help_heading = "Filtering")]
+    pub min_size: Option<String>,
+    #[arg(long, value_name = "SIZE", help_heading = "Filtering")]
+    pub max_size: Option<String>,
+    #[arg(long, value_name = "DURATION", help_heading = "Filtering")]
+    pub min_age: Option<String>,
+    #[arg(long, value_name = "DURATION", help_heading = "Filtering")]
+    pub max_age: Option<String>,
 }

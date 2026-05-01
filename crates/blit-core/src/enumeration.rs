@@ -106,13 +106,15 @@ impl FileEnumerator {
                     let metadata = entry
                         .metadata()
                         .with_context(|| format!("stat file root {}", path.display()))?;
-                    if filter.allows_file(path, metadata.len()) {
-                        let size = metadata.len();
+                    let size = metadata.len();
+                    let mtime = metadata.modified().ok();
+                    let rel = PathBuf::new();
+                    if filter.allows_entry(Some(&rel), path, size, mtime) {
                         visit(EnumeratedEntry {
                             absolute_path: path.to_path_buf(),
                             // Empty relative path so src_root.join(rel) === src_root
                             // and dest_root.join(rel) === dest_root.
-                            relative_path: PathBuf::new(),
+                            relative_path: rel,
                             metadata,
                             kind: EntryKind::File { size },
                         })?;
@@ -141,16 +143,17 @@ impl FileEnumerator {
                 let metadata = entry
                     .metadata()
                     .with_context(|| format!("stat file {}", path.display()))?;
+                let size = metadata.len();
+                let mtime = metadata.modified().ok();
+                let rel = relative_path(root, path);
 
-                if !filter.allows_file(path, metadata.len()) {
+                if !filter.allows_entry(Some(&rel), path, size, mtime) {
                     continue;
                 }
 
-                let size = metadata.len();
-
                 visit(EnumeratedEntry {
                     absolute_path: path.to_path_buf(),
-                    relative_path: relative_path(root, path),
+                    relative_path: rel,
                     metadata,
                     kind: EntryKind::File { size },
                 })?;
@@ -161,8 +164,10 @@ impl FileEnumerator {
 
                 let metadata = fs::symlink_metadata(path)
                     .with_context(|| format!("symlink metadata {}", path.display()))?;
+                let mtime = metadata.modified().ok();
+                let rel = relative_path(root, path);
 
-                if !filter.allows_file(path, 0) {
+                if !filter.allows_entry(Some(&rel), path, 0, mtime) {
                     continue;
                 }
 
@@ -170,7 +175,7 @@ impl FileEnumerator {
 
                 visit(EnumeratedEntry {
                     absolute_path: path.to_path_buf(),
-                    relative_path: relative_path(root, path),
+                    relative_path: rel,
                     metadata,
                     kind: EntryKind::Symlink { target },
                 })?;
