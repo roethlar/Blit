@@ -245,6 +245,19 @@ impl TransferSink for FsTransferSink {
             let _ = filetime::set_file_mtime(&dst, ft);
         }
 
+        // Permissions arrive on the wire (Unix mode bits). Apply best-
+        // effort; ignore failures (cross-fs, root-owned dst, etc.).
+        #[cfg(unix)]
+        if header.permissions != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                &dst,
+                std::fs::Permissions::from_mode(header.permissions),
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = header.permissions;
+
         self.track(&header.relative_path);
 
         Ok(SinkOutcome {

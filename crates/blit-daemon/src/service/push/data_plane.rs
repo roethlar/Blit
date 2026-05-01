@@ -4,20 +4,19 @@ use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
 };
-use filetime::{set_file_mtime, FileTime};
 use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tar::Archive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
-use tokio::task::{self, JoinSet};
+use tokio::task::JoinSet;
 use tonic::{Status, Streaming};
 
 use super::super::util::{resolve_dest_path, resolve_manifest_relative_path};
@@ -25,9 +24,6 @@ use super::super::PushSender;
 use super::control::send_control_message;
 
 const TOKEN_LEN: usize = 32;
-const DATA_PLANE_RECORD_FILE: u8 = 0;
-const DATA_PLANE_RECORD_TAR_SHARD: u8 = 1;
-const DATA_PLANE_RECORD_END: u8 = 0xFF;
 const MAX_PARALLEL_TAR_TASKS: usize = 4;
 
 /// Default buffer size for pooled tar shard buffers (4 MiB).
@@ -142,175 +138,48 @@ async fn handle_data_plane_stream(
         module.path.display()
     );
 
-    let mut stats = TransferStats::default();
-    let mut tar_executor = TarShardExecutor::new(MAX_PARALLEL_TAR_TASKS);
+    // Drain the manifest channel concurrently so the gRPC control loop
+    // doesn't back-pressure when the data plane no longer consumes per-
+    // record headers (we get full headers off the wire now).
+    let drain_handle = {
+        let files = Arc::clone(&files);
+        tokio::spawn(async move {
+            let mut guard = files.lock().await;
+            while guard.recv().await.is_some() {}
+        })
+    };
+    let _ = cache; // headers come off the wire; cache no longer needed
 
-    loop {
-        tar_executor.drain_ready(&mut stats)?;
+    // Route the inbound wire through the unified receive pipeline:
+    //   socket → execute_receive_pipeline → FsTransferSink → disk
+    // Same call shape as the client's pull-receive side. Tar shards get
+    // extracted inline by FsTransferSink (parallelism across streams
+    // already comes from N concurrent invocations of this function).
+    use blit_core::remote::transfer::pipeline::execute_receive_pipeline;
+    use blit_core::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 
-        let mut kind_buf = [0u8; 1];
-        if let Err(err) = socket.read_exact(&mut kind_buf).await {
-            eprintln!("[data-plane] read tag error: {}", err);
-            return Err(Status::internal(format!(
-                "failed to read data plane record tag: {}",
-                err
-            )));
-        }
-        eprintln!("[data-plane] received record tag 0x{:02X}", kind_buf[0]);
+    let config = FsSinkConfig {
+        preserve_times: true,
+        dry_run: false,
+        checksum: None,
+        resume: false,
+    };
+    let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+        PathBuf::new(),
+        module.path.clone(),
+        config,
+    ));
+    let outcome = execute_receive_pipeline(&mut socket, sink, None)
+        .await
+        .map_err(|err| Status::internal(format!("data plane receive: {err:#}")))?;
 
-        match kind_buf[0] {
-            DATA_PLANE_RECORD_FILE => {
-                let path_len = read_u32(&mut socket).await?;
-                let mut path_bytes = vec![0u8; path_len as usize];
-                socket.read_exact(&mut path_bytes).await.map_err(|err| {
-                    eprintln!(
-                        "[data-plane] read path bytes error: {} (expected len {})",
-                        err, path_len
-                    );
-                    Status::internal(format!("failed to read path bytes: {}", err))
-                })?;
-                let rel_string = String::from_utf8(path_bytes)
-                    .map_err(|_| Status::invalid_argument("data plane path not valid UTF-8"))?;
+    drain_handle.abort();
 
-                let header = next_data_plane_header(&files, &cache, &rel_string).await?;
-                eprintln!(
-                    "[data-plane] starting file '{}' ({} bytes expected)",
-                    rel_string, header.size
-                );
-
-                let file_size = read_u64(&mut socket).await?;
-                if file_size != header.size {
-                    eprintln!(
-                        "[data-plane] size mismatch for {} (declared {}, expected {})",
-                        rel_string, file_size, header.size
-                    );
-                    return Err(Status::invalid_argument(format!(
-                        "size mismatch for {} (declared {}, expected {})",
-                        rel_string, file_size, header.size
-                    )));
-                }
-                let rel_path = resolve_manifest_relative_path(&rel_string)?;
-                let dest_path = resolve_dest_path(&module.path, &rel_path);
-
-                if let Some(parent) = dest_path.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|err| {
-                        eprintln!("[data-plane] create dir {}: {}", parent.display(), err);
-                        Status::internal(format!("create dir {}: {}", parent.display(), err))
-                    })?;
-                }
-
-                let mut file = tokio::fs::File::create(&dest_path).await.map_err(|err| {
-                    eprintln!("[data-plane] create file {}: {}", dest_path.display(), err);
-                    Status::internal(format!("create file {}: {}", dest_path.display(), err))
-                })?;
-
-                // Use the shared symmetric receive path so push and pull
-                // hit the same throughput. tokio::io::copy's 8 KiB default
-                // capped throughput at ~1 Gbps; double-buffered 1 MiB
-                // chunks restore parity with the sender.
-                let bytes_copied = blit_core::remote::transfer::data_plane::
-                    receive_stream_double_buffered(
-                        &mut socket,
-                        &mut file,
-                        file_size,
-                        blit_core::remote::transfer::data_plane::RECEIVE_CHUNK_SIZE,
-                    )
-                    .await
-                    .map_err(|err| {
-                        eprintln!("[data-plane] writing {}: {}", dest_path.display(), err);
-                        Status::internal(format!("writing {}: {}", dest_path.display(), err))
-                    })?;
-                if bytes_copied != file_size {
-                    eprintln!(
-                        "[data-plane] short transfer for {} (expected {} bytes, received {})",
-                        rel_string, file_size, bytes_copied
-                    );
-                    return Err(Status::internal(format!(
-                        "short transfer for {} (expected {} bytes, received {})",
-                        rel_string, file_size, bytes_copied
-                    )));
-                }
-
-                apply_stream_file_metadata(&dest_path, &header).await?;
-                stats.files_transferred += 1;
-                stats.bytes_transferred += bytes_copied;
-                eprintln!(
-                    "[data-plane] finished file '{}' ({} bytes transferred)",
-                    rel_string, bytes_copied
-                );
-            }
-            DATA_PLANE_RECORD_TAR_SHARD => {
-                let file_count = read_u32(&mut socket).await? as usize;
-                let mut headers = Vec::with_capacity(file_count);
-                eprintln!(
-                    "[data-plane] starting tar shard header ({} entries)",
-                    file_count
-                );
-
-                for _ in 0..file_count {
-                    let path_len = read_u32(&mut socket).await?;
-                    let mut path_bytes = vec![0u8; path_len as usize];
-                    socket.read_exact(&mut path_bytes).await.map_err(|err| {
-                        eprintln!("[data-plane] read shard path bytes error: {}", err);
-                        Status::internal(format!("failed to read shard path bytes: {}", err))
-                    })?;
-                    let rel_string = String::from_utf8(path_bytes)
-                        .map_err(|_| Status::invalid_argument("tar shard path not valid UTF-8"))?;
-
-                    let expected_size = read_u64(&mut socket).await?;
-                    let expected_mtime = read_i64(&mut socket).await?;
-                    let expected_permissions = read_u32(&mut socket).await?;
-
-                    let header = next_data_plane_header(&files, &cache, &rel_string).await?;
-
-                    if header.size != expected_size
-                        || header.mtime_seconds != expected_mtime
-                        || header.permissions != expected_permissions
-                    {
-                        eprintln!(
-                            "[data-plane] tar shard metadata mismatch for '{}'",
-                            rel_string
-                        );
-                        return Err(Status::invalid_argument(format!(
-                            "tar shard metadata mismatch for '{}'",
-                            rel_string
-                        )));
-                    }
-
-                    headers.push(header);
-                }
-
-                let tar_len = read_u64(&mut socket).await?;
-                // Use pooled buffer for tar shard reception
-                let mut buffer = tar_executor.acquire_buffer(tar_len as usize).await;
-                eprintln!(
-                    "[data-plane] receiving tar shard payload ({} bytes, pooled={})",
-                    tar_len,
-                    buffer.capacity() >= TAR_BUFFER_SIZE
-                );
-                socket.read_exact(&mut buffer).await.map_err(|err| {
-                    eprintln!("[data-plane] read tar shard bytes error: {}", err);
-                    Status::internal(format!("failed to read tar shard bytes: {}", err))
-                })?;
-
-                tar_executor.spawn(module.clone(), headers, buffer).await?;
-                tar_executor.drain_ready(&mut stats)?;
-            }
-            DATA_PLANE_RECORD_END => {
-                eprintln!("[data-plane] received transfer terminator");
-                break;
-            }
-            other => {
-                eprintln!("[data-plane] unknown record type: {}", other);
-                return Err(Status::invalid_argument(format!(
-                    "unknown data plane record type: {}",
-                    other
-                )));
-            }
-        }
-    }
-
-    tar_executor.finish(&mut stats).await?;
+    let stats = TransferStats {
+        files_transferred: outcome.files_written as u64,
+        bytes_transferred: outcome.bytes_written,
+        bytes_zero_copy: 0,
+    };
 
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     let gbps = (stats.bytes_transferred as f64 * 8.0) / elapsed / 1e9;
@@ -321,66 +190,6 @@ async fn handle_data_plane_stream(
     Ok(stats)
 }
 
-pub(crate) async fn next_data_plane_header(
-    files: &Arc<AsyncMutex<mpsc::Receiver<FileHeader>>>,
-    cache: &Arc<AsyncMutex<HashMap<String, FileHeader>>>,
-    rel_string: &str,
-) -> Result<FileHeader, Status> {
-    {
-        let mut guard = cache.lock().await;
-        if let Some(header) = guard.remove(rel_string) {
-            eprintln!("[push-server] cache hit for {}", rel_string);
-            return Ok(header);
-        }
-    }
-
-    loop {
-        let next = {
-            let mut files_guard = files.lock().await;
-            files_guard.recv().await
-        };
-        match next {
-            Some(header) => {
-                if header.relative_path == rel_string {
-                    eprintln!("[push-server] matched {}", rel_string);
-                    return Ok(header);
-                }
-                let mut guard = cache.lock().await;
-                let header_path = header.relative_path.clone();
-                eprintln!(
-                    "[push-server] deferring {} while waiting for {}",
-                    header_path, rel_string
-                );
-                guard.insert(header_path.clone(), header);
-                eprintln!(
-                    "[push-server] cached {} (pending {:?})",
-                    header_path,
-                    guard.keys().collect::<Vec<_>>()
-                );
-            }
-            None => break,
-        }
-    }
-
-    // Channel exhausted — but another stream may have cached our header
-    // while we were draining. Check the cache one more time.
-    {
-        let mut guard = cache.lock().await;
-        if let Some(header) = guard.remove(rel_string) {
-            eprintln!("[push-server] cache hit (post-drain) for {}", rel_string);
-            return Ok(header);
-        }
-        let pending: Vec<_> = guard.keys().cloned().collect();
-        eprintln!(
-            "[data-plane] unexpected file entry '{}' (upload queue drained before payload, cache has {} entries)",
-            rel_string, pending.len()
-        );
-    }
-    Err(Status::internal(format!(
-        "data plane received unexpected file entry '{}'",
-        rel_string
-    )))
-}
 
 pub(crate) async fn receive_fallback_data(
     stream: &mut Streaming<ClientPushRequest>,
@@ -668,6 +477,8 @@ impl TarShardExecutor {
 
     /// Acquire a buffer for receiving tar data.
     /// Uses pooled buffer if size fits, otherwise allocates on demand.
+    /// Currently only used by the gRPC fallback path.
+    #[allow(dead_code)]
     async fn acquire_buffer(&self, size: usize) -> Vec<u8> {
         if size <= self.buffer_pool.buffer_size() {
             // Use pooled buffer - acquire and take ownership
@@ -782,64 +593,6 @@ fn accumulate_transfer_stats(target: &mut TransferStats, shard: &TransferStats) 
     target.bytes_zero_copy += shard.bytes_zero_copy;
 }
 
-async fn apply_stream_file_metadata(path: &Path, header: &FileHeader) -> Result<(), Status> {
-    if header.permissions != 0 {
-        set_stream_permissions(path, header.permissions).await?;
-    }
-
-    let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
-    let path_buf = path.to_path_buf();
-    let display_path = path_buf.clone();
-    task::spawn_blocking(move || set_file_mtime(&path_buf, ft))
-        .await
-        .map_err(|err| Status::internal(format!("set mtime task panicked: {}", err)))?
-        .map_err(|err| {
-            Status::internal(format!("set mtime {}: {}", display_path.display(), err))
-        })?;
-
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn set_stream_permissions(path: &Path, mode: u32) -> Result<(), Status> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(mode);
-    tokio::fs::set_permissions(path, perms)
-        .await
-        .map_err(|err| Status::internal(format!("set permissions {}: {}", path.display(), err)))
-}
-
-#[cfg(not(unix))]
-async fn set_stream_permissions(_path: &Path, _mode: u32) -> Result<(), Status> {
-    Ok(())
-}
-
-pub(crate) async fn read_u32(stream: &mut TcpStream) -> Result<u32, Status> {
-    let mut buf = [0u8; 4];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .map_err(|err| Status::internal(format!("failed to read u32: {}", err)))?;
-    Ok(u32::from_be_bytes(buf))
-}
-
-pub(crate) async fn read_u64(stream: &mut TcpStream) -> Result<u64, Status> {
-    let mut buf = [0u8; 8];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .map_err(|err| Status::internal(format!("failed to read u64: {}", err)))?;
-    Ok(u64::from_be_bytes(buf))
-}
-
-pub(crate) async fn read_i64(stream: &mut TcpStream) -> Result<i64, Status> {
-    let mut buf = [0u8; 8];
-    stream
-        .read_exact(&mut buf)
-        .await
-        .map_err(|err| Status::internal(format!("failed to read i64: {}", err)))?;
-    Ok(i64::from_be_bytes(buf))
-}
 
 /// Process a tar shard and return stats plus the buffer for potential reuse.
 /// The buffer is returned if its capacity matches the pool size.

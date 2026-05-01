@@ -213,6 +213,18 @@ impl DataPlaneSession {
             .write_all(&header.size.to_be_bytes())
             .await
             .context("writing file size")?;
+        // Wire-format extension (2026-05-01): include mtime + permissions
+        // inline so push and pull data plane records carry the same
+        // information. Lets the receive pipeline apply metadata via
+        // FsTransferSink without consulting an out-of-band manifest cache.
+        self.stream
+            .write_all(&header.mtime_seconds.to_be_bytes())
+            .await
+            .context("writing mtime")?;
+        self.stream
+            .write_all(&header.permissions.to_be_bytes())
+            .await
+            .context("writing permissions")?;
 
         // Double-buffered I/O: overlaps source reads with network writes
         self.send_file_double_buffered(reader, header, rel).await?;

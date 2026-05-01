@@ -218,7 +218,11 @@ pub async fn execute_receive_pipeline(
             DATA_PLANE_RECORD_FILE => {
                 let mut header = read_file_header(socket).await?;
                 let file_size = read_u64(socket).await?;
+                let mtime = read_i64(socket).await?;
+                let perms = read_u32(socket).await?;
                 header.size = file_size;
+                header.mtime_seconds = mtime;
+                header.permissions = perms;
                 // Use AsyncReadExt::take to give the sink exactly
                 // file_size bytes of the wire. tokio's Take is the
                 // canonical way to limit a borrowed AsyncRead.
