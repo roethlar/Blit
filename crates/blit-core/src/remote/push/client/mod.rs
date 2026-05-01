@@ -328,9 +328,13 @@ impl RemotePushClient {
                                 Some(ServerPayload::FilesToUpload(list)) => {
                                     if list.relative_paths.is_empty() {
                                         // Empty terminator — no more need_lists coming.
+                                        // Fall through to the bottom of the loop so the
+                                        // early-finish check can fire on this iteration;
+                                        // don't `continue` (that would skip the check
+                                        // and require another response message to wake
+                                        // the select, which never arrives).
                                         need_lists_done = true;
-                                        continue;
-                                    }
+                                    } else {
                                     need_list_fresh = true;
                                     let mut rels = list.relative_paths;
                                     files_requested.extend(rels.iter().cloned());
@@ -455,6 +459,7 @@ impl RemotePushClient {
                                         }
                                         TransferMode::Undecided => {}
                                     }
+                                    } // end else (non-empty need_list)
                                 }
                                 Some(ServerPayload::Negotiation(neg)) => {
                                     if neg.tcp_fallback {
