@@ -127,11 +127,28 @@ pub(crate) async fn handle_pull_sync_stream(
     let files_to_send = files_needing_transfer(&diff);
     send_need_list(&tx, &files_to_send).await?;
 
-    // Build set of resume-eligible files (Modified status means client has existing file)
-    let resume_eligible: std::collections::HashSet<String> = diff
+    // Build client-size lookup so we can distinguish "mtime-only change"
+    // (same size, different mtime) from "actual content change" (different
+    // size). The former benefits from block-hash comparison — the server
+    // compares Blake3 hashes block-by-block and sends only differing blocks.
+    // When only mtime was touched, that sends zero bytes.
+    let client_size_map: std::collections::HashMap<&str, u64> = client_manifest
+        .iter()
+        .map(|h| (h.relative_path.as_str(), h.size))
+        .collect();
+
+    // Effective resume set: always includes Modified files where the client
+    // has the same size (mtime-only change → block-hash compare avoids full
+    // re-transfer). When --resume is set, expand to ALL Modified files
+    // including size-changed ones (partial-block resume).
+    let effective_resume: std::collections::HashSet<String> = diff
         .files_to_transfer
         .iter()
         .filter(|f| f.status == FileStatus::Modified)
+        .filter(|f| {
+            resume_mode
+                || client_size_map.get(f.relative_path.as_str()) == Some(&f.size)
+        })
         .map(|f| f.relative_path.clone())
         .collect();
 
@@ -157,7 +174,7 @@ pub(crate) async fn handle_pull_sync_stream(
 
     if force_grpc {
         // gRPC fallback: stream via control plane (full files or blocks)
-        if resume_mode && !resume_eligible.is_empty() {
+        if !effective_resume.is_empty() {
             // Block-level resume via gRPC bidirectional stream
             let stats = stream_via_block_resume_grpc(
                 &module,
@@ -165,7 +182,7 @@ pub(crate) async fn handle_pull_sync_stream(
                 block_size,
                 &tx,
                 &mut stream,
-                &resume_eligible,
+                &effective_resume,
             )
             .await?;
             send_summary(&tx, stats, true, diff.files_to_delete.len() as u64).await?;
@@ -183,7 +200,7 @@ pub(crate) async fn handle_pull_sync_stream(
             )
             .await?;
         }
-    } else if resume_mode && !resume_eligible.is_empty() {
+    } else if !effective_resume.is_empty() {
         // Data plane with block-level resume
         // Use gRPC for block hash exchange, data plane for block transfer
         let stats = stream_via_data_plane_resume(
@@ -193,7 +210,7 @@ pub(crate) async fn handle_pull_sync_stream(
             block_size,
             &tx,
             &mut stream,
-            &resume_eligible,
+            &effective_resume,
         )
         .await?;
         send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
@@ -461,7 +478,7 @@ async fn stream_via_data_plane_resume(
     block_size_param: u32,
     tx: &PullSyncSender,
     stream: &mut Streaming<ClientPullMessage>,
-    resume_eligible: &std::collections::HashSet<String>,
+    effective_resume: &std::collections::HashSet<String>,
 ) -> Result<TransferStats, Status> {
     use blit_core::buffer::BufferPool;
     use blit_core::copy::DEFAULT_BLOCK_SIZE;
@@ -535,7 +552,7 @@ async fn stream_via_data_plane_resume(
     // Phase 1: Send all block hash requests upfront for resume-eligible files
     // This fills the pipeline so the client can compute hashes while we transfer data.
     for entry in entries.iter() {
-        if resume_eligible.contains(&entry.header.relative_path) {
+        if effective_resume.contains(&entry.header.relative_path) {
             tx.send(Ok(ServerPullMessage {
                 payload: Some(server_pull_message::Payload::BlockHashRequest(
                     BlockHashRequest {
@@ -557,10 +574,10 @@ async fn stream_via_data_plane_resume(
     for entry in entries {
         let abs_path = module.path.join(&entry.relative_path);
         let relative_path = &entry.header.relative_path;
-        let is_resume_eligible = resume_eligible.contains(relative_path);
+        let is_effective_resume = effective_resume.contains(relative_path);
 
         // Get client hashes if resume-eligible (JIT from stream)
-        let file_client_hashes = if is_resume_eligible {
+        let file_client_hashes = if is_effective_resume {
             match stream.message().await {
                 Ok(Some(msg)) => {
                     if let Some(client_pull_message::Payload::BlockHashes(hash_list)) = msg.payload
@@ -642,9 +659,16 @@ async fn stream_via_data_plane_resume(
             block_idx += 1;
         }
 
-        // Signal file complete via data plane
+        // Signal file complete via data plane. Send mtime + perms with
+        // the terminator so the receiver can stamp metadata even when
+        // zero blocks transferred (mtime-only touch + auto-promote case).
         session
-            .send_block_complete(relative_path, file_size as u64)
+            .send_block_complete(
+                relative_path,
+                file_size as u64,
+                entry.header.mtime_seconds,
+                entry.header.permissions,
+            )
             .await
             .map_err(|err| Status::internal(format!("sending block complete: {}", err)))?;
 
@@ -673,7 +697,7 @@ async fn stream_via_block_resume_grpc(
     block_size: u32,
     tx: &PullSyncSender,
     stream: &mut Streaming<ClientPullMessage>,
-    resume_eligible: &std::collections::HashSet<String>,
+    effective_resume: &std::collections::HashSet<String>,
 ) -> Result<TransferStats, Status> {
     use blit_core::copy::DEFAULT_BLOCK_SIZE;
     use tokio::io::AsyncReadExt;
@@ -688,7 +712,7 @@ async fn stream_via_block_resume_grpc(
     for entry in entries {
         let abs_path = module.path.join(&entry.relative_path);
         let relative_path = &entry.header.relative_path;
-        let is_resume_eligible = resume_eligible.contains(relative_path);
+        let is_effective_resume = effective_resume.contains(relative_path);
 
         // Open file for streaming
         let mut file = tokio::fs::File::open(&abs_path).await.map_err(|e| {
@@ -708,7 +732,7 @@ async fn stream_via_block_resume_grpc(
             .len() as usize;
 
         // Get client block hashes if resume-eligible
-        let client_hashes: Option<Vec<Vec<u8>>> = if is_resume_eligible {
+        let client_hashes: Option<Vec<Vec<u8>>> = if is_effective_resume {
             // Request block hashes from client
             tx.send(Ok(ServerPullMessage {
                 payload: Some(server_pull_message::Payload::BlockHashRequest(

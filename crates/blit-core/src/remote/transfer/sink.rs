@@ -149,9 +149,17 @@ impl TransferSink for FsTransferSink {
             PreparedPayload::FileBlockComplete {
                 relative_path,
                 total_size,
+                mtime_seconds,
+                permissions,
             } => {
-                let outcome =
-                    write_file_block_complete(&self.dst_root, &relative_path, total_size).await?;
+                let outcome = write_file_block_complete(
+                    &self.dst_root,
+                    &relative_path,
+                    total_size,
+                    mtime_seconds,
+                    permissions,
+                )
+                .await?;
                 if outcome.files_written > 0 {
                     self.track(&relative_path);
                 }
@@ -475,24 +483,48 @@ async fn write_file_block_payload(
     })
 }
 
-/// Resume protocol: finalize a resumed file by truncating to total_size + fsync.
+/// Resume protocol: finalize a resumed file by truncating to total_size,
+/// then stamp mtime + perms from the wire. The mtime stamp is what makes
+/// the "mtime touched, content identical" mirror case correct — block-hash
+/// compare sends zero blocks, but BLOCK_COMPLETE still updates the dest
+/// mtime to match the source.
 async fn write_file_block_complete(
     dst_root: &Path,
     relative_path: &str,
     total_size: u64,
+    mtime_seconds: i64,
+    permissions: u32,
 ) -> Result<SinkOutcome> {
     let dst = dst_root.join(relative_path);
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&dst)
-        .await
-        .with_context(|| format!("opening {} for truncation", dst.display()))?;
-    file.set_len(total_size)
-        .await
-        .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
-    file.sync_all()
-        .await
-        .with_context(|| format!("syncing {}", dst.display()))?;
+    {
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&dst)
+            .await
+            .with_context(|| format!("opening {} for truncation", dst.display()))?;
+        file.set_len(total_size)
+            .await
+            .with_context(|| format!("truncating {} to {}", dst.display(), total_size))?;
+        file.sync_all()
+            .await
+            .with_context(|| format!("syncing {}", dst.display()))?;
+    }
+    // Stamp mtime + perms after the file handle is closed (same race
+    // dance as write_file_stream — see commit 946bd77).
+    if mtime_seconds > 0 {
+        let ft = FileTime::from_unix_time(mtime_seconds, 0);
+        let _ = filetime::set_file_mtime(&dst, ft);
+    }
+    #[cfg(unix)]
+    if permissions != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &dst,
+            std::fs::Permissions::from_mode(permissions),
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = permissions;
     Ok(SinkOutcome {
         files_written: 1,
         bytes_written: 0,

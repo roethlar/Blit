@@ -434,11 +434,17 @@ impl DataPlaneSession {
     }
 
     /// Signal that block-level transfer for a file is complete.
-    /// Format: [type:1][path_len:4][path][total_size:8]
+    /// Format: [type:1][path_len:4][path][total_size:8][mtime:8][perms:4]
+    ///
+    /// Carries mtime + perms inline so the receiver can stamp the
+    /// destination metadata even when zero blocks transferred (the
+    /// "mtime touched, content identical" case for mirror).
     pub async fn send_block_complete(
         &mut self,
         relative_path: &str,
         total_size: u64,
+        mtime_seconds: i64,
+        permissions: u32,
     ) -> Result<()> {
         let path_bytes = relative_path.as_bytes();
         if path_bytes.len() > u32::MAX as usize {
@@ -468,6 +474,14 @@ impl DataPlaneSession {
             .write_all(&total_size.to_be_bytes())
             .await
             .context("writing total size")?;
+        self.stream
+            .write_all(&mtime_seconds.to_be_bytes())
+            .await
+            .context("writing mtime")?;
+        self.stream
+            .write_all(&permissions.to_be_bytes())
+            .await
+            .context("writing permissions")?;
 
         Ok(())
     }

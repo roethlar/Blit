@@ -91,10 +91,15 @@ pub enum PreparedPayload {
         bytes: Vec<u8>,
     },
     /// Resume: finalize the file at `dst_root.join(relative_path)` by
-    /// truncating to `total_size`.
+    /// truncating to `total_size` and stamping mtime + perms.
+    /// Metadata is carried inline so a "mtime touched, content
+    /// identical" mirror correctly updates the destination's mtime
+    /// even when zero blocks needed to be transferred.
     FileBlockComplete {
         relative_path: String,
         total_size: u64,
+        mtime_seconds: i64,
+        permissions: u32,
     },
 }
 
