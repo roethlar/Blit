@@ -95,13 +95,18 @@ pub(crate) async fn handle_push_stream(
 
                 if file_requires_upload(module_ref, &rel, &file)? {
                     file.relative_path = sanitized.clone();
-                    upload_tx.send(file.clone()).await.map_err(|_| {
-                        eprintln!(
-                            "upload_tx send failed for {} (mirror_mode={})",
-                            sanitized, mirror_mode
-                        );
-                        Status::internal("failed to enqueue upload header")
-                    })?;
+                    // Post-Phase-5, the TCP data plane receiver no longer
+                    // consumes upload_tx (manifest metadata is now on the
+                    // wire inline). Only the gRPC fallback path uses this
+                    // queue. Tolerate a closed receiver — the data plane
+                    // having shut down cleanly (END seen, all bytes
+                    // received) is not a failure mode that should reject
+                    // late manifest entries.
+                    if let Err(err) = upload_tx.send(file.clone()).await {
+                        let _ = err;
+                        // Receiver dropped — TCP data plane is done; the
+                        // gRPC fallback path doesn't open this stream.
+                    }
                     eprintln!("[push-server] queued {}", sanitized);
                     let flushed = need_list_sender.push(sanitized).await?;
                     files_to_upload.push(file);
@@ -332,15 +337,20 @@ impl FileListBatcher {
     async fn finish(mut self) -> Result<(), Status> {
         if !self.batch.is_empty() {
             self.flush().await?;
-        } else if !self.sent_any {
-            send_control_message(
-                &self.tx,
-                server_push_response::Payload::FilesToUpload(FileList {
-                    relative_paths: Vec::new(),
-                }),
-            )
-            .await?;
         }
+        // Always emit an empty FilesToUpload terminator so the client
+        // can distinguish "more need_lists may arrive" from "no more
+        // coming". Without this, the client races between its early-
+        // finish condition (looks complete) and the daemon still
+        // streaming batches — closes the data plane prematurely and
+        // late manifest entries can't be queued.
+        send_control_message(
+            &self.tx,
+            server_push_response::Payload::FilesToUpload(FileList {
+                relative_paths: Vec::new(),
+            }),
+        )
+        .await?;
         Ok(())
     }
 

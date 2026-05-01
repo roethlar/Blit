@@ -306,6 +306,11 @@ impl RemotePushClient {
         // Don't finish the data plane until a full iteration passes with
         // no new entries — this ensures all in-flight gRPC batches arrive.
         let mut need_list_fresh: bool;
+        // Set when the daemon signals "no more need_lists coming" by
+        // sending an empty FilesToUpload terminator. Gates the early
+        // finish() so we don't close the data plane while the daemon
+        // is still streaming need_list batches.
+        let mut need_lists_done = false;
         loop {
             if manifest_done && summary.is_some() {
                 break;
@@ -321,6 +326,11 @@ impl RemotePushClient {
                             match message.payload {
                                 Some(ServerPayload::Ack(_)) => {}
                                 Some(ServerPayload::FilesToUpload(list)) => {
+                                    if list.relative_paths.is_empty() {
+                                        // Empty terminator — no more need_lists coming.
+                                        need_lists_done = true;
+                                        continue;
+                                    }
                                     need_list_fresh = true;
                                     let mut rels = list.relative_paths;
                                     files_requested.extend(rels.iter().cloned());
@@ -735,11 +745,11 @@ impl RemotePushClient {
 
             if matches!(transfer_mode, TransferMode::DataPlane)
                 && !need_list_fresh
+                && need_lists_done
                 && pending_queue.is_empty()
                 && manifest_done
                 && data_plane_outstanding == 0
-                && (files_requested.is_empty()
-                    || data_plane_files_sent >= files_requested.len())
+                && data_plane_files_sent >= files_requested.len()
             {
                 if let Some(sender) = data_plane_sender.take() {
                     sender.finish().await?;
