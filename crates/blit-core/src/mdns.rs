@@ -80,11 +80,21 @@ impl MdnsAdvertiser {
 pub fn advertise(options: AdvertiseOptions<'_>) -> Result<MdnsAdvertiser> {
     let daemon = Arc::new(ServiceDaemon::new().context("failed to create mDNS daemon")?);
 
-    let hostname = get()
+    // mdns-sd 0.19 enforces a `.local.` suffix on the hostname argument
+    // (the old 0.8 was lenient). Append if missing — system hostname is
+    // usually the bare label.
+    let raw_hostname = get()
         .ok()
         .and_then(|name| name.into_string().ok())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "localhost".to_string());
+    let hostname = if raw_hostname.ends_with(".local.") {
+        raw_hostname
+    } else if raw_hostname.ends_with(".local") {
+        format!("{raw_hostname}.")
+    } else {
+        format!("{raw_hostname}.local.")
+    };
 
     let instance_name = options
         .instance_name
