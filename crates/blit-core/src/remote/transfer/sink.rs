@@ -236,9 +236,11 @@ impl TransferSink for FsTransferSink {
         receive_stream_double_buffered(reader, &mut file, header.size, RECEIVE_CHUNK_SIZE)
             .await
             .with_context(|| format!("writing {}", dst.display()))?;
-        file.sync_all()
-            .await
-            .with_context(|| format!("syncing {}", dst.display()))?;
+        // Intentionally no sync_all per file: ZFS commits per fsync are
+        // multi-second on spinning rust and crater throughput
+        // (9.3 → 3.3 Gbps observed). The transfer's durability signal
+        // is its END marker plus the OS's own flush; matches rsync's
+        // default behavior. Add a config flag if a caller needs sync.
 
         if self.config.preserve_times && header.mtime_seconds > 0 {
             let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
