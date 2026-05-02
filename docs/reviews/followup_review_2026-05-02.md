@@ -1106,3 +1106,46 @@ Status:
 
 - F2 is substantially implemented.
 - R13-F1 should be closed before calling F2 fully release-ready.
+
+## Round 14 - R13-F1 Closure Commit
+
+Reviewed change:
+
+- Commit: `0d4d2fb fix(daemon): contain push destination_path mutation + purge enum (R13-F1)`
+- Scope: push `destination_path` containment at handshake, purge-root
+  containment before enumeration, and end-to-end symlink-destination regression
+  coverage.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Findings:
+
+- No findings.
+
+Assessment:
+
+R13-F1 is accepted as fixed. The push handler now verifies the rewritten
+`module.path` against `module.canonical_root` immediately after applying
+`destination_path` and before sending `Ack`, so a push through an in-module
+escape symlink is rejected before data-plane setup, file writes, or mirror purge.
+
+`purge_extraneous_entries` also verifies the purge root before
+`plan_extraneous_entries` enumerates it, which is the right defense-in-depth
+for future callers that might bypass the push handshake.
+
+The new integration test covers the concrete failure mode:
+
+- `module/escape -> /sibling`
+- `blit mirror src/ server:/test/escape/`
+- daemon rejects with a containment error
+- sibling files are not touched
+
+Status:
+
+- R13-F1 is closed.
+- F2 is accepted as release-ready for the documented canonical/symlink
+  containment class, subject to the already-documented TOCTOU limitation of
+  check-then-use canonicalization.
+- F2, F7, and F8 are now accepted as closed.

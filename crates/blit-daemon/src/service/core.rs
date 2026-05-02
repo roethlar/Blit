@@ -87,16 +87,20 @@ impl Blit for BlitService {
         let default_root = self.default_root.clone();
         // Counter increments at the dispatch boundary — single chokepoint
         // per RPC, no reach-in to the transfer pipeline. No-op when
-        // metrics are disabled (default).
+        // metrics are disabled (default). The active-transfers gauge
+        // uses an RAII guard so panic/cancellation can't leak it
+        // (F5 of docs/reviews/codebase_review_2026-05-01.md).
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_push();
-        metrics.inc_active();
+        let guard = Arc::clone(&metrics).enter_transfer();
 
         tokio::spawn(async move {
+            // `guard` is moved into the task; its Drop fires no
+            // matter how the task ends.
+            let _guard = guard;
             let result =
                 handle_push_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
                     .await;
-            metrics.dec_active();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
@@ -118,11 +122,11 @@ impl Blit for BlitService {
         let (tx, rx) = mpsc::channel(32);
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_pull();
-        metrics.inc_active();
+        let guard = Arc::clone(&metrics).enter_transfer();
 
         tokio::spawn(async move {
+            let _guard = guard;
             let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
-            metrics.dec_active();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
@@ -144,9 +148,10 @@ impl Blit for BlitService {
         let server_checksums_enabled = self.server_checksums_enabled;
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_pull();
-        metrics.inc_active();
+        let guard = Arc::clone(&metrics).enter_transfer();
 
         tokio::spawn(async move {
+            let _guard = guard;
             let result = handle_pull_sync_stream(
                 modules,
                 default_root,
@@ -156,7 +161,6 @@ impl Blit for BlitService {
                 server_checksums_enabled,
             )
             .await;
-            metrics.dec_active();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
@@ -242,6 +246,10 @@ impl Blit for BlitService {
         request: Request<PurgeRequest>,
     ) -> Result<Response<PurgeResponse>, Status> {
         let req = request.into_inner();
+        // F5: counters mark dispatch attempts (matching push/pull
+        // semantics). Previously inc_purge fired only after a
+        // successful delete, contradicting the metrics-module doc.
+        self.metrics.inc_purge();
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
         if module.read_only {
             return Err(Status::permission_denied(format!(
@@ -261,8 +269,6 @@ impl Blit for BlitService {
             sanitized,
         )
         .await?;
-
-        self.metrics.inc_purge();
 
         Ok(Response::new(PurgeResponse {
             files_deleted: stats.total(),

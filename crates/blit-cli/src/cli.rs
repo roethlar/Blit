@@ -16,6 +16,23 @@ A trailing slash on SRC means \"copy the contents\". Without one, the basename i
 appended when DEST is (or ends in) a directory; otherwise DEST is the exact
 target path. See blit(1) for the full table.";
 
+/// Appended to `blit check --help` so the equivalence model is
+/// discoverable. F12 of docs/reviews/codebase_review_2026-05-01.md.
+const CHECK_SEMANTICS_HELP: &str = "\
+EQUIVALENCE MODEL:
+  blit check verifies that a destination tree matches what `blit copy` or
+  `blit mirror` would have produced — not full filesystem equivalence.
+
+  Compared:    Regular files (by size+mtime, or hash with --checksum).
+  Skipped:     Symlinks, FIFOs, devices, and other non-regular entries.
+               Empty directories. Two trees differing only in those will
+               be reported identical.
+  Mismatches:  File-vs-directory at the same path produces a diff entry
+               on the file side.
+
+If you need full filesystem-tree equivalence (symlinks-as-targets,
+empty-dir presence, etc.), use `diff -r` or a similar tool.";
+
 #[derive(Parser)]
 #[command(name = "blit")]
 #[command(about = "A fast, AI-built file transfer tool (v2)")]
@@ -364,7 +381,29 @@ pub struct ProfileArgs {
 /// Reuses the same filter machinery (`FileFilter` + `build_filter`) that
 /// transfers do, so `--exclude '*.tmp'` here behaves identically to
 /// `--exclude '*.tmp'` on `blit copy`.
+///
+/// Equivalence model — `check` verifies *transfer equivalence*, not
+/// full filesystem-tree equivalence. That means:
+///
+///   - **Regular files** are compared by size+mtime (default) or
+///     Blake3 hash (with `--checksum`).
+///   - **Symlinks** and other non-regular entries (FIFOs, devices,
+///     etc.) are skipped silently. The transfer pipeline doesn't
+///     replicate symlink contents byte-for-byte either, so two
+///     trees that differ only in their symlinks will be reported
+///     identical.
+///   - **Empty directories** are not part of the diff. Transfers
+///     don't preserve them today, so verifying their presence
+///     would report false negatives on legitimate trees.
+///   - **File-vs-directory mismatches** at the same path produce a
+///     diff entry on the entry that's a file (the directory side
+///     contributes nothing on its own).
+///
+/// Use `blit check` to verify that a `blit copy` or `blit mirror`
+/// produced an equivalent destination, not as a general-purpose
+/// `diff -r`. F12 of `docs/reviews/codebase_review_2026-05-01.md`.
 #[derive(Args, Clone, Debug)]
+#[command(after_long_help = CHECK_SEMANTICS_HELP)]
 pub struct CheckArgs {
     /// Source tree to compare from
     pub source: String,

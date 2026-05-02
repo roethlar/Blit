@@ -30,20 +30,20 @@ use crate::transfers::{build_filter_from_inputs, FilterInputs};
 use crate::util::format_bytes;
 
 #[derive(Debug, Clone, Serialize)]
-struct DiffEntry {
-    path: String,
-    reason: String,
-    src_size: u64,
-    dst_size: u64,
+pub(crate) struct DiffEntry {
+    pub(crate) path: String,
+    pub(crate) reason: String,
+    pub(crate) src_size: u64,
+    pub(crate) dst_size: u64,
 }
 
 #[derive(Debug, Default, Serialize)]
-struct CheckResult {
-    matching: usize,
-    differing: Vec<DiffEntry>,
-    missing_on_src: Vec<String>,
-    missing_on_dest: Vec<String>,
-    errors: Vec<(String, String)>,
+pub(crate) struct CheckResult {
+    pub(crate) matching: usize,
+    pub(crate) differing: Vec<DiffEntry>,
+    pub(crate) missing_on_src: Vec<String>,
+    pub(crate) missing_on_dest: Vec<String>,
+    pub(crate) errors: Vec<(String, String)>,
 }
 
 pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
@@ -96,7 +96,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     }
 }
 
-fn compare_trees(
+pub(crate) fn compare_trees(
     src_root: &Path,
     dst_root: &Path,
     use_checksum: bool,
@@ -277,5 +277,148 @@ fn print_result(result: &CheckResult, one_way: bool) {
         for (path, err) in &result.errors {
             println!("  ! {path}: {err}");
         }
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod equivalence_tests {
+    //! F12 regression tests pinning the documented `blit check`
+    //! equivalence model. These don't go through clap; they call
+    //! `compare_trees` directly so they're fast and deterministic.
+
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use tempfile::tempdir;
+
+    fn write(path: &Path, body: &[u8]) {
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn matching_files_report_zero_diffs() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.txt"), b"hello");
+        write(&dst.join("a.txt"), b"hello");
+        // Mtime sync so size+mtime equality holds.
+        let mtime = std::fs::metadata(src.join("a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        filetime::set_file_mtime(
+            dst.join("a.txt"),
+            filetime::FileTime::from_system_time(mtime),
+        )
+        .unwrap();
+
+        let result = compare_trees(&src, &dst, false, false, FileFilter::default()).unwrap();
+        assert_eq!(result.matching, 1);
+        assert!(result.differing.is_empty());
+        assert!(result.missing_on_dest.is_empty());
+        assert!(result.missing_on_src.is_empty());
+    }
+
+    #[test]
+    fn empty_directories_are_not_part_of_equivalence() {
+        // Source has only an empty directory; destination is empty.
+        // Equivalence model: matches transfer behavior, which doesn't
+        // replicate empty directories. Result: zero diffs.
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("empty_dir")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let result = compare_trees(&src, &dst, false, false, FileFilter::default()).unwrap();
+        assert_eq!(result.matching, 0);
+        assert!(
+            result.differing.is_empty()
+                && result.missing_on_dest.is_empty()
+                && result.missing_on_src.is_empty(),
+            "empty dirs must not produce diff entries: {:#?}",
+            result
+        );
+    }
+
+    #[test]
+    fn symlinks_are_skipped_silently() {
+        // src has a symlink, dst doesn't (or vice versa). The
+        // equivalence model ignores them — no diff entry produced.
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        // Symlink target doesn't need to exist for this test.
+        symlink("nowhere", src.join("link")).unwrap();
+        let result = compare_trees(&src, &dst, false, false, FileFilter::default()).unwrap();
+        assert!(
+            result.differing.is_empty() && result.missing_on_dest.is_empty(),
+            "symlink-only difference must report identical: {:#?}",
+            result
+        );
+    }
+
+    #[test]
+    fn file_vs_directory_at_same_path_diffs_on_file_side() {
+        // src has a regular file at "x"; dst has a directory at "x".
+        // The diff entry is keyed on the file side (only files
+        // populate the equivalence model).
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("x"), b"file");
+        std::fs::create_dir_all(dst.join("x")).unwrap();
+        let result = compare_trees(&src, &dst, false, false, FileFilter::default()).unwrap();
+        assert_eq!(
+            result.differing.len(),
+            1,
+            "expected one diff: {:#?}",
+            result
+        );
+        assert_eq!(result.differing[0].path, "x");
+        assert!(result.differing[0].reason.contains("type mismatch"));
+    }
+
+    #[test]
+    fn missing_on_dest_reported() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("only-here.txt"), b"x");
+        std::fs::create_dir_all(&dst).unwrap();
+        let result = compare_trees(&src, &dst, false, false, FileFilter::default()).unwrap();
+        assert_eq!(result.missing_on_dest.len(), 1);
+        assert_eq!(result.missing_on_dest[0], "only-here.txt");
+    }
+
+    #[test]
+    fn one_way_ignores_extras_on_dest() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.txt"), b"x");
+        let mtime = std::fs::metadata(src.join("a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        write(&dst.join("a.txt"), b"x");
+        write(&dst.join("extra.txt"), b"y");
+        filetime::set_file_mtime(
+            dst.join("a.txt"),
+            filetime::FileTime::from_system_time(mtime),
+        )
+        .unwrap();
+
+        let one_way = compare_trees(&src, &dst, false, true, FileFilter::default()).unwrap();
+        assert_eq!(one_way.matching, 1);
+        // missing_on_src is populated by compare_trees regardless,
+        // but the print/exit logic ignores it under one_way.
+        assert!(one_way.differing.is_empty());
+        assert!(one_way.missing_on_dest.is_empty());
     }
 }

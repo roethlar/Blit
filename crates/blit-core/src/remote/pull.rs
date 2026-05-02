@@ -68,6 +68,16 @@ pub struct RemotePullReport {
     /// so a hostile daemon can't escape the destination via `..`,
     /// absolute paths, or Windows-shaped roots (R5-F1).
     pub paths_to_delete: Option<Vec<String>>,
+    /// Daemon's `server_checksums_enabled` advertisement from the
+    /// PullSyncAck. `None` means no ack arrived (legacy daemon or
+    /// pre-spec wire shape). Set by the receive loop and read by
+    /// the CLI to honor F11 of the 2026-05-01 baseline review:
+    /// when the client asked for `--checksum` mode but the daemon
+    /// has checksums disabled, the comparison would silently
+    /// degrade to size+mtime — a real footgun for users expecting
+    /// byte-level equality. The pull_sync handshake errors out
+    /// before any data flows when this mismatch is detected.
+    pub server_checksums_enabled: Option<bool>,
 }
 
 pub type RemotePullProgress = RemoteTransferProgress;
@@ -523,9 +533,19 @@ impl RemotePullClient {
                     // Header acknowledged, continue (deprecated, use PullSyncAck)
                 }
                 Some(server_pull_message::Payload::PullSyncAck(ack)) => {
-                    // Server tells us its checksum capability
-                    // TODO: Store ack.server_checksums_enabled for decision making
-                    let _ = ack.server_checksums_enabled;
+                    // F11: store the capability and reject early if
+                    // the user explicitly asked for `--checksum` but
+                    // the daemon has checksums disabled. Silently
+                    // degrading to size+mtime would lie to the user
+                    // about the comparison strength they requested.
+                    report.server_checksums_enabled = Some(ack.server_checksums_enabled);
+                    if options.checksum && !ack.server_checksums_enabled {
+                        bail!(
+                            "client requested checksum comparison (--checksum) but the daemon \
+                             has checksums disabled; aborting before transfer to avoid silent \
+                             fallback to size+mtime comparison"
+                        );
+                    }
                 }
                 Some(server_pull_message::Payload::ManifestBatch(batch)) => {
                     if let Some(progress) = progress {

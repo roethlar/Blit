@@ -33,7 +33,35 @@ impl TransferOrchestrator {
         Self
     }
 
+    /// Sync wrapper around [`execute_local_mirror_async`]. Builds a
+    /// new multi-thread Tokio runtime and blocks on it. Use this from
+    /// non-async callers (CLI commands, tests). Callers already
+    /// inside an async runtime must use `execute_local_mirror_async`
+    /// directly — calling this from inside a Tokio context will
+    /// panic at `Runtime::new` (closes F9 of
+    /// `docs/reviews/codebase_review_2026-05-01.md`).
     pub fn execute_local_mirror(
+        &self,
+        src_root: &Path,
+        dest_root: &Path,
+        options: LocalMirrorOptions,
+    ) -> Result<LocalMirrorSummary> {
+        let workers = options.workers.max(1);
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()
+            .context("build tokio runtime")?;
+        runtime.block_on(self.execute_local_mirror_async(src_root, dest_root, options))
+    }
+
+    /// Async core of the local-mirror orchestrator. Callable from
+    /// any async context. Closes F9 of the 2026-05-01 baseline
+    /// review: previously `execute_local_mirror` built and owned its
+    /// own Tokio runtime, which panicked when called from an async
+    /// caller. The sync wrapper above is now a thin convenience for
+    /// blocking callers.
+    pub async fn execute_local_mirror_async(
         &self,
         src_root: &Path,
         dest_root: &Path,
@@ -328,12 +356,6 @@ impl TransferOrchestrator {
 
         let planning_start = Instant::now();
 
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(options.workers.max(1))
-            .enable_all()
-            .build()
-            .context("build tokio runtime")?;
-
         let src_root_buf = src_root.to_path_buf();
         let dest_root_buf = dest_root.to_path_buf();
         let filter = options.filter.clone_without_cache();
@@ -350,80 +372,73 @@ impl TransferOrchestrator {
             ComparisonMode::SizeMtime
         };
 
-        let pipeline_result = runtime.block_on(async {
-            // 1. Scan source via FsTransferSource, wrapped in FilteredSource so
-            //    the user filter applies through the universal pipeline chokepoint
-            //    (identical to push/pull/remote-remote behavior — full parity).
-            let inner: Arc<dyn TransferSource> =
-                Arc::new(FsTransferSource::new(src_root_buf.clone()));
-            let source: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(inner, filter));
-            let unreadable = Arc::new(Mutex::new(Vec::new()));
-            let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        // 1. Scan source via FsTransferSource, wrapped in FilteredSource so
+        //    the user filter applies through the universal pipeline chokepoint
+        //    (identical to push/pull/remote-remote behavior — full parity).
+        let inner: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root_buf.clone()));
+        let source: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(inner, filter));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
 
-            // 2. Collect all headers
-            let mut all_headers = Vec::new();
-            while let Some(h) = header_rx.recv().await {
-                all_headers.push(h);
-            }
-            let _total_scanned = scan_handle
-                .await
-                .context("scan task panicked")?
-                .context("scan failed")?;
-
-            // 3. Diff + plan via the shared DiffPlanner stage. Combines
-            //    the comparison-filter and payload-planning steps that
-            //    were previously inline. Behavior preserved bit-for-bit
-            //    (size+mtime or Blake3 hash, then tar/large/raw planning).
-            let src = src_root_buf.clone();
-            let dst = dest_root_buf.clone();
-            let plan_opts = plan_options.clone();
-            let headers = all_headers.clone();
-            let planned = tokio::task::spawn_blocking(move || {
-                plan_local_mirror(
-                    headers,
-                    LocalDiffInputs {
-                        src_root: &src,
-                        dst_root: &dst,
-                        compare_mode,
-                        ignore_existing,
-                        plan_options: plan_opts,
-                        skip_unchanged,
-                    },
-                )
-            })
+        // 2. Collect all headers
+        let mut all_headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            all_headers.push(h);
+        }
+        let _total_scanned = scan_handle
             .await
-            .context("diff_planner task panicked")??;
+            .context("scan task panicked")?
+            .context("scan failed")?;
 
-            // 5. Create sink and execute unified pipeline
-            let sink: Arc<dyn TransferSink> = if copy_config.null_sink {
-                Arc::new(NullSink::new())
-            } else {
-                Arc::new(FsTransferSink::new(
-                    src_root_buf.clone(),
-                    dest_root_buf.clone(),
-                    FsSinkConfig {
-                        preserve_times: copy_config.preserve_times,
-                        dry_run: copy_config.dry_run,
-                        checksum: copy_config.checksum,
-                        resume: copy_config.resume,
-                    },
-                ))
-            };
-
-            let outcome = execute_sink_pipeline(
-                source,
-                vec![sink],
-                planned.payloads,
-                DEFAULT_PAYLOAD_PREFETCH,
-                None,
+        // 3. Diff + plan via the shared DiffPlanner stage. Combines
+        //    the comparison-filter and payload-planning steps that
+        //    were previously inline. Behavior preserved bit-for-bit
+        //    (size+mtime or Blake3 hash, then tar/large/raw planning).
+        let src = src_root_buf.clone();
+        let dst = dest_root_buf.clone();
+        let plan_opts = plan_options.clone();
+        let headers = all_headers.clone();
+        let planned = tokio::task::spawn_blocking(move || {
+            plan_local_mirror(
+                headers,
+                LocalDiffInputs {
+                    src_root: &src,
+                    dst_root: &dst,
+                    compare_mode,
+                    ignore_existing,
+                    plan_options: plan_opts,
+                    skip_unchanged,
+                },
             )
-            .await
-            .context("transfer pipeline failed")?;
+        })
+        .await
+        .context("diff_planner task panicked")??;
 
-            Ok::<_, eyre::Report>((all_headers, outcome))
-        })?;
+        // 5. Create sink and execute unified pipeline
+        let sink: Arc<dyn TransferSink> = if copy_config.null_sink {
+            Arc::new(NullSink::new())
+        } else {
+            Arc::new(FsTransferSink::new(
+                src_root_buf.clone(),
+                dest_root_buf.clone(),
+                FsSinkConfig {
+                    preserve_times: copy_config.preserve_times,
+                    dry_run: copy_config.dry_run,
+                    checksum: copy_config.checksum,
+                    resume: copy_config.resume,
+                },
+            ))
+        };
 
-        let (all_headers, pipeline_outcome) = pipeline_result;
+        let pipeline_outcome = execute_sink_pipeline(
+            source,
+            vec![sink],
+            planned.payloads,
+            DEFAULT_PAYLOAD_PREFETCH,
+            None,
+        )
+        .await
+        .context("transfer pipeline failed")?;
         let planner_duration_ms = planning_start.elapsed().as_millis();
 
         let total_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
@@ -734,4 +749,68 @@ fn execute_single_file_copy(
         },
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod async_runtime_tests {
+    //! F9 regression: `execute_local_mirror_async` must be callable
+    //! from inside an existing Tokio runtime without panicking. The
+    //! sync `execute_local_mirror` wrapper builds its own runtime
+    //! and would panic with "Cannot start a runtime from within a
+    //! runtime" if called from `#[tokio::test]`.
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_file(path: &std::path::Path, body: &[u8]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn opts() -> LocalMirrorOptions {
+        LocalMirrorOptions {
+            workers: 2,
+            preserve_times: false,
+            dry_run: false,
+            checksum: false,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn async_version_callable_from_async_context() {
+        // The whole point of F9 — calling the async version from
+        // within #[tokio::test]'s runtime must not build a nested
+        // runtime or panic.
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_file(&src.join("a.txt"), b"hello");
+        let orch = TransferOrchestrator::new();
+        let summary = orch
+            .execute_local_mirror_async(&src, &dst, opts())
+            .await
+            .unwrap();
+        assert!(
+            summary.copied_files >= 1,
+            "expected at least one file copied, got {:?}",
+            summary
+        );
+        assert!(dst.join("a.txt").exists());
+    }
+
+    #[test]
+    fn sync_wrapper_still_works() {
+        // The sync API must keep working for non-async callers
+        // (CLI commands today).
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_file(&src.join("a.txt"), b"hello-sync");
+        let orch = TransferOrchestrator::new();
+        let summary = orch.execute_local_mirror(&src, &dst, opts()).unwrap();
+        assert!(summary.copied_files >= 1);
+        assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"hello-sync");
+    }
 }
