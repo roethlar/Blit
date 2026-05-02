@@ -617,3 +617,111 @@ Status:
   safe.
 - Step 4C is functionally correct for normal tar shards, but R5-F2 and R5-F3
   must be fixed before accepting the gRPC tar-shard receive path as safe.
+
+## Round 6 - R5 Closure Commit
+
+Reviewed change:
+
+- Commit: `9f6d5b1 fix(receive): close R5 review findings (path safety + tar-shard hardening)`
+- Scope: `DeleteList` validation, pull gRPC tar-shard extraction hardening,
+  tar-shard buffer cap, `FilterSpec` glob validation, DEVLOG ordering, and
+  regression tests.
+
+Verification:
+
+- `cargo fmt -- --check` passed.
+- `cargo test --workspace` passed.
+- Existing warnings remain unrelated: deprecated macOS FSEvents API usage and
+  an unused macOS capability test variable.
+
+Verdict:
+
+The R5 fixes are mostly correct. R5-F1 is closed: delete-list entries now stay
+as raw strings and go through `path_safety::safe_join` before deletion.
+R5-F2 is closed for the symlink/hardlink class: the pull gRPC tar extractor no
+longer calls `Entry::unpack` and rejects non-regular entries. R5-F4 and R5-F5
+are closed. R5-F3 is partially closed: the shard-level `archive_size` cap is in
+place, but there is still a per-entry allocation hole.
+
+### R6-F1. Pull tar-shard extraction still preallocates from daemon-controlled `FileHeader.size`
+
+Severity: Medium
+
+`crates/blit-core/src/remote/pull.rs:1032` to
+`crates/blit-core/src/remote/pull.rs:1035` now avoids `Entry::unpack`, but it
+creates the destination buffer with:
+
+```rust
+let mut contents = Vec::with_capacity(header.size as usize);
+```
+
+`header.size` comes from `TarShardHeader.files`, which is daemon-authored wire
+input. A daemon can keep `TarShardHeader.archive_size` under the new 256 MiB cap
+while putting `u64::MAX` or another huge value in a file header, causing the
+client to attempt a huge allocation before `std::io::copy` or the later size
+check has a chance to reject it.
+
+Recommendation:
+
+Do not preallocate from `FileHeader.size`. Validate first that
+`header.size <= shard.declared_size` and `header.size <= MAX_TAR_SHARD_BYTES`;
+also compare `entry.size()` to `header.size` before allocating. Then either use
+`Vec::new()` / bounded `try_reserve` or stream directly to a file and count
+bytes, rejecting if the count differs. The push receive tar helper has the same
+shape at `crates/blit-core/src/remote/transfer/sink.rs:403`, so this is a good
+candidate for a shared safe tar-entry writer.
+
+### R6-F2. A stream that ends with an open tar shard is accepted instead of rejected
+
+Severity: Medium
+
+The receive loop validates final shard length only inside the
+`TarShardComplete` arm at `crates/blit-core/src/remote/pull.rs:630` to
+`crates/blit-core/src/remote/pull.rs:641`. After the gRPC stream ends, the code
+finalizes only `active_file` at `crates/blit-core/src/remote/pull.rs:770`; it
+does not check whether `active_shard` is still `Some`.
+
+A buggy or hostile daemon can send `TarShardHeader`, maybe some chunks, then end
+the stream without `TarShardComplete`. If the stream closes cleanly, the client
+drops the buffered shard and can return success with missing files.
+
+Recommendation:
+
+After the response loop exits, bail if `active_shard.is_some()`. Add tests for
+`Header` with no `Complete` and `Header + partial Chunk` with no `Complete`.
+This should be treated like `FileData` without a preceding `FileHeader`: a wire
+protocol error, not a partial success.
+
+### R6-F3. Manual tar-shard writes drop source metadata on the gRPC pull fallback
+
+Severity: Medium
+
+`build_tar_shard` writes mode and mtime into each tar entry at
+`crates/blit-core/src/remote/transfer/payload.rs:368` to
+`crates/blit-core/src/remote/transfer/payload.rs:383`. The safe sink-side tar
+path restores mtime from `FileHeader` at
+`crates/blit-core/src/remote/transfer/sink.rs:406` to
+`crates/blit-core/src/remote/transfer/sink.rs:433`.
+
+The new pull gRPC tar extractor writes bytes manually at
+`crates/blit-core/src/remote/pull.rs:1034` to
+`crates/blit-core/src/remote/pull.rs:1046`, but never applies
+`header.mtime_seconds` or `header.permissions`. That means a forced-gRPC pull of
+many small files can succeed byte-for-byte while leaving destination mtimes at
+"now", causing later size+mtime syncs to re-transfer unchanged files.
+
+Recommendation:
+
+After the manual write, apply the same best-effort metadata policy as
+`FsTransferSink`: set mtime when `header.mtime_seconds > 0` and Unix
+permissions when nonzero. Extend `test_pull_grpc_fallback_many_small_files` or a
+unit test to pin mtime preservation for tar-shard extraction.
+
+Status:
+
+- R5-F1, R5-F2, R5-F4, and R5-F5 are accepted as fixed.
+- R5-F3 is reduced but not fully closed because of R6-F1.
+- Step 4B delete-list safety is accepted modulo the already-known F2
+  symlink-containment work.
+- Step 4C gRPC tar-shard safety needs the three R6 follow-ups before I would
+  call it release-ready.

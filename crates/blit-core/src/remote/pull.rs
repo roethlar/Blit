@@ -768,6 +768,7 @@ impl RemotePullClient {
         }
 
         finalize_active_file(&mut active_file, progress).await?;
+        ensure_no_open_shard(&active_shard)?;
 
         // Wait for the manifest send task to complete (it should have
         // finished by now — daemon's response stream couldn't have
@@ -940,6 +941,23 @@ async fn finalize_active_file(
 /// allocate (R5-F3 of `docs/reviews/followup_review_2026-05-02.md`).
 const MAX_TAR_SHARD_BYTES: u64 = 256 * 1024 * 1024;
 
+/// R6-F2: a stream that closes with `active_shard = Some(_)` is a
+/// protocol error — the daemon sent `TarShardHeader` and possibly
+/// chunks but never sent `TarShardComplete`, so files inside that
+/// shard never landed. The pull receive loop calls this after the
+/// response stream ends. Treated like `FileData` without a
+/// preceding `FileHeader`: a wire protocol error, not a partial
+/// success.
+fn ensure_no_open_shard(active: &Option<InProgressShard>) -> Result<()> {
+    if active.is_some() {
+        bail!(
+            "gRPC pull stream ended with an open tar shard \
+             (TarShardHeader received, no TarShardComplete)"
+        );
+    }
+    Ok(())
+}
+
 /// Buffer state for a tar shard arriving on the gRPC pull control
 /// plane (Step 4C). `declared_size` is checked at every Chunk
 /// arrival and again at Complete so a daemon that lies about the
@@ -960,29 +978,35 @@ struct ShardApplyStats {
     paths: Vec<PathBuf>,
 }
 
-/// Extract a tar-shard buffer into `dest_root`. Per R5-F2 of
-/// `docs/reviews/followup_review_2026-05-02.md` we never call
-/// `Entry::unpack` — that would honor tar entry-type semantics
-/// (symlinks, hardlinks, devices) which a hostile daemon could use
-/// to write outside `dest_root`. Instead we:
+/// Extract a tar-shard buffer into `dest_root`. Per R5-F2 / R6-F1 /
+/// R6-F3 of `docs/reviews/followup_review_2026-05-02.md` we:
 ///
-///   - Reject anything that isn't a regular-file entry.
+///   - Reject anything that isn't a regular-file entry (no symlinks,
+///     hardlinks, devices, etc.).
 ///   - Route the path through `path_safety::validate_wire_path` /
 ///     `safe_join` so traversal/abs/UNC/Windows-root inputs fail.
-///   - Copy bytes out of the entry manually, never letting tar
-///     materialize a special inode.
-///   - Verify the byte count matches the header's declared size
-///     (a daemon claiming "1 KiB" but emitting 1 MiB is a wire bug
-///     even if the path was safe).
+///   - Verify `entry.size()` (from the tar header inside the buffer)
+///     matches `header.size` (from the daemon's `TarShardHeader.files`)
+///     and that both are within `shard.declared_size`, *before*
+///     allocating. This closes R6-F1: a daemon could otherwise keep
+///     `archive_size` under the cap while putting `u64::MAX` in a
+///     per-file header and force a huge `Vec::with_capacity`.
+///   - Use `try_reserve_exact` so a still-pathological size produces
+///     `AllocError` instead of an abort.
+///   - Apply `header.mtime_seconds` and `header.permissions` after
+///     write so a forced-gRPC pull doesn't desync mtime-based
+///     comparisons (R6-F3).
 fn apply_pull_tar_shard(
     dest_root: &Path,
     shard: InProgressShard,
     track_paths: bool,
 ) -> Result<ShardApplyStats> {
+    use filetime::{set_file_mtime, FileTime};
     use std::collections::HashMap;
     use std::io::Cursor;
     use tar::{Archive, EntryType};
 
+    let declared_size = shard.declared_size;
     let mut expected: HashMap<String, FileHeader> = shard
         .files
         .into_iter()
@@ -1018,6 +1042,34 @@ fn apply_pull_tar_shard(
             .remove(&rel_string)
             .ok_or_else(|| eyre!("tar shard produced unexpected entry '{rel_string}'"))?;
 
+        // Validate sizes BEFORE any allocation (R6-F1). The tar
+        // header's size and the daemon's FileHeader size must agree,
+        // and neither can exceed the shard cap. After this check
+        // header.size is bounded by declared_size <= MAX_TAR_SHARD_BYTES.
+        let entry_declared = entry.size();
+        if entry_declared != header.size {
+            bail!(
+                "tar shard entry '{rel_string}' tar-header size {} does not match \
+                 FileHeader size {}",
+                entry_declared,
+                header.size
+            );
+        }
+        if header.size > declared_size {
+            bail!(
+                "tar shard entry '{rel_string}' size {} exceeds shard declared_size {}",
+                header.size,
+                declared_size
+            );
+        }
+        if header.size > MAX_TAR_SHARD_BYTES {
+            bail!(
+                "tar shard entry '{rel_string}' size {} exceeds local cap {}",
+                header.size,
+                MAX_TAR_SHARD_BYTES
+            );
+        }
+
         // Validate path through the shared chokepoint, then safe_join
         // for the actual filesystem write.
         crate::path_safety::validate_wire_path(&rel_string)
@@ -1029,14 +1081,24 @@ fn apply_pull_tar_shard(
                 .with_context(|| format!("creating directory {}", parent.display()))?;
         }
 
-        // Copy bytes manually; never goes through tar's special-file
-        // creation paths.
-        let mut contents = Vec::with_capacity(header.size as usize);
+        // Bounded allocation: try_reserve_exact returns Err instead of
+        // aborting if the OS can't satisfy the request, so a daemon
+        // that defeats the byte-level checks above (e.g. via a future
+        // bump in cap) still can't crash us.
+        let mut contents: Vec<u8> = Vec::new();
+        contents
+            .try_reserve_exact(header.size as usize)
+            .with_context(|| {
+                format!(
+                    "allocating buffer for tar entry '{rel_string}' (size {})",
+                    header.size
+                )
+            })?;
         std::io::copy(&mut entry, &mut contents)
             .with_context(|| format!("buffering tar entry {rel_string}"))?;
         if contents.len() as u64 != header.size {
             bail!(
-                "tar shard entry '{rel_string}' size {} does not match header size {}",
+                "tar shard entry '{rel_string}' produced {} bytes; expected {}",
                 contents.len(),
                 header.size
             );
@@ -1044,6 +1106,22 @@ fn apply_pull_tar_shard(
 
         std::fs::write(&dest_path, &contents)
             .with_context(|| format!("writing {}", dest_path.display()))?;
+
+        // R6-F3: preserve metadata so size+mtime sync doesn't see
+        // every tar-shard-extracted file as "modified at now". Best
+        // effort — log nothing on failure (matches FsTransferSink).
+        if header.mtime_seconds > 0 {
+            let _ = set_file_mtime(
+                &dest_path,
+                FileTime::from_unix_time(header.mtime_seconds, 0),
+            );
+        }
+        #[cfg(unix)]
+        if header.permissions != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(header.permissions);
+            let _ = std::fs::set_permissions(&dest_path, perms);
+        }
 
         stats.files += 1;
         stats.bytes += header.size;
@@ -1173,7 +1251,9 @@ mod tar_shard_safety_tests {
 
     #[test]
     fn rejects_size_mismatch() {
-        // Header advertises a different size than the archive entry.
+        // Daemon's FileHeader advertises a different size than the
+        // tar entry. R6-F1 catches this before any allocation by
+        // comparing entry.size() against header.size up front.
         let tmp = tempdir().unwrap();
         let dest = tmp.path().to_path_buf();
         let buffer = build_regular_archive(&[("ok.txt", b"hello")]);
@@ -1184,7 +1264,81 @@ mod tar_shard_safety_tests {
             declared_size,
         };
         let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
-        assert!(err.to_string().contains("does not match header size"));
+        assert!(
+            err.to_string().contains("does not match"),
+            "expected size-mismatch rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_per_entry_size_above_shard_cap() {
+        // R6-F1: a FileHeader claiming u64::MAX must be rejected
+        // before any allocation. The check is against
+        // shard.declared_size and MAX_TAR_SHARD_BYTES.
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+        let buffer = build_regular_archive(&[("ok.txt", b"hi")]);
+        let declared_size = buffer.len() as u64;
+        let shard = InProgressShard {
+            // Daemon claims this single file is bigger than the
+            // entire shard. We must catch this before allocating.
+            files: vec![header("ok.txt", u64::MAX)],
+            buffer,
+            declared_size,
+        };
+        let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
+        // The first check that fires is the entry/header size mismatch
+        // (entry says 2, header says u64::MAX).
+        assert!(err.to_string().contains("does not match"));
+        assert!(!dest.join("ok.txt").exists());
+    }
+
+    #[test]
+    fn ensure_no_open_shard_accepts_none() {
+        // Healthy stream end: no active shard, helper returns Ok.
+        assert!(ensure_no_open_shard(&None).is_ok());
+    }
+
+    #[test]
+    fn ensure_no_open_shard_rejects_open_shard() {
+        // R6-F2: stream ended after TarShardHeader without
+        // TarShardComplete — must be a hard error.
+        let shard = InProgressShard {
+            files: vec![header("partial.txt", 10)],
+            buffer: Vec::new(),
+            declared_size: 10,
+        };
+        let err = ensure_no_open_shard(&Some(shard)).unwrap_err();
+        assert!(
+            err.to_string().contains("open tar shard"),
+            "expected open-shard error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn preserves_mtime_on_pull_tar_shard() {
+        // R6-F3: the pull gRPC tar extractor must apply mtime so a
+        // subsequent size+mtime sync doesn't see every extracted file
+        // as "modified at now" and re-transfer it.
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+        let buffer = build_regular_archive(&[("dated.txt", b"hi")]);
+        let declared_size = buffer.len() as u64;
+        let target_mtime: i64 = 1_577_836_800; // 2020-01-01 UTC, deterministic
+        let mut h = header("dated.txt", 2);
+        h.mtime_seconds = target_mtime;
+        let shard = InProgressShard {
+            files: vec![h],
+            buffer,
+            declared_size,
+        };
+        apply_pull_tar_shard(&dest, shard, false).unwrap();
+        let meta = std::fs::metadata(dest.join("dated.txt")).unwrap();
+        let actual = filetime::FileTime::from_last_modification_time(&meta).unix_seconds();
+        assert_eq!(
+            actual, target_mtime,
+            "extracted file mtime should match FileHeader.mtime_seconds"
+        );
     }
 
     #[test]
