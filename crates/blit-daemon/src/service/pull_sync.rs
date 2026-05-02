@@ -12,8 +12,9 @@ use crate::runtime::{ModuleConfig, RootExport};
 use base64::{engine::general_purpose, Engine as _};
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
-    BlockTransferComplete, ClientPullMessage, DataTransferNegotiation, FileData, FileHeader,
-    FileList, ManifestBatch, PullSummary, PullSyncAck, PullSyncHeader, ServerPullMessage,
+    BlockTransferComplete, ClientPullMessage, ComparisonMode, DataTransferNegotiation, FileData,
+    FileHeader, FileList, ManifestBatch, MirrorMode, PullSummary, PullSyncAck, ServerPullMessage,
+    TransferOperationSpec,
 };
 use blit_core::manifest::{
     compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
@@ -39,50 +40,57 @@ pub(crate) async fn handle_pull_sync_stream(
     force_grpc_override: bool,
     server_checksums_enabled: bool,
 ) -> Result<(), Status> {
-    // Phase 1: Receive header
-    let header = match receive_header(&mut stream).await? {
-        Some(h) => h,
+    // Phase 1: Receive the unified TransferOperationSpec
+    let spec = match receive_spec(&mut stream).await? {
+        Some(s) => s,
         None => {
             return Err(Status::invalid_argument(
-                "expected PullSyncHeader as first message",
+                "expected TransferOperationSpec as first message",
             ))
         }
     };
 
-    // Resolve module from header
-    let module = resolve_module(&modules, default_root.as_ref(), &header.module).await?;
+    // Resolve module from spec
+    let module = resolve_module(&modules, default_root.as_ref(), &spec.module).await?;
 
-    let force_grpc = header.force_grpc || force_grpc_override;
-    let mirror_mode = header.mirror_mode;
-    let client_wants_checksum = header.checksum;
-    let resume_mode = header.resume;
+    let force_grpc = spec.force_grpc || force_grpc_override;
+    let mirror_mode_kind = MirrorMode::try_from(spec.mirror_mode).unwrap_or(MirrorMode::Off);
+    let mirror_mode = !matches!(mirror_mode_kind, MirrorMode::Off | MirrorMode::Unspecified);
+    let compare_mode_kind =
+        ComparisonMode::try_from(spec.compare_mode).unwrap_or(ComparisonMode::SizeMtime);
+    // Filter parity (F10) is wired in step 4B via FilteredSource on the
+    // FsTransferSource. For 4A this is a pure wire-shape migration —
+    // bool-soup → typed enums on the wire, internal behavior unchanged.
+    let client_wants_checksum = matches!(compare_mode_kind, ComparisonMode::Checksum);
+    let resume_settings = spec.resume.clone().unwrap_or_default();
+    let resume_mode = resume_settings.enabled;
     // Clamp block size to safe limit to prevent server OOM
     use blit_core::copy::MAX_BLOCK_SIZE;
-    let block_size = header.block_size.min(MAX_BLOCK_SIZE as u32);
+    let block_size = resume_settings.block_size.min(MAX_BLOCK_SIZE as u32);
 
     // Acknowledge header with server capabilities
     send_pull_sync_ack(&tx, server_checksums_enabled).await?;
 
     // Resolve path
-    let requested = if header.path.trim().is_empty() {
+    let requested = if spec.source_path.trim().is_empty() {
         PathBuf::from(".")
     } else {
-        resolve_relative_path(&header.path)?
+        resolve_relative_path(&spec.source_path)?
     };
 
     let root = module.path.join(&requested);
     if !root.exists() {
         return Err(Status::not_found(format!(
             "path not found in module '{}': {}",
-            module.name, header.path
+            module.name, spec.source_path
         )));
     }
 
     // Phase 2: Receive client manifest
     let client_manifest = receive_client_manifest(&mut stream).await?;
 
-    // Phase 3: Enumerate server files and compare with client manifest
-    // Compute checksums if client requests checksum mode and server has checksums enabled
+    // Phase 3: Enumerate server files and compare with client manifest.
+    // Compute checksums if client requests checksum mode and server has checksums enabled.
     let compute_checksums = client_wants_checksum && server_checksums_enabled;
     let server_entries =
         collect_pull_entries_with_checksums(&module.path, &root, &requested, compute_checksums)
@@ -96,23 +104,16 @@ pub(crate) async fn handle_pull_sync_stream(
     let total_bytes: u64 = server_manifest.iter().map(|h| h.size).sum();
     send_manifest_batch(&tx, server_manifest.len() as u64, total_bytes).await?;
 
-    // Determine comparison mode based on header flags
-    let compare_mode = if header.ignore_times {
-        CompareMode::IgnoreTimes
-    } else if header.force {
-        CompareMode::Force
-    } else if header.size_only {
-        CompareMode::SizeOnly
-    } else if header.checksum {
-        CompareMode::Checksum
-    } else {
-        CompareMode::Default
-    };
+    // Map protocol ComparisonMode onto the internal CompareMode used
+    // by manifest comparison primitives. Force/IgnoreTimes/SizeOnly/
+    // Checksum/SizeMtime collapse the previous bool-soup; the
+    // ignore_existing case becomes a separate field below.
+    let (compare_mode, ignore_existing) = compare_mode_to_internal(compare_mode_kind);
 
     // Compare manifests: server files are source, client files are target
     let compare_opts = CompareOptions {
         mode: compare_mode,
-        ignore_existing: header.ignore_existing,
+        ignore_existing,
         include_deletions: mirror_mode,
     };
     let diff = compare_manifests(&server_manifest, &client_manifest, &compare_opts);
@@ -224,19 +225,36 @@ pub(crate) async fn handle_pull_sync_stream(
     Ok(())
 }
 
-async fn receive_header(
+async fn receive_spec(
     stream: &mut Streaming<ClientPullMessage>,
-) -> Result<Option<PullSyncHeader>, Status> {
+) -> Result<Option<TransferOperationSpec>, Status> {
     match stream.message().await {
         Ok(Some(msg)) => {
-            if let Some(client_pull_message::Payload::Header(header)) = msg.payload {
-                Ok(Some(header))
+            if let Some(client_pull_message::Payload::Spec(spec)) = msg.payload {
+                Ok(Some(spec))
             } else {
                 Ok(None)
             }
         }
         Ok(None) => Ok(None),
-        Err(e) => Err(Status::internal(format!("failed to receive header: {}", e))),
+        Err(e) => Err(Status::internal(format!("failed to receive spec: {}", e))),
+    }
+}
+
+/// Translate the protocol-level `ComparisonMode` enum onto the
+/// internal `CompareMode` plus the orthogonal `ignore_existing` flag.
+/// `IgnoreExisting` is a separate axis on the comparison primitives,
+/// so we surface it as both an enum case (wire) and a separate option
+/// field (internal).
+fn compare_mode_to_internal(mode: ComparisonMode) -> (CompareMode, bool) {
+    match mode {
+        ComparisonMode::Checksum => (CompareMode::Checksum, false),
+        ComparisonMode::SizeOnly => (CompareMode::SizeOnly, false),
+        ComparisonMode::IgnoreTimes => (CompareMode::IgnoreTimes, false),
+        ComparisonMode::Force => (CompareMode::Force, false),
+        ComparisonMode::IgnoreExisting => (CompareMode::Default, true),
+        // Unspecified | SizeMtime — both fall back to the historical default.
+        _ => (CompareMode::Default, false),
     }
 }
 

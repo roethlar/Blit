@@ -154,10 +154,14 @@ message PullSummary {
   uint64 entries_deleted = 5; // count of files/dirs removed during mirror purge
 }
 
-// PullSync Operation (bidirectional pull with manifest comparison)
+// PullSync Operation (bidirectional pull with manifest comparison).
+// The leading message is now `TransferOperationSpec` (the unified
+// contract — see step 2 of docs/plan/PIPELINE_UNIFICATION.md). The
+// previous `PullSyncHeader` bool-soup shape was removed entirely
+// because we don't carry backward compatibility into the next release.
 message ClientPullMessage {
   oneof payload {
-    PullSyncHeader header = 1;           // Initial request with module/path
+    TransferOperationSpec spec = 1;      // Initial request: module, path, filter, compare/mirror/resume
     FileHeader local_file = 2;           // Client's local file metadata
     ManifestComplete manifest_done = 3;  // Signals end of client manifest
     BlockHashList block_hashes = 4;      // Client's block hashes for resume mode
@@ -202,21 +206,6 @@ message ServerPullMessage {
 message BlockHashRequest {
   string relative_path = 1;              // File to get block hashes for
   uint32 block_size = 2;                 // Block size to use
-}
-
-message PullSyncHeader {
-  string module = 1;
-  string path = 2;
-  bool force_grpc = 3;
-  bool mirror_mode = 4;  // If true, client wants deletions reported
-  // Comparison options
-  bool size_only = 5;       // Compare only by size, ignore mtime
-  bool ignore_times = 6;    // Transfer all files unconditionally
-  bool ignore_existing = 7; // Skip files that already exist on target
-  bool force = 8;           // Overwrite even if target is newer (dangerous)
-  bool checksum = 9;        // Force checksum comparison (slower but more accurate)
-  bool resume = 10;         // Enable block-level resume for partial/changed files
-  uint32 block_size = 11;   // Block size for resume (0 = default 1 MiB)
 }
 
 // Other Operations
@@ -341,6 +330,13 @@ message TransferOperationSpec {
   // pick payload shapes the target can handle (e.g. fall back from
   // tar shards if the client is older).
   PeerCapabilities client_capabilities = 8;
+
+  // Request that the origin route bulk file bytes through the gRPC
+  // control plane instead of negotiating a TCP data plane. Useful for
+  // diagnostics and for environments where the data plane port can't
+  // be reached. Origin still honors filter/compare/mirror/resume; only
+  // the byte transport changes.
+  bool force_grpc = 9;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource

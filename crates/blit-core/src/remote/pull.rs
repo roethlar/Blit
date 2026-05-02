@@ -12,8 +12,9 @@ use tokio::task::JoinHandle;
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
     client_pull_message, pull_chunk, server_pull_message, BlockHashList, ClientPullMessage,
-    DataTransferNegotiation, FileData, FileHeader, ManifestComplete, PullChunk, PullRequest,
-    PullSummary, PullSyncHeader,
+    ComparisonMode, DataTransferNegotiation, FileData, FileHeader, FilterSpec, ManifestComplete,
+    MirrorMode, PeerCapabilities, PullChunk, PullRequest, PullSummary, ResumeSettings,
+    TransferOperationSpec,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::progress::RemoteTransferProgress;
@@ -399,24 +400,58 @@ impl RemotePullClient {
             .map_err(|status| eyre!(status.message().to_string()))?
             .into_inner();
 
-        // Send header
+        // Build the unified TransferOperationSpec from the client's
+        // CLI args. ComparisonMode collapses what used to be a 5-bool
+        // soup (size_only, ignore_times, ignore_existing, force,
+        // checksum) into a typed enum that rejects nonsensical
+        // combinations at the type level. Filter rules ride along
+        // here too — the daemon honors them via FilteredSource on its
+        // FsTransferSource (closes F10 in the same migration).
+        let compare_mode = if options.ignore_times {
+            ComparisonMode::IgnoreTimes
+        } else if options.force {
+            ComparisonMode::Force
+        } else if options.ignore_existing {
+            ComparisonMode::IgnoreExisting
+        } else if options.size_only {
+            ComparisonMode::SizeOnly
+        } else if options.checksum {
+            ComparisonMode::Checksum
+        } else {
+            ComparisonMode::SizeMtime
+        };
+        let mirror = if mirror_mode {
+            // Default to FILTERED_SUBSET — when `--exclude '*.log'` is
+            // active, local files outside the filter scope must not be
+            // mirror-purged. Step 4B will add a `--delete-scope all`
+            // CLI override that switches to MirrorMode::All.
+            MirrorMode::FilteredSubset
+        } else {
+            MirrorMode::Off
+        };
         tx.send(ClientPullMessage {
-            payload: Some(client_pull_message::Payload::Header(PullSyncHeader {
+            payload: Some(client_pull_message::Payload::Spec(TransferOperationSpec {
+                spec_version: 1,
                 module,
-                path: path_str,
+                source_path: path_str,
+                filter: Some(FilterSpec::default()),
+                compare_mode: compare_mode as i32,
+                mirror_mode: mirror as i32,
+                resume: Some(ResumeSettings {
+                    enabled: options.resume,
+                    block_size: options.block_size,
+                }),
+                client_capabilities: Some(PeerCapabilities {
+                    supports_resume: true,
+                    supports_tar_shards: true,
+                    supports_data_plane_tcp: true,
+                    supports_filter_spec: true,
+                }),
                 force_grpc,
-                mirror_mode,
-                size_only: options.size_only,
-                ignore_times: options.ignore_times,
-                ignore_existing: options.ignore_existing,
-                force: options.force,
-                checksum: options.checksum,
-                resume: options.resume,
-                block_size: options.block_size,
             })),
         })
         .await
-        .map_err(|_| eyre!("failed to send pull sync header"))?;
+        .map_err(|_| eyre!("failed to send pull sync spec"))?;
 
         // Send local manifest. Send in a separate task so we can also
         // drive response_stream concurrently — for large manifests the
