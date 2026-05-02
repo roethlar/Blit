@@ -45,8 +45,8 @@ impl<'a> FilterInputs<'a> {
     }
 }
 use endpoints::{
-    ensure_remote_destination_supported, ensure_remote_source_supported,
-    ensure_remote_transfer_supported,
+    ensure_remote_destination_supported, ensure_remote_pull_supported,
+    ensure_remote_push_supported, ensure_remote_source_supported,
 };
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
@@ -374,7 +374,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
-            ensure_remote_transfer_supported(args)?;
+            ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&remote)?;
             run_remote_push_transfer(
                 args,
@@ -385,7 +385,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             .await
         }
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
-            ensure_remote_transfer_supported(args)?;
+            ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&remote)?;
             run_remote_pull_transfer(
                 args,
@@ -396,7 +396,10 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             .await
         }
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
-            ensure_remote_transfer_supported(args)?;
+            // Remote-remote relays go through the push transport
+            // for the dst leg; --checksum stays gated by the push
+            // gate.
+            ensure_remote_push_supported(args)?;
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             run_remote_push_transfer(
@@ -459,7 +462,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             Ok(())
         }
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
-            ensure_remote_transfer_supported(args)?;
+            ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&remote)?;
             run_remote_pull_transfer(args, remote.clone(), &dst_path, false).await?;
 
@@ -477,7 +480,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
-            ensure_remote_transfer_supported(args)?;
+            ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&remote)?;
             run_remote_push_transfer(
                 args,
@@ -498,7 +501,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             Ok(())
         }
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
-            ensure_remote_transfer_supported(args)?;
+            ensure_remote_push_supported(args)?;
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
             run_remote_push_transfer(args, Endpoint::Remote(src.clone()), dst, false).await?;

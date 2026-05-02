@@ -1149,3 +1149,74 @@ Status:
   containment class, subject to the already-documented TOCTOU limitation of
   check-then-use canonicalization.
 - F2, F7, and F8 are now accepted as closed.
+
+## Round 15 - Lower-Priority Baseline Batch
+
+Reviewed change:
+
+- Commit: `6f83c8d fix: close F5/F11/F12/F9 — lower-priority baseline review items`
+- Scope: metrics active-transfer RAII guard, pull checksum ack handling,
+  `blit check` equivalence docs/tests, and async local-mirror API split.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+F5 is accepted. `TransferMetrics::enter_transfer()` gives the active gauge
+drop-on-panic/cancel semantics, and push/pull/pull_sync move the guard into the
+spawned handler task. The purge counter now increments at dispatch, matching the
+documented attempts/errors/gauge contract.
+
+F9 is accepted. `execute_local_mirror_async` gives async callers a non-nested
+runtime entry point, while `execute_local_mirror` remains a sync wrapper for
+blocking callers.
+
+F12 is accepted. `blit check` now documents that it verifies transfer
+equivalence, not full filesystem-tree equivalence, and the tests pin the
+regular-file, empty-dir, symlink, file-vs-dir, missing, and one-way cases.
+
+F11 is improved but the user-facing closure is still inconsistent.
+
+### R15-F1. Remote checksum ack behavior is unreachable from the CLI
+
+Severity: Low
+
+`crates/blit-core/src/remote/pull.rs:535` to
+`crates/blit-core/src/remote/pull.rs:548` now stores
+`PullSyncAck.server_checksums_enabled` and bails if
+`PullSyncOptions.checksum` is true while the daemon advertises checksums
+disabled. That is the right core behavior.
+
+However, `crates/blit-cli/src/transfers/endpoints.rs:40` still rejects
+`--checksum` for every remote transfer before `run_remote_pull_transfer` can
+construct `PullSyncOptions { checksum: args.checksum, ... }`. The new F11 path is
+therefore not reachable from `blit copy server:/module/path ./local --checksum`
+or `blit mirror server:/module/path ./local --checksum`.
+
+This means there is no user-facing way to exercise the advertised "bails at the
+ack" behavior, and no integration test can currently prove the daemon
+`--no-server-checksums` case through the CLI. The existing blanket CLI rejection
+does prevent silent degradation for CLI users, but it does so by keeping remote
+checksum mode unsupported rather than by using the new ack negotiation.
+
+Recommendation:
+
+Pick one product shape and make the code match it:
+
+- If remote pull checksum mode is now supported, make remote capability checks
+  direction-aware: allow `--checksum` for remote-source/local-dest pulls, keep it
+  rejected for unsupported push or remote-remote paths, and add an integration
+  test with a daemon started with `--no-server-checksums` that asserts the new
+  ack error.
+- If remote checksum mode is still intentionally unsupported, keep the CLI gate
+  but add a lower-level `RemotePullClient::pull_sync` test for the ack behavior
+  and adjust the F11 closure wording so it does not claim a user-facing CLI
+  behavior that cannot occur.
+
+Status:
+
+- F5, F9, and F12 are accepted as closed.
+- F11 is partially closed in core but needs the CLI/product mismatch resolved
+  before I would mark the baseline finding fully closed.
