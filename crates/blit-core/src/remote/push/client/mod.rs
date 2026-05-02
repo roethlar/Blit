@@ -29,7 +29,11 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::data_plane::DataPlaneSession;
-use super::payload::{payload_file_count, plan_transfer_payloads, TransferPayload};
+use super::payload::{payload_file_count, TransferPayload};
+// Push planning routes through the unified diff_planner module so the
+// canonical entry point is the same regardless of origin type. Push's
+// "diff" itself lives on the daemon side (NeedList) — see plan_push_payloads.
+use crate::remote::transfer::diff_planner::plan_push_payloads as plan_transfer_payloads;
 use crate::remote::transfer::pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
 use crate::remote::transfer::progress::RemoteTransferProgress;
 use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, SinkOutcome, TransferSink};

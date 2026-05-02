@@ -32,6 +32,28 @@ use crate::generated::{ComparisonMode, FileHeader};
 use crate::remote::transfer::payload::{plan_transfer_payloads, PlannedPayloads};
 use crate::transfer_plan::PlanOptions;
 
+/// Push origins outsource the diff to the daemon: the client sends its
+/// source manifest, daemon returns a NeedList, client filters to the
+/// intersection. By the time we plan payloads, the headers are already
+/// filtered. This re-exports the existing payload planner under the
+/// diff_planner module so the push-client call site goes through the
+/// unified module — there's no separate comparison stage to consolidate
+/// (the comparison happens on the daemon, not the client).
+///
+/// When step 4 lands and the daemon-side diff moves into this module
+/// for the pull case, push could in principle use the same daemon-side
+/// helper instead of the round-trip-via-NeedList protocol. That would
+/// be a deeper protocol change tracked under remote→remote re-evaluation
+/// (step 5 of `docs/plan/PIPELINE_UNIFICATION.md`).
+pub fn plan_push_payloads(
+    headers: Vec<FileHeader>,
+    source_root: &Path,
+    plan_options: PlanOptions,
+) -> Result<PlannedPayloads> {
+    plan_transfer_payloads(headers, source_root, plan_options)
+        .context("planning push payloads")
+}
+
 /// Input bundle for the local-mirror diff stage. Origin and target
 /// are co-located (both on the same filesystem), so the comparison
 /// can stat the destination directly without a wire roundtrip.
