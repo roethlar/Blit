@@ -917,3 +917,44 @@ Status:
 - R8-F2 is accepted as fixed.
 - Daemon gRPC push fallback is release-ready modulo the low-priority regression
   coverage gap above.
+
+## Round 10 - R9 Coverage Closure
+
+Reviewed change:
+
+- Commit: `8b10f3f test(push-fallback): cover EOF-without-UploadComplete (R9-F1)`
+- Scope: generic `receive_fallback_data` stream input and direct EOF regression
+  tests for daemon gRPC push fallback.
+
+Verification:
+
+- `cargo fmt -- --check` passed.
+- `cargo test --workspace` passed.
+- Existing warnings remain unrelated: deprecated macOS FSEvents API usage and
+  an unused macOS capability test variable.
+
+Findings:
+
+- No findings.
+
+Assessment:
+
+R9-F1 is accepted as fixed. `receive_fallback_data` now accepts any
+`tokio_stream::Stream<Item = Result<ClientPushRequest, Status>> + Unpin`, and
+the production `tonic::Streaming<ClientPushRequest>` call site continues to
+match that contract. The loop changed from `message().await` to
+`next().await.transpose()`, which preserves the same `Result<Option<_>, Status>`
+shape.
+
+The new tests directly cover the previously review-only invariant:
+
+- EOF after `FileManifest` without `UploadComplete` is rejected.
+- EOF after `TarShardHeader` without `TarShardComplete` / `UploadComplete` is
+  rejected.
+- Empty EOF without `UploadComplete` is rejected even when no files are pending.
+
+Status:
+
+- R9-F1 is closed.
+- R8-F1 and R8-F2 remain accepted as fixed.
+- Daemon gRPC push fallback is accepted as release-ready.
