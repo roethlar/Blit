@@ -18,9 +18,16 @@ pub(super) enum FastPathDecision {
     /// `examined` distinguishes "source was empty / had no enumerable
     /// files" (examined=0) from "source had N files but all already
     /// matched the destination under skip_unchanged" (examined>0).
-    NoWork { examined: usize },
-    Tiny { files: Vec<(PathBuf, u64)> },
-    Huge { file: PathBuf, size: u64 },
+    NoWork {
+        examined: usize,
+    },
+    Tiny {
+        files: Vec<(PathBuf, u64)>,
+    },
+    Huge {
+        file: PathBuf,
+        size: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default)]

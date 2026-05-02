@@ -24,7 +24,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum TransferPayload {
     File(FileHeader),
-    TarShard { headers: Vec<FileHeader> },
+    TarShard {
+        headers: Vec<FileHeader>,
+    },
     /// Resume protocol: overwrite a block of an existing file.
     FileBlock {
         relative_path: String,
@@ -327,9 +329,7 @@ pub async fn transfer_payloads_via_control_plane(
             }
             // Resume variants are receive-only — gRPC control plane is outbound only.
             PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
-                bail!(
-                    "FileBlock payloads cannot traverse the gRPC control plane (outbound only)"
-                );
+                bail!("FileBlock payloads cannot traverse the gRPC control plane (outbound only)");
             }
         }
     }

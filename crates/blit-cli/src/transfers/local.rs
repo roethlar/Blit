@@ -89,7 +89,11 @@ pub async fn run_local_transfer(
     Ok(())
 }
 
-fn build_local_options(ctx: &AppContext, args: &TransferArgs, mirror: bool) -> Result<LocalMirrorOptions> {
+fn build_local_options(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    mirror: bool,
+) -> Result<LocalMirrorOptions> {
     let mut options = LocalMirrorOptions {
         mirror,
         dry_run: args.dry_run,
@@ -187,9 +191,8 @@ fn print_summary(
     // Suppress throughput/workers noise on small transfers where startup
     // dominates wall time and the numbers are meaningless. Keep it for
     // bulk transfers where it's actually informative.
-    let show_throughput = verbose
-        || summary.total_bytes >= THROUGHPUT_LINE_MIN_BYTES
-        || summary.copied_files > 1;
+    let show_throughput =
+        verbose || summary.total_bytes >= THROUGHPUT_LINE_MIN_BYTES || summary.copied_files > 1;
     if show_throughput {
         let throughput = if duration.as_secs_f64() > 0.0 {
             summary.total_bytes as f64 / duration.as_secs_f64()

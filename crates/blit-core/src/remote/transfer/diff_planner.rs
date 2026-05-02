@@ -50,8 +50,7 @@ pub fn plan_push_payloads(
     source_root: &Path,
     plan_options: PlanOptions,
 ) -> Result<PlannedPayloads> {
-    plan_transfer_payloads(headers, source_root, plan_options)
-        .context("planning push payloads")
+    plan_transfer_payloads(headers, source_root, plan_options).context("planning push payloads")
 }
 
 /// Input bundle for the local-mirror diff stage. Origin and target
@@ -87,7 +86,12 @@ pub fn plan_local_mirror(
     inputs: LocalDiffInputs<'_>,
 ) -> Result<PlannedPayloads> {
     let headers_to_copy = if inputs.skip_unchanged {
-        filter_unchanged(&source_headers, inputs.src_root, inputs.dst_root, inputs.compare_mode)
+        filter_unchanged(
+            &source_headers,
+            inputs.src_root,
+            inputs.dst_root,
+            inputs.compare_mode,
+        )
     } else {
         source_headers
     };
@@ -147,7 +151,10 @@ mod tests {
 
     #[test]
     fn checksum_mode_enables_blake3() {
-        assert_eq!(checksum_for_mode(ComparisonMode::Checksum), Some(ChecksumType::Blake3));
+        assert_eq!(
+            checksum_for_mode(ComparisonMode::Checksum),
+            Some(ChecksumType::Blake3)
+        );
     }
 
     #[test]

@@ -801,7 +801,8 @@ async fn accept_pull_data_connection_streaming(
                     TransferPayload::File(_) => 1,
                     TransferPayload::TarShard { headers } => headers.len() as u64,
                     // Daemon's pull source (filesystem) never produces resume payloads.
-                    TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => 0,
+                    TransferPayload::FileBlock { .. }
+                    | TransferPayload::FileBlockComplete { .. } => 0,
                 };
                 if payload_tx.send(payload).await.is_err() {
                     return (total_files, total_bytes);

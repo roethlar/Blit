@@ -86,7 +86,10 @@ pub fn validate_wire_path(wire_path: &str) -> Result<PathBuf> {
     for component in path.components() {
         match component {
             Component::Prefix(_) => {
-                bail!("path has prefix component (Windows drive/UNC): {:?}", wire_path);
+                bail!(
+                    "path has prefix component (Windows drive/UNC): {:?}",
+                    wire_path
+                );
             }
             Component::RootDir => {
                 bail!("path has root component: {:?}", wire_path);
@@ -181,7 +184,10 @@ mod tests {
     #[test]
     fn safe_join_empty_returns_root() {
         let root = Path::new("/dest/file.txt");
-        assert_eq!(safe_join(root, "").unwrap(), PathBuf::from("/dest/file.txt"));
+        assert_eq!(
+            safe_join(root, "").unwrap(),
+            PathBuf::from("/dest/file.txt")
+        );
     }
 
     #[test]

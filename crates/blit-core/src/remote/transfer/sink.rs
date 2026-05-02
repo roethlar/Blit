@@ -116,10 +116,7 @@ impl FsTransferSink {
     /// path of the written file is pushed onto the supplied collector.
     /// Lets receive callers (e.g. mirror) discover which files survived
     /// without re-implementing the record dispatch loop.
-    pub fn with_path_tracker(
-        mut self,
-        tracker: Arc<std::sync::Mutex<Vec<PathBuf>>>,
-    ) -> Self {
+    pub fn with_path_tracker(mut self, tracker: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
         self.path_tracker = Some(tracker);
         self
     }
@@ -271,10 +268,8 @@ impl TransferSink for FsTransferSink {
         #[cfg(unix)]
         if header.permissions != 0 {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &dst,
-                std::fs::Permissions::from_mode(header.permissions),
-            );
+            let _ =
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(header.permissions));
         }
         #[cfg(not(unix))]
         let _ = header.permissions;
@@ -524,10 +519,7 @@ async fn write_file_block_complete(
     #[cfg(unix)]
     if permissions != 0 {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            &dst,
-            std::fs::Permissions::from_mode(permissions),
-        );
+        let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(permissions));
     }
     #[cfg(not(unix))]
     let _ = permissions;
@@ -838,9 +830,7 @@ impl TransferSink for GrpcFallbackSink {
             // gRPC fallback is outbound only; receive-side payloads
             // shouldn't reach this sink.
             PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
-                eyre::bail!(
-                    "GrpcFallbackSink does not handle FileBlock payloads (outbound only)"
-                );
+                eyre::bail!("GrpcFallbackSink does not handle FileBlock payloads (outbound only)");
             }
         }
     }
@@ -1112,15 +1102,8 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("hello.txt"), b"world").unwrap();
 
-        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(
-            src,
-        ));
-        let sink = GrpcFallbackSink::new(
-            source,
-            tx,
-            1024 * 1024,
-            PathBuf::from("remote:/test/"),
-        );
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(src));
+        let sink = GrpcFallbackSink::new(source, tx, 1024 * 1024, PathBuf::from("remote:/test/"));
 
         let header = make_file_header("hello.txt", 5);
         let outcome = sink
@@ -1157,12 +1140,7 @@ mod tests {
         let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(
             tmp.path().to_path_buf(),
         ));
-        let sink = GrpcFallbackSink::new(
-            source,
-            tx,
-            1024 * 1024,
-            PathBuf::from("remote:/test/"),
-        );
+        let sink = GrpcFallbackSink::new(source, tx, 1024 * 1024, PathBuf::from("remote:/test/"));
 
         sink.finish().await.unwrap();
 

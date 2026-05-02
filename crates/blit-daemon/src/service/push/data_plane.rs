@@ -71,7 +71,8 @@ pub(crate) async fn accept_data_connection_stream(
         // Enable nodelay + keepalive to prevent idle stream timeouts
         // during long transfers on other streams.
         let socket = {
-            let std_sock = accepted.into_std()
+            let std_sock = accepted
+                .into_std()
                 .map_err(|err| Status::internal(format!("converting socket: {err}")))?;
             let s2 = socket2::Socket::from(std_sock);
             let _ = s2.set_tcp_nodelay(true);
@@ -189,7 +190,6 @@ async fn handle_data_plane_stream(
     );
     Ok(stats)
 }
-
 
 pub(crate) async fn receive_fallback_data(
     stream: &mut Streaming<ClientPushRequest>,
@@ -592,7 +592,6 @@ fn accumulate_transfer_stats(target: &mut TransferStats, shard: &TransferStats) 
     target.bytes_transferred += shard.bytes_transferred;
     target.bytes_zero_copy += shard.bytes_zero_copy;
 }
-
 
 /// Process a tar shard and return stats plus the buffer for potential reuse.
 /// The buffer is returned if its capacity matches the pool size.

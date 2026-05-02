@@ -146,10 +146,7 @@ pub(crate) async fn handle_pull_sync_stream(
         .files_to_transfer
         .iter()
         .filter(|f| f.status == FileStatus::Modified)
-        .filter(|f| {
-            resume_mode
-                || client_size_map.get(f.relative_path.as_str()) == Some(&f.size)
-        })
+        .filter(|f| resume_mode || client_size_map.get(f.relative_path.as_str()) == Some(&f.size))
         .map(|f| f.relative_path.clone())
         .collect();
 
@@ -218,7 +215,8 @@ pub(crate) async fn handle_pull_sync_stream(
     } else {
         // Data plane transfer (full files). Pass the enumeration `root`,
         // not module.path — header.relative_path is relative to `root`.
-        let stats = stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
+        let stats =
+            stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
         send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
     }
 
@@ -389,9 +387,9 @@ async fn stream_via_data_plane(
 ) -> Result<TransferStats, Status> {
     use blit_core::buffer::BufferPool;
     use blit_core::remote::transfer::data_plane::DataPlaneSession;
+    use blit_core::remote::transfer::payload_file_count;
     use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
     use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
-    use blit_core::remote::transfer::payload_file_count;
 
     // Determine tuning based on total bytes
     let tuning = determine_remote_tuning(total_bytes);
@@ -458,16 +456,10 @@ async fn stream_via_data_plane(
     let memory_budget = buffer_size * pool_size * 2;
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
-    let session = DataPlaneSession::from_stream(
-        socket,
-        false,
-        tuning.chunk_bytes,
-        8,
-        pool,
-    )
-    .await;
+    let session = DataPlaneSession::from_stream(socket, false, tuning.chunk_bytes, 8, pool).await;
 
-    let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(source_root.to_path_buf()));
+    let source: Arc<dyn TransferSource> =
+        Arc::new(FsTransferSource::new(source_root.to_path_buf()));
     let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
         session,
         source.clone(),

@@ -27,11 +27,8 @@ fn pull_sync_does_not_deadlock_with_populated_destination() {
     // Populate server with 50 files.
     for i in 0..50 {
         let name = format!("file_{:03}.txt", i);
-        fs::write(
-            ctx.module_dir.join(&name),
-            format!("server content {}", i),
-        )
-        .expect("write server file");
+        fs::write(ctx.module_dir.join(&name), format!("server content {}", i))
+            .expect("write server file");
     }
 
     // Populate dest with a subset (40/50 files).
@@ -66,10 +63,7 @@ fn pull_sync_does_not_deadlock_with_populated_destination() {
     for i in 0..50 {
         let name = format!("file_{:03}.txt", i);
         let dest_path = dest_dir.join(&name);
-        assert!(
-            dest_path.exists(),
-            "expected {name} to exist after mirror"
-        );
+        assert!(dest_path.exists(), "expected {name} to exist after mirror");
         let content = fs::read_to_string(&dest_path).expect("read dest file");
         assert_eq!(
             content,

@@ -325,10 +325,12 @@ fn same_device(src: &Endpoint, dst: &Endpoint) -> Option<bool> {
         // path may not exist yet on a fresh target.
         let src_meta = std::fs::metadata(s).ok()?;
         let dst_meta = std::fs::metadata(d)
-            .or_else(|_| d.parent().map_or_else(
-                || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-                std::fs::metadata,
-            ))
+            .or_else(|_| {
+                d.parent().map_or_else(
+                    || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                    std::fs::metadata,
+                )
+            })
             .ok()?;
         Some(src_meta.dev() == dst_meta.dev())
     }
@@ -341,7 +343,10 @@ fn same_device(src: &Endpoint, dst: &Endpoint) -> Option<bool> {
 
 fn print_dump_human(v: &Value) {
     println!("blit diagnostics dump");
-    println!("  version     : {}", v["blit_version"].as_str().unwrap_or("?"));
+    println!(
+        "  version     : {}",
+        v["blit_version"].as_str().unwrap_or("?")
+    );
     if let Some(invocation) = v["invocation"].as_array() {
         let joined: Vec<&str> = invocation.iter().filter_map(|s| s.as_str()).collect();
         println!("  invocation  : {}", joined.join(" "));
@@ -355,11 +360,26 @@ fn print_dump_human(v: &Value) {
     println!();
     let res = &v["rsync_resolution"];
     println!("Rsync resolution");
-    println!("  source_is_contents     : {}", res["source_is_contents"].as_bool().unwrap_or(false));
-    println!("  destination_is_container: {}", res["destination_is_container"].as_bool().unwrap_or(false));
-    println!("  pre_resolve_destination: {}", res["pre_resolve_destination"].as_str().unwrap_or("?"));
-    println!("  resolved_destination   : {}", res["resolved_destination"].as_str().unwrap_or("?"));
-    println!("  resolution_changed     : {}", res["resolution_changed"].as_bool().unwrap_or(false));
+    println!(
+        "  source_is_contents     : {}",
+        res["source_is_contents"].as_bool().unwrap_or(false)
+    );
+    println!(
+        "  destination_is_container: {}",
+        res["destination_is_container"].as_bool().unwrap_or(false)
+    );
+    println!(
+        "  pre_resolve_destination: {}",
+        res["pre_resolve_destination"].as_str().unwrap_or("?")
+    );
+    println!(
+        "  resolved_destination   : {}",
+        res["resolved_destination"].as_str().unwrap_or("?")
+    );
+    println!(
+        "  resolution_changed     : {}",
+        res["resolution_changed"].as_bool().unwrap_or(false)
+    );
     if let Some(same) = v["same_device"].as_bool() {
         println!();
         println!("Transport hints");
@@ -370,7 +390,10 @@ fn print_dump_human(v: &Value) {
 fn print_endpoint_human(v: &Value) {
     if v["kind"] == "local" {
         println!("  raw            : {}", v["raw"].as_str().unwrap_or("?"));
-        println!("  absolute_path  : {}", v["absolute_path"].as_str().unwrap_or("(not canonicalized)"));
+        println!(
+            "  absolute_path  : {}",
+            v["absolute_path"].as_str().unwrap_or("(not canonicalized)")
+        );
         println!(
             "  exists         : {}  is_file={} is_dir={}",
             v["exists"].as_bool().unwrap_or(false),
@@ -388,10 +411,7 @@ fn print_endpoint_human(v: &Value) {
         }
         if let Some(free) = v["free_bytes"].as_u64() {
             let total = v["total_bytes"].as_u64().unwrap_or(0);
-            println!(
-                "  disk (free/total): {} / {} bytes",
-                free, total
-            );
+            println!("  disk (free/total): {} / {} bytes", free, total);
         }
     } else {
         println!("  raw       : {}", v["raw"].as_str().unwrap_or("?"));

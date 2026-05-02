@@ -86,8 +86,7 @@ pub async fn execute_sink_pipeline_streaming(
 
     // Per-sink payload channels; dispatcher forwards round-robin to these.
     let mut sink_senders: Vec<mpsc::Sender<TransferPayload>> = Vec::with_capacity(sink_count);
-    let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> =
-        Vec::with_capacity(sink_count);
+    let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(sink_count);
 
     for sink in sinks {
         let (tx, mut rx) = mpsc::channel::<TransferPayload>(per_sink_capacity);
@@ -242,7 +241,10 @@ pub async fn execute_receive_pipeline(
                 let (headers, data) = read_tar_shard(socket).await?;
                 let bytes = data.len() as u64;
                 let payload = PreparedPayload::TarShard { headers, data };
-                let outcome = sink.write_payload(payload).await.context("writing payload")?;
+                let outcome = sink
+                    .write_payload(payload)
+                    .await
+                    .context("writing payload")?;
                 if let Some(p) = progress {
                     p.report_payload(0, bytes);
                 }
@@ -269,7 +271,10 @@ pub async fn execute_receive_pipeline(
                     offset,
                     bytes,
                 };
-                let outcome = sink.write_payload(payload).await.context("writing payload")?;
+                let outcome = sink
+                    .write_payload(payload)
+                    .await
+                    .context("writing payload")?;
                 total.merge(&outcome);
             }
             DATA_PLANE_RECORD_BLOCK_COMPLETE => {
@@ -283,7 +288,10 @@ pub async fn execute_receive_pipeline(
                     mtime_seconds: mtime,
                     permissions: perms,
                 };
-                let outcome = sink.write_payload(payload).await.context("writing payload")?;
+                let outcome = sink
+                    .write_payload(payload)
+                    .await
+                    .context("writing payload")?;
                 total.merge(&outcome);
             }
             other => bail!("unknown data-plane record tag: 0x{:02X}", other),
@@ -604,134 +612,129 @@ mod tests {
         // Each payload is a `(description, bytes)` pair fed to the parser.
         let payloads: Vec<(&str, Vec<u8>)> = vec![
             // ---- valid records ----
-            ("empty stream (immediate END)",
-             vec![DATA_PLANE_RECORD_END]),
-            ("file record with zero-length path",
-             encode_file(b"", &[], 0, 0)),
-            ("file record with zero-length body",
-             encode_file(b"hello.txt", &[], 0, 0o644)),
-            ("file record with content",
-             encode_file(b"a.txt", &b"payload"[..], 1_600_000_000, 0o755)),
-            ("tar shard with zero entries",
-             encode_tar_shard(&[], 0, &[])),
-            ("tar shard with one entry",
-             encode_tar_shard(
-                 &[("f.txt", 5, 1_600_000_000, 0o644)],
-                 5,
-                 &[0u8; 5],
-             )),
-            ("block record",
-             encode_block(b"f.txt", 0, b"hello")),
-            ("block complete record",
-             encode_block_complete(b"f.txt", 100)),
+            ("empty stream (immediate END)", vec![DATA_PLANE_RECORD_END]),
+            (
+                "file record with zero-length path",
+                encode_file(b"", &[], 0, 0),
+            ),
+            (
+                "file record with zero-length body",
+                encode_file(b"hello.txt", &[], 0, 0o644),
+            ),
+            (
+                "file record with content",
+                encode_file(b"a.txt", &b"payload"[..], 1_600_000_000, 0o755),
+            ),
+            ("tar shard with zero entries", encode_tar_shard(&[], 0, &[])),
+            (
+                "tar shard with one entry",
+                encode_tar_shard(&[("f.txt", 5, 1_600_000_000, 0o644)], 5, &[0u8; 5]),
+            ),
+            ("block record", encode_block(b"f.txt", 0, b"hello")),
+            (
+                "block complete record",
+                encode_block_complete(b"f.txt", 100),
+            ),
             // ---- truncated / malformed ----
-            ("empty stream",
-             vec![]),
-            ("truncated tag byte only",
-             vec![0x00]),
-            ("tag then EOF (file header truncated)",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_FILE];
-                 v.extend_from_slice(&42u32.to_be_bytes()); // path_len
-                 // no path bytes, no size, no mtime, no perms
-                 v
-             }),
-            ("file with path_len but no path bytes",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_FILE];
-                 v.extend_from_slice(&5u32.to_be_bytes()); // claim 5 path bytes
-                 v.extend_from_slice(b"ab"); // only 2 bytes provided
-                 v
-             }),
-            ("file with path but no size/mtime/perms",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_FILE];
-                 v.extend_from_slice(&3u32.to_be_bytes());
-                 v.extend_from_slice(b"abc");
-                 // size, mtime, perms all missing
-                 v
-             }),
-            ("file with header but no content bytes",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_FILE];
-                 v.extend_from_slice(&3u32.to_be_bytes());
-                 v.extend_from_slice(b"abc");
-                 v.extend_from_slice(&100u64.to_be_bytes()); // size = 100
-                 v.extend_from_slice(&1i64.to_be_bytes()); // mtime
-                 v.extend_from_slice(&0o644u32.to_be_bytes()); // perms
-                 // no content
-                 v
-             }),
-            ("file with oversized path_len (potential OOM guard)",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_FILE];
-                 v.extend_from_slice(&(u32::MAX).to_be_bytes());
-                 v
-             }),
-            ("tar shard with huge entry count",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
-                 v.extend_from_slice(&(u32::MAX).to_be_bytes());
-                 v
-             }),
-            ("tar shard truncated mid-entry header",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
-                 v.extend_from_slice(&1u32.to_be_bytes()); // 1 entry
-                 v.extend_from_slice(&3u32.to_be_bytes());
-                 v.extend_from_slice(b"abc");
-                 // missing size, mtime, perms for that entry
-                 v
-             }),
-            ("tar shard with valid headers but truncated data_len",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
-                 v.extend_from_slice(&1u32.to_be_bytes());
-                 let path = b"f.txt";
-                 v.extend_from_slice(&(path.len() as u32).to_be_bytes());
-                 v.extend_from_slice(path);
-                 v.extend_from_slice(&100u64.to_be_bytes()); // size
-                 v.extend_from_slice(&1i64.to_be_bytes()); // mtime
-                 v.extend_from_slice(&0o644u32.to_be_bytes()); // perms
-                 // tar_size missing
-                 v
-             }),
-            ("tar shard with data_len but no tar bytes",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
-                 v.extend_from_slice(&1u32.to_be_bytes());
-                 let path = b"f.txt";
-                 v.extend_from_slice(&(path.len() as u32).to_be_bytes());
-                 v.extend_from_slice(path);
-                 v.extend_from_slice(&100u64.to_be_bytes());
-                 v.extend_from_slice(&1i64.to_be_bytes());
-                 v.extend_from_slice(&0o644u32.to_be_bytes());
-                 v.extend_from_slice(&50u64.to_be_bytes()); // tar_size = 50
-                 // no tar bytes
-                 v
-             }),
-            ("unknown record tag",
-             vec![0xAB, DATA_PLANE_RECORD_END]),
-            ("only unknown record tag (no END)",
-             vec![0x42]),
+            ("empty stream", vec![]),
+            ("truncated tag byte only", vec![0x00]),
+            ("tag then EOF (file header truncated)", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&42u32.to_be_bytes()); // path_len
+                                                           // no path bytes, no size, no mtime, no perms
+                v
+            }),
+            ("file with path_len but no path bytes", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&5u32.to_be_bytes()); // claim 5 path bytes
+                v.extend_from_slice(b"ab"); // only 2 bytes provided
+                v
+            }),
+            ("file with path but no size/mtime/perms", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&3u32.to_be_bytes());
+                v.extend_from_slice(b"abc");
+                // size, mtime, perms all missing
+                v
+            }),
+            ("file with header but no content bytes", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&3u32.to_be_bytes());
+                v.extend_from_slice(b"abc");
+                v.extend_from_slice(&100u64.to_be_bytes()); // size = 100
+                v.extend_from_slice(&1i64.to_be_bytes()); // mtime
+                v.extend_from_slice(&0o644u32.to_be_bytes()); // perms
+                                                              // no content
+                v
+            }),
+            ("file with oversized path_len (potential OOM guard)", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&(u32::MAX).to_be_bytes());
+                v
+            }),
+            ("tar shard with huge entry count", {
+                let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
+                v.extend_from_slice(&(u32::MAX).to_be_bytes());
+                v
+            }),
+            ("tar shard truncated mid-entry header", {
+                let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
+                v.extend_from_slice(&1u32.to_be_bytes()); // 1 entry
+                v.extend_from_slice(&3u32.to_be_bytes());
+                v.extend_from_slice(b"abc");
+                // missing size, mtime, perms for that entry
+                v
+            }),
+            ("tar shard with valid headers but truncated data_len", {
+                let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
+                v.extend_from_slice(&1u32.to_be_bytes());
+                let path = b"f.txt";
+                v.extend_from_slice(&(path.len() as u32).to_be_bytes());
+                v.extend_from_slice(path);
+                v.extend_from_slice(&100u64.to_be_bytes()); // size
+                v.extend_from_slice(&1i64.to_be_bytes()); // mtime
+                v.extend_from_slice(&0o644u32.to_be_bytes()); // perms
+                                                              // tar_size missing
+                v
+            }),
+            ("tar shard with data_len but no tar bytes", {
+                let mut v = vec![DATA_PLANE_RECORD_TAR_SHARD];
+                v.extend_from_slice(&1u32.to_be_bytes());
+                let path = b"f.txt";
+                v.extend_from_slice(&(path.len() as u32).to_be_bytes());
+                v.extend_from_slice(path);
+                v.extend_from_slice(&100u64.to_be_bytes());
+                v.extend_from_slice(&1i64.to_be_bytes());
+                v.extend_from_slice(&0o644u32.to_be_bytes());
+                v.extend_from_slice(&50u64.to_be_bytes()); // tar_size = 50
+                                                           // no tar bytes
+                v
+            }),
+            ("unknown record tag", vec![0xAB, DATA_PLANE_RECORD_END]),
+            ("only unknown record tag (no END)", vec![0x42]),
             // ---- edge-case sizes ----
-            ("file with declared size=MAX (no content)",
-             {
-                 let mut v = vec![DATA_PLANE_RECORD_FILE];
-                 v.extend_from_slice(&7u32.to_be_bytes());
-                 v.extend_from_slice(b"max.bin");
-                 v.extend_from_slice(&u64::MAX.to_be_bytes()); // size = u64::MAX
-                 v.extend_from_slice(&0i64.to_be_bytes()); // mtime
-                 v.extend_from_slice(&0o644u32.to_be_bytes()); // perms
-                 // no content — receiver should NOT panic / OOM trying to read u64::MAX bytes
-                 v
-             }),
-            ("block with zero-length payload",
-             encode_block(b"f.txt", 0, b"")),
-            ("block with huge offset",
-             encode_block(b"f.txt", u64::MAX, b"x")),
-            ("block complete with zero total_size",
-             encode_block_complete(b"f.txt", 0)),
+            ("file with declared size=MAX (no content)", {
+                let mut v = vec![DATA_PLANE_RECORD_FILE];
+                v.extend_from_slice(&7u32.to_be_bytes());
+                v.extend_from_slice(b"max.bin");
+                v.extend_from_slice(&u64::MAX.to_be_bytes()); // size = u64::MAX
+                v.extend_from_slice(&0i64.to_be_bytes()); // mtime
+                v.extend_from_slice(&0o644u32.to_be_bytes()); // perms
+                                                              // no content — receiver should NOT panic / OOM trying to read u64::MAX bytes
+                v
+            }),
+            (
+                "block with zero-length payload",
+                encode_block(b"f.txt", 0, b""),
+            ),
+            (
+                "block with huge offset",
+                encode_block(b"f.txt", u64::MAX, b"x"),
+            ),
+            (
+                "block complete with zero total_size",
+                encode_block_complete(b"f.txt", 0),
+            ),
         ];
 
         for (_desc, bytes) in &payloads {
@@ -742,10 +745,8 @@ mod tests {
                 .await
                 .expect("bind");
             let addr = listener.local_addr().expect("local addr");
-            let (client_res, server_res) = tokio::join!(
-                tokio::net::TcpStream::connect(addr),
-                listener.accept(),
-            );
+            let (client_res, server_res) =
+                tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept(),);
             let mut writer = client_res.expect("connect");
             let (mut reader, _) = server_res.expect("accept");
             let sink = Arc::clone(&sink);
@@ -820,4 +821,3 @@ mod tests {
         v
     }
 }
-

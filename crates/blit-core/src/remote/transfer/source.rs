@@ -267,7 +267,9 @@ impl TransferSource for FilteredSource {
         headers: Vec<FileHeader>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> Result<Vec<FileHeader>> {
-        self.inner.check_availability(headers, unreadable_paths).await
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
     }
 
     async fn open_file(
@@ -462,7 +464,10 @@ mod filtered_source_tests {
         baked_in.exclude_files = vec!["*.tmp".to_string()];
         let filtered = FilteredSource::new(inner, baked_in);
         // Caller passes empty filter; baked-in still applies
-        let (rx, _h) = filtered.scan(Some(FileFilter::default()), Arc::new(Mutex::new(Vec::new())));
+        let (rx, _h) = filtered.scan(
+            Some(FileFilter::default()),
+            Arc::new(Mutex::new(Vec::new())),
+        );
         let names = collect(rx).await;
         assert!(names.is_empty(), "baked-in filter should drop a.tmp");
     }

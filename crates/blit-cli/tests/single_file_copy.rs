@@ -63,10 +63,7 @@ fn single_file_to_dir_with_trailing_slash() {
     fs::create_dir_all(&dst).unwrap();
 
     let dst_arg = format!("{}/", dst.display());
-    let output = run_copy(&[
-        &src.to_string_lossy(),
-        &dst_arg,
-    ]);
+    let output = run_copy(&[&src.to_string_lossy(), &dst_arg]);
     assert!(
         output.status.success(),
         "blit copy failed\nstdout:\n{}\nstderr:\n{}",
@@ -84,10 +81,7 @@ fn single_file_to_existing_dir_no_slash() {
     fs::write(&src, b"hello world").unwrap();
     fs::create_dir_all(&dst).unwrap();
 
-    let output = run_copy(&[
-        &src.to_string_lossy(),
-        &dst.to_string_lossy(),
-    ]);
+    let output = run_copy(&[&src.to_string_lossy(), &dst.to_string_lossy()]);
     assert!(output.status.success());
     assert_eq!(fs::read(dst.join("file.txt")).unwrap(), b"hello world");
 }
@@ -101,10 +95,7 @@ fn single_file_rename_to_exact_path() {
     fs::write(&src, b"hello world").unwrap();
     fs::create_dir_all(&dst_dir).unwrap();
 
-    let output = run_copy(&[
-        &src.to_string_lossy(),
-        &renamed.to_string_lossy(),
-    ]);
+    let output = run_copy(&[&src.to_string_lossy(), &renamed.to_string_lossy()]);
     assert!(output.status.success());
     assert_eq!(fs::read(&renamed).unwrap(), b"hello world");
 }
@@ -118,10 +109,7 @@ fn single_file_copy_reports_nonzero_files() {
     fs::create_dir_all(&dst).unwrap();
 
     let dst_arg = format!("{}/", dst.display());
-    let output = run_copy(&[
-        &src.to_string_lossy(),
-        &dst_arg,
-    ]);
+    let output = run_copy(&[&src.to_string_lossy(), &dst_arg]);
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -180,10 +168,7 @@ fn single_file_missing_source_fails() {
     let dst = tmp.path().join("dst");
     fs::create_dir_all(&dst).unwrap();
 
-    let output = run_copy(&[
-        &missing.to_string_lossy(),
-        &dst.to_string_lossy(),
-    ]);
+    let output = run_copy(&[&missing.to_string_lossy(), &dst.to_string_lossy()]);
     assert!(
         !output.status.success(),
         "blit copy should fail when source is missing"

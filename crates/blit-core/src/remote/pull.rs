@@ -109,9 +109,9 @@ impl RemotePullClient {
         // handle_file_record will mkdir sub-directories as files arrive.
         if let Some(parent) = dest_root.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                fs::create_dir_all(parent).await.with_context(|| {
-                    format!("creating destination parent {}", parent.display())
-                })?;
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("creating destination parent {}", parent.display()))?;
             }
         }
 
@@ -358,9 +358,9 @@ impl RemotePullClient {
         // a directory here would cause the subsequent File::create to fail.
         if let Some(parent) = dest_root.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                fs::create_dir_all(parent).await.with_context(|| {
-                    format!("creating destination parent {}", parent.display())
-                })?;
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("creating destination parent {}", parent.display()))?;
             }
         }
 
@@ -568,14 +568,14 @@ impl RemotePullClient {
                     // empty (single-file dest) and traversal/abs/UNC
                     // attacks are handled uniformly with the rest of
                     // the receive sink sites. F1 of the 2026-05-01 review.
-                    let local_path =
-                        crate::path_safety::safe_join(dest_root, &req.relative_path)
-                            .map_err(|e| {
-                                eyre!(
-                                    "server returned unsafe block-hash path {:?}: {}",
-                                    req.relative_path, e
-                                )
-                            })?;
+                    let local_path = crate::path_safety::safe_join(dest_root, &req.relative_path)
+                        .map_err(|e| {
+                        eyre!(
+                            "server returned unsafe block-hash path {:?}: {}",
+                            req.relative_path,
+                            e
+                        )
+                    })?;
                     let hashes = compute_block_hashes(&local_path, req.block_size as usize).await?;
 
                     tx.send(ClientPullMessage {
@@ -963,7 +963,9 @@ async fn receive_data_plane_stream_inner(
     let outcome = execute_receive_pipeline(&mut stream, sink, progress).await?;
 
     // Fold the unified outcome into pull's existing stats shape.
-    stats.bytes_transferred = stats.bytes_transferred.saturating_add(outcome.bytes_written);
+    stats.bytes_transferred = stats
+        .bytes_transferred
+        .saturating_add(outcome.bytes_written);
     stats.bytes = stats.bytes.saturating_add(outcome.bytes_written);
     stats.files_transferred = stats
         .files_transferred

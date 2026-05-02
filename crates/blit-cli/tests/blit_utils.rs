@@ -168,10 +168,7 @@ fn test_utils_find() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
-    cmd.arg("find")
-        .arg(&remote)
-        .arg("--pattern")
-        .arg(".md");
+    cmd.arg("find").arg(&remote).arg("--pattern").arg(".md");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
@@ -251,10 +248,7 @@ fn test_utils_find_limit() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
-    cmd.arg("find")
-        .arg(&remote)
-        .arg("--limit")
-        .arg("3");
+    cmd.arg("find").arg(&remote).arg("--limit").arg("3");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(output.status.success());

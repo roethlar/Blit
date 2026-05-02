@@ -24,6 +24,5 @@
 //!   backward-compatible wire change.
 
 pub use crate::generated::{
-    ComparisonMode, FilterSpec, MirrorMode, PeerCapabilities, ResumeSettings,
-    TransferOperationSpec,
+    ComparisonMode, FilterSpec, MirrorMode, PeerCapabilities, ResumeSettings, TransferOperationSpec,
 };

@@ -55,7 +55,11 @@ fn dump_local_to_local_json_shape() {
     let src_arg = format!("{}/", src.display());
     let dst_arg = format!("{}/", dst.display());
     let out = run_dump(&[&src_arg, &dst_arg, "--json"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let v: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("invalid JSON: {e}\nstdout:\n{stdout}"));
@@ -97,7 +101,10 @@ fn dump_detects_rsync_basename_append() {
     // Normalize separators so the suffix check works on Windows where
     // the path prefix uses backslashes.
     let normalized = resolved.replace('\\', "/");
-    assert!(normalized.ends_with("/dst/src"), "expected dst/src, got {resolved}");
+    assert!(
+        normalized.ends_with("/dst/src"),
+        "expected dst/src, got {resolved}"
+    );
 }
 
 #[test]

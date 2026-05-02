@@ -110,9 +110,7 @@ impl TransferOrchestrator {
                             if let Some(probe) = dest_probe.as_ref() {
                                 log_probe("dest", probe);
                             } else {
-                                eprintln!(
-                                    "Journal probe dest unsupported; cannot take fast-path"
-                                );
+                                eprintln!("Journal probe dest unsupported; cannot take fast-path");
                             }
                         }
 
@@ -366,7 +364,8 @@ impl TransferOrchestrator {
             while let Some(h) = header_rx.recv().await {
                 all_headers.push(h);
             }
-            let _total_scanned = scan_handle.await
+            let _total_scanned = scan_handle
+                .await
                 .context("scan task panicked")?
                 .context("scan failed")?;
 
@@ -458,7 +457,8 @@ impl TransferOrchestrator {
         if options.verbose {
             eprintln!(
                 "Planning enumerated {} file(s), {} bytes",
-                all_headers.len(), total_bytes
+                all_headers.len(),
+                total_bytes
             );
             eprintln!(
                 "Completed local {}: {} file(s), {} bytes in {:.2?}",

@@ -653,12 +653,8 @@ mod tests {
         // rsync: `rsync src newdst` where newdst doesn't exist → newdst becomes src copy
         let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
         let dst = Endpoint::Local(PathBuf::from("/definitely/does/not/exist/newdst"));
-        let resolved = resolve_destination(
-            "/a/GameDir",
-            "/definitely/does/not/exist/newdst",
-            &src,
-            dst,
-        );
+        let resolved =
+            resolve_destination("/a/GameDir", "/definitely/does/not/exist/newdst", &src, dst);
         match resolved {
             Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/definitely/does/not/exist/newdst")),
             _ => panic!("expected local endpoint"),
@@ -711,8 +707,7 @@ mod tests {
         // Dest doesn't exist, no trailing slash → exact rename.
         let src = Endpoint::Local(PathBuf::from("/a/file.txt"));
         let dst = Endpoint::Local(PathBuf::from("/b/renamed.txt"));
-        let resolved =
-            resolve_destination("/a/file.txt", "/b/renamed.txt", &src, dst);
+        let resolved = resolve_destination("/a/file.txt", "/b/renamed.txt", &src, dst);
         match resolved {
             Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/b/renamed.txt")),
             _ => panic!("expected local endpoint"),
@@ -732,8 +727,7 @@ mod tests {
                 rel_path: PathBuf::from("common"),
             },
         });
-        let resolved =
-            resolve_destination("/a/GameDir", "h:/m/common/", &src, dst);
+        let resolved = resolve_destination("/a/GameDir", "h:/m/common/", &src, dst);
         match resolved {
             Endpoint::Remote(r) => match r.path {
                 RemotePath::Module { rel_path, .. } => {
@@ -758,8 +752,7 @@ mod tests {
                 rel_path: PathBuf::from("common/target"),
             },
         });
-        let resolved =
-            resolve_destination("/a/GameDir", "h:/m/common/target", &src, dst);
+        let resolved = resolve_destination("/a/GameDir", "h:/m/common/target", &src, dst);
         match resolved {
             Endpoint::Remote(r) => match r.path {
                 RemotePath::Module { rel_path, .. } => {
@@ -786,8 +779,7 @@ mod tests {
         });
         let dst = Endpoint::Local(tmp.path().to_path_buf());
         let dst_raw = tmp.path().to_string_lossy().into_owned();
-        let resolved =
-            resolve_destination("h:/m/Games/DOOM", &dst_raw, &src, dst);
+        let resolved = resolve_destination("h:/m/Games/DOOM", &dst_raw, &src, dst);
         match resolved {
             Endpoint::Local(p) => assert_eq!(p, tmp.path().join("DOOM")),
             _ => panic!("expected local endpoint"),
