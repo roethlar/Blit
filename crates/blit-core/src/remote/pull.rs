@@ -529,7 +529,18 @@ impl RemotePullClient {
                 Some(server_pull_message::Payload::BlockHashRequest(req)) => {
                     // Server requests block hashes for resume mode
                     // Compute Blake3 hashes of local file blocks and send them back
-                    let local_path = dest_root.join(sanitize_relative_path(&req.relative_path)?);
+                    // Routes through the shared safe_join chokepoint so
+                    // empty (single-file dest) and traversal/abs/UNC
+                    // attacks are handled uniformly with the rest of
+                    // the receive sink sites. F1 of the 2026-05-01 review.
+                    let local_path =
+                        crate::path_safety::safe_join(dest_root, &req.relative_path)
+                            .map_err(|e| {
+                                eyre!(
+                                    "server returned unsafe block-hash path {:?}: {}",
+                                    req.relative_path, e
+                                )
+                            })?;
                     let hashes = compute_block_hashes(&local_path, req.block_size as usize).await?;
 
                     tx.send(ClientPullMessage {
@@ -941,36 +952,16 @@ fn resolve_pull_dest(dest_root: &Path, relative_path: &Path) -> PathBuf {
     }
 }
 
+/// Validate a wire-supplied relative path coming from the daemon.
+///
+/// Thin wrapper over `crate::path_safety::validate_wire_path` that
+/// preserves the historical "server returned ..." error prefix so log
+/// scrapers continue to find familiar messages. All actual policy
+/// (rejecting absolute paths, `..`, Windows drive prefixes, UNC, etc.)
+/// lives in the shared module — this is just the call site.
 fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
-    // Empty path is legitimate: indicates "write to dest_root itself", which
-    // is used when the source is a single file — dest_root is already the
-    // fully-resolved target path, so joining an empty component is a no-op.
-    if raw.is_empty() {
-        return Ok(PathBuf::new());
-    }
-
-    let path = Path::new(raw);
-    if path.is_absolute() {
-        bail!("server returned absolute path: {}", raw);
-    }
-
-    use std::path::Component;
-    if path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
-    {
-        bail!(
-            "server returned parent directory component in path: {}",
-            raw
-        );
-    }
-
-    let normalized: PathBuf = path
-        .components()
-        .filter(|c| !matches!(c, Component::CurDir))
-        .collect();
-
-    Ok(normalized)
+    crate::path_safety::validate_wire_path(raw)
+        .map_err(|e| eyre::eyre!("server returned unsafe path {:?}: {}", raw, e))
 }
 
 fn normalize_for_request(path: &Path) -> String {

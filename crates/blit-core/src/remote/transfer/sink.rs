@@ -211,15 +211,12 @@ impl TransferSink for FsTransferSink {
             receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
         };
 
-        // Single-file source emits relative_path="" — destination is
-        // already the full target path. PathBuf::join("") on Unix
-        // appends a trailing separator that File::create rejects with
-        // ENOTDIR, so handle empty as identity.
-        let dst = if header.relative_path.is_empty() {
-            self.dst_root.clone()
-        } else {
-            self.dst_root.join(&header.relative_path)
-        };
+        // Wire-supplied relative path validated and joined via the
+        // single chokepoint. Empty input returns `dst_root` unchanged
+        // (single-file destination case). Rejects ../, absolute paths,
+        // Windows drive prefixes, UNC, etc.
+        let dst = crate::path_safety::safe_join(&self.dst_root, &header.relative_path)
+            .with_context(|| format!("validating receive path {:?}", header.relative_path))?;
         if let Some(parent) = dst.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -402,9 +399,12 @@ fn write_tar_shard_payload(
         }
         let rel_path = entry.path().context("tar shard path")?;
         let rel = rel_path.to_string_lossy().replace('\\', "/");
-        if rel.contains("..") {
-            eyre::bail!("tar shard contains path traversal: {}", rel);
-        }
+        // Validate the wire-supplied path through the shared chokepoint
+        // (rejects ../, absolute, Windows drive, UNC, NUL — replaces the
+        // previous weak `rel.contains("..")` substring check that also
+        // rejected legitimate filenames containing literal `..`).
+        crate::path_safety::validate_wire_path(&rel)
+            .with_context(|| format!("validating tar shard entry {:?}", rel))?;
         let mut contents = Vec::with_capacity(entry.size() as usize);
         std::io::copy(&mut entry, &mut contents)
             .with_context(|| format!("buffering tar entry {}", rel))?;
@@ -423,7 +423,11 @@ fn write_tar_shard_payload(
     let results: Vec<Result<u64>> = pending
         .into_par_iter()
         .map(|p| -> Result<u64> {
-            let dest_path = dst_root.join(&p.rel);
+            // Already validated above; safe_join here defends against
+            // any future change that bypasses the per-entry validation
+            // and centralizes the single-file empty-rel handling.
+            let dest_path = crate::path_safety::safe_join(&dst_root, &p.rel)
+                .with_context(|| format!("joining tar shard path {:?}", p.rel))?;
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create dir {}", parent.display()))?;
@@ -459,7 +463,8 @@ async fn write_file_block_payload(
 ) -> Result<SinkOutcome> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-    let dst = dst_root.join(relative_path);
+    let dst = crate::path_safety::safe_join(dst_root, relative_path)
+        .with_context(|| format!("validating block-write path {:?}", relative_path))?;
     let bytes_len = bytes.len() as u64;
     // Resume blocks patch existing files at offset; we want to create
     // if missing but never truncate (subsequent block records share
@@ -495,7 +500,8 @@ async fn write_file_block_complete(
     mtime_seconds: i64,
     permissions: u32,
 ) -> Result<SinkOutcome> {
-    let dst = dst_root.join(relative_path);
+    let dst = crate::path_safety::safe_join(dst_root, relative_path)
+        .with_context(|| format!("validating block-complete path {:?}", relative_path))?;
     {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -1168,5 +1174,151 @@ mod tests {
             ),
             "expected UploadComplete"
         );
+    }
+
+    // ─── Path-safety end-to-end (F1) ──────────────────────────────────
+    //
+    // The shared `path_safety` module has its own unit tests covering the
+    // validator's surface. These tests exercise the FsTransferSink end of
+    // the chain to confirm a malicious wire path is rejected before any
+    // filesystem write happens. They protect against future regressions
+    // where a sink-level call site bypasses `safe_join`.
+
+    async fn assert_sink_rejects(rel: &str) {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let sink = FsTransferSink::new(
+            src,
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+            },
+        );
+        let header = make_file_header(rel, 4);
+        // Use write_file_stream so we exercise the sink.rs:218 site that
+        // F1 hardens. An empty reader is fine — validation happens before
+        // any byte is consumed.
+        let mut empty: &[u8] = b"";
+        let result = sink.write_file_stream(&header, &mut empty).await;
+        assert!(
+            result.is_err(),
+            "expected rejection for malicious wire path {:?}, but got Ok",
+            rel
+        );
+        // Sibling-of-dst guard: nothing was written to a sibling
+        // directory under tmp.
+        let sibling_attack = tmp.path().join("evil");
+        assert!(
+            !sibling_attack.exists(),
+            "malicious path {:?} caused write outside dst_root",
+            rel
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_sink_rejects_parent_dir_traversal() {
+        assert_sink_rejects("../evil").await;
+    }
+
+    #[tokio::test]
+    async fn fs_sink_rejects_nested_parent_dir() {
+        assert_sink_rejects("subdir/../../../evil").await;
+    }
+
+    #[tokio::test]
+    async fn fs_sink_rejects_unix_absolute() {
+        assert_sink_rejects("/tmp/evil").await;
+    }
+
+    #[tokio::test]
+    async fn fs_sink_rejects_windows_drive() {
+        assert_sink_rejects("C:\\evil").await;
+    }
+
+    #[tokio::test]
+    async fn fs_sink_rejects_unc() {
+        assert_sink_rejects("\\\\server\\share\\evil").await;
+    }
+
+    #[tokio::test]
+    async fn fs_sink_rejects_nul_byte() {
+        assert_sink_rejects("foo\0bar").await;
+    }
+
+    #[tokio::test]
+    async fn fs_sink_accepts_filename_containing_dot_dot() {
+        // `foo..bar` is a valid filename — only `..` as a *component* is
+        // dangerous. Confirms the new validator is precise enough to not
+        // reject legitimate names (the previous `rel.contains("..")`
+        // check was too aggressive here).
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let sink = FsTransferSink::new(
+            src,
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        let content = b"valid";
+        let header = make_file_header("foo..bar.txt", content.len() as u64);
+        let mut reader: &[u8] = content;
+        let outcome = sink
+            .write_file_stream(&header, &mut reader)
+            .await
+            .expect("filename containing literal `..` must be accepted");
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, content.len() as u64);
+        assert_eq!(std::fs::read(dst.join("foo..bar.txt")).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn fs_sink_accepts_empty_path_for_single_file_dest() {
+        // Single-file destination case: dst_root is itself the final
+        // file path, header.relative_path == "" by convention. This
+        // path must remain working even with the safe_join chokepoint.
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // dst_root is the file path itself, not a directory.
+        let dst_root = tmp.path().join("output.bin");
+
+        let sink = FsTransferSink::new(
+            src,
+            dst_root.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        let content = b"single-file content";
+        let header = make_file_header("", content.len() as u64);
+        let mut reader: &[u8] = content;
+        let outcome = sink
+            .write_file_stream(&header, &mut reader)
+            .await
+            .expect("empty relative_path must use dst_root verbatim");
+
+        assert_eq!(outcome.bytes_written, content.len() as u64);
+        assert_eq!(std::fs::read(&dst_root).unwrap(), content);
     }
 }

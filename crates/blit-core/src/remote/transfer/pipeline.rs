@@ -347,6 +347,12 @@ async fn read_string(socket: &mut TcpStream) -> Result<String> {
 
 async fn read_file_header(socket: &mut TcpStream) -> Result<FileHeader> {
     let path = read_string(socket).await?;
+    // Validate at the wire boundary — rejects ../, absolute paths,
+    // Windows drive prefixes, UNC, NUL bytes. Sinks re-validate via
+    // `safe_join` (defense in depth), but failing here keeps unsafe
+    // headers out of the FileHeader stream entirely.
+    crate::path_safety::validate_wire_path(&path)
+        .with_context(|| format!("rejecting wire file header path {:?}", path))?;
     Ok(FileHeader {
         relative_path: path,
         size: 0, // populated by caller from the file_size field on the wire
@@ -368,6 +374,8 @@ async fn read_tar_shard(socket: &mut TcpStream) -> Result<(Vec<FileHeader>, Vec<
     let mut headers = Vec::with_capacity(count);
     for _ in 0..count {
         let path = read_string(socket).await?;
+        crate::path_safety::validate_wire_path(&path)
+            .with_context(|| format!("rejecting wire tar shard header path {:?}", path))?;
         let size = read_u64(socket).await?;
         let mtime = read_i64(socket).await?;
         let permissions = read_u32(socket).await?;

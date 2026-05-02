@@ -4,12 +4,71 @@ This is the master checklist. Execute the first unchecked item. After completion
 
 ## Current Review Follow-up
 
-See `docs/reviews/codebase_review_2026-05-01.md` for the full codebase review and rationale.
+See `docs/reviews/codebase_review_2026-05-01.md` for the full codebase
+review. Pipeline architecture clarification + sequencing in
+`docs/plan/PIPELINE_UNIFICATION.md`.
 
-- [ ] **P0** Centralize receive-side path sanitization and apply it to streamed files, tar shards, and resume block records.
-- [ ] **P0** Resolve daemon `use_chroot` truthfulness: implement canonical containment/symlink escape protection or remove the advertised option.
-- [ ] **P1** Define and test filtered mirror delete semantics (`filtered` vs `all` destination delete scope).
-- [ ] **P1** Harden daemon metrics lifecycle and endpoint behavior before treating Prometheus output as production-ready.
+### Pipeline unification sequence (in order)
+
+- [ ] **F1 — P0** Centralize receive-side path sanitization. Shared
+      `safe_join` helper in `blit-core`. Apply at every receive-sink
+      path-join site (`sink.rs:218` streamed files, `sink.rs:426` tar
+      entries, `sink.rs:462` resume block writes, `sink.rs:498` block
+      completion, `pipeline.rs:348` FileHeader construction). Migrate
+      `pull.rs::sanitize_relative_path` and daemon `service/util.rs`
+      validators into the shared module. Adversarial tests: `..`,
+      absolute Unix paths, Windows drive prefixes, UNC, root, valid
+      `..`-containing filenames.
+- [ ] **TransferOperationSpec** Define proto messages
+      (`TransferOperationSpec`, `FilterSpec`, `ComparisonMode`,
+      `MirrorMode`, `ResumeSettings`, `PeerCapabilities`) and Rust
+      mirrors. No behavior change yet — contract only.
+- [ ] **DiffPlanner extraction** Pull diff/comparison/resume/tar-batching
+      logic out of `pull_sync.rs` into
+      `blit-core::remote::transfer::diff_planner`. Push-origin code
+      starts using it.
+- [ ] **pull_sync.rs refactor** Replace custom enumeration/streaming with
+      the unified pipeline (`FsTransferSource → DiffPlanner →
+      execute_sink_pipeline_streaming → DataPlaneSink`). Filter parity
+      becomes free; pull-bail on filter args goes away.
+- [ ] **Remote→remote re-evaluation** Decide whether daemon-A → daemon-B
+      should bypass CLI relay. Probably yes; defer the call until pull
+      is unified.
+
+### Other review findings (after pipeline unification or independent)
+
+- [ ] **F2 — P0** Resolve daemon `use_chroot` truthfulness: implement
+      canonical containment / symlink-escape protection, or remove the
+      advertised option and the documentation that promises it.
+- [ ] **F4 — P1** Define and test filtered mirror delete semantics
+      (`filtered` vs `all` destination delete scope). Needs a product
+      decision before implementation.
+- [ ] **F3 — Medium** Default daemon bind to `127.0.0.1`; require
+      explicit `--bind 0.0.0.0` for LAN exposure, or warn at startup.
+- [ ] **F5 — Medium** RAII guard around `active_transfers` so panics/
+      cancellations don't leak the gauge. Counter semantics (attempts
+      vs successes) consistent across push/pull/purge.
+- [ ] **F7/F8 — Medium** Tar shard memory: enforce per-shard byte budget
+      in `RemoteTransferSource` and the receive parser; prefer streaming
+      tar construction.
+- [ ] **F9 — Medium** Split `execute_local_mirror` into async impl + sync
+      wrapper to remove the nested-runtime hazard.
+- [ ] **F10 — Medium** Soften CLI help text once pipeline unification
+      lands (filter parity is real then) — until then, document the pull
+      limitation accurately.
+- [ ] **F11 — Medium** Pull checksum capability ack: store and act on it,
+      or remove the TODO. Resolved naturally by pipeline unification
+      (capabilities become a `TransferOperationSpec` field).
+- [ ] **F12 — Low/Medium** `blit check` directory + symlink semantics.
+      Document or include in diff.
+- [ ] **F13 — Low/Medium** Doc drift: make
+      `docs/plan/PROJECT_STATE_ASSESSMENT.md` the source of truth or
+      update the stale workflow docs.
+- [ ] **F14 — Low** Pay down warnings: deprecated FSEvents API
+      (`change_journal/snapshot.rs:85,111`), unused test variable
+      (`fs_capability/macos.rs:165`).
+- [ ] **F15 — Low** Adopt `tracing` or structured `log` across daemon
+      and transfer modules. Gate noisy data-plane logs.
 
 ## Phase 0: Workspace & Core Logic Foundation
 

@@ -34,56 +34,22 @@ pub(crate) async fn resolve_module(
         .ok_or_else(|| Status::not_found(format!("module '{}' not found", name)))
 }
 
+/// Validate a wire-supplied relative path and return its normalized
+/// form. Folds an empty input to `.` (legacy behavior — see
+/// `resolve_manifest_relative_path` for the empty-preserving variant).
+///
+/// Thin wrapper over `blit_core::path_safety::validate_wire_path` —
+/// the actual policy (reject `..`, absolute paths, Windows drive
+/// prefixes, UNC, NUL, etc.) lives in the shared module.
 #[allow(clippy::result_large_err)]
 pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
-    #[cfg(windows)]
-    {
-        if rel.starts_with('/') || rel.starts_with('\\') {
-            return Err(Status::invalid_argument(format!(
-                "absolute-style path not allowed in manifest: {}",
-                rel
-            )));
-        }
-    }
-
-    let path = Path::new(rel);
-    if path.is_absolute() {
-        return Err(Status::invalid_argument(format!(
-            "absolute paths not allowed in manifest: {}",
-            rel
-        )));
-    }
-
-    use std::path::Component;
-    let mut components = path.components();
-    let mut normalized = PathBuf::new();
-
-    // Skip leading '.' components
-    while let Some(Component::CurDir) = components.as_path().components().next() {
-        components.next();
-    }
-
-    for component in components {
-        match component {
-            Component::ParentDir | Component::Prefix(_) => {
-                return Err(Status::invalid_argument(format!(
-                    "invalid path segment: {:?}",
-                    component
-                )));
-            }
-            Component::CurDir => {} // Skip internal '.'
-            Component::RootDir => {
-                return Err(Status::invalid_argument("absolute paths not allowed"));
-            }
-            Component::Normal(c) => normalized.push(c),
-        }
-    }
-
+    let normalized = blit_core::path_safety::validate_wire_path(rel)
+        .map_err(|e| Status::invalid_argument(format!("path not allowed: {}: {e}", rel)))?;
     if normalized.as_os_str().is_empty() {
-        return Ok(PathBuf::from("."));
+        Ok(PathBuf::from("."))
+    } else {
+        Ok(normalized)
     }
-
-    Ok(normalized)
 }
 
 /// Same validation as `resolve_relative_path` but preserves an empty
@@ -96,12 +62,8 @@ pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
 /// opens the path (File::create on `.../file.txt/.` fails ENOTDIR).
 #[allow(clippy::result_large_err)]
 pub(crate) fn resolve_manifest_relative_path(rel: &str) -> Result<PathBuf, Status> {
-    let resolved = resolve_relative_path(rel)?;
-    if rel.is_empty() {
-        Ok(PathBuf::new())
-    } else {
-        Ok(resolved)
-    }
+    blit_core::path_safety::validate_wire_path(rel)
+        .map_err(|e| Status::invalid_argument(format!("path not allowed: {}: {e}", rel)))
 }
 
 /// Resolve a destination file path as `base.join(rel)`, but preserving
