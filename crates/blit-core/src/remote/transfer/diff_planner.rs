@@ -15,18 +15,18 @@
 //! (`filter_headers_for_copy` + the call to `plan_transfer_payloads`).
 //! Push and pull will adopt the same module in 3b and step 4.
 //!
-//! `ComparisonMode` in `proto/blit.proto` is the canonical input
-//! shape; today we honor `SizeMtime` (default) and `Checksum`. The
-//! other variants (`SizeOnly`, `IgnoreTimes`, `IgnoreExisting`,
-//! `Force`) are accepted by the API and documented but mapped to the
-//! historical defaults until step 4 brings them in alongside the
-//! `pull_sync.rs` migration that introduced them.
+//! `ComparisonMode` in `proto/blit.proto` is the canonical input shape.
+//! As of R2-F1 (`docs/reviews/followup_review_2026-05-02.md`) we honor
+//! every variant with concrete semantics — no silent fall-through to
+//! size+mtime. This means callers passing `SizeOnly`, `IgnoreTimes`,
+//! `IgnoreExisting`, or `Force` get the behavior the wire enum
+//! advertises, not whatever the historical default happened to do.
 
 use std::path::Path;
 
 use eyre::{Context, Result};
 
-use crate::checksum::ChecksumType;
+use crate::checksum::{self, ChecksumType};
 use crate::copy::file_needs_copy_with_checksum_type;
 use crate::generated::{ComparisonMode, FileHeader};
 use crate::remote::transfer::payload::{plan_transfer_payloads, PlannedPayloads};
@@ -106,133 +106,269 @@ pub fn plan_local_mirror(
 /// This is the local-mirror flavor: it stats the destination directly.
 /// Remote-source variants (where the destination manifest arrives over
 /// the wire) live in their own helpers — TBD step 4.
+///
+/// Every `ComparisonMode` variant is implemented (R2-F1). `Unspecified`
+/// behaves as `SizeMtime` (the historical default) — callers should fold
+/// `Unspecified` away via `NormalizedTransferOperation::from_spec`
+/// before reaching this function, but we accept it defensively.
 pub fn filter_unchanged(
     headers: &[FileHeader],
     src_root: &Path,
     dst_root: &Path,
     compare_mode: ComparisonMode,
 ) -> Vec<FileHeader> {
-    let checksum = checksum_for_mode(compare_mode);
-
     headers
         .iter()
         .filter(|h| {
             let src = src_root.join(&h.relative_path);
             let dst = dst_root.join(&h.relative_path);
-            file_needs_copy_with_checksum_type(&src, &dst, checksum).unwrap_or(true)
+            local_needs_copy(&src, &dst, compare_mode).unwrap_or(true)
         })
         .cloned()
         .collect()
 }
 
-/// Translate a `ComparisonMode` enum into the `Option<ChecksumType>`
-/// that the existing comparison primitives consume.
+/// Per-mode comparison predicate. Returns `true` when the source file
+/// should be transferred to the destination given the comparison mode.
 ///
-/// Only `SizeMtime` (default) and `Checksum` map to existing behavior;
-/// the other variants (`SizeOnly`, `IgnoreTimes`, `IgnoreExisting`,
-/// `Force`) are accepted at the protocol surface but currently fall
-/// back to size+mtime semantics. Step 4 (pull_sync.rs migration) is
-/// where the alternate comparison strategies that today live as
-/// PullSyncHeader bools get wired in.
-fn checksum_for_mode(mode: ComparisonMode) -> Option<ChecksumType> {
+/// All variants are implemented:
+///
+///   - `SizeMtime` / `Unspecified`: copy when missing, when sizes
+///     differ, or when source is newer than dest by >2s. The 2s
+///     tolerance matches the historical `file_needs_copy` primitive
+///     and FAT/exFAT mtime granularity.
+///   - `Checksum`: copy when missing, when sizes differ, or when
+///     Blake3 hashes differ. mtime is not consulted.
+///   - `SizeOnly`: copy when missing or sizes differ; mtime ignored.
+///   - `IgnoreTimes`: always copy. Equivalent to rsync's
+///     `--ignore-times` — destination is unconditionally rewritten.
+///   - `IgnoreExisting`: copy only when destination is missing.
+///     Existing files are left alone regardless of differences.
+///   - `Force`: always copy, even if dest is newer than source.
+///     Equivalent to `IgnoreTimes` for one-way mirroring; named
+///     differently because the rsync semantic also disables some
+///     "skip newer" guards in mirror flows.
+fn local_needs_copy(src: &Path, dst: &Path, mode: ComparisonMode) -> Result<bool> {
     match mode {
-        ComparisonMode::Checksum => Some(ChecksumType::Blake3),
-        // Unspecified, SizeMtime, SizeOnly, IgnoreTimes, IgnoreExisting,
-        // Force — all default to historical size+mtime comparison.
-        // The non-SizeMtime variants are silently treated as SizeMtime
-        // until step 4 brings their proper behavior over.
-        _ => None,
+        ComparisonMode::IgnoreExisting => Ok(!dst.exists()),
+        ComparisonMode::IgnoreTimes | ComparisonMode::Force => Ok(true),
+        ComparisonMode::SizeOnly => {
+            if !dst.exists() {
+                return Ok(true);
+            }
+            let src_meta = src.metadata().context("stat source for size compare")?;
+            let dst_meta = dst.metadata().context("stat dest for size compare")?;
+            Ok(src_meta.len() != dst_meta.len())
+        }
+        ComparisonMode::Checksum => {
+            if !dst.exists() {
+                return Ok(true);
+            }
+            let src_meta = src.metadata().context("stat source for checksum compare")?;
+            let dst_meta = dst.metadata().context("stat dest for checksum compare")?;
+            if src_meta.len() != dst_meta.len() {
+                return Ok(true);
+            }
+            let src_hash = checksum::hash_file(src, ChecksumType::Blake3)
+                .with_context(|| format!("hashing source {}", src.display()))?;
+            let dst_hash = checksum::hash_file(dst, ChecksumType::Blake3)
+                .with_context(|| format!("hashing dest {}", dst.display()))?;
+            Ok(src_hash != dst_hash)
+        }
+        // Unspecified folds to the historical default. Callers that
+        // run NormalizedTransferOperation never hit this branch.
+        ComparisonMode::Unspecified | ComparisonMode::SizeMtime => {
+            file_needs_copy_with_checksum_type(src, dst, None)
+        }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn checksum_mode_enables_blake3() {
-        assert_eq!(
-            checksum_for_mode(ComparisonMode::Checksum),
-            Some(ChecksumType::Blake3)
-        );
-    }
-
-    #[test]
-    fn other_modes_default_to_size_mtime() {
-        assert_eq!(checksum_for_mode(ComparisonMode::Unspecified), None);
-        assert_eq!(checksum_for_mode(ComparisonMode::SizeMtime), None);
-        // The variants below are protocol-level placeholders today;
-        // they should still produce a valid (size+mtime) result.
-        assert_eq!(checksum_for_mode(ComparisonMode::SizeOnly), None);
-        assert_eq!(checksum_for_mode(ComparisonMode::IgnoreTimes), None);
-        assert_eq!(checksum_for_mode(ComparisonMode::IgnoreExisting), None);
-        assert_eq!(checksum_for_mode(ComparisonMode::Force), None);
-    }
-
-    #[test]
-    fn filter_unchanged_drops_matching_files() {
+    /// Build src+dst trees with the given (relative_path, content)
+    /// pairs on each side. Returns (src_root, dst_root, _tempdir).
+    fn make_trees(
+        src_files: &[(&str, &[u8])],
+        dst_files: &[(&str, &[u8])],
+    ) -> (std::path::PathBuf, std::path::PathBuf, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&dst).unwrap();
+        for (path, content) in src_files {
+            let full = src.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full, content).unwrap();
+        }
+        for (path, content) in dst_files {
+            let full = dst.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full, content).unwrap();
+        }
+        (src, dst, tmp)
+    }
 
-        // Two files: one identical on both sides, one different.
-        std::fs::write(src.join("same.txt"), b"matching content").unwrap();
-        std::fs::write(dst.join("same.txt"), b"matching content").unwrap();
-        std::fs::write(src.join("diff.txt"), b"new content").unwrap();
-        std::fs::write(dst.join("diff.txt"), b"old content").unwrap();
-        // Sync mtimes for the matching pair so size+mtime equality holds.
-        let src_mtime = std::fs::metadata(src.join("same.txt"))
+    fn header(rel: &str, size: u64) -> FileHeader {
+        FileHeader {
+            relative_path: rel.into(),
+            size,
+            mtime_seconds: 0,
+            permissions: 0,
+            checksum: vec![],
+        }
+    }
+
+    fn sync_mtimes(src_root: &Path, dst_root: &Path, rel: &str) {
+        let src_mtime = std::fs::metadata(src_root.join(rel))
             .unwrap()
             .modified()
             .unwrap();
         let _ = filetime::set_file_mtime(
-            dst.join("same.txt"),
+            dst_root.join(rel),
             filetime::FileTime::from_system_time(src_mtime),
         );
+    }
 
-        let headers = vec![
-            FileHeader {
-                relative_path: "same.txt".into(),
-                size: 16,
-                mtime_seconds: 0,
-                permissions: 0,
-                checksum: vec![],
-            },
-            FileHeader {
-                relative_path: "diff.txt".into(),
-                size: 11,
-                mtime_seconds: 0,
-                permissions: 0,
-                checksum: vec![],
-            },
-        ];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime);
-        // diff.txt has different size on disk → comparison says "needs copy".
-        // same.txt has matching size+mtime → dropped.
-        let kept_paths: Vec<_> = kept.iter().map(|h| h.relative_path.as_str()).collect();
-        assert_eq!(kept_paths, vec!["diff.txt"]);
+    fn kept_paths(kept: &[FileHeader]) -> Vec<String> {
+        let mut v: Vec<String> = kept.iter().map(|h| h.relative_path.clone()).collect();
+        v.sort();
+        v
     }
 
     #[test]
-    fn filter_unchanged_keeps_missing_dest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::create_dir_all(&dst).unwrap();
+    fn size_mtime_drops_matching_files() {
+        let (src, dst, _tmp) = make_trees(
+            &[("same.txt", b"matching content"), ("diff.txt", b"new")],
+            &[("same.txt", b"matching content"), ("diff.txt", b"old content")],
+        );
+        sync_mtimes(&src, &dst, "same.txt");
 
-        std::fs::write(src.join("only.txt"), b"hi").unwrap();
-
-        let headers = vec![FileHeader {
-            relative_path: "only.txt".into(),
-            size: 2,
-            mtime_seconds: 0,
-            permissions: 0,
-            checksum: vec![],
-        }];
+        let headers = vec![header("same.txt", 16), header("diff.txt", 3)];
         let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime);
-        assert_eq!(kept.len(), 1, "missing-on-dest file must survive filter");
+        assert_eq!(kept_paths(&kept), vec!["diff.txt"]);
+    }
+
+    #[test]
+    fn size_mtime_keeps_missing_dest() {
+        let (src, dst, _tmp) = make_trees(&[("only.txt", b"hi")], &[]);
+        let headers = vec![header("only.txt", 2)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn size_only_ignores_mtime_when_sizes_match() {
+        let (src, dst, _tmp) = make_trees(
+            &[("same.txt", b"abcdef")],
+            &[("same.txt", b"abcdef")],
+        );
+        // Don't sync mtimes — they'll differ. SizeOnly should still drop
+        // the entry because content sizes match.
+        let headers = vec![header("same.txt", 6)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly);
+        assert!(
+            kept.is_empty(),
+            "SizeOnly must skip files with matching size regardless of mtime"
+        );
+    }
+
+    #[test]
+    fn size_only_keeps_size_mismatch() {
+        let (src, dst, _tmp) = make_trees(
+            &[("file.txt", b"longer")],
+            &[("file.txt", b"short")],
+        );
+        let headers = vec![header("file.txt", 6)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn ignore_times_always_copies() {
+        let (src, dst, _tmp) = make_trees(
+            &[("a.txt", b"x"), ("b.txt", b"y")],
+            &[("a.txt", b"x"), ("b.txt", b"y")],
+        );
+        sync_mtimes(&src, &dst, "a.txt");
+        sync_mtimes(&src, &dst, "b.txt");
+        let headers = vec![header("a.txt", 1), header("b.txt", 1)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::IgnoreTimes);
+        assert_eq!(kept.len(), 2, "IgnoreTimes must always copy");
+    }
+
+    #[test]
+    fn force_always_copies() {
+        let (src, dst, _tmp) = make_trees(
+            &[("a.txt", b"x")],
+            &[("a.txt", b"x")],
+        );
+        sync_mtimes(&src, &dst, "a.txt");
+        let headers = vec![header("a.txt", 1)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Force);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn ignore_existing_skips_existing() {
+        let (src, dst, _tmp) = make_trees(
+            &[("a.txt", b"new"), ("b.txt", b"only-on-src")],
+            &[("a.txt", b"old")],
+        );
+        let headers = vec![header("a.txt", 3), header("b.txt", 11)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::IgnoreExisting);
+        assert_eq!(
+            kept_paths(&kept),
+            vec!["b.txt"],
+            "IgnoreExisting keeps only files missing on dest"
+        );
+    }
+
+    #[test]
+    fn checksum_drops_byte_identical_files_with_diff_mtime() {
+        let (src, dst, _tmp) = make_trees(
+            &[("same.txt", b"identical bytes")],
+            &[("same.txt", b"identical bytes")],
+        );
+        // Don't sync mtimes — Checksum mode shouldn't care about mtime.
+        let headers = vec![header("same.txt", 15)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum);
+        assert!(
+            kept.is_empty(),
+            "Checksum should skip byte-identical files regardless of mtime"
+        );
+    }
+
+    #[test]
+    fn checksum_keeps_content_diff() {
+        let (src, dst, _tmp) = make_trees(
+            &[("a.txt", b"hello world")],
+            &[("a.txt", b"goodbye foo")],
+        );
+        let headers = vec![header("a.txt", 11)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn unspecified_folds_to_size_mtime() {
+        // The orchestrator never sends Unspecified after normalization,
+        // but defensively the planner should treat it as the historical
+        // default (matches what NormalizedTransferOperation::from_spec does).
+        let (src, dst, _tmp) = make_trees(
+            &[("same.txt", b"x")],
+            &[("same.txt", b"x")],
+        );
+        sync_mtimes(&src, &dst, "same.txt");
+        let headers = vec![header("same.txt", 1)];
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Unspecified);
+        assert!(kept.is_empty());
     }
 }
