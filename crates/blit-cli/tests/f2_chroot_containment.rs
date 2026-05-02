@@ -79,6 +79,56 @@ fn f2_pull_through_symlink_rejected() {
 
 #[cfg(unix)]
 #[test]
+fn f2_push_destination_path_symlink_rejected() {
+    // R13-F1 regression: a push whose destination_path traverses
+    // an in-module symlink pointing outside the module root must
+    // be refused at the push handshake — not just at per-file
+    // write time. Mirror purge in particular enumerates the
+    // (post-mutation) module path before any per-entry check fires,
+    // so the handshake-level rejection is load-bearing.
+    let ctx = TestContext::new();
+    let _outside = place_escape_symlink(&ctx);
+
+    // Source has a single file we'd be pushing.
+    let src_dir = ctx.workspace.join("src");
+    fs::create_dir_all(&src_dir).expect("src dir");
+    fs::write(src_dir.join("payload.txt"), b"would-overwrite").expect("payload");
+
+    // Destination URL targets *through* the in-module symlink.
+    // The daemon should refuse the push before any write.
+    let dest_remote = format!("127.0.0.1:{}:/test/escape/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("mirror")
+        .arg("--yes")
+        .arg(&format!("{}/", src_dir.display()))
+        .arg(&dest_remote);
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
+
+    assert!(
+        !output.status.success(),
+        "daemon should have refused push through escape symlink, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("containment")
+            || stderr.to_lowercase().contains("escapes module root"),
+        "expected containment error, got stderr:\n{stderr}"
+    );
+
+    // The outside directory must not have been touched — neither
+    // a payload.txt copied through, nor the victim.txt overwritten.
+    let leaked = ctx.workspace.join("outside").join("payload.txt");
+    assert!(!leaked.exists(), "payload must not leak through symlink");
+    let victim_bytes =
+        fs::read(ctx.workspace.join("outside").join("victim.txt")).expect("read victim");
+    assert_eq!(victim_bytes, b"SENSITIVE", "victim.txt must be untouched");
+}
+
+#[cfg(unix)]
+#[test]
 fn f2_legitimate_intra_module_symlink_works() {
     // Sanity: an intra-module symlink (e.g., latest -> v1) is a
     // legitimate use case and must NOT be rejected.

@@ -1047,3 +1047,62 @@ Status:
 - R11-F1 is closed.
 - F7 and F8 from the baseline review are closed.
 - Remaining release-blocking baseline work is F2 canonical/symlink containment.
+
+## Round 13 - Baseline F2 Closure Commit
+
+Reviewed change:
+
+- Commit: `a7f64c1 fix(daemon): canonical containment for module paths (F2)`
+- Scope: canonical module roots, `path_safety::contained_join` /
+  `verify_contained`, daemon read/write path migration, and F2 integration tests.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+The F2 implementation is the right shape overall. `ModuleConfig::canonical_root`
+gives containment checks an immutable boundary even when push handling rewrites
+`module.path` with a destination subpath, and the new helper covers the important
+pre-existing symlink escape cases. The pull/list/find/du/push read/write paths I
+checked now resolve or verify containment before the dangerous filesystem
+operation.
+
+One gap remains in the push mirror purge path.
+
+### R13-F1. Push mirror purge enumerates destination-rewritten module path before containment check
+
+Severity: Medium
+
+`crates/blit-daemon/src/service/push/control.rs:270` calls
+`purge_extraneous_entries(module.path.clone(), module.canonical_root.clone(),
+expected_rel_files)` after push completion. `module.path` may have been mutated
+from the client-supplied `destination_path` at
+`crates/blit-daemon/src/service/push/control.rs:74`.
+
+Inside `purge_extraneous_entries`,
+`crates/blit-daemon/src/service/admin.rs:62` calls
+`plan_extraneous_entries(&module_path, &expected_files)` before any containment
+check on `module_path` itself. `plan_extraneous_entries` then enumerates
+`module_path` at `crates/blit-daemon/src/service/admin.rs:76`.
+
+The later delete phase is protected by
+`verify_contained(canonical_root, &target)`, so this does not look like a delete
+escape. But enumeration is still a daemon filesystem read. If the push
+destination subpath is, or contains, a symlink that resolves outside the
+canonical module root, mirror purge can touch/enumerate outside the module before
+the delete-phase containment check fires.
+
+Recommendation:
+
+Verify the purge root before enumeration. In `purge_extraneous_entries`, call
+`verify_contained(&canonical_root, &module_path)` before
+`plan_extraneous_entries`, and return `permission_denied` on failure. Add a test
+where `destination_path` points at an in-module symlink to an outside directory
+and `mirror_mode` is enabled; the daemon should reject before enumeration/purge.
+
+Status:
+
+- F2 is substantially implemented.
+- R13-F1 should be closed before calling F2 fully release-ready.

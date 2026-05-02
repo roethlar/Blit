@@ -59,6 +59,17 @@ pub(crate) async fn purge_extraneous_entries(
     expected_files: Vec<PathBuf>,
 ) -> Result<DeletionStats, Status> {
     task::spawn_blocking(move || {
+        // R13-F1: verify the purge root is contained before any
+        // enumeration. The delete phase below has its own per-entry
+        // verify_contained, but plan_extraneous_entries enumerates
+        // module_path itself — that read-side filesystem op needs the
+        // same protection. The push handler's destination_path
+        // containment check should already reject escape paths at
+        // handshake; this is defense-in-depth in case a future
+        // caller bypasses the handshake check.
+        blit_core::path_safety::verify_contained(&canonical_root, &module_path)
+            .map_err(|e| Status::permission_denied(format!("purge root containment: {e:#}")))?;
+
         let extraneous = plan_extraneous_entries(&module_path, &expected_files)?;
         if extraneous.is_empty() {
             return Ok(DeletionStats::default());

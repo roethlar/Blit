@@ -71,7 +71,24 @@ pub(crate) async fn handle_push_stream(
                 let dest_path = header.destination_path.trim();
                 if !dest_path.is_empty() {
                     let rel = resolve_relative_path(dest_path)?;
-                    config.path = config.path.join(rel);
+                    let new_path = config.path.join(rel);
+                    // F2 / R13-F1: verify the rewritten module path
+                    // stays inside the canonical module root before
+                    // any downstream operation runs against it. Without
+                    // this, a destination_path traversing an in-module
+                    // symlink to outside would have all subsequent
+                    // ops (file writes, mirror-purge enumeration)
+                    // operate outside the module. Per-file write paths
+                    // are already individually checked, but mirror
+                    // purge enumerates module.path before any per-file
+                    // check can fire.
+                    blit_core::path_safety::verify_contained(&config.canonical_root, &new_path)
+                        .map_err(|e| {
+                            Status::permission_denied(format!(
+                                "destination path containment: {e:#}"
+                            ))
+                        })?;
+                    config.path = new_path;
                 }
                 module = Some(config);
                 send_control_message(&tx, server_push_response::Payload::Ack(Ack {})).await?;
