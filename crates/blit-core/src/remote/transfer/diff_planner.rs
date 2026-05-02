@@ -367,6 +367,151 @@ mod tests {
     }
 
     #[test]
+    fn plan_local_mirror_skip_unchanged_off_passes_all_headers() {
+        // R2-F4: when skip_unchanged=false the comparison stage is
+        // bypassed, so identical files still appear in the planned
+        // payloads. Equivalent to user-side --ignore-times / --force.
+        let (src, dst, _tmp) = make_trees(
+            &[("a.txt", b"x"), ("b.txt", b"y")],
+            &[("a.txt", b"x"), ("b.txt", b"y")],
+        );
+        sync_mtimes(&src, &dst, "a.txt");
+        sync_mtimes(&src, &dst, "b.txt");
+        let headers = vec![header("a.txt", 1), header("b.txt", 1)];
+        let planned = plan_local_mirror(
+            headers,
+            LocalDiffInputs {
+                src_root: &src,
+                dst_root: &dst,
+                compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
+                plan_options: PlanOptions::default(),
+                skip_unchanged: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::remote::transfer::payload::payload_file_count(&planned.payloads),
+            2,
+            "skip_unchanged=false must keep matching files in the plan"
+        );
+    }
+
+    #[test]
+    fn plan_local_mirror_skip_unchanged_on_drops_matching_files() {
+        // Counterpart to the above — confirms skip_unchanged=true
+        // does drop matching files (the historical behavior).
+        let (src, dst, _tmp) = make_trees(
+            &[("a.txt", b"x"), ("b.txt", b"y")],
+            &[("a.txt", b"x"), ("b.txt", b"y")],
+        );
+        sync_mtimes(&src, &dst, "a.txt");
+        sync_mtimes(&src, &dst, "b.txt");
+        let headers = vec![header("a.txt", 1), header("b.txt", 1)];
+        let planned = plan_local_mirror(
+            headers,
+            LocalDiffInputs {
+                src_root: &src,
+                dst_root: &dst,
+                compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
+                plan_options: PlanOptions::default(),
+                skip_unchanged: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::remote::transfer::payload::payload_file_count(&planned.payloads),
+            0,
+            "skip_unchanged=true must drop matching files before planning"
+        );
+    }
+
+    #[test]
+    fn plan_local_mirror_batches_many_small_files_into_tar_shard() {
+        // R2-F4 tar-shard batching boundary: 50 tiny files in the
+        // small bucket (<64KiB) should produce at least one TarShard
+        // payload from the planner. We only assert that *some* tar
+        // shard exists — the exact mix depends on the planner's
+        // adaptive thresholds, which are tuning concerns rather than
+        // a contract.
+        use crate::remote::transfer::payload::TransferPayload;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        let mut headers = Vec::with_capacity(50);
+        for i in 0..50 {
+            let name = format!("f{:03}.txt", i);
+            std::fs::write(src.join(&name), b"tiny").unwrap();
+            headers.push(header(&name, 4));
+        }
+        let planned = plan_local_mirror(
+            headers,
+            LocalDiffInputs {
+                src_root: &src,
+                dst_root: &dst, // doesn't exist; skip_unchanged=false avoids stat
+                compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
+                plan_options: PlanOptions::default(),
+                skip_unchanged: false,
+            },
+        )
+        .unwrap();
+        let tar_shards = planned
+            .payloads
+            .iter()
+            .filter(|p| matches!(p, TransferPayload::TarShard { .. }))
+            .count();
+        assert!(
+            tar_shards >= 1,
+            "expected at least one TarShard payload for 50 small files, got {} payloads: {:?}",
+            planned.payloads.len(),
+            planned.payloads
+        );
+    }
+
+    #[test]
+    fn plan_local_mirror_force_tar_groups_even_a_few_files() {
+        // PlanOptions::force_tar=true should always produce tar shards
+        // regardless of file size distribution.
+        use crate::remote::transfer::payload::TransferPayload;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 0..3 {
+            let name = format!("f{i}.txt");
+            std::fs::write(src.join(&name), b"x").unwrap();
+        }
+        let headers = vec![
+            header("f0.txt", 1),
+            header("f1.txt", 1),
+            header("f2.txt", 1),
+        ];
+        let plan_options = PlanOptions {
+            force_tar: true,
+            ..PlanOptions::default()
+        };
+        let planned = plan_local_mirror(
+            headers,
+            LocalDiffInputs {
+                src_root: &src,
+                dst_root: &src.join("nope"),
+                compare_mode: ComparisonMode::SizeMtime,
+                ignore_existing: false,
+                plan_options,
+                skip_unchanged: false,
+            },
+        )
+        .unwrap();
+        let has_tar = planned
+            .payloads
+            .iter()
+            .any(|p| matches!(p, TransferPayload::TarShard { .. }));
+        assert!(has_tar, "force_tar must produce a TarShard payload");
+    }
+
+    #[test]
     fn unspecified_folds_to_size_mtime() {
         // The orchestrator never sends Unspecified after normalization,
         // but defensively the planner should treat it as the historical
