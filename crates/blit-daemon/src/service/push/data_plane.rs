@@ -235,11 +235,15 @@ fn check_fallback_chunk_overflow(
     Ok(new_total)
 }
 
-pub(crate) async fn receive_fallback_data(
-    stream: &mut Streaming<ClientPushRequest>,
+pub(crate) async fn receive_fallback_data<S>(
+    stream: &mut S,
     module: &ModuleConfig,
     files_requested: Vec<FileHeader>,
-) -> Result<TransferStats, Status> {
+) -> Result<TransferStats, Status>
+where
+    S: tokio_stream::Stream<Item = Result<ClientPushRequest, Status>> + Unpin,
+{
+    use tokio_stream::StreamExt;
     #[derive(Debug)]
     struct ActiveFile {
         header: FileHeader,
@@ -274,7 +278,7 @@ pub(crate) async fn receive_fallback_data(
     // never delivering the data.
     let mut upload_complete_seen = false;
 
-    while let Some(req) = stream.message().await? {
+    while let Some(req) = stream.next().await.transpose()? {
         tar_executor.drain_ready(&mut stats)?;
         match req.payload {
             Some(client_push_request::Payload::FileManifest(header)) => {
@@ -916,5 +920,96 @@ mod tests {
         assert_eq!(check_fallback_chunk_overflow(100, 200, 1024).unwrap(), 300);
         // exact boundary: chunk lands at declared.
         assert_eq!(check_fallback_chunk_overflow(900, 124, 1024).unwrap(), 1024);
+    }
+
+    // R9-F1 regression tests: drive `receive_fallback_data` over a
+    // synthetic message stream so the EOF-without-UploadComplete
+    // rejection is exercised directly, not just by code review.
+    // The function is now generic over `tokio_stream::Stream` so
+    // we feed it an `iter` of pre-built messages.
+
+    fn module_for_test(path: PathBuf) -> ModuleConfig {
+        ModuleConfig {
+            name: "test".into(),
+            path,
+            read_only: false,
+            _comment: None,
+            _use_chroot: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_rejects_eof_after_file_manifest() {
+        // Client sends a FileManifest claiming 100 bytes, then closes
+        // the stream without sending FileData or UploadComplete. Pre
+        // R8-F2 this would have returned success because the manifest
+        // already removed `expected.txt` from `pending`.
+        let dest_root = tempdir().expect("tempdir");
+        let module = module_for_test(dest_root.path().to_path_buf());
+        let header = FileHeader {
+            relative_path: "expected.txt".into(),
+            size: 100,
+            mtime_seconds: 0,
+            permissions: 0o644,
+            checksum: vec![],
+        };
+        let messages: Vec<Result<ClientPushRequest, Status>> = vec![Ok(ClientPushRequest {
+            payload: Some(client_push_request::Payload::FileManifest(header.clone())),
+        })];
+        let mut stream = tokio_stream::iter(messages);
+        let err = receive_fallback_data(&mut stream, &module, vec![header])
+            .await
+            .expect_err("EOF after FileManifest must be rejected");
+        let msg = err.message();
+        assert!(
+            msg.contains("UploadComplete") || msg.contains("in-flight"),
+            "expected UploadComplete/in-flight error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_rejects_eof_after_tar_shard_header() {
+        // Client sends TarShardHeader, then closes the stream without
+        // any chunks or TarShardComplete or UploadComplete.
+        let dest_root = tempdir().expect("tempdir");
+        let module = module_for_test(dest_root.path().to_path_buf());
+        let file = FileHeader {
+            relative_path: "small.txt".into(),
+            size: 4,
+            mtime_seconds: 0,
+            permissions: 0o644,
+            checksum: vec![],
+        };
+        let shard = blit_core::generated::TarShardHeader {
+            files: vec![file.clone()],
+            archive_size: 1024,
+        };
+        let messages: Vec<Result<ClientPushRequest, Status>> = vec![Ok(ClientPushRequest {
+            payload: Some(client_push_request::Payload::TarShardHeader(shard)),
+        })];
+        let mut stream = tokio_stream::iter(messages);
+        let err = receive_fallback_data(&mut stream, &module, vec![file])
+            .await
+            .expect_err("EOF after TarShardHeader must be rejected");
+        let msg = err.message();
+        assert!(
+            msg.contains("UploadComplete") || msg.contains("in-flight"),
+            "expected UploadComplete/in-flight error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_rejects_eof_with_empty_pending_no_complete() {
+        // Even with no expected files and a clean state, a stream
+        // that never carries an UploadComplete must still be
+        // rejected — we treat the explicit terminator as required.
+        let dest_root = tempdir().expect("tempdir");
+        let module = module_for_test(dest_root.path().to_path_buf());
+        let messages: Vec<Result<ClientPushRequest, Status>> = vec![];
+        let mut stream = tokio_stream::iter(messages);
+        let err = receive_fallback_data(&mut stream, &module, vec![])
+            .await
+            .expect_err("EOF without UploadComplete must be rejected");
+        assert!(err.message().contains("UploadComplete"));
     }
 }

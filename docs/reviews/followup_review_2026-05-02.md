@@ -866,3 +866,54 @@ Status:
 - The daemon push `Entry::unpack` symlink/hardlink class is closed.
 - The daemon gRPC push fallback still needs R8-F1 and R8-F2 before I would call
   that fallback path release-ready.
+
+## Round 9 - R8 Closure Commit
+
+Reviewed change:
+
+- Commit: `3ef6615 fix(push-fallback): close R8 framing bugs on daemon gRPC push receive`
+- Scope: daemon gRPC push fallback tar-shard framing bounds and explicit
+  `UploadComplete` requirement.
+
+Verification:
+
+- `cargo fmt -- --check` passed.
+- `cargo test --workspace` passed.
+- Existing warnings remain unrelated: deprecated macOS FSEvents API usage and
+  an unused macOS capability test variable.
+
+Verdict:
+
+R8-F1 and R8-F2 are accepted as fixed. The daemon gRPC push fallback now rejects
+zero/over-cap tar shard `archive_size` values before buffering, checks every
+chunk with `checked_add` against both declared size and the local cap, and
+requires explicit `UploadComplete` before treating the stream as successful.
+
+### R9-F1. `UploadComplete` EOF regression is fixed in code but not directly covered
+
+Severity: Low
+
+The functional R8-F2 fix is present at
+`crates/blit-daemon/src/service/push/data_plane.rs:470` to
+`crates/blit-daemon/src/service/push/data_plane.rs:503`: `UploadComplete` sets
+`upload_complete_seen`, and EOF without that flag now returns an error. That
+closes the silent-success bug.
+
+The new tests cover R8-F1 framing helpers, but they do not directly exercise
+`receive_fallback_data` returning an error on EOF after `FileManifest` or
+`TarShardHeader` without `UploadComplete`. That means the most important R8-F2
+behavior is protected by code review rather than by a regression test.
+
+Recommendation:
+
+Not a release blocker, but add a small stream-harness test when convenient. It
+should feed `receive_fallback_data` a `FileHeader` then EOF, and separately a
+`TarShardHeader` then EOF, and assert both return an error containing
+`UploadComplete` or `in-flight`.
+
+Status:
+
+- R8-F1 is accepted as fixed.
+- R8-F2 is accepted as fixed.
+- Daemon gRPC push fallback is release-ready modulo the low-priority regression
+  coverage gap above.
