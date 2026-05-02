@@ -147,6 +147,66 @@ fn validate_remote_tar_shard_sizes(headers: &[FileHeader]) -> Result<()> {
     Ok(())
 }
 
+/// Read exactly `expected_size` bytes from a remote-source stream
+/// into a bounded `Vec<u8>`. Closes R11-F1 of
+/// `docs/reviews/followup_review_2026-05-02.md`: previously the
+/// caller did `try_reserve_exact(size)` then `read_to_end(...)`,
+/// which only bounded the *reservation* — `read_to_end` would still
+/// grow the Vec past the bound if the remote source streamed extra
+/// bytes. Now the read itself is wrapped with `take(size + 1)` so
+/// over-reads are bounded at one byte past the declared size, and
+/// the post-read length check rejects both lie-large and lie-small.
+///
+/// Extracted as a free function so it's unit-testable against any
+/// `AsyncRead` (a real `RemotePullClient` stream isn't required).
+async fn read_remote_entry_bounded<R>(reader: R, expected_size: u64, label: &str) -> Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
+
+    // Defense-in-depth: this helper is private and current callers
+    // pre-validate, but reject explicitly so any future caller that
+    // bypasses validation can't allocate past the cap.
+    if expected_size > MAX_TAR_SHARD_BYTES {
+        bail!(
+            "remote-source entry '{}' size {} exceeds local cap {} bytes",
+            label,
+            expected_size,
+            MAX_TAR_SHARD_BYTES
+        );
+    }
+
+    let mut data: Vec<u8> = Vec::new();
+    data.try_reserve_exact(expected_size as usize)
+        .map_err(|err| {
+            eyre::eyre!(
+                "allocating buffer for remote-source entry '{}' (size {}): {}",
+                label,
+                expected_size,
+                err
+            )
+        })?;
+
+    // Read at most `expected_size + 1` bytes. The +1 is the over-read
+    // canary: if the post-read length is `expected_size + 1` we know
+    // the source sent more than declared. `expected_size` is bounded
+    // at `MAX_TAR_SHARD_BYTES` (above), so the addition can't overflow.
+    let read_limit = expected_size + 1;
+    let mut limited = reader.take(read_limit);
+    limited.read_to_end(&mut data).await?;
+
+    if data.len() as u64 != expected_size {
+        bail!(
+            "remote-source entry '{}' returned {} bytes; manifest declared {}",
+            label,
+            data.len(),
+            expected_size
+        );
+    }
+    Ok(data)
+}
+
 pub struct RemoteTransferSource {
     client: RemotePullClient,
     root: PathBuf,
@@ -204,36 +264,13 @@ impl TransferSource for RemoteTransferSource {
 
                 let mut builder = tar::Builder::new(Vec::new());
                 for header in headers.clone() {
-                    let mut stream = self
+                    let stream = self
                         .client
                         .open_remote_file(Path::new(&header.relative_path))
                         .await?;
-                    // Bounded allocation. try_reserve_exact returns
-                    // AllocError instead of aborting if the size
-                    // validation upstream is ever bypassed.
-                    let mut data: Vec<u8> = Vec::new();
-                    data.try_reserve_exact(header.size as usize)
-                        .map_err(|err| {
-                            eyre::eyre!(
-                                "allocating buffer for remote-source entry '{}' (size {}): {}",
-                                header.relative_path,
-                                header.size,
-                                err
-                            )
-                        })?;
-                    stream.read_to_end(&mut data).await?;
-
-                    // Validate that the actual read matches the
-                    // declared size. If the remote source lied, we
-                    // refuse rather than emit a malformed tar.
-                    if data.len() as u64 != header.size {
-                        bail!(
-                            "remote-source entry '{}' returned {} bytes; manifest declared {}",
-                            header.relative_path,
-                            data.len(),
-                            header.size
-                        );
-                    }
+                    let data =
+                        read_remote_entry_bounded(stream, header.size, &header.relative_path)
+                            .await?;
 
                     let mut tar_header = tar::Header::new_gnu();
                     tar_header.set_path(&header.relative_path)?;
@@ -603,5 +640,82 @@ mod remote_tar_size_tests {
         // Per-entry cap fires first, which is fine — the test pins
         // that one of the two checks rejects this input.
         assert!(err.to_string().contains("exceeds"));
+    }
+}
+
+#[cfg(test)]
+mod remote_bounded_read_tests {
+    //! R11-F1 regression coverage. The bug: `try_reserve_exact`
+    //! bounded the initial allocation but `read_to_end` would still
+    //! grow the Vec past the bound if the remote source streamed
+    //! extra bytes. Fix: wrap the reader with `take(size + 1)` so
+    //! the read itself is bounded; the post-read length check
+    //! rejects both over-read and under-read.
+
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn happy_path_returns_exactly_declared_bytes() {
+        let payload = b"abcdefghij";
+        let reader = Cursor::new(payload.to_vec());
+        let data = read_remote_entry_bounded(reader, payload.len() as u64, "ok.txt")
+            .await
+            .unwrap();
+        assert_eq!(data, payload);
+    }
+
+    #[tokio::test]
+    async fn rejects_under_read() {
+        // Source sends fewer bytes than declared — must error, not
+        // pad with zeros.
+        let payload = b"only5"; // 5 bytes
+        let reader = Cursor::new(payload.to_vec());
+        let err = read_remote_entry_bounded(reader, 100, "short.txt")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("returned") && msg.contains("100"),
+            "expected length-mismatch error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_over_read_bounded_at_size_plus_one() {
+        // Source declares 4 bytes but streams 1 MiB. The bounded
+        // read caps at 5 bytes (4 + 1) so the over-read is detected
+        // without growing the buffer past the cap.
+        let big_payload = vec![0xABu8; 1024 * 1024];
+        let reader = Cursor::new(big_payload);
+        let err = read_remote_entry_bounded(reader, 4, "lying.txt")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("returned 5") && msg.contains("declared 4"),
+            "expected over-read rejection at size+1, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_size_above_cap_defensively() {
+        // Helper enforces its own size cap as defense in depth even
+        // though the public callers pre-validate.
+        use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
+        let reader = Cursor::new(Vec::new());
+        let err = read_remote_entry_bounded(reader, MAX_TAR_SHARD_BYTES + 1, "huge.txt")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds local cap"));
+    }
+
+    #[tokio::test]
+    async fn empty_file_passes() {
+        let reader = Cursor::new(Vec::<u8>::new());
+        let data = read_remote_entry_bounded(reader, 0, "empty.txt")
+            .await
+            .unwrap();
+        assert!(data.is_empty());
     }
 }

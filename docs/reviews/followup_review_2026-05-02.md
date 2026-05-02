@@ -958,3 +958,54 @@ Status:
 - R9-F1 is closed.
 - R8-F1 and R8-F2 remain accepted as fixed.
 - Daemon gRPC push fallback is accepted as release-ready.
+
+## Round 11 - Baseline F7/F8 Closure Commit
+
+Reviewed change:
+
+- Commit: `34f43b0 fix(remote-source): bound tar-shard prepare allocation; harmonize wire cap (F7+F8)`
+- Scope: remote-source tar-shard preparation and data-plane tar-shard wire cap.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+F8 is accepted as fixed. `MAX_WIRE_TAR_SHARD_BYTES` now derives from
+`tar_safety::MAX_TAR_SHARD_BYTES`, so the TCP data-plane reader no longer
+accepts a 1 GiB shard that the shared tar helper would reject at 256 MiB.
+
+F7 is improved but not closed. The new size validation and `try_reserve_exact`
+remove the direct `Vec::with_capacity(header.size as usize)` problem, but the
+actual remote file read is still unbounded.
+
+### R11-F1. Remote-source tar-shard read can still grow past the declared size
+
+Severity: High
+
+`crates/blit-core/src/remote/transfer/source.rs:203` validates the declared
+tar-shard entry sizes against `tar_safety::MAX_TAR_SHARD_BYTES`, and
+`crates/blit-core/src/remote/transfer/source.rs:215` reserves only the declared
+size. But `crates/blit-core/src/remote/transfer/source.rs:224` then calls
+`stream.read_to_end(&mut data).await?`.
+
+That post-reservation read is not capped. A hostile or buggy remote source can
+advertise a small `FileHeader.size`, pass validation, and then stream far more
+bytes. `Vec` will grow beyond the bounded reservation before the length check at
+`crates/blit-core/src/remote/transfer/source.rs:229` runs. The result is still a
+remote-controlled memory growth path in the remote-source tar-shard builder.
+
+Recommendation:
+
+Cap the read itself. Either wrap the stream with `take(header.size + 1)`, read to
+end, and reject if more than `header.size` bytes were observed, or read exactly
+`header.size` bytes and then attempt one extra byte to verify EOF. Keep the
+existing post-read equality check. Add a regression test that uses a synthetic
+reader returning more bytes than the declared header size; the test should fail
+before the buffer can grow beyond the declared size plus one byte.
+
+Status:
+
+- F8 is closed.
+- F7 remains open pending a bounded-read fix.
