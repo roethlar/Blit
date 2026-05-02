@@ -62,7 +62,12 @@ pub struct RemotePullReport {
     /// shouldn't reach here). Empty `Some` means "daemon agrees
     /// nothing should be deleted." The CLI deletes exactly these
     /// relative paths and never walks the dest tree on its own.
-    pub paths_to_delete: Option<Vec<PathBuf>>,
+    ///
+    /// Stored as raw wire strings — the consumer routes each through
+    /// `path_safety::safe_join` before performing any filesystem op,
+    /// so a hostile daemon can't escape the destination via `..`,
+    /// absolute paths, or Windows-shaped roots (R5-F1).
+    pub paths_to_delete: Option<Vec<String>>,
 }
 
 pub type RemotePullProgress = RemoteTransferProgress;
@@ -533,11 +538,10 @@ impl RemotePullClient {
                 }
                 Some(server_pull_message::Payload::DeleteList(list)) => {
                     // Daemon authoritative mirror-purge list (closes F4).
-                    // Stored verbatim; the CLI applies these deletions
-                    // after the transfer completes.
-                    let entries: Vec<PathBuf> =
-                        list.relative_paths.into_iter().map(PathBuf::from).collect();
-                    report.paths_to_delete = Some(entries);
+                    // Stored as wire strings — the CLI consumer is
+                    // responsible for routing each through safe_join
+                    // before touching the filesystem (R5-F1).
+                    report.paths_to_delete = Some(list.relative_paths);
                 }
                 Some(server_pull_message::Payload::FileHeader(header)) => {
                     finalize_active_file(&mut active_file, progress).await?;
@@ -578,15 +582,46 @@ impl RemotePullClient {
                     if active_shard.is_some() {
                         bail!("received TarShardHeader while a previous shard was open");
                     }
+                    if header.archive_size > MAX_TAR_SHARD_BYTES {
+                        bail!(
+                            "TarShardHeader.archive_size {} exceeds local cap {} bytes",
+                            header.archive_size,
+                            MAX_TAR_SHARD_BYTES
+                        );
+                    }
+                    // Modest initial reservation — chunks grow the
+                    // buffer incrementally up to declared_size, so
+                    // we don't have to trust archive_size for the
+                    // up-front allocation.
+                    let initial_capacity = (header.archive_size as usize)
+                        .min(1024 * 1024)
+                        .min(MAX_TAR_SHARD_BYTES as usize);
                     active_shard = Some(InProgressShard {
                         files: header.files,
-                        buffer: Vec::with_capacity(header.archive_size as usize),
+                        buffer: Vec::with_capacity(initial_capacity),
+                        declared_size: header.archive_size,
                     });
                 }
                 Some(server_pull_message::Payload::TarShardChunk(chunk)) => {
                     let shard = active_shard
                         .as_mut()
                         .ok_or_else(|| eyre!("TarShardChunk arrived without a preceding header"))?;
+                    let new_total = shard.buffer.len() as u64 + chunk.content.len() as u64;
+                    if new_total > shard.declared_size {
+                        bail!(
+                            "TarShardChunk would overflow declared archive_size: \
+                             buffer={} chunk={} declared={}",
+                            shard.buffer.len(),
+                            chunk.content.len(),
+                            shard.declared_size
+                        );
+                    }
+                    if new_total > MAX_TAR_SHARD_BYTES {
+                        bail!(
+                            "tar shard buffer would exceed local cap of {} bytes",
+                            MAX_TAR_SHARD_BYTES
+                        );
+                    }
                     if let Some(progress) = progress {
                         progress.report_payload(0, chunk.content.len() as u64);
                     }
@@ -596,6 +631,13 @@ impl RemotePullClient {
                     let shard = active_shard
                         .take()
                         .ok_or_else(|| eyre!("TarShardComplete with no active shard"))?;
+                    if shard.buffer.len() as u64 != shard.declared_size {
+                        bail!(
+                            "tar shard buffer length {} does not match declared archive_size {}",
+                            shard.buffer.len(),
+                            shard.declared_size
+                        );
+                    }
                     let stats = apply_pull_tar_shard(dest_root, shard, track_paths)
                         .with_context(|| "applying tar shard")?;
                     report.files_transferred += stats.files;
@@ -891,24 +933,47 @@ async fn finalize_active_file(
     Ok(())
 }
 
+/// Hard cap on tar-shard buffer size on the pull receive side.
+/// The planner targets shards in the 4–64 MiB range; 256 MiB gives
+/// plenty of headroom for tar overhead while bounding what a hostile
+/// daemon's `TarShardHeader.archive_size` can force the client to
+/// allocate (R5-F3 of `docs/reviews/followup_review_2026-05-02.md`).
+const MAX_TAR_SHARD_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Buffer state for a tar shard arriving on the gRPC pull control
-/// plane (Step 4C). The header carries the expected file list and
-/// archive size; chunks accumulate into the buffer until Complete
-/// arrives, at which point we hand it to `apply_pull_tar_shard`.
+/// plane (Step 4C). `declared_size` is checked at every Chunk
+/// arrival and again at Complete so a daemon that lies about the
+/// shard size can't desync the buffer or grow it past the cap.
 struct InProgressShard {
     files: Vec<FileHeader>,
     buffer: Vec<u8>,
+    /// Total archive size promised by `TarShardHeader.archive_size`.
+    /// The buffer must reach exactly this length by the time the
+    /// `TarShardComplete` message arrives.
+    declared_size: u64,
 }
 
+#[derive(Debug)]
 struct ShardApplyStats {
     files: usize,
     bytes: u64,
     paths: Vec<PathBuf>,
 }
 
-/// Extract a tar-shard buffer into `dest_root`. Mirror image of the
-/// daemon's `apply_tar_shard_sync` (push receive side); shared
-/// semantics, different runtime context.
+/// Extract a tar-shard buffer into `dest_root`. Per R5-F2 of
+/// `docs/reviews/followup_review_2026-05-02.md` we never call
+/// `Entry::unpack` — that would honor tar entry-type semantics
+/// (symlinks, hardlinks, devices) which a hostile daemon could use
+/// to write outside `dest_root`. Instead we:
+///
+///   - Reject anything that isn't a regular-file entry.
+///   - Route the path through `path_safety::validate_wire_path` /
+///     `safe_join` so traversal/abs/UNC/Windows-root inputs fail.
+///   - Copy bytes out of the entry manually, never letting tar
+///     materialize a special inode.
+///   - Verify the byte count matches the header's declared size
+///     (a daemon claiming "1 KiB" but emitting 1 MiB is a wire bug
+///     even if the path was safe).
 fn apply_pull_tar_shard(
     dest_root: &Path,
     shard: InProgressShard,
@@ -916,7 +981,7 @@ fn apply_pull_tar_shard(
 ) -> Result<ShardApplyStats> {
     use std::collections::HashMap;
     use std::io::Cursor;
-    use tar::Archive;
+    use tar::{Archive, EntryType};
 
     let mut expected: HashMap<String, FileHeader> = shard
         .files
@@ -935,9 +1000,17 @@ fn apply_pull_tar_shard(
 
     for entry_result in entries {
         let mut entry = entry_result.context("tar shard entry")?;
-        if entry.header().entry_type().is_dir() {
+        let entry_type = entry.header().entry_type();
+        if entry_type == EntryType::Directory {
             continue;
         }
+        // Only accept regular files. Reject Symlink/Link/Block/Char/
+        // Fifo/GNU-* etc. so a bad daemon can't substitute a special
+        // inode for an expected regular file (R5-F2).
+        if entry_type != EntryType::Regular && entry_type != EntryType::Continuous {
+            bail!("tar shard contained non-regular entry type {entry_type:?}; only files allowed");
+        }
+
         let raw_path = entry.path().context("tar shard path")?;
         let rel_string = raw_path.to_string_lossy().replace('\\', "/");
 
@@ -945,21 +1018,37 @@ fn apply_pull_tar_shard(
             .remove(&rel_string)
             .ok_or_else(|| eyre!("tar shard produced unexpected entry '{rel_string}'"))?;
 
-        let safe_rel = sanitize_relative_path(&rel_string)?;
-        let dest_path = resolve_pull_dest(dest_root, &safe_rel);
+        // Validate path through the shared chokepoint, then safe_join
+        // for the actual filesystem write.
+        crate::path_safety::validate_wire_path(&rel_string)
+            .with_context(|| format!("validating tar shard entry {rel_string:?}"))?;
+        let dest_path = crate::path_safety::safe_join(dest_root, &rel_string)
+            .with_context(|| format!("resolving tar shard dest {rel_string:?}"))?;
         if let Some(parent) = dest_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating directory {}", parent.display()))?;
         }
 
-        entry
-            .unpack(&dest_path)
-            .with_context(|| format!("unpacking {}", dest_path.display()))?;
+        // Copy bytes manually; never goes through tar's special-file
+        // creation paths.
+        let mut contents = Vec::with_capacity(header.size as usize);
+        std::io::copy(&mut entry, &mut contents)
+            .with_context(|| format!("buffering tar entry {rel_string}"))?;
+        if contents.len() as u64 != header.size {
+            bail!(
+                "tar shard entry '{rel_string}' size {} does not match header size {}",
+                contents.len(),
+                header.size
+            );
+        }
+
+        std::fs::write(&dest_path, &contents)
+            .with_context(|| format!("writing {}", dest_path.display()))?;
 
         stats.files += 1;
         stats.bytes += header.size;
         if track_paths {
-            stats.paths.push(safe_rel);
+            stats.paths.push(PathBuf::from(&rel_string));
         }
     }
 
@@ -969,6 +1058,152 @@ fn apply_pull_tar_shard(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tar_shard_safety_tests {
+    use super::*;
+    use std::io::Cursor;
+    use tar::{Builder, EntryType, Header};
+    use tempfile::tempdir;
+
+    fn header(rel: &str, size: u64) -> FileHeader {
+        FileHeader {
+            relative_path: rel.into(),
+            size,
+            mtime_seconds: 0,
+            permissions: 0o644,
+            checksum: vec![],
+        }
+    }
+
+    fn build_archive_with_symlink(rel: &str, link_target: &str) -> Vec<u8> {
+        let mut builder = Builder::new(Vec::new());
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        builder.append_link(&mut h, rel, link_target).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    fn build_regular_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = Builder::new(Vec::new());
+        for (rel, data) in entries {
+            let mut h = Header::new_gnu();
+            h.set_entry_type(EntryType::Regular);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            builder
+                .append_data(&mut h, rel, Cursor::new(*data))
+                .unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn rejects_symlink_entry() {
+        // Hostile daemon claims to ship `expected.txt` but the tar
+        // entry is actually a symlink. Pre-R5-F2 we would have called
+        // entry.unpack and created a symlink to /etc/passwd.
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path();
+        let buffer = build_archive_with_symlink("expected.txt", "/etc/passwd");
+        let declared_size = buffer.len() as u64;
+        let shard = InProgressShard {
+            files: vec![header("expected.txt", 0)],
+            buffer,
+            declared_size,
+        };
+        let err = apply_pull_tar_shard(dest, shard, false).unwrap_err();
+        assert!(
+            err.to_string().contains("non-regular entry"),
+            "expected non-regular rejection, got: {err}"
+        );
+        assert!(!dest.join("expected.txt").exists());
+    }
+
+    #[test]
+    fn rejects_traversal_path_in_archive() {
+        // The tar crate's Builder rejects `..` at the sender side, so
+        // we craft a malicious archive by hand: standard 512-byte
+        // ustar header with the path field overwritten to `../escape.txt`.
+        // A hostile non-Rust peer could trivially produce this shape;
+        // we want apply_pull_tar_shard to reject it via
+        // validate_wire_path, not let safe_join trip later.
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Build a tar archive with a benign path, then surgically
+        // overwrite the path bytes in the header.
+        let mut buffer = build_regular_archive(&[("aaaaaaaaa.txt", b"pwn")]);
+        let bad_name = b"../escape.txt\0";
+        buffer[..bad_name.len()].copy_from_slice(bad_name);
+        // Recompute checksum (offset 148, 8 bytes ASCII octal). Tar
+        // checksum spec: sum of all header bytes treating chksum
+        // field as spaces (0x20).
+        let mut sum: u32 = 0;
+        for (i, b) in buffer[..512].iter().enumerate() {
+            if (148..156).contains(&i) {
+                sum += 0x20;
+            } else {
+                sum += *b as u32;
+            }
+        }
+        let chksum = format!("{:06o}\0 ", sum);
+        buffer[148..156].copy_from_slice(chksum.as_bytes());
+
+        let declared_size = buffer.len() as u64;
+        let shard = InProgressShard {
+            files: vec![header("../escape.txt", 3)],
+            buffer,
+            declared_size,
+        };
+        let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("validating") || msg.contains("validate"),
+            "expected validation rejection, got: {err}"
+        );
+        // The sibling file `escape.txt` (one dir up from `dest`) must
+        // not have been created.
+        assert!(!dest.parent().unwrap().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn rejects_size_mismatch() {
+        // Header advertises a different size than the archive entry.
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+        let buffer = build_regular_archive(&[("ok.txt", b"hello")]);
+        let declared_size = buffer.len() as u64;
+        let shard = InProgressShard {
+            files: vec![header("ok.txt", 99)], // lie
+            buffer,
+            declared_size,
+        };
+        let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
+        assert!(err.to_string().contains("does not match header size"));
+    }
+
+    #[test]
+    fn happy_path_extracts_regular_files() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().to_path_buf();
+        let buffer = build_regular_archive(&[("a.txt", b"alpha"), ("nested/b.txt", b"beta")]);
+        let declared_size = buffer.len() as u64;
+        let shard = InProgressShard {
+            files: vec![header("a.txt", 5), header("nested/b.txt", 4)],
+            buffer,
+            declared_size,
+        };
+        let stats = apply_pull_tar_shard(&dest, shard, true).unwrap();
+        assert_eq!(stats.files, 2);
+        assert_eq!(stats.bytes, 9);
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"alpha");
+        assert_eq!(std::fs::read(dest.join("nested/b.txt")).unwrap(), b"beta");
+    }
 }
 
 /// Owned-value version for spawning data plane receiver as background task. for spawning as background task.

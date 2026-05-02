@@ -409,40 +409,46 @@ async fn enumerate_local_manifest(root: &Path, compute_checksums: bool) -> Resul
     .map_err(|err| eyre!("manifest enumeration task failed: {}", err))?
 }
 
+#[derive(Debug)]
 struct LocalPurgeStats {
     files_deleted: u64,
     dirs_deleted: u64,
 }
 
-/// Apply a delete list provided by the daemon. Each `relative` is
-/// joined against `dest_root`; the resulting absolute path is
-/// validated to stay inside `dest_root` (defense-in-depth: a bad
-/// daemon can't escape the destination root via `..`). Empty parent
-/// directories are pruned bottom-up after the file deletions.
+/// Apply a delete list provided by the daemon. Each wire string is
+/// routed through `path_safety::safe_join` before any filesystem op
+/// runs, so `..`, absolute paths, Windows drive prefixes, UNC paths,
+/// and the like are rejected uniformly with the rest of the receive
+/// pipeline. The prior lexical `starts_with` check (R5-F1 of
+/// `docs/reviews/followup_review_2026-05-02.md`) was insufficient:
+/// `dest_root.join("../victim")` produces `dest_root/../victim`
+/// which still starts with `dest_root` lexically and would have
+/// passed. Empty parent directories under `dest_root` are pruned
+/// bottom-up after the file deletions.
 async fn delete_listed_paths(
     dest_root: &Path,
-    relative_paths: &[PathBuf],
+    relative_paths: &[String],
 ) -> Result<LocalPurgeStats> {
+    use blit_core::path_safety::safe_join;
     use std::collections::BTreeSet;
     let mut stats = LocalPurgeStats {
         files_deleted: 0,
         dirs_deleted: 0,
     };
-    // Collect parent directories of every deleted file so we can
-    // walk them in deepest-first order to remove now-empty dirs.
     let mut candidate_parents: BTreeSet<PathBuf> = BTreeSet::new();
 
     for rel in relative_paths {
-        let target = dest_root.join(rel);
-        // Reject any path that would resolve outside dest_root after
-        // canonicalization-free normalization. We don't canonicalize
-        // (would follow symlinks); we just check that the target's
-        // ancestors include dest_root via prefix.
-        if !target.starts_with(dest_root) {
-            eyre::bail!(
-                "daemon delete list contained path outside destination: {}",
-                rel.display()
-            );
+        let target = safe_join(dest_root, rel).map_err(|e| {
+            eyre!(
+                "daemon delete list contained unsafe path '{}': {:#}",
+                rel,
+                e
+            )
+        })?;
+        // safe_join("") returns dest_root itself; we never delete the
+        // destination root.
+        if target == dest_root {
+            eyre::bail!("daemon delete list referenced the destination root itself");
         }
         match tokio::fs::remove_file(&target).await {
             Ok(()) => {
@@ -473,6 +479,69 @@ async fn delete_listed_paths(
         }
     }
     Ok(stats)
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod delete_list_safety_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn rejects_parent_traversal() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(tmp.path().join("victim.txt"), b"keep me").unwrap();
+        std::fs::write(outside.parent().unwrap().join("victim.txt"), b"keep me").unwrap();
+
+        let bad = vec!["../victim.txt".to_string()];
+        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe path"),
+            "expected unsafe-path error, got: {err}"
+        );
+        // The sibling file the daemon was trying to reach must still exist.
+        assert!(tmp.path().join("victim.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_absolute_path() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(tmp.path().join("victim.txt"), b"keep me").unwrap();
+
+        let bad = vec!["/etc/passwd".to_string(), "/tmp/victim.txt".to_string()];
+        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
+        assert!(err.to_string().contains("unsafe path"));
+        assert!(tmp.path().join("victim.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn deletes_in_scope_paths() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("ok.txt"), b"goodbye").unwrap();
+
+        let good = vec!["ok.txt".to_string()];
+        let stats = delete_listed_paths(&dest, &good).await.unwrap();
+        assert_eq!(stats.files_deleted, 1);
+        assert!(!dest.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_root_self_reference() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        // Empty string normalizes to dest_root via safe_join.
+        let bad = vec!["".to_string()];
+        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
+        assert!(err.to_string().contains("destination root"));
+    }
 }
 
 fn print_pull_json(report: &RemotePullReport, dest_root: &Path) {

@@ -163,9 +163,18 @@ fn mirror_mode_from_proto(raw: i32) -> Result<MirrorMode> {
 }
 
 /// Convert a wire `FilterSpec` to a concrete `FileFilter`. Validates
-/// glob patterns and size/duration strings — bad input becomes a hard
-/// error so a buggy peer can't silently disable filtering.
+/// every glob pattern individually so a malformed pattern from a
+/// hostile or buggy peer is a hard error here rather than silently
+/// dropped by `FileFilter::build_globset` later (R5-F4 of
+/// `docs/reviews/followup_review_2026-05-02.md`).
 fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
+    for pat in &spec.include {
+        globset::Glob::new(pat).with_context(|| format!("invalid include glob '{pat}'"))?;
+    }
+    for pat in &spec.exclude {
+        globset::Glob::new(pat).with_context(|| format!("invalid exclude glob '{pat}'"))?;
+    }
+
     let mut filter = FileFilter::default();
     filter.include_files = spec.include;
     filter.exclude_files = spec.exclude;
@@ -261,6 +270,47 @@ mod tests {
         spec.ignore_existing = true;
         let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
         assert!(normalized.ignore_existing);
+    }
+
+    #[test]
+    fn malformed_include_glob_rejected() {
+        // Unbalanced bracket — globset rejects this.
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            include: vec!["[abc".into()],
+            exclude: vec![],
+            min_size: None,
+            max_size: None,
+            min_age_secs: None,
+            max_age_secs: None,
+            files_from: vec![],
+        });
+        let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid include glob"),
+            "expected include-glob rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn malformed_exclude_glob_rejected() {
+        let mut spec = empty_spec();
+        spec.filter = Some(ProtoFilterSpec {
+            include: vec![],
+            exclude: vec!["[bad".into()],
+            min_size: None,
+            max_size: None,
+            min_age_secs: None,
+            max_age_secs: None,
+            files_from: vec![],
+        });
+        let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid exclude glob"),
+            "expected exclude-glob rejection, got: {msg}"
+        );
     }
 
     #[test]

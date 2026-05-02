@@ -448,3 +448,172 @@ Status:
 - F10 remains open until Step 4B sends and applies real filters.
 - F4 remains open until mirror deletion uses an exact delete list and filtered
   subset semantics are tested.
+
+## Round 5 - R2/R4 Closure, Step 4B Filtered Pull, Step 4C gRPC Tar Shards
+
+Reviewed change:
+
+- Commit range: `e503938..4f84d7c`
+- Included commits: `d68f9f7`, `4a14840`, `ae15483`, `33796fd`,
+  `4101cac`, `8da4824`, `71d3c30`, `cbd5eee`, `2d155d1`, `e6a1b7a`,
+  `4f84d7c`.
+- Scope: normalized operation spec adoption, concrete `ComparisonMode`
+  semantics, strict pull wire normalization, `ignore_existing` split from
+  comparison mode, pull filter parity, authoritative mirror delete lists,
+  gRPC pull tar-shard fallback, and planner-boundary tests.
+
+DEVLOG check:
+
+- New entries exist at `DEVLOG.md:194`, `DEVLOG.md:196`, and `DEVLOG.md:198`.
+- They describe the claimed R2/R4 closures plus Step 4B and Step 4C.
+- They are appended after older 2025 entries rather than being placed at the
+  top of the log, so a normal latest-first scan misses them.
+
+Verification:
+
+- `cargo fmt -- --check` passed.
+- `cargo test --workspace` passed.
+- Existing warnings remain unrelated to this review: deprecated macOS
+  FSEvents usage and an unused macOS capability test variable.
+
+Verdict:
+
+The architectural direction is right: `TransferOperationSpec` is now active on
+the pull path, `ignore_existing` is no longer encoded as a compare mode, pull
+filters are wired end to end, and the gRPC fallback no longer has the
+single-file-only limitation. The R2/R4 fixes are mostly accepted.
+
+However, Step 4B and Step 4C introduce new client-side trust-boundary bugs.
+Both are on messages authored by the daemon and consumed by the CLI, so they
+should be treated with the same rigor as the F1 receive-side path work.
+
+### R5-F1. `DeleteList` application bypasses `safe_join` and can delete outside the destination
+
+Severity: High
+
+`crates/blit-cli/src/transfers/remote.rs:435` to
+`crates/blit-cli/src/transfers/remote.rs:447` applies daemon-supplied delete
+paths with:
+
+```rust
+let target = dest_root.join(rel);
+if !target.starts_with(dest_root) { ... }
+tokio::fs::remove_file(&target).await
+```
+
+This is not equivalent to the shared F1 path-safety helper. A path like
+`../victim` produces a lexical path such as `dest_root/../victim`; that path
+still starts with `dest_root` component-wise before normalization, so the check
+passes and the subsequent remove can target a file outside the destination
+root.
+
+This also contradicts the local comment at `crates/blit-cli/src/transfers/remote.rs:420`
+to `crates/blit-cli/src/transfers/remote.rs:421`, which says the daemon cannot
+escape the destination root via `..`.
+
+Recommendation:
+
+Route every `DeleteList` entry through `blit_core::path_safety::safe_join`.
+Ideally store delete-list entries as strings until validation, rather than
+converting wire strings into `PathBuf` at
+`crates/blit-core/src/remote/pull.rs:534` to
+`crates/blit-core/src/remote/pull.rs:540`. Add a regression test that sends
+`../outside.txt` in `DeleteList` and proves the client rejects it without
+touching the sibling file.
+
+### R5-F2. gRPC pull tar-shard extraction trusts tar entry type and uses `Entry::unpack`
+
+Severity: High
+
+`crates/blit-core/src/remote/pull.rs:936` to
+`crates/blit-core/src/remote/pull.rs:957` accepts all non-directory tar entries
+and calls `entry.unpack(&dest_path)`. That means the receiver trusts tar header
+semantics from the daemon. A malicious or buggy daemon can send an expected path
+with a symlink, hardlink, or other special tar entry type instead of a regular
+file. The path name is checked, but the entry type and link target are not.
+
+The safer sink-side implementation already avoids this problem:
+`crates/blit-core/src/remote/transfer/sink.rs:390` to
+`crates/blit-core/src/remote/transfer/sink.rs:430` buffers entry bytes and writes
+regular file contents via `path_safety::safe_join`, rather than asking the tar
+crate to materialize arbitrary entry types.
+
+Recommendation:
+
+Make the pull gRPC extractor follow the same receive policy as
+`write_tar_shard_payload`: reject anything that is not a regular file, validate
+the path through `safe_join`, copy bytes out of the tar entry, and write the file
+contents directly. Also verify the entry size matches the expected
+`FileHeader.size` before counting or reporting the file. Add a malicious
+tar-shard regression test for a symlink entry whose `relative_path` matches an
+expected header.
+
+### R5-F3. `TarShardHeader.archive_size` can force an unbounded client allocation
+
+Severity: Medium
+
+`crates/blit-core/src/remote/pull.rs:576` to
+`crates/blit-core/src/remote/pull.rs:584` allocates the shard buffer with
+`Vec::with_capacity(header.archive_size as usize)` directly from the daemon's
+`TarShardHeader`.
+
+That makes `archive_size` a remote-controlled allocation hint. A bad daemon can
+advertise a huge value before sending any chunk, causing the client to attempt a
+large allocation or hit platform-dependent truncation from `u64 as usize`.
+
+Recommendation:
+
+Use `usize::try_from`, cap `archive_size` to the configured/negotiated maximum
+tar-shard size, and reserve incrementally instead of preallocating the full
+remote-supplied size. While chunks arrive, reject if accumulated bytes exceed
+the declared size or the local cap; on `TarShardComplete`, reject if the final
+length does not equal `archive_size`.
+
+### R5-F4. `NormalizedTransferOperation::from_spec` claims filter validation it does not perform
+
+Severity: Low
+
+`crates/blit-core/src/remote/transfer/operation_spec.rs:81` to
+`crates/blit-core/src/remote/transfer/operation_spec.rs:86` and
+`crates/blit-core/src/remote/transfer/operation_spec.rs:165` to
+`crates/blit-core/src/remote/transfer/operation_spec.rs:168` say malformed
+filter rules become hard errors. The actual conversion at
+`crates/blit-core/src/remote/transfer/operation_spec.rs:169` to
+`crates/blit-core/src/remote/transfer/operation_spec.rs:181` only copies fields
+into `FileFilter`. `FileFilter::build_globset` silently drops invalid globset
+patterns at `crates/blit-core/src/fs_enum.rs:115` to
+`crates/blit-core/src/fs_enum.rs:123`.
+
+This is not currently a release blocker if local CLI filter behavior is already
+defined as permissive, but the normalized wire boundary should not document
+strict validation that is not happening.
+
+Recommendation:
+
+Either make `filter_from_spec` actually validate include/exclude patterns and
+files-from paths, or soften the comments to say it normalizes filter fields and
+parses scalar size/age values before the CLI builds the proto.
+
+### R5-F5. DEVLOG ordering makes the review workflow easy to miss
+
+Severity: Low
+
+The new 2026-05-02 entries are present but appended around `DEVLOG.md:194`
+below old 2025 entries. The current workflow depends on agents checking DEVLOG
+for newly landed work; if the log is not latest-first or clearly partitioned,
+reviewers can falsely conclude there are no new entries.
+
+Recommendation:
+
+Pick one convention and enforce it. Given the current usage, latest-first is
+the least surprising: add new entries at the top below the title, or add a
+clearly marked `## 2026-05-02` section above historical entries.
+
+Status:
+
+- R2-F1, R2-F2, R4-F1, R4-F2, and R4-F4 are accepted as fixed in this batch.
+- Step 4B is functionally correct for filter parity and filtered-subset mirror
+  semantics, but R5-F1 must be fixed before treating its delete-list receiver as
+  safe.
+- Step 4C is functionally correct for normal tar shards, but R5-F2 and R5-F3
+  must be fixed before accepting the gRPC tar-shard receive path as safe.
