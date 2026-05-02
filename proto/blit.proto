@@ -291,3 +291,143 @@ message FilesystemStatsResponse {
 
 message AuthRequest { string token = 1; }
 message AuthResponse { bool authenticated = 1; }
+
+// ─────────────────────────────────────────────────────────────────────
+// TransferOperationSpec — the unified contract that step 4 of the
+// pipeline-unification plan (docs/plan/PIPELINE_UNIFICATION.md) will
+// hand from the initiator to the origin. Defined here as the canonical
+// shape; not yet wired into any RPC. PushHeader and PullSyncHeader stay
+// as the today-active control messages until the DiffPlanner extraction
+// (step 3) and pull_sync.rs refactor (step 4) port to this message.
+// ─────────────────────────────────────────────────────────────────────
+
+// What the initiator tells the origin about a transfer. Normalized
+// intent — not a flag bag. Identical regardless of whether the origin
+// is the local CLI (push), a remote daemon (pull), or daemon A talking
+// to daemon B (remote→remote, future).
+message TransferOperationSpec {
+  // Bumped when the wire shape of this message or any of its fields
+  // changes in a way that requires the receiver to know. Receivers
+  // should reject specs with a version they don't understand.
+  uint32 spec_version = 1;
+
+  // Origin-side module name. Empty means "use default root export".
+  string module = 2;
+
+  // Path within the origin's module, relative to the module root.
+  // Empty means "the module root itself" (single-file source).
+  string source_path = 3;
+
+  // User-supplied filter rules. Applies during origin enumeration so
+  // filtered files never appear in the payload stream. Identical
+  // semantics to the CLI's `--exclude/--include/--min-size/--max-size/
+  // --min-age/--max-age/--files-from` flags.
+  FilterSpec filter = 4;
+
+  // How the origin's DiffPlanner decides whether a file on the target
+  // matches the source. Affects which payloads the origin emits.
+  ComparisonMode compare_mode = 5;
+
+  // Whether and how the target should delete extraneous files. Only
+  // meaningful when this is a mirror operation; ignored for plain copy.
+  MirrorMode mirror_mode = 6;
+
+  // Resume / block-level transfer settings. When disabled the origin
+  // emits only File / TarShard payloads; when enabled it may emit
+  // FileBlock / FileBlockComplete pairs for changed files.
+  ResumeSettings resume = 7;
+
+  // What the initiator's side of the wire supports. Lets the origin
+  // pick payload shapes the target can handle (e.g. fall back from
+  // tar shards if the client is older).
+  PeerCapabilities client_capabilities = 8;
+}
+
+// Source-side filter rules. Applied at the origin's TransferSource
+// enumeration via FilteredSource, before DiffPlanner sees a header.
+message FilterSpec {
+  // Whitelist patterns. When empty, no whitelist is applied. When
+  // non-empty, a file must match at least one include pattern to pass.
+  repeated string include = 1;
+
+  // Blacklist patterns. Always applied; files matching any exclude
+  // are dropped regardless of include matches.
+  repeated string exclude = 2;
+
+  // Size constraints in bytes. Unset means no constraint.
+  optional uint64 min_size = 3;
+  optional uint64 max_size = 4;
+
+  // Age constraints in seconds, evaluated against the origin's clock
+  // at the moment the spec is processed. Unset means no constraint.
+  optional uint64 min_age_secs = 5;
+  optional uint64 max_age_secs = 6;
+
+  // Explicit file list. When non-empty, only listed relative paths
+  // pass — all other rules above are bypassed for the inclusion test.
+  // Currently inline; may move to a streamed manifest if list sizes
+  // become a concern.
+  repeated string files_from = 7;
+}
+
+// How the origin decides which files need transfer. The origin's
+// DiffPlanner consults this against the target's destination manifest.
+enum ComparisonMode {
+  // Treat as SIZE_MTIME (the historical default).
+  COMPARISON_MODE_UNSPECIFIED = 0;
+  // Match if size and mtime (within tolerance) agree.
+  COMPARISON_MODE_SIZE_MTIME = 1;
+  // Match only on Blake3 hash equality. Slower; bytes-accurate.
+  COMPARISON_MODE_CHECKSUM = 2;
+  // Match if sizes are equal — ignore mtime. Useful for copies that
+  // touch mtime as a side effect.
+  COMPARISON_MODE_SIZE_ONLY = 3;
+  // Always transfer; ignore both size and mtime on the target side.
+  COMPARISON_MODE_IGNORE_TIMES = 4;
+  // Skip any file the target already has, regardless of differences.
+  COMPARISON_MODE_IGNORE_EXISTING = 5;
+  // Transfer regardless of target state. Equivalent to dest is empty.
+  COMPARISON_MODE_FORCE = 6;
+}
+
+// What "mirror" means for files the target has but the source filter
+// scope doesn't include. Resolves F4 from the 2026-05-01 review by
+// making the choice explicit at the wire boundary.
+enum MirrorMode {
+  // Treat as OFF.
+  MIRROR_MODE_UNSPECIFIED = 0;
+  // No mirror deletions; copy/update only.
+  MIRROR_MODE_OFF = 1;
+  // Mirror only within the filter's scope: target files matching the
+  // filter are deleted if absent from source; target files outside the
+  // filter are left alone. Default for `blit mirror --include …`.
+  MIRROR_MODE_FILTERED_SUBSET = 2;
+  // Mirror the full target tree against the (filtered) source: target
+  // files are deleted whenever they're absent from the source set the
+  // filter produces. Use when the user genuinely wants "destination
+  // exactly mirrors filtered source".
+  MIRROR_MODE_ALL = 3;
+}
+
+message ResumeSettings {
+  // When false, origin emits only whole-file payloads. When true,
+  // origin may emit FileBlock + FileBlockComplete for changed files.
+  bool enabled = 1;
+  // Block size in bytes. 0 means "origin chooses" (currently 1 MiB).
+  uint32 block_size = 2;
+}
+
+// Peer capability advertisement. Used during initial spec exchange so
+// the origin can emit only payload shapes the target understands.
+// Adding a capability is backward-compatible; receivers default
+// missing fields to false (not supported).
+message PeerCapabilities {
+  bool supports_resume = 1;
+  bool supports_tar_shards = 2;
+  bool supports_data_plane_tcp = 3;
+  // Set by clients that send TransferOperationSpec. Daemons that
+  // implement step 4 of the pipeline-unification plan will set this
+  // when responding so newer clients can fall back to PullSyncHeader
+  // when talking to older daemons.
+  bool supports_filter_spec = 4;
+}
