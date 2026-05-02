@@ -2,6 +2,15 @@
 
 This is the master checklist. Execute the first unchecked item. After completion, check the box and add an entry to `DEVLOG.md`.
 
+## Current Review Follow-up
+
+See `docs/reviews/codebase_review_2026-05-01.md` for the full codebase review and rationale.
+
+- [ ] **P0** Centralize receive-side path sanitization and apply it to streamed files, tar shards, and resume block records.
+- [ ] **P0** Resolve daemon `use_chroot` truthfulness: implement canonical containment/symlink escape protection or remove the advertised option.
+- [ ] **P1** Define and test filtered mirror delete semantics (`filtered` vs `all` destination delete scope).
+- [ ] **P1** Harden daemon metrics lifecycle and endpoint behavior before treating Prometheus output as production-ready.
+
 ## Phase 0: Workspace & Core Logic Foundation
 
 - [x] Initialize Cargo workspace with `blit-core`, `blit-cli`, `blit-daemon`, `blit-utils`.

@@ -56,7 +56,13 @@ impl BlitService {
         modules: HashMap<String, ModuleConfig>,
         force_grpc_data: bool,
     ) -> Self {
-        Self::from_runtime(modules, None, force_grpc_data, true, TransferMetrics::new())
+        Self::from_runtime(
+            modules,
+            None,
+            force_grpc_data,
+            true,
+            TransferMetrics::disabled(),
+        )
     }
 }
 
@@ -78,26 +84,19 @@ impl Blit for BlitService {
         let force_grpc_data = self.force_grpc_data;
         let default_root = self.default_root.clone();
         // Counter increments at the dispatch boundary — single chokepoint
-        // per RPC, no reach-in to the transfer pipeline.
+        // per RPC, no reach-in to the transfer pipeline. No-op when
+        // metrics are disabled (default).
         let metrics = Arc::clone(&self.metrics);
-        metrics
-            .push_operations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .active_transfers
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.inc_push();
+        metrics.inc_active();
 
         tokio::spawn(async move {
             let result =
                 handle_push_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
                     .await;
-            metrics
-                .active_transfers
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.dec_active();
             if let Err(status) = result {
-                metrics
-                    .transfer_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
         });
@@ -116,22 +115,14 @@ impl Blit for BlitService {
         let metadata_only = req.metadata_only;
         let (tx, rx) = mpsc::channel(32);
         let metrics = Arc::clone(&self.metrics);
-        metrics
-            .pull_operations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .active_transfers
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.inc_pull();
+        metrics.inc_active();
 
         tokio::spawn(async move {
             let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
-            metrics
-                .active_transfers
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.dec_active();
             if let Err(status) = result {
-                metrics
-                    .transfer_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
         });
@@ -150,12 +141,8 @@ impl Blit for BlitService {
         let default_root = self.default_root.clone();
         let server_checksums_enabled = self.server_checksums_enabled;
         let metrics = Arc::clone(&self.metrics);
-        metrics
-            .pull_operations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        metrics
-            .active_transfers
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics.inc_pull();
+        metrics.inc_active();
 
         tokio::spawn(async move {
             let result = handle_pull_sync_stream(
@@ -167,13 +154,9 @@ impl Blit for BlitService {
                 server_checksums_enabled,
             )
             .await;
-            metrics
-                .active_transfers
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            metrics.dec_active();
             if let Err(status) = result {
-                metrics
-                    .transfer_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
         });
@@ -272,9 +255,7 @@ impl Blit for BlitService {
 
         let stats = delete_rel_paths(module.path.clone(), sanitized).await?;
 
-        self.metrics
-            .purge_operations
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics.inc_purge();
 
         Ok(Response::new(PurgeResponse {
             files_deleted: stats.total(),

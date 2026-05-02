@@ -74,10 +74,12 @@ pub(crate) struct DaemonArgs {
     /// Disable server-side checksum computation (clients will transfer files for local verification)
     #[arg(long)]
     pub(crate) no_server_checksums: bool,
-    /// Address to serve Prometheus metrics on (e.g. 0.0.0.0:9090).
-    /// When unset, the metrics endpoint is not started.
-    #[arg(long, value_name = "ADDR")]
-    pub(crate) metrics_addr: Option<String>,
+    /// Enable internal RPC counters (push/pull/purge totals, active gauge,
+    /// error counter). No exposure mechanism today; reserved for a future
+    /// GUI/TUI gRPC `GetState`-style RPC. Off by default — atomic ops are
+    /// skipped entirely when disabled.
+    #[arg(long)]
+    pub(crate) metrics: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
