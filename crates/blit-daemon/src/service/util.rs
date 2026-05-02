@@ -16,6 +16,7 @@ pub(crate) async fn resolve_module(
             return Ok(ModuleConfig {
                 name: "default".to_string(),
                 path: root.path.clone(),
+                canonical_root: root.canonical_root.clone(),
                 read_only: root.read_only,
                 _comment: None,
                 _use_chroot: root.use_chroot,
@@ -88,6 +89,37 @@ pub(crate) fn resolve_dest_path(base: &Path, rel: &Path) -> PathBuf {
     } else {
         base.join(rel)
     }
+}
+
+/// Join `rel` under `module.path` and verify the resolved location
+/// stays inside the module's canonical root after symlink expansion.
+/// Closes F2 of `docs/reviews/codebase_review_2026-05-01.md`.
+///
+/// Containment is checked against `module.canonical_root`, not
+/// `module.path`. The push handler may rewrite `module.path` to
+/// include a destination subpath (rsync "copy into here" semantics),
+/// so `module.path` isn't reliably the canonical root anymore.
+/// `module.canonical_root` is set once at runtime load time and
+/// never mutated.
+#[allow(clippy::result_large_err)]
+pub(crate) fn resolve_contained_path(module: &ModuleConfig, rel: &Path) -> Result<PathBuf, Status> {
+    let target = resolve_dest_path(&module.path, rel);
+    blit_core::path_safety::verify_contained(&module.canonical_root, &target)
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
+    Ok(target)
+}
+
+/// Same as `resolve_contained_path` but takes a wire string and
+/// runs the lexical `validate_wire_path` check too. Reserved for
+/// future call sites; currently every daemon entry point either
+/// goes through `resolve_relative_path` first (and ends up using
+/// `resolve_contained_path` with a `&Path`) or constructs the path
+/// directly from a manifest entry.
+#[allow(dead_code)]
+#[allow(clippy::result_large_err)]
+pub(crate) fn resolve_contained_wire(module: &ModuleConfig, wire: &str) -> Result<PathBuf, Status> {
+    blit_core::path_safety::contained_join(&module.canonical_root, wire)
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))
 }
 
 pub(crate) fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {

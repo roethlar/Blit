@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 use tokio::task::JoinSet;
 use tonic::{Status, Streaming};
 
-use super::super::util::{resolve_dest_path, resolve_manifest_relative_path};
+use super::super::util::resolve_manifest_relative_path;
 use super::super::PushSender;
 use super::control::send_control_message;
 
@@ -303,7 +303,11 @@ where
                 }
 
                 let rel_path = resolve_manifest_relative_path(&expected.relative_path)?;
-                let dest_path = resolve_dest_path(&module.path, &rel_path);
+                // F2: containment check before any directory create
+                // or file open. A push client could otherwise place
+                // a symlink earlier (in a previous transfer) and
+                // then write through it on a later push.
+                let dest_path = super::super::util::resolve_contained_path(module, &rel_path)?;
                 if let Some(parent) = dest_path.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|err| {
                         Status::internal(format!("create dir {}: {}", parent.display(), err))
@@ -700,6 +704,17 @@ fn apply_tar_shard_sync(
 
     let mut stats = TransferStats::default();
     for file in &extracted {
+        // F2: containment check on every entry's destination before
+        // writing. The tar_safety helper only does lexical safe_join;
+        // an existing symlink at a parent component (placed by a
+        // previous push) would otherwise have create_dir_all/write
+        // follow it outside the module root. R5-F2 already rejects
+        // tar entries whose tar header type is Symlink/Hardlink, so
+        // this defends against pre-existing symlinks on disk, not
+        // tar-encoded ones. Check against canonical_root, not path,
+        // because path may be munged with a destination subpath.
+        blit_core::path_safety::verify_contained(&module.canonical_root, &file.dest_path)
+            .map_err(|err| Status::permission_denied(format!("path containment: {err:#}")))?;
         write_extracted_file(file)
             .map_err(|err| Status::internal(format!("applying tar shard entry: {err:#}")))?;
         stats.files_transferred += 1;
@@ -746,9 +761,11 @@ mod tests {
             checksum: vec![],
         };
 
+        let canonical = std::fs::canonicalize(dest_root.path()).expect("canonicalize tempdir");
         let module = ModuleConfig {
             name: "test".into(),
-            path: dest_root.path().to_path_buf(),
+            path: canonical.clone(),
+            canonical_root: canonical,
             read_only: false,
             _comment: None,
             _use_chroot: false,
@@ -823,9 +840,11 @@ mod tests {
     #[test]
     fn apply_tar_shard_rejects_symlink_entry() {
         let dest_root = tempdir().expect("dest tempdir");
+        let canonical = std::fs::canonicalize(dest_root.path()).expect("canonicalize tempdir");
         let module = ModuleConfig {
             name: "test".into(),
-            path: dest_root.path().to_path_buf(),
+            path: canonical.clone(),
+            canonical_root: canonical,
             read_only: false,
             _comment: None,
             _use_chroot: false,
@@ -929,9 +948,11 @@ mod tests {
     // we feed it an `iter` of pre-built messages.
 
     fn module_for_test(path: PathBuf) -> ModuleConfig {
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
         ModuleConfig {
             name: "test".into(),
-            path,
+            canonical_root: canonical.clone(),
+            path: canonical,
             read_only: false,
             _comment: None,
             _use_chroot: false,

@@ -85,7 +85,8 @@ pub(crate) async fn handle_pull_sync_stream(
         resolve_relative_path(&spec.source_path)?
     };
 
-    let root = module.path.join(&requested);
+    // F2: resolve and verify containment at the entry point.
+    let root = super::util::resolve_contained_path(&module, &requested)?;
     if !root.exists() {
         return Err(Status::not_found(format!(
             "path not found in module '{}': {}",

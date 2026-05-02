@@ -8,7 +8,18 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub(crate) struct ModuleConfig {
     pub(crate) name: String,
+    /// Effective filesystem path for this transfer. Mirrors the
+    /// historical "module root" but may be mutated by the push
+    /// handler to bake in a destination subpath (rsync-style "copy
+    /// into here" semantics). Use `canonical_root` for F2
+    /// containment checks — `path` may be munged.
     pub(crate) path: PathBuf,
+    /// Canonicalized module root from config. Never mutated after
+    /// runtime load. F2 containment checks resolve against this so
+    /// daemon writes can't escape the original root even when
+    /// `path` is rewritten with a destination subpath that contains
+    /// (or eventually points through) on-disk symlinks.
+    pub(crate) canonical_root: PathBuf,
     pub(crate) read_only: bool,
     pub(crate) _comment: Option<String>,
     pub(crate) _use_chroot: bool,
@@ -17,6 +28,8 @@ pub(crate) struct ModuleConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct RootExport {
     pub(crate) path: PathBuf,
+    /// Canonicalized form of `path`; see `ModuleConfig::canonical_root`.
+    pub(crate) canonical_root: PathBuf,
     pub(crate) read_only: bool,
     pub(crate) use_chroot: bool,
 }
@@ -194,7 +207,8 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
             module.name.clone(),
             ModuleConfig {
                 name: module.name,
-                path: canonical,
+                path: canonical.clone(),
+                canonical_root: canonical,
                 read_only: module.read_only,
                 _comment: module.comment,
                 _use_chroot: module.use_chroot,
@@ -246,13 +260,15 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
             ModuleConfig {
                 name: "default".to_string(),
                 path: canonical.clone(),
+                canonical_root: canonical.clone(),
                 read_only: chosen.read_only,
                 _comment: None,
                 _use_chroot: chosen.use_chroot,
             },
         );
         default_root = Some(RootExport {
-            path: canonical,
+            path: canonical.clone(),
+            canonical_root: canonical,
             read_only: chosen.read_only,
             use_chroot: chosen.use_chroot,
         });
@@ -264,7 +280,8 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
             )
         })?;
         default_root = Some(RootExport {
-            path: canonical,
+            path: canonical.clone(),
+            canonical_root: canonical,
             read_only: spec.read_only,
             use_chroot: spec.use_chroot,
         });

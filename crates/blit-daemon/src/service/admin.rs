@@ -45,15 +45,17 @@ pub(crate) fn sanitize_request_paths(paths: Vec<String>) -> Result<Vec<PathBuf>,
 
 pub(crate) async fn delete_rel_paths(
     module_path: PathBuf,
+    canonical_root: PathBuf,
     rel_paths: Vec<PathBuf>,
 ) -> Result<DeletionStats, Status> {
-    task::spawn_blocking(move || delete_rel_paths_sync(&module_path, rel_paths))
+    task::spawn_blocking(move || delete_rel_paths_sync(&module_path, &canonical_root, rel_paths))
         .await
         .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
 }
 
 pub(crate) async fn purge_extraneous_entries(
     module_path: PathBuf,
+    canonical_root: PathBuf,
     expected_files: Vec<PathBuf>,
 ) -> Result<DeletionStats, Status> {
     task::spawn_blocking(move || {
@@ -61,7 +63,7 @@ pub(crate) async fn purge_extraneous_entries(
         if extraneous.is_empty() {
             return Ok(DeletionStats::default());
         }
-        delete_rel_paths_sync(&module_path, extraneous)
+        delete_rel_paths_sync(&module_path, &canonical_root, extraneous)
     })
     .await
     .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
@@ -128,6 +130,7 @@ fn plan_extraneous_entries(
 
 fn delete_rel_paths_sync(
     module_path: &Path,
+    canonical_root: &Path,
     rel_paths: Vec<PathBuf>,
 ) -> Result<DeletionStats, Status> {
     let mut files = Vec::new();
@@ -139,6 +142,11 @@ fn delete_rel_paths_sync(
         }
 
         let target = module_path.join(&rel);
+        // F2: containment check before any filesystem operation.
+        // Verified against canonical_root so post-push-mutated
+        // module_path doesn't bypass the original boundary.
+        blit_core::path_safety::verify_contained(canonical_root, &target)
+            .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
         let metadata = match std::fs::symlink_metadata(&target) {
             Ok(meta) => meta,
             Err(err) if err.kind() == ErrorKind::NotFound => continue,
@@ -309,6 +317,13 @@ pub(crate) fn stream_disk_usage(
     sender: &DiskUsageSender,
 ) -> Result<(), Status> {
     let start_abs = module_root.join(&start_rel);
+    // F2: containment check before any filesystem operation. The
+    // enumerator below has follow_symlinks=false so it won't escape
+    // during traversal, but the start point itself can be a symlink
+    // that points outside the module root. `module_root` here is the
+    // canonical root — du callers don't mutate it.
+    blit_core::path_safety::verify_contained(&module_root, &start_abs)
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
     if !start_abs.exists() {
         return Err(Status::not_found(format!(
             "start path not found for disk usage: {}",
@@ -444,6 +459,9 @@ pub(crate) fn stream_find_entries(
     sender: &FindSender,
 ) -> Result<(), Status> {
     let start_abs = module_root.join(&start_rel);
+    // F2: containment check before any filesystem operation.
+    blit_core::path_safety::verify_contained(&module_root, &start_abs)
+        .map_err(|e| Status::permission_denied(format!("path containment: {e:#}")))?;
     if !start_abs.exists() {
         return Err(Status::not_found(format!(
             "start path not found for find: {}",

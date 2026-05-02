@@ -46,7 +46,12 @@ pub(crate) async fn stream_pull(
         resolve_relative_path(&requested_path)?
     };
 
-    let root = module.path.join(&requested);
+    // F2: resolve and verify containment before any filesystem op.
+    // The downstream collect_pull_entries / FsTransferSource walk
+    // never follows symlinks during enumeration (FileEnumerator
+    // defaults follow_symlinks=false), so the only escape vector is
+    // the entry-point path itself.
+    let root = super::util::resolve_contained_path(&module, &requested)?;
 
     if !root.exists() {
         return Err(Status::not_found(format!(

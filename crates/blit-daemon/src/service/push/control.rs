@@ -265,7 +265,12 @@ pub(crate) async fn handle_push_stream(
 
     let mut entries_deleted = 0u64;
     if mirror_mode {
-        let purge_stats = purge_extraneous_entries(module.path.clone(), expected_rel_files).await?;
+        let purge_stats = purge_extraneous_entries(
+            module.path.clone(),
+            module.canonical_root.clone(),
+            expected_rel_files,
+        )
+        .await?;
         entries_deleted = purge_stats.total();
     }
 
@@ -389,8 +394,11 @@ fn file_requires_upload(
     rel: &Path,
     header: &FileHeader,
 ) -> Result<bool, Status> {
-    use super::super::util::resolve_dest_path;
-    let full_path = resolve_dest_path(&module.path, rel);
+    use super::super::util::resolve_contained_path;
+    // F2: canonical containment check before stat. Same protection
+    // as the actual write path — a symlink in the parent could
+    // otherwise have us stat outside the module.
+    let full_path = resolve_contained_path(module, rel)?;
     let requires_upload = match fs::metadata(&full_path) {
         Ok(meta) => {
             if !meta.is_file() {

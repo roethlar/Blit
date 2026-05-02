@@ -1009,3 +1009,41 @@ Status:
 
 - F8 is closed.
 - F7 remains open pending a bounded-read fix.
+
+## Round 12 - R11-F1 Closure Commit
+
+Reviewed change:
+
+- Commit: `eb89ae2 fix(remote-source): bound the read itself, not just the reservation (R11-F1)`
+- Scope: bounded remote-source tar-shard entry reads and regression tests.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Findings:
+
+- No findings.
+
+Assessment:
+
+R11-F1 is accepted as fixed. `read_remote_entry_bounded` now wraps the remote
+reader with `take(expected_size + 1)`, so a peer that declares a small
+`FileHeader.size` cannot make `read_to_end` grow the buffer beyond the declared
+size plus the one-byte over-read canary. The helper also keeps the defensive
+`MAX_TAR_SHARD_BYTES` cap and the existing exact-length check.
+
+The new tests cover the important cases directly without a real
+`RemotePullClient` mock:
+
+- Exact declared length succeeds.
+- Under-read is rejected.
+- Over-read is capped at `size + 1` and rejected.
+- Above-cap declared size is rejected defensively.
+- Empty files still pass.
+
+Status:
+
+- R11-F1 is closed.
+- F7 and F8 from the baseline review are closed.
+- Remaining release-blocking baseline work is F2 canonical/symlink containment.

@@ -5,7 +5,9 @@ use super::admin::{
 use super::pull::stream_pull;
 use super::pull_sync::handle_pull_sync_stream;
 use super::push::handle_push_stream;
-use super::util::{metadata_mtime_seconds, resolve_module, resolve_relative_path};
+use super::util::{
+    metadata_mtime_seconds, resolve_contained_path, resolve_module, resolve_relative_path,
+};
 use super::{DiskUsageSender, FindSender};
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
@@ -174,7 +176,7 @@ impl Blit for BlitService {
             resolve_relative_path(&req.path)?
         };
 
-        let target = module.path.join(&requested);
+        let target = resolve_contained_path(&module, &requested)?;
         let response_entries =
             tokio::task::spawn_blocking(move || -> Result<Vec<FileInfo>, Status> {
                 let metadata = fs::metadata(&target).map_err(|err| {
@@ -253,7 +255,12 @@ impl Blit for BlitService {
             return Ok(Response::new(PurgeResponse { files_deleted: 0 }));
         }
 
-        let stats = delete_rel_paths(module.path.clone(), sanitized).await?;
+        let stats = delete_rel_paths(
+            module.path.clone(),
+            module.canonical_root.clone(),
+            sanitized,
+        )
+        .await?;
 
         self.metrics.inc_purge();
 
@@ -276,7 +283,7 @@ impl Blit for BlitService {
 
         let (dir_rel, display_prefix, leaf_prefix) =
             split_completion_prefix(req.path_prefix.as_str())?;
-        let search_root = module.path.join(&dir_rel);
+        let search_root = resolve_contained_path(&module, &dir_rel)?;
         let include_files = req.include_files;
         let include_dirs = req.include_directories;
 

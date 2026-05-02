@@ -22,28 +22,38 @@
 //! receive sink — current `pull_sync.rs` custom path AND the unified
 //! pipeline — needs it.
 //!
-//! ─── Contract: lexical safety only ────────────────────────────────
+//! ─── Contract: two layers of safety ──────────────────────────────
 //!
 //! `safe_join(root, wire)` performs a *lexical* containment check.
 //! It rejects path strings that escape via syntax (above), but does
-//! NOT canonicalize the result or resolve symlinks. That means:
+//! NOT canonicalize the result or resolve symlinks.
 //!
-//!   - If `dest_root/link` is a symlink that points outside
-//!     `dest_root`, a wire path of `"link/file"` lexically passes and
-//!     `safe_join` returns `dest_root/link/file`. The actual filesystem
-//!     write follows the symlink and lands outside the root.
+//! `contained_join(canonical_root, wire)` adds the canonicalize-
+//! and-check pass on top of `safe_join`'s lexical layer. It walks
+//! to the deepest existing ancestor of the target, canonicalizes,
+//! and confirms the resolution stays under `canonical_root`. Use it
+//! at every daemon site that touches a path under a module root
+//! (F2 of `docs/reviews/codebase_review_2026-05-01.md`).
 //!
-//!   - Symlink-traversal containment is the responsibility of the
-//!     `use_chroot` / canonical-containment work tracked as F2 in
-//!     `docs/reviews/codebase_review_2026-05-01.md` and as the second
-//!     post-pipeline-unification item in `TODO.md`. F2's canonicalize-
-//!     and-check pass operates *after* `safe_join`'s lexical pass.
+//! Both layers are needed:
 //!
-//! For receive paths today (F1 only), this means an operator running
-//! the daemon with `use_chroot = false` (the default) and a destination
-//! root that contains attacker-controlled symlinks can have files
-//! written through those links. The daemon docs describe this risk.
-//! F2 is the resolution.
+//!   - `safe_join` alone fails on `module/link/file` where `link` is
+//!     a symlink to `/etc`. Lexically the wire path is fine; the
+//!     filesystem write follows the symlink outside the module.
+//!     `contained_join` rejects this case via canonicalize.
+//!
+//!   - `contained_join` alone is more permissive about wire syntax
+//!     than `safe_join` would be. Always run the wire input through
+//!     `validate_wire_path` (which `contained_join` does internally
+//!     via `safe_join`) so absolute / Windows-shaped / NUL inputs
+//!     are rejected before any filesystem call.
+//!
+//! TOCTOU note: `contained_join` is check-then-use, so a symlink
+//! could in principle be swapped between the canonicalize call and
+//! the actual fs op. For the trust model (authenticated peers,
+//! operator-controlled module roots) this matches rsync's chroot
+//! module behavior. A fully race-proof alternative would use
+//! `openat` + `O_NOFOLLOW` per-component descent.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -136,6 +146,117 @@ pub fn safe_join(root: &Path, wire_path: &str) -> Result<PathBuf> {
     } else {
         Ok(root.join(validated))
     }
+}
+
+/// Resolve a wire-supplied relative path under a daemon module root
+/// AND verify the resolved location stays inside that root after
+/// symlink resolution. Returns the lexical target path (not the
+/// canonicalized one) so callers write to the path they expect.
+///
+/// This is the F2 chokepoint from
+/// `docs/reviews/codebase_review_2026-05-01.md`. `safe_join` is
+/// lexical — it rejects `../`, absolute paths, etc. — but does not
+/// follow symlinks. A module that contains `module_root/link`
+/// pointing at `/etc` would let a wire request for `link/passwd`
+/// pass `safe_join` and then have the daemon read `/etc/passwd`.
+/// `contained_join` closes that gap by canonicalizing the deepest
+/// existing ancestor of the target and confirming it stays under
+/// `canonical_module_root`.
+///
+/// `canonical_module_root` MUST already be the canonicalized form
+/// (the daemon canonicalizes module paths at load time). The check
+/// fails closed if either canonicalize call fails for a reason
+/// other than NotFound.
+///
+/// Note: this is a check-then-use API with a TOCTOU window. Between
+/// the canonicalize call and the actual filesystem operation, a
+/// symlink within the parent could in principle be replaced. The
+/// fully race-proof alternative would be openat(2) + O_NOFOLLOW
+/// per-component descent, which is significantly more code. For
+/// the threat model — authenticated peers and operator-trusted
+/// module roots — the canonicalize-and-check approach matches
+/// rsync's chroot module behavior and forecloses the practical
+/// attack vector (a module containing pre-existing escape symlinks).
+pub fn contained_join(canonical_module_root: &Path, wire_path: &str) -> Result<PathBuf> {
+    let target = safe_join(canonical_module_root, wire_path)?;
+
+    // Walk to the deepest existing ancestor and canonicalize. For a
+    // read of an existing file, that's the file itself; for a write
+    // creating a new file or directory tree, it's the deepest dir
+    // that already exists.
+    let mut probe: PathBuf = target.clone();
+    let canonical_ancestor = loop {
+        match std::fs::canonicalize(&probe) {
+            Ok(c) => break c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !probe.pop() {
+                    bail!(
+                        "path '{}' has no canonicalizable ancestor (root '{}' missing?)",
+                        target.display(),
+                        canonical_module_root.display()
+                    );
+                }
+            }
+            Err(e) => {
+                bail!(
+                    "canonicalize '{}' for containment check: {}",
+                    probe.display(),
+                    e
+                );
+            }
+        }
+    };
+
+    if !canonical_ancestor.starts_with(canonical_module_root) {
+        bail!(
+            "path '{}' resolves to '{}' which escapes module root '{}'",
+            target.display(),
+            canonical_ancestor.display(),
+            canonical_module_root.display()
+        );
+    }
+
+    Ok(target)
+}
+
+/// Verify that an already-built absolute path stays inside
+/// `canonical_module_root` after symlink resolution. Used by call
+/// sites that received their path from `safe_join` upstream and
+/// want the F2 containment check without redoing the wire-path
+/// validation. Same semantics as `contained_join` but takes the
+/// already-resolved `target` directly.
+pub fn verify_contained(canonical_module_root: &Path, target: &Path) -> Result<()> {
+    let mut probe: PathBuf = target.to_path_buf();
+    let canonical_ancestor = loop {
+        match std::fs::canonicalize(&probe) {
+            Ok(c) => break c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !probe.pop() {
+                    bail!(
+                        "path '{}' has no canonicalizable ancestor (root '{}' missing?)",
+                        target.display(),
+                        canonical_module_root.display()
+                    );
+                }
+            }
+            Err(e) => {
+                bail!(
+                    "canonicalize '{}' for containment check: {}",
+                    probe.display(),
+                    e
+                );
+            }
+        }
+    };
+    if !canonical_ancestor.starts_with(canonical_module_root) {
+        bail!(
+            "path '{}' resolves to '{}' which escapes module root '{}'",
+            target.display(),
+            canonical_ancestor.display(),
+            canonical_module_root.display()
+        );
+    }
+    Ok(())
 }
 
 /// Detect strings that represent Windows-absolute paths regardless of
@@ -324,5 +445,155 @@ mod tests {
         assert!(validate_wire_path(".").is_err());
         assert!(validate_wire_path("./").is_err());
         assert!(validate_wire_path("./.").is_err());
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod containment_tests {
+    //! F2 / `contained_join` regression tests. These exercise the
+    //! canonicalize-and-check layer that sits on top of `safe_join`,
+    //! using real symlinks. Unix-only — the tests use
+    //! `std::os::unix::fs::symlink`, and the Windows daemon path
+    //! semantics warrant their own test pass.
+
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use tempfile::tempdir;
+
+    /// Helper: build a canonicalized module root inside a tempdir.
+    fn module_root(tmp: &std::path::Path) -> PathBuf {
+        let root = tmp.join("module");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::canonicalize(&root).unwrap()
+    }
+
+    #[test]
+    fn contained_join_accepts_simple_relative() {
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/file.txt"), b"x").unwrap();
+
+        let target = contained_join(&root, "sub/file.txt").unwrap();
+        assert_eq!(target, root.join("sub/file.txt"));
+    }
+
+    #[test]
+    fn contained_join_accepts_nonexistent_target_inside_root() {
+        // Writes need to work for paths that don't exist yet — the
+        // helper walks up to the deepest existing ancestor (which is
+        // `root` itself for a fresh module).
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let target = contained_join(&root, "newfile.txt").unwrap();
+        assert_eq!(target, root.join("newfile.txt"));
+    }
+
+    #[test]
+    fn contained_join_rejects_symlink_escaping_root() {
+        // The classic F2 attack: a symlink inside the module points
+        // outside, and a wire request for `link/passwd` would have
+        // had the lexical safe_join layer happily return the join.
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), b"secret").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let err = contained_join(&root, "escape/victim.txt").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("escapes module root"),
+            "expected escape rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contained_join_rejects_top_level_symlink_to_outside() {
+        // Direct symlink at the module root pointing outside.
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let err = contained_join(&root, "escape").unwrap_err();
+        assert!(err.to_string().contains("escapes module root"));
+    }
+
+    #[test]
+    fn contained_join_accepts_intra_root_symlink() {
+        // Symlinks INSIDE the module root that don't escape should
+        // still work — operators legitimately use intra-module
+        // symlinks (e.g., `latest -> v1.2.3`).
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        std::fs::create_dir_all(root.join("v1")).unwrap();
+        std::fs::write(root.join("v1/file.txt"), b"hi").unwrap();
+        symlink(root.join("v1"), root.join("latest")).unwrap();
+
+        let target = contained_join(&root, "latest/file.txt").unwrap();
+        // Returns the lexical target so the caller writes/reads
+        // through the symlink as expected.
+        assert_eq!(target, root.join("latest/file.txt"));
+    }
+
+    #[test]
+    fn contained_join_rejects_nonexistent_symlink_parent_escape() {
+        // Write path: target file doesn't exist yet, but its parent
+        // is a symlink pointing outside the root. The deepest
+        // existing ancestor walk lands on the symlink, which
+        // canonicalizes outside the root.
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        // Attempt to "create" escape/newfile.txt — the parent
+        // (escape) canonicalizes outside.
+        let err = contained_join(&root, "escape/newfile.txt").unwrap_err();
+        assert!(err.to_string().contains("escapes module root"));
+    }
+
+    #[test]
+    fn contained_join_rejects_lexical_traversal() {
+        // The lexical layer (validate_wire_path) catches `..`
+        // before we even reach the canonicalize step.
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        assert!(contained_join(&root, "../escape").is_err());
+    }
+
+    #[test]
+    fn contained_join_accepts_empty_wire_path() {
+        // The empty wire path is the legitimate single-file source
+        // case; safe_join returns root unchanged, and root is by
+        // definition contained.
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let target = contained_join(&root, "").unwrap();
+        assert_eq!(target, root);
+    }
+
+    #[test]
+    fn verify_contained_passes_for_inside_path() {
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        std::fs::write(root.join("ok.txt"), b"x").unwrap();
+        verify_contained(&root, &root.join("ok.txt")).unwrap();
+    }
+
+    #[test]
+    fn verify_contained_rejects_escape() {
+        let tmp = tempdir().unwrap();
+        let root = module_root(tmp.path());
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let err = verify_contained(&root, &root.join("escape/anything")).unwrap_err();
+        assert!(err.to_string().contains("escapes module root"));
     }
 }
