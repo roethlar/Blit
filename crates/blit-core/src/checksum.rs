@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Available checksum algorithms
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ChecksumType {
     #[default]
     Blake3,

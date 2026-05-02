@@ -1,4 +1,5 @@
 pub mod data_plane;
+pub mod diff_planner;
 pub mod operation_spec;
 pub mod payload;
 pub mod pipeline;

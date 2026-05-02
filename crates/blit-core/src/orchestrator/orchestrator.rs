@@ -8,13 +8,13 @@ use tokio::runtime::Builder;
 
 use crate::auto_tune::derive_local_plan_tuning;
 use crate::change_journal::{ChangeState, ChangeTracker, ProbeToken, StoredSnapshot};
-use crate::copy::file_needs_copy_with_checksum_type;
 use crate::fs_enum::FileFilter;
-use crate::generated::FileHeader;
+use crate::generated::ComparisonMode;
 use crate::local_worker::{copy_large_blocking, copy_paths_blocking};
 use crate::perf_history::{read_recent_records, TransferMode};
 use crate::perf_predictor::PerformancePredictor;
-use crate::remote::transfer::payload::{plan_transfer_payloads, DEFAULT_PAYLOAD_PREFETCH};
+use crate::remote::transfer::diff_planner::{plan_local_mirror, LocalDiffInputs};
+use crate::remote::transfer::payload::DEFAULT_PAYLOAD_PREFETCH;
 use crate::remote::transfer::pipeline::execute_sink_pipeline;
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, NullSink, TransferSink};
 use crate::remote::transfer::source::{FilteredSource, FsTransferSource, TransferSource};
@@ -340,10 +340,15 @@ impl TransferOrchestrator {
         let dest_root_buf = dest_root.to_path_buf();
         let filter = options.filter.clone_without_cache();
         let skip_unchanged = options.skip_unchanged;
-        let checksum_type = if options.checksum {
-            Some(crate::checksum::ChecksumType::Blake3)
+        // Translate the orchestrator's bool `checksum` flag onto the
+        // unified ComparisonMode enum. Other variants (SizeOnly,
+        // IgnoreTimes, etc.) become first-class once pull_sync.rs
+        // migrates in step 4 and brings their behavior into the
+        // shared comparison primitives.
+        let compare_mode = if options.checksum {
+            ComparisonMode::Checksum
         } else {
-            None
+            ComparisonMode::SizeMtime
         };
 
         let pipeline_result = runtime.block_on(async {
@@ -365,27 +370,28 @@ impl TransferOrchestrator {
                 .context("scan task panicked")?
                 .context("scan failed")?;
 
-            // 3. Filter headers that need copying (skip unchanged)
-            let headers_to_copy = if skip_unchanged {
-                let src = src_root_buf.clone();
-                let dst = dest_root_buf.clone();
-                let ck = checksum_type;
-                let all = all_headers.clone();
-                tokio::task::spawn_blocking(move || {
-                    filter_headers_for_copy(&all, &src, &dst, ck)
-                })
-                .await
-                .context("filter task panicked")?
-            } else {
-                all_headers.clone()
-            };
-
-            // 4. Plan payloads (same function as remote transfers)
-            let planned = plan_transfer_payloads(
-                headers_to_copy,
-                &src_root_buf,
-                plan_options,
-            )?;
+            // 3. Diff + plan via the shared DiffPlanner stage. Combines
+            //    the comparison-filter and payload-planning steps that
+            //    were previously inline. Behavior preserved bit-for-bit
+            //    (size+mtime or Blake3 hash, then tar/large/raw planning).
+            let src = src_root_buf.clone();
+            let dst = dest_root_buf.clone();
+            let plan_opts = plan_options.clone();
+            let headers = all_headers.clone();
+            let planned = tokio::task::spawn_blocking(move || {
+                plan_local_mirror(
+                    headers,
+                    LocalDiffInputs {
+                        src_root: &src,
+                        dst_root: &dst,
+                        compare_mode,
+                        plan_options: plan_opts,
+                        skip_unchanged,
+                    },
+                )
+            })
+            .await
+            .context("diff_planner task panicked")??;
 
             // 5. Create sink and execute unified pipeline
             let sink: Arc<dyn TransferSink> = if copy_config.null_sink {
@@ -485,24 +491,6 @@ impl TransferOrchestrator {
 
         Ok(summary)
     }
-}
-
-/// Filter headers to only those that need copying (skip unchanged files).
-fn filter_headers_for_copy(
-    headers: &[FileHeader],
-    src_root: &Path,
-    dst_root: &Path,
-    checksum: Option<crate::checksum::ChecksumType>,
-) -> Vec<FileHeader> {
-    headers
-        .iter()
-        .filter(|h| {
-            let src = src_root.join(&h.relative_path);
-            let dst = dst_root.join(&h.relative_path);
-            file_needs_copy_with_checksum_type(&src, &dst, checksum).unwrap_or(true)
-        })
-        .cloned()
-        .collect()
 }
 
 /// Delete destination files/dirs not present in the source header set.
