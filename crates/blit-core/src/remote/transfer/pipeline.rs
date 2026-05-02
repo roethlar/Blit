@@ -328,10 +328,13 @@ const MAX_WIRE_PATH_LEN: usize = 64 * 1024;
 /// thousand entries per shard; this bound prevents a wire-driven
 /// `Vec::with_capacity(u32::MAX)` allocation.
 const MAX_WIRE_TAR_SHARD_FILES: usize = 1_048_576;
-/// Maximum tar shard payload size (in bytes). The planner targets
-/// 4–64 MiB; this is a generous upper bound that still forecloses
-/// the "u64::MAX → terabyte allocation" attack.
-const MAX_WIRE_TAR_SHARD_BYTES: usize = 1024 * 1024 * 1024;
+/// Maximum tar shard payload size (in bytes). Single source of truth
+/// is `tar_safety::MAX_TAR_SHARD_BYTES` so the wire-side reader
+/// rejects shards the receive-side helper would reject anyway.
+/// Previously inconsistent: wire was 1 GiB, helper was 256 MiB —
+/// closing F8 of `docs/reviews/codebase_review_2026-05-01.md`.
+const MAX_WIRE_TAR_SHARD_BYTES: usize =
+    crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES as usize;
 /// Maximum single-block payload size on the resume protocol. Aligns
 /// with `crate::copy::MAX_BLOCK_SIZE`.
 const MAX_WIRE_BLOCK_BYTES: usize = 64 * 1024 * 1024;

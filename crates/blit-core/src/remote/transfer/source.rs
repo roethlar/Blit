@@ -111,6 +111,42 @@ impl TransferSource for FsTransferSource {
     }
 }
 
+/// Validate `FileHeader` sizes for a remote-source tar shard against
+/// the shared cap. Both the per-entry size and the cumulative shard
+/// size must stay within `tar_safety::MAX_TAR_SHARD_BYTES` so a
+/// hostile or buggy remote source can't force the relay into an
+/// unbounded allocation while building the tar.
+///
+/// Extracted from `RemoteTransferSource::prepare_payload` so the
+/// bounds are unit-testable without a `RemotePullClient` mock.
+/// Closes F7 of `docs/reviews/codebase_review_2026-05-01.md`.
+fn validate_remote_tar_shard_sizes(headers: &[FileHeader]) -> Result<()> {
+    use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
+
+    for header in headers {
+        if header.size > MAX_TAR_SHARD_BYTES {
+            bail!(
+                "remote-source tar entry '{}' size {} exceeds local cap {} bytes",
+                header.relative_path,
+                header.size,
+                MAX_TAR_SHARD_BYTES
+            );
+        }
+    }
+    let total_bytes: u64 = headers
+        .iter()
+        .try_fold(0u64, |acc, h| acc.checked_add(h.size))
+        .ok_or_else(|| eyre::eyre!("remote-source tar shard size sum overflows u64"))?;
+    if total_bytes > MAX_TAR_SHARD_BYTES {
+        bail!(
+            "remote-source tar shard total size {} exceeds local cap {} bytes",
+            total_bytes,
+            MAX_TAR_SHARD_BYTES
+        );
+    }
+    Ok(())
+}
+
 pub struct RemoteTransferSource {
     client: RemotePullClient,
     root: PathBuf,
@@ -158,17 +194,46 @@ impl TransferSource for RemoteTransferSource {
         match payload {
             TransferPayload::File(header) => Ok(PreparedPayload::File(header)),
             TransferPayload::TarShard { headers } => {
+                // F7 of docs/reviews/codebase_review_2026-05-01.md: bound
+                // the relay's allocation against a hostile or buggy
+                // remote source. This is the send-side mirror of R6-F1.
+                // The size validation is extracted into a testable
+                // helper so the bounds are pinned without needing a
+                // mock RemotePullClient.
+                validate_remote_tar_shard_sizes(&headers)?;
+
                 let mut builder = tar::Builder::new(Vec::new());
                 for header in headers.clone() {
-                    // Read file into memory to append to tar builder.
-                    // TODO: Use tokio-tar to avoid double-buffering (file vec + tar vec).
-                    // For now, this is acceptable as prepare_payload is only used for small files (tar shards).
                     let mut stream = self
                         .client
                         .open_remote_file(Path::new(&header.relative_path))
                         .await?;
-                    let mut data = Vec::with_capacity(header.size as usize);
+                    // Bounded allocation. try_reserve_exact returns
+                    // AllocError instead of aborting if the size
+                    // validation upstream is ever bypassed.
+                    let mut data: Vec<u8> = Vec::new();
+                    data.try_reserve_exact(header.size as usize)
+                        .map_err(|err| {
+                            eyre::eyre!(
+                                "allocating buffer for remote-source entry '{}' (size {}): {}",
+                                header.relative_path,
+                                header.size,
+                                err
+                            )
+                        })?;
                     stream.read_to_end(&mut data).await?;
+
+                    // Validate that the actual read matches the
+                    // declared size. If the remote source lied, we
+                    // refuse rather than emit a malformed tar.
+                    if data.len() as u64 != header.size {
+                        bail!(
+                            "remote-source entry '{}' returned {} bytes; manifest declared {}",
+                            header.relative_path,
+                            data.len(),
+                            header.size
+                        );
+                    }
 
                     let mut tar_header = tar::Header::new_gnu();
                     tar_header.set_path(&header.relative_path)?;
@@ -470,5 +535,73 @@ mod filtered_source_tests {
         );
         let names = collect(rx).await;
         assert!(names.is_empty(), "baked-in filter should drop a.tmp");
+    }
+}
+
+#[cfg(test)]
+mod remote_tar_size_tests {
+    use super::*;
+    use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
+
+    fn fh(rel: &str, size: u64) -> FileHeader {
+        FileHeader {
+            relative_path: rel.into(),
+            size,
+            mtime_seconds: 0,
+            permissions: 0o644,
+            checksum: vec![],
+        }
+    }
+
+    #[test]
+    fn accepts_within_bounds() {
+        let headers = vec![fh("a", 1024), fh("b", 2048)];
+        validate_remote_tar_shard_sizes(&headers).unwrap();
+    }
+
+    #[test]
+    fn accepts_at_cap() {
+        // Single entry exactly at the cap, total exactly at the cap.
+        let headers = vec![fh("a", MAX_TAR_SHARD_BYTES)];
+        validate_remote_tar_shard_sizes(&headers).unwrap();
+    }
+
+    #[test]
+    fn rejects_per_entry_above_cap() {
+        let headers = vec![fh("huge", MAX_TAR_SHARD_BYTES + 1)];
+        let err = validate_remote_tar_shard_sizes(&headers).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("entry 'huge'") && msg.contains("exceeds"),
+            "expected per-entry rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_cumulative_above_cap() {
+        // Each entry is fine on its own (half the cap), but the sum
+        // exceeds the cap. R6-F1's send-side analog.
+        let half = MAX_TAR_SHARD_BYTES / 2 + 1;
+        let headers = vec![fh("a", half), fh("b", half)];
+        let err = validate_remote_tar_shard_sizes(&headers).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("total size") && msg.contains("exceeds"),
+            "expected cumulative rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_u64_overflow_on_sum() {
+        // A hostile peer claims two entries near u64::MAX so naive
+        // summation overflows. checked_add must catch this before any
+        // allocation. Per-entry sizes themselves exceed cap so the
+        // first loop trips, but if the per-entry cap were ever
+        // raised the cumulative check still bounds via checked_add.
+        let headers = vec![fh("a", u64::MAX - 10), fh("b", u64::MAX - 10)];
+        let err = validate_remote_tar_shard_sizes(&headers).unwrap_err();
+        // Per-entry cap fires first, which is fine — the test pins
+        // that one of the two checks rejects this input.
+        assert!(err.to_string().contains("exceeds"));
     }
 }
