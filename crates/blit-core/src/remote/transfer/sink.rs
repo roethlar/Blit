@@ -3,15 +3,12 @@
 //! Every src→dst combination flows through `TransferSource → plan → prepare → TransferSink`.
 //! Implementations handle the actual write: local filesystem, TCP data plane, etc.
 
-use std::collections::HashMap;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use eyre::{Context, Result};
 use filetime::FileTime;
-use tar::Archive;
 
 use crate::buffer::BufferSizer;
 use crate::checksum::ChecksumType;
@@ -355,84 +352,56 @@ fn write_tar_shard_payload(
     }
 
     // Two-phase extraction:
-    //   1. Walk the tar serially to collect (path, contents) pairs.
-    //      Tar is a sequential format — entries can't be read in
-    //      parallel out of one Archive.
+    //   1. Validate + parse the tar serially via the shared
+    //      `tar_safety` helper. Tar is a sequential format — entries
+    //      can't be read in parallel out of one Archive — and this
+    //      is also where R5-F2 / R6-F1 / R6-F3 safety checks live.
     //   2. Write files to disk in parallel via rayon. Inode creation
     //      and write are the bottleneck for many-small-files shards;
     //      4–8 worker cores can saturate ZFS' inode pipeline.
     //
     // Empirically, sequential extraction was ~62 MiB/s on ZFS-on-HDD
     // for 10k × 4 KiB; parallel raises the disk's small-file ceiling
-    // toward CPU-or-fs limits and matches the old TarShardExecutor's
-    // per-stream parallelism that was lost in the unification.
+    // toward CPU-or-fs limits.
     use rayon::prelude::*;
 
-    struct Pending {
-        rel: String,
-        contents: Vec<u8>,
-        mtime: Option<FileTime>,
-    }
+    use super::tar_safety::{safe_extract_tar_shard, ExtractedFile, TarShardExtractOptions};
 
-    let mtime_lookup: HashMap<&str, i64> = if config.preserve_times {
-        headers
-            .iter()
-            .map(|h| (h.relative_path.as_str(), h.mtime_seconds))
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    let opts = TarShardExtractOptions::default();
+    let mut extracted = safe_extract_tar_shard(data, headers.to_vec(), dst_root, &opts)?;
 
-    let mut archive = Archive::new(Cursor::new(data));
-    let entries = archive.entries().context("reading tar shard entries")?;
-
-    let mut pending: Vec<Pending> = Vec::new();
-    for entry_result in entries {
-        let mut entry = entry_result.context("tar shard entry")?;
-        if entry.header().entry_type().is_dir() {
-            continue;
+    // Honor the sink's preserve_times toggle by stripping mtimes that
+    // the helper would otherwise apply. Permissions are best-effort
+    // either way (matches the historical FsTransferSink policy).
+    if !config.preserve_times {
+        for f in &mut extracted {
+            f.mtime = None;
         }
-        let rel_path = entry.path().context("tar shard path")?;
-        let rel = rel_path.to_string_lossy().replace('\\', "/");
-        // Validate the wire-supplied path through the shared chokepoint
-        // (rejects ../, absolute, Windows drive, UNC, NUL — replaces the
-        // previous weak `rel.contains("..")` substring check that also
-        // rejected legitimate filenames containing literal `..`).
-        crate::path_safety::validate_wire_path(&rel)
-            .with_context(|| format!("validating tar shard entry {:?}", rel))?;
-        let mut contents = Vec::with_capacity(entry.size() as usize);
-        std::io::copy(&mut entry, &mut contents)
-            .with_context(|| format!("buffering tar entry {}", rel))?;
-        let mtime = mtime_lookup
-            .get(rel.as_str())
-            .filter(|&&s| s > 0)
-            .map(|&s| FileTime::from_unix_time(s, 0));
-        pending.push(Pending {
-            rel,
-            contents,
-            mtime,
-        });
     }
 
-    let dst_root = dst_root.to_path_buf();
-    let results: Vec<Result<u64>> = pending
+    // Write in parallel. Each closure does its own create_dir_all +
+    // fs::write + best-effort mtime/permission application — same
+    // policy as `tar_safety::write_extracted_file` but inlined so we
+    // can return per-file byte counts for the SinkOutcome.
+    let results: Vec<Result<u64>> = extracted
         .into_par_iter()
-        .map(|p| -> Result<u64> {
-            // Already validated above; safe_join here defends against
-            // any future change that bypasses the per-entry validation
-            // and centralizes the single-file empty-rel handling.
-            let dest_path = crate::path_safety::safe_join(&dst_root, &p.rel)
-                .with_context(|| format!("joining tar shard path {:?}", p.rel))?;
-            if let Some(parent) = dest_path.parent() {
+        .map(|f: ExtractedFile| -> Result<u64> {
+            if let Some(parent) = f.dest_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create dir {}", parent.display()))?;
             }
-            std::fs::write(&dest_path, &p.contents)
-                .with_context(|| format!("write {}", dest_path.display()))?;
-            if let Some(ft) = p.mtime {
-                let _ = filetime::set_file_mtime(&dest_path, ft);
+            std::fs::write(&f.dest_path, &f.contents)
+                .with_context(|| format!("write {}", f.dest_path.display()))?;
+            if let Some(ft) = f.mtime {
+                let _ = filetime::set_file_mtime(&f.dest_path, ft);
             }
-            Ok(p.contents.len() as u64)
+            #[cfg(unix)]
+            if let Some(perms) = f.permissions {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&f.dest_path, std::fs::Permissions::from_mode(perms));
+            }
+            Ok(f.size)
         })
         .collect();
 

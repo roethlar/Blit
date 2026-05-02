@@ -7,12 +7,9 @@ use blit_core::generated::{
 use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::fs;
-use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tar::Archive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
@@ -595,74 +592,42 @@ fn accumulate_transfer_stats(target: &mut TransferStats, shard: &TransferStats) 
 
 /// Process a tar shard and return stats plus the buffer for potential reuse.
 /// The buffer is returned if its capacity matches the pool size.
+///
+/// Routes through `blit_core::remote::transfer::tar_safety` so the
+/// receive policy here matches the pull-receive sites bit-for-bit.
+/// Critically, this closes the latent High-severity equivalent of
+/// R5-F2 on the push direction: the previous `Entry::unpack` call
+/// honored tar symlink/hardlink/device entries, letting an
+/// authenticated push client place a symlink at a benign-looking
+/// path that subsequent writes would follow outside the module root.
+/// The shared helper rejects any non-regular entry up front.
 fn apply_tar_shard_sync(
     module: ModuleConfig,
     headers: Vec<FileHeader>,
     buffer: Vec<u8>,
     pool_buffer_size: usize,
 ) -> Result<(TransferStats, Option<Vec<u8>>), Status> {
-    let mut expected: HashMap<String, FileHeader> = headers
-        .into_iter()
-        .map(|header| (header.relative_path.clone(), header))
-        .collect();
+    use blit_core::remote::transfer::tar_safety::{
+        safe_extract_tar_shard, write_extracted_file, TarShardExtractOptions,
+    };
 
     let buffer_capacity = buffer.capacity();
-    let mut archive = Archive::new(Cursor::new(buffer));
+    let opts = TarShardExtractOptions::default();
+    let extracted = safe_extract_tar_shard(&buffer, headers, &module.path, &opts)
+        .map_err(|err| Status::internal(format!("tar shard validation: {err:#}")))?;
+
     let mut stats = TransferStats::default();
-
-    let entries = archive
-        .entries()
-        .map_err(|err| Status::internal(format!("tar shard entries: {}", err)))?;
-    for entry_result in entries {
-        let mut entry = entry_result
-            .map_err(|err| Status::internal(format!("tar shard entry error: {}", err)))?;
-        if entry.header().entry_type().is_dir() {
-            continue;
-        }
-
-        let rel_path = entry
-            .path()
-            .map_err(|err| Status::internal(format!("tar shard path error: {}", err)))?;
-        let rel_string = rel_path.to_string_lossy().replace('\\', "/");
-
-        let header = expected.remove(&rel_string).ok_or_else(|| {
-            Status::invalid_argument(format!(
-                "tar shard produced unexpected entry '{}'",
-                rel_string
-            ))
-        })?;
-
-        let resolved = resolve_manifest_relative_path(&rel_string)?;
-        let dest_path = resolve_dest_path(&module.path, &resolved);
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                Status::internal(format!("create dir {}: {}", parent.display(), err))
-            })?;
-        }
-
-        entry
-            .unpack(&dest_path)
-            .map_err(|err| Status::internal(format!("unpack {}: {}", dest_path.display(), err)))?;
-
+    for file in &extracted {
+        write_extracted_file(file)
+            .map_err(|err| Status::internal(format!("applying tar shard entry: {err:#}")))?;
         stats.files_transferred += 1;
-        stats.bytes_transferred += header.size;
+        stats.bytes_transferred += file.size;
     }
 
-    if !expected.is_empty() {
-        let missing: Vec<String> = expected.into_keys().collect();
-        return Err(Status::internal(format!(
-            "tar shard missing expected entries: {:?}",
-            missing
-        )));
-    }
-
-    // Recover the buffer from the archive for potential reuse
-    let cursor = archive.into_inner();
-    let recovered_buffer = cursor.into_inner();
-
-    // Only return buffer for pooling if it matches pool size
+    // Only return buffer for pooling if it matches pool size. We
+    // never moved ownership into an Archive, so the buffer is intact.
     let return_buffer = if buffer_capacity >= pool_buffer_size {
-        Some(recovered_buffer)
+        Some(buffer)
     } else {
         None
     };
@@ -762,5 +727,55 @@ mod tests {
             segments.push(format!("segment_{:02}_{}", idx, "x".repeat(24)));
         }
         format!("{}/{}", segments.join("/"), "deep_file.txt")
+    }
+
+    /// Latent High-severity bug pre-Round-7 cleanup: an authenticated
+    /// push client could ship a tar shard with a Symlink entry whose
+    /// path was inside the module root but whose target pointed
+    /// outside (e.g. `module/config.txt -> ../../etc/passwd`).
+    /// `Entry::unpack` would have created the symlink, and a later
+    /// push to `config.txt` would have written through it.
+    /// `apply_tar_shard_sync` now routes through
+    /// `tar_safety::safe_extract_tar_shard`, which rejects every
+    /// non-regular entry type up front.
+    #[test]
+    fn apply_tar_shard_rejects_symlink_entry() {
+        let dest_root = tempdir().expect("dest tempdir");
+        let module = ModuleConfig {
+            name: "test".into(),
+            path: dest_root.path().to_path_buf(),
+            read_only: false,
+            _comment: None,
+            _use_chroot: false,
+        };
+
+        // Hand-build a tar with a single symlink entry.
+        let mut builder = Builder::new(Vec::new());
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        builder
+            .append_link(&mut h, "config.txt", "/etc/passwd")
+            .expect("append link");
+        let tar_data = builder.into_inner().expect("tar buffer");
+
+        let header = FileHeader {
+            relative_path: "config.txt".into(),
+            size: 0,
+            mtime_seconds: 0,
+            permissions: 0o644,
+            checksum: vec![],
+        };
+
+        let err = apply_tar_shard_sync(module, vec![header], tar_data, TAR_BUFFER_SIZE)
+            .expect_err("symlink entry must be rejected");
+        let msg = err.message();
+        assert!(
+            msg.contains("non-regular entry"),
+            "expected non-regular rejection, got: {msg}"
+        );
+        // No symlink should have been created at the would-be target.
+        assert!(!dest_root.path().join("config.txt").exists());
     }
 }

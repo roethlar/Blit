@@ -935,11 +935,10 @@ async fn finalize_active_file(
 }
 
 /// Hard cap on tar-shard buffer size on the pull receive side.
-/// The planner targets shards in the 4–64 MiB range; 256 MiB gives
-/// plenty of headroom for tar overhead while bounding what a hostile
-/// daemon's `TarShardHeader.archive_size` can force the client to
-/// allocate (R5-F3 of `docs/reviews/followup_review_2026-05-02.md`).
-const MAX_TAR_SHARD_BYTES: u64 = 256 * 1024 * 1024;
+/// Re-exported through `tar_safety::MAX_TAR_SHARD_BYTES` so the
+/// per-entry helper and the receive-loop bounds share one source
+/// of truth (R5-F3 of `docs/reviews/followup_review_2026-05-02.md`).
+use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
 
 /// R6-F2: a stream that closes with `active_shard = Some(_)` is a
 /// protocol error — the daemon sent `TarShardHeader` and possibly
@@ -978,163 +977,43 @@ struct ShardApplyStats {
     paths: Vec<PathBuf>,
 }
 
-/// Extract a tar-shard buffer into `dest_root`. Per R5-F2 / R6-F1 /
-/// R6-F3 of `docs/reviews/followup_review_2026-05-02.md` we:
-///
-///   - Reject anything that isn't a regular-file entry (no symlinks,
-///     hardlinks, devices, etc.).
-///   - Route the path through `path_safety::validate_wire_path` /
-///     `safe_join` so traversal/abs/UNC/Windows-root inputs fail.
-///   - Verify `entry.size()` (from the tar header inside the buffer)
-///     matches `header.size` (from the daemon's `TarShardHeader.files`)
-///     and that both are within `shard.declared_size`, *before*
-///     allocating. This closes R6-F1: a daemon could otherwise keep
-///     `archive_size` under the cap while putting `u64::MAX` in a
-///     per-file header and force a huge `Vec::with_capacity`.
-///   - Use `try_reserve_exact` so a still-pathological size produces
-///     `AllocError` instead of an abort.
-///   - Apply `header.mtime_seconds` and `header.permissions` after
-///     write so a forced-gRPC pull doesn't desync mtime-based
-///     comparisons (R6-F3).
+/// Extract a tar-shard buffer into `dest_root`. Thin adapter over
+/// `tar_safety::safe_extract_tar_shard` — the heavy lifting (R5-F2
+/// non-regular rejection, R6-F1 per-entry size bounds, R6-F3 mtime
+/// preservation, path validation, bounded allocation) lives in the
+/// shared helper so this site, `FsTransferSink`, and the daemon push
+/// receive can't drift.
 fn apply_pull_tar_shard(
     dest_root: &Path,
     shard: InProgressShard,
     track_paths: bool,
 ) -> Result<ShardApplyStats> {
-    use filetime::{set_file_mtime, FileTime};
-    use std::collections::HashMap;
-    use std::io::Cursor;
-    use tar::{Archive, EntryType};
+    use crate::remote::transfer::tar_safety::{
+        safe_extract_tar_shard, write_extracted_file, TarShardExtractOptions,
+    };
 
-    let declared_size = shard.declared_size;
-    let mut expected: HashMap<String, FileHeader> = shard
-        .files
-        .into_iter()
-        .map(|h| (h.relative_path.clone(), h))
-        .collect();
+    let opts = TarShardExtractOptions {
+        // The shard buffer is already capped at declared_size (which
+        // is itself capped at MAX_TAR_SHARD_BYTES on receive), so any
+        // single entry is bounded by that.
+        max_entry_bytes: shard.declared_size,
+        require_exact_headers: true,
+    };
+    let extracted = safe_extract_tar_shard(&shard.buffer, shard.files, dest_root, &opts)?;
 
     let mut stats = ShardApplyStats {
         files: 0,
         bytes: 0,
         paths: Vec::new(),
     };
-
-    let mut archive = Archive::new(Cursor::new(shard.buffer));
-    let entries = archive.entries().context("tar shard entries")?;
-
-    for entry_result in entries {
-        let mut entry = entry_result.context("tar shard entry")?;
-        let entry_type = entry.header().entry_type();
-        if entry_type == EntryType::Directory {
-            continue;
-        }
-        // Only accept regular files. Reject Symlink/Link/Block/Char/
-        // Fifo/GNU-* etc. so a bad daemon can't substitute a special
-        // inode for an expected regular file (R5-F2).
-        if entry_type != EntryType::Regular && entry_type != EntryType::Continuous {
-            bail!("tar shard contained non-regular entry type {entry_type:?}; only files allowed");
-        }
-
-        let raw_path = entry.path().context("tar shard path")?;
-        let rel_string = raw_path.to_string_lossy().replace('\\', "/");
-
-        let header = expected
-            .remove(&rel_string)
-            .ok_or_else(|| eyre!("tar shard produced unexpected entry '{rel_string}'"))?;
-
-        // Validate sizes BEFORE any allocation (R6-F1). The tar
-        // header's size and the daemon's FileHeader size must agree,
-        // and neither can exceed the shard cap. After this check
-        // header.size is bounded by declared_size <= MAX_TAR_SHARD_BYTES.
-        let entry_declared = entry.size();
-        if entry_declared != header.size {
-            bail!(
-                "tar shard entry '{rel_string}' tar-header size {} does not match \
-                 FileHeader size {}",
-                entry_declared,
-                header.size
-            );
-        }
-        if header.size > declared_size {
-            bail!(
-                "tar shard entry '{rel_string}' size {} exceeds shard declared_size {}",
-                header.size,
-                declared_size
-            );
-        }
-        if header.size > MAX_TAR_SHARD_BYTES {
-            bail!(
-                "tar shard entry '{rel_string}' size {} exceeds local cap {}",
-                header.size,
-                MAX_TAR_SHARD_BYTES
-            );
-        }
-
-        // Validate path through the shared chokepoint, then safe_join
-        // for the actual filesystem write.
-        crate::path_safety::validate_wire_path(&rel_string)
-            .with_context(|| format!("validating tar shard entry {rel_string:?}"))?;
-        let dest_path = crate::path_safety::safe_join(dest_root, &rel_string)
-            .with_context(|| format!("resolving tar shard dest {rel_string:?}"))?;
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
-
-        // Bounded allocation: try_reserve_exact returns Err instead of
-        // aborting if the OS can't satisfy the request, so a daemon
-        // that defeats the byte-level checks above (e.g. via a future
-        // bump in cap) still can't crash us.
-        let mut contents: Vec<u8> = Vec::new();
-        contents
-            .try_reserve_exact(header.size as usize)
-            .with_context(|| {
-                format!(
-                    "allocating buffer for tar entry '{rel_string}' (size {})",
-                    header.size
-                )
-            })?;
-        std::io::copy(&mut entry, &mut contents)
-            .with_context(|| format!("buffering tar entry {rel_string}"))?;
-        if contents.len() as u64 != header.size {
-            bail!(
-                "tar shard entry '{rel_string}' produced {} bytes; expected {}",
-                contents.len(),
-                header.size
-            );
-        }
-
-        std::fs::write(&dest_path, &contents)
-            .with_context(|| format!("writing {}", dest_path.display()))?;
-
-        // R6-F3: preserve metadata so size+mtime sync doesn't see
-        // every tar-shard-extracted file as "modified at now". Best
-        // effort — log nothing on failure (matches FsTransferSink).
-        if header.mtime_seconds > 0 {
-            let _ = set_file_mtime(
-                &dest_path,
-                FileTime::from_unix_time(header.mtime_seconds, 0),
-            );
-        }
-        #[cfg(unix)]
-        if header.permissions != 0 {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(header.permissions);
-            let _ = std::fs::set_permissions(&dest_path, perms);
-        }
-
+    for file in &extracted {
+        write_extracted_file(file).context("applying tar shard entry")?;
         stats.files += 1;
-        stats.bytes += header.size;
+        stats.bytes += file.size;
         if track_paths {
-            stats.paths.push(PathBuf::from(&rel_string));
+            stats.paths.push(PathBuf::from(&file.rel));
         }
     }
-
-    if !expected.is_empty() {
-        let missing: Vec<String> = expected.into_keys().collect();
-        bail!("tar shard missing expected entries: {missing:?}");
-    }
-
     Ok(stats)
 }
 

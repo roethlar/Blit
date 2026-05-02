@@ -6,6 +6,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod sink;
 pub mod source;
+pub mod tar_safety;
 
 pub use data_plane::{
     receive_stream_double_buffered, DataPlaneSession, CONTROL_PLANE_CHUNK_SIZE,

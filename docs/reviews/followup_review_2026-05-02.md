@@ -725,3 +725,59 @@ Status:
   symlink-containment work.
 - Step 4C gRPC tar-shard safety needs the three R6 follow-ups before I would
   call it release-ready.
+
+## Round 7 - R6 Closure Commit
+
+Reviewed change:
+
+- Commit: `1386f1e fix(pull): close R6 review findings on tar-shard receive`
+- Scope: per-entry tar size validation, open-shard end-of-stream rejection,
+  metadata preservation for pull gRPC tar shards, and new unit coverage.
+
+Verification:
+
+- `cargo fmt -- --check` passed.
+- `cargo test --workspace` passed.
+- Existing warnings remain unrelated: deprecated macOS FSEvents API usage and
+  an unused macOS capability test variable.
+
+Findings:
+
+- No new release-blocking findings in this commit.
+
+Assessment:
+
+R6-F1 is closed. `apply_pull_tar_shard` now checks the tar entry's declared
+size against the daemon's `FileHeader.size` before allocation at
+`crates/blit-core/src/remote/pull.rs:1049` to
+`crates/blit-core/src/remote/pull.rs:1057`, then checks the file size against
+the shard's declared size and the local shard cap at
+`crates/blit-core/src/remote/pull.rs:1058` to
+`crates/blit-core/src/remote/pull.rs:1071`. The later
+`try_reserve_exact` at `crates/blit-core/src/remote/pull.rs:1088` to
+`crates/blit-core/src/remote/pull.rs:1096` is now bounded by those checks.
+
+R6-F2 is closed. The pull receive loop now calls `ensure_no_open_shard` after
+the gRPC response stream ends at `crates/blit-core/src/remote/pull.rs:770` to
+`crates/blit-core/src/remote/pull.rs:771`, so `TarShardHeader` without
+`TarShardComplete` becomes a protocol error rather than silent partial success.
+
+R6-F3 is closed. The manual tar-shard write path now restores mtime and Unix
+permissions best-effort at `crates/blit-core/src/remote/pull.rs:1110` to
+`crates/blit-core/src/remote/pull.rs:1124`, matching the sink-side metadata
+policy closely enough for size+mtime sync correctness.
+
+Non-blocking cleanup:
+
+- The safe tar-entry receive logic now exists in both the pull gRPC extractor
+  and `FsTransferSink`'s tar-shard path. The duplicated policy is acceptable for
+  this release after the safety fixes, but a shared helper would reduce the
+  chance of future drift in path validation, size checks, metadata application,
+  and special-entry rejection.
+
+Status:
+
+- R6-F1, R6-F2, and R6-F3 are accepted as fixed.
+- Step 4C gRPC tar-shard receive safety is accepted.
+- Remaining path-safety caveat is still the separately tracked F2
+  symlink/canonical-containment work, not a regression from this batch.
