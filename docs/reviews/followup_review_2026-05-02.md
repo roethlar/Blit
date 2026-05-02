@@ -781,3 +781,88 @@ Status:
 - Step 4C gRPC tar-shard receive safety is accepted.
 - Remaining path-safety caveat is still the separately tracked F2
   symlink/canonical-containment work, not a regression from this batch.
+
+## Round 8 - Shared Tar Safety Primitive
+
+Reviewed change:
+
+- Commit: `2fe5a2d refactor(tar): shared safe extraction primitive across all 3 receive sites`
+- Scope: new `remote::transfer::tar_safety` helper, migration of pull gRPC
+  receive, `FsTransferSink` tar-shard receive, and daemon push receive.
+
+Verification:
+
+- `cargo fmt -- --check` passed.
+- `cargo test --workspace` passed.
+- Existing warnings remain unrelated: deprecated macOS FSEvents API usage and
+  an unused macOS capability test variable.
+
+Verdict:
+
+The consolidation is the right shape. The latent daemon-side `Entry::unpack`
+bug is closed, and the three tar-shard extraction sites now share one policy for
+non-regular entry rejection, path validation, per-entry size checks, bounded
+allocation, and metadata application.
+
+The remaining issues I found are not in `tar_safety` itself. They are in the
+daemon gRPC push-fallback framing before the shared helper is reached.
+
+### R8-F1. Daemon gRPC push fallback still accumulates tar shard chunks without a hard cap
+
+Severity: Medium
+
+`crates/blit-daemon/src/service/push/data_plane.rs:342` to
+`crates/blit-daemon/src/service/push/data_plane.rs:350` uses
+`TarShardHeader.archive_size` only as an initial capacity hint capped at 8 MiB.
+The actual `Vec` continues growing in the chunk arm at
+`crates/blit-daemon/src/service/push/data_plane.rs:359` to
+`crates/blit-daemon/src/service/push/data_plane.rs:368`.
+
+The overflow check only runs when `expected_size != 0`. A malicious or buggy
+authenticated client can send `archive_size = 0` and then stream arbitrary
+`TarShardChunk`s, or set a very large `archive_size` and stream until the daemon
+runs out of memory. The new shared helper cannot defend this path because it is
+called only after the whole shard buffer has already been accumulated at
+`crates/blit-daemon/src/service/push/data_plane.rs:616`.
+
+Recommendation:
+
+Apply the same framing cap used on the pull gRPC receiver before buffering:
+reject `archive_size == 0` for non-empty shards, reject
+`archive_size > tar_safety::MAX_TAR_SHARD_BYTES`, use checked addition for
+`received + chunk_len`, and reject any chunk that would exceed either the
+declared size or the local cap. Add regression tests for `archive_size = 0` with
+chunks and for `archive_size > MAX_TAR_SHARD_BYTES`.
+
+### R8-F2. Daemon gRPC push fallback treats stream EOF as a normal finish even without `UploadComplete`
+
+Severity: Medium
+
+`crates/blit-daemon/src/service/push/data_plane.rs:421` breaks the receive loop
+when `stream.message()` returns `None`. That is treated the same as a graceful
+end. But file and tar headers remove entries from `pending` before bytes are
+fully received at `crates/blit-daemon/src/service/push/data_plane.rs:233` to
+`crates/blit-daemon/src/service/push/data_plane.rs:239` and
+`crates/blit-daemon/src/service/push/data_plane.rs:325` to
+`crates/blit-daemon/src/service/push/data_plane.rs:340`.
+
+So a peer can send a valid `FileHeader` or `TarShardHeader`, close the stream
+without sending all data or `UploadComplete`, and the final `pending` check may
+not catch it because the path was already removed. That can return success after
+a partial fallback transfer.
+
+Recommendation:
+
+Require explicit `UploadComplete` for success. If the stream ends with
+`active.is_some()` or before an upload-complete message was seen, return
+`invalid_argument`/`failed_precondition`. Add tests for EOF after `FileHeader`
+and EOF after `TarShardHeader` without completion.
+
+Status:
+
+- Shared `tar_safety` primitive accepted.
+- Pull gRPC tar receive, `FsTransferSink` tar receive, and daemon push tar
+  extraction are accepted as migrated to the shared safety policy.
+- The daemon push `Entry::unpack` symlink/hardlink class is closed.
+- The daemon gRPC push fallback still needs R8-F1 and R8-F2 before I would call
+  that fallback path release-ready.

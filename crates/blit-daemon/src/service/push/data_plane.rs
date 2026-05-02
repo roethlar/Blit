@@ -4,9 +4,9 @@ use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
 };
+use blit_core::remote::transfer::tar_safety;
 use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -188,6 +188,53 @@ async fn handle_data_plane_stream(
     Ok(stats)
 }
 
+/// Validate `TarShardHeader.archive_size` at the wire boundary so a
+/// hostile or buggy push client can't grow the daemon's accumulating
+/// buffer past the local cap (R8-F1). Extracted for direct unit
+/// testing — the receive loop calls it inline.
+fn validate_fallback_shard_archive_size(archive_size: u64) -> Result<(), Status> {
+    if archive_size == 0 {
+        return Err(Status::invalid_argument(
+            "tar shard with files must declare a non-zero archive_size",
+        ));
+    }
+    if archive_size > tar_safety::MAX_TAR_SHARD_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "tar shard archive_size {} exceeds local cap {} bytes",
+            archive_size,
+            tar_safety::MAX_TAR_SHARD_BYTES
+        )));
+    }
+    Ok(())
+}
+
+/// Per-chunk overflow check for the daemon push fallback. Returns
+/// the new running total on success; rejects when the chunk would
+/// exceed either the client-declared shard size or the local cap
+/// (R8-F1).
+fn check_fallback_chunk_overflow(
+    received: u64,
+    chunk_len: u64,
+    declared: u64,
+) -> Result<u64, Status> {
+    let new_total = received
+        .checked_add(chunk_len)
+        .ok_or_else(|| Status::invalid_argument("tar shard chunk size overflows u64"))?;
+    if new_total > declared {
+        return Err(Status::invalid_argument(format!(
+            "tar shard chunk exceeds declared size ({} > {})",
+            new_total, declared
+        )));
+    }
+    if new_total > tar_safety::MAX_TAR_SHARD_BYTES {
+        return Err(Status::invalid_argument(format!(
+            "tar shard buffer would exceed local cap of {} bytes",
+            tar_safety::MAX_TAR_SHARD_BYTES
+        )));
+    }
+    Ok(new_total)
+}
+
 pub(crate) async fn receive_fallback_data(
     stream: &mut Streaming<ClientPushRequest>,
     module: &ModuleConfig,
@@ -219,6 +266,13 @@ pub(crate) async fn receive_fallback_data(
     let mut active: Option<ActiveTransfer> = None;
     let mut stats = TransferStats::default();
     let mut tar_executor = TarShardExecutor::new(MAX_PARALLEL_TAR_TASKS);
+    // R8-F2: stream EOF without explicit UploadComplete is a wire
+    // protocol error, not a graceful end. FileManifest /
+    // TarShardHeader remove entries from `pending` before bytes
+    // arrive, so a client that sends a header then closes the stream
+    // would otherwise pass the `pending.is_empty()` check despite
+    // never delivering the data.
+    let mut upload_complete_seen = false;
 
     while let Some(req) = stream.message().await? {
         tar_executor.drain_ready(&mut stats)?;
@@ -322,6 +376,11 @@ pub(crate) async fn receive_fallback_data(
                     ));
                 }
 
+                // R8-F1: bound the shard buffer at the wire boundary
+                // so a client that lies in `archive_size` (zero or
+                // huge) can't grow our memory uncapped.
+                validate_fallback_shard_archive_size(shard.archive_size)?;
+
                 let mut headers: Vec<FileHeader> = Vec::with_capacity(shard.files.len());
                 for file_header in shard.files {
                     let expected = pending.remove(&file_header.relative_path).ok_or_else(|| {
@@ -339,9 +398,10 @@ pub(crate) async fn receive_fallback_data(
                     headers.push(expected);
                 }
 
-                let capacity = usize::try_from(shard.archive_size)
-                    .unwrap_or(usize::MAX)
-                    .min(8 * 1024 * 1024);
+                // Modest initial reservation regardless of advertised
+                // archive_size; chunks grow the buffer up to the
+                // already-bounded declared size.
+                let capacity = (shard.archive_size as usize).min(1024 * 1024);
                 active = Some(ActiveTransfer::Tar {
                     headers,
                     expected_size: shard.archive_size,
@@ -356,14 +416,14 @@ pub(crate) async fn receive_fallback_data(
                     expected_size,
                     ..
                 }) => {
-                    let chunk_len = chunk.content.len() as u64;
-                    let new_total = received.saturating_add(chunk_len);
-                    if *expected_size != 0 && new_total > *expected_size {
-                        return Err(Status::invalid_argument(format!(
-                            "tar shard chunk exceeds declared size ({} > {})",
-                            new_total, expected_size
-                        )));
-                    }
+                    // R8-F1: enforce client-declared size and local
+                    // cap on every chunk. archive_size is already
+                    // known non-zero (rejected at header).
+                    let new_total = check_fallback_chunk_overflow(
+                        *received,
+                        chunk.content.len() as u64,
+                        *expected_size,
+                    )?;
                     buffer.extend_from_slice(&chunk.content);
                     *received = new_total;
                 }
@@ -385,7 +445,9 @@ pub(crate) async fn receive_fallback_data(
                     received,
                     buffer,
                 }) => {
-                    if expected_size != 0 && expected_size != received {
+                    // archive_size==0 is rejected at TarShardHeader so
+                    // expected_size is always meaningful here.
+                    if expected_size != received {
                         return Err(Status::invalid_argument(format!(
                             "tar shard ended with {} bytes received (expected {})",
                             received, expected_size
@@ -411,6 +473,7 @@ pub(crate) async fn receive_fallback_data(
                         "upload complete received while a transfer is still active",
                     ));
                 }
+                upload_complete_seen = true;
                 break;
             }
             Some(_) => {
@@ -424,6 +487,21 @@ pub(crate) async fn receive_fallback_data(
 
     tar_executor.finish(&mut stats).await?;
 
+    // R8-F2: stream EOF without explicit UploadComplete is a wire
+    // protocol error. FileManifest / TarShardHeader remove entries
+    // from `pending` before bytes arrive, so a client that sends a
+    // header then closes the stream without the data would otherwise
+    // pass the `pending.is_empty()` check.
+    if active.is_some() {
+        return Err(Status::invalid_argument(
+            "fallback stream ended with an in-flight file or tar shard",
+        ));
+    }
+    if !upload_complete_seen {
+        return Err(Status::invalid_argument(
+            "fallback stream ended without UploadComplete",
+        ));
+    }
     if !pending.is_empty() {
         let missing: Vec<String> = pending.into_keys().collect();
         return Err(Status::internal(format!(
@@ -777,5 +855,66 @@ mod tests {
         );
         // No symlink should have been created at the would-be target.
         assert!(!dest_root.path().join("config.txt").exists());
+    }
+
+    // R8-F1 framing tests for the daemon push gRPC fallback receive
+    // loop. These exercise the validation primitives directly so the
+    // rules (no zero archive_size when files present, cap on
+    // archive_size, per-chunk overflow against declared + cap) are
+    // pinned without spinning up a real gRPC server.
+
+    #[test]
+    fn fallback_rejects_zero_archive_size() {
+        let err = validate_fallback_shard_archive_size(0).unwrap_err();
+        assert!(err.message().contains("non-zero archive_size"));
+    }
+
+    #[test]
+    fn fallback_rejects_archive_size_above_cap() {
+        let err =
+            validate_fallback_shard_archive_size(tar_safety::MAX_TAR_SHARD_BYTES + 1).unwrap_err();
+        assert!(err.message().contains("exceeds local cap"));
+    }
+
+    #[test]
+    fn fallback_accepts_archive_size_at_cap() {
+        validate_fallback_shard_archive_size(tar_safety::MAX_TAR_SHARD_BYTES)
+            .expect("at-cap archive_size is allowed");
+        validate_fallback_shard_archive_size(1).expect("1-byte archive_size is allowed");
+    }
+
+    #[test]
+    fn fallback_chunk_overflow_rejects_above_declared() {
+        // declared=10, already received 8, chunk would push us to 12.
+        let err = check_fallback_chunk_overflow(8, 4, 10).unwrap_err();
+        assert!(err.message().contains("exceeds declared size"));
+    }
+
+    #[test]
+    fn fallback_chunk_overflow_rejects_above_local_cap() {
+        // Declared is huge (u64::MAX) so the "exceeds declared"
+        // branch never fires; the cap check is the load-bearing
+        // line of defense.
+        let near_cap = tar_safety::MAX_TAR_SHARD_BYTES - 100;
+        let err = check_fallback_chunk_overflow(near_cap, 200, u64::MAX).unwrap_err();
+        assert!(
+            err.message().contains("local cap"),
+            "expected cap rejection, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn fallback_chunk_overflow_rejects_u64_overflow() {
+        let err = check_fallback_chunk_overflow(u64::MAX - 1, 10, u64::MAX).unwrap_err();
+        assert!(err.message().contains("overflows u64"));
+    }
+
+    #[test]
+    fn fallback_chunk_overflow_accepts_within_bounds() {
+        // declared 1024, received 100, chunk 200 → new_total 300.
+        assert_eq!(check_fallback_chunk_overflow(100, 200, 1024).unwrap(), 300);
+        // exact boundary: chunk lands at declared.
+        assert_eq!(check_fallback_chunk_overflow(900, 124, 1024).unwrap(), 1024);
     }
 }
