@@ -92,8 +92,10 @@ impl NormalizedTransferOperation {
             );
         }
 
-        let compare_mode = compare_mode_from_proto(spec.compare_mode);
-        let mirror_mode = mirror_mode_from_proto(spec.mirror_mode);
+        let compare_mode = compare_mode_from_proto(spec.compare_mode)
+            .with_context(|| format!("invalid compare_mode {}", spec.compare_mode))?;
+        let mirror_mode = mirror_mode_from_proto(spec.mirror_mode)
+            .with_context(|| format!("invalid mirror_mode {}", spec.mirror_mode))?;
         let resume = spec.resume.unwrap_or_default();
         let capabilities = spec.client_capabilities.unwrap_or_default();
         let filter = spec
@@ -125,23 +127,30 @@ impl NormalizedTransferOperation {
     }
 }
 
-/// Fold proto-side `i32` enum into concrete `ComparisonMode`. Treats
-/// `Unspecified` (and any out-of-range value from a hostile peer) as
-/// `SizeMtime`, the historical default.
-fn compare_mode_from_proto(raw: i32) -> ComparisonMode {
-    match ProtoCompareMode::try_from(raw).unwrap_or(ProtoCompareMode::SizeMtime) {
+/// Fold proto-side `i32` enum into concrete `ComparisonMode`. Folds
+/// `Unspecified` to `SizeMtime` (historical default). Rejects any
+/// out-of-range value as a wire error — we'd rather a hostile or
+/// future peer get a hard `Err` than silently pick a default that
+/// doesn't match what they asked for.
+fn compare_mode_from_proto(raw: i32) -> Result<ComparisonMode> {
+    let parsed = ProtoCompareMode::try_from(raw)
+        .map_err(|_| eyre::eyre!("unknown ComparisonMode value {raw}"))?;
+    Ok(match parsed {
         ProtoCompareMode::Unspecified => ComparisonMode::SizeMtime,
         other => other,
-    }
+    })
 }
 
-/// Fold proto-side `i32` enum into concrete `MirrorMode`. Treats
-/// `Unspecified` (and any out-of-range value) as `Off`.
-fn mirror_mode_from_proto(raw: i32) -> MirrorMode {
-    match ProtoMirrorMode::try_from(raw).unwrap_or(ProtoMirrorMode::Off) {
+/// Fold proto-side `i32` enum into concrete `MirrorMode`. Folds
+/// `Unspecified` to `Off` (the safe default). Rejects out-of-range
+/// values for the same reason as `compare_mode_from_proto`.
+fn mirror_mode_from_proto(raw: i32) -> Result<MirrorMode> {
+    let parsed = ProtoMirrorMode::try_from(raw)
+        .map_err(|_| eyre::eyre!("unknown MirrorMode value {raw}"))?;
+    Ok(match parsed {
         ProtoMirrorMode::Unspecified => MirrorMode::Off,
         other => other,
-    }
+    })
 }
 
 /// Convert a wire `FilterSpec` to a concrete `FileFilter`. Validates
@@ -153,12 +162,8 @@ fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     filter.exclude_files = spec.exclude;
     filter.min_size = spec.min_size;
     filter.max_size = spec.max_size;
-    filter.min_age = spec
-        .min_age_secs
-        .map(std::time::Duration::from_secs);
-    filter.max_age = spec
-        .max_age_secs
-        .map(std::time::Duration::from_secs);
+    filter.min_age = spec.min_age_secs.map(std::time::Duration::from_secs);
+    filter.max_age = spec.max_age_secs.map(std::time::Duration::from_secs);
     if filter.min_age.is_some() || filter.max_age.is_some() {
         filter.reference_time = Some(SystemTime::now());
     }
@@ -213,6 +218,22 @@ mod tests {
         spec.spec_version = 99;
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         assert!(err.to_string().contains("spec_version 99"));
+    }
+
+    #[test]
+    fn unknown_compare_mode_rejected() {
+        let mut spec = empty_spec();
+        spec.compare_mode = 999;
+        let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(err.to_string().contains("compare_mode 999"));
+    }
+
+    #[test]
+    fn unknown_mirror_mode_rejected() {
+        let mut spec = empty_spec();
+        spec.mirror_mode = 999;
+        let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(err.to_string().contains("mirror_mode 999"));
     }
 
     #[test]

@@ -183,7 +183,6 @@ fn local_needs_copy(src: &Path, dst: &Path, mode: ComparisonMode) -> Result<bool
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +246,10 @@ mod tests {
     fn size_mtime_drops_matching_files() {
         let (src, dst, _tmp) = make_trees(
             &[("same.txt", b"matching content"), ("diff.txt", b"new")],
-            &[("same.txt", b"matching content"), ("diff.txt", b"old content")],
+            &[
+                ("same.txt", b"matching content"),
+                ("diff.txt", b"old content"),
+            ],
         );
         sync_mtimes(&src, &dst, "same.txt");
 
@@ -266,10 +268,7 @@ mod tests {
 
     #[test]
     fn size_only_ignores_mtime_when_sizes_match() {
-        let (src, dst, _tmp) = make_trees(
-            &[("same.txt", b"abcdef")],
-            &[("same.txt", b"abcdef")],
-        );
+        let (src, dst, _tmp) = make_trees(&[("same.txt", b"abcdef")], &[("same.txt", b"abcdef")]);
         // Don't sync mtimes — they'll differ. SizeOnly should still drop
         // the entry because content sizes match.
         let headers = vec![header("same.txt", 6)];
@@ -282,10 +281,7 @@ mod tests {
 
     #[test]
     fn size_only_keeps_size_mismatch() {
-        let (src, dst, _tmp) = make_trees(
-            &[("file.txt", b"longer")],
-            &[("file.txt", b"short")],
-        );
+        let (src, dst, _tmp) = make_trees(&[("file.txt", b"longer")], &[("file.txt", b"short")]);
         let headers = vec![header("file.txt", 6)];
         let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly);
         assert_eq!(kept.len(), 1);
@@ -306,10 +302,7 @@ mod tests {
 
     #[test]
     fn force_always_copies() {
-        let (src, dst, _tmp) = make_trees(
-            &[("a.txt", b"x")],
-            &[("a.txt", b"x")],
-        );
+        let (src, dst, _tmp) = make_trees(&[("a.txt", b"x")], &[("a.txt", b"x")]);
         sync_mtimes(&src, &dst, "a.txt");
         let headers = vec![header("a.txt", 1)];
         let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Force);
@@ -348,10 +341,8 @@ mod tests {
 
     #[test]
     fn checksum_keeps_content_diff() {
-        let (src, dst, _tmp) = make_trees(
-            &[("a.txt", b"hello world")],
-            &[("a.txt", b"goodbye foo")],
-        );
+        let (src, dst, _tmp) =
+            make_trees(&[("a.txt", b"hello world")], &[("a.txt", b"goodbye foo")]);
         let headers = vec![header("a.txt", 11)];
         let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum);
         assert_eq!(kept.len(), 1);
@@ -362,10 +353,7 @@ mod tests {
         // The orchestrator never sends Unspecified after normalization,
         // but defensively the planner should treat it as the historical
         // default (matches what NormalizedTransferOperation::from_spec does).
-        let (src, dst, _tmp) = make_trees(
-            &[("same.txt", b"x")],
-            &[("same.txt", b"x")],
-        );
+        let (src, dst, _tmp) = make_trees(&[("same.txt", b"x")], &[("same.txt", b"x")]);
         sync_mtimes(&src, &dst, "same.txt");
         let headers = vec![header("same.txt", 1)];
         let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Unspecified);

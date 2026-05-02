@@ -13,12 +13,13 @@ use base64::{engine::general_purpose, Engine as _};
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
     BlockTransferComplete, ClientPullMessage, ComparisonMode, DataTransferNegotiation, FileData,
-    FileHeader, FileList, ManifestBatch, MirrorMode, PullSummary, PullSyncAck, ServerPullMessage,
+    FileHeader, FileList, ManifestBatch, PullSummary, PullSyncAck, ServerPullMessage,
     TransferOperationSpec,
 };
 use blit_core::manifest::{
     compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
 };
+use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::plan_transfer_payloads;
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::tuning::determine_remote_tuning;
@@ -40,8 +41,11 @@ pub(crate) async fn handle_pull_sync_stream(
     force_grpc_override: bool,
     server_checksums_enabled: bool,
 ) -> Result<(), Status> {
-    // Phase 1: Receive the unified TransferOperationSpec
-    let spec = match receive_spec(&mut stream).await? {
+    // Phase 1: Receive the unified TransferOperationSpec and normalize
+    // it at the wire boundary. NormalizedTransferOperation::from_spec
+    // is the single chokepoint that validates spec_version, rejects
+    // unknown enum values, and folds Unspecified into concrete defaults.
+    let raw_spec = match receive_spec(&mut stream).await? {
         Some(s) => s,
         None => {
             return Err(Status::invalid_argument(
@@ -49,20 +53,20 @@ pub(crate) async fn handle_pull_sync_stream(
             ))
         }
     };
+    let spec = NormalizedTransferOperation::from_spec(raw_spec)
+        .map_err(|e| Status::invalid_argument(format!("invalid TransferOperationSpec: {e:#}")))?;
 
     // Resolve module from spec
     let module = resolve_module(&modules, default_root.as_ref(), &spec.module).await?;
 
     let force_grpc = spec.force_grpc || force_grpc_override;
-    let mirror_mode_kind = MirrorMode::try_from(spec.mirror_mode).unwrap_or(MirrorMode::Off);
-    let mirror_mode = !matches!(mirror_mode_kind, MirrorMode::Off | MirrorMode::Unspecified);
-    let compare_mode_kind =
-        ComparisonMode::try_from(spec.compare_mode).unwrap_or(ComparisonMode::SizeMtime);
+    let mirror_mode = spec.mirror_enabled();
+    let compare_mode_kind = spec.compare_mode;
     // Filter parity (F10) is wired in step 4B via FilteredSource on the
     // FsTransferSource. For 4A this is a pure wire-shape migration —
     // bool-soup → typed enums on the wire, internal behavior unchanged.
     let client_wants_checksum = matches!(compare_mode_kind, ComparisonMode::Checksum);
-    let resume_settings = spec.resume.clone().unwrap_or_default();
+    let resume_settings = spec.resume.clone();
     let resume_mode = resume_settings.enabled;
     // Clamp block size to safe limit to prevent server OOM
     use blit_core::copy::MAX_BLOCK_SIZE;
