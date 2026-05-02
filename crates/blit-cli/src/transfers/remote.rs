@@ -229,25 +229,12 @@ pub async fn run_remote_pull_transfer(
     dest_root: &Path,
     mirror_mode: bool,
 ) -> Result<()> {
-    // Pull-side filtering would need to apply at the daemon's source
-    // enumeration, which requires a proto extension. Filtering the
-    // client's local manifest would falsely tell the daemon "I don't
-    // have these files" and trigger redundant sends. Surface the
-    // limitation explicitly until the proto extension lands.
-    let pull_filter_args = !args.exclude.is_empty()
-        || !args.include.is_empty()
-        || args.files_from.is_some()
-        || args.min_size.is_some()
-        || args.max_size.is_some()
-        || args.min_age.is_some()
-        || args.max_age.is_some();
-    if pull_filter_args {
-        eyre::bail!(
-            "filter flags (--exclude/--include/--min-size/--max-size/--min-age/--max-age/--files-from) \
-             are not yet supported for remote-source transfers; the protocol extension that lets the \
-             daemon honor client filters is pending. Run from the source side (push) for now."
-        );
-    }
+    // Filter parity (Step 4B): build the wire FilterSpec here and
+    // ship it on TransferOperationSpec. The daemon applies the same
+    // rules during its source enumeration, so the file set the daemon
+    // sees matches what `--exclude/--include/--min-size/...` would
+    // have produced for an equivalent push.
+    let filter_spec = super::build_filter_spec(args)?;
 
     let mut client = RemotePullClient::connect(remote.clone())
         .await
@@ -268,6 +255,8 @@ pub async fn run_remote_pull_transfer(
     let pull_opts = PullSyncOptions {
         force_grpc: args.force_grpc,
         mirror_mode,
+        delete_all_scope: args.delete_scope_all(),
+        filter: Some(filter_spec),
         size_only: args.size_only,
         ignore_times: args.ignore_times,
         ignore_existing: args.ignore_existing,
@@ -306,14 +295,16 @@ pub async fn run_remote_pull_transfer(
         describe_pull_result(&report, &actual_dest);
     }
 
-    // Handle mirror mode deletions based on server's entries_deleted count
+    // Handle mirror mode deletions using the daemon's authoritative
+    // delete list (closes F4 from the 2026-05-01 review). The daemon
+    // has the filtered source manifest and the unfiltered client
+    // manifest; the client just executes what it's told instead of
+    // walking the dest tree and inferring (which mis-purged unchanged
+    // files and ignored filter scope).
     if mirror_mode {
-        if let Some(ref summary) = report.summary {
-            if summary.entries_deleted > 0 {
-                // The server told us how many files should be deleted locally
-                // We need to delete local files not in the remote manifest
-                let remote_paths: Vec<PathBuf> = report.downloaded_paths.to_vec();
-                let stats = purge_extraneous_local(&actual_dest, &remote_paths).await?;
+        if let Some(ref delete_paths) = report.paths_to_delete {
+            if !delete_paths.is_empty() {
+                let stats = delete_listed_paths(&actual_dest, delete_paths).await?;
                 if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
                     println!(
                         "Mirror purge removed {} file(s) and {} directorie(s).",
@@ -423,69 +414,64 @@ struct LocalPurgeStats {
     dirs_deleted: u64,
 }
 
-async fn purge_extraneous_local(
+/// Apply a delete list provided by the daemon. Each `relative` is
+/// joined against `dest_root`; the resulting absolute path is
+/// validated to stay inside `dest_root` (defense-in-depth: a bad
+/// daemon can't escape the destination root via `..`). Empty parent
+/// directories are pruned bottom-up after the file deletions.
+async fn delete_listed_paths(
     dest_root: &Path,
-    keep_paths: &[PathBuf],
+    relative_paths: &[PathBuf],
 ) -> Result<LocalPurgeStats> {
-    use std::collections::HashSet;
-    use walkdir::WalkDir;
-
-    let keep_set: HashSet<PathBuf> = keep_paths.iter().cloned().collect();
-    let root = dest_root.to_path_buf();
-
-    let extraneous_files = tokio::task::spawn_blocking(move || {
-        let mut extras = Vec::new();
-        for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() {
-                if let Ok(rel) = entry.path().strip_prefix(&root) {
-                    if keep_set.is_empty() || !keep_set.contains(rel) {
-                        extras.push(entry.path().to_path_buf());
-                    }
-                }
-            }
-        }
-        extras
-    })
-    .await
-    .map_err(|err| eyre!("enumeration task failed: {}", err))?;
-
+    use std::collections::BTreeSet;
     let mut stats = LocalPurgeStats {
         files_deleted: 0,
         dirs_deleted: 0,
     };
+    // Collect parent directories of every deleted file so we can
+    // walk them in deepest-first order to remove now-empty dirs.
+    let mut candidate_parents: BTreeSet<PathBuf> = BTreeSet::new();
 
-    for file_path in extraneous_files {
-        if tokio::fs::remove_file(&file_path).await.is_ok() {
-            stats.files_deleted += 1;
+    for rel in relative_paths {
+        let target = dest_root.join(rel);
+        // Reject any path that would resolve outside dest_root after
+        // canonicalization-free normalization. We don't canonicalize
+        // (would follow symlinks); we just check that the target's
+        // ancestors include dest_root via prefix.
+        if !target.starts_with(dest_root) {
+            eyre::bail!(
+                "daemon delete list contained path outside destination: {}",
+                rel.display()
+            );
+        }
+        match tokio::fs::remove_file(&target).await {
+            Ok(()) => {
+                stats.files_deleted += 1;
+                let mut p = target.parent();
+                while let Some(parent) = p {
+                    if parent == dest_root {
+                        break;
+                    }
+                    candidate_parents.insert(parent.to_path_buf());
+                    p = parent.parent();
+                }
+            }
+            // Already gone is fine; daemon's view may lag behind.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(eyre!("failed to delete {}: {}", target.display(), e));
+            }
         }
     }
 
-    let root_for_dirs = dest_root.to_path_buf();
-    let dirs = tokio::task::spawn_blocking(move || {
-        let mut dirs = Vec::new();
-        for entry in WalkDir::new(&root_for_dirs)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_dir() {
-                dirs.push(entry.path().to_path_buf());
-            }
-        }
-        dirs.sort_by_key(|b| std::cmp::Reverse(b.components().count()));
-        dirs
-    })
-    .await
-    .map_err(|err| eyre!("enumeration task failed: {}", err))?;
-
+    // Prune empty directories deepest-first.
+    let mut dirs: Vec<_> = candidate_parents.into_iter().collect();
+    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for dir in dirs {
-        if dir == dest_root {
-            continue;
-        }
         if tokio::fs::remove_dir(&dir).await.is_ok() {
             stats.dirs_deleted += 1;
         }
     }
-
     Ok(stats)
 }
 

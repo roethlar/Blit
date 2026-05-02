@@ -10,10 +10,11 @@ use super::PullSyncSender;
 use crate::runtime::{ModuleConfig, RootExport};
 
 use base64::{engine::general_purpose, Engine as _};
+use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
     BlockTransferComplete, ClientPullMessage, ComparisonMode, DataTransferNegotiation, FileData,
-    FileHeader, FileList, ManifestBatch, PullSummary, PullSyncAck, ServerPullMessage,
+    FileHeader, FileList, ManifestBatch, MirrorMode, PullSummary, PullSyncAck, ServerPullMessage,
     TransferOperationSpec,
 };
 use blit_core::manifest::{
@@ -61,11 +62,13 @@ pub(crate) async fn handle_pull_sync_stream(
 
     let force_grpc = spec.force_grpc || force_grpc_override;
     let mirror_mode = spec.mirror_enabled();
+    let mirror_kind = spec.mirror_mode;
     let compare_mode_kind = spec.compare_mode;
-    // Filter parity (F10) is wired in step 4B via FilteredSource on the
-    // FsTransferSource. For 4A this is a pure wire-shape migration —
-    // bool-soup → typed enums on the wire, internal behavior unchanged.
     let client_wants_checksum = matches!(compare_mode_kind, ComparisonMode::Checksum);
+    // Filter parity (F10): the source-side filter from the spec is
+    // applied during enumeration via FileEnumerator and post-applied
+    // to the deletion candidate list. None means "no filter".
+    let source_filter = spec.filter.clone();
     let resume_settings = spec.resume.clone();
     let resume_mode = resume_settings.enabled;
     // Clamp block size to safe limit to prevent server OOM
@@ -96,9 +99,14 @@ pub(crate) async fn handle_pull_sync_stream(
     // Phase 3: Enumerate server files and compare with client manifest.
     // Compute checksums if client requests checksum mode and server has checksums enabled.
     let compute_checksums = client_wants_checksum && server_checksums_enabled;
-    let server_entries =
-        collect_pull_entries_with_checksums(&module.path, &root, &requested, compute_checksums)
-            .await?;
+    let server_entries = collect_pull_entries_with_checksums(
+        &module.path,
+        &root,
+        &requested,
+        compute_checksums,
+        source_filter.clone().unwrap_or_default(),
+    )
+    .await?;
 
     // Convert to FileHeader for comparison
     let server_manifest: Vec<FileHeader> =
@@ -123,7 +131,28 @@ pub(crate) async fn handle_pull_sync_stream(
     };
     let diff = compare_manifests(&server_manifest, &client_manifest, &compare_opts);
 
-    if diff.files_to_transfer.is_empty() && diff.files_to_delete.is_empty() {
+    // Scope the deletion candidate list per MirrorMode (closes F4).
+    // - Off: no deletions ever (compare_opts already enforces this).
+    // - FilteredSubset: only candidates that the source filter would
+    //   have allowed are real deletions; out-of-scope client files
+    //   are left alone so users don't lose files the source pretends
+    //   not to know about (e.g. user excludes `*.log` on source —
+    //   their `important.log` on dest is none of mirror's business).
+    // - All: every absent-on-source client file is a real deletion.
+    let scoped_deletions = scope_deletions(
+        &diff.files_to_delete,
+        &client_manifest,
+        mirror_kind,
+        &source_filter,
+    );
+
+    // Tell the client which files to delete (replaces the prior
+    // dest-tree walking inference that mis-purged unchanged files).
+    if mirror_mode {
+        send_delete_list(&tx, &scoped_deletions).await?;
+    }
+
+    if diff.files_to_transfer.is_empty() && scoped_deletions.is_empty() {
         // Nothing to transfer
         send_summary(&tx, TransferStats::default(), false, 0).await?;
         return Ok(());
@@ -166,7 +195,7 @@ pub(crate) async fn handle_pull_sync_stream(
             &tx,
             TransferStats::default(),
             false,
-            diff.files_to_delete.len() as u64,
+            scoped_deletions.len() as u64,
         )
         .await?;
         return Ok(());
@@ -188,7 +217,7 @@ pub(crate) async fn handle_pull_sync_stream(
                 &effective_resume,
             )
             .await?;
-            send_summary(&tx, stats, true, diff.files_to_delete.len() as u64).await?;
+            send_summary(&tx, stats, true, scoped_deletions.len() as u64).await?;
         } else {
             stream_via_grpc(&module, &entries_to_send, &tx).await?;
             send_summary(
@@ -199,7 +228,7 @@ pub(crate) async fn handle_pull_sync_stream(
                     bytes_zero_copy: 0,
                 },
                 true,
-                diff.files_to_delete.len() as u64,
+                scoped_deletions.len() as u64,
             )
             .await?;
         }
@@ -216,13 +245,13 @@ pub(crate) async fn handle_pull_sync_stream(
             &effective_resume,
         )
         .await?;
-        send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
+        send_summary(&tx, stats, false, scoped_deletions.len() as u64).await?;
     } else {
         // Data plane transfer (full files). Pass the enumeration `root`,
         // not module.path — header.relative_path is relative to `root`.
         let stats =
             stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
-        send_summary(&tx, stats, false, diff.files_to_delete.len() as u64).await?;
+        send_summary(&tx, stats, false, scoped_deletions.len() as u64).await?;
     }
 
     Ok(())
@@ -328,6 +357,65 @@ async fn send_need_list(tx: &PullSyncSender, files: &[String]) -> Result<(), Sta
     }))
     .await
     .map_err(|_| Status::internal("failed to send need list"))
+}
+
+async fn send_delete_list(tx: &PullSyncSender, paths: &[String]) -> Result<(), Status> {
+    tx.send(Ok(ServerPullMessage {
+        payload: Some(server_pull_message::Payload::DeleteList(FileList {
+            relative_paths: paths.to_vec(),
+        })),
+    }))
+    .await
+    .map_err(|_| Status::internal("failed to send delete list"))
+}
+
+/// Apply MirrorMode + source filter scoping to the candidate deletion
+/// list returned by `compare_manifests`. Closes F4 from
+/// `docs/reviews/codebase_review_2026-05-01.md`: previously the
+/// client walked its own dest tree and inferred "delete anything not
+/// transferred", which mis-purged unchanged files and ignored filter
+/// scope. Now the daemon — which has the filtered server manifest
+/// and the unfiltered client manifest — computes the authoritative
+/// list and sends it to the client.
+fn scope_deletions(
+    candidates: &[String],
+    client_manifest: &[FileHeader],
+    mirror: MirrorMode,
+    filter: &Option<FileFilter>,
+) -> Vec<String> {
+    use std::time::{Duration, SystemTime};
+    match mirror {
+        MirrorMode::Off | MirrorMode::Unspecified => Vec::new(),
+        MirrorMode::All => candidates.to_vec(),
+        MirrorMode::FilteredSubset => {
+            let Some(filter) = filter else {
+                // No filter set, so "filtered subset" is the same as "all".
+                return candidates.to_vec();
+            };
+            if filter.is_empty() {
+                return candidates.to_vec();
+            }
+            let by_path: std::collections::HashMap<&str, &FileHeader> = client_manifest
+                .iter()
+                .map(|h| (h.relative_path.as_str(), h))
+                .collect();
+            candidates
+                .iter()
+                .filter(|path| {
+                    let Some(h) = by_path.get(path.as_str()) else {
+                        return false;
+                    };
+                    let mtime = if h.mtime_seconds > 0 {
+                        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(h.mtime_seconds as u64))
+                    } else {
+                        None
+                    };
+                    filter.allows_relative(std::path::Path::new(path.as_str()), h.size, mtime)
+                })
+                .cloned()
+                .collect()
+        }
+    }
 }
 
 async fn send_summary(
@@ -839,4 +927,105 @@ async fn stream_via_block_resume_grpc(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(rel: &str, size: u64) -> FileHeader {
+        FileHeader {
+            relative_path: rel.into(),
+            size,
+            mtime_seconds: 0,
+            permissions: 0,
+            checksum: vec![],
+        }
+    }
+
+    fn manifest(paths: &[(&str, u64)]) -> Vec<FileHeader> {
+        paths.iter().map(|(p, s)| header(p, *s)).collect()
+    }
+
+    #[test]
+    fn scope_off_returns_empty() {
+        let candidates = vec!["a.txt".into(), "b.tmp".into()];
+        let client = manifest(&[("a.txt", 1), ("b.tmp", 1)]);
+        let out = scope_deletions(&candidates, &client, MirrorMode::Off, &None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn scope_all_returns_everything() {
+        let candidates: Vec<String> = vec!["a.txt".into(), "b.tmp".into()];
+        let client = manifest(&[("a.txt", 1), ("b.tmp", 1)]);
+        let out = scope_deletions(&candidates, &client, MirrorMode::All, &None);
+        assert_eq!(out, candidates);
+    }
+
+    #[test]
+    fn filtered_subset_drops_excluded_paths() {
+        // Source filter excludes *.tmp. A client file `b.tmp` shouldn't
+        // be deleted even if absent from the filtered source manifest —
+        // the filter excluded it on purpose, so it's none of mirror's
+        // business.
+        let mut filter = FileFilter::default();
+        filter.exclude_files = vec!["*.tmp".into()];
+        let candidates: Vec<String> = vec!["a.txt".into(), "b.tmp".into()];
+        let client = manifest(&[("a.txt", 1), ("b.tmp", 1)]);
+        let out = scope_deletions(
+            &candidates,
+            &client,
+            MirrorMode::FilteredSubset,
+            &Some(filter),
+        );
+        assert_eq!(out, vec!["a.txt".to_string()]);
+    }
+
+    #[test]
+    fn filtered_subset_no_filter_acts_like_all() {
+        // `FilteredSubset` with no filter is equivalent to `All` —
+        // there's no scope to scope to, so every absent client file
+        // is a real deletion.
+        let candidates: Vec<String> = vec!["a.txt".into()];
+        let client = manifest(&[("a.txt", 1)]);
+        let out = scope_deletions(&candidates, &client, MirrorMode::FilteredSubset, &None);
+        assert_eq!(out, candidates);
+    }
+
+    #[test]
+    fn filtered_subset_respects_min_size() {
+        // Source filter requires min_size=100. A small file would
+        // never be transferred, so its absence on the source isn't a
+        // signal to delete it on dest.
+        let mut filter = FileFilter::default();
+        filter.min_size = Some(100);
+        let candidates: Vec<String> = vec!["small.txt".into(), "big.txt".into()];
+        let client = manifest(&[("small.txt", 5), ("big.txt", 500)]);
+        let out = scope_deletions(
+            &candidates,
+            &client,
+            MirrorMode::FilteredSubset,
+            &Some(filter),
+        );
+        assert_eq!(out, vec!["big.txt".to_string()]);
+    }
+
+    #[test]
+    fn filtered_subset_drops_unknown_paths() {
+        // A path in the candidate list that isn't in the client manifest
+        // (shouldn't happen in practice, but defensively) is dropped —
+        // we can't size/mtime-check what we don't have metadata for.
+        let mut filter = FileFilter::default();
+        filter.exclude_files = vec!["*.tmp".into()];
+        let candidates: Vec<String> = vec!["mystery.txt".into()];
+        let client: Vec<FileHeader> = Vec::new();
+        let out = scope_deletions(
+            &candidates,
+            &client,
+            MirrorMode::FilteredSubset,
+            &Some(filter),
+        );
+        assert!(out.is_empty());
+    }
 }

@@ -365,7 +365,14 @@ pub(crate) async fn collect_pull_entries(
     root: &Path,
     requested: &Path,
 ) -> Result<Vec<PullEntry>, Status> {
-    collect_pull_entries_with_checksums(module_root, root, requested, false).await
+    collect_pull_entries_with_checksums(
+        module_root,
+        root,
+        requested,
+        false,
+        blit_core::fs_enum::FileFilter::default(),
+    )
+    .await
 }
 
 pub(crate) async fn collect_pull_entries_with_checksums(
@@ -373,6 +380,7 @@ pub(crate) async fn collect_pull_entries_with_checksums(
     root: &Path,
     requested: &Path,
     compute_checksums: bool,
+    filter: blit_core::fs_enum::FileFilter,
 ) -> Result<Vec<PullEntry>, Status> {
     if root.is_file() {
         // Single-file root: physical path (for reads) is the requested path
@@ -405,8 +413,7 @@ pub(crate) async fn collect_pull_entries_with_checksums(
     tokio::task::spawn_blocking(move || -> Result<Vec<PullEntry>, Status> {
         use rayon::prelude::*;
 
-        let enumerator =
-            blit_core::enumeration::FileEnumerator::new(blit_core::fs_enum::FileFilter::default());
+        let enumerator = blit_core::enumeration::FileEnumerator::new(filter);
         let entries = enumerator
             .enumerate_local(&root_clone)
             .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;

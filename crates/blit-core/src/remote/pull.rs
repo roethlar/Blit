@@ -12,9 +12,8 @@ use tokio::task::JoinHandle;
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
     client_pull_message, pull_chunk, server_pull_message, BlockHashList, ClientPullMessage,
-    ComparisonMode, DataTransferNegotiation, FileData, FileHeader, FilterSpec, ManifestComplete,
-    MirrorMode, PeerCapabilities, PullChunk, PullRequest, PullSummary, ResumeSettings,
-    TransferOperationSpec,
+    ComparisonMode, DataTransferNegotiation, FileData, FileHeader, ManifestComplete, MirrorMode,
+    PeerCapabilities, PullChunk, PullRequest, PullSummary, ResumeSettings, TransferOperationSpec,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::progress::RemoteTransferProgress;
@@ -26,6 +25,15 @@ pub struct PullSyncOptions {
     pub force_grpc: bool,
     /// Mirror mode: report files to delete.
     pub mirror_mode: bool,
+    /// Mirror scope policy: when true, deletions extend across the
+    /// full destination tree (`MirrorMode::All`). Default false →
+    /// `MirrorMode::FilteredSubset` so files outside the source
+    /// filter scope are never purged.
+    pub delete_all_scope: bool,
+    /// Filter rules to apply at the daemon's source enumeration.
+    /// `None` means no filtering. The daemon converts this to a
+    /// `FileFilter` via `NormalizedTransferOperation::from_spec`.
+    pub filter: Option<crate::generated::FilterSpec>,
     /// Compare only by size, ignore modification time.
     pub size_only: bool,
     /// Transfer all files unconditionally.
@@ -48,6 +56,13 @@ pub struct RemotePullReport {
     pub bytes_transferred: u64,
     pub downloaded_paths: Vec<PathBuf>,
     pub summary: Option<PullSummary>,
+    /// Authoritative deletion list from the daemon (mirror mode only).
+    /// `None` means the daemon never sent one (e.g. mirror=Off, or
+    /// older daemon — but per the no-back-compat policy the latter
+    /// shouldn't reach here). Empty `Some` means "daemon agrees
+    /// nothing should be deleted." The CLI deletes exactly these
+    /// relative paths and never walks the dest tree on its own.
+    pub paths_to_delete: Option<Vec<PathBuf>>,
 }
 
 pub type RemotePullProgress = RemoteTransferProgress;
@@ -419,20 +434,24 @@ impl RemotePullClient {
             ComparisonMode::SizeMtime
         };
         let mirror = if mirror_mode {
-            // Default to FILTERED_SUBSET — when `--exclude '*.log'` is
-            // active, local files outside the filter scope must not be
-            // mirror-purged. Step 4B will add a `--delete-scope all`
-            // CLI override that switches to MirrorMode::All.
-            MirrorMode::FilteredSubset
+            if options.delete_all_scope {
+                MirrorMode::All
+            } else {
+                // Default — files outside the filter scope are not
+                // purged from the destination, since the source
+                // filter excluded them on purpose.
+                MirrorMode::FilteredSubset
+            }
         } else {
             MirrorMode::Off
         };
+        let filter_spec = options.filter.clone().unwrap_or_default();
         tx.send(ClientPullMessage {
             payload: Some(client_pull_message::Payload::Spec(TransferOperationSpec {
                 spec_version: 1,
                 module,
                 source_path: path_str,
-                filter: Some(FilterSpec::default()),
+                filter: Some(filter_spec),
                 compare_mode: compare_mode as i32,
                 mirror_mode: mirror as i32,
                 resume: Some(ResumeSettings {
@@ -510,6 +529,14 @@ impl RemotePullClient {
                 Some(server_pull_message::Payload::FilesToDownload(_files)) => {
                     // Server tells us which files will be sent - for progress tracking
                     // The actual file count is already handled in ManifestBatch
+                }
+                Some(server_pull_message::Payload::DeleteList(list)) => {
+                    // Daemon authoritative mirror-purge list (closes F4).
+                    // Stored verbatim; the CLI applies these deletions
+                    // after the transfer completes.
+                    let entries: Vec<PathBuf> =
+                        list.relative_paths.into_iter().map(PathBuf::from).collect();
+                    report.paths_to_delete = Some(entries);
                 }
                 Some(server_pull_message::Payload::FileHeader(header)) => {
                     finalize_active_file(&mut active_file, progress).await?;

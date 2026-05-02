@@ -157,6 +157,13 @@ pub struct TransferArgs {
     /// Force exact mirror even if destination files are newer (dangerous)
     #[arg(long, help_heading = "Comparison")]
     pub force: bool,
+    /// Mirror deletion scope: `subset` (default) deletes only files in the
+    /// source filter scope; `all` deletes any destination file absent from
+    /// the (filtered) source set, including files that wouldn't have been
+    /// transferred in the first place. `all` is destructive — use with
+    /// caution.
+    #[arg(long, value_name = "SCOPE", default_value = "subset", value_parser = ["subset", "all"], help_heading = "Comparison")]
+    pub delete_scope: String,
 
     // -- Reliability options: recovery + retries.
     /// Resume interrupted transfers using block-level comparison
@@ -235,6 +242,14 @@ impl TransferArgs {
             return false;
         }
         std::io::stdout().is_terminal()
+    }
+
+    /// True when `--delete-scope all` was passed. Maps onto
+    /// `MirrorMode::All` on the wire — every destination file absent
+    /// from the (filtered) source set is purged, including files
+    /// outside the filter scope. Defaults to false (`subset`).
+    pub fn delete_scope_all(&self) -> bool {
+        self.delete_scope.eq_ignore_ascii_case("all")
     }
 }
 

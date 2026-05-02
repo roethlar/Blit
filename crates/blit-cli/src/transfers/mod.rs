@@ -220,6 +220,52 @@ pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
     build_filter_from_inputs(&FilterInputs::from_transfer(args))
 }
 
+/// Build the wire-side `FilterSpec` proto message from CLI args.
+/// Used by the remote pull path so the daemon enforces the same
+/// filter the CLI would have applied locally. `--files-from` is
+/// read here and shipped expanded so the daemon doesn't have to
+/// reach back into the client's filesystem.
+pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::generated::FilterSpec> {
+    use blit_core::generated::FilterSpec;
+    let mut spec = FilterSpec {
+        include: args.include.clone(),
+        exclude: args.exclude.clone(),
+        min_size: None,
+        max_size: None,
+        min_age_secs: None,
+        max_age_secs: None,
+        files_from: Vec::new(),
+    };
+    if let Some(s) = args.min_size.as_deref() {
+        spec.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
+    }
+    if let Some(s) = args.max_size.as_deref() {
+        spec.max_size = Some(parse_size(s).with_context(|| format!("--max-size {s}"))?);
+    }
+    if let Some(s) = args.min_age.as_deref() {
+        spec.min_age_secs = Some(
+            parse_duration(s)
+                .with_context(|| format!("--min-age {s}"))?
+                .as_secs(),
+        );
+    }
+    if let Some(s) = args.max_age.as_deref() {
+        spec.max_age_secs = Some(
+            parse_duration(s)
+                .with_context(|| format!("--max-age {s}"))?
+                .as_secs(),
+        );
+    }
+    if let Some(path) = args.files_from.as_ref() {
+        let entries = FileFilter::load_files_from(path)?;
+        spec.files_from = entries
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+    }
+    Ok(spec)
+}
+
 /// Build a `FileFilter` from filter inputs. Single helper used by all
 /// commands (copy/mirror/move/check) so filter behavior is identical
 /// regardless of which CLI verb invoked it. The orchestrator-side
@@ -520,6 +566,7 @@ mod tests {
             max_size: None,
             min_age: None,
             max_age: None,
+            delete_scope: "subset".into(),
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;
@@ -565,6 +612,7 @@ mod tests {
             max_size: None,
             min_age: None,
             max_age: None,
+            delete_scope: "subset".into(),
         };
 
         runtime().block_on(run_local_transfer(&ctx, &args, &src, &dest, false))?;

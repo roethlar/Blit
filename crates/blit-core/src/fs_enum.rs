@@ -145,6 +145,18 @@ impl FileFilter {
         self.should_include_dir(path)
     }
 
+    /// Filter check given only a relative path + manifest metadata.
+    /// Used when we don't have an absolute on-disk path — e.g. the
+    /// daemon evaluating "would this client-side file have been
+    /// allowed by the source filter, if it had existed on the source?"
+    /// during MirrorMode::FilteredSubset deletion scoping.
+    ///
+    /// Filename-based globs work because the filename component is the
+    /// same regardless of which root the path is measured under.
+    pub fn allows_relative(&self, rel_path: &Path, size: u64, mtime: Option<SystemTime>) -> bool {
+        self.allows_entry(Some(rel_path), rel_path, size, mtime)
+    }
+
     /// Full filter check. `rel_path` enables `files_from` matching;
     /// `mtime` enables age filtering. Both default to permissive when
     /// `None` (so back-compat callers via `allows_file` still work).

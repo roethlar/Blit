@@ -199,6 +199,14 @@ message ServerPullMessage {
     BlockHashRequest block_hash_request = 9;  // Server requests block hashes for resume
     BlockTransfer block_transfer = 10;        // Server sends a block for resume
     BlockTransferComplete block_complete = 11; // Server signals file resume complete
+    // Authoritative deletion list for mirror mode. Server has the
+    // filtered source manifest and the unfiltered client manifest;
+    // it computes exactly which client paths should be removed (with
+    // MirrorMode::FilteredSubset, only client files that match the
+    // source filter are candidates) and tells the client. Replaces
+    // the prior "client walks dest tree" purge inference, which
+    // mis-purged unchanged files and ignored filter scope.
+    FileList delete_list = 12;
   }
 }
 

@@ -320,3 +320,131 @@ Status:
 
 - Step 3b: accepted.
 - No new blocking findings.
+
+## Round 4 - Step 4A PullSync Wire Migration
+
+Reviewed change:
+
+- `e503938 feat(step-4A): PullSync wire migration to TransferOperationSpec`
+
+DEVLOG source:
+
+- `2026-05-02 04:15:00Z` entry describing the PullSync move from
+  `PullSyncHeader` to `TransferOperationSpec`.
+
+Verification:
+
+- `cargo test --workspace` passed: 214 tests, 0 failures, 1 ignored doc test.
+- `cargo fmt -- --check` passed.
+- Existing unrelated warnings remain: deprecated macOS FSEvents API and an
+  unused macOS capability test variable.
+
+Verdict:
+
+The wire migration is directionally correct. Removing `PullSyncHeader` avoids
+carrying the old release-internal protocol forward, and routing PullSync through
+`TransferOperationSpec` is the right contract boundary for the next steps.
+However, the implementation still treats the protobuf message as a loose flag
+bag at the daemon boundary. Two issues should be fixed before Step 4B builds
+behavior on top of this contract.
+
+Findings:
+
+### R4-F1. PullSync accepts unknown/default operation specs instead of validating the contract
+
+Severity: Medium
+
+`proto/blit.proto:298` to `proto/blit.proto:301` says receivers should reject
+operation spec versions they do not understand, but
+`crates/blit-daemon/src/service/pull_sync.rs:57` to
+`crates/blit-daemon/src/service/pull_sync.rs:60` accepts any `spec_version`
+and silently defaults invalid `mirror_mode` / `compare_mode` enum values to
+`Off` / `SizeMtime`.
+
+This weakens the main value of the migration. A malformed, default, or future
+spec can execute as a valid pull with default semantics instead of failing at
+the wire boundary. With no backward-compatibility requirement, this should be
+strict rather than permissive.
+
+Recommendation:
+
+Reject `spec.spec_version != 1`, reject invalid enum values, and make that
+normalization happen in one helper rather than scattered inline in
+`handle_pull_sync_stream`. This also addresses the earlier R2-F2 concern that
+the protobuf shape needs a normalized Rust intent before downstream behavior
+depends on it.
+
+### R4-F2. `IgnoreExisting` is still modeled as a comparison mode, so CLI bool combinations are silently prioritized
+
+Severity: Medium
+
+`crates/blit-core/src/remote/pull.rs:410` to
+`crates/blit-core/src/remote/pull.rs:419` collapses local bool options into one
+`ComparisonMode` by precedence. The daemon then re-expands
+`ComparisonMode::IgnoreExisting` into `(CompareMode::Default, true)` at
+`crates/blit-daemon/src/service/pull_sync.rs:247` to
+`crates/blit-daemon/src/service/pull_sync.rs:254`.
+
+That acknowledges `ignore_existing` is orthogonal to comparison mode, but the
+wire contract cannot represent it orthogonally. The CLI still exposes
+`--ignore-existing` and `--force` as independent booleans at
+`crates/blit-cli/src/cli.rs:154` to `crates/blit-cli/src/cli.rs:159`, so a user
+can still construct combinations locally. For example, `--force
+--ignore-existing` used to set both flags and the comparison layer skipped
+existing files because `ignore_existing` short-circuited. Step 4A now picks
+`Force` first and drops `ignore_existing`.
+
+Recommendation:
+
+Either make `ignore_existing` a separate `TransferOperationSpec` field (or a
+nested comparison settings message with `mode` plus `ignore_existing`), or add
+CLI/core normalization that rejects conflicting combinations before building
+the spec. Do not rely on precedence ordering while claiming the new type makes
+nonsensical states unconstructible.
+
+### R4-F3. Pull client advertises filter capability and comments imply F10 is closed before filters are wired
+
+Severity: Low
+
+`crates/blit-core/src/remote/pull.rs:407` to
+`crates/blit-core/src/remote/pull.rs:409` says filter rules ride in the spec
+and are honored by the daemon, but the same function sends
+`FilterSpec::default()` at `crates/blit-core/src/remote/pull.rs:437`.
+`crates/blit-cli/src/transfers/remote.rs:231` to
+`crates/blit-cli/src/transfers/remote.rs:249` still bails on filter args for
+remote-source transfers, and the daemon explicitly says filter parity is Step
+4B at `crates/blit-daemon/src/service/pull_sync.rs:61` to
+`crates/blit-daemon/src/service/pull_sync.rs:63`.
+
+Recommendation:
+
+Keep the 4A comments and capability advertisement honest: this commit defines
+the wire slot but does not close F10. Step 4B should be the commit that sends a
+real `FilterSpec`, applies it during daemon enumeration, removes the CLI bail,
+and adds filtered-mirror tests.
+
+### R4-F4. Proto/docs still describe old compatibility assumptions
+
+Severity: Low
+
+`proto/blit.proto:285` to `proto/blit.proto:290` still says
+`TransferOperationSpec` is not wired into any RPC and that `PullSyncHeader`
+remains the active PullSync control message. `proto/blit.proto:416` to
+`proto/blit.proto:428` also describes a `supports_filter_spec` fallback path
+for old daemons, which no longer matches the project's no-backward-compatibility
+position.
+
+Recommendation:
+
+Clean up the stale comments in the next protocol pass. The code has moved, so
+the contract comments should now describe the active PullSync shape rather than
+the pre-4A migration plan.
+
+Status:
+
+- Step 4A: accepted as a structural migration.
+- R2-F2 remains open and is now concrete: add a normalized operation intent and
+  strict wire validation.
+- F10 remains open until Step 4B sends and applies real filters.
+- F4 remains open until mirror deletion uses an exact delete list and filtered
+  subset semantics are tested.
