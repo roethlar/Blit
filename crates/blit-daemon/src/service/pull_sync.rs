@@ -109,10 +109,11 @@ pub(crate) async fn handle_pull_sync_stream(
     send_manifest_batch(&tx, server_manifest.len() as u64, total_bytes).await?;
 
     // Map protocol ComparisonMode onto the internal CompareMode used
-    // by manifest comparison primitives. Force/IgnoreTimes/SizeOnly/
-    // Checksum/SizeMtime collapse the previous bool-soup; the
-    // ignore_existing case becomes a separate field below.
-    let (compare_mode, ignore_existing) = compare_mode_to_internal(compare_mode_kind);
+    // by manifest comparison primitives. ignore_existing is now its
+    // own orthogonal axis on the wire (R4-F2) so we read it directly
+    // from the normalized spec rather than re-expanding an enum.
+    let compare_mode = compare_mode_to_internal(compare_mode_kind);
+    let ignore_existing = spec.ignore_existing;
 
     // Compare manifests: server files are source, client files are target
     let compare_opts = CompareOptions {
@@ -244,19 +245,17 @@ async fn receive_spec(
 }
 
 /// Translate the protocol-level `ComparisonMode` enum onto the
-/// internal `CompareMode` plus the orthogonal `ignore_existing` flag.
-/// `IgnoreExisting` is a separate axis on the comparison primitives,
-/// so we surface it as both an enum case (wire) and a separate option
-/// field (internal).
-fn compare_mode_to_internal(mode: ComparisonMode) -> (CompareMode, bool) {
+/// internal `CompareMode`. `ignore_existing` is no longer carried via
+/// the enum — it's an orthogonal field on `TransferOperationSpec`
+/// (R4-F2) and the caller reads it from the normalized spec directly.
+fn compare_mode_to_internal(mode: ComparisonMode) -> CompareMode {
     match mode {
-        ComparisonMode::Checksum => (CompareMode::Checksum, false),
-        ComparisonMode::SizeOnly => (CompareMode::SizeOnly, false),
-        ComparisonMode::IgnoreTimes => (CompareMode::IgnoreTimes, false),
-        ComparisonMode::Force => (CompareMode::Force, false),
-        ComparisonMode::IgnoreExisting => (CompareMode::Default, true),
+        ComparisonMode::Checksum => CompareMode::Checksum,
+        ComparisonMode::SizeOnly => CompareMode::SizeOnly,
+        ComparisonMode::IgnoreTimes => CompareMode::IgnoreTimes,
+        ComparisonMode::Force => CompareMode::Force,
         // Unspecified | SizeMtime — both fall back to the historical default.
-        _ => (CompareMode::Default, false),
+        _ => CompareMode::Default,
     }
 }
 

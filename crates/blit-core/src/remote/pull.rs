@@ -401,18 +401,16 @@ impl RemotePullClient {
             .into_inner();
 
         // Build the unified TransferOperationSpec from the client's
-        // CLI args. ComparisonMode collapses what used to be a 5-bool
-        // soup (size_only, ignore_times, ignore_existing, force,
-        // checksum) into a typed enum that rejects nonsensical
-        // combinations at the type level. Filter rules ride along
-        // here too — the daemon honors them via FilteredSource on its
-        // FsTransferSource (closes F10 in the same migration).
+        // CLI args. ComparisonMode now covers only the "given the
+        // file is being considered, what counts as a match?" axis;
+        // the orthogonal "skip if dst exists" axis travels in the
+        // top-level `ignore_existing` spec field. The CLI rejects
+        // `--force --ignore-existing` (contradictory) before reaching
+        // here — but the spec normalizer also rejects it defensively.
         let compare_mode = if options.ignore_times {
             ComparisonMode::IgnoreTimes
         } else if options.force {
             ComparisonMode::Force
-        } else if options.ignore_existing {
-            ComparisonMode::IgnoreExisting
         } else if options.size_only {
             ComparisonMode::SizeOnly
         } else if options.checksum {
@@ -448,6 +446,7 @@ impl RemotePullClient {
                     supports_filter_spec: true,
                 }),
                 force_grpc,
+                ignore_existing: options.ignore_existing,
             })),
         })
         .await

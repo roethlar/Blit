@@ -13,6 +13,11 @@ pub struct LocalMirrorOptions {
     pub preserve_symlinks: bool,
     pub include_symlinks: bool,
     pub skip_unchanged: bool,
+    /// Skip any file the destination already has, regardless of
+    /// comparison mode. Orthogonal to `checksum`/`skip_unchanged`;
+    /// matches the `ignore_existing` field on `TransferOperationSpec`
+    /// for full pipeline parity across local/push/pull paths.
+    pub ignore_existing: bool,
     pub checksum: bool,
     pub workers: usize,
     pub preserve_times: bool,
@@ -38,6 +43,7 @@ impl Default for LocalMirrorOptions {
             preserve_symlinks: true,
             include_symlinks: true,
             skip_unchanged: true,
+            ignore_existing: false,
             checksum: false,
             workers: num_cpus::get().max(1),
             preserve_times: true,

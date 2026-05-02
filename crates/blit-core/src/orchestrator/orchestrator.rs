@@ -338,6 +338,7 @@ impl TransferOrchestrator {
         let dest_root_buf = dest_root.to_path_buf();
         let filter = options.filter.clone_without_cache();
         let skip_unchanged = options.skip_unchanged;
+        let ignore_existing = options.ignore_existing;
         // Translate the orchestrator's bool `checksum` flag onto the
         // unified ComparisonMode enum. Other variants (SizeOnly,
         // IgnoreTimes, etc.) become first-class once pull_sync.rs
@@ -384,6 +385,7 @@ impl TransferOrchestrator {
                         src_root: &src,
                         dst_root: &dst,
                         compare_mode,
+                        ignore_existing,
                         plan_options: plan_opts,
                         skip_unchanged,
                     },

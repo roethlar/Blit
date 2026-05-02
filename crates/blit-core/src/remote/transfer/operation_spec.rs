@@ -69,6 +69,11 @@ pub struct NormalizedTransferOperation {
     pub capabilities: PeerCapabilities,
     /// Whether the initiator requested gRPC bulk transport.
     pub force_grpc: bool,
+    /// Skip any file the target already has, regardless of
+    /// `compare_mode`. Orthogonal to `compare_mode`: this controls
+    /// whether we look at the file at all; `compare_mode` controls
+    /// what counts as "matching" once we do.
+    pub ignore_existing: bool,
 }
 
 impl NormalizedTransferOperation {
@@ -96,6 +101,9 @@ impl NormalizedTransferOperation {
             .with_context(|| format!("invalid compare_mode {}", spec.compare_mode))?;
         let mirror_mode = mirror_mode_from_proto(spec.mirror_mode)
             .with_context(|| format!("invalid mirror_mode {}", spec.mirror_mode))?;
+        if spec.ignore_existing && matches!(compare_mode, ComparisonMode::Force) {
+            bail!("ignore_existing=true with compare_mode=Force is contradictory");
+        }
         let resume = spec.resume.unwrap_or_default();
         let capabilities = spec.client_capabilities.unwrap_or_default();
         let filter = spec
@@ -114,6 +122,7 @@ impl NormalizedTransferOperation {
             filter,
             capabilities,
             force_grpc: spec.force_grpc,
+            ignore_existing: spec.ignore_existing,
         })
     }
 
@@ -188,6 +197,7 @@ mod tests {
             resume: None,
             client_capabilities: None,
             force_grpc: false,
+            ignore_existing: false,
         }
     }
 
@@ -234,6 +244,23 @@ mod tests {
         spec.mirror_mode = 999;
         let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
         assert!(err.to_string().contains("mirror_mode 999"));
+    }
+
+    #[test]
+    fn force_with_ignore_existing_rejected() {
+        let mut spec = empty_spec();
+        spec.compare_mode = ProtoCompareMode::Force as i32;
+        spec.ignore_existing = true;
+        let err = NormalizedTransferOperation::from_spec(spec).unwrap_err();
+        assert!(err.to_string().contains("contradictory"));
+    }
+
+    #[test]
+    fn ignore_existing_passes_through() {
+        let mut spec = empty_spec();
+        spec.ignore_existing = true;
+        let normalized = NormalizedTransferOperation::from_spec(spec).unwrap();
+        assert!(normalized.ignore_existing);
     }
 
     #[test]

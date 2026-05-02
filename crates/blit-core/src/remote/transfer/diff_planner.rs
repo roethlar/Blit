@@ -19,7 +19,7 @@
 //! As of R2-F1 (`docs/reviews/followup_review_2026-05-02.md`) we honor
 //! every variant with concrete semantics — no silent fall-through to
 //! size+mtime. This means callers passing `SizeOnly`, `IgnoreTimes`,
-//! `IgnoreExisting`, or `Force` get the behavior the wire enum
+//! or `Force` get the behavior the wire enum
 //! advertises, not whatever the historical default happened to do.
 
 use std::path::Path;
@@ -65,6 +65,10 @@ pub struct LocalDiffInputs<'a> {
     pub dst_root: &'a Path,
     /// How to decide whether a target-existing file matches.
     pub compare_mode: ComparisonMode,
+    /// When true, skip any file the destination already has,
+    /// regardless of `compare_mode`. Orthogonal axis; matches the
+    /// `ignore_existing` field on `TransferOperationSpec`.
+    pub ignore_existing: bool,
     /// Knobs for the tar / large / raw planner (unchanged from the
     /// pre-extraction call site).
     pub plan_options: PlanOptions,
@@ -91,6 +95,7 @@ pub fn plan_local_mirror(
             inputs.src_root,
             inputs.dst_root,
             inputs.compare_mode,
+            inputs.ignore_existing,
         )
     } else {
         source_headers
@@ -102,6 +107,10 @@ pub fn plan_local_mirror(
 
 /// Drop headers whose destination file already matches the source
 /// under the chosen comparison mode. Keeps headers that need transfer.
+///
+/// `ignore_existing` is the orthogonal "skip if dst exists" axis from
+/// `TransferOperationSpec`: when true, present destination files are
+/// dropped before `compare_mode` is consulted at all.
 ///
 /// This is the local-mirror flavor: it stats the destination directly.
 /// Remote-source variants (where the destination manifest arrives over
@@ -116,12 +125,16 @@ pub fn filter_unchanged(
     src_root: &Path,
     dst_root: &Path,
     compare_mode: ComparisonMode,
+    ignore_existing: bool,
 ) -> Vec<FileHeader> {
     headers
         .iter()
         .filter(|h| {
             let src = src_root.join(&h.relative_path);
             let dst = dst_root.join(&h.relative_path);
+            if ignore_existing && dst.exists() {
+                return false;
+            }
             local_needs_copy(&src, &dst, compare_mode).unwrap_or(true)
         })
         .cloned()
@@ -142,15 +155,16 @@ pub fn filter_unchanged(
 ///   - `SizeOnly`: copy when missing or sizes differ; mtime ignored.
 ///   - `IgnoreTimes`: always copy. Equivalent to rsync's
 ///     `--ignore-times` — destination is unconditionally rewritten.
-///   - `IgnoreExisting`: copy only when destination is missing.
-///     Existing files are left alone regardless of differences.
 ///   - `Force`: always copy, even if dest is newer than source.
 ///     Equivalent to `IgnoreTimes` for one-way mirroring; named
 ///     differently because the rsync semantic also disables some
 ///     "skip newer" guards in mirror flows.
+///
+/// "Skip if destination exists" is not a `ComparisonMode` variant —
+/// it's the orthogonal `ignore_existing` flag handled in
+/// `filter_unchanged` before this function runs.
 fn local_needs_copy(src: &Path, dst: &Path, mode: ComparisonMode) -> Result<bool> {
     match mode {
-        ComparisonMode::IgnoreExisting => Ok(!dst.exists()),
         ComparisonMode::IgnoreTimes | ComparisonMode::Force => Ok(true),
         ComparisonMode::SizeOnly => {
             if !dst.exists() {
@@ -254,7 +268,7 @@ mod tests {
         sync_mtimes(&src, &dst, "same.txt");
 
         let headers = vec![header("same.txt", 16), header("diff.txt", 3)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime, false);
         assert_eq!(kept_paths(&kept), vec!["diff.txt"]);
     }
 
@@ -262,7 +276,7 @@ mod tests {
     fn size_mtime_keeps_missing_dest() {
         let (src, dst, _tmp) = make_trees(&[("only.txt", b"hi")], &[]);
         let headers = vec![header("only.txt", 2)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime, false);
         assert_eq!(kept.len(), 1);
     }
 
@@ -272,7 +286,7 @@ mod tests {
         // Don't sync mtimes — they'll differ. SizeOnly should still drop
         // the entry because content sizes match.
         let headers = vec![header("same.txt", 6)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly, false);
         assert!(
             kept.is_empty(),
             "SizeOnly must skip files with matching size regardless of mtime"
@@ -283,7 +297,7 @@ mod tests {
     fn size_only_keeps_size_mismatch() {
         let (src, dst, _tmp) = make_trees(&[("file.txt", b"longer")], &[("file.txt", b"short")]);
         let headers = vec![header("file.txt", 6)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly, false);
         assert_eq!(kept.len(), 1);
     }
 
@@ -296,7 +310,7 @@ mod tests {
         sync_mtimes(&src, &dst, "a.txt");
         sync_mtimes(&src, &dst, "b.txt");
         let headers = vec![header("a.txt", 1), header("b.txt", 1)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::IgnoreTimes);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::IgnoreTimes, false);
         assert_eq!(kept.len(), 2, "IgnoreTimes must always copy");
     }
 
@@ -305,22 +319,26 @@ mod tests {
         let (src, dst, _tmp) = make_trees(&[("a.txt", b"x")], &[("a.txt", b"x")]);
         sync_mtimes(&src, &dst, "a.txt");
         let headers = vec![header("a.txt", 1)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Force);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Force, false);
         assert_eq!(kept.len(), 1);
     }
 
     #[test]
-    fn ignore_existing_skips_existing() {
+    fn ignore_existing_skips_existing_regardless_of_mode() {
+        // ignore_existing is orthogonal to compare_mode: even Force,
+        // which would otherwise always copy, must respect it.
         let (src, dst, _tmp) = make_trees(
             &[("a.txt", b"new"), ("b.txt", b"only-on-src")],
             &[("a.txt", b"old")],
         );
         let headers = vec![header("a.txt", 3), header("b.txt", 11)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::IgnoreExisting);
+        // Use SizeMtime as the mode (Force+ignore_existing is rejected
+        // at the spec normalizer); we still expect a.txt to be skipped.
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime, true);
         assert_eq!(
             kept_paths(&kept),
             vec!["b.txt"],
-            "IgnoreExisting keeps only files missing on dest"
+            "ignore_existing keeps only files missing on dest"
         );
     }
 
@@ -332,7 +350,7 @@ mod tests {
         );
         // Don't sync mtimes — Checksum mode shouldn't care about mtime.
         let headers = vec![header("same.txt", 15)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum, false);
         assert!(
             kept.is_empty(),
             "Checksum should skip byte-identical files regardless of mtime"
@@ -344,7 +362,7 @@ mod tests {
         let (src, dst, _tmp) =
             make_trees(&[("a.txt", b"hello world")], &[("a.txt", b"goodbye foo")]);
         let headers = vec![header("a.txt", 11)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum, false);
         assert_eq!(kept.len(), 1);
     }
 
@@ -356,7 +374,7 @@ mod tests {
         let (src, dst, _tmp) = make_trees(&[("same.txt", b"x")], &[("same.txt", b"x")]);
         sync_mtimes(&src, &dst, "same.txt");
         let headers = vec![header("same.txt", 1)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Unspecified);
+        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Unspecified, false);
         assert!(kept.is_empty());
     }
 }

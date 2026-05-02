@@ -152,7 +152,7 @@ pub struct TransferArgs {
     #[arg(long, conflicts_with_all = ["checksum", "size_only"], help_heading = "Comparison")]
     pub ignore_times: bool,
     /// Skip files that already exist on the destination (regardless of differences)
-    #[arg(long, help_heading = "Comparison")]
+    #[arg(long, conflicts_with = "force", help_heading = "Comparison")]
     pub ignore_existing: bool,
     /// Force exact mirror even if destination files are newer (dangerous)
     #[arg(long, help_heading = "Comparison")]

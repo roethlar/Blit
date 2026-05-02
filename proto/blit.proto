@@ -282,12 +282,12 @@ message AuthRequest { string token = 1; }
 message AuthResponse { bool authenticated = 1; }
 
 // ─────────────────────────────────────────────────────────────────────
-// TransferOperationSpec — the unified contract that step 4 of the
-// pipeline-unification plan (docs/plan/PIPELINE_UNIFICATION.md) will
-// hand from the initiator to the origin. Defined here as the canonical
-// shape; not yet wired into any RPC. PushHeader and PullSyncHeader stay
-// as the today-active control messages until the DiffPlanner extraction
-// (step 3) and pull_sync.rs refactor (step 4) port to this message.
+// TransferOperationSpec — the unified contract handed from initiator
+// to origin for every transfer (push, pull, mirror, remote→remote).
+// The wire shape — typed enums and orthogonal fields, not bool soup.
+// Receivers normalize this via `NormalizedTransferOperation::from_spec`
+// at the boundary; downstream code never sees raw proto-`Unspecified`
+// or unknown enum values.
 // ─────────────────────────────────────────────────────────────────────
 
 // What the initiator tells the origin about a transfer. Normalized
@@ -337,6 +337,14 @@ message TransferOperationSpec {
   // be reached. Origin still honors filter/compare/mirror/resume; only
   // the byte transport changes.
   bool force_grpc = 9;
+
+  // When true, the origin skips any file the target already has,
+  // regardless of comparison mode. Orthogonal to compare_mode: this
+  // controls "should we look at this file at all?" while compare_mode
+  // controls "given that we're looking, do the bytes match?". The
+  // CLI rejects `--ignore-existing` combined with `--force` since
+  // those are semantically contradictory.
+  bool ignore_existing = 10;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -366,9 +374,16 @@ message FilterSpec {
   repeated string files_from = 7;
 }
 
-// How the origin decides which files need transfer. The origin's
-// DiffPlanner consults this against the target's destination manifest.
+// How the origin decides which files need transfer when both sides
+// have the file. Orthogonal to `ignore_existing`, which controls
+// whether the comparison happens at all for already-present files.
 enum ComparisonMode {
+  // Reserved: previously COMPARISON_MODE_IGNORE_EXISTING, removed in
+  // favor of the orthogonal `ignore_existing` field on
+  // TransferOperationSpec. No future variant should reuse number 5.
+  reserved 5;
+  reserved "COMPARISON_MODE_IGNORE_EXISTING";
+
   // Treat as SIZE_MTIME (the historical default).
   COMPARISON_MODE_UNSPECIFIED = 0;
   // Match if size and mtime (within tolerance) agree.
@@ -380,8 +395,6 @@ enum ComparisonMode {
   COMPARISON_MODE_SIZE_ONLY = 3;
   // Always transfer; ignore both size and mtime on the target side.
   COMPARISON_MODE_IGNORE_TIMES = 4;
-  // Skip any file the target already has, regardless of differences.
-  COMPARISON_MODE_IGNORE_EXISTING = 5;
   // Transfer regardless of target state. Equivalent to dest is empty.
   COMPARISON_MODE_FORCE = 6;
 }
@@ -415,15 +428,14 @@ message ResumeSettings {
 
 // Peer capability advertisement. Used during initial spec exchange so
 // the origin can emit only payload shapes the target understands.
-// Adding a capability is backward-compatible; receivers default
-// missing fields to false (not supported).
+// Receivers default missing fields to false (not supported).
 message PeerCapabilities {
   bool supports_resume = 1;
   bool supports_tar_shards = 2;
   bool supports_data_plane_tcp = 3;
-  // Set by clients that send TransferOperationSpec. Daemons that
-  // implement step 4 of the pipeline-unification plan will set this
-  // when responding so newer clients can fall back to PullSyncHeader
-  // when talking to older daemons.
+  // Receiver implements the FilterSpec pipeline chokepoint
+  // (FilteredSource on its origin-side TransferSource). Senders set
+  // this to true; older receivers that didn't honor filter rules
+  // will not.
   bool supports_filter_spec = 4;
 }
