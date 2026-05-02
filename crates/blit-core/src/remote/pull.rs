@@ -504,6 +504,7 @@ impl RemotePullClient {
 
         let mut report = RemotePullReport::default();
         let mut active_file: Option<(File, PathBuf)> = None;
+        let mut active_shard: Option<InProgressShard> = None;
         let mut data_plane_handle: Option<JoinHandle<Result<DataPlaneResult>>> = None;
         let mut files_to_delete = 0u64;
 
@@ -570,6 +571,37 @@ impl RemotePullClient {
                     report.bytes_transferred += content.len() as u64;
                     if let Some(progress) = progress {
                         progress.report_payload(0, content.len() as u64);
+                    }
+                }
+                Some(server_pull_message::Payload::TarShardHeader(header)) => {
+                    finalize_active_file(&mut active_file, progress).await?;
+                    if active_shard.is_some() {
+                        bail!("received TarShardHeader while a previous shard was open");
+                    }
+                    active_shard = Some(InProgressShard {
+                        files: header.files,
+                        buffer: Vec::with_capacity(header.archive_size as usize),
+                    });
+                }
+                Some(server_pull_message::Payload::TarShardChunk(chunk)) => {
+                    let shard = active_shard
+                        .as_mut()
+                        .ok_or_else(|| eyre!("TarShardChunk arrived without a preceding header"))?;
+                    if let Some(progress) = progress {
+                        progress.report_payload(0, chunk.content.len() as u64);
+                    }
+                    shard.buffer.extend_from_slice(&chunk.content);
+                }
+                Some(server_pull_message::Payload::TarShardComplete(_)) => {
+                    let shard = active_shard
+                        .take()
+                        .ok_or_else(|| eyre!("TarShardComplete with no active shard"))?;
+                    let stats = apply_pull_tar_shard(dest_root, shard, track_paths)
+                        .with_context(|| "applying tar shard")?;
+                    report.files_transferred += stats.files;
+                    report.bytes_transferred += stats.bytes;
+                    if track_paths {
+                        report.downloaded_paths.extend(stats.paths);
                     }
                 }
                 Some(server_pull_message::Payload::Negotiation(neg)) => {
@@ -857,6 +889,86 @@ async fn finalize_active_file(
         }
     }
     Ok(())
+}
+
+/// Buffer state for a tar shard arriving on the gRPC pull control
+/// plane (Step 4C). The header carries the expected file list and
+/// archive size; chunks accumulate into the buffer until Complete
+/// arrives, at which point we hand it to `apply_pull_tar_shard`.
+struct InProgressShard {
+    files: Vec<FileHeader>,
+    buffer: Vec<u8>,
+}
+
+struct ShardApplyStats {
+    files: usize,
+    bytes: u64,
+    paths: Vec<PathBuf>,
+}
+
+/// Extract a tar-shard buffer into `dest_root`. Mirror image of the
+/// daemon's `apply_tar_shard_sync` (push receive side); shared
+/// semantics, different runtime context.
+fn apply_pull_tar_shard(
+    dest_root: &Path,
+    shard: InProgressShard,
+    track_paths: bool,
+) -> Result<ShardApplyStats> {
+    use std::collections::HashMap;
+    use std::io::Cursor;
+    use tar::Archive;
+
+    let mut expected: HashMap<String, FileHeader> = shard
+        .files
+        .into_iter()
+        .map(|h| (h.relative_path.clone(), h))
+        .collect();
+
+    let mut stats = ShardApplyStats {
+        files: 0,
+        bytes: 0,
+        paths: Vec::new(),
+    };
+
+    let mut archive = Archive::new(Cursor::new(shard.buffer));
+    let entries = archive.entries().context("tar shard entries")?;
+
+    for entry_result in entries {
+        let mut entry = entry_result.context("tar shard entry")?;
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        let raw_path = entry.path().context("tar shard path")?;
+        let rel_string = raw_path.to_string_lossy().replace('\\', "/");
+
+        let header = expected
+            .remove(&rel_string)
+            .ok_or_else(|| eyre!("tar shard produced unexpected entry '{rel_string}'"))?;
+
+        let safe_rel = sanitize_relative_path(&rel_string)?;
+        let dest_path = resolve_pull_dest(dest_root, &safe_rel);
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+
+        entry
+            .unpack(&dest_path)
+            .with_context(|| format!("unpacking {}", dest_path.display()))?;
+
+        stats.files += 1;
+        stats.bytes += header.size;
+        if track_paths {
+            stats.paths.push(safe_rel);
+        }
+    }
+
+    if !expected.is_empty() {
+        let missing: Vec<String> = expected.into_keys().collect();
+        bail!("tar shard missing expected entries: {missing:?}");
+    }
+
+    Ok(stats)
 }
 
 /// Owned-value version for spawning data plane receiver as background task. for spawning as background task.

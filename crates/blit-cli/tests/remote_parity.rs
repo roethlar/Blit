@@ -164,3 +164,57 @@ fn test_push_grpc_fallback() {
     let bytes = fs::read(&dest_file).expect("read remote file");
     assert_eq!(bytes, b"push-grpc-test");
 }
+
+#[cfg(unix)]
+#[test]
+fn test_pull_grpc_fallback_many_small_files() {
+    // Step 4C parity: many small files on the gRPC pull fallback path.
+    // The unified planner batches them into TarShard payloads (instead
+    // of the prior per-file FileHeader/FileData stream), and the
+    // client extracts on the receive side. Verifies arrival of all
+    // bytes for every file.
+    let ctx = TestContext::new();
+    let dest_dir = ctx.workspace.join("dest");
+
+    // Lay down many small files that the planner should batch as a
+    // tar shard rather than emitting individually.
+    let total_files: u32 = 50;
+    let mut expected: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..total_files {
+        let name = format!("small_{i:03}.txt");
+        let body = format!("file-{i:03}-payload").into_bytes();
+        fs::write(ctx.module_dir.join(&name), &body).expect("write small file");
+        expected.push((name, body));
+    }
+
+    let src_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("mirror")
+        .arg("--yes")
+        .arg("--force-grpc")
+        .arg(&src_remote)
+        .arg(&dest_dir);
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
+    if !output.status.success() {
+        panic!(
+            "pull failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for (name, expected_body) in &expected {
+        let dest_file = dest_dir.join(name);
+        assert!(
+            dest_file.exists(),
+            "missing dest file {} after gRPC pull",
+            dest_file.display()
+        );
+        let actual = fs::read(&dest_file).expect("read dest file");
+        assert_eq!(&actual, expected_body, "content mismatch for {name}");
+    }
+}

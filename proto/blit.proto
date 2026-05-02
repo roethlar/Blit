@@ -207,6 +207,15 @@ message ServerPullMessage {
     // the prior "client walks dest tree" purge inference, which
     // mis-purged unchanged files and ignored filter scope.
     FileList delete_list = 12;
+    // Tar-shard payloads on the gRPC server-streaming fallback. Same
+    // shape as ClientPushRequest's tar_shard_* — the daemon's
+    // GrpcServerStreamingSink emits these for batched small files
+    // when the TCP data plane isn't usable. Without these the gRPC
+    // fallback was artificially file-by-file, which left a
+    // performance gap relative to push.
+    TarShardHeader tar_shard_header = 13;
+    TarShardChunk tar_shard_chunk = 14;
+    TarShardComplete tar_shard_complete = 15;
   }
 }
 

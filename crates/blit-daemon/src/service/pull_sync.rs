@@ -13,8 +13,8 @@ use base64::{engine::general_purpose, Engine as _};
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
-    BlockTransferComplete, ClientPullMessage, ComparisonMode, DataTransferNegotiation, FileData,
-    FileHeader, FileList, ManifestBatch, MirrorMode, PullSummary, PullSyncAck, ServerPullMessage,
+    BlockTransferComplete, ClientPullMessage, ComparisonMode, DataTransferNegotiation, FileHeader,
+    FileList, ManifestBatch, MirrorMode, PullSummary, PullSyncAck, ServerPullMessage,
     TransferOperationSpec,
 };
 use blit_core::manifest::{
@@ -219,18 +219,12 @@ pub(crate) async fn handle_pull_sync_stream(
             .await?;
             send_summary(&tx, stats, true, scoped_deletions.len() as u64).await?;
         } else {
-            stream_via_grpc(&module, &entries_to_send, &tx).await?;
-            send_summary(
-                &tx,
-                TransferStats {
-                    files_transferred: entries_to_send.len() as u64,
-                    bytes_transferred: bytes_to_send,
-                    bytes_zero_copy: 0,
-                },
-                true,
-                scoped_deletions.len() as u64,
-            )
-            .await?;
+            // gRPC pull fallback uses the unified planner + sink so
+            // tar-shard batching applies to the same workloads that
+            // benefit from it on push (Step 4C).
+            let stats =
+                stream_via_grpc(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
+            send_summary(&tx, stats, true, scoped_deletions.len() as u64).await?;
         }
     } else if !effective_resume.is_empty() {
         // Data plane with block-level resume
@@ -438,35 +432,55 @@ async fn send_summary(
 }
 
 async fn stream_via_grpc(
-    module: &ModuleConfig,
-    entries: &[PullEntry],
+    _module: &ModuleConfig,
+    source_root: &Path,
+    entries: Vec<PullEntry>,
+    total_bytes: u64,
     tx: &PullSyncSender,
-) -> Result<(), Status> {
-    for entry in entries {
-        let abs_path = module.path.join(&entry.relative_path);
+) -> Result<TransferStats, Status> {
+    use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
+    use blit_core::remote::transfer::sink::GrpcServerStreamingSink;
+    use blit_core::remote::transfer::source::FsTransferSource;
+    use blit_core::remote::transfer::DEFAULT_PAYLOAD_PREFETCH;
+    use std::sync::Arc;
 
-        // Send header
-        tx.send(Ok(ServerPullMessage {
-            payload: Some(server_pull_message::Payload::FileHeader(
-                entry.header.clone(),
-            )),
-        }))
-        .await
-        .map_err(|_| Status::internal("failed to send file header"))?;
+    // Reuse the unified planner so gRPC fallback emits the same
+    // payload mix (single files / tar shards) as the TCP data plane —
+    // closes Step 4C, no artificial single-file cripple.
+    let tuning = determine_remote_tuning(total_bytes);
+    let plan_options = PlanOptions {
+        chunk_bytes_override: Some(tuning.chunk_bytes),
+        ..Default::default()
+    };
+    let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
+    let planned = plan_transfer_payloads(headers, source_root, plan_options)
+        .map_err(|err| Status::internal(format!("planning gRPC payloads: {err}")))?;
 
-        // Read and send file data
-        let content = tokio::fs::read(&abs_path).await.map_err(|e| {
-            Status::internal(format!("failed to read {}: {}", abs_path.display(), e))
-        })?;
+    let source: Arc<dyn TransferSource> =
+        Arc::new(FsTransferSource::new(source_root.to_path_buf()));
+    let sink: Arc<dyn blit_core::remote::transfer::sink::TransferSink> =
+        Arc::new(GrpcServerStreamingSink::new(
+            source.clone(),
+            tx.clone(),
+            tuning.chunk_bytes,
+            source_root.to_path_buf(),
+        ));
 
-        tx.send(Ok(ServerPullMessage {
-            payload: Some(server_pull_message::Payload::FileData(FileData { content })),
-        }))
-        .await
-        .map_err(|_| Status::internal("failed to send file data"))?;
-    }
+    let outcome = execute_sink_pipeline(
+        source,
+        vec![sink],
+        planned.payloads,
+        DEFAULT_PAYLOAD_PREFETCH,
+        None,
+    )
+    .await
+    .map_err(|err| Status::internal(format!("gRPC pull pipeline failed: {err}")))?;
 
-    Ok(())
+    Ok(TransferStats {
+        files_transferred: outcome.files_written as u64,
+        bytes_transferred: outcome.bytes_written,
+        bytes_zero_copy: 0,
+    })
 }
 
 async fn stream_via_data_plane(

@@ -20,6 +20,6 @@ pub use payload::{
 pub use pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
 pub use progress::{ProgressEvent, RemoteTransferProgress};
 pub use sink::{
-    DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, NullSink, SinkOutcome,
-    TransferSink,
+    DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
+    NullSink, SinkOutcome, TransferSink,
 };

@@ -853,6 +853,164 @@ impl TransferSink for GrpcFallbackSink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GrpcServerStreamingSink — daemon-side mirror of GrpcFallbackSink
+// ---------------------------------------------------------------------------
+
+/// Streams payloads from the daemon to a remote pull client over the
+/// gRPC server-streaming control plane. Mirror image of
+/// `GrpcFallbackSink` — same `PreparedPayload` inputs, same
+/// File / TarShard variants, just emitted as `ServerPullMessage` on
+/// the pull-server side.
+///
+/// Closes Step 4C: the prior `stream_via_grpc` was file-by-file, which
+/// left the gRPC fallback artificially slower than push for transfers
+/// dominated by small files (where push's tar shards win). With this
+/// sink, gRPC pull fallback runs the same planner output as the TCP
+/// data plane and emits the same payload shapes.
+pub struct GrpcServerStreamingSink {
+    source: Arc<dyn TransferSource>,
+    tx: tokio::sync::mpsc::Sender<Result<crate::generated::ServerPullMessage, tonic::Status>>,
+    chunk_bytes: usize,
+    src_label: PathBuf,
+}
+
+impl GrpcServerStreamingSink {
+    pub fn new(
+        source: Arc<dyn TransferSource>,
+        tx: tokio::sync::mpsc::Sender<Result<crate::generated::ServerPullMessage, tonic::Status>>,
+        chunk_bytes: usize,
+        src_label: PathBuf,
+    ) -> Self {
+        Self {
+            source,
+            tx,
+            chunk_bytes,
+            src_label,
+        }
+    }
+}
+
+#[async_trait]
+impl TransferSink for GrpcServerStreamingSink {
+    async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+        use crate::generated::server_pull_message::Payload as ServerPayload;
+        use crate::generated::{
+            FileData, ServerPullMessage, TarShardChunk, TarShardComplete, TarShardHeader,
+        };
+        use tokio::io::AsyncReadExt;
+
+        let chunk_size = self
+            .chunk_bytes
+            .max(super::data_plane::CONTROL_PLANE_CHUNK_SIZE);
+
+        match payload {
+            PreparedPayload::File(header) => {
+                let size = header.size;
+
+                self.tx
+                    .send(Ok(ServerPullMessage {
+                        payload: Some(ServerPayload::FileHeader(header.clone())),
+                    }))
+                    .await
+                    .map_err(|_| eyre::eyre!("gRPC pull stream closed"))?;
+
+                if size > 0 {
+                    let mut file = self
+                        .source
+                        .open_file(&header)
+                        .await
+                        .with_context(|| format!("opening {}", header.relative_path))?;
+
+                    let mut buffer = vec![0u8; chunk_size];
+                    let mut remaining = size;
+                    while remaining > 0 {
+                        let to_read = buffer.len().min(remaining as usize);
+                        let n = file
+                            .read(&mut buffer[..to_read])
+                            .await
+                            .with_context(|| format!("reading {}", header.relative_path))?;
+                        if n == 0 {
+                            eyre::bail!(
+                                "unexpected EOF reading {} ({} bytes remaining)",
+                                header.relative_path,
+                                remaining
+                            );
+                        }
+                        self.tx
+                            .send(Ok(ServerPullMessage {
+                                payload: Some(ServerPayload::FileData(FileData {
+                                    content: buffer[..n].to_vec(),
+                                })),
+                            }))
+                            .await
+                            .map_err(|_| eyre::eyre!("gRPC pull stream closed"))?;
+                        remaining -= n as u64;
+                    }
+                }
+
+                Ok(SinkOutcome {
+                    files_written: 1,
+                    bytes_written: size,
+                })
+            }
+            PreparedPayload::TarShard { headers, data } => {
+                let bytes: u64 = headers.iter().map(|h| h.size).sum();
+                let count = headers.len();
+
+                self.tx
+                    .send(Ok(ServerPullMessage {
+                        payload: Some(ServerPayload::TarShardHeader(TarShardHeader {
+                            files: headers,
+                            archive_size: data.len() as u64,
+                        })),
+                    }))
+                    .await
+                    .map_err(|_| eyre::eyre!("gRPC pull stream closed"))?;
+
+                for chunk in data.chunks(chunk_size) {
+                    self.tx
+                        .send(Ok(ServerPullMessage {
+                            payload: Some(ServerPayload::TarShardChunk(TarShardChunk {
+                                content: chunk.to_vec(),
+                            })),
+                        }))
+                        .await
+                        .map_err(|_| eyre::eyre!("gRPC pull stream closed"))?;
+                }
+
+                self.tx
+                    .send(Ok(ServerPullMessage {
+                        payload: Some(ServerPayload::TarShardComplete(TarShardComplete {})),
+                    }))
+                    .await
+                    .map_err(|_| eyre::eyre!("gRPC pull stream closed"))?;
+
+                Ok(SinkOutcome {
+                    files_written: count,
+                    bytes_written: bytes,
+                })
+            }
+            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                eyre::bail!(
+                    "GrpcServerStreamingSink does not handle FileBlock payloads (resume \
+                     uses block_transfer messages on the daemon's bidirectional stream)"
+                );
+            }
+        }
+    }
+
+    async fn finish(&self) -> Result<()> {
+        // No completion message — the caller is responsible for sending
+        // PullSummary after all sinks have finished.
+        Ok(())
+    }
+
+    fn root(&self) -> &Path {
+        &self.src_label
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
