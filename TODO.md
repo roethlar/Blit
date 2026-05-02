@@ -10,15 +10,15 @@ review. Pipeline architecture clarification + sequencing in
 
 ### Pipeline unification sequence (in order)
 
-- [ ] **F1 — P0** Centralize receive-side path sanitization. Shared
-      `safe_join` helper in `blit-core`. Apply at every receive-sink
-      path-join site (`sink.rs:218` streamed files, `sink.rs:426` tar
-      entries, `sink.rs:462` resume block writes, `sink.rs:498` block
-      completion, `pipeline.rs:348` FileHeader construction). Migrate
-      `pull.rs::sanitize_relative_path` and daemon `service/util.rs`
-      validators into the shared module. Adversarial tests: `..`,
-      absolute Unix paths, Windows drive prefixes, UNC, root, valid
-      `..`-containing filenames.
+- [x] **F1 — P0** Centralize receive-side path sanitization. Shared
+      `safe_join` helper in `blit-core`. Applied at every receive-sink
+      path-join site. Migrated `pull.rs::sanitize_relative_path` and
+      daemon `service/util.rs` validators into the shared module.
+      Adversarial tests in place. *(Landed `cc77074`. Followup
+      `docs/reviews/followup_review_2026-05-02.md` round 1: R1-F1
+      and R1-F3 fixed in a follow-up commit; R1-F2 deferred to F2 —
+      see below — because lexical safety can't address symlink
+      escape on its own.)*
 - [ ] **TransferOperationSpec** Define proto messages
       (`TransferOperationSpec`, `FilterSpec`, `ComparisonMode`,
       `MirrorMode`, `ResumeSettings`, `PeerCapabilities`) and Rust
@@ -39,7 +39,10 @@ review. Pipeline architecture clarification + sequencing in
 
 - [ ] **F2 — P0** Resolve daemon `use_chroot` truthfulness: implement
       canonical containment / symlink-escape protection, or remove the
-      advertised option and the documentation that promises it.
+      advertised option and the documentation that promises it. Note:
+      the F1 `safe_join` is lexical-only; F2's canonicalize-and-contain
+      pass operates after lexical safety to catch symlink-parent escape
+      (R1-F2 from `docs/reviews/followup_review_2026-05-02.md`).
 - [ ] **F4 — P1** Define and test filtered mirror delete semantics
       (`filtered` vs `all` destination delete scope). Needs a product
       decision before implementation.

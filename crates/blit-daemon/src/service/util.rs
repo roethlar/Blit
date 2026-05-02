@@ -34,15 +34,26 @@ pub(crate) async fn resolve_module(
         .ok_or_else(|| Status::not_found(format!("module '{}' not found", name)))
 }
 
-/// Validate a wire-supplied relative path and return its normalized
-/// form. Folds an empty input to `.` (legacy behavior — see
-/// `resolve_manifest_relative_path` for the empty-preserving variant).
+/// Validate a wire-supplied directory-or-request relative path and
+/// return its normalized form. Folds both empty and `"."` / `"./"`
+/// inputs to `PathBuf::from(".")` (module root) — request paths for
+/// list/find/du legitimately mean "the root" with these forms.
 ///
-/// Thin wrapper over `blit_core::path_safety::validate_wire_path` —
-/// the actual policy (reject `..`, absolute paths, Windows drive
-/// prefixes, UNC, NUL, etc.) lives in the shared module.
+/// File-path validation (per-file manifest entries, receive sink
+/// targets) uses `resolve_manifest_relative_path` which preserves
+/// empty as empty and rejects `"."` outright. The two variants exist
+/// because R1-F3 (`docs/reviews/followup_review_2026-05-02.md`)
+/// pointed out that conflating these contexts leads to bugs.
 #[allow(clippy::result_large_err)]
 pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
+    // Request-path-context fold: directory references (".", "./", "")
+    // all map to "module root." Done before strict file-path validation
+    // so the strict validator can keep rejecting these forms in
+    // file-path contexts.
+    let trimmed = rel.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        return Ok(PathBuf::from("."));
+    }
     let normalized = blit_core::path_safety::validate_wire_path(rel)
         .map_err(|e| Status::invalid_argument(format!("path not allowed: {}: {e}", rel)))?;
     if normalized.as_os_str().is_empty() {
