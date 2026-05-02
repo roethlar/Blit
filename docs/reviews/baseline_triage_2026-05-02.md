@@ -16,7 +16,7 @@ against the current tree (commit 503342c).
 |---------|-------------------|------------|-------------|
 | F1 | High | **Closed** (path safety primitive shared) | — |
 | F2 | High | **Open** | **1 (release-blocking)** |
-| F3 | Medium | Open | 4 (security default) |
+| F3 | Medium | **Reframed → docs/clarity item** | 9 (Low) |
 | F4 | Medium | **Closed** (Step 4B + MirrorMode) | — |
 | F5 | Medium | Open (partial) | 5 |
 | F6 | Medium | **Closed** (HTTP server removed) | — |
@@ -161,21 +161,40 @@ Effort: trivial.
 
 ## Open — release-prep, non-blocking
 
-### Rank 4: F3 — default bind on `0.0.0.0`
+### Rank 9: F3 — default bind exposure (reframed)
 
-Severity: Medium. Status: open.
+Severity: Low. Status: **reframed to docs/clarity item**.
 
-`crates/blit-daemon/src/runtime.rs:156` still defaults to
-`0.0.0.0`. With no built-in TLS or auth, the daemon is exposed to
-the entire LAN by default. Mostly a security-defaults issue.
+The original F3 finding recommended changing the default bind from
+`0.0.0.0` to `127.0.0.1`. That recommendation is wrong for a
+network file-copy daemon. The daemon's whole purpose is to serve
+remote CLI clients, so binding all interfaces by default is the
+coherent design choice. Loopback-by-default would only make sense
+for a "local sidecar" or "must SSH-tunnel everything" deployment
+model — neither is Blit's model.
 
-Recommendation: default to `127.0.0.1`. Require explicit
-`--bind 0.0.0.0` (or config opt-in) for LAN exposure. If LAN is
-intentional default, emit a startup warning when binding non-loop.
+The trust model is "operator-provided secure network or tunnel"
+plus per-transfer auth tokens. That's a deliberate product stance,
+documented in the security/deploy docs.
 
-Effort: trivial. ~10 LOC + one test.
+What's left of F3 after the reframe is docs/config clarity, not a
+default change:
 
-### Rank 4 (tied): F13 — docs drift on chroot status
+1. Startup logging should make exposure explicit — current state
+   already prints the bind address, which is fine.
+2. `docs/DAEMON_CONFIG.md` should clearly state that the default
+   bind exposes the daemon to whatever network the host can reach,
+   and that operators are responsible for firewalling /
+   tunnel-fronting it as part of their deployment.
+3. mDNS advertising defaults — currently opt-out via `no_mdns`;
+   acceptable.
+
+Recommendation: close as intentional design, optionally tighten
+the docs about exposure expectations. No code change needed.
+
+Effort: zero (close) to small (docs).
+
+### Rank 4: F13 — docs drift on chroot status
 
 Severity: Low–Medium. Status: open and load-bearing under F2.
 
@@ -285,15 +304,20 @@ Effort: large; whole-codebase migration to `tracing`.
 
 ## Recommended release-track sequencing
 
-1. **F2 first.** Either implement canonical containment or remove the
-   option + doc claims. This is the only remaining High-severity
-   item, and F13 is gated on the decision.
-2. **F7 next.** Reuses the R6-F1 pattern; closes the last
-   tar-shard allocation hole on the send side. Small surgery.
-3. **F8.** Harmonize the wire cap with the helper cap. Trivial.
-4. **F3 + F13 cleanup.** Default-bind change + docs sync after F2.
-5. Stop here for 0.1.0 if time-constrained. F5/F11/F12/F9 are all
-   real but non-release-blocking. F14/F15 explicitly deferred.
+Revised after F3 reframe:
+
+1. **F7 + F8 first** as one small hardening pass. Both are tightly
+   scoped, both match the tar-safety class we just consolidated.
+   F7 reuses the R6-F1 pattern on the send side; F8 just
+   harmonizes a constant. Cheap, low-risk, closes two release
+   blockers in one commit.
+2. **F2 second.** Use the focused time. `use_chroot` needs a real
+   containment model, not a one-off check, so this benefits from
+   not being interleaved with smaller changes. Couples to F13
+   (docs sync after the F2 decision lands).
+3. Stop here for 0.1.0 if time-constrained. F5/F11/F12/F9 are
+   real but non-release-blocking. F3 is intentional design (close
+   or docs-only). F14/F15 explicitly deferred.
 
 ## Out-of-scope items surfaced during triage
 
