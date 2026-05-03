@@ -3,18 +3,21 @@
 This is the master checklist. Execute the first unchecked item in
 the "Current Review Follow-up" section, or pick up other unchecked
 work from later sections. After completion, check the box and add
-an entry to `DEVLOG.md`.
+an entry to `DEVLOG.md`. Items in "Deferred design calls" below
+are intentionally not next-actionable — skip them unless the
+prerequisite (typically benchmark data) has changed.
 
 ## Current Review Follow-up
 
 See `docs/reviews/codebase_review_2026-05-01.md` for the original
 codebase review and `docs/reviews/followup_review_2026-05-02.md`
-for the 16-round followup series. Pipeline architecture
+for the followup review series. Pipeline architecture
 clarification in `docs/plan/PIPELINE_UNIFICATION.md`.
 
-Status: **13 of 15 baseline findings closed**, all 16 followup
-review rounds closed. Remaining open items are non-release-blocking
-polish (F14) and an explicitly-deferred logging epic (F15).
+Status: **13 of 15 baseline findings closed**, every followup
+review round to date closed. Remaining open items are
+non-release-blocking polish (F14) and an explicitly-deferred
+logging epic (F15).
 
 ### Pipeline unification sequence
 
@@ -38,9 +41,6 @@ polish (F14) and an explicitly-deferred logging epic (F15).
       via `FsTransferSource → DiffPlanner → execute_sink_pipeline →
       sink`. Filter parity is real; CLI bail-on-filter-args removed
       (Steps 4B + R4-F3).
-- [ ] **Remote→remote re-evaluation** Decide whether daemon-A →
-      daemon-B should bypass CLI relay. Deferred — current relay
-      shape works; revisit if benchmarks justify protocol surgery.
 
 ### Original baseline findings (`codebase_review_2026-05-01.md`)
 
@@ -97,6 +97,17 @@ polish (F14) and an explicitly-deferred logging epic (F15).
 - [ ] **F15 — Low** Adopt `tracing` or structured `log` across daemon
       and transfer modules. Gate noisy data-plane logs. Explicitly
       deferred per `docs/plan/PROJECT_STATE_ASSESSMENT.md`.
+
+### Deferred design calls
+
+These are intentionally not next-actionable. Don't pick them up
+without the listed prerequisite — they're tracked here so they
+don't get lost, not so the next agent reimplements them on a hunch.
+
+- **Remote→remote re-evaluation** *(prerequisite: benchmark data)* —
+  Decide whether daemon-A → daemon-B should bypass CLI relay.
+  Current relay shape works; revisit only if benchmarks justify
+  the protocol surgery.
 
 ## Phase 0: Workspace & Core Logic Foundation
 

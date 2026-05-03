@@ -1361,3 +1361,76 @@ Status:
 - F3 is accepted as closed.
 - F13 runtime/config/docs are accepted, but F13 should not be considered fully
   closed until `TODO.md` stops advertising stale review work as current work.
+
+## Round 19 - R18-F1 Closure Commit
+
+Reviewed change:
+
+- Commit: `767f8ee docs(todo): sync TODO.md with closed baseline + followup findings`
+- Scope: master TODO sync for closed baseline findings, pipeline-unification
+  status, and remaining deferred/polish items.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+The specific R18-F1 issue is mostly fixed. `TODO.md` no longer advertises the
+closed baseline findings F2, F3, F4, F5, F7/F8, F9, F10, F11, F12, or F13 as
+open work. The pipeline-unification entries are also marked complete where the
+code has already landed. That removes the most dangerous part of the drift: a
+future agent is no longer told to reimplement already-merged security and
+correctness work.
+
+Two low-severity control-plane details remain.
+
+### R19-F1. TODO execution instruction points at a deferred design item, not the next actionable task
+
+Severity: Low
+
+`TODO.md:3` to `TODO.md:6` now says to execute the first unchecked item in the
+"Current Review Follow-up" section. The first unchecked item in that section is
+`TODO.md:41` to `TODO.md:43`, "Remote→remote re-evaluation", which the same
+entry explicitly says is deferred until benchmarks justify protocol surgery.
+
+That contradicts both the user's summary and `TODO.md:15` to `TODO.md:17`,
+which say the remaining open baseline work is F14 polish and F15 explicitly
+deferred logging. An automated agent obeying line 3 will still pick a deferred
+design call before F14.
+
+The same header also says the follow-up series has 16 rounds, but this file now
+contains rounds 17 and 18, and this note is round 19. Counts are less important
+than task ordering, but stale counts are another signal that the control-plane
+state is still not quite canonical.
+
+Recommendation:
+
+Move "Remote→remote re-evaluation" out of the executable follow-up checklist
+into a separate "Deferred design calls" subsection, or mark it closed/deferred
+with wording that does not make it the first unchecked executable item. Replace
+"16-round followup series" with either the current count or a count-free phrase
+such as "followup review series" so the line does not go stale again.
+
+### R19-F2. TODO sync commit was not recorded in DEVLOG
+
+Severity: Low
+
+Commit `767f8ee` changed `TODO.md` and this follow-up review file, but did not
+add a `DEVLOG.md` entry. `TODO.md:3` to `TODO.md:6` and the repository agent
+instructions both say completed work should add an entry to `DEVLOG.md`.
+
+This is not a product issue, but the review workflow has repeatedly used DEVLOG
+as the cross-agent timeline. Without an entry, the timeline still jumps from
+"F13 + F3 closed" to later work without recording that the R18-F1 TODO drift was
+actually fixed.
+
+Recommendation:
+
+Add a short latest-first DEVLOG entry for `767f8ee` stating that TODO.md was
+synced after R18-F1 and noting the remaining open items.
+
+Status:
+
+- R18-F1's main stale-checklist bug is fixed.
+- R19-F1 and R19-F2 remain as low-severity project-state cleanups.
