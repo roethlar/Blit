@@ -1220,3 +1220,59 @@ Status:
 - F5, F9, and F12 are accepted as closed.
 - F11 is partially closed in core but needs the CLI/product mismatch resolved
   before I would mark the baseline finding fully closed.
+
+## Round 16 - R15-F1 Closure Commit
+
+Reviewed change:
+
+- Commit: `4d580fc fix(cli): direction-aware --checksum gate, reachable F11 ack (R15-F1)`
+- Scope: direction-aware remote checksum gating and remote pull checksum
+  negotiation integration tests.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+The production fix is accepted. Remote-source/local-destination pulls now route
+through `ensure_remote_pull_supported`, which allows `--checksum` so the
+pull-sync ack negotiation can run. Local-source/remote-destination pushes and
+remote-remote relays still route through `ensure_remote_push_supported`, which
+rejects `--checksum` because the push protocol has no equivalent capability
+negotiation.
+
+That matches the product shape from R15-F1: checksum pull is supported and
+daemon capability-gated; checksum push/relay remains explicitly unsupported.
+
+One test-harness issue remains.
+
+### R16-F1. New checksum integration test depends on test ordering for daemon build
+
+Severity: Low
+
+`crates/blit-cli/tests/remote_checksum_negotiation.rs:140` to
+`crates/blit-cli/tests/remote_checksum_negotiation.rs:162` builds
+`blit-daemon` in `pull_checksum_rejected_when_daemon_disables_checksums`.
+
+The companion happy-path test at
+`crates/blit-cli/tests/remote_checksum_negotiation.rs:223` to
+`crates/blit-cli/tests/remote_checksum_negotiation.rs:324` locates and spawns
+the daemon binary, but does not build it first. Rust tests run independently and
+ordering is not guaranteed, so a targeted run of this integration test can fail
+if the happy-path test runs before the rejection test and `target/.../blit-daemon`
+does not already exist.
+
+Recommendation:
+
+Extract a shared test helper that builds/locates `blit-daemon` and use it in
+both tests, or reuse/extend `tests/common::TestContext` with extra daemon args
+such as `--no-server-checksums`. The important invariant is that each test is
+self-sufficient and does not rely on another test having prepared the daemon
+binary.
+
+Status:
+
+- R15-F1 production behavior is accepted.
+- F11 is accepted as functionally closed.
+- R16-F1 is a test reliability cleanup, not a release-blocking product issue.
