@@ -1,77 +1,102 @@
 # Blit v2 TODO
 
-This is the master checklist. Execute the first unchecked item. After completion, check the box and add an entry to `DEVLOG.md`.
+This is the master checklist. Execute the first unchecked item in
+the "Current Review Follow-up" section, or pick up other unchecked
+work from later sections. After completion, check the box and add
+an entry to `DEVLOG.md`.
 
 ## Current Review Follow-up
 
-See `docs/reviews/codebase_review_2026-05-01.md` for the full codebase
-review. Pipeline architecture clarification + sequencing in
-`docs/plan/PIPELINE_UNIFICATION.md`.
+See `docs/reviews/codebase_review_2026-05-01.md` for the original
+codebase review and `docs/reviews/followup_review_2026-05-02.md`
+for the 16-round followup series. Pipeline architecture
+clarification in `docs/plan/PIPELINE_UNIFICATION.md`.
 
-### Pipeline unification sequence (in order)
+Status: **13 of 15 baseline findings closed**, all 16 followup
+review rounds closed. Remaining open items are non-release-blocking
+polish (F14) and an explicitly-deferred logging epic (F15).
+
+### Pipeline unification sequence
 
 - [x] **F1 — P0** Centralize receive-side path sanitization. Shared
       `safe_join` helper in `blit-core`. Applied at every receive-sink
       path-join site. Migrated `pull.rs::sanitize_relative_path` and
       daemon `service/util.rs` validators into the shared module.
       Adversarial tests in place. *(Landed `cc77074`. Followup
-      `docs/reviews/followup_review_2026-05-02.md` round 1: R1-F1
-      and R1-F3 fixed in a follow-up commit; R1-F2 deferred to F2 —
-      see below — because lexical safety can't address symlink
-      escape on its own.)*
-- [ ] **TransferOperationSpec** Define proto messages
+      review rounds 1, 5–6 closed R1-F1, R1-F3, R5-F1, R5-F2,
+      R6-F1, R6-F2, R6-F3.)*
+- [x] **TransferOperationSpec** Proto messages
       (`TransferOperationSpec`, `FilterSpec`, `ComparisonMode`,
-      `MirrorMode`, `ResumeSettings`, `PeerCapabilities`) and Rust
-      mirrors. No behavior change yet — contract only.
-- [ ] **DiffPlanner extraction** Pull diff/comparison/resume/tar-batching
-      logic out of `pull_sync.rs` into
-      `blit-core::remote::transfer::diff_planner`. Push-origin code
-      starts using it.
-- [ ] **pull_sync.rs refactor** Replace custom enumeration/streaming with
-      the unified pipeline (`FsTransferSource → DiffPlanner →
-      execute_sink_pipeline_streaming → DataPlaneSink`). Filter parity
-      becomes free; pull-bail on filter args goes away.
-- [ ] **Remote→remote re-evaluation** Decide whether daemon-A → daemon-B
-      should bypass CLI relay. Probably yes; defer the call until pull
-      is unified.
+      `MirrorMode`, `ResumeSettings`, `PeerCapabilities`) defined and
+      wired through. Step 4A landed; daemon normalizes via
+      `NormalizedTransferOperation::from_spec` (R2-F2, R4-F1).
+- [x] **DiffPlanner extraction** Diff/comparison/payload-planning
+      split out into `blit-core::remote::transfer::diff_planner`.
+      Local-mirror, push, and pull all route through it now (Steps
+      3a, 3b, 4).
+- [x] **pull_sync.rs refactor** Pull side runs the unified pipeline
+      via `FsTransferSource → DiffPlanner → execute_sink_pipeline →
+      sink`. Filter parity is real; CLI bail-on-filter-args removed
+      (Steps 4B + R4-F3).
+- [ ] **Remote→remote re-evaluation** Decide whether daemon-A →
+      daemon-B should bypass CLI relay. Deferred — current relay
+      shape works; revisit if benchmarks justify protocol surgery.
 
-### Other review findings (after pipeline unification or independent)
+### Original baseline findings (`codebase_review_2026-05-01.md`)
 
-- [ ] **F2 — P0** Resolve daemon `use_chroot` truthfulness: implement
-      canonical containment / symlink-escape protection, or remove the
-      advertised option and the documentation that promises it. Note:
-      the F1 `safe_join` is lexical-only; F2's canonicalize-and-contain
-      pass operates after lexical safety to catch symlink-parent escape
-      (R1-F2 from `docs/reviews/followup_review_2026-05-02.md`).
-- [ ] **F4 — P1** Define and test filtered mirror delete semantics
-      (`filtered` vs `all` destination delete scope). Needs a product
-      decision before implementation.
-- [ ] **F3 — Medium** Default daemon bind to `127.0.0.1`; require
-      explicit `--bind 0.0.0.0` for LAN exposure, or warn at startup.
-- [ ] **F5 — Medium** RAII guard around `active_transfers` so panics/
-      cancellations don't leak the gauge. Counter semantics (attempts
-      vs successes) consistent across push/pull/purge.
-- [ ] **F7/F8 — Medium** Tar shard memory: enforce per-shard byte budget
-      in `RemoteTransferSource` and the receive parser; prefer streaming
-      tar construction.
-- [ ] **F9 — Medium** Split `execute_local_mirror` into async impl + sync
-      wrapper to remove the nested-runtime hazard.
-- [ ] **F10 — Medium** Soften CLI help text once pipeline unification
-      lands (filter parity is real then) — until then, document the pull
-      limitation accurately.
-- [ ] **F11 — Medium** Pull checksum capability ack: store and act on it,
-      or remove the TODO. Resolved naturally by pipeline unification
-      (capabilities become a `TransferOperationSpec` field).
-- [ ] **F12 — Low/Medium** `blit check` directory + symlink semantics.
-      Document or include in diff.
-- [ ] **F13 — Low/Medium** Doc drift: make
-      `docs/plan/PROJECT_STATE_ASSESSMENT.md` the source of truth or
-      update the stale workflow docs.
+- [x] **F1 — P0** Receive-side path sanitization. *(See above.)*
+- [x] **F2 — P0** Daemon canonical containment. `path_safety::
+      contained_join` / `verify_contained` is the always-on
+      chokepoint at every daemon read/write site. F2 integration
+      tests cover symlink-escape rejection across pull, push
+      destination_path, and mirror purge. R13-F1 closure added the
+      handshake-level rejection on push (commit `0d4d2fb`).
+- [x] **F3 — Medium** Reframed as docs-only: `0.0.0.0` default is
+      intentional for a network file daemon. Trust model + exposure
+      expectations now documented in `docs/DAEMON_CONFIG.md` (commit
+      `35068b8`).
+- [x] **F4 — P1** Filtered mirror delete semantics. Daemon ships an
+      authoritative `DeleteList`; `MirrorMode::FilteredSubset`
+      (default) vs `MirrorMode::All` (`--delete-scope all` opt-in).
+      Step 4B.
+- [x] **F5 — Medium** `TransferMetrics::enter_transfer()` returns
+      an `ActiveGuard` RAII handle that releases the gauge on Drop
+      (panic/cancel-safe). `inc_purge` moved to dispatch boundary so
+      counter semantics are consistent across push/pull/purge.
+- [x] **F6 — Medium** Metrics HTTP server removed entirely; counters
+      are opt-in via `--metrics` and live in-process for a future
+      GUI/TUI consumer.
+- [x] **F7 — Medium** `RemoteTransferSource::prepare_payload` size
+      validation + bounded read via `take(size + 1)` so a hostile
+      remote source can't grow the relay's allocation past
+      `MAX_TAR_SHARD_BYTES` (closes the R6-F1 mirror on the send
+      side; R11-F1 closed the read-bound issue).
+- [x] **F8 — Medium** `MAX_WIRE_TAR_SHARD_BYTES` derived from
+      `tar_safety::MAX_TAR_SHARD_BYTES` — single source of truth.
+- [x] **F9 — Medium** `execute_local_mirror_async` exposed for
+      async callers; `execute_local_mirror` is the sync wrapper.
+      No more nested-runtime hazard.
+- [x] **F10 — Medium** Filter parity on remote pull — daemon honors
+      `FilterSpec` via `FileEnumerator`. CLI no longer bails on
+      filter args for remote-source transfers (Step 4B).
+- [x] **F11 — Medium** Pull `PullSyncAck.server_checksums_enabled`
+      stored on `RemotePullReport`; client errors at handshake when
+      `--checksum` is requested but the daemon has it disabled.
+      R15-F1 made this reachable from the CLI by splitting the
+      remote-transfer gate into pull/push variants.
+- [x] **F12 — Low/Medium** `blit check` equivalence model
+      documented in `--help` and `CheckArgs` rustdoc. 6 unit tests
+      pin the behavior (regular files, empty dirs, symlinks,
+      file-vs-directory, missing-on-dest, one-way).
+- [x] **F13 — Low/Medium** `use_chroot` config field removed
+      entirely (containment is always-on per F2). Workflow docs
+      synced. TODO.md (this section) synced.
 - [ ] **F14 — Low** Pay down warnings: deprecated FSEvents API
-      (`change_journal/snapshot.rs:85,111`), unused test variable
-      (`fs_capability/macos.rs:165`).
+      (`change_journal/snapshot.rs:85,111`). Migrate to
+      `objc2-core-services` or document deferral.
 - [ ] **F15 — Low** Adopt `tracing` or structured `log` across daemon
-      and transfer modules. Gate noisy data-plane logs.
+      and transfer modules. Gate noisy data-plane logs. Explicitly
+      deferred per `docs/plan/PROJECT_STATE_ASSESSMENT.md`.
 
 ## Phase 0: Workspace & Core Logic Foundation
 

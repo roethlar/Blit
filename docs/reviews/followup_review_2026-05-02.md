@@ -1276,3 +1276,88 @@ Status:
 - R15-F1 production behavior is accepted.
 - F11 is accepted as functionally closed.
 - R16-F1 is a test reliability cleanup, not a release-blocking product issue.
+
+## Round 17 - R16-F1 Closure Commit
+
+Reviewed change:
+
+- Commit: `e027b83 test(checksum): shared daemon-build helper for both negotiation tests (R16-F1)`
+- Scope: checksum-negotiation integration test harness.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+R16-F1 is accepted. Both checksum-negotiation tests now go through
+`spawn_daemon_harness`, which builds `blit-daemon`, writes the test config,
+spawns the daemon, and waits for readiness. The rejection and happy-path tests
+are now self-contained and no longer rely on test ordering or a daemon binary
+that another test happened to build first.
+
+No new findings.
+
+Status:
+
+- R16-F1 is closed.
+
+## Round 18 - F13 + F3 Closure Commit
+
+Reviewed change:
+
+- Commit: `35068b8 chore: close F13 + F3 — remove use_chroot, document exposure model`
+- Scope: removal of stale `use_chroot` / `root_use_chroot` runtime config,
+  daemon config docs, network exposure trust-model docs, and plan-doc sync.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+The runtime/config part of F13 is accepted. `use_chroot` and
+`root_use_chroot` are gone from the daemon runtime structs, TOML raw structs,
+default-root plumbing, startup banner, and integration-test config fixtures.
+The deleted `crates/blit-daemon/src/config.rs` and
+`crates/blit-daemon/src/types.rs` files appear to have been genuinely orphaned;
+repo search found no daemon module declarations or daemon references to either
+file.
+
+The DAEMON_CONFIG part of F3 is accepted. The docs now state the intentional
+network-daemon exposure model directly: `0.0.0.0` is the default because Blit is
+a remote file-copy daemon; operators choose firewalling, trusted networks, or
+fronting layers rather than relying on loopback-by-default. The same page also
+documents always-on module containment and the current TOCTOU caveat.
+
+One project-state drift issue remains.
+
+### R18-F1. TODO.md still tells future agents to execute already-closed review findings
+
+Severity: Low
+
+`TODO.md:3` says this is the master checklist and instructs agents to execute
+the first unchecked item. However `TODO.md:40` to `TODO.md:69` still lists F2,
+F4, F3, F5, F7/F8, F9, F10, F11, F12, and F13 as unchecked even though this
+review series has closed those items or explicitly reframed them.
+
+This is exactly the kind of control-plane drift F13 was meant to remove. A
+future agent following the repository instructions will resume from stale work,
+reopen closed decisions, or duplicate already-landed changes. The current code
+and DAEMON_CONFIG docs are materially better, but the master task list still
+contradicts the claimed F13/F3 closure.
+
+Recommendation:
+
+Update `TODO.md` to reflect the actual release state. At minimum, mark the
+closed baseline findings complete with commit/review references, preserve F14 as
+the remaining warning/deprecation cleanup, and keep F15 explicitly deferred. If
+the older pipeline-unification bullets are no longer the current execution
+sequence, close or replace them too so "first unchecked item" remains usable.
+
+Status:
+
+- R16-F1 is accepted as closed.
+- F3 is accepted as closed.
+- F13 runtime/config/docs are accepted, but F13 should not be considered fully
+  closed until `TODO.md` stops advertising stale review work as current work.
