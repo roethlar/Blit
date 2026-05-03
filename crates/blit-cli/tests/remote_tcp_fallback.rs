@@ -31,8 +31,6 @@ struct ModuleSection {
     comment: Option<String>,
     #[serde(default)]
     read_only: bool,
-    #[serde(default)]
-    use_chroot: bool,
 }
 
 fn pick_unused_port() -> u16 {
@@ -72,7 +70,6 @@ fn remote_push_falls_back_to_grpc_when_forced() {
             path: module_dir.clone(),
             comment: None,
             read_only: false,
-            use_chroot: false,
         }],
     };
 

@@ -4,7 +4,7 @@
 
 `blit-utils` provides operator tooling for discovery, inspection, and maintenance of remote Blit daemons. The
 utility must remain composable (stdout-friendly), support non-interactive scripting, and honour daemon security
-constraints (read-only modules, chroot boundaries).
+constraints (read-only modules, always-on canonical-path containment within each module).
 
 ## Command Matrix
 
@@ -39,7 +39,7 @@ constraints (read-only modules, chroot boundaries).
 - **Find** – daemon walks subtree with filters; responds as stream to avoid buffering.
 - **Du** – daemon computes total size/count (optionally depth-limited).
 - **Df** – daemon reports filesystem stats for module root.
-- **Purge** – deletes provided paths (daemon enforces read-only/chroot and reports counts).
+- **Purge** – deletes provided paths (daemon enforces read-only modules and per-entry canonical-path containment, then reports counts).
 
 ## Implementation Checklist
 

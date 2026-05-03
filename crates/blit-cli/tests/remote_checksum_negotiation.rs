@@ -38,8 +38,6 @@ struct ModuleSection {
     comment: Option<String>,
     #[serde(default)]
     read_only: bool,
-    #[serde(default)]
-    use_chroot: bool,
 }
 
 fn pick_unused_port() -> u16 {
@@ -116,7 +114,6 @@ fn spawn_daemon_harness(work: &tempfile::TempDir, extra_daemon_args: &[&str]) ->
             path: module_dir.clone(),
             comment: None,
             read_only: false,
-            use_chroot: false,
         }],
     };
     let config_path = workspace.join("blitd.toml");

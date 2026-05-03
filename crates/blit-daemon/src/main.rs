@@ -36,10 +36,9 @@ async fn main() -> Result<()> {
     }
     if let Some(root) = &default_root {
         eprintln!(
-            "[info] default root export: {}{}{}",
+            "[info] default root export: {}{}",
             root.path.display(),
-            if root.read_only { " (read-only)" } else { "" },
-            if root.use_chroot { " [chroot]" } else { "" }
+            if root.read_only { " (read-only)" } else { "" }
         );
     }
 

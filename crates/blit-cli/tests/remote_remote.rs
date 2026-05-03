@@ -31,8 +31,6 @@ struct ModuleSection {
     comment: Option<String>,
     #[serde(default)]
     read_only: bool,
-    #[serde(default)]
-    use_chroot: bool,
 }
 
 fn pick_unused_port() -> u16 {
@@ -153,7 +151,6 @@ impl DualDaemonContext {
                 path: module_path.to_path_buf(),
                 comment: None,
                 read_only: false,
-                use_chroot: false,
             }],
         };
 

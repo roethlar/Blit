@@ -51,7 +51,7 @@
   - Remote transfer verbs operate across the network with hybrid transport and gRPC fallback.  
   - `blit scan` discovers daemons via mDNS.  
   - `blit list` / `blit ls` enumerate modules and paths; forbid traversal outside exports.  
-  - `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) succeed against daemon with read-only/chroot enforcement.  
+  - `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) succeed against daemon with read-only modules and always-on canonical-path containment (F2).  
   - Structured progress events exist for future GUIs; CLI remains quiet unless verbose.  
   - Integration tests cover remote transfer + admin flows.
 

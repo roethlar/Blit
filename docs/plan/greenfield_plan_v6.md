@@ -327,12 +327,12 @@ message PurgeResponse { /* ... */ }
 - `move` performs a mirror followed by source removal (local or remote).
 
 ### Module Configuration & Daemon Behaviour
-- Load module definitions from a TOML config (`/etc/blit/config.toml` by default) with fields: `name`, `path`, `comment`, `read_only`, `use_chroot`, and daemon-level settings `bind`, `port`, `motd`, `no_mdns`, `mdns_name`.
+- Load module definitions from a TOML config (`/etc/blit/config.toml` by default) with fields: `name`, `path`, `comment`, `read_only`, and daemon-level settings `bind`, `port`, `motd`, `no_mdns`, `mdns_name`. *(Note: an earlier `use_chroot` per-module flag was removed in F13 / 2026-05-02 once F2 made canonical-path containment always-on.)*
 - Expose flags such as `--config`, `--bind`, `--port`, `--root`, `--no-mdns`, `--mdns-name`.
 - Behaviour when no modules are defined:
   - If `--root` is provided (or the config defines a default root), expose it via `server://`.
   - Otherwise `server://` resolves to the daemon’s working directory, matching historical behaviour. Log a warning so operators know they are running with an implicit root export.
-- Enforce read-only modules and chroot semantics for every remote operation.
+- Enforce read-only modules and always-on canonical-path containment (F2) for every remote operation. Containment is not a per-module opt-in; symlinks inside a module that resolve outside the module root are refused by the daemon.
 
 ### Discovery & Admin Utilities (`blit-utils`)
 - Implement subcommands: `scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, and a `profile` command for local performance capture.
@@ -372,7 +372,7 @@ message PurgeResponse { /* ... */ }
    - Share networking code with CLI.
 3. **Daemon Config & Flags**
    - Load modules/root from TOML; respect overrides.
-   - Enforce read-only/chroot semantics.
+   - Enforce read-only modules + always-on canonical-path containment (F2).
    - Define behaviour when no modules exist (require `--root` or emit clear errors).
 4. **mDNS Advertising**
    - Advertise `_blit._tcp.local.` by default; verify discovery via CLI/util tests.
@@ -388,7 +388,7 @@ Benchmarks include remote scenarios using the canonical syntax (TCP + gRPC fallb
 
 ### Phase 3 – Hybrid Remote Operations
 Augment v5 tasks with:
-- Module-aware authorisation (read_only, chroot).
+- Module-aware authorisation (per-module `read_only` flag; canonical-path containment is always-on).
 - RPCs powering `list`, `find`, `du`, `df`, `rm`.
 - Ensure transfer transport defaults to port 9031 (configurable).
 
@@ -405,7 +405,7 @@ Future work (defer until after core TCP/gRPC paths and required features are com
 
 - [ ] CLI (`copy`, `mirror`, `move`, `scan`, `list`, diagnostics) operational with canonical remote syntax.
 - [ ] `blit-core::remote::endpoint` parses `server:/module/...`, `server://...`, discovery forms, and rejects ambiguous inputs.
-- [ ] `blit-daemon` loads modules/root from config, supports flags, advertises via mDNS, enforces read_only/chroot semantics, and handles “no exports configured” cleanly.
+- [ ] `blit-daemon` loads modules/root from config, supports flags, advertises via mDNS, enforces per-module `read_only` + always-on canonical-path containment (F2), and handles “no exports configured” cleanly.
 - [ ] RPC surface supports `list`, `find`, `du`, `df`, `rm`.
 - [ ] `blit-utils` implements `scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile` command.
 - [ ] Test suite covers transfer permutations, admin workflows, and daemon startup scenarios.

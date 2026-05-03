@@ -22,7 +22,6 @@ pub(crate) struct ModuleConfig {
     pub(crate) canonical_root: PathBuf,
     pub(crate) read_only: bool,
     pub(crate) _comment: Option<String>,
-    pub(crate) _use_chroot: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -31,14 +30,12 @@ pub(crate) struct RootExport {
     /// Canonicalized form of `path`; see `ModuleConfig::canonical_root`.
     pub(crate) canonical_root: PathBuf,
     pub(crate) read_only: bool,
-    pub(crate) use_chroot: bool,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RootSpec {
     pub(crate) path: PathBuf,
     pub(crate) read_only: bool,
-    pub(crate) use_chroot: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -114,8 +111,6 @@ struct RawDaemonSection {
     #[serde(default)]
     root_read_only: bool,
     #[serde(default)]
-    root_use_chroot: bool,
-    #[serde(default)]
     no_server_checksums: bool,
 }
 
@@ -127,8 +122,6 @@ struct RawModule {
     comment: Option<String>,
     #[serde(default)]
     read_only: bool,
-    #[serde(default)]
-    use_chroot: bool,
 }
 
 fn default_config_path() -> PathBuf {
@@ -211,7 +204,6 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
                 canonical_root: canonical,
                 read_only: module.read_only,
                 _comment: module.comment,
-                _use_chroot: module.use_chroot,
             },
         );
     }
@@ -220,13 +212,11 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         Some(RootSpec {
             path: cli_root.clone(),
             read_only: false,
-            use_chroot: raw.daemon.root_use_chroot,
         })
     } else if let Some(cfg_root) = raw.daemon.root.clone() {
         Some(RootSpec {
             path: cfg_root,
             read_only: raw.daemon.root_read_only,
-            use_chroot: raw.daemon.root_use_chroot,
         })
     } else {
         None
@@ -246,7 +236,6 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
             RootSpec {
                 path: cwd,
                 read_only: false,
-                use_chroot: false,
             }
         };
         let canonical = fs::canonicalize(&chosen.path).with_context(|| {
@@ -263,14 +252,12 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
                 canonical_root: canonical.clone(),
                 read_only: chosen.read_only,
                 _comment: None,
-                _use_chroot: chosen.use_chroot,
             },
         );
         default_root = Some(RootExport {
             path: canonical.clone(),
             canonical_root: canonical,
             read_only: chosen.read_only,
-            use_chroot: chosen.use_chroot,
         });
     } else if let Some(spec) = root_spec {
         let canonical = fs::canonicalize(&spec.path).with_context(|| {
@@ -283,7 +270,6 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
             path: canonical.clone(),
             canonical_root: canonical,
             read_only: spec.read_only,
-            use_chroot: spec.use_chroot,
         });
     } else if !modules.contains_key("default") {
         warnings.push(

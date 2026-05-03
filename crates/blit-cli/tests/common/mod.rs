@@ -31,8 +31,6 @@ pub struct ModuleSection {
     pub comment: Option<String>,
     #[serde(default)]
     pub read_only: bool,
-    #[serde(default)]
-    pub use_chroot: bool,
 }
 
 pub fn pick_unused_port() -> u16 {
@@ -78,7 +76,6 @@ impl TestContext {
                 path: module_dir.clone(),
                 comment: None,
                 read_only: false,
-                use_chroot: false,
             }],
         };
 

@@ -3,6 +3,31 @@
 This document describes how to configure the Blit daemon (`blit-daemon`) for
 remote file transfer operations.
 
+## Trust Model and Network Exposure
+
+`blit-daemon` is a network file-transfer service. By default it binds to
+`0.0.0.0:9031` so that remote `blit` clients can reach it — that is the
+service's whole purpose. Loopback-by-default would only make sense for a
+"local sidecar" or "must-SSH-tunnel" model, neither of which is Blit's
+deployment model.
+
+Security comes from **operator network controls + per-transfer auth tokens**,
+not from the bind address:
+
+- The TCP data plane uses one-time tokens minted per transfer; a peer that
+  doesn't present the right token is dropped before any bytes flow.
+- Module containment is always-on (see [Path containment](#path-containment));
+  a symlink inside an exported module that points outside it cannot be
+  followed by daemon operations.
+- TLS termination, mutual auth, and access-control fronting are explicitly
+  out of scope for the daemon — operators are expected to firewall the
+  daemon port, restrict it to a trusted network, or front it with
+  WireGuard / Tailscale / SSH-tunnel / whatever fits the deployment.
+
+If you want the daemon reachable only from the local host, set `bind =
+"127.0.0.1"` in the config or pass `--bind 127.0.0.1`. There is no
+"default safe" mode — you choose the exposure that fits your network.
+
 ## Quick Start
 
 ```bash
@@ -42,7 +67,6 @@ mdns_name = "my-file-server"
 # Optional: export a default root for server:// requests
 # root = "/srv/blit"
 # root_read_only = true
-# root_use_chroot = false
 
 # Optional: disable server-side checksum computation
 # no_server_checksums = false
@@ -63,7 +87,6 @@ comment = "Media library (read-only)"
 name = "home"
 path = "/home/shared"
 read_only = false
-use_chroot = false
 ```
 
 ### Configuration Reference
@@ -79,7 +102,6 @@ use_chroot = false
 | `mdns_name` | string | `blit@<hostname>` | Custom mDNS instance name |
 | `root` | string | none | Default export path for `server://` requests |
 | `root_read_only` | boolean | `false` | Make the default root export read-only |
-| `root_use_chroot` | boolean | `false` | Enable chroot for the default root |
 | `no_server_checksums` | boolean | `false` | Disable server-side checksum computation |
 
 #### `[[module]]` Array
@@ -93,9 +115,31 @@ declared with `[[module]]` (TOML array-of-tables syntax).
 | `path` | string | required | Absolute filesystem path to export |
 | `read_only` | boolean | `false` | Prevent write operations |
 | `comment` | string | none | Description shown in module listings |
-| `use_chroot` | boolean | `false` | Enable chroot for this module |
 
 Module names must be non-empty and unique within the configuration.
+
+#### Path containment
+
+Module containment is **always on** as of F2. Every daemon read or
+write resolves the target's deepest existing ancestor through
+`std::fs::canonicalize` and refuses the operation if the canonical
+form escapes the module root. A symlink inside the module that
+points outside it cannot be traversed by daemon operations.
+
+There is no opt-out. The previous `use_chroot` and `root_use_chroot`
+config options were removed (they never enforced anything beyond
+the lexical `safe_join` check, which doesn't follow symlinks).
+Configs containing those keys will silently ignore them — TOML
+unknown-field tolerance — and the runtime behavior is the always-on
+containment described above.
+
+**TOCTOU caveat:** the check is "canonicalize then operate," so a
+symlink swapped between the check and the actual filesystem call
+could in principle be followed. The trust model is authenticated
+peers and operator-controlled module contents — not adversarial
+local processes racing the daemon. A fully race-proof variant
+would use `openat` + `O_NOFOLLOW` per-component descent; that is
+deferred until there's a concrete threat that warrants it.
 
 ## Command-Line Options
 

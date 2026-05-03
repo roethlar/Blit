@@ -12,7 +12,7 @@
 - `blit copy`, `blit mirror`, `blit move` accept local ↔ remote endpoints using `server:/module/...` and `server://...` syntax; hybrid transport negotiates TCP data plane with secure tokens and falls back to gRPC automatically.
 - `blit scan` discovers daemons via mDNS (with opt-out flag).
 - `blit list` and `blit ls` surface module lists and directory contents.
-- `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) operate against the daemon, respecting read-only/chroot rules and prompting before destructive actions.
+- `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) operate against the daemon, respecting read-only modules and module containment, and prompting before destructive actions.
 - Canonical URL parser shared across CLI/daemon/utils (no `blit://` scheme).
 - Daemon loads modules/root from TOML config (and `--root`), advertises via mDNS unless disabled, and warns when using implicit working-directory exports.
 - Integration tests cover remote transfer + admin scenarios on Linux, Windows, and macOS.
@@ -32,7 +32,7 @@
 ### 3.2 Daemon Configuration & Discovery
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 3.2.1 | Add TOML config loader (`/etc/blit/config.toml` or path via `--config`) with module definitions (`name`, `path`, `comment`, `read_only`, `use_chroot`) and daemon settings (`bind`, `port`, `motd`, `no_mdns`, `mdns_name`, optional default root). | ✅ `blit-daemon` now parses config/CLI overrides, populates modules/default root, and warns when falling back to the working directory. |
+| 3.2.1 | Add TOML config loader (`/etc/blit/config.toml` or path via `--config`) with module definitions (`name`, `path`, `comment`, `read_only`) and daemon settings (`bind`, `port`, `motd`, `no_mdns`, `mdns_name`, optional default root). | ✅ `blit-daemon` parses config/CLI overrides, populates modules/default root, and warns when falling back to the working directory. (`use_chroot` field removed in F13 / 2026-05-02; containment is now always-on via F2 canonical-path enforcement.) |
 | 3.2.2 | Implement behaviour when no modules defined: use `--root`/config root export; otherwise default to daemon working directory with warning. | Daemon startup logic and log messaging. |
 | 3.2.3 | Integrate mDNS advertisement (`_blit._tcp.local.`) enabled by default, disabled via `--no-mdns`. | Advertising helper with lifecycle management + tests. |
 | 3.2.4 | Ensure `blit scan` and `blit-utils scan` consume mDNS results cross-platform. | CLI/util output demonstrating discovery, integration tests. |
@@ -41,7 +41,7 @@
 | Task | Description | Deliverable |
 |------|-------------|-------------|
 | 3.3.1 | Finalise `proto/blit.proto` to include hybrid transport negotiation (`DataTransferNegotiation`, summary fields) and admin RPCs (`ListModules`, directory listing, recursive enumeration, disk usage, remote remove). *(2025-11-10: shared `remote::transfer` modules extracted; `PullChunk` now carries negotiation/summary for pull, and bindings regenerated.)* | Updated proto + regenerated Rust code. |
-| 3.3.2 | Implement daemon-side control plane: accept negotiates, spawn TCP listener, issue secure tokens, enforce read-only/chroot, stream Pull responses. | ✅ Logic now lives in `service.rs` (split out of `main.rs` on 2025-10-27); tests cover negotiation + fallback. |
+| 3.3.2 | Implement daemon-side control plane: accept negotiates, spawn TCP listener, issue secure tokens, enforce read-only modules and module containment, stream Pull responses. | ✅ Logic lives in `service.rs` (split out of `main.rs` on 2025-10-27); tests cover negotiation + fallback. Containment is always-on via F2 canonical-path enforcement (2026-05-02). |
 | 3.3.3 | Implement TCP data plane server (zero-copy when available, buffered fallback). | Data-plane module + unit tests. |
 | 3.3.4 | Implement CLI data plane client: token validation, gRPC fallback, progress events. *(2025-11-10: `RemotePullClient` now connects to the negotiated TCP port, applies file/tar shard payloads locally, records summaries, and the CLI reuses the shared `RemoteTransferProgress` monitor for both push/pull. Auto-tune chunk sizing + payload prefetch are now plumbed through both push and pull, and manifest need-lists flush immediately so first payloads launch within milliseconds even on huge manifests. 2025-11-15: `RemotePushClient` gained size-aware batching so multi-stream sends actually utilize every TCP worker, and daemon/client heuristics now negotiate up to 16 TCP streams on multi-GiB manifests; next step is capturing perf logs + remote↔remote orchestration.)* | `blit-cli` transport layer + integration tests. |
 | 3.3.5 | Handle gRPC fallback automatically when TCP negotiation fails; emit warning and continue. | ✅ 2025-10-25 – integration test (`remote_tcp_fallback`) forces client `--force-grpc` and asserts CLI reports `[gRPC fallback]` with files mirrored. |
@@ -54,7 +54,7 @@
 | 3.4.0 | Draft detailed blit-utils plan covering command matrix (see `docs/plan/BLIT_UTILS_PLAN.md`) (`scan`, `list`, `ls`, `rm`, `find`, `du`, `df`, `completions`, `profile`), CLI UX, confirmation flows, and safety prompts. | Design doc + TODO entries. |
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 3.4.1 | Implement daemon RPCs for: module listing, directory listing, recursive enumeration (`find`), disk usage (`du`, `df`), remote removal (`rm`). | ✅ RPC handlers live (2025-10-24) with read-only/chroot enforcement + tests. |
+| 3.4.1 | Implement daemon RPCs for: module listing, directory listing, recursive enumeration (`find`), disk usage (`du`, `df`), remote removal (`rm`). | ✅ RPC handlers live (2025-10-24); F2 canonical containment + per-call read-only checks added 2026-05-02. |
 | 3.4.2 | Implement `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) using shared client helpers. | ✅ `crates/blit-utils/src/main.rs` updated; docs + TODO synced (2025-10-24). |
 | 3.4.3 | Provide safety prompts for destructive operations (default confirm, `--yes` bypass). | CLI UX + tests. |
 | 3.4.4 | Expose shell completions using canonical URL syntax (bash/zsh/fish/powershell). | Completion scripts updated. |
@@ -111,7 +111,7 @@
 - [ ] `blit scan`, `blit list`, `blit ls` operational.
 - [x] Remote push/pull streaming manifest + need list (no in-memory exhaustion). *(Push implemented with streaming manifest + chunked fallback; add pull stress test if future workloads demand it.)*
 - [x] `blit-utils` commands (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) implemented and tested.
-- [ ] Daemon loads modules/root from TOML, advertises via mDNS (with opt-out), enforces read-only/chroot.
+- [x] Daemon loads modules/root from TOML, advertises via mDNS (with opt-out), enforces read-only modules and always-on canonical-path containment (F2 / 2026-05-02; `use_chroot` config option removed in F13).
 - [x] Admin RPCs (list modules, dir listing, recursive search, disk usage, remote remove) implemented.
 - [ ] Integration tests cover remote transfer + admin verbs (TCP + fallback) across platforms.
 - [ ] Documentation (CLI, daemon, utils) updated; DEVLOG/TODO entries recorded.

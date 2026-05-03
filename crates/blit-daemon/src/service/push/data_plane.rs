@@ -768,7 +768,6 @@ mod tests {
             canonical_root: canonical,
             read_only: false,
             _comment: None,
-            _use_chroot: false,
         };
 
         let tar_data = build_tar_bytes(source_root.path(), &header);
@@ -847,7 +846,6 @@ mod tests {
             canonical_root: canonical,
             read_only: false,
             _comment: None,
-            _use_chroot: false,
         };
 
         // Hand-build a tar with a single symlink entry.
@@ -955,7 +953,6 @@ mod tests {
             path: canonical,
             read_only: false,
             _comment: None,
-            _use_chroot: false,
         }
     }
 

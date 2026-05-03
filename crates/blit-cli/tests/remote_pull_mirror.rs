@@ -31,8 +31,6 @@ struct ModuleSection {
     comment: Option<String>,
     #[serde(default)]
     read_only: bool,
-    #[serde(default)]
-    use_chroot: bool,
 }
 
 fn pick_unused_port() -> u16 {
@@ -73,7 +71,6 @@ fn remote_pull_mirror_purges_extraneous_local_files() {
             path: module_dir.clone(),
             comment: None,
             read_only: false,
-            use_chroot: false,
         }],
     };
 
@@ -264,7 +261,6 @@ fn spawn_daemon(workspace: &std::path::Path, module_dir: &std::path::Path) -> (C
             path: module_dir.to_path_buf(),
             comment: None,
             read_only: false,
-            use_chroot: false,
         }],
     };
     let config_path = workspace.join("blitd.toml");
