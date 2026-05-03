@@ -87,6 +87,13 @@ comment = "Media library (read-only)"
 name = "home"
 path = "/home/shared"
 read_only = false
+
+# Optional: enable destination-side delegated pull for direct
+# remote→remote transfers. See "Outbound delegation" under Path
+# containment for the full security model.
+# [delegation]
+# allow_delegated_pull = false
+# allowed_source_hosts = ["server-a.lan", "10.0.0.0/8"]
 ```
 
 ### Configuration Reference
@@ -115,8 +122,22 @@ declared with `[[module]]` (TOML array-of-tables syntax).
 | `path` | string | required | Absolute filesystem path to export |
 | `read_only` | boolean | `false` | Prevent write operations |
 | `comment` | string | none | Description shown in module listings |
+| `delegation_allowed` | boolean | `true` | Per-module narrowing override for the `[delegation]` master switch. Set to `false` to opt this module out of being a `DelegatedPull` destination even when daemon-wide delegation is enabled. Cannot widen — has no effect when `allow_delegated_pull = false` daemon-wide. |
 
 Module names must be non-empty and unique within the configuration.
+
+#### `[delegation]` Section
+
+Controls destination-side delegated pull (direct remote→remote
+transfers). Default: feature off. See [Outbound delegation
+(`DelegatedPull`)](#outbound-delegation-delegatedpull) for the full
+matching semantics, the SSRF/network-pivot rationale, and the
+loopback IP-form rule.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `allow_delegated_pull` | boolean | `false` | Master switch. When false, the daemon refuses `DelegatedPull` requests. |
+| `allowed_source_hosts` | array of strings | `[]` | Source allowlist. Accepts hostnames (IDNA-normalized), CIDR blocks (IPv4 or IPv6, parsed via `ipnet`), and bare IP literals (with optional brackets for IPv6). Invalid entries fail config load. Empty + master switch true means "any host." |
 
 #### Path containment
 
@@ -140,6 +161,119 @@ peers and operator-controlled module contents — not adversarial
 local processes racing the daemon. A fully race-proof variant
 would use `openat` + `O_NOFOLLOW` per-component descent; that is
 deferred until there's a concrete threat that warrants it.
+
+#### Outbound delegation (`DelegatedPull`)
+
+When the CLI runs `blit copy server-A:/x server-B:/y`, the destination
+daemon (server-B) can be told to pull directly from the source daemon
+(server-A) — bytes flow `A → B` over a single data plane and the CLI
+host is not in the byte path. This optimization is opt-in per
+destination daemon because it changes the daemon's network surface:
+
+- **Default off.** A daemon will refuse `DelegatedPull` requests
+  unless the operator sets `[delegation] allow_delegated_pull = true`.
+  CLI clients that hit a daemon with delegation off receive a clear
+  upgrade-or-relay error and can fall back to `--relay-via-cli` to
+  route through the CLI host instead.
+- **Why opt-in.** Allowing `DelegatedPull` lets any caller that can
+  reach this daemon's control plane make the daemon initiate a TCP
+  connection to a source endpoint of the caller's choosing. That is
+  a new outbound-network capability — an SSRF/network-pivot
+  primitive — that didn't exist before. The gate exists so the
+  operator decides when this capability is on and against which
+  hosts.
+
+##### Configuration
+
+```toml
+[delegation]
+# Master switch. Default: false. Setting to true allows the daemon
+# to act as a delegated pull initiator on behalf of CLI clients
+# that can reach its control plane.
+allow_delegated_pull = false
+
+# Source allowlist. When non-empty, every resolved IP of the source
+# host must match at least one entry. Empty + master switch true
+# means "any host" — only honor that posture on a fully trusted
+# LAN.
+#
+# Accepted entry forms:
+#   - hostname        e.g. "server-a.lan"
+#   - CIDR (IPv4/v6)  e.g. "10.0.0.0/8", "fd00::/8"
+#   - bare IP         e.g. "10.1.2.3", "::1", "[::1]"
+allowed_source_hosts = ["server-a.lan", "10.0.0.0/8"]
+```
+
+Per-module narrowing override (under `[[module]]`):
+
+```toml
+[[module]]
+name = "secrets"
+path = "/srv/secrets"
+delegation_allowed = false   # opt this module out even when
+                              # daemon-wide delegation is on.
+                              # Defaults to true.
+```
+
+Per-module overrides can only **narrow** the daemon-wide policy.
+Setting `delegation_allowed = true` on a module when
+`allow_delegated_pull = false` daemon-wide does not enable
+delegation for that module.
+
+##### Allowlist matching semantics
+
+Strict and explicit (a permissive matcher would defeat the gate's
+purpose):
+
+1. **Hostname normalization.** Comparison is case-insensitive after
+   trimming a trailing dot and applying IDNA punycode. `Server-A.LAN.`
+   and `server-a.lan` both match `server-a.lan`.
+2. **Hostname matches** are exact post-normalization equality. No
+   wildcards in 0.1.0.
+3. **CIDR / bare-IP entries** are parsed once at config load via
+   the `ipnet` crate. Invalid entries fail config load loudly —
+   the daemon refuses to start rather than silently treating an
+   unparseable line as "deny everything," which would mask a
+   typo'd permit.
+4. **Resolution.** A hostname locator resolves once to its A/AAAA
+   set; **every** resolved address must match either a CIDR entry
+   or a bare-IP entry (the literal hostname can also match per (2)
+   — but only for non-special-range addresses; see (6)). Mixed-
+   result resolution where some addresses are inside the
+   allowlist and some are outside is denied.
+5. **DNS-rebinding mitigation.** The validated IP is bound to the
+   outbound connection. The daemon connects to a specific
+   `host = <ip>` URI, never to a re-resolvable hostname. A
+   malicious DNS authority cannot swap addresses between the gate
+   check and the connect.
+6. **Loopback / link-local / unique-local addresses require
+   IP- or CIDR-form authorization.** If `evil.example.com` is in
+   the allowlist and resolves to `127.0.0.1`, accepting that on
+   the strength of the hostname alone would let any actor with
+   control of `evil.example.com`'s A record point the daemon at
+   its own loopback services (an SSRF-via-DNS pivot). The gate
+   denies in this case unless an explicit IP/CIDR entry covers
+   the resolved address. The affected ranges are: `127.0.0.0/8`,
+   `169.254.0.0/16`, `0.0.0.0/8`, `::1`, `fe80::/10`, `fc00::/7`,
+   `::`. To delegate against a same-host source for tests, the
+   operator writes `allowed_source_hosts = ["127.0.0.1"]` or
+   `["127.0.0.0/8"]`, not just the hostname.
+
+##### Auth posture (current and future)
+
+In 0.1.0 there is no daemon authentication — the trust model is
+"reachable on a trusted network." The delegation gate is policy,
+not authentication; it does not turn an internet-exposed daemon
+into a safely-internet-exposed one. For internet-exposed
+deployments, both the gate and external auth (TLS termination,
+WireGuard, SSH tunnel, etc.) are required.
+
+`RemoteSourceLocator.delegated_credential` is a forward-compatible
+field defined in the wire format and currently ignored. When
+operator-issued bearer tokens land (post-0.1.0), the CLI will mint
+a token scoped to "operator + dst-host" and pass it through; the
+destination daemon will present it on its outbound connection to
+src.
 
 ## Command-Line Options
 

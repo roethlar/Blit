@@ -14,10 +14,11 @@ use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
-    ClientPullMessage, ClientPushRequest, CompletionRequest, CompletionResponse, DiskUsageEntry,
-    DiskUsageRequest, FileInfo, FilesystemStatsRequest, FilesystemStatsResponse, FindEntry,
-    FindRequest, ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo,
-    PullChunk, PullRequest, PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
+    ClientPullMessage, ClientPushRequest, CompletionRequest, CompletionResponse,
+    DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo,
+    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, ListModulesRequest,
+    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
+    PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -33,6 +34,11 @@ pub struct BlitService {
     force_grpc_data: bool,
     server_checksums_enabled: bool,
     metrics: Arc<TransferMetrics>,
+    /// Delegation gate config. The handler reads it on every
+    /// `DelegatedPull` request; default-disabled means no caller can
+    /// make this daemon initiate outbound connects until the operator
+    /// flips `[delegation] allow_delegated_pull = true`.
+    pub(crate) delegation: Arc<crate::delegation_gate::DelegationConfig>,
 }
 
 impl BlitService {
@@ -42,6 +48,7 @@ impl BlitService {
         force_grpc_data: bool,
         server_checksums_enabled: bool,
         metrics: Arc<TransferMetrics>,
+        delegation: crate::delegation_gate::DelegationConfig,
     ) -> Self {
         Self {
             modules: Arc::new(Mutex::new(modules)),
@@ -49,6 +56,7 @@ impl BlitService {
             force_grpc_data,
             server_checksums_enabled,
             metrics,
+            delegation: Arc::new(delegation),
         }
     }
 
@@ -64,6 +72,7 @@ impl BlitService {
             force_grpc_data,
             true,
             TransferMetrics::disabled(),
+            crate::delegation_gate::DelegationConfig::default(),
         )
     }
 }
@@ -75,6 +84,7 @@ impl Blit for BlitService {
     type PullSyncStream = ReceiverStream<Result<ServerPullMessage, Status>>;
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
+    type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
 
     async fn push(
         &self,
@@ -164,6 +174,54 @@ impl Blit for BlitService {
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn delegated_pull(
+        &self,
+        request: Request<DelegatedPullRequest>,
+    ) -> Result<Response<Self::DelegatedPullStream>, Status> {
+        let req = request.into_inner();
+        let modules = Arc::clone(&self.modules);
+        let default_root = self.default_root.clone();
+        let delegation = Arc::clone(&self.delegation);
+        let metrics = Arc::clone(&self.metrics);
+        let (tx, rx) = mpsc::channel(32);
+
+        // R30-F2: race the handler against tx.closed() so a CLI
+        // disconnect drops the inner pull future. tonic's response
+        // stream drops the mpsc Receiver when the client cancels;
+        // that closes the Sender, and tx.closed() resolves. The
+        // handler's pull_sync_with_spec future is then dropped,
+        // which propagates cancellation through the existing pull
+        // cancellation path (data plane connection drop, manifest
+        // task cleanup). Without this race the spawned task would
+        // continue to write — and post-R30-F1 to delete — on dst
+        // after the operator has Ctrl-C'd.
+        //
+        // Cloning tx for the handler so the original tx survives
+        // long enough for tx.closed() to be the racing future.
+        let handler_tx = tx.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = tx.closed() => {
+                    // Caller hung up. Dropping handler_tx (which
+                    // happens at end of the select branch) and
+                    // dropping the outer task drops the handler
+                    // future implicitly via select cancellation.
+                }
+                _ = super::delegated_pull::handle_delegated_pull(
+                    req,
+                    modules,
+                    default_root,
+                    delegation,
+                    metrics,
+                    handler_tx,
+                ) => {}
             }
         });
 

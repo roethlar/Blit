@@ -1,3 +1,4 @@
+mod delegation_gate;
 mod metrics;
 mod runtime;
 mod service;
@@ -24,6 +25,7 @@ async fn main() -> Result<()> {
         motd,
         warnings,
         server_checksums_enabled,
+        delegation,
     } = runtime;
 
     for warning in &warnings {
@@ -82,12 +84,19 @@ async fn main() -> Result<()> {
         TransferMetrics::disabled()
     };
 
+    if delegation.allow_delegated_pull {
+        eprintln!(
+            "[info] delegated pull enabled ({} allowlist entries)",
+            delegation.allowed_source_hosts.len()
+        );
+    }
     let service = BlitService::from_runtime(
         modules,
         default_root,
         args.force_grpc_data,
         server_checksums_enabled,
         metrics,
+        delegation,
     );
 
     println!("blitd v2 listening on {}", addr);

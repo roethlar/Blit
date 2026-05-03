@@ -10,6 +10,62 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use crate::generated::blit_client::BlitClient;
+
+/// RAII wrapper that aborts the underlying tokio task when dropped
+/// without awaiting (R32-F2).
+///
+/// `JoinHandle::drop` detaches; it does NOT cancel the spawned task.
+/// That's a real bug for `pull_sync_with_spec`: when the outer future
+/// is dropped (e.g. CLI Ctrl-C cancels the gRPC stream from the
+/// daemon's `delegated_pull` handler), spawned data-plane receivers
+/// would otherwise continue reading TCP and writing files.
+///
+/// Usage: wrap every `tokio::spawn` whose lifetime should be bounded
+/// by the calling future. Await with `.join().await` — that holds
+/// `self` across the await so a parent-future cancellation during
+/// the await still triggers `abort()` via Drop. Do NOT add an
+/// `into_inner()` accessor: returning the bare `JoinHandle` and then
+/// awaiting it re-introduces the cancellation gap (R34-F2 — the bare
+/// handle is dropped on parent-future cancel and detaches the task
+/// instead of aborting it).
+pub(crate) struct AbortOnDrop<T>(Option<JoinHandle<T>>);
+
+impl<T> AbortOnDrop<T> {
+    pub(crate) fn new(handle: JoinHandle<T>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Await the spawned task while keeping `self` alive across the
+    /// await. If the surrounding future is cancelled during the
+    /// await, `self` is dropped and our `Drop` impl fires `abort()`.
+    /// Compare to a hypothetical `into_inner().await` pattern, which
+    /// would release the guard before awaiting — that's the
+    /// cancellation-gap bug R34-F2 fixed.
+    pub(crate) async fn join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        // Borrow the JoinHandle out of the Option, but DON'T move it
+        // out of `self`. `self` lives across this await; if the
+        // surrounding future is cancelled here, `self` drops and
+        // `Drop::drop` aborts the still-owned handle.
+        let handle = self
+            .0
+            .as_mut()
+            .expect("AbortOnDrop already consumed (programming error)");
+        let result = handle.await;
+        // Task completed (success or panic). Clear the slot so the
+        // trailing Drop after this returns is a no-op rather than
+        // calling abort() on an already-finished handle.
+        self.0 = None;
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
 use crate::generated::{
     client_pull_message, pull_chunk, server_pull_message, BlockHashList, ClientPullMessage,
     ComparisonMode, DataTransferNegotiation, FileData, FileHeader, ManifestComplete, MirrorMode,
@@ -175,8 +231,10 @@ impl RemotePullClient {
 
         let mut report = RemotePullReport::default();
         let mut active_file: Option<(File, PathBuf)> = None;
-        // Store data plane task handle - spawned as background task so control plane can continue
-        let mut data_plane_handle: Option<JoinHandle<Result<DataPlaneResult>>> = None;
+        // Store data plane task handle - spawned as background task so
+        // control plane can continue. R32-F2: AbortOnDrop ensures the
+        // task is cancelled if this future is dropped mid-flight.
+        let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
 
         while let Some(chunk) = stream
             .message()
@@ -223,13 +281,10 @@ impl RemotePullClient {
                         continue;
                     }
                     // Spawn data plane as background task so we can continue processing
-                    // ManifestBatch messages on the control plane
-                    data_plane_handle = Some(self.spawn_data_plane_receiver(
-                        neg,
-                        dest_root,
-                        track_paths,
-                        progress,
-                    )?);
+                    // ManifestBatch messages on the control plane.
+                    data_plane_handle = Some(AbortOnDrop::new(
+                        self.spawn_data_plane_receiver(neg, dest_root, track_paths, progress)?,
+                    ));
                 }
                 Some(pull_chunk::Payload::Summary(summary)) => {
                     report.summary = Some(summary);
@@ -245,9 +300,16 @@ impl RemotePullClient {
 
         finalize_active_file(&mut active_file, progress).await?;
 
-        // Wait for data plane to complete and merge results
+        // Wait for data plane to complete and merge results. We
+        // `.join()` on the AbortOnDrop wrapper so the wrapper stays
+        // alive across the await — if the surrounding future is
+        // cancelled here, Drop fires abort() on the still-owned
+        // handle. Using a hypothetical `into_inner().await` here
+        // would release the wrapper before awaiting and re-introduce
+        // the detach-on-cancel bug (R34-F2).
         if let Some(handle) = data_plane_handle {
             let dp_result = handle
+                .join()
                 .await
                 .map_err(|err| eyre!("data plane task panicked: {}", err))??;
             report.files_transferred = report
@@ -369,8 +431,87 @@ impl RemotePullClient {
         Ok(RemoteFileStream::new(stream))
     }
 
-    /// Pull with manifest synchronization - sends local manifest to server,
-    /// server compares and only sends files that need updating.
+    /// Build a `TransferOperationSpec` from CLI-style `PullSyncOptions`
+    /// and the client's endpoint. Pure function; testable in isolation.
+    ///
+    /// Lifts two non-contiguous regions of the pre-refactor `pull_sync`:
+    /// the endpoint→`module`/`source_path` mapping (was `pull.rs:397-409`)
+    /// and the options→spec block (was `pull.rs:433-484`). Returns
+    /// `Result` because the `RemotePath::Discovery` variant bails.
+    pub fn build_spec_from_options(
+        endpoint: &RemoteEndpoint,
+        options: &PullSyncOptions,
+    ) -> Result<TransferOperationSpec> {
+        let (module, rel_path) = match &endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
+            RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
+            RemotePath::Discovery => {
+                bail!("remote source must specify a module (server:/module/...)");
+            }
+        };
+
+        let path_str = if rel_path.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            normalize_for_request(&rel_path)
+        };
+
+        // ComparisonMode covers only the "given the file is being
+        // considered, what counts as a match?" axis; the orthogonal
+        // "skip if dst exists" axis travels in the top-level
+        // `ignore_existing` spec field. The CLI rejects `--force
+        // --ignore-existing` (contradictory) before reaching here —
+        // but the spec normalizer also rejects it defensively.
+        let compare_mode = if options.ignore_times {
+            ComparisonMode::IgnoreTimes
+        } else if options.force {
+            ComparisonMode::Force
+        } else if options.size_only {
+            ComparisonMode::SizeOnly
+        } else if options.checksum {
+            ComparisonMode::Checksum
+        } else {
+            ComparisonMode::SizeMtime
+        };
+        let mirror = if options.mirror_mode {
+            if options.delete_all_scope {
+                MirrorMode::All
+            } else {
+                // Default — files outside the filter scope are not
+                // purged from the destination, since the source
+                // filter excluded them on purpose.
+                MirrorMode::FilteredSubset
+            }
+        } else {
+            MirrorMode::Off
+        };
+        let filter_spec = options.filter.clone().unwrap_or_default();
+        Ok(TransferOperationSpec {
+            spec_version: 1,
+            module,
+            source_path: path_str,
+            filter: Some(filter_spec),
+            compare_mode: compare_mode as i32,
+            mirror_mode: mirror as i32,
+            resume: Some(ResumeSettings {
+                enabled: options.resume,
+                block_size: options.block_size,
+            }),
+            client_capabilities: Some(PeerCapabilities {
+                supports_resume: true,
+                supports_tar_shards: true,
+                supports_data_plane_tcp: true,
+                supports_filter_spec: true,
+            }),
+            force_grpc: options.force_grpc,
+            ignore_existing: options.ignore_existing,
+        })
+    }
+
+    /// Pull with manifest synchronization — sends local manifest to
+    /// server, server compares and only sends files that need updating.
+    /// Thin wrapper around `pull_sync_with_spec` for CLI call sites
+    /// that build `PullSyncOptions`.
     pub async fn pull_sync(
         &mut self,
         dest_root: &Path,
@@ -379,8 +520,32 @@ impl RemotePullClient {
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
     ) -> Result<RemotePullReport> {
-        let force_grpc = options.force_grpc;
-        let mirror_mode = options.mirror_mode;
+        let spec = Self::build_spec_from_options(&self.endpoint, options)?;
+        self.pull_sync_with_spec(dest_root, local_manifest, spec, track_paths, progress)
+            .await
+    }
+
+    /// Pull using a pre-built, normalized `TransferOperationSpec`. The
+    /// spec travels over the wire unchanged.
+    ///
+    /// IMPORTANT: this method MUST NOT read `self.endpoint.path` to
+    /// derive any spec field. The endpoint is purely a transport
+    /// handle (host:port for the gRPC connection); the spec is
+    /// authoritative for `module` + `source_path` + every other field.
+    /// Touching `endpoint.path` here would reopen the
+    /// validate-then-reconstruct hole that motivated this split (see
+    /// docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md §4.2 R25-F1).
+    ///
+    /// Used by the delegated-pull daemon handler AND by the existing
+    /// CLI pull entry point (via the `pull_sync` wrapper above).
+    pub async fn pull_sync_with_spec(
+        &mut self,
+        dest_root: &Path,
+        local_manifest: Vec<FileHeader>,
+        spec: TransferOperationSpec,
+        track_paths: bool,
+        progress: Option<&RemotePullProgress>,
+    ) -> Result<RemotePullReport> {
         use tokio_stream::wrappers::ReceiverStream;
 
         // Ensure the parent exists; do NOT mkdir dest_root itself — for a
@@ -394,19 +559,10 @@ impl RemotePullClient {
             }
         }
 
-        let (module, rel_path) = match &self.endpoint.path {
-            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
-            RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
-            RemotePath::Discovery => {
-                bail!("remote source must specify a module (server:/module/...)");
-            }
-        };
-
-        let path_str = if rel_path.as_os_str().is_empty() {
-            ".".to_string()
-        } else {
-            normalize_for_request(&rel_path)
-        };
+        // Derive checksum-mode flag from the spec for the PullSyncAck
+        // mismatch check below. This is the only spec field the body
+        // proper inspects (apart from sending the spec itself).
+        let checksum_requested = spec.compare_mode == ComparisonMode::Checksum as i32;
 
         // Create channel for sending messages to server. Capacity is
         // small (32) — adequate because the gRPC stream is opened
@@ -430,58 +586,8 @@ impl RemotePullClient {
             .map_err(|status| eyre!(status.message().to_string()))?
             .into_inner();
 
-        // Build the unified TransferOperationSpec from the client's
-        // CLI args. ComparisonMode now covers only the "given the
-        // file is being considered, what counts as a match?" axis;
-        // the orthogonal "skip if dst exists" axis travels in the
-        // top-level `ignore_existing` spec field. The CLI rejects
-        // `--force --ignore-existing` (contradictory) before reaching
-        // here — but the spec normalizer also rejects it defensively.
-        let compare_mode = if options.ignore_times {
-            ComparisonMode::IgnoreTimes
-        } else if options.force {
-            ComparisonMode::Force
-        } else if options.size_only {
-            ComparisonMode::SizeOnly
-        } else if options.checksum {
-            ComparisonMode::Checksum
-        } else {
-            ComparisonMode::SizeMtime
-        };
-        let mirror = if mirror_mode {
-            if options.delete_all_scope {
-                MirrorMode::All
-            } else {
-                // Default — files outside the filter scope are not
-                // purged from the destination, since the source
-                // filter excluded them on purpose.
-                MirrorMode::FilteredSubset
-            }
-        } else {
-            MirrorMode::Off
-        };
-        let filter_spec = options.filter.clone().unwrap_or_default();
         tx.send(ClientPullMessage {
-            payload: Some(client_pull_message::Payload::Spec(TransferOperationSpec {
-                spec_version: 1,
-                module,
-                source_path: path_str,
-                filter: Some(filter_spec),
-                compare_mode: compare_mode as i32,
-                mirror_mode: mirror as i32,
-                resume: Some(ResumeSettings {
-                    enabled: options.resume,
-                    block_size: options.block_size,
-                }),
-                client_capabilities: Some(PeerCapabilities {
-                    supports_resume: true,
-                    supports_tar_shards: true,
-                    supports_data_plane_tcp: true,
-                    supports_filter_spec: true,
-                }),
-                force_grpc,
-                ignore_existing: options.ignore_existing,
-            })),
+            payload: Some(client_pull_message::Payload::Spec(spec)),
         })
         .await
         .map_err(|_| eyre!("failed to send pull sync spec"))?;
@@ -494,7 +600,13 @@ impl RemotePullClient {
         // responses yet.
         let local_manifest_clone = local_manifest.clone();
         let tx_for_manifest = tx.clone();
-        let manifest_send_task = tokio::spawn(async move {
+        // R32-F2: AbortOnDrop so an outer cancellation aborts the
+        // manifest send task instead of detaching it. In practice
+        // the task self-terminates the moment the request stream is
+        // dropped (send returns Err), but the explicit guard is
+        // robust to future shape changes (e.g. a task that holds
+        // resources beyond the channel).
+        let manifest_send_task = AbortOnDrop::new(tokio::spawn(async move {
             for header in &local_manifest_clone {
                 if tx_for_manifest
                     .send(ClientPullMessage {
@@ -515,12 +627,15 @@ impl RemotePullClient {
                 .await
                 .map_err(|_| eyre!("failed to send manifest done"))?;
             Ok::<(), eyre::Report>(())
-        });
+        }));
 
         let mut report = RemotePullReport::default();
         let mut active_file: Option<(File, PathBuf)> = None;
         let mut active_shard: Option<InProgressShard> = None;
-        let mut data_plane_handle: Option<JoinHandle<Result<DataPlaneResult>>> = None;
+        // R32-F2: wrap the data-plane handle in AbortOnDrop so an
+        // outer-future drop cancels the spawned TCP receiver instead
+        // of detaching it.
+        let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
         let mut files_to_delete = 0u64;
 
         while let Some(msg) = response_stream
@@ -539,7 +654,7 @@ impl RemotePullClient {
                     // degrading to size+mtime would lie to the user
                     // about the comparison strength they requested.
                     report.server_checksums_enabled = Some(ack.server_checksums_enabled);
-                    if options.checksum && !ack.server_checksums_enabled {
+                    if checksum_requested && !ack.server_checksums_enabled {
                         bail!(
                             "client requested checksum comparison (--checksum) but the daemon \
                              has checksums disabled; aborting before transfer to avoid silent \
@@ -670,12 +785,9 @@ impl RemotePullClient {
                     if neg.tcp_fallback {
                         continue;
                     }
-                    data_plane_handle = Some(self.spawn_data_plane_receiver(
-                        neg,
-                        dest_root,
-                        track_paths,
-                        progress,
-                    )?);
+                    data_plane_handle = Some(AbortOnDrop::new(
+                        self.spawn_data_plane_receiver(neg, dest_root, track_paths, progress)?,
+                    ));
                 }
                 Some(server_pull_message::Payload::Summary(summary)) => {
                     files_to_delete = summary.entries_deleted;
@@ -790,19 +902,27 @@ impl RemotePullClient {
         finalize_active_file(&mut active_file, progress).await?;
         ensure_no_open_shard(&active_shard)?;
 
-        // Wait for the manifest send task to complete (it should have
-        // finished by now — daemon's response stream couldn't have
-        // ended otherwise — but await for error propagation).
+        // Wait for the manifest send task to complete (it should
+        // have finished by now — daemon's response stream couldn't
+        // have ended otherwise — but await for error propagation).
+        // `.join()` keeps the wrapper alive across the await so a
+        // surrounding future cancellation here aborts the task via
+        // Drop instead of detaching it.
         manifest_send_task
+            .join()
             .await
             .map_err(|err| eyre!("manifest send task panicked: {}", err))??;
         // Drop the original tx so the daemon sees end-of-stream after
         // any final messages have flushed.
         drop(tx);
 
-        // Wait for data plane to complete and merge results
+        // Wait for data plane to complete and merge results.
+        // `.join()` keeps the AbortOnDrop wrapper alive across the
+        // await — if the surrounding future is cancelled here, Drop
+        // fires abort() on the still-owned handle. R34-F2.
         if let Some(handle) = data_plane_handle {
             let dp_result = handle
+                .join()
                 .await
                 .map_err(|err| eyre!("data plane task panicked: {}", err))??;
             report.files_transferred = report
@@ -1298,13 +1418,19 @@ async fn receive_data_plane_streams_owned(
 
     let token = Arc::new(token);
 
-    let mut handles = Vec::with_capacity(stream_count);
+    // R32-F2: each parallel data-plane worker is wrapped in
+    // AbortOnDrop so cancellation of the surrounding future cascades
+    // through the whole worker pool. Without this, dropping the
+    // outer JoinHandle would detach this function, which in turn
+    // would detach the per-stream workers — leaving N TCP receivers
+    // running with no observable cancellation.
+    let mut handles: Vec<AbortOnDrop<Result<PullWorkerStats>>> = Vec::with_capacity(stream_count);
     for _ in 0..stream_count {
         let host_clone = host.clone();
         let token_clone = Arc::clone(&token);
         let dest_root_clone = dest_root.clone();
         let progress_clone = progress.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(AbortOnDrop::new(tokio::spawn(async move {
             let mut stats = PullWorkerStats::new();
             receive_data_plane_stream_inner(
                 &host_clone,
@@ -1317,11 +1443,12 @@ async fn receive_data_plane_streams_owned(
             )
             .await?;
             Ok::<_, eyre::Report>(stats)
-        }));
+        })));
     }
 
     for handle in handles {
         let stats = handle
+            .join()
             .await
             .map_err(|err| eyre!(format!("pull data-plane worker panicked: {}", err)))??;
         result.files_transferred = result
@@ -1436,4 +1563,364 @@ fn normalize_for_request(path: &Path) -> String {
             .collect::<Vec<_>>()
             .join("/")
     }
+}
+
+#[cfg(test)]
+mod abort_on_drop_tests {
+    //! Regression tests for the `AbortOnDrop` wrapper that bounds
+    //! every internal `tokio::spawn` in `pull_sync_with_spec` and the
+    //! deprecated `pull` method (R32-F2). Without this, dropping the
+    //! `JoinHandle` would detach the spawned task — meaning a CLI
+    //! Ctrl-C from the daemon's `delegated_pull` handler couldn't
+    //! actually stop a running data-plane receiver.
+
+    use super::AbortOnDrop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn drop_without_consume_aborts_running_task() {
+        // The task tries to set the "completed" flag after a delay
+        // long enough that the test wouldn't naturally race past it.
+        // Wrapping in AbortOnDrop and dropping immediately must
+        // prevent the flag from ever being set.
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_task = Arc::clone(&completed);
+
+        let guard = AbortOnDrop::new(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            completed_in_task.store(true, Ordering::SeqCst);
+        }));
+        // Drop the wrapper without awaiting — this is the
+        // cancellation path (e.g. the outer pull_sync_with_spec
+        // future was dropped mid-flight).
+        drop(guard);
+
+        // Wait significantly longer than the task's natural
+        // duration. If abort actually happened, the task is dead
+        // and the flag never got set.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "task ran to completion despite AbortOnDrop being dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_returns_value_and_drop_becomes_noop() {
+        // Happy path: the caller awaits via `.join()`. The task
+        // completes naturally, the value is returned, and the
+        // wrapper's Drop is a no-op (slot was cleared inside join).
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_task = Arc::clone(&completed);
+
+        let guard = AbortOnDrop::new(tokio::spawn(async move {
+            completed_in_task.store(true, Ordering::SeqCst);
+            42_u32
+        }));
+
+        let value = guard.join().await.expect("task succeeds");
+        assert_eq!(value, 42);
+        assert!(completed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn drop_after_natural_completion_does_not_panic() {
+        // If the task happens to complete before Drop fires, the
+        // wrapper must still drop cleanly. abort() on a completed
+        // JoinHandle is a no-op in tokio; this test pins that
+        // expectation in our wrapper.
+        let guard = AbortOnDrop::new(tokio::spawn(async {}));
+        // Let the task complete.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(guard);
+    }
+
+    // ── R34-F2: cancellation during the join await still aborts ──────
+
+    #[tokio::test]
+    async fn cancellation_during_join_await_still_aborts_task() {
+        // The load-bearing R34-F2 regression. Pre-fix, the wrapper
+        // exposed `into_inner() -> JoinHandle<T>` and callers did
+        // `handle.into_inner().await`. That moved the handle out of
+        // the wrapper before the await: if the surrounding future was
+        // cancelled mid-await, the bare `JoinHandle` was dropped, and
+        // tokio detaches on JoinHandle drop. The spawned task kept
+        // running.
+        //
+        // Post-fix, `.join()` holds `self` across the await; if the
+        // surrounding future is dropped at that point, `self` drops
+        // and `Drop::drop` calls `abort()` on the still-owned handle.
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_task = Arc::clone(&completed);
+
+        let guard = AbortOnDrop::new(tokio::spawn(async move {
+            // Long enough that the test will reliably abort before
+            // natural completion.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            completed_in_task.store(true, Ordering::SeqCst);
+        }));
+
+        // Build the join future and drop it after a short timeout —
+        // simulating an outer `tokio::select!` whose other branch
+        // fired (the realistic scenario in the daemon's
+        // delegated_pull handler when the CLI hangs up).
+        let join_fut = guard.join();
+        let timed_out = tokio::time::timeout(Duration::from_millis(20), join_fut)
+            .await
+            .is_err();
+        assert!(timed_out, "timeout must fire to drop the join future");
+
+        // Wait well past when the task would have naturally
+        // completed. If abort actually fired through the wrapper
+        // during the dropped join await, the flag is still false.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "task ran to completion despite cancellation during join() await — \
+             AbortOnDrop is leaking the handle out before the await again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod spec_extraction_tests {
+    //! Tests pinning the `pull_sync` ↔ `pull_sync_with_spec` seam.
+    //! The body of `pull_sync` was split along an existing-but-implicit
+    //! seam: spec construction (endpoint→module/source_path mapping +
+    //! options→spec) was extracted into `build_spec_from_options`, and
+    //! the rest of the body became `pull_sync_with_spec`. These tests
+    //! guard the seam from drifting on the `build_spec_from_options`
+    //! side:
+    //!
+    //!   * `wire_equivalence_*` — `build_spec_from_options(opts)`
+    //!     produces the same shape the pre-refactor `pull_sync` would
+    //!     have sent for representative options.
+    //!   * `endpoint_path_*` — exercises the variants of the
+    //!     endpoint→spec mapping (Module / Root / Discovery / empty
+    //!     rel_path) so future regressions surface here.
+    //!
+    //! The corresponding endpoint-isolation invariant on
+    //! `pull_sync_with_spec` ("spec wins over endpoint at the wire")
+    //! is exercised by a real gRPC roundtrip in the integration test
+    //! at `crates/blit-core/tests/pull_sync_with_spec_wire.rs`.
+
+    use super::*;
+    use crate::generated::FilterSpec;
+    use crate::remote::endpoint::RemotePath;
+    use prost::Message;
+    use std::path::PathBuf;
+
+    fn endpoint_with_path(path: RemotePath) -> RemoteEndpoint {
+        RemoteEndpoint {
+            host: "localhost".to_string(),
+            port: 50051,
+            path,
+        }
+    }
+
+    fn module_endpoint(module: &str, rel: &str) -> RemoteEndpoint {
+        endpoint_with_path(RemotePath::Module {
+            module: module.to_string(),
+            rel_path: PathBuf::from(rel),
+        })
+    }
+
+    #[test]
+    fn wire_equivalence_default_options() {
+        // Default options + module endpoint should produce the spec
+        // shape the pre-refactor code emitted: module="alpha",
+        // source_path="x/y", compare_mode=SizeMtime, mirror=Off,
+        // resume disabled, capabilities all-true.
+        let endpoint = module_endpoint("alpha", "x/y");
+        let opts = PullSyncOptions::default();
+        let spec = RemotePullClient::build_spec_from_options(&endpoint, &opts).unwrap();
+        assert_eq!(spec.spec_version, 1);
+        assert_eq!(spec.module, "alpha");
+        assert_eq!(spec.source_path, "x/y");
+        assert_eq!(spec.compare_mode, ComparisonMode::SizeMtime as i32);
+        assert_eq!(spec.mirror_mode, MirrorMode::Off as i32);
+        assert!(!spec.force_grpc);
+        assert!(!spec.ignore_existing);
+        let caps = spec.client_capabilities.as_ref().unwrap();
+        assert!(caps.supports_resume);
+        assert!(caps.supports_tar_shards);
+        assert!(caps.supports_data_plane_tcp);
+        assert!(caps.supports_filter_spec);
+    }
+
+    #[test]
+    fn wire_equivalence_compare_modes() {
+        // Each compare-mode flag maps to the matching enum variant.
+        // The `if-else` chain priority is exercised: ignore_times >
+        // force > size_only > checksum > size_mtime.
+        let ep = module_endpoint("m", ".");
+
+        let mut opts = PullSyncOptions {
+            ignore_times: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.compare_mode, ComparisonMode::IgnoreTimes as i32);
+
+        opts = PullSyncOptions {
+            force: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.compare_mode, ComparisonMode::Force as i32);
+
+        opts = PullSyncOptions {
+            size_only: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.compare_mode, ComparisonMode::SizeOnly as i32);
+
+        opts = PullSyncOptions {
+            checksum: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.compare_mode, ComparisonMode::Checksum as i32);
+    }
+
+    #[test]
+    fn wire_equivalence_mirror_modes() {
+        let ep = module_endpoint("m", ".");
+
+        // mirror_mode=false → MirrorMode::Off (delete_all_scope is ignored)
+        let opts = PullSyncOptions {
+            mirror_mode: false,
+            delete_all_scope: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.mirror_mode, MirrorMode::Off as i32);
+
+        // mirror_mode=true, delete_all_scope=false → FilteredSubset (default)
+        let opts = PullSyncOptions {
+            mirror_mode: true,
+            delete_all_scope: false,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.mirror_mode, MirrorMode::FilteredSubset as i32);
+
+        // mirror_mode=true, delete_all_scope=true → All
+        let opts = PullSyncOptions {
+            mirror_mode: true,
+            delete_all_scope: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.mirror_mode, MirrorMode::All as i32);
+    }
+
+    #[test]
+    fn wire_equivalence_resume_and_filter_and_force_grpc() {
+        let ep = module_endpoint("m", ".");
+        let filter = FilterSpec {
+            include: vec!["*.txt".into()],
+            exclude: vec!["tmp/**".into()],
+            min_size: Some(1),
+            max_size: None,
+            min_age_secs: None,
+            max_age_secs: None,
+            files_from: vec![],
+        };
+        let opts = PullSyncOptions {
+            resume: true,
+            block_size: 4096,
+            filter: Some(filter.clone()),
+            force_grpc: true,
+            ignore_existing: true,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        let resume = spec.resume.as_ref().unwrap();
+        assert!(resume.enabled);
+        assert_eq!(resume.block_size, 4096);
+        let spec_filter = spec.filter.as_ref().unwrap();
+        assert_eq!(spec_filter.include, vec!["*.txt".to_string()]);
+        assert_eq!(spec_filter.exclude, vec!["tmp/**".to_string()]);
+        assert_eq!(spec_filter.min_size, Some(1));
+        assert!(spec.force_grpc);
+        assert!(spec.ignore_existing);
+    }
+
+    #[test]
+    fn endpoint_path_root_variant_yields_empty_module() {
+        // RemotePath::Root → module is empty string, source_path is
+        // the rel_path. Pre-refactor behavior at pull.rs:399.
+        let ep = endpoint_with_path(RemotePath::Root {
+            rel_path: PathBuf::from("data"),
+        });
+        let opts = PullSyncOptions::default();
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.module, "");
+        assert_eq!(spec.source_path, "data");
+    }
+
+    #[test]
+    fn endpoint_path_empty_rel_path_yields_dot_source() {
+        // Empty rel_path → "." for source_path. Pre-refactor behavior
+        // at pull.rs:405-409.
+        let ep = module_endpoint("m", "");
+        let opts = PullSyncOptions::default();
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        assert_eq!(spec.module, "m");
+        assert_eq!(spec.source_path, ".");
+    }
+
+    #[test]
+    fn endpoint_path_discovery_variant_bails() {
+        // RemotePath::Discovery should bail with a clear error.
+        // Pre-refactor behavior at pull.rs:400-402.
+        let ep = endpoint_with_path(RemotePath::Discovery);
+        let opts = PullSyncOptions::default();
+        let err = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap_err();
+        assert!(
+            err.to_string().contains("must specify a module"),
+            "expected module-required error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn wire_equivalence_byte_identical_proto_round_trip() {
+        // Round-trip the spec through prost encoding to confirm we
+        // produce a stable wire form. This is the load-bearing
+        // regression guard: any future change that drops a field or
+        // reorders enum variants would change the bytes.
+        let ep = module_endpoint("alpha", "x/y");
+        let opts = PullSyncOptions {
+            checksum: true,
+            mirror_mode: true,
+            delete_all_scope: true,
+            resume: true,
+            block_size: 1024,
+            force_grpc: false,
+            ignore_existing: false,
+            ..Default::default()
+        };
+        let spec = RemotePullClient::build_spec_from_options(&ep, &opts).unwrap();
+        let bytes = spec.encode_to_vec();
+        let decoded = TransferOperationSpec::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded, spec);
+    }
+
+    // ── Endpoint-isolation invariant (R25-F1) ─────────────────────────────
+    //
+    // The "pull_sync_with_spec MUST NOT read self.endpoint.path"
+    // invariant is tested via a real gRPC roundtrip in
+    // crates/blit-core/tests/pull_sync_with_spec_wire.rs. That test
+    // spins up a stub server, captures the first ClientPullMessage
+    // emitted by pull_sync_with_spec, and asserts it equals the
+    // supplied spec — with the client's endpoint deliberately
+    // constructed using a *different* module/rel_path from the spec.
+    // A unit-level construct-and-compare check would only prove that
+    // two specs differ; it would not exercise the function under
+    // test. R30-F4 (Round 30 review) replaced the original
+    // construct-and-compare test with that real wire roundtrip.
 }

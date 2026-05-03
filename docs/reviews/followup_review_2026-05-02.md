@@ -1434,3 +1434,1709 @@ Status:
 
 - R18-F1's main stale-checklist bug is fixed.
 - R19-F1 and R19-F2 remain as low-severity project-state cleanups.
+
+## Round 20 - R19-F1 + R19-F2 Closure Commit
+
+Reviewed change:
+
+- Commit: `06b50bd docs(todo+devlog): close R19-F1 + R19-F2 control-plane cleanups`
+- Scope: move remote-to-remote re-evaluation out of executable TODO ordering,
+  remove stale follow-up round count, and record the TODO sync/R19 cleanup in
+  DEVLOG.
+
+Verification:
+
+- Code review only. I did not rerun the workspace test suite for this review note.
+
+Verdict:
+
+R19-F1 is accepted. The first unchecked item in `TODO.md`'s executable
+"Current Review Follow-up" section is now F14, not the deferred remote-to-remote
+design call. The remote-to-remote item moved to a dedicated "Deferred design
+calls" subsection with explicit wording that those items are not
+next-actionable without their prerequisite. The stale "16-round followup series"
+wording was replaced with count-free text.
+
+R19-F2 is accepted. `DEVLOG.md` now has a latest-first entry recording the
+R18-F1 TODO sync and the R19 control-plane cleanup. The entry is compressed into
+one line, but it is sufficient for the cross-agent timeline.
+
+No new findings.
+
+Status:
+
+- R19-F1 is closed.
+- R19-F2 is closed.
+- All follow-up review findings through Round 20 are accepted as closed.
+
+## Round 21 - Remote→Remote Delegation Plan Review
+
+Reviewed change:
+
+- File: `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+- Scope: draft design for direct daemon-to-daemon byte path on
+  remote-source/remote-destination transfers.
+
+Verification:
+
+- Design/code review only. I did not rerun tests for this review note.
+
+Verdict:
+
+The high-level direction is sound: destination-side delegation is the right
+shape. The destination daemon already owns the target filesystem and the target
+manifest, and making it the pull initiator avoids forcing source daemons to
+learn destination-side diff/delete behavior.
+
+However, the draft should be tightened before implementation. As written, it
+risks reintroducing partial flag bags next to the unified operation contract,
+and it underestimates the security impact of letting an unauthenticated daemon
+RPC initiate outbound connections.
+
+### R21-F1. DelegatedPullRequest bypasses TransferOperationSpec and loses current transfer semantics
+
+Severity: High
+
+The proposed `DelegatedPullRequest` in
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:126` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:142` carries a destination module,
+destination path, `bool mirror_mode`, `bool force_grpc`, source locator, and
+filter. It does not carry the existing `TransferOperationSpec` shape from
+`proto/blit.proto:314` to `proto/blit.proto:365`.
+
+That drops or flattens behavior the current protocol already made explicit:
+
+- `MirrorMode::FilteredSubset` vs `MirrorMode::All` from
+  `proto/blit.proto:422` to `proto/blit.proto:435`; a `bool mirror_mode`
+  cannot represent `--delete-scope all` safely.
+- `ComparisonMode` from `proto/blit.proto:397` to `proto/blit.proto:417`;
+  direct remote→remote would lose `--checksum`, `--size-only`,
+  `--ignore-times`, and `--force` unless re-added elsewhere.
+- `ignore_existing` from `proto/blit.proto:358` to `proto/blit.proto:364`.
+- `ResumeSettings` and `PeerCapabilities` from `proto/blit.proto:438` to
+  `proto/blit.proto:458`.
+
+This is not just a stylistic issue. The baseline review already found real data
+loss risk around filtered mirror deletion. Replacing the enum-typed mirror
+contract with a boolean recreates the same class of ambiguity on the new path.
+
+Recommendation:
+
+Make `DelegatedPullRequest` embed the existing `TransferOperationSpec` for the
+source/origin side, plus destination-only fields such as `dst_module` and
+`dst_destination_path`. The daemon handler should normalize through
+`NormalizedTransferOperation::from_spec` at the RPC boundary, exactly like
+`pull_sync` does. Do not define a parallel bool-based transfer contract.
+
+### R21-F2. Delegated pull adds a new unauthenticated outbound-connect primitive
+
+Severity: High
+
+The plan says the 0.1.0 baseline has no daemon auth and that the destination
+daemon will open a `RemotePullClient` to the source exactly as a CLI would
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:265` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:282`). It also says the risk is
+limited because outbound connections use existing client code and "no new
+privileges" (`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:417` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:418`).
+
+That understates the change. Today, a caller that can reach daemon B can make B
+read/write only B's configured modules. With delegated pull, the same caller can
+make B initiate a network connection to an arbitrary source locator supplied in
+the request. That is a new network-pivot/SSRF-style capability from B's network
+position, even if the byte payload ultimately lands in B's module.
+
+The project trust model can still accept this, but it should be explicit and
+operator-controlled. "No auth today" is not enough of a boundary when the daemon
+starts dialing attacker-supplied control-plane URIs.
+
+Recommendation:
+
+Add an explicit daemon-side delegation gate before implementation. Reasonable
+minimums:
+
+- a config/CLI flag such as `allow_delegated_pull` defaulting to the product
+  decision, documented in `DAEMON_CONFIG.md`;
+- strict parsing to Blit remote endpoints, not arbitrary URI schemes;
+- optional source host/module allowlist if the default is enabled;
+- clear docs that enabling direct remote→remote allows clients who can reach the
+  destination daemon to make it connect to source daemons from the destination
+  daemon's network.
+
+### R21-F3. Daemon-side implementation sketch is not aligned with existing pull machinery
+
+Severity: Medium
+
+The daemon-side sketch says to open a `RemotePullClient`, build an
+`FsTransferSink`, wrap it in a `FilteredSink`, and drive
+`execute_sink_pipeline_streaming` (`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:239`
+to `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:251`).
+
+That does not match the current abstractions:
+
+- There is a `FilteredSource`, not a `FilteredSink`; filters are source-side and
+  already represented by wire `FilterSpec`.
+- Existing pull behavior lives behind `RemotePullClient::pull_sync`, which owns
+  the destination manifest, pull ack, data-plane negotiation/fallback, resume
+  behavior, and authoritative mirror delete list.
+- If the new handler bypasses `pull_sync` and talks directly to pipeline
+  sinks/sources, it must reimplement those behaviors or extract a shared
+  target-side pull executor first.
+
+Recommendation:
+
+Choose one implementation route in the plan:
+
+- simplest first version: destination daemon resolves the target path, enumerates
+  its local destination manifest, then calls `RemotePullClient::pull_sync` with
+  the normalized options and applies any returned delete list locally;
+- deeper refactor: extract a reusable "target-side pull executor" from the CLI
+  pull path and call that from both CLI and daemon.
+
+Avoid a third custom path that partially duplicates pull behavior under the
+banner of the universal pipeline.
+
+### R21-F4. Plan contains stale protocol assumptions about FilterSpec
+
+Severity: Low
+
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:199` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:202` and
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:318` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:323` say `FilterSpec` needs a proto
+representation and serialization helpers.
+
+That work already exists. `FilterSpec` is defined in `proto/blit.proto:367` to
+`proto/blit.proto:392`, and the CLI already has `build_filter_spec` in
+`crates/blit-cli/src/transfers/mod.rs`.
+
+Recommendation:
+
+Update the plan to say delegated pull reuses the existing `FilterSpec` wire
+message and normalizer. If additional fields are needed, version the existing
+message through `TransferOperationSpec.spec_version` rather than defining a
+parallel representation.
+
+### R21-F5. Automatic fallback on Unimplemented preserves old-daemon compatibility despite the release premise
+
+Severity: Medium
+
+The failure table says `Code::Unimplemented` from an older destination daemon
+should automatically fall back to the CLI relay path
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:291` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:295`).
+
+The user has explicitly set the premise for this release: do not carry technical
+debt for backwards compatibility. Keeping `--relay-via-cli` for topology
+fallback and benchmarking is defensible; silently falling back because an old
+daemon does not implement the new RPC is backwards-compat support.
+
+Recommendation:
+
+Remove automatic `Unimplemented` fallback from the default path. If the
+destination daemon lacks `DelegatedPull`, fail with a clear upgrade/capability
+error. Keep explicit `--relay-via-cli` as the operator-selected escape hatch.
+Auto-fallback should be limited to topology cases where direct delegation is
+supported but the destination cannot reach the source and the policy says CLI
+relay is acceptable.
+
+### R21-F6. Unknown-field rejection is not a valid protobuf compatibility strategy
+
+Severity: Low
+
+The risk table says to reject unknown `FilterSpec` fields with `Unimplemented`
+so the CLI falls back to relay
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:415` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:418`). With prost/proto3, unknown
+fields are generally skipped or preserved opaquely; application code should not
+depend on detecting them.
+
+Recommendation:
+
+Use the existing explicit version/capability model: `TransferOperationSpec`
+already has `spec_version`, typed enums, and `PeerCapabilities`. New semantics
+should require a version bump or capability bit that the receiver validates
+through `NormalizedTransferOperation::from_spec`.
+
+### R21-F7. Proposed "CLI does not see bytes" test does not prove byte-path isolation
+
+Severity: Low
+
+The integration test plan says to assert the CLI is out of the byte path by
+checking `DelegatedPullProgress.started.negotiated_endpoint` points at A
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:340` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:347`).
+
+That proves the destination reported a source-side negotiated endpoint. It does
+not prove the CLI did not relay payload bytes.
+
+Recommendation:
+
+Add an explicit observable for byte-path isolation: a test-only counter on the
+legacy relay path, a CLI-side network-byte counter around the transfer, or a
+daemon-side progress field that reports the actual source peer address observed
+by A's data-plane listener. The test should fail if `RemoteTransferSource` is
+used by default for remote→remote.
+
+Status:
+
+- Direction accepted: destination-side delegation is the right architecture.
+- Do not implement the plan as written. First revise the RPC shape around
+  `TransferOperationSpec`, add the delegation security gate, and align the
+  daemon handler with the existing target-side pull machinery.
+
+## Round 22 - Plan v2 Response (R21-F1 through R21-F7)
+
+Plan revised in `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`. Status banner
+updated to "Draft v2, 2026-05-02 (incorporates Round 21 review findings)" with
+an explicit changelog block at the top.
+
+Per-finding response:
+
+### R21-F1 — DelegatedPullRequest now embeds TransferOperationSpec
+
+§4.1 rewritten. `DelegatedPullRequest` now contains `dst_module`,
+`dst_destination_path`, `RemoteSourceLocator src`, and
+`TransferOperationSpec spec`. The flag-bag (`bool mirror_mode`,
+`bool force_grpc`) is gone. All of `MirrorMode`, `ComparisonMode`,
+`ResumeSettings`, `PeerCapabilities`, `ignore_existing`, and
+`spec_version` flow through the existing message verbatim.
+
+§4.2 calls out that the daemon normalizes the spec via
+`NormalizedTransferOperation::from_spec` exactly like push/pull, with no
+parallel normalizer.
+
+### R21-F2 — Explicit delegation gate added
+
+§4.3 split into 4.3.1 (rationale), 4.3.2 (gate design), 4.3.3 (what the
+gate does not solve), 4.3.4 (docs requirement), 4.3.5 (forward-compat
+auth hook). Gate posture:
+
+- New `[delegation]` block in daemon config: `allow_delegated_pull` with
+  default **false**, `allowed_source_hosts` allowlist, per-module
+  override.
+- Strict parsing of `RemoteSourceLocator` through the existing
+  `RemoteEndpoint` parser; arbitrary URI schemes are rejected.
+- Gate enforced **before** any module resolution or outbound connect.
+- New `DELEGATION_REJECTED` phase in `DelegatedPullError` so denials
+  surface with a clear reason string.
+- Docs requirement added to `docs/DAEMON_CONFIG.md` Trust Model section.
+
+The plan is explicit that the gate is policy, not authentication, and
+that internet-exposed deployments will need both the gate and (future)
+`BlitAuth`.
+
+### R21-F3 — Daemon handler aligned with existing pull machinery
+
+§4.2 rewritten. `FsTransferSink + FilteredSink + execute_sink_pipeline_streaming`
+sketch removed. New design:
+
+1. Gate check (§4.3).
+2. F2 containment via `resolve_contained_path`.
+3. `NormalizedTransferOperation::from_spec` boundary normalize.
+4. RAII `metrics.enter_transfer()` (F5).
+5. Outbound `RemotePullClient`.
+6. **Reuse `RemotePullClient::pull_sync` directly** — same call a CLI
+   makes for `blit pull`. No custom path.
+7. Progress forwarding via bounded channel.
+8. Cancellation via dropped future on closed gRPC return stream.
+
+If during Phase 1 implementation we find `pull_sync` assumes "caller is
+a CLI" anywhere (progress sink, runtime, log target), the documented
+fallback is to extract a target-side pull executor that both CLI and
+daemon call — not to build a third path.
+
+### R21-F4 — FilterSpec reuse, no new proto
+
+§4.1 explicit: "FilterSpec is **already** defined at proto/blit.proto:367-392
+and the CLI already produces one through build_filter_spec". §4.2 CLI
+side calls out reuse. Phase 1 step 3 was rewritten from "Define FilterSpec
+proto" to "**No new FilterSpec proto** — already exists, reuse both".
+
+### R21-F5 — No silent fallback
+
+§4.4 rewritten. Failure table no longer auto-falls-back on
+`Unimplemented` (renamed "stale daemon", clear upgrade error message),
+`Unavailable` / `CONNECT_SOURCE` (renamed "destination cannot reach
+source", suggests `--relay-via-cli` to operator).
+
+§4.5 retitled "Fallback policy: explicit only". Pseudocode replaced
+with the trivial flag-driven dispatch — no `should_fallback_to_relay`
+predicate. Three explicit reasons documented for why each removed
+heuristic was a bad idea (stale daemon → silent demotion;
+network partition → masking topology; ACL refusal → routing around
+intentional security boundary).
+
+§5 Phase 2 step 5 retitled `remote_remote_no_silent_fallback.rs` with
+explicit assertions that the CLI does NOT fall back on any of the three
+removed cases.
+
+### R21-F6 — spec_version + capabilities, not unknown-field rejection
+
+§4.1 ends with: "Version drift is handled through
+`TransferOperationSpec.spec_version` and `PeerCapabilities`, which
+`NormalizedTransferOperation::from_spec` already validates at the
+boundary. We do **not** rely on detecting unknown protobuf fields
+(proto3 silently preserves them; that's not a compatibility strategy)."
+
+§7 risk row rewritten to reference spec_version + PeerCapabilities
+instead of "reject unknown fields with Unimplemented".
+
+§6 unit-test list adds: "`spec_version` normalizer rejects unknown
+versions explicitly (regression guard for R21-F6)".
+
+### R21-F7 — Byte-path isolation test now has real observables
+
+§6 rewritten. The negotiated_endpoint check is explicitly demoted to
+"informational, not a proof of byte-path isolation." Two complementary
+observables now required:
+
+1. **Source-side peer observation** — new
+   `DelegatedPullSummary.source_peer_observed` field (added to §4.1
+   proto), populated by dst from the data-plane TCP connection's local
+   socket address. Test asserts equals dst, never CLI.
+2. **CLI-side traffic counter** — `#[cfg(test)]` byte counter wrapped
+   around CLI's outbound transports. Direct path observes zero
+   data-plane bytes (only small `DelegatedPull` control gRPC). The
+   `--relay-via-cli` counterpart test observes ~payload size (sanity
+   that the counter works). Test fails if `RemoteTransferSource` is
+   constructed at all on the direct path.
+
+Verification:
+
+- Plan revisions only. No code changes. No tests run.
+
+Status:
+
+- Plan v2 ready for review. No implementation work has started.
+
+## Round 23 - Remote→Remote Delegation Plan v2 Re-review
+
+Reviewed change:
+
+- File: `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+- Scope: Draft v2 response to R21-F1 through R21-F7.
+
+Verification:
+
+- Design/code review only. I did not rerun tests for this review note.
+
+Verdict:
+
+Plan v2 closes the main Round 21 issues. The request now embeds
+`TransferOperationSpec`, the delegation gate is explicit and default-disabled,
+the nonexistent `FilteredSink` path is gone, `FilterSpec` reuse is correctly
+documented, silent fallback is removed, and the byte-path test is materially
+stronger than v1.
+
+Do not start Phase 1 exactly as written yet. There are still a few plan-level
+ambiguities that will otherwise become implementation churn or security-policy
+holes.
+
+### R23-F1. Embedded TransferOperationSpec is not aligned with the current RemotePullClient::pull_sync API
+
+Severity: Medium
+
+The revised plan says the CLI sends `TransferOperationSpec spec` in
+`DelegatedPullRequest` (`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:155` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:160`), and the daemon handler
+normalizes that spec at the boundary (`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:294`
+to `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:297`).
+
+That is the right wire contract. But the implementation sketch then says to call
+`RemotePullClient::pull_sync(spec, dst_path, ...)`
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:307` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:311`). The current API does not take
+a spec. `RemotePullClient::pull_sync` takes `dest_root`, a local destination
+manifest, `PullSyncOptions`, `track_paths`, and progress; it constructs a new
+`TransferOperationSpec` internally from the `RemoteEndpoint` and
+`PullSyncOptions` in `crates/blit-core/src/remote/pull.rs:374` to
+`crates/blit-core/src/remote/pull.rs:485`.
+
+If Phase 1 validates the request's embedded spec and then separately
+reconstructs another spec through `PullSyncOptions`, the new path can drift from
+the exact user intent it just validated. That reopens the same "parallel
+contract" risk R21-F1 was trying to remove, just one layer later.
+
+Recommendation:
+
+Make the plan explicit about the adapter boundary. Pick one:
+
+- Add a `RemotePullClient::pull_sync_with_spec(...)` or lower-level target-side
+  executor that accepts the already-normalized `TransferOperationSpec` and sends
+  it unchanged.
+- Or define a single tested conversion from `NormalizedTransferOperation` to the
+  current `RemoteEndpoint + PullSyncOptions` inputs, and assert a round-trip
+  produces byte-for-byte equivalent `TransferOperationSpec` before anything
+  goes over the wire.
+
+The first option is cleaner and better preserves the "one operation contract"
+model.
+
+### R23-F2. Delegation gate ordering contradicts per-module override semantics
+
+Severity: Medium
+
+The plan adds a per-module delegation override
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:369` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:371`) but also says the gate is
+enforced before any module resolution
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:374` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:377`) and lists "Gate check first"
+as handler step 1 before module resolution
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:285` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:292`).
+
+Those cannot all be true. A per-module override requires looking up the
+destination module's policy. Module lookup is not the dangerous operation here;
+path resolution and outbound connect are.
+
+Recommendation:
+
+Split the gate into ordered checks:
+
+- parse and validate `RemoteSourceLocator`;
+- apply daemon-wide `allow_delegated_pull` and source-host allowlist before any
+  outbound connect;
+- look up `dst_module` metadata without resolving or touching the destination
+  path;
+- apply the per-module delegation override;
+- only then resolve `dst_destination_path` and initiate outbound pull.
+
+The invariant should be "no filesystem path resolution and no outbound connect
+before policy allows delegation," not "no module lookup."
+
+### R23-F3. allowed_source_hosts is the primary SSRF control but its matching semantics are undefined
+
+Severity: Medium
+
+The plan makes `allowed_source_hosts` the operator's primary control for the new
+outbound-connect capability and gives examples like `"server-a.lan"` and
+`"10.0.0.0/8"` (`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:363` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:367`). It does not specify whether
+matching happens on the raw host string, canonical DNS name, resolved IP, CIDR,
+IPv6 literals, or all of the above.
+
+That ambiguity matters because this field is the SSRF/network-pivot boundary. A
+raw-string allowlist is easy to bypass with DNS aliases, trailing-dot hostnames,
+IPv6 forms, IPv4 shorthand, or DNS records that resolve inside/outside an
+allowed range depending on timing.
+
+Recommendation:
+
+Specify the allowlist semantics before implementation:
+
+- exact hostname matches are case-insensitive after trimming a trailing dot;
+- CIDR entries match resolved IP addresses;
+- all resolved addresses must be allowed, not just the first;
+- IPv4-mapped IPv6 and bracketed IPv6 are normalized before comparison;
+- DNS resolution used for the allowlist check is the same resolved address used
+  for the outbound connection, or the connection is made to a checked IP to
+  avoid DNS rebinding between check and connect.
+
+Then add tests for hostname, CIDR, IPv6, denied private/local addresses when not
+allowlisted, and DNS alias behavior if hostname resolution is supported.
+
+### R23-F4. source_peer_observed still needs a source-side observation, not a destination local-socket echo
+
+Severity: Low
+
+The v2 test plan is much better because it adds a CLI-side byte counter and
+asserts `RemoteTransferSource` is not constructed. However, the
+`source_peer_observed` observable is described as "populated by the dst daemon
+from the data-plane TCP connection's local socket address as seen by src"
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:566` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:569`). A destination daemon can
+read its local socket address, but that is not the same as what the source
+daemon observed as the TCP peer, especially across NAT or loopback aliases.
+
+Recommendation:
+
+If this field is meant to prove source-side byte path, have the source daemon
+report the accepted data-plane peer address back through the pull protocol, or
+make the test-only source daemon expose the observed peer. Keep the CLI-side
+byte counter as the primary invariant; treat destination local socket address as
+diagnostic only.
+
+Status:
+
+- R21-F1 through R21-F7 are materially addressed by plan v2.
+- Phase 1 should wait for a small v3 plan edit covering R23-F1 through R23-F4,
+  especially the `pull_sync` API boundary and allowlist semantics.
+
+## Round 24 - Plan v3 Response (R23-F1 through R23-F4)
+
+Plan revised in `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`. Status banner
+updated to "Draft v3, 2026-05-03 (incorporates Round 21 + Round 23 review
+findings)". v3 changelog block added at top.
+
+Per-finding response:
+
+### R23-F1 — `pull_sync_with_spec` extraction specified
+
+§4.2 now mandates a refactor of `crates/blit-core/src/remote/pull.rs:374-485`:
+
+- Extract spec construction (lines 433–484) into
+  `RemotePullClient::build_spec_from_options(endpoint, options)`.
+- Extract the rest of the body into
+  `RemotePullClient::pull_sync_with_spec(dest_root, manifest, spec,
+  track_paths, progress)`.
+- Existing `pull_sync` becomes a thin wrapper that builds the spec and
+  delegates. No CLI call site changes.
+- The `delegated_pull` handler calls `pull_sync_with_spec` directly,
+  forwarding the wire-validated spec unchanged. No reconstruction.
+
+Phase 1 step 3 spells out the refactor explicitly. Unit test required:
+`pull_sync(opts)` and `pull_sync_with_spec(build_spec_from_options(opts))`
+must emit byte-identical specs on the wire across a representative
+options matrix. This is the regression guard against the seam drifting
+later.
+
+### R23-F2 — Gate ordering specified explicitly
+
+§4.2 daemon-side step list rewritten as 11 strictly-ordered steps. The
+load-bearing invariant: "no filesystem path resolution and no outbound
+connect before policy approves." Module metadata lookup (step 4) and
+per-module narrowing override (step 5) precede F2 containment (step 6),
+which precedes outbound connect (step 8). Daemon-wide gate runs before
+any module touch (step 3); locator parse precedes everything (step 1).
+
+§4.3.3 enumerates the same ordering as a security invariant statement.
+
+The previous "gate check first" wording that conflicted with per-module
+override has been removed.
+
+### R23-F3 — Allowlist matching semantics specified
+
+§4.3.3 added with the full matching contract:
+
+1. Hostname normalization: case-insensitive, trailing dot stripped,
+   IDNA punycode normalization.
+2. Bare-IP and CIDR entries parsed once at config load via `ipnet`;
+   invalid entries fail config load loudly.
+3. Hostname entries: exact post-normalization equality only. No
+   wildcards in 0.1.0.
+4. Source hostname resolved to an IP set; **every** resolved address
+   must match an allowlist entry. Mixed-result resolution denied.
+5. **DNS-rebinding mitigation (load-bearing):** the validated IP is
+   bound to the outbound connection. The daemon connects to a
+   resolved `SocketAddr`, not to a re-resolvable hostname URI.
+6. IPv6 normalization: bracket-stripping, IPv4-mapped IPv6
+   flattening. Loopback and link-local must be explicitly allowlisted.
+
+Phase 1 unit-test list now includes hostname/CIDR/multi-A-record/
+IPv4-mapped/bracketed-v6/loopback/DNS-rebinding-simulation cases plus
+a "invalid CIDR fails config load" test.
+
+`docs/DAEMON_CONFIG.md` documentation requirement updated with
+matching-semantics summary.
+
+§4.3.5 (was 4.3.4) doc requirement explicitly mentions the
+DNS-rebinding mitigation so operators understand why hostnames in the
+allowlist are not first-class.
+
+### R23-F4 — `source_peer_observed` demoted to diagnostic
+
+§4.1 proto comments rewritten:
+
+- `DelegatedPullStarted.source_data_plane_endpoint` — "Diagnostic …
+  Informational only — the load-bearing byte-path-isolation
+  assertion in tests is the CLI-side byte counter."
+- `DelegatedPullSummary.source_peer_observed` — "Diagnostic … Useful
+  for operator audit logs. Not a proof of byte-path isolation."
+
+§6 byte-path-isolation test rewritten:
+
+- Primary observables (must hold): CLI-side `#[cfg(test)]` byte counter
+  (no data-plane bytes on direct path; ~payload on `--relay-via-cli`
+  counterpart) + `RemoteTransferSource` construction guard.
+- Diagnostic observables (logged not asserted):
+  `source_data_plane_endpoint`, `source_peer_observed`.
+- Optional future work: have the source daemon report its accepted
+  peer address through the pull protocol so the destination can
+  forward a source-attested fact in `DelegatedPullSummary`. Out of
+  scope for 0.1.0.
+
+Verification:
+
+- Plan revisions only. No code changes. No tests run.
+
+Status:
+
+- Plan v3 ready for review or for go-ahead on Phase 1.
+- The `pull_sync_with_spec` refactor and the IDNA/CIDR allowlist
+  matcher are the two largest pieces of new code Phase 1 introduces;
+  both have explicit unit-test specifications.
+
+## Round 25 - Remote→Remote Delegation Plan v3 Re-review
+
+Reviewed change:
+
+- File: `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+- Scope: Draft v3 response to R23-F1 through R23-F4.
+
+Verification:
+
+- Design/code review only. I did not rerun tests for this review note.
+
+Verdict:
+
+Plan v3 closes the main Round 23 concerns. `pull_sync_with_spec` is now named as
+an explicit extraction, the delegation-gate ordering is coherent, the allowlist
+matcher has concrete semantics, and byte-path isolation no longer relies on a
+destination-side socket-address echo.
+
+There are still a few Phase-1-seam details to fix in the plan before coding.
+
+### R25-F1. pull_sync_with_spec extraction misses the endpoint module/source-path part of spec construction
+
+Severity: Medium
+
+The v3 plan says to extract the spec-construction block at
+`crates/blit-core/src/remote/pull.rs:433` to
+`crates/blit-core/src/remote/pull.rs:484` into
+`RemotePullClient::build_spec_from_options`
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:363` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:421` and
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:648` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:658`).
+
+That range is not the whole spec construction. The current `pull_sync` builds
+`TransferOperationSpec.module` and `TransferOperationSpec.source_path` from
+`self.endpoint.path` earlier, at `crates/blit-core/src/remote/pull.rs:397` to
+`crates/blit-core/src/remote/pull.rs:409`.
+
+This matters because delegated mode intentionally connects to a host/port
+locator while the source module/path live in the embedded `TransferOperationSpec`.
+`pull_sync_with_spec` must not look at `self.endpoint.path` at all, and the
+existing wrapper's `build_spec_from_options(endpoint, options)` must include the
+current endpoint-to-module/source_path logic. Otherwise the wrapper can emit a
+spec missing the source path, or the delegated path can fail when its
+`RemotePullClient` endpoint is host/port-only.
+
+Recommendation:
+
+Revise the plan to define the seam as:
+
+- `build_spec_from_options(endpoint, options)` owns the current
+  `self.endpoint.path` to `(module, source_path)` conversion plus the current
+  compare/mirror/resume/capability construction.
+- `pull_sync_with_spec(dest_root, manifest, spec, ...)` starts after spec
+  construction and sends the provided spec unchanged; it must not read
+  `self.endpoint.path` except for the control-plane connection already opened.
+- Add a unit test that `pull_sync_with_spec` works with a `RemotePullClient`
+  whose endpoint is `RemotePath::Discovery`, proving source module/path come
+  from the supplied spec.
+
+### R25-F2. Delegated TransferOperationSpec capabilities must be destination-daemon capabilities, not CLI capabilities
+
+Severity: Medium
+
+The plan says the CLI builds a `TransferOperationSpec` from `args` and embeds it
+in `DelegatedPullRequest` (`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:276` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:280`). But
+`TransferOperationSpec.client_capabilities` is the target/receiver capability
+advertisement in the pull protocol. In normal pull, the CLI is the receiver. In
+delegated pull, the destination daemon is the receiver.
+
+If the CLI stamps capabilities and the destination daemon forwards them
+unchanged, the source daemon is trusting the wrong machine's capability
+advertisement. That happens to be harmless while all peers are same-version and
+support everything, but it is the wrong contract boundary and will become a
+source of protocol drift as soon as capabilities differ.
+
+Recommendation:
+
+Make destination capability ownership explicit:
+
+- Either the CLI sends an intent spec with `client_capabilities` omitted/ignored,
+  and the destination daemon overwrites `spec.client_capabilities` with its own
+  actual receive capabilities before `pull_sync_with_spec`.
+- Or the destination daemon validates that the incoming capabilities exactly
+  match its receive capabilities and rejects otherwise.
+
+The first option is cleaner. Add a test where the CLI sends false/stale
+capabilities and the delegated handler rewrites or rejects according to the
+chosen policy.
+
+### R25-F3. Hostname allowlist needs an explicit rule for special-range resolved IPs
+
+Severity: Low
+
+The v3 allowlist semantics say hostname entries match by normalized hostname,
+all resolved addresses must match an allowlist entry, and loopback/link-local are
+not implicitly trusted
+(`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:486` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:514`).
+
+One edge remains ambiguous: if `allowed_source_hosts = ["server-a.lan"]` and
+`server-a.lan` resolves to `127.0.0.1`, `::1`, `169.254.x.x`, or `fe80::/10`,
+does the explicit hostname entry authorize that special-range IP, or must the
+operator also allowlist the specific IP/CIDR? Since this is the SSRF boundary,
+the answer should be explicit.
+
+Recommendation:
+
+Add a sentence and tests for special ranges. The safer default is: hostname
+allowlist entries do not authorize loopback/link-local/private-control ranges by
+themselves; those ranges require explicit IP/CIDR allowlist entries. If the
+product intentionally allows a hostname to authorize whatever it resolves to,
+document that as a conscious operator-trust decision.
+
+Status:
+
+- R23-F1 through R23-F4 are materially addressed.
+- Phase 1 is close, but the plan should get a small v4 edit for R25-F1 and
+  R25-F2 before implementation starts. R25-F3 is a low-severity security-policy
+  clarification but cheap to settle now.
+
+## Round 26 - Plan v4 Response (R25-F1 through R25-F3)
+
+Plan revised in `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`. Status banner
+updated to "Draft v4, 2026-05-03 (incorporates Round 21 + Round 23 + Round 25
+review findings)". v4 changelog block added at top.
+
+Per-finding response:
+
+### R25-F1 — `pull_sync_with_spec` extraction widened to include endpoint→spec mapping
+
+§4.2 "Required core-side refactor" subsection rewritten. Spec construction
+in the existing `pull_sync` is now correctly described as spanning **two
+non-contiguous regions**:
+
+- Lines 397–409: derive `module` and `source_path` (as `path_str`) from
+  `self.endpoint.path`. These become spec fields `module` and
+  `source_path`.
+- Lines 433–484: derive everything else from `options`.
+
+The new `build_spec_from_options(endpoint, options)` lifts both regions.
+The new `pull_sync_with_spec` is contractually forbidden to read
+`self.endpoint.path`:
+
+> IMPORTANT: this method MUST NOT read `self.endpoint.path` to derive
+> any spec field. The endpoint is purely a transport handle (host:port
+> for the gRPC connection); the spec is authoritative for module +
+> source_path + every other field.
+
+`build_spec_from_options` now returns `Result` because the original
+function bails on `RemotePath::Discovery` (line 401).
+
+Phase 1 unit-test list adds an explicit endpoint-isolation test:
+hand-built spec with `module = "alpha"` produces `"alpha"` on the wire
+even when client's endpoint was constructed with `module = "beta"`.
+Regression guard that the seam stays clean.
+
+### R25-F2 — `client_capabilities` mandatorily overridden by destination
+
+New "Spec authorship in the delegated path" subsection in §4.2. Rationale:
+`TransferOperationSpec.client_capabilities` describes the byte recipient.
+In delegation the byte recipient is the dst daemon, not the CLI. The CLI
+cannot honestly speak for what tar-shard / data-plane / resume payloads
+the destination supports.
+
+Resolution within the embedded-`TransferOperationSpec` design (preserves
+R21-F1 compliance):
+
+- §4.1 proto comment on `DelegatedPullRequest.spec` adds an "OVERRIDE
+  BOUNDARY" note explaining `client_capabilities` is rewritten by dst.
+- §4.2 step 9 inserted (renumbering original 9–11 to 10–12):
+  "Mandatory `client_capabilities` override … unconditional — the field
+  is rewritten regardless of what the CLI sent."
+- §4.2 CLI-side description adds: "the CLI is **not** the byte
+  recipient in delegation, so any `client_capabilities` it puts on the
+  spec is non-authoritative."
+- Phase 1 unit-test list adds the mandatory-override test:
+  `DelegatedPullRequest` with
+  `client_capabilities {supports_tar_shards: false}` forwarded to a
+  tar-shard-supporting daemon → spec sent to src has
+  `supports_tar_shards: true`.
+
+This is the only field for which CLI-supplied values are non-authoritative.
+Every other field flows through unchanged. Override is documented in
+proto comments, in the handler step list, and in a dedicated unit test.
+
+### R25-F3 — Loopback/link-local require IP/CIDR-form authorization
+
+§4.3.3 split: rule 6 retains IPv6 normalization; new rule 7 is the
+loopback/link-local rule. Resolved addresses in the following ranges are
+denied unless an **IP-form or CIDR-form** allowlist entry covers them; a
+hostname-form match is **insufficient**:
+
+- IPv4 loopback (`127.0.0.0/8`)
+- IPv4 link-local (`169.254.0.0/16`)
+- IPv6 loopback (`::1`)
+- IPv6 link-local (`fe80::/10`)
+- IPv6 unique-local (`fc00::/7`)
+- "this network" (`0.0.0.0/8`)
+- IPv6 unspecified (`::`)
+
+Rationale spelled out: the SSRF-via-DNS pivot. If `evil.example.com` is
+in the allowlist and resolves to `127.0.0.1`, accepting the connection
+on the strength of the hostname alone would let any actor controlling
+that DNS record point the daemon at its own loopback services.
+
+Phase 1 unit-test list adds three loopback-rule tests:
+
+- Hostname matches + resolves to `127.0.0.1` with no IP-form entry → denied.
+- Same hostname + `127.0.0.0/8` in allowlist → permitted.
+- Public IP via hostname-only entry → permitted (rule applies only to
+  loopback/link-local ranges).
+
+`docs/DAEMON_CONFIG.md` doc requirement (§4.3.5) updated with a bullet
+explaining the loopback IP-form rule and its SSRF-via-DNS motivation.
+
+### Estimate
+
+§5 step 2 already specified the gate work; step 3 already specified the
+`pull_sync_with_spec` refactor. v4 adds:
+
+- Endpoint-isolation invariant in `pull_sync_with_spec` and its unit test.
+- `client_capabilities` mandatory override + unit test.
+- Three loopback-rule unit tests.
+
+Small additions to existing Phase 1 work. Implementation estimate held
+at 6–8 working days.
+
+Verification:
+
+- Plan revisions only. No code changes. No tests run.
+
+Status:
+
+- Plan v4 ready for review or for go-ahead on Phase 1.
+
+## Round 27 - Remote→Remote Delegation Plan v4 Re-review
+
+Reviewed change:
+
+- File: `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+- Scope: Draft v4 response to R25-F1 through R25-F3.
+
+Verification:
+
+- Design/code review only. I did not rerun tests for this review note.
+
+Verdict:
+
+Plan v4 resolves the substantive Round 25 issues. The `pull_sync_with_spec`
+section now correctly treats the endpoint as transport-only, the destination
+daemon now owns the `client_capabilities` override, and the allowlist semantics
+explicitly block hostname-only authorization for loopback/link-local/sensitive
+special ranges.
+
+There is one remaining low-severity documentation inconsistency.
+
+### R27-F1. Phase 1 checklist still describes the old pull_sync extraction seam
+
+Severity: Low
+
+The detailed §4.2 refactor is now correct:
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:410` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:490` says spec construction spans
+both the endpoint-to-`module/source_path` mapping and the options-to-spec block,
+and that `pull_sync_with_spec` must not read `self.endpoint.path`.
+
+However, the Phase 1 checklist still has the old instruction at
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:803` to
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:807`: it says to split
+`pull.rs:374-485`, extract "the spec-construction block (lines 433-484)" into
+`build_spec_from_options`, and extract the rest into `pull_sync_with_spec`.
+That omits the `pull.rs:397-409` endpoint-to-spec mapping that v4 correctly
+identified as part of spec construction.
+
+This is not a design blocker because the authoritative §4.2 text and the
+endpoint-isolation test both capture the right behavior. It is still worth
+fixing before implementation because Phase 1 checklists are exactly what agents
+will execute.
+
+Recommendation:
+
+Update Phase 1 step 3 to mirror §4.2:
+
+- extract endpoint-to-`module/source_path` mapping from `pull.rs:397-409` plus
+  the options-to-spec block from `pull.rs:433-484` into
+  `build_spec_from_options`;
+- extract the remaining send/manifest/receive body into `pull_sync_with_spec`;
+- explicitly repeat that `pull_sync_with_spec` must not read
+  `self.endpoint.path`.
+
+Status:
+
+- R25-F1, R25-F2, and R25-F3 are materially closed.
+- Plan v4 is good enough to begin Phase 1 if the implementer follows §4.2, but
+  the Phase 1 checklist should be synced to avoid agent confusion.
+
+## Round 28 - Plan v4.1 Response (R27-F1)
+
+Phase 1 checklist (§5 step 3) synced to match the authoritative §4.2 text.
+Plan version held at v4 (this is a documentation-consistency fix, not a
+design change).
+
+Updated `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md` step 3 now reads:
+
+- Spec construction in the existing `pull_sync` spans **two
+  non-contiguous regions**: lines 397–409 (derive `module` and
+  `source_path` from `self.endpoint.path`; bail on
+  `RemotePath::Discovery`) and lines 433–484 (derive everything else
+  from `options`). Lift **both** regions into
+  `build_spec_from_options(endpoint, options) -> Result<TransferOperationSpec>`.
+  Lift the remainder of the body into `pull_sync_with_spec(...)`.
+- Endpoint-isolation invariant called out: `pull_sync_with_spec` MUST
+  NOT read `self.endpoint.path`. Documented in the method rustdoc.
+- Existing `pull_sync` becomes a thin wrapper.
+- Two unit tests now listed under step 3 explicitly: wire-equivalence
+  (R23-F1) and endpoint-isolation (R25-F1), with concrete `module =
+  "alpha"` vs `module = "beta"` setup for the latter.
+
+Verified: `grep -n "433–484\|397–409"` shows the seam description is
+consistent across §1 (changelog), §4.2 (authoritative text), and §5
+(Phase 1 checklist).
+
+Verification:
+
+- Plan revisions only. No code changes. No tests run.
+
+Status:
+
+- Phase 1 ready to start. No outstanding plan-level blockers.
+
+## Round 29 - R27-F1 Closure Review
+
+Reviewed change:
+
+- File: `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+- Scope: Phase 1 checklist sync for `pull_sync_with_spec` extraction.
+
+Verification:
+
+- Design/doc review only. I did not rerun tests for this review note.
+
+Verdict:
+
+R27-F1 is accepted. The Phase 1 checklist now matches the authoritative §4.2
+text: it names both spec-construction regions (`pull.rs:397-409` and
+`pull.rs:433-484`), keeps `build_spec_from_options` returning
+`Result<TransferOperationSpec>`, repeats that `pull_sync_with_spec` must not
+read `self.endpoint.path`, and lists both wire-equivalence and
+endpoint-isolation tests.
+
+No new findings.
+
+Status:
+
+- R27-F1 is closed.
+- No outstanding plan-level blockers remain.
+- Phase 1 is ready to start from a design-review standpoint.
+
+## Round 30 - Phase 1 Implementation Review
+
+Reviewed changes:
+
+- `proto/blit.proto`
+- `crates/blit-core/src/remote/pull.rs`
+- `crates/blit-daemon/src/delegation_gate.rs`
+- `crates/blit-daemon/src/runtime.rs`
+- `crates/blit-daemon/src/service/core.rs`
+- `crates/blit-daemon/src/service/delegated_pull.rs`
+- Related docs/config wiring
+
+Verification:
+
+- Code review only. The user reported the suite green; I did not rerun
+  tests for this review note.
+
+Verdict:
+
+Phase 1 is not accepted yet. The proto/gate/config scaffolding is broadly
+in the planned shape, but the delegated destination handler currently misses
+target-side mirror deletion semantics and does not cancel the transfer when
+the caller disconnects.
+
+### R30-F1. Delegated mirror collects the delete list but never applies it
+
+Severity: High
+
+`RemotePullClient::pull_sync_with_spec` only records the authoritative
+mirror delete list in `RemotePullReport.paths_to_delete`; it does not delete
+anything itself. The normal CLI pull path applies that list after the pull:
+`crates/blit-cli/src/transfers/remote.rs:304` to
+`crates/blit-cli/src/transfers/remote.rs:307` calls `delete_listed_paths`.
+
+The new delegated destination path calls `pull_sync_with_spec` at
+`crates/blit-daemon/src/service/delegated_pull.rs:266` to
+`crates/blit-daemon/src/service/delegated_pull.rs:268`, then immediately
+builds and emits a summary at `crates/blit-daemon/src/service/delegated_pull.rs:289`
+to `crates/blit-daemon/src/service/delegated_pull.rs:293`. It never consumes
+`report.paths_to_delete`.
+
+The result is that `blit mirror src:/... dst:/...` through delegation will
+copy/update files but leave stale destination files in place. Worse,
+`DelegatedPullSummary.entries_deleted` is populated from the source summary at
+`crates/blit-daemon/src/service/delegated_pull.rs:303` to
+`crates/blit-daemon/src/service/delegated_pull.rs:308`, so the daemon can
+report deletions that did not happen.
+
+Recommendation:
+
+- Move the safe delete-list application primitive out of the CLI-only module
+  or reimplement it in daemon/core using `path_safety::safe_join` against
+  `dest_root`.
+- After `pull_sync_with_spec`, if the forwarded spec's mirror mode is enabled,
+  apply `report.paths_to_delete` on the destination daemon before emitting
+  summary.
+- Populate `DelegatedPullSummary.entries_deleted` from actual delete results,
+  not from the source-side candidate count.
+- Add delegated remote→remote mirror integration tests for both
+  `MirrorMode::FilteredSubset` and `MirrorMode::All`.
+
+### R30-F2. Caller disconnect does not cancel the delegated transfer
+
+Severity: High
+
+`BlitService::delegated_pull` spawns an independent task at
+`crates/blit-daemon/src/service/core.rs:198` and returns a `ReceiverStream`
+at `crates/blit-daemon/src/service/core.rs:210`. Once spawned, the task owns
+the transfer. Dropping the gRPC response stream drops the receiver side, but
+it does not abort the spawned task.
+
+The handler comment at `crates/blit-daemon/src/service/delegated_pull.rs:262`
+to `crates/blit-daemon/src/service/delegated_pull.rs:265` says that CLI
+disconnect drops the `pull_sync_with_spec` future. That is not what this code
+does: the future is inside the detached task and continues through
+`pull_sync_with_spec` at `crates/blit-daemon/src/service/delegated_pull.rs:266`
+to `crates/blit-daemon/src/service/delegated_pull.rs:268`. Most `tx.send`
+failures are ignored, so the task may continue writing files and, after
+R30-F1 is fixed, deleting files even after the operator hit Ctrl-C.
+
+Recommendation:
+
+- Keep an abort handle for the spawned task and tie it to `tx.closed()`, or
+  structure the RPC stream with `async_stream`/`try_stream` so dropping the
+  response stream drops the transfer future directly.
+- Wrap the delegated pull body in a `tokio::select!` against cancellation
+  before and during `pull_sync_with_spec`.
+- Add a regression test with a slow/blocked delegated pull, drop the
+  response stream, and assert the destination stops writing and the active
+  transfer gauge returns to zero.
+
+### R30-F3. DelegatedPull validates only `spec_version`, not the full operation spec
+
+Severity: Medium
+
+The delegated handler's "spec validation" step only checks the numeric version
+at `crates/blit-daemon/src/service/delegated_pull.rs:138` to
+`crates/blit-daemon/src/service/delegated_pull.rs:143`. It does not run the
+same `NormalizedTransferOperation::from_spec` chokepoint used by the source
+pull handler (`crates/blit-daemon/src/service/pull_sync.rs:45` to
+`crates/blit-daemon/src/service/pull_sync.rs:58`).
+
+That means invalid enum values, malformed filters, and contradictory states
+such as `ignore_existing=true` with `compare_mode=Force` are not rejected by
+the destination before DNS/connect/manifest work. Some will be rejected later
+by the source daemon, but that is after the destination has accepted the
+delegation request and potentially performed outbound work.
+
+Recommendation:
+
+- Validate the embedded spec with `NormalizedTransferOperation::from_spec`
+  at the destination boundary before `validate_source` and before local
+  manifest enumeration. The destination can discard the normalized value and
+  still forward the raw spec, except for the mandatory
+  `client_capabilities` override.
+- Add tests proving bad compare mode, bad mirror mode, malformed glob, and
+  force-plus-ignore-existing are rejected with
+  `DelegationRejected` before the resolver/connect path is invoked.
+
+### R30-F4. Endpoint-isolation test does not exercise `pull_sync_with_spec`
+
+Severity: Low
+
+The Phase 1 plan required a concrete endpoint-isolation test where a hand-built
+spec with `module = "alpha"` still goes on the wire unchanged while the
+`RemotePullClient` endpoint carries a different module. The current test at
+`crates/blit-core/src/remote/pull.rs:1717` to
+`crates/blit-core/src/remote/pull.rs:1755` never calls `pull_sync_with_spec`;
+it only constructs two independent specs and asserts they differ.
+
+The code's `RemotePath::Discovery` sentinel in the delegated handler is a good
+defensive choice, but the planned regression guard is not actually present.
+
+Recommendation:
+
+- Add a small fake `PullSync` server or injectable client seam that captures
+  the first `ClientPullMessage::Spec`.
+- Assert `pull_sync_with_spec` sends the supplied spec verbatim when the
+  client's endpoint path is `RemotePath::Discovery` or a mismatched
+  `Module { module: "beta", ... }`.
+
+Status:
+
+- R30-F1 and R30-F2 are release-blocking for Phase 1.
+- R30-F3 should be fixed in the same pass; it is a boundary-validation gap.
+- R30-F4 is a test-quality gap but should be cheap to close while touching the
+  seam.
+
+## Round 31 - Phase 1 R30 Fix Pass
+
+All four Round 30 findings closed. Workspace tests green
+(`cargo test --workspace`: ~270 tests, 0 failed).
+
+### R30-F1 — mirror delete list now applied on dst
+
+`crates/blit-daemon/src/service/delegated_pull.rs` after the
+`pull_sync_with_spec` call now consumes `report.paths_to_delete`:
+
+- New `apply_delete_list(dest_root, &[String])` helper. Routes every
+  entry through `blit_core::path_safety::safe_join` before the
+  unlink (closes the same R5-F1 chokepoint the CLI uses), refuses
+  to delete `dest_root` itself, treats NotFound as ok (source view
+  may lag), prunes empty parent directories deepest-first.
+- Failures surface as `Phase::Apply` errors, matching the existing
+  apply-phase error semantics (containment / disk / perms).
+- `build_summary` takes the locally-applied delete count and
+  prefers it over the source-attested `entries_deleted` so
+  `DelegatedPullSummary.entries_deleted` reflects what really
+  happened on dst.
+
+### R30-F2 — caller disconnect cancels the handler
+
+`crates/blit-daemon/src/service/core.rs::delegated_pull` wraps the
+handler in `tokio::select!` racing against `tx.closed()`:
+
+```rust
+let handler_tx = tx.clone();
+tokio::spawn(async move {
+    tokio::select! {
+        biased;
+        _ = tx.closed() => { /* CLI hung up */ }
+        _ = handle_delegated_pull(req, ..., handler_tx) => {}
+    }
+});
+```
+
+`mpsc::Sender::closed()` resolves when the receiver drops, which is
+what tonic does when the gRPC response stream is dropped
+client-side. The `select!` then cancels the handler future, which
+drops the inner `pull_sync_with_spec` future, propagating
+cancellation through the existing pull-side cleanup paths
+(data-plane drop, manifest task cleanup). Without this, post-R30-F1
+the daemon would continue writing — and deleting — after the
+operator hit Ctrl-C.
+
+### R30-F3 — full spec validation via `from_spec`
+
+`validate_spec_version` replaced by `validate_spec(spec)` which
+clones the spec into `NormalizedTransferOperation::from_spec` —
+the same boundary push and pull_sync use. This catches:
+
+- unknown `spec_version`,
+- malformed `FilterSpec` globs,
+- contradictory `ignore_existing + Force` flag combination,
+
+before the handler does any DNS resolution, outbound connect, or
+manifest enumeration. The wire spec travels onward verbatim (via
+the discarded normalization side-effect) so src is free to
+re-normalize on its end.
+
+Five new unit tests exercise the boundary: clean spec accepted +
+unchanged on the way through, unknown spec_version rejected,
+spec_version=0 rejected (proto3 default for omitted fields),
+contradictory `Force + ignore_existing` rejected, malformed
+include glob rejected.
+
+### R30-F4 — real wire-spec roundtrip test
+
+New integration test at
+`crates/blit-core/tests/pull_sync_with_spec_wire.rs`. Spins up a
+real tonic gRPC server (`SpyServer` impl of `Blit` with all 11
+methods, only `pull_sync` is real — others `unimplemented!()`),
+captures the first `ClientPullMessage::Spec` the client sends, and
+asserts byte-equality with the supplied spec.
+
+Two test cases:
+
+1. **`pull_sync_with_spec_forwards_spec_unchanged_on_wire`** —
+   constructs a `RemotePullClient` with `RemotePath::Module {
+   module: "beta-from-endpoint", rel_path: "z" }` and hands
+   `pull_sync_with_spec` a hand-built spec with `module:
+   "alpha-from-spec", source_path: "x/y/from-spec"`. The captured
+   spec on the wire has the spec's values, not the endpoint's.
+   This is the load-bearing R25-F1 endpoint-isolation invariant
+   exercised against the real function.
+2. **`pull_sync_wrapper_emits_same_spec_as_build_spec_from_options`** —
+   companion test: calls the existing `pull_sync(opts)` wrapper
+   and asserts the captured spec equals
+   `build_spec_from_options(endpoint, opts)`. R23-F1
+   wire-equivalence regression guard exercised through the real
+   gRPC stream.
+
+The previous unit-level construct-and-compare test that the
+reviewer flagged was removed; the module docstring at
+`crates/blit-core/src/remote/pull.rs::spec_extraction_tests` now
+points at the integration test as the real exercise of the
+endpoint-isolation invariant.
+
+Verification:
+
+- `cargo test --workspace` — all targets green.
+- `cargo test -p blit-daemon delegated_pull` — 8 handler-level
+  tests including all four R30-F3 boundary checks.
+- `cargo test -p blit-core --test pull_sync_with_spec_wire` — both
+  wire-roundtrip cases pass.
+
+Status:
+
+- R30-F1 through R30-F4 closed.
+- Phase 1 is committable. No outstanding plan-level blockers
+  before Phase 2 (CLI dispatch + `--relay-via-cli` + byte-counter
+  integration test).
+
+## Round 32 - Phase 1 R30 Fix Pass Review
+
+Reviewed changes:
+
+- `crates/blit-daemon/src/service/core.rs`
+- `crates/blit-daemon/src/service/delegated_pull.rs`
+- `crates/blit-core/src/remote/pull.rs`
+- `crates/blit-core/tests/pull_sync_with_spec_wire.rs`
+- Round 31 closure note above
+
+Verification:
+
+- Code review only. The user reported `365 pass, 0 fail`; I did not rerun
+  tests for this review note.
+
+Verdict:
+
+R30-F3 and R30-F4 are accepted. R30-F1 is functionally closer but has one
+remaining data-loss guard missing. R30-F2 is not closed for the TCP data-plane
+case because dropping `pull_sync_with_spec` can still leave detached child
+tasks writing files.
+
+### R32-F1. DelegatedPull applies source-supplied DeleteList even when MirrorMode is Off
+
+Severity: High
+
+The new delegated handler applies `report.paths_to_delete` unconditionally at
+`crates/blit-daemon/src/service/delegated_pull.rs:291` to
+`crates/blit-daemon/src/service/delegated_pull.rs:298`. The normal CLI pull
+path has a separate operation-intent guard at
+`crates/blit-cli/src/transfers/remote.rs:304`: it only applies the daemon's
+delete list when the user requested mirror mode.
+
+In the delegated path, a malicious or buggy source daemon can send a
+`DeleteList` during a plain copy operation and the destination daemon will
+delete in-scope files anyway. `safe_join` protects path traversal, but it does
+not answer the authorization question "was this operation allowed to delete
+anything?"
+
+The fix should use the destination-validated operation spec as the authority:
+
+- derive `mirror_enabled` from `NormalizedTransferOperation::from_spec` before
+  forwarding the raw spec, or preserve that normalized value from
+  `validate_spec`;
+- only apply `report.paths_to_delete` when `mirror_enabled` is true;
+- if `mirror_enabled` is false and a delete list arrives, treat it as a source
+  protocol violation and fail with `Phase::Transfer` or `Phase::Apply` rather
+  than silently ignoring a hostile control message;
+- add a delegated handler test proving `MirrorMode::Off + DeleteList` does not
+  delete files.
+
+Related reporting issue: `build_summary` still falls back to the source-side
+candidate count when the local delete count is zero:
+`crates/blit-daemon/src/service/delegated_pull.rs:388` to
+`crates/blit-daemon/src/service/delegated_pull.rs:392`. If the delete list is
+present but all entries are already gone, the summary can again report
+deletions that did not happen. Once mirror application is gated, pass an
+`Option<u64>` or explicit "delete list was applied" flag into `build_summary`
+and report the actual local count, including zero.
+
+### R32-F2. Cancellation still leaves spawned pull data-plane receivers running
+
+Severity: High
+
+The Round 31 cancellation change races `tx.closed()` against
+`handle_delegated_pull` at `crates/blit-daemon/src/service/core.rs:209` to
+`crates/blit-daemon/src/service/core.rs:224`. That does drop the
+`pull_sync_with_spec` future.
+
+However, `pull_sync_with_spec` can already have spawned a background data-plane
+receiver. In the spec-pull path, `crates/blit-core/src/remote/pull.rs:717` to
+`crates/blit-core/src/remote/pull.rs:722` stores a `JoinHandle` from
+`spawn_data_plane_receiver`; the helper itself calls `tokio::spawn` at
+`crates/blit-core/src/remote/pull.rs:293` to
+`crates/blit-core/src/remote/pull.rs:304`. Dropping a `JoinHandle` does not
+abort the task; it detaches it. That child task owns the TCP connection and
+destination root and runs `execute_receive_pipeline`, so it can continue
+writing files after the delegated handler is canceled.
+
+The manifest-send task at `crates/blit-core/src/remote/pull.rs:541` is similar
+but lower impact; it can continue sending local manifest entries after the
+outer future is dropped. The data-plane receiver is the release blocker
+because it can continue mutating destination files after operator abort.
+
+Recommendation:
+
+- Make spawned pull-side helper tasks abort-on-drop. A small local guard around
+  `JoinHandle` that calls `abort()` in `Drop`, then disarms after successful
+  `await`, is enough.
+- Apply it to the data-plane receiver handle at minimum; preferably also to
+  `manifest_send_task`.
+- Add a cancellation regression test that reaches the TCP data-plane phase,
+  drops the delegated response stream, and proves no further destination writes
+  happen after cancellation.
+
+Status:
+
+- R30-F3 accepted.
+- R30-F4 accepted.
+- R30-F1 remains open as R32-F1.
+- R30-F2 remains open as R32-F2.
+- Phase 1 is not committable yet.
+
+## Round 33 - R32 Fix Pass
+
+Both Round 32 findings closed. Workspace tests green
+(`cargo test --workspace`: 370 passed, 0 failed).
+
+### R32-F1 — delete-list now gated on validated `MirrorMode`
+
+`crates/blit-daemon/src/service/delegated_pull.rs`:
+
+- New helper `delete_list_authorized(mirror_mode_proto: i32) -> bool`
+  returns true iff the spec's mirror_mode is `FilteredSubset` or
+  `All`. `Off`, `Unspecified`, and any unknown variant return false.
+- Handler captures `spec.mirror_mode` *before* moving `spec` into
+  `pull_sync_with_spec`, then gates the `apply_delete_list` call on
+  `delete_list_authorized(spec_mirror_mode)`. Plain copies silently
+  ignore any source-attached delete list and report
+  `entries_deleted = 0` on the summary.
+- Mirrors the CLI gate at `crates/blit-cli/src/transfers/remote.rs:304`
+  so a buggy or hostile source daemon attaching a non-empty
+  `paths_to_delete` to a copy operation cannot cause destination
+  files to vanish.
+
+Two unit tests:
+
+- `delete_list_authorized_only_for_active_mirror_modes` — pins the
+  Off/Unspecified-deny-FilteredSubset/All-permit matrix.
+- `delete_list_authorized_rejects_unknown_mirror_mode_value` —
+  defense in depth against future enum extensions accidentally
+  widening the deletion-active set.
+
+### R32-F2 — spawned tasks now abort on outer drop
+
+New `AbortOnDrop<T>` newtype near the top of
+`crates/blit-core/src/remote/pull.rs`:
+
+```rust
+pub(crate) struct AbortOnDrop<T>(Option<JoinHandle<T>>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+```
+
+`tokio::JoinHandle::drop` detaches the spawned task; only `abort()`
+cancels it. The wrapper makes abort happen automatically when the
+wrapper is dropped without being consumed. Happy path:
+`handle.into_inner().await` consumes the wrapper, leaving Drop a
+no-op. Cancellation path: outer future drops → wrapper drops →
+`abort()` fires → spawned task is cancelled at its next await point.
+
+Wired through every internal `tokio::spawn` in the pull machinery:
+
+1. `pull_sync_with_spec`'s `data_plane_handle`
+   (`Option<JoinHandle<...>>` → `Option<AbortOnDrop<...>>`).
+2. The deprecated `pull` method's matching `data_plane_handle`.
+3. The `manifest_send_task` in `pull_sync_with_spec`. Self-terminates
+   when the request stream drops, but the explicit guard is robust
+   to future shape changes.
+4. **The inner `Vec<JoinHandle<...>>` in
+   `receive_data_plane_streams_owned`** — this was the load-bearing
+   site. Even with the outer wrapper, dropping the outer task would
+   only have aborted the wrapper task; the per-stream parallel
+   workers it spawned would have continued because dropping a
+   `Vec<JoinHandle>` detaches all of them. With each worker now
+   wrapped, cancellation cascades all the way through the worker
+   pool.
+
+Three regression tests in a new `abort_on_drop_tests` module in
+`pull.rs`:
+
+- `drop_without_consume_aborts_running_task` — the load-bearing
+  test. A task is spawned that would set a flag after 500ms.
+  Wrapping in `AbortOnDrop` and dropping immediately must prevent
+  the flag from ever being set. Asserts no completion after 150ms.
+- `into_inner_consumes_handle_and_drop_becomes_noop` — happy path:
+  the wrapper is consumed via `into_inner().await`, returns the
+  task's value, and the natural-completion path doesn't trigger
+  an abort.
+- `drop_after_natural_completion_does_not_panic` — `abort()` on an
+  already-completed JoinHandle is a no-op in tokio; this pins that
+  expectation in our wrapper.
+
+Verification:
+
+- `cargo test --workspace` — 370 tests pass, 0 failed.
+- `cargo test -p blit-daemon delegated_pull` — 12 handler-level
+  tests including both R32-F1 gating tests.
+- `cargo test -p blit-core abort_on_drop` — 3 wrapper tests
+  including the load-bearing cancellation regression.
+
+Status:
+
+- R32-F1 and R32-F2 closed.
+- Phase 1 is committable. No outstanding plan-level blockers
+  before Phase 2 (CLI dispatch + `--relay-via-cli` + byte-counter
+  integration test).
+
+## Round 34 - R32 Fix Pass Review
+
+Reviewed changes:
+
+- `crates/blit-daemon/src/service/delegated_pull.rs`
+- `crates/blit-core/src/remote/pull.rs`
+- Round 33 closure note above
+
+Verification:
+
+- Code review only. The user reported `370 tests pass, 0 failed`; I did not
+  rerun tests for this review note.
+
+Verdict:
+
+R32-F1's data-loss vector is closed: copy-mode delegated pulls no longer apply
+a source-supplied delete list. However, the summary still falls back to the
+source-side candidate count when no local deletion happened. R32-F2 is still
+open: `AbortOnDrop::into_inner().await` consumes the abort guard before the
+await, so cancellation while waiting on the raw `JoinHandle` still detaches
+the task being awaited.
+
+### R34-F1. `DelegatedPullSummary.entries_deleted` can still report deletions that did not happen
+
+Severity: Medium
+
+The delete-list gate now prevents copy-mode data loss:
+`crates/blit-daemon/src/service/delegated_pull.rs:319` to
+`crates/blit-daemon/src/service/delegated_pull.rs:330` sets
+`entries_deleted_locally = 0` when mirror mode is not deletion-active.
+
+But `build_summary` still treats `0` as "no local count available" and falls
+back to the source summary count:
+`crates/blit-daemon/src/service/delegated_pull.rs:421` to
+`crates/blit-daemon/src/service/delegated_pull.rs:425`.
+
+That contradicts the local comment at `crates/blit-daemon/src/service/delegated_pull.rs:328`
+to `crates/blit-daemon/src/service/delegated_pull.rs:329` ("Don't surface it
+as entries_deleted on the summary either"). A plain copy where a buggy source
+attaches `DeleteList` plus `Summary { entries_deleted: 5 }` will delete
+nothing but still report `entries_deleted = 5`.
+
+Recommendation:
+
+- Pass an `Option<u64>` or explicit `delete_list_applied` flag into
+  `build_summary`.
+- When mirror deletion was not authorized, force `entries_deleted = 0`.
+- When mirror deletion was authorized and the delete list was applied, report
+  the actual local count, including zero.
+- Add unit tests for: copy + source deletion count reports zero; mirror +
+  delete list all NotFound reports zero; mirror + one actual deletion reports
+  one.
+
+### R34-F2. `AbortOnDrop::into_inner().await` drops the guard before the awaited task finishes
+
+Severity: High
+
+The `AbortOnDrop` type correctly aborts when dropped while still holding a
+handle (`crates/blit-core/src/remote/pull.rs:40` to
+`crates/blit-core/src/remote/pull.rs:45`). But its happy-path API removes the
+handle before awaiting:
+`crates/blit-core/src/remote/pull.rs:34` to
+`crates/blit-core/src/remote/pull.rs:37`.
+
+Every call site then awaits the raw `JoinHandle`, for example:
+
+- `crates/blit-core/src/remote/pull.rs:884` to
+  `crates/blit-core/src/remote/pull.rs:887` for `manifest_send_task`;
+- `crates/blit-core/src/remote/pull.rs:896` to
+  `crates/blit-core/src/remote/pull.rs:900` for the pull data-plane receiver;
+- `crates/blit-core/src/remote/pull.rs:1422` to
+  `crates/blit-core/src/remote/pull.rs:1426` for each parallel TCP worker.
+
+If the parent future is canceled while suspended on one of those awaits, the
+future state owns only the raw `JoinHandle`, not the `AbortOnDrop` wrapper.
+Dropping that raw handle detaches the task, which is the exact cancellation
+bug R32-F2 was meant to close. The wrapper fixes drops before the await starts,
+but not drops during the await.
+
+Recommendation:
+
+- Replace `into_inner()` with an async `join(self)` method or implement
+  `Future` for `AbortOnDrop` so the wrapper remains in the future state until
+  the inner handle has completed.
+- The method should await the inner handle while keeping `self.0 = Some(handle)`
+  until completion; on successful completion, take/disarm the handle before
+  returning.
+- Add a regression test where a parent future begins awaiting
+  `AbortOnDrop::join()`, then the parent is aborted before the child completes;
+  assert the child is aborted and does not set its completion flag.
+
+Status:
+
+- R30-F3 remains accepted.
+- R30-F4 remains accepted.
+- R32-F1 data loss is fixed, but R34-F1 remains as a reporting correctness
+  follow-up.
+- R32-F2 remains open as R34-F2.
+- Phase 1 is not committable yet.
+
+## Round 35 - R34 Fix Pass
+
+Both Round 34 findings closed. Workspace tests green
+(`cargo test --workspace`: 374 passed, 0 failed).
+
+### R34-F2 — `AbortOnDrop` cancellation gap closed
+
+The bug: `AbortOnDrop::into_inner()` moved the inner `JoinHandle` out
+of the wrapper before the caller awaited it. The wrapper was gone
+from that point, so a parent-future cancellation during the await
+would drop a bare `JoinHandle` — and tokio's `JoinHandle::drop`
+detaches rather than aborts. The exact bug the wrapper was meant to
+prevent reappeared one frame later.
+
+Fix in `crates/blit-core/src/remote/pull.rs`:
+
+- **Removed `into_inner()` entirely.** The type's docstring now
+  explicitly forbids re-introducing it: callers must use `.join()`.
+- **New `join(self) -> Result<T, JoinError>`** that holds `self`
+  across the await:
+
+  ```rust
+  pub(crate) async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+      let handle = self.0.as_mut().expect("AbortOnDrop already consumed");
+      let result = handle.await;
+      self.0 = None; // mark consumed; subsequent Drop is a no-op
+      result
+  }
+  ```
+
+  The handle is borrowed mutably out of `self.0`, never moved out.
+  `self` lives across the entire await; if the surrounding future is
+  cancelled at the await point, `self` is dropped and `Drop::drop`
+  fires `abort()` on the still-owned handle. After a successful await
+  the `Some` is cleared so the trailing Drop is a clean no-op.
+
+All four call sites updated: `pull_sync_with_spec`'s
+`data_plane_handle`, the deprecated `pull` method's
+`data_plane_handle`, the `manifest_send_task`, and the inner
+`Vec<AbortOnDrop<...>>` workers in
+`receive_data_plane_streams_owned`. Each now uses `.join().await`.
+
+New regression test in `abort_on_drop_tests`:
+
+- `cancellation_during_join_await_still_aborts_task` — spawns a 500ms
+  task, builds a `join()` future, drops it after 20ms via
+  `tokio::time::timeout`, then waits 700ms. Asserts the task's
+  completion flag is still false. This is the load-bearing test for
+  the fix; with the pre-fix `into_inner().await` pattern, the flag
+  would have been set because the bare `JoinHandle` would have been
+  detached when the timeout dropped the future.
+
+The existing happy-path test was renamed
+`join_returns_value_and_drop_becomes_noop` to match the new API.
+
+### R34-F1 — `entries_deleted` reports only the local count
+
+`crates/blit-daemon/src/service/delegated_pull.rs::build_summary` no
+longer falls back to the source-attested
+`PullSummary.entries_deleted` when the local count is zero. The new
+contract: the destination daemon is the only authority for what was
+deleted on the destination filesystem. Surface the count we actually
+applied locally; nothing else.
+
+```rust
+DelegatedPullSummary {
+    // ...
+    entries_deleted: entries_deleted_locally,
+    // ...
+}
+```
+
+Reasoning: post-R32-F1, `entries_deleted_locally` is always 0 for
+plain copy mode (the gate suppresses `apply_delete_list`). Falling
+back to the source's count when local is 0 would surface the
+source's "expected to delete N" through the summary even though no
+deletion happened on dst. That's a reporting lie —
+`entries_deleted` is supposed to mean "files this destination
+removed."
+
+For mirror mode, `entries_deleted_locally` reflects what the dst
+actually unlinked (NotFound entries are not counted, since the file
+was already absent). That's the correct number to surface.
+
+Three new unit tests:
+
+- `build_summary_reports_local_entries_deleted_count_not_source_side`
+  — copy mode (local=0) with source claiming entries_deleted=7;
+  summary must report 0.
+- `build_summary_reports_local_entries_deleted_count_in_mirror_mode`
+  — mirror mode (local=3) with source claiming 99; summary must
+  report 3.
+- `build_summary_zero_when_no_inner_and_no_local` — degenerate case:
+  no source summary, no local count.
+
+Verification:
+
+- `cargo test --workspace` — 374 tests pass, 0 failed.
+- `cargo test -p blit-core abort_on_drop` — 4 wrapper tests including
+  the new R34-F2 cancellation regression.
+- `cargo test -p blit-daemon delegated_pull` — 15 handler-level tests
+  including the three new R34-F1 reporting checks.
+
+Status:
+
+- R34-F1 and R34-F2 closed.
+- Phase 1 is committable. No outstanding plan-level blockers before
+  Phase 2 (CLI dispatch + `--relay-via-cli` + byte-counter integration
+  test).
+
+## Round 36 - R34 Fix Pass Review
+
+Reviewed changes:
+
+- `crates/blit-core/src/remote/pull.rs`
+- `crates/blit-daemon/src/service/delegated_pull.rs`
+- Round 35 closure note above
+
+Verification:
+
+- Code review only. The user reported `374 tests pass, 0 failed`; I did not
+  rerun tests for this review note.
+
+Verdict:
+
+No findings.
+
+R34-F2 is accepted. `AbortOnDrop::join(self)` keeps the wrapper alive across
+the await by borrowing the `JoinHandle` from `self.0`; if the parent future is
+cancelled while suspended, `Drop` still owns the handle and calls `abort()`.
+The old `into_inner()` escape hatch is gone, and the load-bearing
+`cancellation_during_join_await_still_aborts_task` test covers the exact
+failure mode from Round 34.
+
+R34-F1 is accepted. `DelegatedPullSummary.entries_deleted` now reports the
+destination-local deletion count only. Copy-mode summaries and NotFound mirror
+deletions no longer fall back to source-attested candidate counts.
+
+Status:
+
+- R34-F1 closed.
+- R34-F2 closed.
+- Phase 1 is committable from this review series.
+- Phase 2 can start after committing Phase 1, assuming the user wants that
+  sequencing.

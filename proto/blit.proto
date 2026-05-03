@@ -34,6 +34,18 @@ service Blit {
 
   // Reports module/storage capacity information (df-style).
   rpc FilesystemStats(FilesystemStatsRequest) returns (FilesystemStatsResponse);
+
+  // Destination-side delegated initiator. The CLI calls this on the
+  // destination daemon when both endpoints in a `blit copy` are
+  // remote. The destination daemon validates the request through the
+  // delegation gate, opens its own pull against the named source, and
+  // streams progress/results back to the CLI. Bytes flow source→dst
+  // directly; the CLI is not in the byte path.
+  //
+  // See docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md for the design
+  // (gate ordering, allowlist semantics, client_capabilities
+  // override boundary).
+  rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
 }
 
 // Optional service for handling authentication if needed in the future.
@@ -455,4 +467,109 @@ message PeerCapabilities {
   // this to true; older receivers that didn't honor filter rules
   // will not.
   bool supports_filter_spec = 4;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Delegated Pull — direct daemon-to-daemon byte path for remote→remote
+// transfers. See docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message DelegatedPullRequest {
+  // ── Destination-side fields (this daemon) ─────────────────────────
+  // Module on this (destination) daemon to write into. Resolved
+  // through the same module table push uses; F2 canonical-path
+  // containment applies to dst_destination_path.
+  string dst_module = 1;
+  string dst_destination_path = 2;
+
+  // ── Source-side / universal contract ──────────────────────────────
+  // Where this daemon should pull from. Strictly typed; arbitrary URI
+  // schemes are rejected during locator parsing.
+  RemoteSourceLocator src = 10;
+
+  // The universal transfer contract. Reuses TransferOperationSpec
+  // including FilterSpec, ComparisonMode, MirrorMode, ResumeSettings,
+  // force_grpc, ignore_existing, and spec_version. Receivers normalize
+  // via NormalizedTransferOperation::from_spec exactly like push/pull.
+  //
+  // OVERRIDE BOUNDARY: spec.client_capabilities describes the byte
+  // recipient's capabilities. In delegation, the byte recipient is
+  // the destination daemon, not the CLI. The destination handler
+  // mandatorily REPLACES client_capabilities with its own
+  // PeerCapabilities before forwarding the spec to the source —
+  // any CLI-supplied value here is non-authoritative. Every other
+  // field flows through unchanged.
+  TransferOperationSpec spec = 20;
+
+  // Diagnostics-only.
+  bool trace_data_plane = 31;
+}
+
+message RemoteSourceLocator {
+  // Strict Blit remote endpoint. The daemon parses this through the
+  // same RemoteEndpoint code the CLI uses; rejects schemes other than
+  // the Blit gRPC control-plane scheme.
+  string host = 1;
+  uint32 port = 2;
+
+  // Auth-passthrough hook. Empty in 0.1.0 (no auth implemented yet).
+  // When BlitAuth lands, the operator-minted, dst-scoped bearer token
+  // travels here and dst presents it on its outbound connection to
+  // src.
+  bytes delegated_credential = 10;
+}
+
+message DelegatedPullProgress {
+  oneof payload {
+    DelegatedPullStarted started = 1;
+    ManifestBatch        manifest_batch = 2; // existing message reuse
+    BytesProgress        bytes_progress = 3;
+    DelegatedPullSummary summary = 4;
+    DelegatedPullError   error = 5;
+  }
+}
+
+message DelegatedPullStarted {
+  // Diagnostic: the source-side data-plane endpoint this daemon's
+  // pull client observed (its remote-socket peer). "tcp:host:port"
+  // when TCP data plane is used; "grpc-fallback" otherwise.
+  // Informational only — the load-bearing byte-path-isolation
+  // assertion in tests is the CLI-side byte counter.
+  string source_data_plane_endpoint = 1;
+  uint32 stream_count = 2;
+}
+
+message BytesProgress {
+  uint64 files_completed = 1;
+  uint64 files_total = 2;
+  uint64 bytes_completed = 3;
+  uint64 bytes_total = 4;
+}
+
+message DelegatedPullSummary {
+  // Mirrors PullSummary plus a delegation-specific diagnostic field.
+  uint64 files_transferred = 1;
+  uint64 bytes_transferred = 2;
+  uint64 bytes_zero_copy = 3;
+  bool   tcp_fallback_used = 4;
+  uint64 entries_deleted = 5;
+
+  // Diagnostic: the data-plane peer address this dst observed when
+  // connecting to src. Useful for operator audit logs. Not a proof of
+  // byte-path isolation.
+  string source_peer_observed = 6;
+}
+
+message DelegatedPullError {
+  string upstream_message = 1;
+
+  enum Phase {
+    UNKNOWN = 0;
+    DELEGATION_REJECTED = 1; // gate denied (master switch / allowlist / per-module override)
+    CONNECT_SOURCE = 2;      // dst could not reach src
+    NEGOTIATE = 3;           // src refused dst (auth/ACL/handshake)
+    TRANSFER = 4;            // mid-transfer pull failure
+    APPLY = 5;               // dst-side apply failure (containment, disk, perms)
+  }
+  Phase phase = 2;
 }

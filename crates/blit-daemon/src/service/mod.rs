@@ -1,5 +1,6 @@
 mod admin;
 mod core;
+pub(crate) mod delegated_pull;
 mod pull;
 mod pull_sync;
 mod push;

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::delegation_gate::{parse_allow_entry, DelegationConfig};
+
 #[derive(Debug, Clone)]
 pub(crate) struct ModuleConfig {
     pub(crate) name: String,
@@ -22,6 +24,17 @@ pub(crate) struct ModuleConfig {
     pub(crate) canonical_root: PathBuf,
     pub(crate) read_only: bool,
     pub(crate) _comment: Option<String>,
+    /// Per-module narrowing override for delegated-pull
+    /// (`[delegation]` master switch). Default true: when the daemon
+    /// allows delegation globally, every module participates. Set to
+    /// false on a specific module to opt that module out of being a
+    /// delegation destination, e.g. for sensitive modules where
+    /// operators should always go through the CLI relay.
+    ///
+    /// The override can only narrow the daemon-wide policy, never
+    /// widen it: if `allow_delegated_pull = false` daemon-wide, this
+    /// flag has no effect and delegation remains denied.
+    pub(crate) delegation_allowed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +68,10 @@ pub(crate) struct DaemonRuntime {
     pub(crate) warnings: Vec<String>,
     /// Server-side checksums enabled (default: true)
     pub(crate) server_checksums_enabled: bool,
+    /// Delegation gate config. `allow_delegated_pull` defaults to
+    /// false; the operator must opt the daemon in (and may further
+    /// constrain via `allowed_source_hosts`).
+    pub(crate) delegation: DelegationConfig,
 }
 
 #[derive(Parser, Debug)]
@@ -98,6 +115,8 @@ struct RawConfig {
     daemon: RawDaemonSection,
     #[serde(default, rename = "module")]
     modules: Vec<RawModule>,
+    #[serde(default)]
+    delegation: RawDelegationSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -114,6 +133,17 @@ struct RawDaemonSection {
     no_server_checksums: bool,
 }
 
+/// `[delegation]` block from the daemon config. Default: feature off.
+/// See `delegation_gate.rs` for matching semantics; entries are parsed
+/// (and validated) at config load.
+#[derive(Debug, Default, Deserialize)]
+struct RawDelegationSection {
+    #[serde(default)]
+    allow_delegated_pull: bool,
+    #[serde(default)]
+    allowed_source_hosts: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawModule {
     name: String,
@@ -122,6 +152,14 @@ struct RawModule {
     comment: Option<String>,
     #[serde(default)]
     read_only: bool,
+    /// Per-module narrowing override. Defaults to true so existing
+    /// configs unaffected. See `ModuleConfig::delegation_allowed`.
+    #[serde(default = "default_true")]
+    delegation_allowed: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_config_path() -> PathBuf {
@@ -181,6 +219,25 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         !raw.daemon.no_server_checksums
     };
 
+    // Parse delegation gate config first so an invalid CIDR / bad
+    // hostname surfaces as a config-load error before we touch any
+    // module paths. This is the §4.3.2 contract: invalid entries fail
+    // config load loudly.
+    let mut allowed_source_hosts = Vec::with_capacity(raw.delegation.allowed_source_hosts.len());
+    for entry in &raw.delegation.allowed_source_hosts {
+        let parsed = parse_allow_entry(entry).with_context(|| {
+            format!(
+                "failed to parse allowed_source_hosts entry '{}' in [delegation]",
+                entry
+            )
+        })?;
+        allowed_source_hosts.push(parsed);
+    }
+    let delegation = DelegationConfig {
+        allow_delegated_pull: raw.delegation.allow_delegated_pull,
+        allowed_source_hosts,
+    };
+
     let mut modules = HashMap::new();
     for module in raw.modules {
         if module.name.trim().is_empty() {
@@ -204,6 +261,7 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
                 canonical_root: canonical,
                 read_only: module.read_only,
                 _comment: module.comment,
+                delegation_allowed: module.delegation_allowed,
             },
         );
     }
@@ -252,6 +310,9 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
                 canonical_root: canonical.clone(),
                 read_only: chosen.read_only,
                 _comment: None,
+                // Implicit "default" module follows the daemon-wide
+                // delegation policy without further narrowing.
+                delegation_allowed: true,
             },
         );
         default_root = Some(RootExport {
@@ -287,5 +348,152 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         motd,
         warnings,
         server_checksums_enabled,
+        delegation,
     })
+}
+
+#[cfg(test)]
+mod delegation_config_tests {
+    //! Tests pinning that bad delegation-gate config fails config
+    //! load loudly (Phase 1 unit-test list, R23-F3 contract).
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    fn with_config(toml: &str) -> (TempDir, DaemonArgs) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("config.toml");
+        let mut f = std::fs::File::create(&cfg_path).expect("create config");
+        f.write_all(toml.as_bytes()).expect("write config");
+        let args = DaemonArgs {
+            config: Some(cfg_path),
+            bind: None,
+            port: None,
+            root: Some(dir.path().to_path_buf()),
+            no_mdns: true,
+            mdns_name: None,
+            force_grpc_data: false,
+            no_server_checksums: false,
+            metrics: false,
+        };
+        (dir, args)
+    }
+
+    #[test]
+    fn invalid_cidr_fails_config_load() {
+        let toml = r#"
+            [delegation]
+            allow_delegated_pull = true
+            allowed_source_hosts = ["10.0.0.0/99"]
+        "#;
+        let (_dir, args) = with_config(toml);
+        let err = load_runtime(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid CIDR") || msg.contains("allowed_source_hosts"),
+            "expected CIDR-related config error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_allowlist_entry_fails_config_load() {
+        let toml = r#"
+            [delegation]
+            allow_delegated_pull = true
+            allowed_source_hosts = ["", "10.0.0.0/8"]
+        "#;
+        let (_dir, args) = with_config(toml);
+        let err = load_runtime(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("empty entry") || msg.contains("allowed_source_hosts"),
+            "expected empty-entry rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn valid_cidr_and_hostname_load_cleanly() {
+        let toml = r#"
+            [delegation]
+            allow_delegated_pull = true
+            allowed_source_hosts = ["10.0.0.0/8", "server-a.lan", "[::1]"]
+        "#;
+        let (_dir, args) = with_config(toml);
+        let runtime = load_runtime(&args).expect("config loads");
+        assert!(runtime.delegation.allow_delegated_pull);
+        assert_eq!(runtime.delegation.allowed_source_hosts.len(), 3);
+    }
+
+    #[test]
+    fn delegation_block_omitted_defaults_to_disabled() {
+        // Existing configs without [delegation] still load.
+        let toml = "";
+        let (_dir, args) = with_config(toml);
+        let runtime = load_runtime(&args).expect("default load");
+        assert!(!runtime.delegation.allow_delegated_pull);
+        assert!(runtime.delegation.allowed_source_hosts.is_empty());
+    }
+
+    #[test]
+    fn per_module_delegation_allowed_defaults_true() {
+        // A module without an explicit `delegation_allowed` setting
+        // follows the daemon-wide policy without further narrowing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mod_path = dir.path().join("mod1");
+        std::fs::create_dir_all(&mod_path).expect("create module dir");
+        let cfg_path = dir.path().join("config.toml");
+        let toml = format!(
+            r#"
+                [[module]]
+                name = "alpha"
+                path = {path:?}
+            "#,
+            path = mod_path.canonicalize().unwrap().to_str().unwrap()
+        );
+        std::fs::write(&cfg_path, toml).expect("write config");
+        let args = DaemonArgs {
+            config: Some(cfg_path),
+            bind: None,
+            port: None,
+            root: None,
+            no_mdns: true,
+            mdns_name: None,
+            force_grpc_data: false,
+            no_server_checksums: false,
+            metrics: false,
+        };
+        let runtime = load_runtime(&args).expect("config loads");
+        assert!(runtime.modules["alpha"].delegation_allowed);
+    }
+
+    #[test]
+    fn per_module_delegation_allowed_can_opt_out() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mod_path = dir.path().join("mod1");
+        std::fs::create_dir_all(&mod_path).expect("create module dir");
+        let cfg_path = dir.path().join("config.toml");
+        let toml = format!(
+            r#"
+                [[module]]
+                name = "alpha"
+                path = {path:?}
+                delegation_allowed = false
+            "#,
+            path = mod_path.canonicalize().unwrap().to_str().unwrap()
+        );
+        std::fs::write(&cfg_path, toml).expect("write config");
+        let args = DaemonArgs {
+            config: Some(cfg_path),
+            bind: None,
+            port: None,
+            root: None,
+            no_mdns: true,
+            mdns_name: None,
+            force_grpc_data: false,
+            no_server_checksums: false,
+            metrics: false,
+        };
+        let runtime = load_runtime(&args).expect("config loads");
+        assert!(!runtime.modules["alpha"].delegation_allowed);
+    }
 }

@@ -19,6 +19,9 @@ pub(crate) async fn resolve_module(
                 canonical_root: root.canonical_root.clone(),
                 read_only: root.read_only,
                 _comment: None,
+                // Synthesized "default" module follows the daemon-wide
+                // delegation policy without further narrowing.
+                delegation_allowed: true,
             });
         } else {
             return Err(Status::not_found(
