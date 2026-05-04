@@ -3308,3 +3308,50 @@ Status:
 - Phase 3 cleanup/harness items are accepted.
 - Remaining unchecked item is live benchmark execution and filling
   `docs/perf/remote_remote_benchmarks.md` with target-network results.
+
+## Round 40 - F14 Migration Review
+
+Reviewed commit:
+
+- `30b95a2 Close F14 — migrate FSEvents binding to objc2-core-services`
+
+Reviewed changes:
+
+- `crates/blit-core/Cargo.toml`
+- `crates/blit-core/src/change_journal/snapshot.rs`
+- `TODO.md`
+- `DEVLOG.md`
+
+Verification:
+
+- Code review only. Claude reported `cargo check --workspace`,
+  `cargo build -p blit-core`, and `cargo test --workspace` passing with
+  383 tests. I did not rerun the suite for this note.
+
+### R40-F1 — Low — DEVLOG timestamp is stale relative to the committed work
+
+The new DEVLOG entry at `DEVLOG.md:8` is timestamped
+`2026-05-03 02:10:00Z`, but the commit itself is dated
+`2026-05-04 15:55:51 -0400` (`2026-05-04 19:55:51Z`). The entry is still
+top-most, but the timestamp is not the actual event time and will make the
+cross-agent timeline misleading once later May 4 entries are added.
+
+Recommended fix:
+
+- Update the DEVLOG entry timestamp to the actual UTC commit/work time, e.g.
+  `2026-05-04 19:55:51Z` or a nearby rounded value.
+
+Code verdict:
+
+No code findings.
+
+The macOS target dependency swap is localized, stale `fsevent-sys` references
+are gone from tracked files, and the call remains the same unsafe
+`FSEventsGetCurrentEventId() -> u64` shape. `Cargo.lock` is intentionally
+ignored by this repo, so the absence of a lockfile diff is consistent with
+existing repository policy.
+
+Status:
+
+- F14 code migration accepted.
+- R40-F1 is a docs/process cleanup only.
