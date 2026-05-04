@@ -6,7 +6,7 @@
 #   DST_REMOTE=server-b:/bench/   # destination module/directory endpoint
 #
 # Optional environment:
-#   BLIT=target/release/blit-cli
+#   BLIT=target/release/blit
 #   SIZE_MB=512
 #   RUNS=3
 #   LOG_DIR=logs/bench_remote_remote_<timestamp>
@@ -27,7 +27,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
-BLIT=${BLIT:-"$REPO_ROOT/target/release/blit-cli"}
+BLIT=${BLIT:-"$REPO_ROOT/target/release/blit"}
 SRC_REMOTE=${SRC_REMOTE:?set SRC_REMOTE, e.g. server-a:/bench/}
 DST_REMOTE=${DST_REMOTE:?set DST_REMOTE, e.g. server-b:/bench/}
 SIZE_MB=${SIZE_MB:-512}

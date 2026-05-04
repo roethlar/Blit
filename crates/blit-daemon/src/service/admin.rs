@@ -481,17 +481,24 @@ pub(crate) fn stream_find_entries(
     }
 
     // Pattern matching is glob-based, matching `BLIT_UTILS_PLAN.md`.
-    // Pre-0.1.0 behavior was substring containment; the move to glob
-    // is a deliberate API change before 0.1.0 ships (no
-    // backwards-compat constraint). Use case-insensitive flag on the
-    // builder so the matcher is single-pass and the candidate path
-    // doesn't need to be lowercased per entry.
+    // Pre-0.1.0 behavior was substring containment; the move to
+    // glob is a deliberate API change before 0.1.0 ships (no
+    // backwards-compat constraint).
+    //
+    // R41-F3: `literal_separator(true)` matches POSIX shell-glob
+    // semantics — `*` does NOT cross `/`, so `foo*.csv` matches
+    // `foo-bar.csv` but NOT `foo/bar.csv`. The basename fallback
+    // below covers the common "find files with this extension at
+    // any depth" use case (`*.csv` matches both `top.csv` and
+    // `nested/x.csv` via the basename), without making `*` greedy
+    // across the whole path. Users wanting a path-component-
+    // crossing match write `**/`.
     let matcher = if pattern.is_empty() {
         None
     } else {
         let glob = globset::GlobBuilder::new(&pattern)
             .case_insensitive(!case_sensitive)
-            .literal_separator(false)
+            .literal_separator(true)
             .build()
             .map_err(|e| {
                 Status::invalid_argument(format!("invalid find --pattern glob '{pattern}': {e}"))

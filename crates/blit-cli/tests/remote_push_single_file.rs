@@ -31,7 +31,7 @@ fn push_single_file_to_container_dir() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli failed:\nstdout:\n{}\nstderr:\n{}",
+        "blit failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -68,7 +68,7 @@ fn push_single_file_rename() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli failed:\nstdout:\n{}\nstderr:\n{}",
+        "blit failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

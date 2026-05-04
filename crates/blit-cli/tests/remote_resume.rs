@@ -39,7 +39,7 @@ fn test_pull_resume_partial_file() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli failed: {}",
+        "blit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -76,7 +76,7 @@ fn test_pull_resume_identical_file() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli failed: {}",
+        "blit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -115,7 +115,7 @@ fn test_pull_resume_grpc_fallback() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli failed: {}",
+        "blit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 

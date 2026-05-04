@@ -54,7 +54,7 @@ fn pull_sync_does_not_deadlock_with_populated_destination() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli mirror failed (pull_sync deadlock?)\nstdout:\n{}\nstderr:\n{}",
+        "blit mirror failed (pull_sync deadlock?)\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -126,7 +126,7 @@ fn pull_preserves_mtime_end_to_end() {
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
     assert!(
         output.status.success(),
-        "blit-cli mirror failed\nstdout:\n{}\nstderr:\n{}",
+        "blit mirror failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

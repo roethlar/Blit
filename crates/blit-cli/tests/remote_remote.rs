@@ -363,7 +363,7 @@ fn run_blit(
 fn assert_success(output: &std::process::Output) {
     if !output.status.success() {
         panic!(
-            "blit-cli failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "blit failed with status {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -401,11 +401,7 @@ fn binary_paths() -> (PathBuf, PathBuf) {
         .parent()
         .expect("deps parent directory")
         .to_path_buf();
-    let cli_bin = bin_dir.join(if cfg!(windows) {
-        "blit-cli.exe"
-    } else {
-        "blit-cli"
-    });
+    let cli_bin = bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" });
     let daemon_bin = bin_dir.join(if cfg!(windows) {
         "blit-daemon.exe"
     } else {

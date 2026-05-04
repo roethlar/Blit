@@ -312,6 +312,47 @@ fn test_admin_find_glob_invalid_pattern_rejected() {
 }
 
 #[test]
+fn test_admin_find_glob_star_does_not_cross_path_separator() {
+    // R41-F3 regression. `*` must NOT match across `/` per POSIX
+    // shell-glob conventions. With `literal_separator(true)` set on
+    // the daemon's GlobBuilder, `foo*.csv` matches `foo-x.csv` (a
+    // basename in the root or via the basename-fallback) but does
+    // NOT match `foo/bar.csv` as a path. Users wanting to cross
+    // path components must use `**/`.
+    let ctx = TestContext::new();
+    fs::create_dir(ctx.module_dir.join("foo")).expect("mkdir foo");
+    fs::write(ctx.module_dir.join("foo/bar.csv"), "x").expect("write nested");
+    fs::write(ctx.module_dir.join("foo-x.csv"), "x").expect("write sibling");
+    fs::write(ctx.module_dir.join("notes.txt"), "x").expect("write txt");
+
+    let remote_path = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("find")
+        .arg(&remote_path)
+        .arg("--pattern")
+        .arg("foo*.csv");
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
+    assert!(output.status.success(), "blit find foo*.csv failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // foo-x.csv is in the root → matches both as path and basename.
+    assert!(stdout.contains("foo-x.csv"), "missing foo-x.csv");
+    // foo/bar.csv has the basename `bar.csv` (no foo prefix), and
+    // its path `foo/bar.csv` would only match if `*` crossed `/`.
+    // With literal_separator(true) it does not — and the basename
+    // is `bar.csv`, which `foo*.csv` also doesn't match.
+    assert!(
+        !stdout.contains("foo/bar.csv") && !stdout.contains("bar.csv"),
+        "foo/bar.csv should NOT match foo*.csv (literal_separator); got:\n{}",
+        stdout
+    );
+    assert!(!stdout.contains("notes.txt"));
+}
+
+#[test]
 fn test_admin_find_glob_nested_with_double_star() {
     // `**/*.csv` matches across directory components. With the
     // basename fallback, plain `*.csv` already matches nested

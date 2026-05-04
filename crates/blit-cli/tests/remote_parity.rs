@@ -27,7 +27,7 @@ fn test_push_tcp_negotiation() {
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed");
+    assert!(output.status.success(), "blit failed");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -63,7 +63,7 @@ fn test_pull_tcp_negotiation() {
         .arg(&dest_dir);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed");
+    assert!(output.status.success(), "blit failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Verify we did NOT fall back to gRPC
@@ -108,7 +108,7 @@ fn test_pull_grpc_fallback() {
         .arg(&dest_dir);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed");
+    assert!(output.status.success(), "blit failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -150,7 +150,7 @@ fn test_push_grpc_fallback() {
         .arg(&dest_remote);
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
-    assert!(output.status.success(), "blit-cli failed");
+    assert!(output.status.success(), "blit failed");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

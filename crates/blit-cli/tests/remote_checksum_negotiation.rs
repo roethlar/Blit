@@ -127,11 +127,7 @@ fn spawn_daemon_harness(work: &tempfile::TempDir, extra_daemon_args: &[&str]) ->
         .parent()
         .expect("deps parent")
         .to_path_buf();
-    let cli_bin = bin_dir.join(if cfg!(windows) {
-        "blit-cli.exe"
-    } else {
-        "blit-cli"
-    });
+    let cli_bin = bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" });
     let daemon_bin = bin_dir.join(if cfg!(windows) {
         "blit-daemon.exe"
     } else {

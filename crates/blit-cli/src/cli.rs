@@ -341,12 +341,16 @@ pub struct RmArgs {
 pub struct FindArgs {
     /// Remote path to search (e.g., server:/module/path)
     pub target: String,
-    /// Glob pattern to match against entry paths (and filename
-    /// basenames). Uses standard shell-glob syntax: `*` matches any
-    /// run of non-`/` characters, `?` matches one, `[abc]` matches
-    /// a class, `**/` matches zero or more nested directory
-    /// components. Case sensitivity controlled by
-    /// `--case-insensitive`. Empty matches everything.
+    /// Glob pattern matched against each entry's relative path AND
+    /// its file-name basename (whichever matches first). Uses POSIX
+    /// shell-glob semantics: `*` matches any run of non-`/`
+    /// characters, `?` matches one non-`/` character, `[abc]`
+    /// matches a class, `**/` matches zero or more nested directory
+    /// components. `*` does NOT cross `/`; use `**/` to traverse
+    /// directories. The basename fallback means `*.csv` finds nested
+    /// entries (matching their basename) without writing `**/`.
+    /// Case sensitivity controlled by `--case-insensitive`. Empty
+    /// matches everything.
     #[arg(long)]
     pub pattern: Option<String>,
     /// Include only files in results

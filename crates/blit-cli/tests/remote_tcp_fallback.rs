@@ -85,11 +85,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
         .to_path_buf();
 
     let cli_bin = {
-        let name = if cfg!(windows) {
-            "blit-cli.exe"
-        } else {
-            "blit-cli"
-        };
+        let name = if cfg!(windows) { "blit.exe" } else { "blit" };
         bin_dir.join(name)
     };
     let daemon_bin = {
@@ -178,7 +174,7 @@ fn remote_push_falls_back_to_grpc_when_forced() {
 
     if !output.status.success() {
         panic!(
-            "blit-cli failed\nstdout:\n{}\nstderr:\n{}",
+            "blit failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );

@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-BLIT="$REPO_ROOT/target/release/blit-cli"
+BLIT="$REPO_ROOT/target/release/blit"
 BLIT_DAEMON="$REPO_ROOT/target/release/blit-daemon"
 
 # --- Configuration ---
