@@ -278,6 +278,7 @@ impl DataPlaneSession {
             );
 
             write_result.with_context(|| format!("sending {}", rel))?;
+            crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes_a as u64);
 
             let bytes_b = read_result.with_context(|| format!("reading {}", rel))?;
 
@@ -301,6 +302,7 @@ impl DataPlaneSession {
                 .write_all(&buf_a.as_slice()[..bytes_a])
                 .await
                 .with_context(|| format!("sending {}", rel))?;
+            crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes_a as u64);
         }
 
         // Buffers return to pool automatically on drop
@@ -372,6 +374,7 @@ impl DataPlaneSession {
                 .write_all(chunk)
                 .await
                 .context("writing tar shard payload")?;
+            crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(chunk.len() as u64);
         }
         trace_client!(
             self,
@@ -428,6 +431,7 @@ impl DataPlaneSession {
             .write_all(content)
             .await
             .context("writing block content")?;
+        crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(content.len() as u64);
 
         self.bytes_sent += content.len() as u64;
         Ok(())

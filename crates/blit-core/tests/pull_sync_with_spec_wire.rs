@@ -26,7 +26,7 @@ use blit_core::generated::{
     ServerPullMessage, ServerPushResponse, TransferOperationSpec,
 };
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use blit_core::remote::pull::RemotePullClient;
+use blit_core::remote::pull::{PullSyncError, RemotePullClient};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
@@ -39,6 +39,7 @@ use tonic::{transport::Server, Request, Response, Status, Streaming};
 /// shape arriving on the server side.
 struct SpyServer {
     captured: Arc<Mutex<Option<TransferOperationSpec>>>,
+    reject_pull_sync: Option<(tonic::Code, &'static str)>,
 }
 
 #[tonic::async_trait]
@@ -57,10 +58,7 @@ impl Blit for SpyServer {
         unimplemented!("test only exercises pull_sync")
     }
 
-    async fn pull(
-        &self,
-        _: Request<PullRequest>,
-    ) -> Result<Response<Self::PullStream>, Status> {
+    async fn pull(&self, _: Request<PullRequest>) -> Result<Response<Self::PullStream>, Status> {
         unimplemented!("test only exercises pull_sync")
     }
 
@@ -68,6 +66,9 @@ impl Blit for SpyServer {
         &self,
         request: Request<Streaming<ClientPullMessage>>,
     ) -> Result<Response<Self::PullSyncStream>, Status> {
+        if let Some((code, message)) = self.reject_pull_sync {
+            return Err(Status::new(code, message));
+        }
         let captured = Arc::clone(&self.captured);
         let mut stream = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
@@ -83,11 +84,9 @@ impl Blit for SpyServer {
                     // logic. Immediately drop tx so the stream ends.
                     let _ = tx
                         .send(Ok(ServerPullMessage {
-                            payload: Some(server_pull_message::Payload::PullSyncAck(
-                                PullSyncAck {
-                                    server_checksums_enabled: true,
-                                },
-                            )),
+                            payload: Some(server_pull_message::Payload::PullSyncAck(PullSyncAck {
+                                server_checksums_enabled: true,
+                            })),
                         }))
                         .await;
                     break;
@@ -99,17 +98,11 @@ impl Blit for SpyServer {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn list(
-        &self,
-        _: Request<ListRequest>,
-    ) -> Result<Response<ListResponse>, Status> {
+    async fn list(&self, _: Request<ListRequest>) -> Result<Response<ListResponse>, Status> {
         unimplemented!()
     }
 
-    async fn purge(
-        &self,
-        _: Request<PurgeRequest>,
-    ) -> Result<Response<PurgeResponse>, Status> {
+    async fn purge(&self, _: Request<PurgeRequest>) -> Result<Response<PurgeResponse>, Status> {
         unimplemented!()
     }
 
@@ -127,10 +120,7 @@ impl Blit for SpyServer {
         unimplemented!()
     }
 
-    async fn find(
-        &self,
-        _: Request<FindRequest>,
-    ) -> Result<Response<Self::FindStream>, Status> {
+    async fn find(&self, _: Request<FindRequest>) -> Result<Response<Self::FindStream>, Status> {
         unimplemented!()
     }
 
@@ -157,13 +147,23 @@ impl Blit for SpyServer {
 }
 
 async fn spawn_spy(captured: Arc<Mutex<Option<TransferOperationSpec>>>) -> u16 {
+    spawn_spy_with_rejection(captured, None).await
+}
+
+async fn spawn_spy_with_rejection(
+    captured: Arc<Mutex<Option<TransferOperationSpec>>>,
+    reject_pull_sync: Option<(tonic::Code, &'static str)>,
+) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
     let port = listener.local_addr().expect("local_addr").port();
 
     tokio::spawn(async move {
-        let svc = BlitServer::new(SpyServer { captured });
+        let svc = BlitServer::new(SpyServer {
+            captured,
+            reject_pull_sync,
+        });
         Server::builder()
             .add_service(svc)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
@@ -339,5 +339,51 @@ async fn pull_sync_wrapper_emits_same_spec_as_build_spec_from_options() {
     assert_eq!(
         captured_spec, expected_spec,
         "pull_sync wrapper emitted a different spec than build_spec_from_options"
+    );
+}
+
+#[tokio::test]
+async fn pull_sync_with_spec_classifies_initial_rpc_rejection_as_negotiation() {
+    let captured: Arc<Mutex<Option<TransferOperationSpec>>> = Arc::new(Mutex::new(None));
+    let port = spawn_spy_with_rejection(
+        Arc::clone(&captured),
+        Some((
+            tonic::Code::PermissionDenied,
+            "source ACL rejected delegated peer",
+        )),
+    )
+    .await;
+
+    let endpoint = RemoteEndpoint {
+        host: "127.0.0.1".to_string(),
+        port,
+        path: RemotePath::Discovery,
+    };
+    let mut client = RemotePullClient::connect(endpoint)
+        .await
+        .expect("connect to rejecting spy");
+
+    let err = client
+        .pull_sync_with_spec(
+            std::path::Path::new("/tmp"),
+            Vec::<FileHeader>::new(),
+            hand_built_spec(),
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    let pull_err = err
+        .downcast_ref::<PullSyncError>()
+        .expect("initial pull_sync RPC rejection should preserve PullSyncError");
+    assert!(
+        pull_err.is_negotiation(),
+        "initial RPC rejection must be classified as negotiation: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("source ACL rejected delegated peer"),
+        "source rejection reason should survive, got: {err}"
     );
 }

@@ -207,6 +207,15 @@ where
     Ok(data)
 }
 
+/// Transfer source backed by a remote daemon.
+///
+/// This is intentionally the legacy remote→remote relay primitive: the CLI
+/// pulls bytes from a source daemon, then pushes them to a destination daemon.
+/// Default remote→remote transfers now use destination-side `DelegatedPull`, so
+/// payload bytes flow source→destination without crossing the CLI host.
+/// `RemoteTransferSource` remains for the explicit `--relay-via-cli` escape
+/// hatch and for any future topology where the CLI really must be in the byte
+/// path.
 pub struct RemoteTransferSource {
     client: RemotePullClient,
     root: PathBuf,
@@ -214,6 +223,7 @@ pub struct RemoteTransferSource {
 
 impl RemoteTransferSource {
     pub fn new(client: RemotePullClient, root: PathBuf) -> Self {
+        crate::remote::instrumentation::record_remote_transfer_source_constructed();
         Self { client, root }
     }
 }

@@ -64,6 +64,11 @@ Any `<SOURCE>` or `<DESTINATION>` may be a local path or a remote endpoint:
 Incorrect: `server:\module\path` — Correct: `server:/module/path`
 
 Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server2:/mod/B`).
+By default, the CLI asks the destination daemon to pull directly from the
+source daemon, so payload bytes flow source→destination and do not cross the
+CLI host. The destination daemon must opt in with `[delegation]
+allow_delegated_pull = true`; if its gate rejects the request, the CLI fails
+with the daemon's reason instead of silently relaying.
 
 ### Admin Commands
 - `scan` discovers blit daemons on the local network via mDNS.
@@ -94,6 +99,11 @@ Remote-to-remote transfers are supported (e.g., `blit copy server1:/mod/A server
 
 - `--force-grpc`
   Bypass the TCP data plane negotiation and stream payloads over gRPC.
+
+- `--relay-via-cli`
+  For remote-to-remote transfers, force the legacy relay path where the CLI
+  pulls from the source and pushes to the destination. Use this only when the
+  destination daemon cannot reach the source daemon, or for benchmarking.
 
 - `--yes`, `-y` (mirror, move)
   Skip the confirmation prompt for destructive operations. By default, `mirror`

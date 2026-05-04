@@ -3140,3 +3140,171 @@ Status:
 - Phase 1 is committable from this review series.
 - Phase 2 can start after committing Phase 1, assuming the user wants that
   sequencing.
+
+## Round 37 - Phase 2 CLI Dispatch Review
+
+Reviewed changes:
+
+- `crates/blit-cli/src/transfers/mod.rs`
+- `crates/blit-cli/src/transfers/remote_remote_direct.rs`
+- `crates/blit-cli/src/cli.rs`
+- `crates/blit-cli/tests/remote_remote.rs`
+- `crates/blit-core/src/remote/instrumentation.rs`
+- `crates/blit-core/src/remote/transfer/data_plane.rs`
+- `crates/blit-core/src/remote/transfer/source.rs`
+- `crates/blit-daemon/src/service/delegated_pull.rs`
+- `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+
+Verification:
+
+- Code review only. The worker reported `cargo test --workspace` passing; I did
+  not rerun the full suite for this note.
+
+### R37-F1 — Medium — `NEGOTIATE` is documented and handled by the CLI, but never emitted
+
+The Phase 2 plan marks the no-silent-fallback integration coverage complete at
+`docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md:879`, but the third required case
+is explicitly still pending at `:884`: "Src refuses dst (NEGOTIATE phase)".
+More importantly, the daemon currently cannot produce that phase. The only
+post-connect `pull_sync_with_spec` error mapping in
+`crates/blit-daemon/src/service/delegated_pull.rs:320` tags every failure as
+`Phase::TRANSFER`:
+
+```rust
+.map_err(|err| {
+    err_progress(Phase::Transfer as i32, format!("delegated pull: {err}"))
+})?;
+```
+
+That makes the CLI's `DelegatedPullPhase::Negotiate` branch in
+`crates/blit-cli/src/transfers/remote_remote_direct.rs:170` unreachable, even
+though `proto/blit.proto:570` defines `NEGOTIATE` as "src refused dst". A
+source-side auth/ACL/spec rejection will be shown as a generic transfer failure
+instead of "source refused delegated pull", and there is no test proving that
+this boundary does not silently relay.
+
+Recommended fix:
+
+- Either implement a typed/phase-bearing error path from `pull_sync_with_spec`
+  so pre-transfer source rejection maps to `Phase::NEGOTIATE`, or remove the
+  proto/CLI/plan promise.
+- Given the plan direction, prefer implementing it: add a fake source daemon
+  that accepts `DelegatedPull`'s outbound connection but rejects `pull_sync`
+  during negotiation, then assert the CLI surfaces `source refused delegated
+  pull` and the relay counters remain zero.
+- Do not mark Phase 2's no-silent-fallback checklist fully complete until that
+  case is either implemented or deliberately moved to a new, unchecked follow-up
+  item.
+
+### R37-F2 — Low — delegated byte progress is shaped like cumulative state but fed into a delta accumulator
+
+`BytesProgress` has cumulative-looking field names in `proto/blit.proto:542`
+(`files_completed`, `bytes_completed`, totals alongside them). The CLI handler
+passes those values directly into `RemoteTransferProgress::report_payload` at
+`crates/blit-cli/src/transfers/remote_remote_direct.rs:150`, but the progress
+monitor treats `ProgressEvent::Payload` values as deltas and adds them to
+running totals in `crates/blit-cli/src/transfers/remote.rs:52`.
+
+Today this is not user-visible because the delegated daemon path only sends
+`ManifestBatch` and `Summary`, not `BytesProgress`. When progress passthrough is
+added, repeated cumulative updates like `1 MiB`, `2 MiB`, `3 MiB` would render
+as `6 MiB`.
+
+Recommended fix:
+
+- Make the proto/comments explicit that `BytesProgress` carries deltas, or
+  change `report_bytes_progress` to store the last seen values and report only
+  the increment.
+- Add a unit test around `report_bytes_progress` before enabling delegated
+  streaming progress.
+
+Status:
+
+- Direct remote→remote dispatch and `--relay-via-cli` are directionally sound.
+- The byte-path isolation tests cover the default direct copy path and the
+  explicit relay counterpart.
+- Phase 2 should not be considered fully closed until R37-F1 is resolved or
+  formally split out as an unchecked follow-up.
+
+## Round 38 - R37 Fix Pass Review
+
+Reviewed changes:
+
+- `crates/blit-core/src/remote/pull.rs`
+- `crates/blit-core/tests/pull_sync_with_spec_wire.rs`
+- `crates/blit-daemon/src/service/delegated_pull.rs`
+- `crates/blit-cli/src/transfers/remote_remote_direct.rs`
+- `crates/blit-cli/tests/remote_remote.rs`
+- `proto/blit.proto`
+- `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+
+Verification:
+
+- `cargo fmt`
+- `cargo fmt -- --check`
+- `cargo test -p blit-core pull_sync_with_spec`
+- `cargo test -p blit-cli remote_remote_direct`
+- `cargo test -p blit-cli --test remote_remote`
+- `cargo test -p blit-daemon delegated_pull`
+- `cargo test --workspace`
+
+All passed. Existing warnings remain: macOS FSEvents deprecation (F14) and the
+pre-existing unused `preserved` test variable in `fs_capability::macos`.
+
+Verdict:
+
+No new findings.
+
+R37-F1 is closed. `pull_sync_with_spec` now preserves a typed
+`PullSyncError::Negotiation` for initial source-side `pull_sync` rejection and
+for checksum-capability negotiation refusal. The delegated destination handler
+downcasts that error and emits `DelegatedPullError::NEGOTIATE`, so the CLI's
+`source refused delegated pull` branch is reachable. The new
+`source_refuses_destination_negotiation_does_not_fall_back_to_relay`
+integration test proves the full path with a real destination daemon and fake
+rejecting source; the relay counters stay at zero.
+
+R37-F2 is closed. Delegated `BytesProgress` is documented as cumulative in the
+proto, and the CLI converts cumulative updates into deltas before feeding the
+existing progress accumulator. Unit tests cover both normal cumulative
+increments and duplicate update suppression.
+
+Status:
+
+- Phase 2 CLI dispatch/no-fallback coverage is accepted.
+- Remaining Phase 3 work is cleanup and benchmarking per
+  `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`.
+
+## Round 39 - Phase 3 Cleanup/Harness Review
+
+Reviewed changes:
+
+- `crates/blit-core/src/remote/transfer/source.rs`
+- `scripts/bench_remote_remote.sh`
+- `docs/perf/remote_remote_benchmarks.md`
+- `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`
+- `DEVLOG.md`
+
+Verification:
+
+- `cargo fmt -- --check`
+- `cargo test -p blit-cli remote_remote_direct`
+- `bash -n scripts/bench_remote_remote.sh`
+
+Verdict:
+
+No findings.
+
+The `RemoteTransferSource` docstring now matches the architecture: it is the
+explicit legacy relay primitive, not the default remote→remote path. The
+benchmark harness is intentionally operator-driven because it needs two real
+daemons and a target network. It stages a source payload, runs default direct
+copy and `--relay-via-cli` copy against unique destination paths, and records
+both throughput and the CLI-side data-plane byte counter. The docs/perf page is
+a template only; no benchmark numbers were fabricated locally.
+
+Status:
+
+- Phase 3 cleanup/harness items are accepted.
+- Remaining unchecked item is live benchmark execution and filling
+  `docs/perf/remote_remote_benchmarks.md` with target-network results.

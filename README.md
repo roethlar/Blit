@@ -92,6 +92,12 @@ blit mirror ./local server:/module/ --yes
 # Remote pull from daemon
 blit mirror server:/module/ ./local --yes
 
+# Remote-to-remote copy (direct by default; destination daemon must allow delegation)
+blit copy server-a:/module/data/ server-b:/module/data/
+
+# Explicit legacy relay when only the CLI can reach both daemons
+blit copy server-a:/module/data/ server-b:/module/data/ --relay-via-cli
+
 # Resume interrupted transfer (block-level comparison)
 blit mirror ./source ./dest --resume
 

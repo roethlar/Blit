@@ -540,6 +540,8 @@ message DelegatedPullStarted {
 }
 
 message BytesProgress {
+  // Cumulative values for the delegated transfer so far. Receivers that feed
+  // delta-oriented progress renderers must subtract the last observed values.
   uint64 files_completed = 1;
   uint64 files_total = 2;
   uint64 bytes_completed = 3;

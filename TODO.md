@@ -104,10 +104,13 @@ These are intentionally not next-actionable. Don't pick them up
 without the listed prerequisite — they're tracked here so they
 don't get lost, not so the next agent reimplements them on a hunch.
 
-- **Remote→remote re-evaluation** *(prerequisite: benchmark data)* —
-  Decide whether daemon-A → daemon-B should bypass CLI relay.
-  Current relay shape works; revisit only if benchmarks justify
-  the protocol surgery.
+- [x] **Remote→remote re-evaluation** — resolved by
+  `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md`. Phase 1 (`15991ed`)
+  added the `DelegatedPull` wire/gate/daemon path; Phase 2 makes
+  remote→remote CLI transfers direct by default, keeps
+  `--relay-via-cli` as the explicit escape hatch, and pins byte-path
+  isolation plus stale-dst/gate/source-refusal no-fallback behavior
+  with CLI-side counters.
 
 ## Phase 0: Workspace & Core Logic Foundation
 

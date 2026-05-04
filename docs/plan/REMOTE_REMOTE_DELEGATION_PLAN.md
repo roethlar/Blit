@@ -1,6 +1,6 @@
 # Remote→Remote Direct Transfer Plan
 
-**Status:** Draft v4, 2026-05-03 (incorporates Round 21 + Round 23 + Round 25 review findings)
+**Status:** Phase 3 cleanup/harness in workspace, 2026-05-03 (Phase 1 committed as `15991ed`; Phase 2 CLI dispatch + no-fallback tests implemented; live benchmark results still TBD)
 **Owner:** mcoelho
 **Supersedes:** the "Remote→remote re-evaluation" entry in `TODO.md`'s Deferred design calls.
 
@@ -866,45 +866,60 @@ operator-controlled escape, not a fallback automaton.
 
 ### Phase 2 — CLI dispatch and integration tests (2 days)
 
-1. Add `run_remote_to_remote_direct` in
+1. [x] Add `run_remote_to_remote_direct` in
    `crates/blit-cli/src/transfers/remote_remote_direct.rs`. Builds
    `TransferOperationSpec` from `args` using existing `build_filter_spec`
    and the same mirror/comparison/resume normalization push/pull use.
-2. Update dispatch in `transfers/mod.rs:398` and `:503` per §4.2 (no
+2. [x] Update dispatch in `transfers/mod.rs:398` and `:503` per §4.2 (no
    silent fallback predicate).
-3. Add `--relay-via-cli` flag on `TransferArgs`.
-4. Integration test `crates/blit-cli/tests/remote_remote_direct.rs`
+3. [x] Add `--relay-via-cli` flag on `TransferArgs`.
+4. [x] Integration test `crates/blit-cli/tests/remote_remote.rs`
    (see §6 for byte-path-isolation test design — this is the load-bearing
    correctness test).
-5. Integration test `remote_remote_no_silent_fallback.rs`:
+5. [x] Integration test `remote_remote_no_silent_fallback.rs`:
    - Stale dst (returns `Unimplemented`): assert CLI fails with explicit
      upgrade message; assert CLI did **not** route through relay path.
    - Gate-rejected dst (allow_delegated_pull = false): assert CLI surfaces
      the gate's reason string verbatim.
    - Src refuses dst (NEGOTIATE phase): assert CLI surfaces upstream
      error verbatim; assert CLI did **not** retry through relay.
-6. Integration test `remote_remote_explicit_relay.rs`:
+6. [x] Integration test `remote_remote_explicit_relay.rs`:
    - With `--relay-via-cli`, assert legacy path runs and bytes flow
      through CLI (counterpart to the byte-path-isolation test).
 
+Implementation note: Phase 2 coverage lives in the existing
+`crates/blit-cli/tests/remote_remote.rs` integration target rather than
+three separate files, so the dual-daemon fixture and env-gated byte
+counter are shared. The load-bearing observables are:
+
+- `BLIT_TEST_COUNTER_FILE` records CLI outbound data-plane payload bytes
+  from `DataPlaneSession`; direct delegation must record zero.
+- The same file records `RemoteTransferSource::new`; direct delegation
+  must not construct the relay primitive.
+- The explicit `--relay-via-cli` counterpart asserts both observables
+  move in the opposite direction, proving the instrumentation would catch
+  accidental relay fallback.
+
 ### Phase 3 — Cleanup and benchmarking (1 day)
 
-1. Audit `RemoteTransferSource` usages. If only the legacy CLI relay path
+1. [x] Audit `RemoteTransferSource` usages. If only the legacy CLI relay path
    uses it, **leave it** (relay is a real fallback). Document this in the
    module docstring.
-2. Update `docs/DAEMON_CONFIG.md`:
+2. [x] Update `docs/DAEMON_CONFIG.md`:
    - "Trust Model" section: direct remote→remote, ACL implications.
    - "Path containment" section: F2 still applies to dst-side resolution
      in delegated handler.
-3. Update `docs/CLI_USAGE.md` (or wherever `--relay-via-cli` belongs) and
+3. [x] Update CLI usage docs (README + `docs/cli/blit.1.md`) and
    `man` pages.
-4. Update `TODO.md`: move "Remote→remote re-evaluation" out of Deferred,
+4. [x] Update `TODO.md`: move "Remote→remote re-evaluation" out of Deferred,
    mark closed with reference to commit.
-5. Add benchmark script under `benches/` or `scripts/bench/`:
+5. [x] Add benchmark script under `benches/` or `scripts/bench/`:
    - Run identical workload through `--relay-via-cli` vs default direct.
    - Measure wallclock, bytes/sec, CLI-host network bytes (proves CLI is
      out of the byte path).
-   - Capture results in `docs/perf/remote_remote_benchmarks.md`.
+   - Capture result template in `docs/perf/remote_remote_benchmarks.md`.
+6. [ ] Run the benchmark on the target network and fill
+   `docs/perf/remote_remote_benchmarks.md` with real results.
 
 ### Phase 4 — Future-proofing (parallel, can land separately)
 

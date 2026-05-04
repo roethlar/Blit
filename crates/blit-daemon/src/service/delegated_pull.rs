@@ -19,14 +19,12 @@ use blit_core::generated::{
     TransferOperationSpec,
 };
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use blit_core::remote::pull::RemotePullClient;
+use blit_core::remote::pull::{PullSyncError, RemotePullClient};
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use tokio::sync::mpsc;
 use tonic::Status;
 
-use crate::delegation_gate::{
-    validate_source, GateDenial, HostResolver, LocatorView, StdResolver,
-};
+use crate::delegation_gate::{validate_source, GateDenial, HostResolver, LocatorView, StdResolver};
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
 use crate::service::util::{resolve_contained_path, resolve_module};
@@ -48,7 +46,9 @@ pub(crate) fn dst_capabilities() -> PeerCapabilities {
 /// `client_capabilities` the CLI put on the spec must be replaced
 /// with the destination's actual capabilities before the spec leaves
 /// for src. Unconditional — no merging, no field-level fallback.
-pub(crate) fn apply_dst_capabilities_override(mut spec: TransferOperationSpec) -> TransferOperationSpec {
+pub(crate) fn apply_dst_capabilities_override(
+    mut spec: TransferOperationSpec,
+) -> TransferOperationSpec {
     spec.client_capabilities = Some(dst_capabilities());
     spec
 }
@@ -112,8 +112,16 @@ pub(crate) async fn handle_delegated_pull(
     tx: mpsc::Sender<Result<DelegatedPullProgress, Status>>,
 ) {
     let resolver = StdResolver;
-    let result =
-        run_delegated_pull(req, modules, default_root, delegation, metrics, &tx, &resolver).await;
+    let result = run_delegated_pull(
+        req,
+        modules,
+        default_root,
+        delegation,
+        metrics,
+        &tx,
+        &resolver,
+    )
+    .await;
 
     if let Err(error_progress) = result {
         // Surface the phased error to the CLI. We use a one-shot
@@ -165,8 +173,8 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let spec = req
         .spec
         .ok_or_else(|| err_progress(Phase::DelegationRejected as i32, "missing transfer spec"))?;
-    let spec = validate_spec(spec)
-        .map_err(|msg| err_progress(Phase::DelegationRejected as i32, msg))?;
+    let spec =
+        validate_spec(spec).map_err(|msg| err_progress(Phase::DelegationRejected as i32, msg))?;
 
     // Step 3: daemon-wide gate (master switch + allowlist matching +
     // DNS-rebinding mitigation by binding to the resolved IP).
@@ -181,7 +189,10 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let module = resolve_module(&modules, default_root.as_ref(), &req.dst_module)
         .await
         .map_err(|status| {
-            err_progress(Phase::DelegationRejected as i32, status.message().to_string())
+            err_progress(
+                Phase::DelegationRejected as i32,
+                status.message().to_string(),
+            )
         })?;
 
     // Step 5: per-module narrowing override.
@@ -208,9 +219,8 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     } else {
         PathBuf::from(&req.dst_destination_path)
     };
-    let dest_root = resolve_contained_path(&module, &dst_rel).map_err(|status| {
-        err_progress(Phase::Apply as i32, status.message().to_string())
-    })?;
+    let dest_root = resolve_contained_path(&module, &dst_rel)
+        .map_err(|status| err_progress(Phase::Apply as i32, status.message().to_string()))?;
 
     // Step 7: metrics RAII. inc_pull because — from this daemon's
     // perspective — the body of work is a pull from src.
@@ -243,7 +253,12 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let mut pull_client = RemotePullClient::connect(endpoint).await.map_err(|err| {
         err_progress(
             Phase::ConnectSource as i32,
-            format!("connecting to source {}:{}: {}", resolved.ip(), resolved.port(), err),
+            format!(
+                "connecting to source {}:{}: {}",
+                resolved.ip(),
+                resolved.port(),
+                err
+            ),
         )
     })?;
 
@@ -294,13 +309,27 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     // — we need it after the call to gate `apply_delete_list` (R32-F1).
     let spec_mirror_mode = spec.mirror_mode;
     let report = pull_client
-        .pull_sync_with_spec(&dest_root, local_manifest, spec, /* track_paths = */ false, None)
+        .pull_sync_with_spec(
+            &dest_root,
+            local_manifest,
+            spec,
+            /* track_paths = */ false,
+            None,
+        )
         .await
         .map_err(|err| {
             // Errors here can be from the negotiate/transfer/apply
-            // phases; surface verbatim and tag with a best-guess
-            // phase based on whether we got any summary.
-            err_progress(Phase::Transfer as i32, format!("delegated pull: {err}"))
+            // phases. Preserve pull_sync_with_spec's typed
+            // negotiation boundary so source-side refusal surfaces as
+            // `NEGOTIATE` instead of a generic transfer failure (R37-F1).
+            if err
+                .downcast_ref::<PullSyncError>()
+                .is_some_and(PullSyncError::is_negotiation)
+            {
+                err_progress(Phase::Negotiate as i32, err.to_string())
+            } else {
+                err_progress(Phase::Transfer as i32, format!("delegated pull: {err}"))
+            }
         })?;
 
     // R30-F1 + R32-F1: apply the daemon-authoritative mirror delete
@@ -337,7 +366,11 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             .send(Ok(DelegatedPullProgress {
                 payload: Some(ProgressPayload::ManifestBatch(ProtoManifestBatch {
                     file_count: batch_count,
-                    total_bytes: report.summary.as_ref().map(|s| s.bytes_transferred).unwrap_or(0),
+                    total_bytes: report
+                        .summary
+                        .as_ref()
+                        .map(|s| s.bytes_transferred)
+                        .unwrap_or(0),
                 })),
             }))
             .await;

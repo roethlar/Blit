@@ -1,6 +1,7 @@
 mod endpoints;
 mod local;
 mod remote;
+mod remote_remote_direct;
 
 pub use endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
 
@@ -50,6 +51,7 @@ use endpoints::{
 };
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
+use remote_remote_direct::run_remote_to_remote_direct;
 
 /// Render an endpoint for human-facing log lines, collapsing any runs of
 /// `/` into a single `/` in the local-path portion. Filesystems already
@@ -396,19 +398,22 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             .await
         }
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
-            // Remote-remote relays go through the push transport
-            // for the dst leg; --checksum stays gated by the push
-            // gate.
-            ensure_remote_push_supported(args)?;
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(
-                args,
-                Endpoint::Remote(src),
-                dst,
-                matches!(mode, TransferKind::Mirror),
-            )
-            .await
+            if args.relay_via_cli {
+                ensure_remote_push_supported(args)?;
+                run_remote_push_transfer(
+                    args,
+                    Endpoint::Remote(src),
+                    dst,
+                    matches!(mode, TransferKind::Mirror),
+                )
+                .await
+            } else {
+                ensure_remote_pull_supported(args)?;
+                run_remote_to_remote_direct(args, src, dst, matches!(mode, TransferKind::Mirror))
+                    .await
+            }
         }
     }
 }
@@ -501,10 +506,15 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             Ok(())
         }
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
-            ensure_remote_push_supported(args)?;
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(args, Endpoint::Remote(src.clone()), dst, false).await?;
+            if args.relay_via_cli {
+                ensure_remote_push_supported(args)?;
+                run_remote_push_transfer(args, Endpoint::Remote(src.clone()), dst, false).await?;
+            } else {
+                ensure_remote_pull_supported(args)?;
+                run_remote_to_remote_direct(args, src.clone(), dst, false).await?;
+            }
 
             // Delete remote source
             let rel_path = match &src.path {
@@ -559,6 +569,7 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
+            relay_via_cli: false,
             resume: false,
             null: false,
             json: false,
@@ -605,6 +616,7 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
+            relay_via_cli: false,
             resume: false,
             null: false,
             json: false,

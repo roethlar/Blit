@@ -201,13 +201,13 @@ pub(crate) fn is_special_range(ip: IpAddr) -> bool {
             v4.is_loopback()              // 127.0.0.0/8
                 || v4.is_link_local()     // 169.254.0.0/16
                 || v4.is_unspecified()    // 0.0.0.0
-                || v4.octets()[0] == 0    // 0.0.0.0/8 ("this network")
+                || v4.octets()[0] == 0 // 0.0.0.0/8 ("this network")
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()              // ::1
                 || v6.is_unspecified()    // ::
                 || v6.segments()[0] & 0xffc0 == 0xfe80   // fe80::/10 link-local
-                || v6.segments()[0] & 0xfe00 == 0xfc00   // fc00::/7 unique-local
+                || v6.segments()[0] & 0xfe00 == 0xfc00 // fc00::/7 unique-local
         }
     }
 }
@@ -341,18 +341,14 @@ pub(crate) async fn validate_source<R: HostResolver + ?Sized>(
                 "{} resolved to {} which is in a special range and was not \
                  authorized by an IP/CIDR entry (hostname entries do not \
                  authorize special ranges)",
-                normalized_hostname
-                    .as_deref()
-                    .unwrap_or(unbracketed),
+                normalized_hostname.as_deref().unwrap_or(unbracketed),
                 ip
             )));
         }
         if !by_ip && !hostname_matches {
             return Err(GateDenial::UnauthorizedAddress(format!(
                 "{} resolved to {} which matches no allowlist entry",
-                normalized_hostname
-                    .as_deref()
-                    .unwrap_or(unbracketed),
+                normalized_hostname.as_deref().unwrap_or(unbracketed),
                 ip
             )));
         }
@@ -510,7 +506,9 @@ mod tests {
             host: "example.com",
             port: 9031,
         };
-        let err = validate_source(&cfg, &locator, &resolver).await.unwrap_err();
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
         assert_eq!(err, GateDenial::MasterSwitchOff);
     }
 
@@ -573,7 +571,9 @@ mod tests {
             host: "host.lan",
             port: 9031,
         };
-        let err = validate_source(&cfg, &locator, &resolver).await.unwrap_err();
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
         assert!(matches!(err, GateDenial::UnauthorizedAddress(_)));
     }
 
@@ -589,7 +589,9 @@ mod tests {
             host: "multi.lan",
             port: 9031,
         };
-        let err = validate_source(&cfg, &locator, &resolver).await.unwrap_err();
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
         assert!(matches!(err, GateDenial::UnauthorizedAddress(_)));
     }
 
@@ -609,7 +611,9 @@ mod tests {
             host: "evil.example.com",
             port: 9031,
         };
-        let err = validate_source(&cfg, &locator, &resolver).await.unwrap_err();
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, GateDenial::SpecialRangeNeedsIpAuth(_)),
             "expected SpecialRangeNeedsIpAuth, got {err:?}"
@@ -664,7 +668,9 @@ mod tests {
             host: "router.local",
             port: 9031,
         };
-        let err = validate_source(&cfg, &locator, &resolver).await.unwrap_err();
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
         assert!(matches!(err, GateDenial::SpecialRangeNeedsIpAuth(_)));
     }
 
@@ -680,8 +686,8 @@ mod tests {
             allowed_source_hosts: vec![parse_allow_entry("10.0.0.0/8").unwrap()],
         };
         let resolver = ScriptedResolver::new(vec![
-            vec![ip4("10.1.2.3")],   // first call: in-range (validated + bound)
-            vec![ip4("127.0.0.1")],  // second call: would-be rebind to loopback
+            vec![ip4("10.1.2.3")],  // first call: in-range (validated + bound)
+            vec![ip4("127.0.0.1")], // second call: would-be rebind to loopback
         ]);
         let locator = LocatorView {
             host: "rebinder.lan",

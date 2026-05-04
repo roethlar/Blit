@@ -74,6 +74,52 @@ use crate::generated::{
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::progress::RemoteTransferProgress;
 
+/// Phase-bearing pull-sync error used by delegation callers to preserve the
+/// source-refusal vs mid-transfer distinction across the `eyre::Report`
+/// boundary. The CLI pull path still renders this as a normal error string.
+#[derive(Debug)]
+pub enum PullSyncError {
+    Negotiation(String),
+    Transfer(String),
+}
+
+impl PullSyncError {
+    pub fn negotiation(status: tonic::Status) -> Self {
+        Self::Negotiation(format_status(status))
+    }
+
+    fn transfer(status: tonic::Status) -> Self {
+        Self::Transfer(format_status(status))
+    }
+
+    pub fn negotiation_message(message: impl Into<String>) -> Self {
+        Self::Negotiation(message.into())
+    }
+
+    pub fn is_negotiation(&self) -> bool {
+        matches!(self, Self::Negotiation(_))
+    }
+}
+
+impl std::fmt::Display for PullSyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Negotiation(message) => write!(f, "pull sync negotiation failed: {message}"),
+            Self::Transfer(message) => write!(f, "pull sync stream failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for PullSyncError {}
+
+fn format_status(status: tonic::Status) -> String {
+    if status.message().is_empty() {
+        status.code().to_string()
+    } else {
+        format!("{} ({})", status.message(), status.code())
+    }
+}
+
 /// Options for pull synchronization operations.
 #[derive(Debug, Default, Clone)]
 pub struct PullSyncOptions {
@@ -282,9 +328,12 @@ impl RemotePullClient {
                     }
                     // Spawn data plane as background task so we can continue processing
                     // ManifestBatch messages on the control plane.
-                    data_plane_handle = Some(AbortOnDrop::new(
-                        self.spawn_data_plane_receiver(neg, dest_root, track_paths, progress)?,
-                    ));
+                    data_plane_handle = Some(AbortOnDrop::new(self.spawn_data_plane_receiver(
+                        neg,
+                        dest_root,
+                        track_paths,
+                        progress,
+                    )?));
                 }
                 Some(pull_chunk::Payload::Summary(summary)) => {
                     report.summary = Some(summary);
@@ -583,7 +632,7 @@ impl RemotePullClient {
             .client
             .pull_sync(request_stream)
             .await
-            .map_err(|status| eyre!(status.message().to_string()))?
+            .map_err(PullSyncError::negotiation)?
             .into_inner();
 
         tx.send(ClientPullMessage {
@@ -637,12 +686,16 @@ impl RemotePullClient {
         // of detaching it.
         let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
         let mut files_to_delete = 0u64;
+        let mut negotiation_complete = false;
 
-        while let Some(msg) = response_stream
-            .message()
-            .await
-            .map_err(|status| eyre!(status.message().to_string()))?
-        {
+        while let Some(msg) = response_stream.message().await.map_err(|status| {
+            if negotiation_complete {
+                PullSyncError::transfer(status)
+            } else {
+                PullSyncError::negotiation(status)
+            }
+        })? {
+            negotiation_complete = true;
             match msg.payload {
                 Some(server_pull_message::Payload::Ack(_)) => {
                     // Header acknowledged, continue (deprecated, use PullSyncAck)
@@ -655,11 +708,12 @@ impl RemotePullClient {
                     // about the comparison strength they requested.
                     report.server_checksums_enabled = Some(ack.server_checksums_enabled);
                     if checksum_requested && !ack.server_checksums_enabled {
-                        bail!(
+                        return Err(PullSyncError::negotiation_message(
                             "client requested checksum comparison (--checksum) but the daemon \
                              has checksums disabled; aborting before transfer to avoid silent \
-                             fallback to size+mtime comparison"
-                        );
+                             fallback to size+mtime comparison",
+                        )
+                        .into());
                     }
                 }
                 Some(server_pull_message::Payload::ManifestBatch(batch)) => {
@@ -785,9 +839,12 @@ impl RemotePullClient {
                     if neg.tcp_fallback {
                         continue;
                     }
-                    data_plane_handle = Some(AbortOnDrop::new(
-                        self.spawn_data_plane_receiver(neg, dest_root, track_paths, progress)?,
-                    ));
+                    data_plane_handle = Some(AbortOnDrop::new(self.spawn_data_plane_receiver(
+                        neg,
+                        dest_root,
+                        track_paths,
+                        progress,
+                    )?));
                 }
                 Some(server_pull_message::Payload::Summary(summary)) => {
                     files_to_delete = summary.entries_deleted;

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use super::endpoints::{format_remote_endpoint, Endpoint};
 
-fn spawn_progress_monitor(
+pub(crate) fn spawn_progress_monitor(
     enabled: bool,
     verbose: bool,
     json: bool,

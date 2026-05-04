@@ -1,4 +1,5 @@
 pub mod endpoint;
+pub(crate) mod instrumentation;
 pub mod pull;
 pub mod push;
 pub mod transfer;
