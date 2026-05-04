@@ -2,7 +2,7 @@
 //!
 //! These hooks are inert unless `BLIT_TEST_COUNTER_FILE` is set. They are
 //! intentionally env-gated instead of `cfg(test)` because CLI integration tests
-//! execute the compiled `blit-cli` binary as a child process.
+//! execute the compiled `blit` binary as a child process.
 
 use std::fs::OpenOptions;
 use std::io::Write;

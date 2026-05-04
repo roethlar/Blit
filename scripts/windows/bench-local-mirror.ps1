@@ -189,13 +189,13 @@ try {
         Write-Log "Small-file payload generated."
     }
 
-    Write-Log "Building blit-cli (release)..."
+    Write-Log "Building blit (release)..."
     Push-Location $RepoRoot
     try {
         $previousActionPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = "Continue"
-            & cargo build --release --package blit-cli --bin blit-cli 2>&1 |
+            & cargo build --release --package blit-cli --bin blit 2>&1 |
                 ForEach-Object { Write-Log $_ }
         } finally {
             $ErrorActionPreference = $previousActionPreference
@@ -207,12 +207,12 @@ try {
         Pop-Location
     }
 
-    $blitBin = Join-Path $RepoRoot "target/release/blit-cli.exe"
+    $blitBin = Join-Path $RepoRoot "target/release/blit.exe"
     if (-not (Test-Path $blitBin)) {
-        $blitBin = Join-Path $RepoRoot "target/release/blit-cli"
+        $blitBin = Join-Path $RepoRoot "target/release/blit"
     }
     if (-not (Test-Path $blitBin)) {
-        throw "blit-cli binary not found at $blitBin"
+        throw "blit binary not found at $blitBin"
     }
     Write-Log "Binary ready: $blitBin"
 

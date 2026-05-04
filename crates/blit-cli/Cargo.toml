@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
+# The shipped command is named `blit`, matching every doc, manpage,
+# and README example. Crate stays `blit-cli` to avoid rippling the
+# workspace member name; only the produced binary is renamed via
+# `[[bin]]`. Tests, scripts, and CI walk the build dir and look for
+# `blit` / `blit.exe` (was `blit-cli` / `blit-cli.exe`).
+[[bin]]
+name = "blit"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"

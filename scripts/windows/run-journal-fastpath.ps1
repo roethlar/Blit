@@ -46,16 +46,16 @@ for ($i = 1; $i -le 5000; $i++) {
 }
 
 $candidateBinaries = @(
-    Join-Path -Path $RepoRoot -ChildPath "target\release\blit-cli.exe"
-    Join-Path -Path $RepoRoot -ChildPath "target\x86_64-pc-windows-msvc\release\blit-cli.exe"
+    Join-Path -Path $RepoRoot -ChildPath "target\release\blit.exe"
+    Join-Path -Path $RepoRoot -ChildPath "target\x86_64-pc-windows-msvc\release\blit.exe"
 )
 $blitCli = $candidateBinaries | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 if (-not $blitCli) {
-    throw "Unable to find blit-cli.exe. Build it first: cargo build --release -p blit-cli --bin blit-cli"
+    throw "Unable to find blit.exe. Build it first: cargo build --release -p blit-cli --bin blit"
 }
 
 Write-Host ""
-Write-Host "Using blit-cli : $blitCli"
+Write-Host "Using blit : $blitCli"
 Write-Host ""
 
 function Invoke-BlitMirror {

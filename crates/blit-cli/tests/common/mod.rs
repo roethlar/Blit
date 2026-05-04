@@ -91,11 +91,7 @@ impl TestContext {
             .to_path_buf();
 
         let cli_bin = {
-            let name = if cfg!(windows) {
-                "blit-cli.exe"
-            } else {
-                "blit-cli"
-            };
+            let name = if cfg!(windows) { "blit.exe" } else { "blit" };
             bin_dir.join(name)
         };
         let daemon_bin = {

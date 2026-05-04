@@ -23,9 +23,9 @@ for i in $(seq 1 5000); do
 done
 
 candidates=(
-  "${REPO_ROOT}/target/release/blit-cli"
-  "${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/blit-cli"
-  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/blit-cli"
+  "${REPO_ROOT}/target/release/blit"
+  "${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/blit"
+  "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/blit"
 )
 
 BLIT_BIN=""
@@ -37,12 +37,12 @@ for candidate in "${candidates[@]}"; do
 done
 
 if [[ -z "${BLIT_BIN}" ]]; then
-  echo "blit-cli binary not found. Build it first: cargo build --release -p blit-cli --bin blit-cli" >&2
+  echo "blit binary not found. Build it first: cargo build --release -p blit-cli --bin blit" >&2
   exit 1
 fi
 
 echo
-echo "Using blit-cli : ${BLIT_BIN}"
+echo "Using blit : ${BLIT_BIN}"
 echo
 
 run_mirror() {

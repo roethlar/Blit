@@ -11,7 +11,7 @@ mkdir -p "$SRC" "$CONFIG"
 
 printf 'payload' > "$SRC/file.txt"
 
-BLIT_BIN="$(dirname "$0")/../../target/release/blit-cli"
+BLIT_BIN="$(dirname "$0")/../../target/release/blit"
 
 mirror() {
   "$BLIT_BIN" --config-dir "$CONFIG" mirror "$SRC" "$1" --verbose
