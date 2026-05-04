@@ -244,7 +244,9 @@ fn test_admin_find_with_pattern() {
     fs::create_dir(ctx.module_dir.join("subdir")).expect("create subdir");
     fs::write(ctx.module_dir.join("subdir/results.csv"), "results").expect("write nested csv");
 
-    // Pattern is substring match, not glob
+    // --pattern is a glob (per BLIT_UTILS_PLAN). The glob matches
+    // both the relative path AND the basename, so `*.csv` finds
+    // `report.csv` (root) and `subdir/results.csv` (nested).
     let remote_path = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cli_cmd = Command::new(&ctx.cli_bin);
     cli_cmd
@@ -253,7 +255,7 @@ fn test_admin_find_with_pattern() {
         .arg("find")
         .arg(&remote_path)
         .arg("--pattern")
-        .arg(".csv");
+        .arg("*.csv");
 
     let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
     assert!(output.status.success(), "blit find --pattern failed");
@@ -271,6 +273,73 @@ fn test_admin_find_with_pattern() {
         !stdout.contains("notes.txt"),
         "notes.txt should not match .csv pattern"
     );
+}
+
+#[test]
+fn test_admin_find_glob_invalid_pattern_rejected() {
+    // Glob compilation can fail (e.g. unclosed character class).
+    // The daemon must surface the error to the CLI rather than
+    // treating the bad pattern as no-pattern (matches everything)
+    // or panicking. Pre-glob (substring) implementation accepted any
+    // string; with glob we get real validation.
+    let ctx = TestContext::new();
+    fs::write(ctx.module_dir.join("a.txt"), "x").expect("write");
+
+    let remote_path = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("find")
+        .arg(&remote_path)
+        .arg("--pattern")
+        .arg("[unterminated");
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
+    assert!(
+        !output.status.success(),
+        "blit find with malformed glob should fail, got success with stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.to_lowercase().contains("glob")
+            || stderr.to_lowercase().contains("invalid")
+            || stderr.to_lowercase().contains("pattern"),
+        "expected glob/invalid/pattern in stderr, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn test_admin_find_glob_nested_with_double_star() {
+    // `**/*.csv` matches across directory components. With the
+    // basename fallback, plain `*.csv` already matches nested
+    // entries via their basename — but the explicit `**/*.csv`
+    // form is what users will reach for. Confirm both shapes work.
+    let ctx = TestContext::new();
+    fs::write(ctx.module_dir.join("top.csv"), "x").expect("write");
+    fs::create_dir(ctx.module_dir.join("a")).expect("mkdir a");
+    fs::create_dir(ctx.module_dir.join("a/b")).expect("mkdir a/b");
+    fs::write(ctx.module_dir.join("a/b/deep.csv"), "x").expect("write deep");
+    fs::write(ctx.module_dir.join("notes.txt"), "x").expect("write txt");
+
+    let remote_path = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("find")
+        .arg(&remote_path)
+        .arg("--pattern")
+        .arg("**/*.csv");
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(10));
+    assert!(output.status.success(), "blit find **/*.csv failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("top.csv"), "missing top.csv");
+    assert!(stdout.contains("deep.csv"), "missing deep.csv");
+    assert!(!stdout.contains("notes.txt"), "notes.txt should not match");
 }
 
 #[test]

@@ -480,12 +480,23 @@ pub(crate) fn stream_find_entries(
         )));
     }
 
+    // Pattern matching is glob-based, matching `BLIT_UTILS_PLAN.md`.
+    // Pre-0.1.0 behavior was substring containment; the move to glob
+    // is a deliberate API change before 0.1.0 ships (no
+    // backwards-compat constraint). Use case-insensitive flag on the
+    // builder so the matcher is single-pass and the candidate path
+    // doesn't need to be lowercased per entry.
     let matcher = if pattern.is_empty() {
         None
-    } else if case_sensitive {
-        Some(pattern)
     } else {
-        Some(pattern.to_lowercase())
+        let glob = globset::GlobBuilder::new(&pattern)
+            .case_insensitive(!case_sensitive)
+            .literal_separator(false)
+            .build()
+            .map_err(|e| {
+                Status::invalid_argument(format!("invalid find --pattern glob '{pattern}': {e}"))
+            })?;
+        Some(glob.compile_matcher())
     };
 
     let mut sent = 0usize;
@@ -506,13 +517,20 @@ pub(crate) fn stream_find_entries(
             }
 
             let rel_display = pathbuf_to_display(&rel_path);
-            if let Some(ref pat) = matcher {
-                let candidate = if case_sensitive {
-                    rel_display.clone()
-                } else {
-                    rel_display.to_lowercase()
-                };
-                if !candidate.contains(pat) {
+            if let Some(ref glob_matcher) = matcher {
+                // Match against the relative path AND its file-name
+                // tail. Users typically write `--pattern '*.txt'`
+                // expecting it to match any file with that
+                // extension regardless of depth. With
+                // `literal_separator(false)` `*.txt` matches across
+                // directory components, but matching against the
+                // basename too is the intuitive fallback for
+                // patterns that don't use `**`.
+                let basename = std::path::Path::new(&rel_display)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&rel_display);
+                if !glob_matcher.is_match(&rel_display) && !glob_matcher.is_match(basename) {
                     return Ok(());
                 }
             }

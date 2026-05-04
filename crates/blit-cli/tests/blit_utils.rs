@@ -168,7 +168,7 @@ fn test_utils_find() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
-    cmd.arg("find").arg(&remote).arg("--pattern").arg(".md");
+    cmd.arg("find").arg(&remote).arg("--pattern").arg("*.md");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(
@@ -197,7 +197,7 @@ fn test_utils_find_json() {
     cmd.arg("find")
         .arg(&remote)
         .arg("--pattern")
-        .arg(".log")
+        .arg("*.log")
         .arg("--json");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));

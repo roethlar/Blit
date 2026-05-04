@@ -41,6 +41,7 @@ All notable changes to Blit are documented in this file.
 - `--json` output for all inspection commands
 - Human-readable byte formatting in `df` output
 - Local path support for `ls`
+- `find --pattern <GLOB>` uses standard shell-glob syntax (`*`, `?`, `[abc]`, `**/`); matches against both relative path and basename so `*.csv` finds nested entries
 - Originally a separate `blit-utils` binary; merged into `blit` for a single install/distribution surface
 
 ### Performance History
@@ -72,5 +73,4 @@ All notable changes to Blit are documented in this file.
 - TCP data plane throughput not yet benchmarked at 10+ Gbps (implementation complete, hardware testing pending)
 - No built-in TLS encryption
 - No authentication beyond module-level access control
-- `find` uses substring matching, not glob patterns
 - Windows ReFS block clone requires SeManageVolumePrivilege

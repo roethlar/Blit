@@ -341,7 +341,12 @@ pub struct RmArgs {
 pub struct FindArgs {
     /// Remote path to search (e.g., server:/module/path)
     pub target: String,
-    /// Pattern to match (substring match)
+    /// Glob pattern to match against entry paths (and filename
+    /// basenames). Uses standard shell-glob syntax: `*` matches any
+    /// run of non-`/` characters, `?` matches one, `[abc]` matches
+    /// a class, `**/` matches zero or more nested directory
+    /// components. Case sensitivity controlled by
+    /// `--case-insensitive`. Empty matches everything.
     #[arg(long)]
     pub pattern: Option<String>,
     /// Include only files in results
