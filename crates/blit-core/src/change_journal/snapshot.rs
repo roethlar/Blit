@@ -82,7 +82,12 @@ fn compare_windows(previous: &WindowsSnapshot, current: &WindowsSnapshot) -> Cha
 mod macos {
     use super::{system_time_to_epoch_ms, MacSnapshot};
     use eyre::{Context, Result};
-    use fsevent_sys::FSEventsGetCurrentEventId;
+    // F14: migrated from `fsevent_sys::FSEventsGetCurrentEventId`,
+    // which the upstream crate deprecated in favour of
+    // `objc2-core-services`. The function and signature are
+    // identical; the binding is just sourced from the maintained
+    // crate so the deprecation warning goes away.
+    use objc2_core_services::FSEventsGetCurrentEventId;
     use std::ffi::CString;
     use std::mem::MaybeUninit;
     use std::os::unix::ffi::OsStrExt;

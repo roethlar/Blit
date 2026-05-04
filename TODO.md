@@ -14,10 +14,9 @@ codebase review and `docs/reviews/followup_review_2026-05-02.md`
 for the followup review series. Pipeline architecture
 clarification in `docs/plan/PIPELINE_UNIFICATION.md`.
 
-Status: **13 of 15 baseline findings closed**, every followup
-review round to date closed. Remaining open items are
-non-release-blocking polish (F14) and an explicitly-deferred
-logging epic (F15).
+Status: **14 of 15 baseline findings closed**, every followup
+review round to date closed. The only remaining open item is the
+explicitly-deferred logging epic (F15).
 
 ### Pipeline unification sequence
 
@@ -91,9 +90,12 @@ logging epic (F15).
 - [x] **F13 — Low/Medium** `use_chroot` config field removed
       entirely (containment is always-on per F2). Workflow docs
       synced. TODO.md (this section) synced.
-- [ ] **F14 — Low** Pay down warnings: deprecated FSEvents API
-      (`change_journal/snapshot.rs:85,111`). Migrate to
-      `objc2-core-services` or document deferral.
+- [x] **F14 — Low** Migrated `change_journal/snapshot.rs` from
+      `fsevent_sys::FSEventsGetCurrentEventId` to
+      `objc2_core_services::FSEventsGetCurrentEventId`
+      (`objc2-core-services` crate, `FSEvents` feature). Same call
+      shape and `u64` return — only the binding crate changed. Both
+      deprecation warnings on macOS builds are gone.
 - [ ] **F15 — Low** Adopt `tracing` or structured `log` across daemon
       and transfer modules. Gate noisy data-plane logs. Explicitly
       deferred per `docs/plan/PROJECT_STATE_ASSESSMENT.md`.
