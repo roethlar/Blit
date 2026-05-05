@@ -477,7 +477,13 @@ impl TransferOrchestrator {
         // is post-release work (see §3.3 / Phase 4.8.2 deferral).
         let scanned_files = all_headers.len();
         let scanned_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
-        let total_bytes = scanned_bytes;
+        // R45 follow-up to R44-F1: never alias `total_bytes` to
+        // `scanned_bytes`. `summary.total_bytes` is the
+        // pipeline-wrote-bytes contract (see `LocalMirrorSummary`
+        // rustdoc); the predictor uses scan features only. Pre-fix
+        // this aliased the two so `summary.total_bytes` reported
+        // scanned bytes as bytes-written, overcounting throughput
+        // on incremental runs.
         let predictor_estimate = predictor.as_ref().and_then(|p| {
             let kind_total = crate::perf_predictor::DurationKind::Total;
             let mode = if options.mirror {
@@ -498,6 +504,12 @@ impl TransferOrchestrator {
             )?;
             // Pull planner + transfer separately too so the verbose
             // line and the JSON profile can break down the estimate.
+            // All three predictor calls share the same
+            // (scanned_files, scanned_bytes) feature vector — both
+            // for consistency with the recording side, and so a
+            // future maintainer can't accidentally reintroduce a
+            // train/query mismatch by editing one branch and
+            // missing another.
             let planner_pred = p
                 .predict(
                     crate::perf_predictor::DurationKind::Planner,
@@ -507,8 +519,8 @@ impl TransferOrchestrator {
                     None,
                     options.skip_unchanged,
                     options.checksum,
-                    all_headers.len(),
-                    total_bytes,
+                    scanned_files,
+                    scanned_bytes,
                 )
                 .map(|p| p.predicted_ms)
                 .unwrap_or(0.0);
@@ -521,8 +533,8 @@ impl TransferOrchestrator {
                     None,
                     options.skip_unchanged,
                     options.checksum,
-                    all_headers.len(),
-                    total_bytes,
+                    scanned_files,
+                    scanned_bytes,
                 )
                 .map(|p| p.predicted_ms)
                 .unwrap_or(0.0);
@@ -564,7 +576,9 @@ impl TransferOrchestrator {
         let mut summary = LocalMirrorSummary {
             planned_files: pipeline_outcome.files_written,
             copied_files: pipeline_outcome.files_written,
-            total_bytes,
+            // R45: bytes the pipeline actually wrote, not scanned
+            // bytes. Distinct on incremental runs.
+            total_bytes: pipeline_outcome.bytes_written,
             scanned_files,
             scanned_bytes,
             dry_run: options.dry_run,
@@ -596,8 +610,7 @@ impl TransferOrchestrator {
         if options.verbose {
             eprintln!(
                 "Planning enumerated {} file(s), {} bytes",
-                all_headers.len(),
-                total_bytes
+                scanned_files, scanned_bytes
             );
             eprintln!(
                 "Completed local {}: {} file(s), {} bytes in {:.2?} (plan {} ms, xfer {} ms)",
@@ -974,5 +987,75 @@ mod async_runtime_tests {
         let summary = orch.execute_local_mirror(&src, &dst, opts()).unwrap();
         assert!(summary.copied_files >= 1);
         assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"hello-sync");
+    }
+
+    /// R45 regression: `summary.total_bytes` must report bytes the
+    /// pipeline actually wrote, not bytes the source scan saw. The
+    /// pre-fix R44 commit aliased `let total_bytes = scanned_bytes`
+    /// and fed that into the summary — so on this skip-unchanged
+    /// incremental run the second run would have reported the full
+    /// scanned size as bytes-written even though zero bytes were
+    /// actually written.
+    ///
+    /// The fast-path branches (NoWork / Tiny / Huge / JournalSkip)
+    /// don't exhibit the bug because they construct their summary
+    /// directly without going through the aliased local. We force
+    /// the streaming-pipeline path by enabling `mirror = true`,
+    /// which disables fast-path selection (see
+    /// `maybe_select_fast_path`'s mirror short-circuit).
+    #[tokio::test]
+    async fn incremental_run_total_bytes_excludes_skipped_files() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let body_a = vec![b'a'; 2 * 1024];
+        let body_b = vec![b'b'; 2 * 1024];
+        write_file(&src.join("a.txt"), &body_a);
+        write_file(&src.join("b.txt"), &body_b);
+        let total_payload = (body_a.len() + body_b.len()) as u64;
+
+        // mirror=true forces the streaming pipeline (fast-path is
+        // skipped for mirror runs); skip_unchanged=true means the
+        // diff stage will mark both files unchanged on the second
+        // run, so the pipeline writes 0 bytes.
+        let mut run_opts = opts();
+        run_opts.mirror = true;
+        run_opts.skip_unchanged = true;
+
+        let orch = TransferOrchestrator::new();
+        let first = orch
+            .execute_local_mirror_async(&src, &dst, run_opts.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            first.scanned_files, 2,
+            "first run should hit streaming planner and scan both files (got summary {:?})",
+            first
+        );
+        assert_eq!(first.scanned_bytes, total_payload);
+        assert_eq!(
+            first.total_bytes, total_payload,
+            "from-scratch run: total_bytes equals bytes written"
+        );
+        assert_eq!(first.copied_files, 2);
+
+        let second = orch
+            .execute_local_mirror_async(&src, &dst, run_opts)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.scanned_files, 2,
+            "second run still scans both files in mirror mode (got summary {:?})",
+            second
+        );
+        assert_eq!(second.scanned_bytes, total_payload);
+        assert_eq!(
+            second.total_bytes, 0,
+            "incremental skip_unchanged run must report 0 bytes \
+             written; R45 alias bug would have reported {} here \
+             (full summary: {:?})",
+            second.scanned_bytes, second
+        );
+        assert_eq!(second.copied_files, 0);
     }
 }
