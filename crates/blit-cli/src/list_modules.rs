@@ -16,6 +16,15 @@ struct ModuleJson<'a> {
 pub async fn run_list_modules(args: ListModulesArgs) -> Result<()> {
     let remote = RemoteEndpoint::parse(&args.remote)
         .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
+    list_modules_remote(remote, args.json).await
+}
+
+/// Core "list modules on this remote" logic. Shared between
+/// `blit list-modules <remote>` (the explicit form) and
+/// `blit list <bare-host>` smart-dispatch in `ls::run_ls`. Keeping
+/// the two entry points routed through a single function ensures the
+/// two surfaces print exactly the same output and `--json` shape.
+pub(crate) async fn list_modules_remote(remote: RemoteEndpoint, json: bool) -> Result<()> {
     let uri = remote.control_plane_uri();
     let mut client = BlitClient::connect(uri.clone())
         .await
@@ -27,7 +36,7 @@ pub async fn run_list_modules(args: ListModulesArgs) -> Result<()> {
         .map_err(|status| eyre::eyre!(status.message().to_string()))?
         .into_inner();
 
-    if args.json {
+    if json {
         let json_modules: Vec<_> = response
             .modules
             .iter()

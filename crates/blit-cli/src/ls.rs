@@ -107,10 +107,23 @@ fn list_local_path(path: &Path, json: bool) -> Result<()> {
 }
 
 async fn list_remote_path(remote: RemoteEndpoint, json: bool) -> Result<()> {
+    // Smart-dispatch: bare-host targets (no module, no path) list
+    // modules, matching the v6 plan's `blit list server` semantics.
+    // Module/path targets fall through to the directory-listing
+    // path. The explicit `blit list-modules <host>` and
+    // `blit ls <host:/module/path>` commands stay available;
+    // `blit list <target>` (which aliases `ls`) just routes
+    // intelligently between the two. (R41-prev / Plan §2.3.)
+    if matches!(remote.path, RemotePath::Discovery) {
+        return crate::list_modules::list_modules_remote(remote, json).await;
+    }
+
     let (module, rel_path) = match &remote.path {
         RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
         RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
         RemotePath::Discovery => {
+            // Unreachable — handled above. Kept defensive in case
+            // a future RemotePath variant lands.
             bail!("listing a bare host requires `list-modules` or module/path syntax");
         }
     };
