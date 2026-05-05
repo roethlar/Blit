@@ -1,27 +1,35 @@
 # Blit v2 Planning & Workflow Documentation
 
-This directory contains all planning, workflow, and architectural documentation for the Blit v2 implementation.
+This directory contains all planning, workflow, and architectural
+documentation for the Blit v2 implementation.
 
 ## Current Status
 
-**Feature-complete as of 2026-04-07.** All phases through Phase 4 (Production
-Hardening) are done. Remaining work is benchmarking (needs 10+ GbE hardware)
-and post-release investigations (RDMA, ReFS privilege).
+**Release-readiness work for 0.1.0 is tracked in
+[`RELEASE_PLAN_v2_2026-05-04.md`](./RELEASE_PLAN_v2_2026-05-04.md).**
+That document is the live source of truth for what's left before
+shipping; everything else in this directory is either still-applicable
+design (greenfield_plan_v6, REMOTE_TRANSFER_PARITY,
+LOCAL_TRANSFER_HEURISTICS) or historical phase-workflow / state
+artifacts.
 
-See [PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md) for details.
+PROJECT_STATE_ASSESSMENT.md is a 2026-04-07 snapshot — superseded by
+the release plan above for current readiness, but retained as a phase-4
+checkpoint reference.
 
 ## Document Index
 
 ### Status & Planning
 
-- **[PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md)** — Current state, what's done, what's left, Windows dev guide
+- **[RELEASE_PLAN_v2_2026-05-04.md](./RELEASE_PLAN_v2_2026-05-04.md)** — Live 0.1.0 release plan (P0/P1/P2 + decisions)
+- **[PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md)** — 2026-04-07 phase-4 snapshot (superseded for current state by the release plan)
 - **[MASTER_WORKFLOW.md](./MASTER_WORKFLOW.md)** — Phase coordination and quality gates
 - **[AI_TELEMETRY_ANALYSIS.md](./AI_TELEMETRY_ANALYSIS.md)** — Scoping doc for optional performance analysis features
 
 ### Architecture & Design
 
 - **[greenfield_plan_v6.md](./greenfield_plan_v6.md)** — Active architectural plan
-- **[BLIT_UTILS_PLAN.md](./BLIT_UTILS_PLAN.md)** — Admin utilities command matrix and UX principles
+- **[BLIT_UTILS_PLAN.md](./BLIT_UTILS_PLAN.md)** — Admin command matrix and UX principles (utilities now ship as `blit` subcommands; doc retained for the design rationale)
 - **[REMOTE_TRANSFER_PARITY.md](./REMOTE_TRANSFER_PARITY.md)** — Remote push/pull parity refactor (completed)
 - **[LOCAL_TRANSFER_HEURISTICS.md](./LOCAL_TRANSFER_HEURISTICS.md)** — Local transfer optimization decisions
 

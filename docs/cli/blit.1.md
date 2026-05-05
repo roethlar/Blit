@@ -9,12 +9,17 @@ blit – local and hybrid-transport file transfer CLI
 `blit copy [OPTIONS] <SOURCE> <DESTINATION>`
 `blit mirror [OPTIONS] [--yes] <SOURCE> <DESTINATION>`
 `blit move [OPTIONS] [--yes] <SOURCE> <DESTINATION>`
-`blit scan [--wait <SECONDS>]`
-`blit list <REMOTE>`
+`blit scan [--wait <SECONDS>] [--json]`
+`blit list <REMOTE> [--json]`
+`blit list-modules <REMOTE> [--json]`
+`blit ls <TARGET> [--json]`
 `blit du [--max-depth <N>] [--json] <REMOTE>`
 `blit df [--json] <REMOTE>`
 `blit rm [--yes] <REMOTE>`
 `blit find [--pattern <GLOB>] [--case-insensitive] [--limit <N>] [--json] <REMOTE>`
+`blit completions shell <SHELL>`
+`blit completions remote <REMOTE> [--prefix <STR>] [--files] [--dirs]`
+`blit profile [--limit <N>] [--json]`
 `blit diagnostics perf [--limit <N>] [--enable|--disable] [--clear]`
 `blit diagnostics dump [--json] <SOURCE> <DESTINATION>`
 
@@ -72,11 +77,27 @@ with the daemon's reason instead of silently relaying.
 
 ### Admin Commands
 - `scan` discovers blit daemons on the local network via mDNS.
-- `list` lists modules (on a bare host) or directory contents (on a module path).
+- `list` smart-dispatches by target shape: a bare host (`server`,
+  `server:9031`) routes to `list-modules`; a target with a module
+  or path (`server:/module/`) routes to `ls`.
+- `list-modules` lists modules exported by a daemon.
+- `ls` lists directory contents inside a module (or local path).
 - `du` shows disk usage for a remote path.
 - `df` shows filesystem statistics (total/used/free) for a remote module.
 - `rm` removes a file or directory on a remote daemon.
-- `find` searches for files on a remote daemon.
+- `find` searches for files on a remote daemon (glob `--pattern`,
+  e.g. `*.csv` or `**/*.log`; `*` does not cross `/`).
+- `completions shell <SHELL>` writes a clap-generated shell-completion
+  script to stdout (bash/zsh/fish/powershell/elvish). Source it from
+  your shell's rc file or completion directory.
+- `completions remote <REMOTE>` returns daemon-side path completions
+  via the `CompletePath` RPC. Used internally by the generated shell
+  scripts for `server:/module/<TAB>`-style completion; usable
+  directly for scripting too.
+- `profile` prints local performance history records and the
+  predictor's coefficients per transfer mode (`--json` for
+  scripting). Reads `perf_local.jsonl` and the predictor state
+  file; no network access.
 
 ## OPTIONS
 ### Transfer Options

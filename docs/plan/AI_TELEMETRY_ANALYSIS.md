@@ -127,10 +127,12 @@ blit diagnostics analyze [--days <N>] [--json]
 Reads local `perf_local.jsonl`, runs analysis, prints results. JSON output
 for scripting.
 
-### Phase 3: blit-utils Integration
+### Phase 3: Admin-verb integration (already merged)
 
-Add `blit-utils analyze` as a standalone equivalent for operators who only
-have the utils binary installed.
+The "standalone utils binary" path is moot now that admin verbs ship
+under the single `blit` binary — `blit analyze` would just be another
+subcommand alongside `blit profile`, both reading the same local
+`perf_local.jsonl`. No separate distribution to integrate with.
 
 ## Guardrails
 

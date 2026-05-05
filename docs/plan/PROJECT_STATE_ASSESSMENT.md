@@ -1,5 +1,12 @@
 # Blit v2 Project State Assessment
 
+> **Superseded.** Snapshot dated 2026-04-07; predates pipeline-unification
+> (Phase 4.7) and the destination-side delegated-pull rework (Phase 4.8.1),
+> and lists `blit-utils` as a separate artifact even though admin utilities
+> were merged into the `blit` binary. Kept as a historical artifact. For
+> the live release-readiness picture see
+> [`RELEASE_PLAN_v2_2026-05-04.md`](./RELEASE_PLAN_v2_2026-05-04.md).
+
 **Last Updated**: 2026-04-07
 **Plan Reference**: [greenfield_plan_v6.md](./greenfield_plan_v6.md)
 
@@ -47,19 +54,23 @@ post-release investigations (RDMA, ReFS privilege).
 - Filesystem capability probing for 12+ FS types, cached per device ID
 
 ### CLI Surface
-- `blit`: copy, mirror, move, scan, list, du, df, rm, find, diagnostics
+- `blit`: copy, mirror, move, scan, list, list-modules, ls, find, du, df,
+  rm, completions, profile, diagnostics
+  (admin utilities merged into `blit` since this snapshot — no separate
+  `blit-utils` binary)
 - `blit-daemon`: TOML config, modules, mDNS, hybrid transport
-- `blit-utils`: scan, list-modules, ls, find, du, df, rm, completions, profile
 
 ### Testing
-- Integration tests: admin verbs (10), blit-utils (21), remote transfers,
-  transfer edges, parity, resume, move, remote-to-remote
+- Integration tests: admin verbs (10), admin-utility coverage (21, in
+  `tests/blit_utils.rs`), remote transfers, transfer edges, parity,
+  resume, move, remote-to-remote
 - Unit tests: predictor regression (9), schema versioning (7), FS probing (7),
   mirror planner, checksum, enumeration, buffer pool
 - GitHub Actions CI: fmt/clippy, tri-platform tests, release artifacts
 
 ### Documentation
-- Man pages: blit(1), blit-daemon(1), blit-utils(1)
+- Man pages: blit(1), blit-daemon(1)
+  (no separate blit-utils manpage — admin verbs documented under blit(1))
 - ARCHITECTURE.md, DAEMON_CONFIG.md, PERFORMANCE_ROADMAP.md
 - CHANGELOG.md with full 0.1.0 feature inventory
 - AI telemetry analysis scoping doc
@@ -95,9 +106,10 @@ implementation work is done — only the measurement runs remain.
 
 ```
 User Layer
-├── blit-cli      (CLI: copy/mirror/move/scan/list/du/df/rm/find/diagnostics)
-├── blit-daemon   (gRPC server: modules, hybrid transport, admin RPCs)
-└── blit-utils    (admin: scan/list-modules/ls/find/du/df/rm/completions/profile)
+├── blit          (CLI: copy/mirror/move/scan/list/list-modules/ls/find/
+│                  du/df/rm/completions/profile/diagnostics — admin verbs
+│                  merged in; binary produced by `crates/blit-cli`)
+└── blit-daemon   (gRPC server: modules, hybrid transport, admin RPCs)
 
 blit-core
 ├── orchestrator      — parallel transfer coordination

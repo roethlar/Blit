@@ -64,9 +64,10 @@ Add to the TXT record:
 | `nmods` | numeric module count | accurate total when `mods` was truncated |
 | `caps` | bitfield of capability flags (e.g. `grpc=1,ck=1`) | TUI dims options for unsupported features |
 
-**Effort:** ~30 LOC in `blit-core/src/mdns.rs` plus 10 LOC in `blit-utils`-merged
-`scan` parsing. No new attack surface (mDNS is already there). Worth doing
-ahead of the TUI work — even today's `blit scan` output gets better.
+**Effort:** ~30 LOC in `blit-core/src/mdns.rs` plus 10 LOC in
+`blit-cli`'s `scan` parsing. No new attack surface (mDNS is already
+there). Worth doing ahead of the TUI work — even today's `blit scan`
+output gets better.
 
 ## Subscribe RPC (the live event stream)
 

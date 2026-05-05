@@ -17,7 +17,7 @@
 ### Feature-Completeness Goals
 - CLI verbs: `copy`, `mirror`, `move`, `scan`, `list`, diagnostics.
 - Remote syntax: `server:/module/...`, `server://...`, discovery on bare host.
-- Admin tooling (`blit-utils`): `scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`.
+- Admin subcommands on `blit`: `scan`, `ls`, `list`, `list-modules`, `rm`, `find`, `du`, `df`, `completions`, `profile` (admin verbs were merged into the main binary; there is no separate `blit-utils`).
 - Daemon configuration via TOML modules + optional `--root`; mDNS advertised unless disabled.
 - Hybrid transport (gRPC control plane + TCP data plane with secure tokens and gRPC fallback).
 
@@ -51,7 +51,7 @@
   - Remote transfer verbs operate across the network with hybrid transport and gRPC fallback.  
   - `blit scan` discovers daemons via mDNS.  
   - `blit list` / `blit ls` enumerate modules and paths; forbid traversal outside exports.  
-  - `blit-utils` verbs (`scan`, `ls`, `list`, `rm`, `find`, `du`, `df`, `completions`, `profile`) succeed against daemon with read-only modules and always-on canonical-path containment (F2).  
+  - Admin verbs on `blit` (`scan`, `ls`, `list`, `list-modules`, `rm`, `find`, `du`, `df`, `completions`, `profile`) succeed against daemon with read-only modules and always-on canonical-path containment (F2).  
   - Structured progress events exist for future GUIs; CLI remains quiet unless verbose.  
   - Integration tests cover remote transfer + admin flows.
 
@@ -71,7 +71,7 @@
 | Error handling | ✅ `eyre`/`color-eyre` for CLI + daemon, consistent context-rich errors |
 | Async runtime | ✅ Tokio across crates |
 | Progress UX | ✅ CLI quiet by default; structured events exposed for GUIs/debug |
-| Telemetry | ✅ Local JSONL history (optional opt-out); `blit-utils profile` surfaces data |
+| Telemetry | ✅ Local JSONL history (optional opt-out); `blit profile` surfaces data |
 | Environment variables | ✅ Not used for configuration; precedence is CLI flag → config file |
 
 Future architectural decisions must be recorded here and in DEVLOG before implementation.

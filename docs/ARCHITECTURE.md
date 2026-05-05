@@ -7,10 +7,13 @@ This document describes the high-level architecture of Blit, a high-performance 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         User Layer                               │
-├─────────────┬─────────────────────────┬─────────────────────────┤
-│  blit-cli   │      blit-daemon        │      blit-utils         │
-│  (CLI app)  │    (gRPC server)        │   (admin tools)         │
-├─────────────┴─────────────────────────┴─────────────────────────┤
+├──────────────────────────────┬──────────────────────────────────┤
+│  blit (CLI app + admin)      │      blit-daemon                 │
+│  copy/mirror/move/scan/list/ │      (gRPC server)               │
+│  list-modules/ls/find/du/df/ │                                  │
+│  rm/completions/profile/     │                                  │
+│  diagnostics                 │                                  │
+├──────────────────────────────┴──────────────────────────────────┤
 │                       blit-core                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │   Unified Transfer Pipeline (execute_sink_pipeline*)        │ │
@@ -57,20 +60,35 @@ The core library containing all transfer logic, protocols, and platform abstract
 | `perf_history` | Versioned JSONL performance record storage |
 | `fs_capability` | Per-filesystem capability detection and caching |
 
-### blit-cli
+### blit-cli (produces the `blit` binary)
 
-Command-line interface providing user access to all transfer operations.
+Command-line interface providing user access to transfer operations and
+all admin verbs. The Cargo package is `blit-cli`; the produced binary
+is named `blit` (`[[bin]] name = "blit"`). Admin verbs originally
+scoped as a separate `blit-utils` artifact were merged into this binary
+during Phase 3.
 
 **Structure:**
 ```
 blit-cli/
 ├── main.rs           # Entry point and CLI argument parsing
-├── admin.rs          # Administrative commands (du, df, rm, find)
-├── list.rs           # Remote listing operations
+├── cli.rs            # Clap argument definitions
 ├── transfers/        # Transfer command implementations
 │   ├── mod.rs        # Common transfer logic
 │   ├── local.rs      # Local-to-local transfers
 │   └── remote.rs     # Remote transfer handling
+├── scan.rs           # mDNS daemon discovery
+├── list_modules.rs   # ListModules RPC wrapper
+├── ls.rs             # Remote/local directory listing
+│                     #  (smart-dispatches bare hosts to list_modules)
+├── find.rs           # Recursive remote file search
+├── du.rs             # Remote disk usage summary
+├── df.rs             # Remote filesystem statistics
+├── rm.rs             # Remote file/directory deletion
+├── completions.rs    # Shell completion script generation +
+│                     #  CompletePath-backed remote completions
+├── profile.rs        # Local performance history viewer
+├── diagnostics.rs    # Diagnostic dump
 └── tests/            # Integration tests
 ```
 
@@ -94,29 +112,19 @@ blit-daemon/
     └── util.rs       # Shared utilities
 ```
 
-### blit-utils
+### Admin verbs
 
-Standalone utilities for daemon administration and diagnostics.
+The admin verbs (`scan`, `list-modules`, `ls`, `find`, `du`, `df`,
+`rm`, `completions`, `profile`) live inside `crates/blit-cli`
+alongside the transfer verbs — see the `blit-cli` structure above.
+There is no separate `blit-utils` crate or binary; the
+[`docs/plan/BLIT_UTILS_PLAN.md`](./plan/BLIT_UTILS_PLAN.md)
+document captures the original command-matrix design but is marked
+superseded for the artifact-shape question.
 
-**Structure:**
-```
-blit-utils/
-├── main.rs           # Entry point, dispatches to subcommands
-├── cli.rs            # Clap argument definitions
-├── util.rs           # Shared helpers (endpoint parsing, byte formatting)
-├── scan.rs           # mDNS daemon discovery
-├── list_modules.rs   # ListModules RPC wrapper
-├── ls.rs             # Remote/local directory listing
-├── find.rs           # Recursive remote file search
-├── du.rs             # Remote disk usage summary
-├── df.rs             # Remote filesystem statistics
-├── rm.rs             # Remote file/directory deletion
-├── completions.rs    # Shell path completion via CompletePath RPC
-└── profile.rs        # Local performance history viewer
-```
-
-All remote commands connect via gRPC to a running daemon. Output defaults to
-human-readable tables; `--json` emits machine-parsable JSON for scripting.
+All remote commands connect via gRPC to a running daemon. Output
+defaults to human-readable tables; `--json` emits machine-parsable
+JSON for scripting.
 
 ## Data Flow: Unified Transfer Pipeline
 

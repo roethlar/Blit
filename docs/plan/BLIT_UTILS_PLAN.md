@@ -1,9 +1,23 @@
 # blit-utils Command Plan
 
+> **Superseded.** The admin utilities listed below shipped as
+> subcommands of the `blit` binary, not as a separate `blit-utils`
+> artifact. Concretely: `blit scan`, `blit list-modules`,
+> `blit ls`, `blit list`, `blit find`, `blit du`, `blit df`,
+> `blit rm`, `blit completions`, `blit profile`. There is no
+> `crates/blit-utils` crate, no `blit-utils(1)` manpage, and no
+> standalone binary. See [`docs/cli/blit.1.md`](../cli/blit.1.md)
+> for the live command surface.
+>
+> This document is retained because the **command matrix and UX
+> principles below are the design rationale** for those
+> subcommands. Read it as design intent, but treat any reference to
+> `blit-utils <verb>` as historical wording for `blit <verb>`.
+
 ## Overview
 
-`blit-utils` provides operator tooling for discovery, inspection, and maintenance of remote Blit daemons. The
-utility must remain composable (stdout-friendly), support non-interactive scripting, and honour daemon security
+The admin utilities provide operator tooling for discovery, inspection, and maintenance of remote Blit daemons. They
+must remain composable (stdout-friendly), support non-interactive scripting, and honour daemon security
 constraints (read-only modules, always-on canonical-path containment within each module).
 
 ## Command Matrix

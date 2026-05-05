@@ -1,5 +1,11 @@
 # Phase 4: Production Hardening & Packaging
 
+> **Note (post-phase, 2026-05-05):** the admin verbs ship as
+> subcommands of the single `blit` binary, not a separate
+> `blit-utils` artifact (the merge was finalised before this
+> phase). Any reference below to `blit-utils <verb>` should be read
+> as `blit <verb>`. Kept as historical workflow.
+
 **Goal**: Prepare Blit v2 for delivery – installers/packages, service documentation, cross-platform integration tests, and final polish on configuration/discovery.  
 **Prerequisites**: Phase 3 gate complete.  
 **Status**: In progress. Repo-level production hardening review saved at `docs/reviews/codebase_review_2026-05-01.md`; packaging, benchmark capture, and hardening follow-ups remain.
