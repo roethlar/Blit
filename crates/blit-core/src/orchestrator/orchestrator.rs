@@ -430,6 +430,96 @@ impl TransferOrchestrator {
             ))
         };
 
+        // Boundary between planner and transfer phases. `planning_start`
+        // covers scan + diff + plan; everything after this `Instant`
+        // is the transfer pipeline. §2.8 phase 2 split: pre-fix the
+        // record's `planner_duration_ms` field was set to whole-run
+        // time, so the v1 predictor effectively trained on `planner =
+        // total` for both targets and couldn't distinguish them.
+        let plan_done = Instant::now();
+        let planner_duration_ms = plan_done.duration_since(planning_start).as_millis();
+
+        // §2.8 phase 2: query the predictor BEFORE running the
+        // pipeline. Surfaces in summary.predictor_estimate so
+        // `--verbose` and `blit profile --json` can compare
+        // predicted vs actual. We have file_count + total_bytes
+        // from `all_headers`; src_fs/dest_fs are left None for
+        // 0.1.0 — wiring `fs_capability` per-path probes into the
+        // predictor query is post-release work (see §3.3 / Phase
+        // 4.8.2 deferral).
+        let total_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
+        let predictor_estimate = predictor.as_ref().and_then(|p| {
+            let kind_total = crate::perf_predictor::DurationKind::Total;
+            let mode = if options.mirror {
+                crate::perf_history::TransferMode::Mirror
+            } else {
+                crate::perf_history::TransferMode::Copy
+            };
+            let total_pred = p.predict(
+                kind_total,
+                mode.clone(),
+                None,
+                None,
+                None,
+                options.skip_unchanged,
+                options.checksum,
+                all_headers.len(),
+                total_bytes,
+            )?;
+            // Pull planner + transfer separately too so the verbose
+            // line and the JSON profile can break down the estimate.
+            let planner_pred = p
+                .predict(
+                    crate::perf_predictor::DurationKind::Planner,
+                    mode.clone(),
+                    None,
+                    None,
+                    None,
+                    options.skip_unchanged,
+                    options.checksum,
+                    all_headers.len(),
+                    total_bytes,
+                )
+                .map(|p| p.predicted_ms)
+                .unwrap_or(0.0);
+            let transfer_pred = p
+                .predict(
+                    crate::perf_predictor::DurationKind::Transfer,
+                    mode,
+                    None,
+                    None,
+                    None,
+                    options.skip_unchanged,
+                    options.checksum,
+                    all_headers.len(),
+                    total_bytes,
+                )
+                .map(|p| p.predicted_ms)
+                .unwrap_or(0.0);
+            Some(super::summary::PredictorEstimate {
+                planner_ms: planner_pred.max(0.0) as u128,
+                transfer_ms: transfer_pred.max(0.0) as u128,
+                total_ms: total_pred.predicted_ms.max(0.0) as u128,
+                observations: total_pred.observations,
+                fallback_depth: total_pred.fallback_depth,
+            })
+        });
+        if options.verbose {
+            if let Some(est) = predictor_estimate.as_ref() {
+                eprintln!(
+                    "Predictor estimate: planner ~{} ms, transfer ~{} ms, \
+                     total ~{} ms (n={}, fallback_depth={})",
+                    est.planner_ms,
+                    est.transfer_ms,
+                    est.total_ms,
+                    est.observations,
+                    est.fallback_depth
+                );
+            } else {
+                eprintln!("Predictor estimate: unavailable (no profile yet for this workload)");
+            }
+        }
+
         let pipeline_outcome = execute_sink_pipeline(
             source,
             vec![sink],
@@ -439,15 +529,15 @@ impl TransferOrchestrator {
         )
         .await
         .context("transfer pipeline failed")?;
-        let planner_duration_ms = planning_start.elapsed().as_millis();
+        let transfer_duration_ms = plan_done.elapsed().as_millis();
 
-        let total_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
         let mut summary = LocalMirrorSummary {
             planned_files: pipeline_outcome.files_written,
             copied_files: pipeline_outcome.files_written,
             total_bytes,
             dry_run: options.dry_run,
             duration: start_time.elapsed(),
+            predictor_estimate: predictor_estimate.clone(),
             ..Default::default()
         };
 
@@ -478,12 +568,40 @@ impl TransferOrchestrator {
                 total_bytes
             );
             eprintln!(
-                "Completed local {}: {} file(s), {} bytes in {:.2?}",
+                "Completed local {}: {} file(s), {} bytes in {:.2?} (plan {} ms, xfer {} ms)",
                 if options.mirror { "mirror" } else { "copy" },
                 summary.copied_files,
                 summary.total_bytes,
-                summary.duration
+                summary.duration,
+                planner_duration_ms,
+                transfer_duration_ms,
             );
+            // §2.8: side-by-side predicted-vs-actual so operators
+            // can audit the predictor against this run's actual
+            // numbers. The bare percentage error per phase is the
+            // most useful single number; we keep absolute ms in the
+            // line above for context.
+            if let Some(est) = summary.predictor_estimate.as_ref() {
+                let pct = |predicted_ms: u128, actual_ms: u128| -> String {
+                    if actual_ms == 0 {
+                        "n/a".to_string()
+                    } else {
+                        let pred = predicted_ms as f64;
+                        let act = actual_ms as f64;
+                        format!("{:+.0}%", ((pred - act) / act) * 100.0)
+                    }
+                };
+                eprintln!(
+                    "Predictor delta: planner {} ({} vs {} ms), \
+                     transfer {} ({} vs {} ms)",
+                    pct(est.planner_ms, planner_duration_ms),
+                    est.planner_ms,
+                    planner_duration_ms,
+                    pct(est.transfer_ms, transfer_duration_ms),
+                    est.transfer_ms,
+                    transfer_duration_ms,
+                );
+            }
         }
 
         let fast_path_label = if options.null_sink {
@@ -496,7 +614,7 @@ impl TransferOrchestrator {
             &options,
             fast_path_label,
             planner_duration_ms,
-            summary.duration.as_millis(),
+            transfer_duration_ms,
         ) {
             // Don't update the predictor from null-sink runs — the zero
             // write cost would teach it that transfers are faster than
