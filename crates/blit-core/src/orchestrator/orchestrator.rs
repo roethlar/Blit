@@ -733,7 +733,10 @@ fn execute_single_file_copy(
     if options.preserve_times && did_copy && !clone_succeeded {
         if let Ok(modified) = src_meta.modified() {
             let ft = FileTime::from_system_time(modified);
-            let _ = filetime::set_file_mtime(dest_root, ft);
+            // R42-F1: warn-don't-silence (was `let _ = ...`).
+            if let Err(e) = filetime::set_file_mtime(dest_root, ft) {
+                log::warn!("set mtime on {}: {}", dest_root.display(), e);
+            }
         }
     }
 

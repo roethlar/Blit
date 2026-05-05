@@ -225,13 +225,26 @@ pub fn write_extracted_file(file: &ExtractedFile) -> Result<()> {
     }
     std::fs::write(&file.dest_path, &file.contents)
         .with_context(|| format!("writing {}", file.dest_path.display()))?;
+    // POST_REVIEW_FIXES §1.1: best-effort metadata, but failures
+    // must be visible. R42-F1 caught this site as still silent
+    // after the first sweep; this helper is shared by pull
+    // tar-shard receive (`pull.rs`) and the daemon's gRPC push
+    // fallback (`service/push/data_plane.rs`), so silencing the
+    // errors here masked the same data-loss surface the sink-side
+    // sweep just unmasked.
     if let Some(ft) = file.mtime {
-        let _ = set_file_mtime(&file.dest_path, ft);
+        if let Err(e) = set_file_mtime(&file.dest_path, ft) {
+            log::warn!("set mtime on {}: {}", file.dest_path.display(), e);
+        }
     }
     #[cfg(unix)]
     if let Some(perms) = file.permissions {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&file.dest_path, std::fs::Permissions::from_mode(perms));
+        if let Err(e) =
+            std::fs::set_permissions(&file.dest_path, std::fs::Permissions::from_mode(perms))
+        {
+            log::warn!("set permissions on {}: {}", file.dest_path.display(), e);
+        }
     }
     Ok(())
 }
