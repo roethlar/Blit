@@ -177,6 +177,9 @@ impl TransferOrchestrator {
                 );
             }
 
+            // Journal said both sides match, so we never enumerated.
+            // scanned_{files,bytes} stay 0 — predictor sees this as
+            // "noop with no scan cost" which is what actually happened.
             let summary = LocalMirrorSummary {
                 dry_run: options.dry_run,
                 duration: start_time.elapsed(),
@@ -222,8 +225,13 @@ impl TransferOrchestrator {
                             ),
                         }
                     }
+                    // NoWork ran a real fast-path scan but copied nothing.
+                    // scanned_files = examined captures the planner-side
+                    // workload; scanned_bytes is 0 because the fast-path
+                    // scanner only resolves names + identity, not sizes.
                     let summary = LocalMirrorSummary {
                         planned_files: examined,
+                        scanned_files: examined,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         outcome,
@@ -251,10 +259,16 @@ impl TransferOrchestrator {
                     }
                     let rels: Vec<PathBuf> = files.iter().map(|(rel, _)| rel.clone()).collect();
                     copy_paths_blocking(src_root, dest_root, &rels, &copy_config)?;
+                    // Tiny copies everything it scanned, so scanned ==
+                    // copied here. Setting both lets the predictor
+                    // train on the actual workload size for the
+                    // tiny_manifest fast-path key.
                     let summary = LocalMirrorSummary {
                         planned_files: files.len(),
                         copied_files: files.len(),
                         total_bytes,
+                        scanned_files: files.len(),
+                        scanned_bytes: total_bytes,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         ..Default::default()
@@ -279,10 +293,15 @@ impl TransferOrchestrator {
                         );
                     }
                     copy_large_blocking(src_root, dest_root, &file, &copy_config)?;
+                    // Huge fast-path copies a single file: scan size
+                    // and copy size are identical (one file, `size`
+                    // bytes).
                     let summary = LocalMirrorSummary {
                         planned_files: 1,
                         copied_files: 1,
                         total_bytes: size,
+                        scanned_files: 1,
+                        scanned_bytes: size,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         large_tasks: 1,
@@ -442,12 +461,23 @@ impl TransferOrchestrator {
         // §2.8 phase 2: query the predictor BEFORE running the
         // pipeline. Surfaces in summary.predictor_estimate so
         // `--verbose` and `blit profile --json` can compare
-        // predicted vs actual. We have file_count + total_bytes
-        // from `all_headers`; src_fs/dest_fs are left None for
-        // 0.1.0 — wiring `fs_capability` per-path probes into the
-        // predictor query is post-release work (see §3.3 / Phase
-        // 4.8.2 deferral).
-        let total_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
+        // predicted vs actual.
+        //
+        // R44-F1: query and observation must use the same feature
+        // vector. We query with `(scanned_files, scanned_bytes)`
+        // here; `record_performance_history` populates the matching
+        // `PerformanceRecord.{file_count,total_bytes}` from
+        // `summary.{scanned_files,scanned_bytes}`. Pre-fix the
+        // record was populated from `summary.copied_files`, so on
+        // any incremental run the predictor was queried with one
+        // workload size and trained against another.
+        //
+        // src_fs/dest_fs are left None for 0.1.0 — wiring
+        // `fs_capability` per-path probes into the predictor query
+        // is post-release work (see §3.3 / Phase 4.8.2 deferral).
+        let scanned_files = all_headers.len();
+        let scanned_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
+        let total_bytes = scanned_bytes;
         let predictor_estimate = predictor.as_ref().and_then(|p| {
             let kind_total = crate::perf_predictor::DurationKind::Total;
             let mode = if options.mirror {
@@ -463,8 +493,8 @@ impl TransferOrchestrator {
                 None,
                 options.skip_unchanged,
                 options.checksum,
-                all_headers.len(),
-                total_bytes,
+                scanned_files,
+                scanned_bytes,
             )?;
             // Pull planner + transfer separately too so the verbose
             // line and the JSON profile can break down the estimate.
@@ -535,6 +565,8 @@ impl TransferOrchestrator {
             planned_files: pipeline_outcome.files_written,
             copied_files: pipeline_outcome.files_written,
             total_bytes,
+            scanned_files,
+            scanned_bytes,
             dry_run: options.dry_run,
             duration: start_time.elapsed(),
             predictor_estimate: predictor_estimate.clone(),
@@ -809,6 +841,8 @@ fn execute_single_file_copy(
             planned_files: 1,
             copied_files: 1,
             total_bytes: size,
+            scanned_files: 1,
+            scanned_bytes: size,
             dry_run: true,
             duration: start_time.elapsed(),
             ..Default::default()
@@ -820,6 +854,8 @@ fn execute_single_file_copy(
             planned_files: 1,
             copied_files: 1,
             total_bytes: size,
+            scanned_files: 1,
+            scanned_bytes: size,
             duration: start_time.elapsed(),
             ..Default::default()
         });
@@ -862,6 +898,11 @@ fn execute_single_file_copy(
         planned_files: 1,
         copied_files: if did_copy { 1 } else { 0 },
         total_bytes: bytes_copied,
+        // Single-file path always saw exactly one entry of `size`
+        // bytes; whether we copied it or not is the
+        // copied_files/total_bytes story, but the scan saw it.
+        scanned_files: 1,
+        scanned_bytes: size,
         duration: start_time.elapsed(),
         outcome: if did_copy {
             TransferOutcome::Transferred

@@ -577,4 +577,55 @@ fn test_utils_profile_json() {
         parsed.get("records").is_some(),
         "expected 'records' field in profile JSON"
     );
+
+    // R44-F2: pin the predictor key shape. Two valid states:
+    //   - top-level null: predictor file failed to load entirely
+    //     (rare — only on permission errors or corrupted state)
+    //   - object with `copy` and `mirror` fields, each either null
+    //     ("no profile yet for this mode, needs ≥5 observations")
+    //     or a coefficient object — chosen because it's strictly
+    //     more informative: it distinguishes "predictor never
+    //     initialised" from "predictor exists, mode-specific
+    //     profile not yet trained."
+    //
+    // The pre-fix commit message claimed top-level null in the
+    // empty case, which was wrong; this assertion locks the actual
+    // contract so the next reviewer can rely on it.
+    let predictor = parsed
+        .get("predictor")
+        .expect("expected 'predictor' field in profile JSON");
+    if !predictor.is_null() {
+        let obj = predictor
+            .as_object()
+            .unwrap_or_else(|| panic!("predictor must be null or object, got: {}", predictor));
+        assert!(
+            obj.contains_key("copy"),
+            "predictor object must include 'copy' (got: {})",
+            predictor
+        );
+        assert!(
+            obj.contains_key("mirror"),
+            "predictor object must include 'mirror' (got: {})",
+            predictor
+        );
+        // Each mode is either null (no trained profile) or an
+        // object with planner+transfer coefficient blocks.
+        for mode in ["copy", "mirror"] {
+            let val = &obj[mode];
+            if !val.is_null() {
+                let mode_obj = val.as_object().unwrap_or_else(|| {
+                    panic!("predictor.{} must be null or object, got: {}", mode, val)
+                });
+                for key in ["observations", "fallback_depth", "planner", "transfer"] {
+                    assert!(
+                        mode_obj.contains_key(key),
+                        "predictor.{} must include '{}' (got: {})",
+                        mode,
+                        key,
+                        val
+                    );
+                }
+            }
+        }
+    }
 }

@@ -352,6 +352,24 @@ plan:
 
 **Cost:** ~1.5 days end-to-end with tests.
 
+**Status (R44, 2026-05-04):** Phase 1 + 2 landed at `da6ced2` /
+`<this commit>`. Steps 1, 2, and 4 are done — the predictor learns
+planner + transfer separately, walks the fallback chain, and is
+visible in `--verbose` and `blit profile --json`. Step 3 (Tiny
+extension) was deferred to post-0.1.0 with explicit reasoning in
+DEVLOG. So §2.8 closed as **predictor observability and training**
+— the predictor is no longer dead code (it is queried, surfaced,
+and audit-able), but adaptive planning behavior (Tiny picking up
+predictor signals) is still future work. Anyone reading this
+section after release should NOT assume the planner consults the
+predictor for routing; only the verbose/JSON surface does. R44-F1
+also fixed a train/query feature mismatch — the orchestrator now
+queries with `(scanned_files, scanned_bytes)` and the recorded
+`PerformanceRecord.{file_count,total_bytes}` is populated from the
+same scan-side fields, so estimates no longer drift on incremental
+runs. R44-F2 pinned the `blit profile --json` shape with an
+assertion.
+
 **Fallback — delete it.** If release cushion is thin: delete
 `perf_predictor.rs`, drop `update_predictor` calls, keep
 `perf_history` + `derive_local_plan_tuning` which are the

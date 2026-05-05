@@ -46,11 +46,45 @@ pub struct PredictorEstimate {
 }
 
 /// Summary of a local transfer execution.
+///
+/// Field semantics — the predictor and `derive_local_plan_tuning`
+/// both read these, so a clear distinction matters:
+///
+///   - `scanned_files` / `scanned_bytes`: the source-side workload
+///     observed by the enumeration pass. The planner phase scales
+///     with these (it has to walk all scanned headers regardless of
+///     whether they get copied). Set on every summary, including
+///     fast-path branches that never run the streaming planner.
+///   - `planned_files`: how many entries the planner decided to
+///     copy after diffing against the destination. On a noop run
+///     this is 0 even if `scanned_files` is huge.
+///   - `copied_files`: what the pipeline actually wrote. Equal to
+///     `planned_files` on a successful run; less if the run errored
+///     mid-pipeline.
+///   - `total_bytes`: bytes the pipeline wrote (transfer phase
+///     scales with this). Distinct from `scanned_bytes` on
+///     incremental runs.
+///
+/// R44-F1 split the predictor's training features from
+/// `copied_files`/`copied_bytes` to `scanned_files`/`scanned_bytes`
+/// because the orchestrator's pre-run query also uses scan
+/// features; pre-fix the predictor was trained on copied counts
+/// then queried with scanned counts, so estimates drifted on
+/// every incremental workload.
 #[derive(Clone, Debug, Default)]
 pub struct LocalMirrorSummary {
     pub planned_files: usize,
     pub copied_files: usize,
     pub total_bytes: u64,
+    /// Source-side workload observed by enumeration. The planner
+    /// phase scales with this; the predictor trains and queries
+    /// against this for the planner duration target. Populated on
+    /// every summary, including fast-path branches.
+    pub scanned_files: usize,
+    /// Sum of all scanned-file sizes (post-filter, pre-diff).
+    /// Distinct from `total_bytes` on incremental runs where the
+    /// pipeline writes only changed entries.
+    pub scanned_bytes: u64,
     pub deleted_files: usize,
     pub deleted_dirs: usize,
     pub dry_run: bool,
