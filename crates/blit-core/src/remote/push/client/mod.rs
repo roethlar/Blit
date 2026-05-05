@@ -39,38 +39,54 @@ use crate::remote::transfer::progress::RemoteTransferProgress;
 use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, SinkOutcome, TransferSink};
 use crate::remote::transfer::source::TransferSource;
 
-/// Drain a pipeline JoinHandle into a clear `eyre::Report`.
+/// Await a pipeline JoinHandle and return the outcome with
+/// consistent error wrapping. Used by both `MultiStreamSender::queue`
+/// (via `drain_pipeline_error`) and `MultiStreamSender::finish` so
+/// the failure-path messages are identical regardless of which side
+/// noticed the pipeline died first.
 ///
-/// Used by `MultiStreamSender::queue` and `MultiStreamSender::finish`
-/// when they need to surface the real pipeline failure rather than a
-/// generic "channel closed" message. Three terminal states:
+/// Terminal states:
 ///
-/// - `Ok(Ok(_))` — the pipeline returned successfully but the
-///   producer channel was already closed when the queue tried to
-///   send. This is a race in pipeline shutdown, not a real error,
-///   but it's surfaced as a diagnostic so a future regression
-///   doesn't hide behind silence.
-/// - `Ok(Err(e))` — the pipeline returned an error. Wrapped with a
-///   "data plane pipeline failed" prefix so the eyre cause chain
-///   reads naturally from the user's perspective.
-/// - `Err(join)` — the pipeline task panicked or was aborted.
-///   Surface the join error as text.
+/// - `Ok(Ok(o))` → `Ok(o)` — pipeline returned cleanly with the
+///   accumulated `SinkOutcome`.
+/// - `Ok(Err(e))` → `Err(e.wrap_err("data plane pipeline failed"))` —
+///   the eyre cause chain reads "data plane pipeline failed: <inner>"
+///   so the underlying disk-full / channel-closed / etc. surfaces in
+///   the user-visible message.
+/// - `Err(join)` → `Err(eyre!("data plane pipeline panicked: {join}"))`
+///   — the panic message surfaces rather than being hidden.
+///
+/// Closes R43 follow-up to R42-F2: previously `finish()` duplicated
+/// these match arms while a comment claimed they routed through the
+/// helper. Now there's actually one helper.
+async fn drain_pipeline_outcome(handle: JoinHandle<Result<SinkOutcome>>) -> Result<SinkOutcome> {
+    match handle.await {
+        Ok(Ok(o)) => Ok(o),
+        Ok(Err(e)) => Err(e.wrap_err("data plane pipeline failed")),
+        Err(join) => Err(eyre!("data plane pipeline panicked: {join}")),
+    }
+}
+
+/// Drain a pipeline JoinHandle into a clear `eyre::Report` for the
+/// producer-side path where we already know the channel closed.
+/// Wraps `drain_pipeline_outcome` so the failure formatting is
+/// shared, then converts the `Ok` case (channel closed but pipeline
+/// returned cleanly) into a diagnostic message — that combination is
+/// the rare race in pipeline shutdown that we surface rather than
+/// hide behind silence.
 ///
 /// Extracted to a free function so the join-error-drain logic is
 /// directly testable without spinning up a full
 /// `MultiStreamSender::connect` (which requires real TCP streams).
-/// Closes R42-F2 — the previous regression test only exercised
-/// `execute_sink_pipeline_streaming`, leaving the producer-side
-/// drain logic untested.
+/// Closes R42-F2.
 async fn drain_pipeline_error(handle: JoinHandle<Result<SinkOutcome>>) -> eyre::Report {
-    match handle.await {
-        Ok(Ok(_)) => eyre!(
+    match drain_pipeline_outcome(handle).await {
+        Ok(_) => eyre!(
             "data plane pipeline closed cleanly but the producer \
              channel was already closed — likely a race in \
              pipeline shutdown"
         ),
-        Ok(Err(e)) => e.wrap_err("data plane pipeline failed"),
-        Err(join) => eyre!("data plane pipeline panicked: {join}"),
+        Err(report) => report,
     }
 }
 
@@ -188,16 +204,13 @@ impl MultiStreamSender {
             .pipeline_handle
             .take()
             .ok_or_else(|| eyre!("data plane pipeline handle missing"))?;
-        let outcome = match handle.await {
-            Ok(Ok(o)) => o,
-            // For failure paths, route through the same drain helper
-            // `queue()` uses so the wrapping reads consistently
-            // ("data plane pipeline failed: <cause>") regardless of
-            // whether the producer noticed the receiver dropped or
-            // the pipeline returned an error after end-of-stream.
-            Ok(Err(e)) => return Err(e.wrap_err("data plane pipeline failed")),
-            Err(join) => return Err(eyre!("data plane pipeline panicked: {join}")),
-        };
+        // Route both Ok and Err through the shared drain helper so
+        // the failure-path wrapping ("data plane pipeline failed:
+        // <cause>" / "data plane pipeline panicked: <join>") matches
+        // exactly what `queue()` would produce. R43 follow-up to
+        // R42-F2 — earlier this was a hand-rolled match that
+        // duplicated the helper's arms.
+        let outcome = drain_pipeline_outcome(handle).await?;
         let elapsed = self.started.elapsed().as_secs_f64().max(1e-6);
         let throughput = (outcome.bytes_written as f64 * 8.0) / elapsed / 1e9;
         eprintln!(
@@ -989,6 +1002,60 @@ mod drain_pipeline_error_tests {
 
         let report = drain_pipeline_error(handle).await;
         let msg = format!("{:#}", report);
+        assert!(
+            msg.contains("data plane pipeline panicked"),
+            "missing panic-prefix in:\n{}",
+            msg
+        );
+    }
+
+    // ── drain_pipeline_outcome (the underlying helper) ───────────────
+
+    #[tokio::test]
+    async fn drain_outcome_returns_value_on_clean_finish() {
+        // Happy path: pipeline returned `Ok(SinkOutcome)`; the
+        // helper passes it through. `finish()` relies on this to
+        // get the per-run throughput numbers.
+        let outcome = SinkOutcome {
+            files_written: 7,
+            bytes_written: 1024,
+        };
+        let cloned = outcome.clone();
+        let handle: JoinHandle<Result<SinkOutcome>> = tokio::spawn(async move { Ok(cloned) });
+        let got = drain_pipeline_outcome(handle).await.expect("clean finish");
+        assert_eq!(got.files_written, outcome.files_written);
+        assert_eq!(got.bytes_written, outcome.bytes_written);
+    }
+
+    #[tokio::test]
+    async fn drain_outcome_wraps_pipeline_error() {
+        // `finish()` failure path: pipeline returned Err. The helper
+        // must wrap the same way `queue()`'s drain does so the user-
+        // visible message is "data plane pipeline failed: <cause>"
+        // regardless of which call site reported the error.
+        let handle: JoinHandle<Result<SinkOutcome>> =
+            tokio::spawn(async { Err(eyre!("synthetic apply error: ENOSPC")) });
+        let err = drain_pipeline_outcome(handle).await.expect_err("must err");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("data plane pipeline failed"),
+            "missing wrapping prefix in:\n{}",
+            msg
+        );
+        assert!(
+            msg.contains("synthetic apply error: ENOSPC"),
+            "underlying cause not preserved in:\n{}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_outcome_surfaces_panic_message() {
+        let handle: JoinHandle<Result<SinkOutcome>> = tokio::spawn(async {
+            panic!("synthetic finish-time panic");
+        });
+        let err = drain_pipeline_outcome(handle).await.expect_err("must err");
+        let msg = format!("{:#}", err);
         assert!(
             msg.contains("data plane pipeline panicked"),
             "missing panic-prefix in:\n{}",
