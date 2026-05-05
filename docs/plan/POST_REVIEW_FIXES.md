@@ -19,8 +19,13 @@ risk + effort.
 
 ## Round 1 — cheap correctness wins (~half day)
 
-Pick up tomorrow. All low-risk; collectively close one data-loss
-window and remove ~100 LOC of dead code.
+**Status:** Closed `2026-05-05` — see commit log entry below for the
+landed work and the §1.2 deferral rationale. The four items here
+were promoted from P1 to P0 in `RELEASE_PLAN_v2_2026-05-04.md` §2.7
+because §1.1b's vague error path was user-visible on real push
+failures. §1.1, §1.1b, and §1.3 fully closed; §1.2 explicitly
+deferred with a docstring on `TarShardExecutor` and a tracked
+post-0.1.0 plan.
 
 ### 1.1 Fix error swallowing in `sink.rs`
 

@@ -543,6 +543,33 @@ pub(crate) async fn execute_grpc_fallback(
     Ok(stats)
 }
 
+/// Tar-shard work scheduler used **only** by the gRPC fallback
+/// receive path (`receive_fallback_data`). The TCP push receive path
+/// routes through `FsTransferSink::write_tar_shard_payload`
+/// (rayon-parallel via the shared buffer pool) and does not touch
+/// this struct.
+///
+/// POST_REVIEW_FIXES §1.2 considered deleting this in favor of
+/// having the gRPC fallback also call `FsTransferSink::write_payload`,
+/// unifying the buffer pool. Two reasons it stays for 0.1.0:
+///
+/// 1. The gRPC fallback path streams chunked `TarShardHeader` →
+///    `TarShardChunk` messages and applies them when
+///    `TarShardComplete` arrives — different framing than the TCP
+///    path's `apply_tar_shard` over a single contiguous buffer.
+///    Routing the fallback through `write_payload` would require
+///    threading a streaming-tar receiver into the sink shape, which
+///    is a meaningful refactor of the receive abstraction.
+/// 2. The dedicated buffer pool sized for fallback's typical
+///    chunking (TAR_BUFFER_SIZE × TAR_BUFFER_POOL_SIZE) is the kind
+///    of tuning that benefits from running the unification with
+///    real fallback throughput numbers in hand. We don't have those
+///    yet.
+///
+/// Plan after 0.1.0: collapse this into the unified sink path once
+/// the gRPC-fallback streaming receiver lives behind a small
+/// `TarShardReceiver` trait. Tracked as deferred technical debt;
+/// see `docs/plan/POST_REVIEW_FIXES.md` §1.2.
 struct TarShardExecutor {
     semaphore: Arc<Semaphore>,
     tasks: JoinSet<Result<(TransferStats, Option<Vec<u8>>), Status>>,

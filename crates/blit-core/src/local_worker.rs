@@ -59,7 +59,9 @@ pub(crate) fn copy_large_blocking(
             if let Ok(md) = std::fs::metadata(&src) {
                 if let Ok(modified) = md.modified() {
                     let ft = FileTime::from_system_time(modified);
-                    let _ = filetime::set_file_mtime(&dest, ft);
+                    if let Err(e) = filetime::set_file_mtime(&dest, ft) {
+                        log::warn!("set mtime on {}: {}", dest.display(), e);
+                    }
                 }
             }
         }
@@ -122,7 +124,9 @@ fn copy_path_maybe(
         if let Ok(meta) = std::fs::metadata(&src) {
             if let Ok(modified) = meta.modified() {
                 let ft = FileTime::from_system_time(modified);
-                let _ = filetime::set_file_mtime(&dst, ft);
+                if let Err(e) = filetime::set_file_mtime(&dst, ft) {
+                    log::warn!("set mtime on {}: {}", dst.display(), e);
+                }
             }
         }
     }

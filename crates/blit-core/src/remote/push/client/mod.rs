@@ -44,7 +44,13 @@ use crate::remote::transfer::source::TransferSource;
 /// round-robin distribution across sinks is handled by the pipeline.
 struct MultiStreamSender {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
-    pipeline_handle: JoinHandle<Result<SinkOutcome>>,
+    /// Pipeline JoinHandle. `Option` so `queue()` can `take()` it on
+    /// the unhappy path: if `tx.send().await` fails the receiver has
+    /// been dropped, which means the pipeline died with an error
+    /// inside the spawned task. We surface that real error instead
+    /// of the previous generic "data plane pipeline closed
+    /// unexpectedly" string. POST_REVIEW_FIXES §1.1b.
+    pipeline_handle: Option<JoinHandle<Result<SinkOutcome>>>,
     started: Instant,
 }
 
@@ -109,7 +115,7 @@ impl MultiStreamSender {
 
         Ok(Self {
             payload_tx: Some(payload_tx),
-            pipeline_handle,
+            pipeline_handle: Some(pipeline_handle),
             started: Instant::now(),
         })
     }
@@ -121,9 +127,29 @@ impl MultiStreamSender {
             .as_ref()
             .ok_or_else(|| eyre!("data plane sender already finished"))?;
         for payload in payloads {
-            tx.send(payload)
-                .await
-                .map_err(|_| eyre!("data plane pipeline closed unexpectedly"))?;
+            if tx.send(payload).await.is_err() {
+                // Receiver dropped → pipeline task already exited.
+                // Drain `pipeline_handle` to surface the underlying
+                // error (sink worker errored, remote daemon closed,
+                // disk full on dest…) instead of the previous
+                // generic "data plane pipeline closed unexpectedly".
+                // POST_REVIEW_FIXES §1.1b.
+                drop(self.payload_tx.take());
+                let handle = self
+                    .pipeline_handle
+                    .take()
+                    .ok_or_else(|| eyre!("data plane pipeline handle missing"))?;
+                let err = match handle.await {
+                    Ok(Ok(_)) => eyre!(
+                        "data plane pipeline closed cleanly but the producer \
+                         channel was already closed — likely a race in \
+                         pipeline shutdown"
+                    ),
+                    Ok(Err(e)) => e.wrap_err("data plane pipeline failed"),
+                    Err(join) => eyre!("data plane pipeline panicked: {join}"),
+                };
+                return Err(err);
+            }
         }
         Ok(())
     }
@@ -132,8 +158,11 @@ impl MultiStreamSender {
     async fn finish(mut self) -> Result<()> {
         // Drop the sender so the pipeline sees end-of-stream.
         drop(self.payload_tx.take());
-        let outcome = self
+        let handle = self
             .pipeline_handle
+            .take()
+            .ok_or_else(|| eyre!("data plane pipeline handle missing"))?;
+        let outcome = handle
             .await
             .map_err(|err| eyre!("data plane pipeline panicked: {err}"))??;
         let elapsed = self.started.elapsed().as_secs_f64().max(1e-6);

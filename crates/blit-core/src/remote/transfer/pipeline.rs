@@ -417,10 +417,33 @@ async fn read_tar_shard(socket: &mut TcpStream) -> Result<(Vec<FileHeader>, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink};
+    use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
     use crate::remote::transfer::source::FsTransferSource;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use tempfile::tempdir;
+
+    /// Sink that fails the first `write_payload` with a recognisable
+    /// message. Used by the POST_REVIEW_FIXES §1.1b regression test
+    /// to confirm `execute_sink_pipeline_streaming` returns the
+    /// underlying error verbatim — which is what
+    /// `MultiStreamSender::queue` then surfaces to the user instead
+    /// of the previous generic "data plane pipeline closed
+    /// unexpectedly" string.
+    struct FailingSink {
+        marker: &'static str,
+        dst_root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for FailingSink {
+        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+            eyre::bail!("{}", self.marker)
+        }
+        fn root(&self) -> &Path {
+            &self.dst_root
+        }
+    }
 
     #[tokio::test]
     async fn pipeline_copies_files_end_to_end() {
@@ -822,5 +845,69 @@ mod tests {
         v.extend_from_slice(path);
         v.extend_from_slice(&total_size.to_be_bytes());
         v
+    }
+
+    /// POST_REVIEW_FIXES §1.1b regression. When a sink errors mid-
+    /// pipeline, `execute_sink_pipeline_streaming` must return the
+    /// underlying error message — not the previous generic "data
+    /// plane pipeline closed unexpectedly" produced by
+    /// `MultiStreamSender::queue` when its `tx.send` saw the receiver
+    /// drop. The fix in `MultiStreamSender::queue` only works if this
+    /// invariant holds at the pipeline layer.
+    #[tokio::test]
+    async fn pipeline_streaming_surfaces_underlying_sink_error() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let dst = tmp.path().join("dst");
+        let failing: Arc<dyn TransferSink> = Arc::new(FailingSink {
+            marker: "synthetic sink failure: disk full",
+            dst_root: dst,
+        });
+
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _scanned = scan_handle.await.unwrap().unwrap();
+
+        let planned = crate::remote::transfer::payload::plan_transfer_payloads(
+            headers,
+            source.root(),
+            Default::default(),
+        )
+        .unwrap();
+
+        // Feed the planned payloads through the streaming variant
+        // exactly as MultiStreamSender::connect does it: spawn the
+        // pipeline in a task, push payloads via mpsc, then drop the
+        // sender to signal end-of-stream.
+        let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(4);
+        let source_clone = Arc::clone(&source);
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_streaming(source_clone, vec![failing], payload_rx, 4, None).await
+        });
+
+        for payload in planned.payloads {
+            // Sink errors after the first write; later sends may
+            // race the channel close. We only care that the
+            // pipeline future resolves with the real error.
+            let _ = payload_tx.send(payload).await;
+        }
+        drop(payload_tx);
+
+        let result = pipeline.await.expect("pipeline task did not panic");
+        let err = result.expect_err("pipeline must surface the sink error");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("synthetic sink failure: disk full"),
+            "expected pipeline error to include underlying sink message; got:\n{}",
+            msg
+        );
     }
 }

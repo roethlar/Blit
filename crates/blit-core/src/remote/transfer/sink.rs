@@ -244,7 +244,13 @@ impl TransferSink for FsTransferSink {
             // this, set_file_mtime races with deferred writes from
             // tokio's blocking-thread pool: 5/8 of mtimes were
             // observed silently bumped to "now" on the receive side.
-            let _ = file.flush().await;
+            //
+            // POST_REVIEW_FIXES §1.1: flush failure is a data-loss
+            // signal — the user believes the file is durable when it
+            // isn't. Propagate, don't swallow.
+            file.flush()
+                .await
+                .with_context(|| format!("flushing {}", dst.display()))?;
         }
         // Handle dropped → kernel close() complete → no further
         // metadata churn from this file. Now safe to set mtime by path.
@@ -257,7 +263,13 @@ impl TransferSink for FsTransferSink {
 
         if self.config.preserve_times && header.mtime_seconds > 0 {
             let ft = FileTime::from_unix_time(header.mtime_seconds, 0);
-            let _ = filetime::set_file_mtime(&dst, ft);
+            // Best-effort: cross-fs, root-owned, or ACL-protected
+            // destinations can refuse mtime updates. Surface via
+            // `log::warn!` so the failure is visible without making
+            // it a hard transfer error. POST_REVIEW_FIXES §1.1.
+            if let Err(e) = filetime::set_file_mtime(&dst, ft) {
+                log::warn!("set mtime on {}: {}", dst.display(), e);
+            }
         }
 
         // Permissions arrive on the wire (Unix mode bits). Apply best-
@@ -265,8 +277,11 @@ impl TransferSink for FsTransferSink {
         #[cfg(unix)]
         if header.permissions != 0 {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(header.permissions));
+            if let Err(e) =
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(header.permissions))
+            {
+                log::warn!("set permissions on {}: {}", dst.display(), e);
+            }
         }
         #[cfg(not(unix))]
         let _ = header.permissions;
@@ -326,7 +341,9 @@ fn write_file_payload(
         if let Ok(meta) = std::fs::metadata(&src) {
             if let Ok(modified) = meta.modified() {
                 let ft = FileTime::from_system_time(modified);
-                let _ = filetime::set_file_mtime(&dst, ft);
+                if let Err(e) = filetime::set_file_mtime(&dst, ft) {
+                    log::warn!("set mtime on {}: {}", dst.display(), e);
+                }
             }
         }
     }
@@ -393,13 +410,18 @@ fn write_tar_shard_payload(
             std::fs::write(&f.dest_path, &f.contents)
                 .with_context(|| format!("write {}", f.dest_path.display()))?;
             if let Some(ft) = f.mtime {
-                let _ = filetime::set_file_mtime(&f.dest_path, ft);
+                if let Err(e) = filetime::set_file_mtime(&f.dest_path, ft) {
+                    log::warn!("set mtime on {}: {}", f.dest_path.display(), e);
+                }
             }
             #[cfg(unix)]
             if let Some(perms) = f.permissions {
                 use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(&f.dest_path, std::fs::Permissions::from_mode(perms));
+                if let Err(e) =
+                    std::fs::set_permissions(&f.dest_path, std::fs::Permissions::from_mode(perms))
+                {
+                    log::warn!("set permissions on {}: {}", f.dest_path.display(), e);
+                }
             }
             Ok(f.size)
         })
@@ -483,12 +505,17 @@ async fn write_file_block_complete(
     // dance as write_file_stream — see commit 946bd77).
     if mtime_seconds > 0 {
         let ft = FileTime::from_unix_time(mtime_seconds, 0);
-        let _ = filetime::set_file_mtime(&dst, ft);
+        if let Err(e) = filetime::set_file_mtime(&dst, ft) {
+            log::warn!("set mtime on {}: {}", dst.display(), e);
+        }
     }
     #[cfg(unix)]
     if permissions != 0 {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(permissions));
+        if let Err(e) = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(permissions))
+        {
+            log::warn!("set permissions on {}: {}", dst.display(), e);
+        }
     }
     #[cfg(not(unix))]
     let _ = permissions;

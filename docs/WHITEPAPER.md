@@ -198,6 +198,7 @@ TAR_SHARD := 0x01 count:u32 [path_len:u32 path:bytes size:u64 mtime:i64 perms:u3
              tar_size:u64 tar_bytes:tar_size
 BLOCK := 0x02 path_len:u32 path:bytes offset:u64 len:u32 bytes:len
 BLOCK_COMPLETE := 0x03 path_len:u32 path:bytes total_size:u64
+                       mtime:i64 perms:u32
 END   := 0xFF
 ```
 
@@ -205,6 +206,15 @@ Tar shards bundle small files for amortization (the planner targets
 ~8–64 MiB shard size). Block records implement resume — server
 requests block hashes via gRPC, sends only differing blocks via the
 data plane.
+
+Note: `BLOCK_COMPLETE` carries `mtime` and `perms` after `total_size`
+(commit `a7d659f`). The auto-promote path — where the block-hash
+compare proves all blocks already match and zero `BLOCK` records
+need to ship — still has to update the destination's mtime and
+permissions to match the source. Without the metadata trailing
+the terminator, a same-bytes resume wouldn't refresh the
+destination metadata and downstream `blit copy` runs would keep
+re-comparing the file every time.
 
 ### 3.1 Symmetric byte copy
 
