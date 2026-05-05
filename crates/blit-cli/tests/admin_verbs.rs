@@ -247,6 +247,7 @@ fn test_admin_complete_path() {
     let remote_path = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("completions")
+        .arg("remote")
         .arg(&remote_path)
         .arg("--prefix")
         .arg("alpha");

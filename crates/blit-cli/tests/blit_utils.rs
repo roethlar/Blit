@@ -448,6 +448,7 @@ fn test_utils_completions() {
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("completions")
+        .arg("remote")
         .arg(&remote)
         .arg("--prefix")
         .arg("foo");
@@ -480,7 +481,10 @@ fn test_utils_completions_dirs_only() {
 
     let remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
     let mut cmd = Command::new(&ctx.cli_bin);
-    cmd.arg("completions").arg(&remote).arg("--dirs");
+    cmd.arg("completions")
+        .arg("remote")
+        .arg(&remote)
+        .arg("--dirs");
 
     let output = run_with_timeout(cmd, Duration::from_secs(10));
     assert!(output.status.success());
@@ -493,6 +497,34 @@ fn test_utils_completions_dirs_only() {
     assert!(
         !stdout.contains("file.txt"),
         "file.txt should not appear in --dirs completions"
+    );
+}
+
+#[test]
+fn test_utils_completions_shell_bash_emits_script() {
+    // P0 §2.5 integration test. Daemon is unused here; we just need
+    // the binary on disk. `blit completions shell bash` must exit
+    // cleanly and emit a non-empty bash-completion script that
+    // defines `_blit` and references known subcommands.
+    let ctx = TestContext::new();
+
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("completions").arg("shell").arg("bash");
+
+    let output = run_with_timeout(cmd, Duration::from_secs(10));
+    assert!(
+        output.status.success(),
+        "blit completions shell bash failed:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("_blit()"), "missing _blit() definition");
+    assert!(stdout.contains("copy"), "missing copy subcommand");
+    assert!(stdout.contains("mirror"), "missing mirror subcommand");
+    assert!(
+        stdout.contains("completions"),
+        "missing completions subcommand"
     );
 }
 

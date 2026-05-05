@@ -125,8 +125,8 @@ blit list-modules server
 # Browse remote directories
 blit ls server:/module/path
 
-# Search for files on a remote daemon
-blit find server:/module/ --pattern ".csv"
+# Search for files on a remote daemon (glob pattern)
+blit find server:/module/ --pattern "*.csv"
 
 # Disk usage summary
 blit du server:/module/path --json
@@ -139,3 +139,13 @@ blit rm server:/module/path/old-data
 
 # Show local performance history
 blit profile
+
+# Install shell-completion scripts (bash / zsh / fish / powershell / elvish)
+blit completions shell bash > ~/.local/share/bash-completion/completions/blit
+blit completions shell zsh  > "${fpath[1]}/_blit"
+blit completions shell fish > ~/.config/fish/completions/blit.fish
+```
+
+`blit completions remote <prefix>` is the daemon-backed remote-path
+completion the generated shell scripts call internally; you don't
+typically run it directly.

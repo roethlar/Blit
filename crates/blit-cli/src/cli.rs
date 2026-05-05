@@ -372,6 +372,37 @@ pub struct FindArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct CompletionArgs {
+    #[command(subcommand)]
+    pub kind: CompletionKind,
+}
+
+#[derive(clap::Subcommand, Clone, Debug)]
+pub enum CompletionKind {
+    /// Generate a shell-completion script for one of bash, zsh,
+    /// fish, powershell, or elvish. Pipe the output to your shell's
+    /// completion-script directory:
+    ///
+    ///   blit completions shell bash > ~/.local/share/bash-completion/completions/blit
+    ///   blit completions shell zsh  > "${fpath[1]}/_blit"
+    ///   blit completions shell fish > ~/.config/fish/completions/blit.fish
+    Shell(ShellCompletionArgs),
+
+    /// Fetch remote-path completions via the daemon's CompletePath
+    /// RPC. Used by interactive shells when the user types a
+    /// `server:/module/` prefix and presses Tab; the generated
+    /// shell-completion scripts call this internally and stream the
+    /// matching paths.
+    Remote(RemoteCompletionArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct ShellCompletionArgs {
+    /// Target shell.
+    pub shell: clap_complete::Shell,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RemoteCompletionArgs {
     /// Remote path (e.g., server:/module/)
     pub target: String,
     /// Include only file completions
@@ -452,4 +483,83 @@ pub struct CheckArgs {
     pub min_age: Option<String>,
     #[arg(long, value_name = "DURATION", help_heading = "Filtering")]
     pub max_age: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the clap surface itself. Anything that can fail at
+    //! `cargo build` time isn't worth a runtime check; these target
+    //! behavior that only surfaces at parse / generation time.
+
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn clap_definition_validates() {
+        // clap's debug_assert! validations only fire in debug builds
+        // when CommandFactory::command() is called. This test forces
+        // them to run so a misconfigured arg/conflict surfaces here
+        // rather than the first time a real user hits the bad path.
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn shell_completions_generate_for_bash() {
+        // P0 §2.5: `blit completions shell <SHELL>` must actually
+        // emit a non-empty completion script for each supported
+        // shell. This is the load-bearing test that the README:33
+        // "shell completions" promise is now backed by real script
+        // generation, not just the CompletePath RPC.
+        let mut cmd = Cli::command();
+        let mut buffer: Vec<u8> = Vec::new();
+        clap_complete::generate(clap_complete::Shell::Bash, &mut cmd, "blit", &mut buffer);
+        let script = String::from_utf8(buffer).expect("utf8 script");
+        assert!(
+            script.contains("_blit()"),
+            "bash completion script should define the _blit function; got first 200 chars:\n{}",
+            &script[..script.len().min(200)]
+        );
+        // The script must mention every top-level subcommand so
+        // tab-completion at `blit <Tab>` actually works.
+        for verb in [
+            "copy",
+            "mirror",
+            "move",
+            "scan",
+            "list",
+            "find",
+            "completions",
+        ] {
+            assert!(
+                script.contains(verb),
+                "bash completion script missing verb '{}'",
+                verb
+            );
+        }
+    }
+
+    #[test]
+    fn shell_completions_generate_for_each_supported_shell() {
+        // Every shell variant clap_complete advertises must produce
+        // non-empty output. Catches the case where a future shell
+        // is added to clap_complete::Shell but our handler doesn't
+        // route it (clap_complete::generate is total over the enum,
+        // so this should always pass — the test pins it).
+        let mut cmd = Cli::command();
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Zsh,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+            clap_complete::Shell::Elvish,
+        ] {
+            let mut buffer: Vec<u8> = Vec::new();
+            clap_complete::generate(shell, &mut cmd, "blit", &mut buffer);
+            assert!(
+                !buffer.is_empty(),
+                "{:?} completion generation produced empty output",
+                shell
+            );
+        }
+    }
 }

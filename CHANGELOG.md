@@ -41,7 +41,10 @@ All notable changes to Blit are documented in this file.
 - `--json` output for all inspection commands
 - Human-readable byte formatting in `df` output
 - Local path support for `ls`
-- `find --pattern <GLOB>` uses standard shell-glob syntax (`*`, `?`, `[abc]`, `**/`); matches against both relative path and basename so `*.csv` finds nested entries
+- `blit list <bare-host>` smart-dispatches to module listing; `blit list <module/path>` falls through to `ls`
+- `find --pattern <GLOB>` uses POSIX shell-glob syntax (`*`, `?`, `[abc]`, `**/`); `*` does not cross `/`. Pattern matches against both the relative path and the file-name basename so `*.csv` finds nested entries.
+- `blit completions shell <SHELL>` generates static bash/zsh/fish/powershell/elvish completion scripts via `clap_complete`; pipe to your shell's completion directory.
+- `blit completions remote <PREFIX>` is the existing daemon-backed remote-path completion; called internally by the generated shell scripts.
 - Originally a separate `blit-utils` binary; merged into `blit` for a single install/distribution surface
 
 ### Performance History

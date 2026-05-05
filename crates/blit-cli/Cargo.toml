@@ -17,6 +17,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 blit-core = { path = "../blit-core" }
 eyre = "0.6"
 color-eyre = "0.6"
