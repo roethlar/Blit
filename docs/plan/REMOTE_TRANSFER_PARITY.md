@@ -80,7 +80,7 @@ Achieve “absolute parity” across every transfer direction (local→remote, r
 
 ## Success Criteria
 
-- `blit-cli mirror -p -v local remote` and the reverse both display progress and achieve comparable throughput on 10 GbE.
+- `blit mirror -p -v local remote` and the reverse both display progress and achieve comparable throughput on 10 GbE.
 - Force-grpc runs remain available and behave identically in both directions.
 - Shared modules eliminate duplicate implementations, keeping future changes centralized.
 

@@ -3,6 +3,40 @@
 **Status:** Authoritative for the 0.1.0 release. Supersedes
 `PROJECT_STATE_ASSESSMENT.md` (dated 2026-04-07, materially stale).
 
+---
+
+## Closure tracker (last updated 2026-05-07)
+
+P0 items below are annotated with a per-section **Status** line
+showing the closing commit (or pending notice) so the next agent
+can read this doc as live state, not the original 2026-05-04
+snapshot. Bird's-eye view:
+
+| § | Item | Status |
+|---|---|---|
+| 2.1 | Binary rename `blit-cli` → `blit` | ✅ Closed `0ca489b` (R41 followup `e8f6aec`) |
+| 2.2 | `blit-utils` artifact decision | ✅ Closed `aac13bf` (followup `8d43e4d`) |
+| 2.3 | `blit list` smart-dispatch | ✅ Closed `4d07177` |
+| 2.4 | `find --pattern` glob | ✅ Closed `090f5cd` (R41 followup `e8f6aec` for `literal_separator`) |
+| 2.5 | Shell completions | ✅ Closed `0139a71` (Option A — `clap_complete` generation) |
+| 2.6 | Live remote benchmark capture | ⏳ **Pending** — hardware-bound (two-daemon network) |
+| 2.7 | `POST_REVIEW_FIXES` Round 1 | ✅ Closed `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
+| 2.8 | Predictor wire-or-delete | ✅ Wired (Option: wire) — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
+| 3.1 | Daemon `TransferMetrics` decision | ⏳ Pending — D5 default is "keep + document as dormant" |
+| 3.2 | mDNS TXT enrichment | ⏳ Pending — see D4 |
+| 3.3 | Phase 4.8 daemon FS capability | ⏳ Pending — doc-only re-scoping (D6 default: defer to 0.2.0) |
+| 4 | Doc cleanup table | ✅ Closed `aac13bf` (followup `8d43e4d` caught binary-path stragglers) |
+
+Decision-default outcomes (§7 table): D1=blit (rename), D2=merged,
+D3=smart-dispatch, D7=glob, D8=Option A (clap_complete), D9=wire
+were all taken. D4/D5/D6 still pending owner sign-off — they gate
+the §3.1/§3.2/§3.3 closures.
+
+**Net release-blocker count:** §2.6 (hardware-bound benchmark
+capture) is the last remaining P0. Everything else either closed
+or sits in P1 (§3.x) where the defaults from §7 are unambiguous
+and the cost is small.
+
 **Inputs:** `docs/audit/2026-05-04_roadmap_audit.md` (deep technical
 audit, ~95 features classified across 17 plan docs) and
 `docs/GPT_plan_review.md` rev 2 (release-surface audit, merged with
@@ -131,7 +165,13 @@ Both audits agree. These are SHIPPING and tested:
   --workspace` on Linux, macOS, Windows.
 - Release builds + artifact upload.
 
-**Test totals:** 383 workspace tests, 0 failed (as of `30b95a2`).
+**Test totals:** 383 workspace tests, 0 failed (as of `30b95a2`,
+the 2026-05-04 baseline). As of 2026-05-07: **407 / 0** after R41
+through R45 review-fix commits added regression coverage for the
+binary rename, glob `literal_separator`, drain-helper unit tests,
+predictor schema v2 + dual-target learning, predictor-record
+feature-vector consistency, and `summary.total_bytes`
+bytes-written contract.
 
 ---
 
@@ -141,6 +181,12 @@ Each item must close before tagging 0.1.0. Each has a recommended
 default; product owner can override.
 
 ### 2.1 Binary name drift — `blit-cli` vs `blit`
+
+**Status (2026-05-07):** ✅ Closed `0ca489b`. Crate name stayed
+`blit-cli`; binary produced is named `blit` via
+`[[bin]] name = "blit"`. R41 followup `e8f6aec` swept the test
+files that hardcoded `"blit-cli"` / `"blit-cli.exe"` as filesystem
+paths.
 
 **Source:** GPT review P0.
 
@@ -174,6 +220,13 @@ doc to match. Worse for users — `blit` is the planned product name.
 
 ### 2.2 `blit-utils` artifact decision
 
+**Status (2026-05-07):** ✅ Closed `aac13bf` (sweep of the §4 doc
+table) + `8d43e4d` (followup catching stale binary paths in the
+benchmark playbook + whitepaper, README completions syntax). All
+plan/architecture/manpage references now point at the single
+`blit` binary; `BLIT_UTILS_PLAN.md` got a Superseded banner;
+phase-3/phase-4 workflow docs got post-phase notes.
+
 **Source:** GPT review P1.
 
 `CHANGELOG.md` says admin utilities were merged into `blit`. There
@@ -192,6 +245,12 @@ reference to either remove the `blit-utils` mention or rephrase as
 **Cost:** ~2-3 hours of doc edits. Mechanical.
 
 ### 2.3 `blit list` semantics
+
+**Status (2026-05-07):** ✅ Closed `4d07177`. Smart-dispatch
+implemented: bare-host targets route to `list-modules`;
+module/path targets route to `ls`. The explicit `blit list-modules
+<remote>` form continues to work. Documented in
+`docs/cli/blit.1.md` Admin Commands section.
 
 **Source:** GPT review P1.
 
@@ -219,6 +278,12 @@ manpage to match. Plan/docs change is bigger than the code change.
 
 ### 2.4 `find --pattern` glob vs substring
 
+**Status (2026-05-07):** ✅ Closed `090f5cd` (initial glob via
+`globset`) + R41 followup `e8f6aec` (set
+`literal_separator(true)` so `*` does not cross `/`, plus added
+basename-fallback regression test). CHANGELOG updated to drop the
+substring known-limitation.
+
 **Source:** GPT review P1, my audit confirmed.
 
 `BLIT_UTILS_PLAN.md` specifies glob matching; `CHANGELOG.md`
@@ -235,6 +300,16 @@ in the `Find` handler in `service/admin.rs` (server side) and
 Update CHANGELOG to say "glob matching."
 
 ### 2.5 Shell completions — match docs to code or code to docs
+
+**Status (2026-05-07):** ✅ Closed `0139a71` — picked Option A
+(clap_complete script generation). The completions subcommand
+split into two forms: `blit completions shell <SHELL>` writes a
+clap_complete-generated bash/zsh/fish/powershell/elvish script to
+stdout; `blit completions remote <REMOTE> [--prefix <STR>]
+[--files] [--dirs]` keeps the daemon-backed `CompletePath` RPC
+form (used internally by the generated shell scripts for
+remote-path completion). Documented in `docs/cli/blit.1.md` and
+`README.md`.
 
 **Source:** GPT review (Phase 3.4.4 / `BLIT_UTILS_PLAN.md`); release
 surface anchored on `README.md:33`.
@@ -262,8 +337,9 @@ resolve before release:
 <shell>` (or `blit completions generate <shell>`) subcommand using
 `clap_complete`. Generates static bash/zsh/fish/powershell
 completion. Existing remote-path completion stays as-is or moves
-under `blit completions remote <prefix>`. ~2 hours. `clap_complete`
-dep + `Command::generate` in the handler.
+under `blit completions remote <REMOTE> [--prefix <STR>]
+[--files] [--dirs]`. ~2 hours. `clap_complete` dep +
+`Command::generate` in the handler.
 
 **Option B:** Edit `README.md:33` to remove "shell completions"
 from the feature list, OR rephrase as "remote path completion
@@ -274,6 +350,11 @@ Pick before release. README claim is the release-blocking surface,
 not the Phase 3.4.4 plan-doc reference.
 
 ### 2.6 Live remote benchmark capture
+
+**Status (2026-05-07):** ⏳ **PENDING — last open P0.** Hardware-bound;
+needs the two-daemon network. The benchmark playbook in
+`docs/plan/BENCHMARK_10GBE_PLAN.md` has been brought up to current
+binary names (`blit`, not `blit-cli`) so it's now followable.
 
 **Source:** Both audits agree.
 
@@ -291,6 +372,12 @@ speed.
 checks documented in earlier exchange.
 
 ### 2.7 `POST_REVIEW_FIXES.md` Round 1 closure (promoted from P1)
+
+**Status (2026-05-07):** ✅ Closed `96cbb10`. R42 followup `3d953d9`
+finished the §1.1 metadata-error sweep (caught three sites the
+initial commit missed) and the §1.1b drain-helper test extraction.
+R43 `8fd928e` factored `drain_pipeline_outcome` so the comment
+claiming `finish()` shared the helper actually matched the code.
 
 **Source:** Roadmap audit caught the open round; GPT rev 2
 release-blocking.
@@ -352,23 +439,30 @@ plan:
 
 **Cost:** ~1.5 days end-to-end with tests.
 
-**Status (R44, 2026-05-04):** Phase 1 + 2 landed at `da6ced2` /
-`<this commit>`. Steps 1, 2, and 4 are done — the predictor learns
-planner + transfer separately, walks the fallback chain, and is
-visible in `--verbose` and `blit profile --json`. Step 3 (Tiny
-extension) was deferred to post-0.1.0 with explicit reasoning in
-DEVLOG. So §2.8 closed as **predictor observability and training**
-— the predictor is no longer dead code (it is queried, surfaced,
-and audit-able), but adaptive planning behavior (Tiny picking up
+**Status (2026-05-07):** ✅ Closed. Phase 1 `ebcbb45` (data-model
+v2: dual targets + fallback chain), phase 2 `da6ced2` (orchestrator
+query + verbose/JSON surface). R44 `f83a208` fixed a train/query
+feature mismatch (orchestrator queries with `(scanned_files,
+scanned_bytes)` and the recorded `PerformanceRecord.{file_count,
+total_bytes}` is now populated from the same scan-side fields, so
+estimates no longer drift on incremental runs). R44-F2 pinned the
+`blit profile --json` shape with an assertion. R45 `8351878` fixed
+a follow-on alias bug where `summary.total_bytes` was reporting
+scanned bytes instead of bytes-written; the streaming summary now
+reads `pipeline_outcome.bytes_written` directly, and all three
+predictor sub-calls share the explicit `(scanned_files,
+scanned_bytes)` feature vector.
+
+Steps 1, 2, and 4 are done — the predictor learns planner +
+transfer separately, walks the fallback chain, and is visible in
+`--verbose` and `blit profile --json`. Step 3 (Tiny extension)
+was deferred to post-0.1.0 with explicit reasoning in DEVLOG. So
+§2.8 closed as **predictor observability and training** — the
+predictor is no longer dead code (it is queried, surfaced, and
+audit-able), but adaptive planning behavior (Tiny picking up
 predictor signals) is still future work. Anyone reading this
 section after release should NOT assume the planner consults the
-predictor for routing; only the verbose/JSON surface does. R44-F1
-also fixed a train/query feature mismatch — the orchestrator now
-queries with `(scanned_files, scanned_bytes)` and the recorded
-`PerformanceRecord.{file_count,total_bytes}` is populated from the
-same scan-side fields, so estimates no longer drift on incremental
-runs. R44-F2 pinned the `blit profile --json` shape with an
-assertion.
+predictor for routing; only the verbose/JSON surface does.
 
 **Fallback — delete it.** If release cushion is thin: delete
 `perf_predictor.rs`, drop `update_predictor` calls, keep
@@ -386,6 +480,13 @@ These don't strictly block 0.1.0 but are visible-quality issues
 that reviewers and early users will hit.
 
 ### 3.1 Daemon `TransferMetrics` decision
+
+**Status (2026-05-07):** ⏳ Pending. D5 default ("keep + document
+as dormant") has not been actioned in code yet — `metrics.rs:14`
+docstring already says "scaffolding for a future GUI/TUI", but
+the `--metrics` flag's `--help` text and the module-level rustdoc
+have not been updated to spell out "dormant, intended for 0.2.0
+TUI." ~30 min of doc-only work when picked up.
 
 **Source:** Roadmap audit headline.
 
@@ -414,6 +515,10 @@ that they're dormant.
 
 ### 3.2 mDNS TXT enrichment
 
+**Status (2026-05-07):** ⏳ Pending. D4 default is "Yes (small,
+useful)" but has not been implemented. ~1-2 hours when picked up;
+non-release-blocking.
+
 **Source:** Roadmap audit. `TUI_DESIGN.md` flagged this as
 "do early."
 
@@ -433,6 +538,10 @@ records actually surface in `blit scan`.
 `TUI_DESIGN.md` "do early" note as superseded.
 
 ### 3.3 Phase 4.8 — daemon FS capability per-export
+
+**Status (2026-05-07):** ⏳ Pending. D6 default ("defer to 0.2.0;
+doc only") not yet recorded in `WORKFLOW_PHASE_4.md` §4.8.2 / 4.8.3.
+~30 min of doc-only work when picked up; non-release-blocking.
 
 **Source:** GPT review.
 
@@ -457,21 +566,31 @@ not worth blocking release on.
 
 ## 4. Doc cleanup (P2) — required for 0.1.0 honesty
 
-Both audits enumerate stale docs. Reconciled list:
+**Status (2026-05-07):** ✅ Closed `aac13bf` (sweep) + `8d43e4d`
+(followup catching stale binary paths in BENCHMARK_10GBE_PLAN.md
+and WHITEPAPER.md, plus README completion-syntax). Reconciled
+list with closing actions:
 
-| Doc | Drift | Action |
-|---|---|---|
-| `docs/plan/PROJECT_STATE_ASSESSMENT.md` | "Feature-complete 2026-04-07" predates pipeline-unification + delegation. Lists `blit-utils` as shipping. | Mark superseded by this doc; keep as historical artifact with an explicit pointer at the top to `RELEASE_PLAN_v2_2026-05-04.md`. |
-| `docs/plan/README.md` | Same currency mismatch as PSA. Lists `blit-utils` as shipping. | Update "Last Updated" + add prominent pointer to this plan. Drop `blit-utils` references. |
-| `docs/plan/MASTER_WORKFLOW.md` | Describes admin tooling as `blit-utils`. | Replace `blit-utils` with `blit` admin subcommands. |
-| `docs/plan/BLIT_UTILS_PLAN.md` | Standalone `blit-utils`, glob `find` semantics, separate manpage. | Add header: "Superseded — admin utilities merged into `blit` subcommands. See `docs/cli/blit.1.md`." Keep the document for the command-matrix design, mark inapplicable parts. |
-| `docs/plan/WORKFLOW_PHASE_3.md` | Claims `crates/blit-utils/src/main.rs` exists. | Update to reflect merged-CLI reality. |
-| `docs/plan/WORKFLOW_PHASE_4.md` | Implies `blit-utils` packaging. | Same. |
-| `docs/ARCHITECTURE.md` | Top-level `blit-utils` component diagram. | Remove or label "superseded — merged into `blit-cli`." |
-| `docs/cli/blit.1.md` | Synopsis says `blit list <REMOTE>`; actual `list` aliases `ls`. | Match whichever 2.3 outcome we pick. |
-| `README.md` | Uses `blit` command in examples; binary is currently `blit-cli`. | Match whichever 2.1 outcome we pick. |
+| Doc | Closing action |
+|---|---|
+| `docs/plan/PROJECT_STATE_ASSESSMENT.md` | Top-of-file Superseded callout pointing here. CLI Surface and Documentation sections rewritten — single `blit` binary, no `blit-utils` line. Architecture Overview ASCII diagram redrawn. |
+| `docs/plan/README.md` | Current Status flipped to point at this plan as live source of truth; PSA labelled superseded snapshot; BLIT_UTILS_PLAN tagged as design-rationale-only. |
+| `docs/plan/MASTER_WORKFLOW.md` | Feature-Completeness Goals, Phase 3 gates, Telemetry row reword `blit-utils` → `blit` admin subcommands. |
+| `docs/plan/BLIT_UTILS_PLAN.md` | Top-of-file Superseded banner — artifact never shipped; body retained as design rationale. |
+| `docs/plan/WORKFLOW_PHASE_3.md` | Post-phase note at top so historical body stays as workflow record without being read as current state. |
+| `docs/plan/WORKFLOW_PHASE_4.md` | Same. |
+| `docs/ARCHITECTURE.md` | User Layer ASCII diagram redrawn (no `blit-utils` column); `### blit-cli` rewritten with merged structure; `### blit-utils` section replaced with `### Admin verbs` cross-referencing the superseded plan. |
+| `docs/cli/blit.1.md` | SYNOPSIS adds `list-modules`, `ls`, `completions shell <SHELL>`, `completions remote <REMOTE>`, and `profile`; Admin Commands section documents all of them plus the §2.3 smart-dispatch wording. |
+| `README.md` | `crates/blit-cli/` repo-structure entry annotated to clarify it produces the `blit` binary; `blit completions remote <REMOTE> [--prefix <STR>]` syntax fixed. |
 
-**Cost:** ~3-4 hours total once 2.1 and 2.3 are decided.
+Drive-bys outside the original table caught by the `8d43e4d`
+followup: `docs/plan/BENCHMARK_10GBE_PLAN.md` (active 10 GbE
+benchmark playbook) and `docs/WHITEPAPER.md` (build/run example,
+crate description) had `target/release/blit-cli` paths replaced
+with `blit`; `docs/plan/AI_TELEMETRY_ANALYSIS.md` "Phase 3:
+blit-utils Integration" section rewritten; `docs/plan/TUI_DESIGN.md`
+ScanResponse-effort line corrected to point at `blit-cli`'s scan
+parsing (was "blit-utils-merged").
 
 ---
 
@@ -544,55 +663,50 @@ Both are post-release tracking items.
 
 ## 6. Suggested commit sequence
 
-If acting on this plan in order:
+**Status (2026-05-07):** all P0 commits below have landed except
+step 2 (live remote benchmark). Recorded original ordering plus
+actual closing commits for traceability.
 
-1. **Decide D1-D9** (§7 below). Particularly D1, D3, D8, D9.
-2. **§2.6** — Run remote benchmark while daemons are reachable. ~1
-   hour wall-clock. No code changes.
-3. **§2.4** — `find --pattern` glob fix. ~30 min, single commit.
-4. **§2.5** — Shell completions via `clap_complete` (Option A) or
-   README edit (Option B). ~30 min - 2 hours, single commit.
-5. **§2.1** — Binary rename `blit-cli → blit`. ~1-2 hours, single
-   commit (`Cargo.toml` `[[bin]]` + `~6` test files with hardcoded
-   string literals + scripts + CI).
-6. **§2.3** — `blit list` smart-dispatch. ~1 hour, single commit.
-7. **§2.2** + **§4 doc cleanup** — `blit-utils` references and all
-   stale docs. ~4-5 hours, single doc commit.
-8. **§2.7** — POST_REVIEW_FIXES Round 1. ~half day, single commit.
-   (§1.1 sink.rs error swallowing, §1.1b MultiStreamSender real
-   error, §1.2 TarShardExecutor, §1.3 WHITEPAPER doc.)
-9. **§3.2** — mDNS TXT enrichment (if doing it; defer otherwise).
-   ~1-2 hours.
-10. **§3.1** — `TransferMetrics` doc-only fix (option b). ~30 min.
-11. **§3.3** — Phase 4.8 doc-only re-scoping. ~30 min.
-12. **§2.8** — Predictor wire-or-delete. ~1.5 days (wire) or ~2
-    hours (delete). Last because it's the biggest variance.
-13. **Tag 0.1.0.**
+| # | Item | Status / closing commit |
+|---|---|---|
+| 1 | Decide D1-D9 (§7) | ✅ D1/D2/D3/D7/D8/D9 taken; D4/D5/D6 still open (P1 / doc-only) |
+| 2 | §2.6 — Run remote benchmark | ⏳ **Pending** (last open P0; hardware-bound) |
+| 3 | §2.4 — `find --pattern` glob | ✅ `090f5cd` (R41 followup `e8f6aec`) |
+| 4 | §2.5 — Shell completions (Option A) | ✅ `0139a71` |
+| 5 | §2.1 — Binary rename `blit-cli` → `blit` | ✅ `0ca489b` (R41 followup `e8f6aec`) |
+| 6 | §2.3 — `blit list` smart-dispatch | ✅ `4d07177` |
+| 7 | §2.2 + §4 doc cleanup | ✅ `aac13bf` (followup `8d43e4d`) |
+| 8 | §2.7 — POST_REVIEW_FIXES Round 1 | ✅ `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
+| 9 | §3.2 — mDNS TXT enrichment (P1) | ⏳ Not started; deferrable |
+| 10 | §3.1 — `TransferMetrics` doc-only | ⏳ Not started; deferrable |
+| 11 | §3.3 — Phase 4.8 doc-only rescope | ⏳ Not started; deferrable |
+| 12 | §2.8 — Predictor wire-or-delete | ✅ Wired — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
+| 13 | Tag 0.1.0 | ⏳ Blocked on step 2 (and product-owner ack of P1 deferrals) |
 
-**Cost band:**
-- Steps 1-11: roughly **2-3 days** of work plus benchmark
-  wall-clock.
-- Step 12: **+1.5 days** (wire) or **+2 hours** (delete).
-- Total: **4-7 days** to release-ready depending on D9 outcome.
+**Cost band actuals:** P0 work ran ~3 days of focused effort plus
+the still-pending §2.6 benchmark wall-clock. Steps 9-11 (P1) total
+~3 hours when scheduled and can land post-tag if owner agrees the
+defaults are acceptable.
 
 ---
 
 ## 7. Decisions still owed
 
-| # | Decision | Default recommendation | Owner |
-|---|---|---|---|
-| D1 | Binary name: `blit` or `blit-cli`? | `blit` (rename via `[[bin]]`); ~6 test files have hardcoded string literals to sweep | mcoelho |
-| D2 | `blit-utils` artifact: standalone or merged? | Merged (current state); fix docs to match | mcoelho |
-| D3 | `blit list` semantics: smart-dispatch or `list-modules`-only? | Smart-dispatch | mcoelho |
-| D4 | mDNS TXT enrichment in 0.1.0? | Yes (small, useful) | mcoelho |
-| D5 | `TransferMetrics` keep-as-scaffolding or remove? | Keep + document as dormant | mcoelho |
-| D6 | Phase 4.8.2/4.8.3 daemon FS capability in 0.1.0? | Defer to 0.2.0; doc only | mcoelho |
-| D7 | `find --pattern` glob or substring? | Glob (matches plan) | mcoelho |
-| D8 | Shell completions: clap_complete generation OR README edit? | clap_complete generation (Option A) | mcoelho |
-| D9 | Predictor: wire OR delete? | Wire (matches "harder, more correct" directive); fall back to delete if cushion is thin | mcoelho |
+**Status (2026-05-07):** D1, D2, D3, D7, D8, D9 were taken (default
+recommendations). D4, D5, D6 still open but each has a clear
+default and the cost is small.
 
-Once D1-D9 are decided, the "Suggested commit sequence" above is
-fully unblocked.
+| # | Decision | Default | Outcome |
+|---|---|---|---|
+| D1 | Binary name: `blit` or `blit-cli`? | `blit` (rename via `[[bin]]`) | ✅ Taken — `0ca489b` |
+| D2 | `blit-utils` artifact: standalone or merged? | Merged | ✅ Taken — `aac13bf` |
+| D3 | `blit list` semantics: smart-dispatch or `list-modules`-only? | Smart-dispatch | ✅ Taken — `4d07177` |
+| D4 | mDNS TXT enrichment in 0.1.0? | Yes (small, useful) | ⏳ Open — §3.2 not yet started |
+| D5 | `TransferMetrics` keep-as-scaffolding or remove? | Keep + document as dormant | ⏳ Open — §3.1 doc-only work pending |
+| D6 | Phase 4.8.2/4.8.3 daemon FS capability in 0.1.0? | Defer to 0.2.0; doc only | ⏳ Open — §3.3 doc-only work pending |
+| D7 | `find --pattern` glob or substring? | Glob | ✅ Taken — `090f5cd` |
+| D8 | Shell completions: clap_complete generation OR README edit? | Option A (clap_complete) | ✅ Taken — `0139a71` |
+| D9 | Predictor: wire OR delete? | Wire | ✅ Taken — `ebcbb45` + `da6ced2` |
 
 ---
 
@@ -645,5 +759,8 @@ benchmarks pending), confidence is high.
 ---
 
 **Owner:** mcoelho
-**Last updated:** 2026-05-04 (v2.1)
-**Next review:** after D1-D9 are decided, or before tagging 0.1.0.
+**Last updated:** 2026-05-07 (per-section status added; closure
+tracker at the top reflects the §2.1/§2.2/§2.3/§2.4/§2.5/§2.7/§2.8
++ §4 closures; §2.6 + §3.x still pending)
+**Next review:** after §2.6 benchmark capture, or before tagging
+0.1.0.
