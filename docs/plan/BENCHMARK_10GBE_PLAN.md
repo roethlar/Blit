@@ -33,7 +33,7 @@ No network needed. Confirms the refactored local→local path works and performs
 
 ```bash
 # Quick sanity test
-./target/release/blit-cli copy /tmp/test_src /tmp/test_dst --yes
+./target/release/blit copy /tmp/test_src /tmp/test_dst --yes
 
 # Full local benchmark (3 workloads × blit + rsync)
 REMOTE_HOST= SIZE_MB=512 SMALL_COUNT=5000 RUNS=3 ./scripts/bench_10gbe.sh
@@ -94,10 +94,10 @@ Tests the reverse direction (TrueNAS as client).
 ./target/release/blit-daemon --root /tmp/blit-bench-local --port 9031
 ```
 
-**From TrueNAS (copy blit-cli over):**
+**From TrueNAS (copy the `blit` binary over):**
 ```bash
-scp target/release/blit-cli truenas:/tmp/
-ssh truenas '/tmp/blit-cli copy /mnt/<pool>/blit-bench/src <this-machine-ip>:9031:/default/ --yes -v'
+scp target/release/blit truenas:/tmp/
+ssh truenas '/tmp/blit copy /mnt/<pool>/blit-bench/src <this-machine-ip>:9031:/default/ --yes -v'
 ```
 
 Or script it from here by SSHing commands. This validates both daemon directions.

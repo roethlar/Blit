@@ -4,8 +4,10 @@
 quality, architectural soundness, and likely bug surfaces.
 
 **Repo:** `~/dev/Blit` (Rust workspace, ~26 KLOC excluding generated proto).
-Three crates: `blit-core` (library), `blit-cli` (user binary), `blit-daemon`
-(server binary). Workspace `Cargo.toml` lists them; nothing else.
+Three crates: `blit-core` (library), `blit-cli` (produces the `blit`
+user binary — name set via `[[bin]] name = "blit"`; admin verbs are
+merged in here, no separate `blit-utils`), `blit-daemon` (server
+binary). Workspace `Cargo.toml` lists them; nothing else.
 
 **Stated philosophy:** "fastest, most reliable, most stable file transfer
 in any scenario." Adaptive tuning over hardcoded constants. Identical data
@@ -735,8 +737,8 @@ cargo build --release --workspace
 ./target/release/blit-daemon --root /some/path
 
 # Run a transfer
-./target/release/blit-cli copy /local/path server:/path/
-./target/release/blit-cli mirror server:/path/ /local/dest/
+./target/release/blit copy /local/path server:/path/
+./target/release/blit mirror server:/path/ /local/dest/
 
 # Test
 cargo test --workspace

@@ -146,6 +146,8 @@ blit completions shell zsh  > "${fpath[1]}/_blit"
 blit completions shell fish > ~/.config/fish/completions/blit.fish
 ```
 
-`blit completions remote <prefix>` is the daemon-backed remote-path
-completion the generated shell scripts call internally; you don't
-typically run it directly.
+`blit completions remote <REMOTE> [--prefix <STR>] [--files] [--dirs]`
+is the daemon-backed remote-path completion the generated shell
+scripts call internally — `<REMOTE>` is the target host (e.g.
+`server:9031`) and `--prefix` narrows the returned path set. You
+don't typically run it directly.
