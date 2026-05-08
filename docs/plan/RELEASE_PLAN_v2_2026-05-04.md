@@ -46,20 +46,24 @@ is their reconciled merge.
 **Scope:** What ships in 0.1.0, what blocks the release, what's
 explicitly deferred to 0.2.0+.
 
-**v2.1 changes vs v2:**
+**v2.1 changes vs v2** (section numbers below are the v2.1
+layout — "now §X, was v2 §Y" where they moved):
 - §2.5 (shell completions): kept P0, rationale anchored on
   `README.md:33` which explicitly promises "shell completions" as a
   feature. Either implement clap_complete generation OR edit the
   README — the doc claim is the release-blocking surface.
-- §3.1 (predictor): promoted from P1 to **P0-decision**. Required
-  outcome before release: predictor is consumed OR deleted. Default
-  is wire (matches user's "harder, more correct thing" directive);
-  fallback is delete if cushion is thin.
-- §3.2 (POST_REVIEW_FIXES Round 1): promoted from P1 to P0. The
-  vague "data plane pipeline closed unexpectedly" path in
-  `MultiStreamSender::queue` is user-visible on real push failures;
-  fixing it is a half-day item that materially affects release
-  diagnostic quality.
+- **§2.8** (predictor — was v2 §3.1): promoted from P1 to
+  **P0-decision**. Required outcome before release: predictor is
+  consumed OR deleted. Default is wire (matches user's "harder,
+  more correct thing" directive); fallback is delete if cushion is
+  thin. *(In current v2.1 layout, §3.1 is now `TransferMetrics`,
+  not the predictor.)*
+- **§2.7** (POST_REVIEW_FIXES Round 1 — was v2 §3.2): promoted
+  from P1 to P0. The vague "data plane pipeline closed
+  unexpectedly" path in `MultiStreamSender::queue` is user-visible
+  on real push failures; fixing it is a half-day item that
+  materially affects release diagnostic quality. *(In current v2.1
+  layout, §3.2 is now mDNS TXT enrichment, not POST_REVIEW_FIXES.)*
 - §6 commit sequence: revised for 8 P0 items (was 6). Total cost
   band shifts from 3-5 days to 4-7 days depending on predictor path.
 - §7 decisions table: added D8 (shell completions implement vs README
