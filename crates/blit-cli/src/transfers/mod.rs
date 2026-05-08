@@ -455,7 +455,17 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             if !src_path.exists() {
                 bail!("source path does not exist: {}", src_path.display());
             }
-            run_local_transfer(ctx, args, &src_path, &dst_path, true).await?;
+            // R46-F1 (data-loss): pass `mirror=false` here. `move`
+            // means "copy + delete source," NOT "purge unrelated
+            // destination entries." Pre-fix this passed `true`,
+            // which made the local→local move path silently delete
+            // any destination file/dir that happened not to exist
+            // on the source side — including files the user had no
+            // intent to touch. The other three move arms
+            // (remote→local, local→remote, remote→remote) all
+            // correctly pass `false`; this was a bare local arm
+            // outlier.
+            run_local_transfer(ctx, args, &src_path, &dst_path, false).await?;
 
             if src_path.is_dir() {
                 fs::remove_dir_all(&src_path)

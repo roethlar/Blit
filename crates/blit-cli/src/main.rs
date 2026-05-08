@@ -54,7 +54,7 @@ async fn main() -> Result<ExitCode> {
         // `check` is the only command whose exit code carries semantic
         // info (0 identical / 1 differences / 2 errors), so we propagate
         // it directly. Other commands return Ok(()) and use the default 0.
-        Commands::Check(args) => return Ok(run_check(&args).await?),
+        Commands::Check(args) => return run_check(&args).await,
         Commands::Diagnostics { command } => match command {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
             DiagnosticsCommand::Dump(args) => run_diagnostics_dump(&args)?,

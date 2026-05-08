@@ -386,10 +386,7 @@ mod tests {
         async fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<IpAddr>> {
             let mut s = self.script.lock().unwrap();
             if s.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "ScriptedResolver exhausted",
-                ));
+                return Err(std::io::Error::other("ScriptedResolver exhausted"));
             }
             Ok(s.remove(0))
         }

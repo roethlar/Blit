@@ -69,7 +69,7 @@ pub(crate) async fn handle_pull_sync_stream(
     // applied during enumeration via FileEnumerator and post-applied
     // to the deletion candidate list. None means "no filter".
     let source_filter = spec.filter.clone();
-    let resume_settings = spec.resume.clone();
+    let resume_settings = spec.resume;
     let resume_mode = resume_settings.enabled;
     // Clamp block size to safe limit to prevent server OOM
     use blit_core::copy::MAX_BLOCK_SIZE;

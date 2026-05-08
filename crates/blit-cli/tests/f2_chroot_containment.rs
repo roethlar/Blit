@@ -103,7 +103,7 @@ fn f2_push_destination_path_symlink_rejected() {
         .arg(&ctx.config_dir)
         .arg("mirror")
         .arg("--yes")
-        .arg(&format!("{}/", src_dir.display()))
+        .arg(format!("{}/", src_dir.display()))
         .arg(&dest_remote);
     let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
 

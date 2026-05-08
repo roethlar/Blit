@@ -162,10 +162,12 @@ mod tests {
         std::fs::write(&src, b"test")?;
 
         let cap = MacOSCapability::new();
-        let preserved = cap.preserve_metadata(&src, &dst)?;
-
-        // At minimum, should attempt mtime
-        // Actual success depends on filesystem
+        // Preserve attempts mtime/perms/xattrs; the boolean it returns
+        // indicates whether anything actually got applied. Result
+        // depends on the underlying filesystem so we just assert the
+        // call succeeds — coverage of actual application lives in the
+        // platform integration tests.
+        let _preserved = cap.preserve_metadata(&src, &dst)?;
         Ok(())
     }
 }

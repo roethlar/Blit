@@ -415,7 +415,7 @@ impl TransferOrchestrator {
         //    (size+mtime or Blake3 hash, then tar/large/raw planning).
         let src = src_root_buf.clone();
         let dst = dest_root_buf.clone();
-        let plan_opts = plan_options.clone();
+        let plan_opts = plan_options;
         let headers = all_headers.clone();
         let planned = tokio::task::spawn_blocking(move || {
             plan_local_mirror(

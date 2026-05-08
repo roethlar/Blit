@@ -102,6 +102,11 @@ pub async fn run_remote_to_remote_direct(
                 break;
             }
         };
+        // clippy::collapsible_match wants the verbose-gated branch as a
+        // match guard. We keep the inner `if` because the alternative
+        // requires a second `Some(DelegatedPayload::Started(_)) => {}`
+        // fallthrough arm, which is uglier than the explicit gate.
+        #[allow(clippy::collapsible_match)]
         match message.payload {
             Some(DelegatedPayload::Started(started)) => {
                 if args.verbose && !args.json {

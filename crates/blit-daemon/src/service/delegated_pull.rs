@@ -626,7 +626,7 @@ mod tests {
         let snapshot_source_path = spec_in.source_path.clone();
         let snapshot_compare = spec_in.compare_mode;
         let snapshot_mirror = spec_in.mirror_mode;
-        let snapshot_resume = spec_in.resume.clone();
+        let snapshot_resume = spec_in.resume;
         let snapshot_force_grpc = spec_in.force_grpc;
         let snapshot_ignore_existing = spec_in.ignore_existing;
         // Move spec_in by value through the override.
