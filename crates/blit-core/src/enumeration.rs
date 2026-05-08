@@ -14,6 +14,41 @@ pub enum EntryKind {
     Symlink { target: Option<PathBuf> },
 }
 
+/// One non-root WalkDir error suppressed during enumeration.
+/// Surfaced via [`EnumerationOutcome`] so destructive follow-ups
+/// (mirror-deletion, move) can refuse to act on an incomplete scan.
+#[derive(Debug, Clone)]
+pub struct SuppressedScanError {
+    /// Path from the WalkDir error if it was attached, else
+    /// `"<unknown>"`. Best-effort and not necessarily a clean
+    /// relative path.
+    pub path: String,
+    /// IO error kind (PermissionDenied, NotFound, etc.) if the
+    /// underlying WalkDir error wrapped one. WalkDir's loop and
+    /// recursion errors do not carry an IO kind.
+    pub kind: Option<std::io::ErrorKind>,
+    /// Human-readable error message from WalkDir.
+    pub message: String,
+}
+
+/// Outcome of a [`FileEnumerator::enumerate_local_streaming_capturing`]
+/// run. `suppressed_errors` is empty on a fully clean walk; non-empty
+/// means at least one subtree was skipped (most commonly because of
+/// EACCES / ENOENT during traversal). Callers must NOT use the
+/// resulting header set to drive destructive destination work
+/// without first inspecting this field.
+#[derive(Debug, Default, Clone)]
+pub struct EnumerationOutcome {
+    pub suppressed_errors: Vec<SuppressedScanError>,
+}
+
+impl EnumerationOutcome {
+    /// True iff the walk completed without dropping any subtree.
+    pub fn is_complete(&self) -> bool {
+        self.suppressed_errors.is_empty()
+    }
+}
+
 /// Result of filesystem enumeration. `absolute_path` is the full path on disk,
 /// `relative_path` is the path relative to the enumeration root, and
 /// `metadata` always refers to the filesystem object (captured via
@@ -70,7 +105,42 @@ impl FileEnumerator {
     }
 
     /// Enumerate entries and invoke `visit` for each discovered item.
-    pub fn enumerate_local_streaming<F>(&self, root: &Path, mut visit: F) -> Result<()>
+    ///
+    /// **Suppressed errors**: non-root WalkDir errors (e.g.
+    /// permission-denied on a child directory) are silently
+    /// skipped to keep the scan resilient. Callers that need to
+    /// know about these — most importantly anything driving
+    /// mirror-deletion, where "not seen during scan" must NOT mean
+    /// "delete from destination" — must use
+    /// [`enumerate_local_streaming_capturing`] instead, which
+    /// surfaces the suppressed paths so the caller can refuse
+    /// destructive follow-up work.
+    pub fn enumerate_local_streaming<F>(&self, root: &Path, visit: F) -> Result<()>
+    where
+        F: FnMut(EnumeratedEntry) -> Result<()>,
+    {
+        let outcome = self.enumerate_local_streaming_capturing(root, visit)?;
+        // Drop the captured errors — any caller using this entry
+        // point has already opted into "best-effort" semantics.
+        let _ = outcome;
+        Ok(())
+    }
+
+    /// Same as [`enumerate_local_streaming`] but returns an
+    /// [`EnumerationOutcome`] enumerating any non-root errors that
+    /// were suppressed during the walk. R46-F2 (data-loss): any
+    /// caller that uses the resulting headers to drive
+    /// destructive behavior on the *destination* (mirror-delete,
+    /// move-then-delete-source) MUST inspect
+    /// `outcome.suppressed_errors` and either refuse to delete or
+    /// fail the operation — otherwise an unreadable source
+    /// subtree would silently translate into the destination
+    /// subtree being deleted.
+    pub fn enumerate_local_streaming_capturing<F>(
+        &self,
+        root: &Path,
+        mut visit: F,
+    ) -> Result<EnumerationOutcome>
     where
         F: FnMut(EnumeratedEntry) -> Result<()>,
     {
@@ -79,6 +149,7 @@ impl FileEnumerator {
         }
 
         let filter = self.filter.clone_without_cache();
+        let mut outcome = EnumerationOutcome::default();
 
         let mut walker = WalkDir::new(root)
             .follow_links(self.follow_symlinks)
@@ -91,6 +162,24 @@ impl FileEnumerator {
                     if err.depth() == 0 {
                         return Err(err.into());
                     }
+                    // Non-root walkdir error: capture it so callers
+                    // that drive destructive work can detect the
+                    // incomplete scan. Pre-R46-F2 this `continue`
+                    // silently dropped permission-denied
+                    // subdirectories, and a follow-up
+                    // mirror-deletion would treat the unscanned
+                    // subtree as "absent at source" and delete the
+                    // corresponding destination subtree.
+                    let path_display = err
+                        .path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    let io_kind = err.io_error().map(|e| e.kind());
+                    outcome.suppressed_errors.push(SuppressedScanError {
+                        path: path_display,
+                        kind: io_kind,
+                        message: err.to_string(),
+                    });
                     continue;
                 }
             };
@@ -182,7 +271,7 @@ impl FileEnumerator {
             }
         }
 
-        Ok(())
+        Ok(outcome)
     }
 }
 

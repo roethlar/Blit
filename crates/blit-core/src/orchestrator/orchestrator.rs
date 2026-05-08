@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use eyre::{eyre, Context, Result};
+use eyre::{bail, eyre, Context, Result};
 use tokio::runtime::Builder;
 
 use crate::auto_tune::derive_local_plan_tuning;
@@ -397,7 +397,7 @@ impl TransferOrchestrator {
         let inner: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root_buf.clone()));
         let source: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(inner, filter));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable.clone());
 
         // 2. Collect all headers
         let mut all_headers = Vec::new();
@@ -588,6 +588,46 @@ impl TransferOrchestrator {
         };
 
         if options.mirror {
+            // R46-F2: refuse to mirror-delete when the source scan
+            // was incomplete. The `unreadable` accumulator is
+            // populated by both the per-file open path
+            // (PermissionDenied / NotFound on individual files) and,
+            // post-R46-F2, the walkdir non-root error path
+            // (unreadable subdirectories). Either case means the
+            // header set we're about to use as the source-of-truth
+            // for "what the destination should contain" is missing
+            // entries, and a delete pass would silently remove
+            // matching destination subtrees. Refuse the delete and
+            // surface the partial state instead — a noisy failure
+            // is strictly preferable to silent destination data
+            // loss.
+            let unreadable_snapshot: Vec<String> = unreadable
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+            if !unreadable_snapshot.is_empty() {
+                bail!(
+                    "refusing to mirror-delete from {}: source scan was \
+                     incomplete ({} unreadable entr{}); the first {} \
+                     reported: {}. Resolve the scan errors (typically \
+                     permissions) or run as a non-mirror copy.",
+                    dest_root.display(),
+                    unreadable_snapshot.len(),
+                    if unreadable_snapshot.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
+                    unreadable_snapshot.len().min(5),
+                    unreadable_snapshot
+                        .iter()
+                        .take(5)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                );
+            }
+
             let source_paths: HashSet<String> = all_headers
                 .iter()
                 .map(|h| h.relative_path.clone())
@@ -1057,5 +1097,90 @@ mod async_runtime_tests {
             second.scanned_bytes, second
         );
         assert_eq!(second.copied_files, 0);
+    }
+
+    /// R46-F2 regression: a mirror with an unreadable source
+    /// subdirectory must NOT delete the corresponding destination
+    /// subtree. Pre-fix the walkdir error on the unreadable
+    /// subdir was silently dropped at `enumeration.rs:90-95`, the
+    /// orchestrator never checked `unreadable`, and
+    /// `apply_mirror_deletions` would treat the unscanned subtree
+    /// as "absent at source" and delete the matching destination
+    /// path. Now the mirror branch refuses to delete with a clear
+    /// error.
+    ///
+    /// Unix-only because we rely on `chmod 000` to make the
+    /// subdirectory unreadable and that doesn't work the same way
+    /// on Windows.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mirror_refuses_when_source_scan_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+
+        // Source has a readable file and a subdirectory we'll make
+        // unreadable so the walkdir can't enter it.
+        write_file(&src.join("readable.txt"), b"keep");
+        let blocked = src.join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        write_file(&blocked.join("inner.txt"), b"unscannable");
+
+        // Destination has the readable file already AND a
+        // subdirectory matching the (now-unreadable) source
+        // subdir. Pre-fix mirror would delete `dst/blocked/`
+        // because the source scan never observed it.
+        std::fs::create_dir_all(&dst).unwrap();
+        write_file(&dst.join("readable.txt"), b"keep");
+        std::fs::create_dir_all(dst.join("blocked")).unwrap();
+        write_file(&dst.join("blocked/preserve_me.txt"), b"survivor");
+
+        // Make src/blocked unreadable to the walkdir.
+        let mut perms = std::fs::metadata(&blocked).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&blocked, perms).unwrap();
+        // Restore perms in a guard so cleanup works whatever the
+        // assertion outcome.
+        struct PermGuard(std::path::PathBuf);
+        impl Drop for PermGuard {
+            fn drop(&mut self) {
+                let mut p = std::fs::metadata(&self.0).unwrap().permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&self.0, p);
+            }
+        }
+        let _guard = PermGuard(blocked.clone());
+
+        let mut opts = opts();
+        opts.mirror = true;
+        let orch = TransferOrchestrator::new();
+        let result = orch.execute_local_mirror_async(&src, &dst, opts).await;
+
+        // Mirror should refuse with an explicit error. Pre-fix it
+        // would have returned Ok and deleted dst/blocked/.
+        let err = match result {
+            Err(e) => e,
+            Ok(summary) => {
+                panic!(
+                    "expected mirror to refuse on incomplete scan, \
+                     got Ok(summary={:?}); dst/blocked/preserve_me \
+                     exists: {}",
+                    summary,
+                    dst.join("blocked/preserve_me.txt").exists()
+                );
+            }
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("source scan was") && msg.contains("incomplete"),
+            "expected scan-incomplete error, got: {msg}"
+        );
+        // The destination subtree must still be intact.
+        assert!(
+            dst.join("blocked/preserve_me.txt").exists(),
+            "dst/blocked/preserve_me.txt was deleted (R46-F2 \
+             incomplete-scan-mirror-delete regression)"
+        );
     }
 }

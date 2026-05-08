@@ -105,7 +105,13 @@ pub fn spawn_manifest_task(
         let mut last_log = start;
         let mut enumerated: u64 = 0;
         let unreadable = unreadable;
-        enumerator.enumerate_local_streaming(&root, |entry| {
+        // R46-F2: capture suppressed walk errors so the orchestrator
+        // can refuse mirror-deletion when the source scan was
+        // incomplete. Pre-fix, walkdir errors on unreadable
+        // subdirectories were silently dropped, and a follow-up
+        // mirror would treat those subtrees as "absent at source"
+        // and delete the matching destination subtrees.
+        let scan_outcome = enumerator.enumerate_local_streaming_capturing(&root, |entry| {
             if let EntryKind::File { size } = entry.kind {
                 let rel = normalize_relative_path(&entry.relative_path);
                 let absolute = entry.absolute_path.clone();
@@ -150,6 +156,17 @@ pub fn spawn_manifest_task(
             }
             Ok(())
         })?;
+        // R46-F2: surface suppressed walk errors. We push them into
+        // the same `unreadable` list the per-file open path uses,
+        // so a downstream mirror-deletion gate sees "scan was
+        // incomplete" via a single check.
+        for suppressed in &scan_outcome.suppressed_errors {
+            record_unreadable_entry(
+                &unreadable,
+                &suppressed.path,
+                &format!("scan suppressed: {}", suppressed.message),
+            );
+        }
         println!(
             "Manifest enumeration complete in {:.2?} ({} entries)",
             start.elapsed(),
