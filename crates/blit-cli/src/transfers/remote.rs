@@ -289,28 +289,37 @@ pub async fn run_remote_pull_transfer(
         let _ = task.await;
     }
 
-    if args.json {
-        print_pull_json(&report, &actual_dest);
-    } else {
-        describe_pull_result(&report, &actual_dest);
-    }
-
-    // Handle mirror mode deletions using the daemon's authoritative
-    // delete list (closes F4 from the 2026-05-01 review). The daemon
-    // has the filtered source manifest and the unfiltered client
-    // manifest; the client just executes what it's told instead of
-    // walking the dest tree and inferring (which mis-purged unchanged
-    // files and ignored filter scope).
-    if mirror_mode {
+    // R46-F6: run mirror purge BEFORE emitting final JSON/human
+    // output, so deletion counts and failures show up in the
+    // structured summary. Pre-fix, the success line was already on
+    // stdout when purge ran; in JSON mode the purge's println!
+    // appended non-JSON text after the JSON document, and a purge
+    // failure surfaced too late for downstream tools that had
+    // already parsed the success state.
+    let mirror_purge_stats = if mirror_mode {
         if let Some(ref delete_paths) = report.paths_to_delete {
             if !delete_paths.is_empty() {
-                let stats = delete_listed_paths(&actual_dest, delete_paths).await?;
-                if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
-                    println!(
-                        "Mirror purge removed {} file(s) and {} directorie(s).",
-                        stats.files_deleted, stats.dirs_deleted
-                    );
-                }
+                Some(delete_listed_paths(&actual_dest, delete_paths).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if args.json {
+        print_pull_json(&report, &actual_dest, mirror_purge_stats.as_ref());
+    } else {
+        describe_pull_result(&report, &actual_dest);
+        if let Some(stats) = mirror_purge_stats.as_ref() {
+            if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
+                println!(
+                    "Mirror purge removed {} file(s) and {} directorie(s).",
+                    stats.files_deleted, stats.dirs_deleted
+                );
             }
         }
     }
@@ -481,8 +490,21 @@ async fn delete_listed_paths(
     Ok(stats)
 }
 
-fn print_pull_json(report: &RemotePullReport, dest_root: &Path) {
+fn print_pull_json(
+    report: &RemotePullReport,
+    dest_root: &Path,
+    mirror_purge_stats: Option<&LocalPurgeStats>,
+) {
     use serde_json::json;
+    // R46-F6: include mirror-purge stats inside the JSON document so
+    // downstream tools see a single self-contained object instead
+    // of having human-readable text appended after the JSON.
+    let mirror = mirror_purge_stats.map(|s| {
+        json!({
+            "files_deleted": s.files_deleted,
+            "dirs_deleted": s.dirs_deleted,
+        })
+    });
     let summary = json!({
         "operation": "pull",
         "destination": dest_root.to_string_lossy(),
@@ -490,6 +512,7 @@ fn print_pull_json(report: &RemotePullReport, dest_root: &Path) {
         "bytes_transferred": report.summary.as_ref().map(|s| s.bytes_transferred).unwrap_or(report.bytes_transferred),
         "bytes_zero_copy": report.summary.as_ref().map(|s| s.bytes_zero_copy).unwrap_or(0u64),
         "tcp_fallback": report.summary.as_ref().map(|s| s.tcp_fallback_used).unwrap_or(false),
+        "mirror_purge": mirror,
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }

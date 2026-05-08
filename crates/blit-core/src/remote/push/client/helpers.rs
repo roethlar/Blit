@@ -150,7 +150,12 @@ pub fn spawn_manifest_task(
                     .map_err(|_| eyre!("failed to queue manifest entry"))?;
                 enumerated += 1;
                 if last_log.elapsed() >= Duration::from_secs(1) {
-                    println!("Enumerated {} entries… (streaming manifest)", enumerated);
+                    // R46-F4: write progress to stderr, not stdout.
+                    // The CLI's `--json` modes treat stdout as the
+                    // exclusive structured-output channel; writing
+                    // human progress here corrupts the JSON that
+                    // downstream tools parse.
+                    eprintln!("Enumerated {} entries… (streaming manifest)", enumerated);
                     last_log = Instant::now();
                 }
             }
@@ -167,7 +172,9 @@ pub fn spawn_manifest_task(
                 &format!("scan suppressed: {}", suppressed.message),
             );
         }
-        println!(
+        // R46-F4: completion line also goes to stderr so it doesn't
+        // appear inside `--json` stdout output.
+        eprintln!(
             "Manifest enumeration complete in {:.2?} ({} entries)",
             start.elapsed(),
             enumerated

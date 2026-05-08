@@ -745,6 +745,16 @@ fn apply_mirror_deletions(
 
     let mut deleted_files = 0usize;
     let mut deleted_dirs = 0usize;
+    // R46-F5: collect deletion failures and bail at the end. Pre-fix
+    // each `remove_file` / `remove_dir` error was printed as a
+    // warning and the function returned Ok, so a mirror could
+    // succeed-on-paper while leaving stale destination content
+    // behind. Now we still attempt every deletion (better partial
+    // progress than abort-on-first-failure), but we bail with an
+    // aggregated error if any failed — the caller's mirror operation
+    // returns Err, the user sees the failed entries, and the summary
+    // line doesn't claim "complete".
+    let mut failures: Vec<String> = Vec::new();
 
     for path in files_to_delete {
         #[cfg(windows)]
@@ -760,6 +770,7 @@ fn apply_mirror_deletions(
                 }
                 Err(err) => {
                     eprintln!("Failed to delete file {}: {}", path.display(), err);
+                    failures.push(format!("{}: {}", path.display(), err));
                 }
             }
         } else {
@@ -781,11 +792,29 @@ fn apply_mirror_deletions(
                 }
                 Err(err) => {
                     eprintln!("Failed to delete directory {}: {}", path.display(), err);
+                    failures.push(format!("{}: {}", path.display(), err));
                 }
             }
         } else {
             deleted_dirs += 1;
         }
+    }
+
+    if !failures.is_empty() {
+        let preview = failures
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "mirror-delete left {} entr{} in place at {} ({} succeeded): {}",
+            failures.len(),
+            if failures.len() == 1 { "y" } else { "ies" },
+            dest_root.display(),
+            deleted_files + deleted_dirs,
+            preview
+        );
     }
 
     Ok((deleted_files, deleted_dirs))
@@ -1181,6 +1210,62 @@ mod async_runtime_tests {
             dst.join("blocked/preserve_me.txt").exists(),
             "dst/blocked/preserve_me.txt was deleted (R46-F2 \
              incomplete-scan-mirror-delete regression)"
+        );
+    }
+
+    /// R46-F5 regression: mirror-delete failures must surface as an
+    /// Err on the orchestrator's return value, not be silently
+    /// swallowed into a warning + Ok summary. We force a deletion
+    /// failure by making the destination's "extra" file's parent
+    /// non-writable; on unix `remove_file` then fails with EACCES.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mirror_delete_failure_propagates_as_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+
+        write_file(&src.join("kept.txt"), b"src");
+
+        std::fs::create_dir_all(&dst).unwrap();
+        write_file(&dst.join("kept.txt"), b"src");
+        // The "extra" file mirror would try to delete. Lock its
+        // parent dir so the unlink fails.
+        let locked_parent = dst.join("locked_subdir");
+        std::fs::create_dir_all(&locked_parent).unwrap();
+        write_file(&locked_parent.join("extra.txt"), b"unwanted");
+        let mut perms = std::fs::metadata(&locked_parent).unwrap().permissions();
+        perms.set_mode(0o555); // r-xr-xr-x: contents listable, not writable
+        std::fs::set_permissions(&locked_parent, perms).unwrap();
+
+        struct PermGuard(std::path::PathBuf);
+        impl Drop for PermGuard {
+            fn drop(&mut self) {
+                let mut p = std::fs::metadata(&self.0).unwrap().permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&self.0, p);
+            }
+        }
+        let _g = PermGuard(locked_parent.clone());
+
+        let mut opts = opts();
+        opts.mirror = true;
+        let orch = TransferOrchestrator::new();
+        let result = orch.execute_local_mirror_async(&src, &dst, opts).await;
+
+        let err = match result {
+            Err(e) => e,
+            Ok(summary) => panic!(
+                "expected mirror-delete failure to propagate as Err, \
+                 got Ok(summary={:?})",
+                summary
+            ),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("mirror-delete left") && msg.contains("in place"),
+            "expected mirror-delete-left-in-place message, got: {msg}"
         );
     }
 }
