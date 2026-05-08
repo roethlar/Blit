@@ -438,7 +438,7 @@ async fn delete_listed_paths(
     dest_root: &Path,
     relative_paths: &[String],
 ) -> Result<LocalPurgeStats> {
-    use blit_core::path_safety::safe_join;
+    use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
     use std::collections::BTreeSet;
     let mut stats = LocalPurgeStats {
         files_deleted: 0,
@@ -446,8 +446,23 @@ async fn delete_listed_paths(
     };
     let mut candidate_parents: BTreeSet<PathBuf> = BTreeSet::new();
 
+    // R46-F3: capture canonical destination root once. If it can't
+    // be canonicalized (extremely unusual), fail closed — we
+    // refuse to apply a delete list rather than fall back to
+    // lexical-only on the destructive side. Lexical-only would
+    // expose mirror-purge to escape via pre-existing dest
+    // symlinks, and unlike the write side a delete failure here
+    // means data loss.
+    let canonical = canonical_dest_root(dest_root).map_err(|e| {
+        eyre!(
+            "cannot canonicalize destination '{}' for mirror-purge containment: {:#}",
+            dest_root.display(),
+            e
+        )
+    })?;
+
     for rel in relative_paths {
-        let target = safe_join(dest_root, rel).map_err(|e| {
+        let target = safe_join_contained(&canonical, dest_root, rel).map_err(|e| {
             eyre!(
                 "daemon delete list contained unsafe path '{}': {:#}",
                 rel,

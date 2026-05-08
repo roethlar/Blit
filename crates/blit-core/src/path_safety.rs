@@ -259,6 +259,75 @@ pub fn verify_contained(canonical_module_root: &Path, target: &Path) -> Result<(
     Ok(())
 }
 
+/// Compute the canonical form of `dest_root` for use in
+/// `verify_contained` calls. If `dest_root` exists, this is just
+/// `canonicalize(dest_root)`. If it doesn't yet (e.g. the receive
+/// operation will create it), we walk to the deepest existing
+/// ancestor and canonicalize that — that's the only frame of
+/// reference symlinks could escape from at write time, since
+/// new directories created under it inherit its canonical
+/// identity.
+///
+/// R46-F3: every receive site that joins a wire-supplied
+/// relative path under a destination root must pair `safe_join`
+/// (lexical) with `verify_contained` (canonical), and the
+/// canonical root needs to be computed once at the entry point
+/// of the operation rather than per-entry. This helper is the
+/// single chokepoint that gives all five sites the same
+/// "deepest-existing-ancestor canonicalize" semantics.
+///
+/// Returns Err if the deepest-existing-ancestor walk hits the
+/// filesystem root without finding a canonicalizable path
+/// (extremely unusual — typically means the entire path was
+/// invalid or the FS is in a weird state).
+pub fn canonical_dest_root(dest_root: &Path) -> Result<PathBuf> {
+    let mut probe: PathBuf = dest_root.to_path_buf();
+    loop {
+        match std::fs::canonicalize(&probe) {
+            Ok(c) => return Ok(c),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !probe.pop() {
+                    bail!(
+                        "destination root '{}' has no canonicalizable \
+                         ancestor — filesystem root unreachable",
+                        dest_root.display()
+                    );
+                }
+            }
+            Err(e) => {
+                bail!(
+                    "canonicalize '{}' for destination-root capture: {}",
+                    probe.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// One-stop "lexically resolve a wire path against a destination
+/// root, then verify the result stays inside the canonical root."
+/// R46-F3: this is the local-receive analogue of `contained_join`
+/// (which is the daemon-module-root chokepoint). Pairs with
+/// `canonical_dest_root` for the canonical root capture.
+///
+/// Returns the lexical target path (NOT the canonicalized form)
+/// so the caller writes to the path they expect; the returned
+/// path is guaranteed to resolve under `canonical_root` post-
+/// symlink-following, so it's safe to write/read/delete. There
+/// remains a TOCTOU window between this check and the actual
+/// filesystem op — the threat model accepts that, the same as
+/// `contained_join` does on the daemon side.
+pub fn safe_join_contained(
+    canonical_root: &Path,
+    dest_root: &Path,
+    wire_path: &str,
+) -> Result<PathBuf> {
+    let target = safe_join(dest_root, wire_path)?;
+    verify_contained(canonical_root, &target)?;
+    Ok(target)
+}
+
 /// Detect strings that represent Windows-absolute paths regardless of
 /// the host platform. This catches forms that `Path::components` on
 /// Unix does not flag (because `C:` and `\` are normal characters
@@ -595,5 +664,76 @@ mod containment_tests {
         symlink(&outside, root.join("escape")).unwrap();
         let err = verify_contained(&root, &root.join("escape/anything")).unwrap_err();
         assert!(err.to_string().contains("escapes module root"));
+    }
+
+    /// R46-F3: `canonical_dest_root` walks deepest-existing
+    /// ancestor when the dest_root itself doesn't exist yet, so
+    /// receive operations that will create their dest dir get a
+    /// stable canonical root from the start.
+    #[test]
+    fn canonical_dest_root_handles_nonexistent_dest() {
+        let tmp = tempdir().unwrap();
+        let nonexistent_dest = tmp.path().join("does_not_exist_yet/nested");
+        let canonical = canonical_dest_root(&nonexistent_dest).unwrap();
+        let tmp_canonical = std::fs::canonicalize(tmp.path()).unwrap();
+        assert!(
+            canonical.starts_with(&tmp_canonical),
+            "canonical dest root {:?} should be under tmp {:?}",
+            canonical,
+            tmp_canonical
+        );
+    }
+
+    /// R46-F3: `safe_join_contained` is the all-in-one helper for
+    /// receive sites — accepts the lexical traversal cases
+    /// `safe_join` rejects, AND rejects pre-existing escape
+    /// symlinks under the canonical root the same way
+    /// `verify_contained` does.
+    #[cfg(unix)]
+    #[test]
+    fn safe_join_contained_rejects_symlink_escape() {
+        let tmp = tempdir().unwrap();
+        let dest_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), b"sensitive").unwrap();
+
+        // Pre-existing escape symlink inside dest_root.
+        symlink(&outside, dest_root.join("link")).unwrap();
+
+        let canonical = canonical_dest_root(&dest_root).unwrap();
+        let err = safe_join_contained(&canonical, &dest_root, "link/victim.txt").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("escapes module root") || msg.contains("escape"),
+            "expected canonical-escape rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn safe_join_contained_passes_for_clean_path() {
+        let tmp = tempdir().unwrap();
+        let dest_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let canonical = canonical_dest_root(&dest_root).unwrap();
+        let target = safe_join_contained(&canonical, &dest_root, "subdir/file.txt").unwrap();
+        assert_eq!(target, dest_root.join("subdir/file.txt"));
+    }
+
+    /// Lexical traversal still rejected (defense in depth — the
+    /// lexical check fires before the canonical one).
+    #[test]
+    fn safe_join_contained_still_rejects_parent_traversal() {
+        let tmp = tempdir().unwrap();
+        let dest_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        let canonical = canonical_dest_root(&dest_root).unwrap();
+        let err = safe_join_contained(&canonical, &dest_root, "../escape").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("traversal") || msg.contains("..") || msg.contains("escape"),
+            "expected traversal rejection, got: {msg}"
+        );
     }
 }

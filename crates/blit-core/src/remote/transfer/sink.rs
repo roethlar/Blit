@@ -91,6 +91,15 @@ pub struct FsSinkConfig {
 pub struct FsTransferSink {
     src_root: PathBuf,
     dst_root: PathBuf,
+    /// Canonical form of `dst_root` (or its deepest existing
+    /// ancestor) captured once at sink construction time. Every
+    /// per-entry write resolves the lexical path under `dst_root`
+    /// and then verifies it stays inside `canonical_dst_root`
+    /// post-symlink. R46-F3: pre-fix the sink only ran lexical
+    /// `safe_join`, so a peer-controlled relative path joined under
+    /// a `dst_root/link → /outside` symlink would write outside
+    /// the destination root.
+    canonical_dst_root: Option<PathBuf>,
     config: FsSinkConfig,
     /// Optional collector for relative paths of successfully-written
     /// files. Used by remote pull's mirror flow to know which files to
@@ -101,9 +110,19 @@ pub struct FsTransferSink {
 
 impl FsTransferSink {
     pub fn new(src_root: PathBuf, dst_root: PathBuf, config: FsSinkConfig) -> Self {
+        // Best-effort canonical root capture. We don't fail
+        // construction if canonicalize fails (e.g. dst_root is a
+        // not-yet-created path under a deeply unusual filesystem) —
+        // instead we leave canonical_dst_root as None and the
+        // per-write check degrades to lexical-only with a warn.
+        // R46-F3: in the common case (dst_root or its ancestor
+        // exists) this captures the canonical form needed for
+        // symlink-escape rejection.
+        let canonical_dst_root = crate::path_safety::canonical_dest_root(&dst_root).ok();
         Self {
             src_root,
             dst_root,
+            canonical_dst_root,
             config,
             path_tracker: None,
         }
@@ -116,6 +135,30 @@ impl FsTransferSink {
     pub fn with_path_tracker(mut self, tracker: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
         self.path_tracker = Some(tracker);
         self
+    }
+
+    /// R46-F3: lexical resolve + canonical containment check in one
+    /// call. Used by every per-entry write site on this sink so a
+    /// peer-controlled relative path can't escape the destination
+    /// root via a pre-existing symlink. Falls back to lexical-only
+    /// (with a warn) if `canonical_dst_root` was None at
+    /// construction time — that path remains exposed but is
+    /// extremely unusual in practice.
+    fn resolve_destination(&self, wire_path: &str) -> Result<PathBuf> {
+        match self.canonical_dst_root.as_ref() {
+            Some(canonical) => {
+                crate::path_safety::safe_join_contained(canonical, &self.dst_root, wire_path)
+            }
+            None => {
+                log::warn!(
+                    "FsTransferSink at '{}' has no canonical root; \
+                     receive falls back to lexical-only path check \
+                     (R46-F3 escape protection unavailable)",
+                    self.dst_root.display()
+                );
+                crate::path_safety::safe_join(&self.dst_root, wire_path)
+            }
+        }
     }
 
     fn track(&self, rel: &str) {
@@ -139,7 +182,16 @@ impl TransferSink for FsTransferSink {
                 relative_path,
                 offset,
                 bytes,
-            } => write_file_block_payload(&self.dst_root, &relative_path, offset, bytes).await,
+            } => {
+                write_file_block_payload(
+                    &self.dst_root,
+                    self.canonical_dst_root.as_deref(),
+                    &relative_path,
+                    offset,
+                    bytes,
+                )
+                .await
+            }
             PreparedPayload::FileBlockComplete {
                 relative_path,
                 total_size,
@@ -148,6 +200,7 @@ impl TransferSink for FsTransferSink {
             } => {
                 let outcome = write_file_block_complete(
                     &self.dst_root,
+                    self.canonical_dst_root.as_deref(),
                     &relative_path,
                     total_size,
                     mtime_seconds,
@@ -205,11 +258,15 @@ impl TransferSink for FsTransferSink {
             receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
         };
 
-        // Wire-supplied relative path validated and joined via the
-        // single chokepoint. Empty input returns `dst_root` unchanged
-        // (single-file destination case). Rejects ../, absolute paths,
-        // Windows drive prefixes, UNC, etc.
-        let dst = crate::path_safety::safe_join(&self.dst_root, &header.relative_path)
+        // R46-F3: lexical resolve + canonical containment check via
+        // resolve_destination. Pre-fix this was a bare safe_join,
+        // which rejected lexical traversal (`../`) but didn't catch
+        // the case where dst_root contained a pre-existing symlink
+        // pointing outside (`dst_root/link → /outside`); a peer-
+        // controlled relative path `link/file` would then write to
+        // `/outside/file`.
+        let dst = self
+            .resolve_destination(&header.relative_path)
             .with_context(|| format!("validating receive path {:?}", header.relative_path))?;
         if let Some(parent) = dst.parent() {
             tokio::fs::create_dir_all(parent)
@@ -443,14 +500,22 @@ fn write_tar_shard_payload(
 /// Resume protocol: overwrite a block of an existing file at the given offset.
 async fn write_file_block_payload(
     dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
     relative_path: &str,
     offset: u64,
     bytes: Vec<u8>,
 ) -> Result<SinkOutcome> {
     use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-    let dst = crate::path_safety::safe_join(dst_root, relative_path)
-        .with_context(|| format!("validating block-write path {:?}", relative_path))?;
+    // R46-F3: contained resolve when canonical root is available.
+    let dst = match canonical_dst_root {
+        Some(canonical) => {
+            crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
+                .with_context(|| format!("validating block-write path {:?}", relative_path))?
+        }
+        None => crate::path_safety::safe_join(dst_root, relative_path)
+            .with_context(|| format!("validating block-write path {:?}", relative_path))?,
+    };
     let bytes_len = bytes.len() as u64;
     // Resume blocks patch existing files at offset; we want to create
     // if missing but never truncate (subsequent block records share
@@ -481,13 +546,21 @@ async fn write_file_block_payload(
 /// mtime to match the source.
 async fn write_file_block_complete(
     dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
     relative_path: &str,
     total_size: u64,
     mtime_seconds: i64,
     permissions: u32,
 ) -> Result<SinkOutcome> {
-    let dst = crate::path_safety::safe_join(dst_root, relative_path)
-        .with_context(|| format!("validating block-complete path {:?}", relative_path))?;
+    // R46-F3: contained resolve when canonical root is available.
+    let dst = match canonical_dst_root {
+        Some(canonical) => {
+            crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
+                .with_context(|| format!("validating block-complete path {:?}", relative_path))?
+        }
+        None => crate::path_safety::safe_join(dst_root, relative_path)
+            .with_context(|| format!("validating block-complete path {:?}", relative_path))?,
+    };
     {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -1452,5 +1525,59 @@ mod tests {
 
         assert_eq!(outcome.bytes_written, content.len() as u64);
         assert_eq!(std::fs::read(&dst_root).unwrap(), content);
+    }
+
+    /// R46-F3 regression: a destination root containing a pre-
+    /// existing escape symlink must reject any peer-controlled
+    /// wire path that would write through it. Pre-fix the sink ran
+    /// only `safe_join` (lexical), which accepts `link/file.txt`
+    /// because lexically that's just two components — the symlink
+    /// resolution happens at write time and would land outside the
+    /// destination root. unix-only because the test relies on
+    /// `std::os::unix::fs::symlink`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_sink_rejects_write_through_pre_existing_escape_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Pre-existing escape symlink inside dst.
+        symlink(&outside, dst.join("link")).unwrap();
+
+        let sink = FsTransferSink::new(
+            src,
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        // Wire path joining through `link` resolves to /outside/victim.txt.
+        let content = b"would-be exfiltration";
+        let header = make_file_header("link/victim.txt", content.len() as u64);
+        let mut reader: &[u8] = content;
+        let err = sink
+            .write_file_stream(&header, &mut reader)
+            .await
+            .expect_err("R46-F3: write through escape symlink must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("escape") || msg.contains("escapes"),
+            "expected canonical-escape rejection, got: {msg}"
+        );
+        assert!(
+            !outside.join("victim.txt").exists(),
+            "victim file should NOT have been written outside dst"
+        );
     }
 }

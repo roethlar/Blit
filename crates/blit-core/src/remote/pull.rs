@@ -247,6 +247,17 @@ impl RemotePullClient {
             }
         }
 
+        // R46-F3: capture the canonical destination root once at
+        // the entry point so every per-file write site below can
+        // verify containment without re-canonicalizing. Best-effort:
+        // a missing-deepest-ancestor failure (very rare) leaves
+        // canonical_dest_root as None and the per-write check
+        // degrades to lexical-only with a logged warning. Falling
+        // back to lexical-only is preferable to refusing to write
+        // because the canonicalize layer is fragile (e.g. on
+        // unusual filesystems).
+        let canonical_dest_root = crate::path_safety::canonical_dest_root(dest_root).ok();
+
         let (module, rel_path) = match &self.endpoint.path {
             RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
             RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
@@ -292,7 +303,11 @@ impl RemotePullClient {
                     finalize_active_file(&mut active_file, progress).await?;
 
                     let relative_path = sanitize_relative_path(&header.relative_path)?;
-                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
+                    let dest_path = resolve_pull_dest_contained(
+                        dest_root,
+                        canonical_dest_root.as_deref(),
+                        &relative_path,
+                    )?;
                     if let Some(parent) = dest_path.parent() {
                         fs::create_dir_all(parent)
                             .await
@@ -608,6 +623,10 @@ impl RemotePullClient {
             }
         }
 
+        // R46-F3: capture canonical destination root for symlink-
+        // escape prevention on every per-file write below.
+        let canonical_dest_root = crate::path_safety::canonical_dest_root(dest_root).ok();
+
         // Derive checksum-mode flag from the spec for the PullSyncAck
         // mismatch check below. This is the only spec field the body
         // proper inspects (apart from sending the spec itself).
@@ -736,7 +755,11 @@ impl RemotePullClient {
                     finalize_active_file(&mut active_file, progress).await?;
 
                     let relative_path = sanitize_relative_path(&header.relative_path)?;
-                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
+                    let dest_path = resolve_pull_dest_contained(
+                        dest_root,
+                        canonical_dest_root.as_deref(),
+                        &relative_path,
+                    )?;
                     if let Some(parent) = dest_path.parent() {
                         fs::create_dir_all(parent)
                             .await
@@ -827,8 +850,13 @@ impl RemotePullClient {
                             shard.declared_size
                         );
                     }
-                    let stats = apply_pull_tar_shard(dest_root, shard, track_paths)
-                        .with_context(|| "applying tar shard")?;
+                    let stats = apply_pull_tar_shard(
+                        dest_root,
+                        canonical_dest_root.as_deref(),
+                        shard,
+                        track_paths,
+                    )
+                    .with_context(|| "applying tar shard")?;
                     report.files_transferred += stats.files;
                     report.bytes_transferred += stats.bytes;
                     if track_paths {
@@ -852,13 +880,25 @@ impl RemotePullClient {
                 }
                 Some(server_pull_message::Payload::BlockHashRequest(req)) => {
                     // Server requests block hashes for resume mode
-                    // Compute Blake3 hashes of local file blocks and send them back
-                    // Routes through the shared safe_join chokepoint so
-                    // empty (single-file dest) and traversal/abs/UNC
-                    // attacks are handled uniformly with the rest of
-                    // the receive sink sites. F1 of the 2026-05-01 review.
-                    let local_path = crate::path_safety::safe_join(dest_root, &req.relative_path)
+                    // Compute Blake3 hashes of local file blocks and send them back.
+                    // R46-F3: contained resolve via the same canonical
+                    // root the rest of pull_sync_with_spec uses, so a
+                    // peer-controlled `link/file` can't trick the
+                    // hashing pass into reading outside the destination.
+                    let rel_path = crate::path_safety::validate_wire_path(&req.relative_path)
                         .map_err(|e| {
+                            eyre!(
+                                "server returned unsafe block-hash path {:?}: {}",
+                                req.relative_path,
+                                e
+                            )
+                        })?;
+                    let local_path = resolve_pull_dest_contained(
+                        dest_root,
+                        canonical_dest_root.as_deref(),
+                        &rel_path,
+                    )
+                    .map_err(|e| {
                         eyre!(
                             "server returned unsafe block-hash path {:?}: {}",
                             req.relative_path,
@@ -1182,6 +1222,7 @@ struct ShardApplyStats {
 /// receive can't drift.
 fn apply_pull_tar_shard(
     dest_root: &Path,
+    canonical_dest_root: Option<&Path>,
     shard: InProgressShard,
     track_paths: bool,
 ) -> Result<ShardApplyStats> {
@@ -1197,6 +1238,26 @@ fn apply_pull_tar_shard(
         require_exact_headers: true,
     };
     let extracted = safe_extract_tar_shard(&shard.buffer, shard.files, dest_root, &opts)?;
+
+    // R46-F3: verify each extracted entry's destination path stays
+    // inside the canonical destination root. `safe_extract_tar_shard`
+    // already does lexical validation on each header, but a pre-
+    // existing symlink under `dest_root` would still let a tar
+    // shard write outside via wire-controlled paths.
+    if let Some(canonical) = canonical_dest_root {
+        for f in &extracted {
+            crate::path_safety::verify_contained(canonical, &f.dest_path).with_context(|| {
+                format!("tar shard entry {:?} escapes destination root", f.dest_path)
+            })?;
+        }
+    } else {
+        log::warn!(
+            "apply_pull_tar_shard at '{}' has no canonical root; \
+             tar-shard receive falls back to lexical-only path checks \
+             (R46-F3 escape protection unavailable)",
+            dest_root.display()
+        );
+    }
 
     let mut stats = ShardApplyStats {
         files: 0,
@@ -1269,7 +1330,7 @@ mod tar_shard_safety_tests {
             buffer,
             declared_size,
         };
-        let err = apply_pull_tar_shard(dest, shard, false).unwrap_err();
+        let err = apply_pull_tar_shard(dest, None, shard, false).unwrap_err();
         assert!(
             err.to_string().contains("non-regular entry"),
             "expected non-regular rejection, got: {err}"
@@ -1314,7 +1375,7 @@ mod tar_shard_safety_tests {
             buffer,
             declared_size,
         };
-        let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
+        let err = apply_pull_tar_shard(&dest, None, shard, false).unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("validating") || msg.contains("validate"),
@@ -1339,7 +1400,7 @@ mod tar_shard_safety_tests {
             buffer,
             declared_size,
         };
-        let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
+        let err = apply_pull_tar_shard(&dest, None, shard, false).unwrap_err();
         assert!(
             err.to_string().contains("does not match"),
             "expected size-mismatch rejection, got: {err}"
@@ -1362,7 +1423,7 @@ mod tar_shard_safety_tests {
             buffer,
             declared_size,
         };
-        let err = apply_pull_tar_shard(&dest, shard, false).unwrap_err();
+        let err = apply_pull_tar_shard(&dest, None, shard, false).unwrap_err();
         // The first check that fires is the entry/header size mismatch
         // (entry says 2, header says u64::MAX).
         assert!(err.to_string().contains("does not match"));
@@ -1408,7 +1469,7 @@ mod tar_shard_safety_tests {
             buffer,
             declared_size,
         };
-        apply_pull_tar_shard(&dest, shard, false).unwrap();
+        apply_pull_tar_shard(&dest, None, shard, false).unwrap();
         let meta = std::fs::metadata(dest.join("dated.txt")).unwrap();
         let actual = filetime::FileTime::from_last_modification_time(&meta).unix_seconds();
         assert_eq!(
@@ -1428,7 +1489,7 @@ mod tar_shard_safety_tests {
             buffer,
             declared_size,
         };
-        let stats = apply_pull_tar_shard(&dest, shard, true).unwrap();
+        let stats = apply_pull_tar_shard(&dest, None, shard, true).unwrap();
         assert_eq!(stats.files, 2);
         assert_eq!(stats.bytes, 9);
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"alpha");
@@ -1597,6 +1658,40 @@ fn resolve_pull_dest(dest_root: &Path, relative_path: &Path) -> PathBuf {
     } else {
         dest_root.join(relative_path)
     }
+}
+
+/// R46-F3: lexical resolve + canonical containment check for the
+/// non-FsTransferSink pull paths (legacy direct-write,
+/// resume-block-hash, tar-shard apply). Pre-fix these paths only ran
+/// `safe_join` lexically; a pre-existing symlink under `dest_root`
+/// would let a peer-controlled wire path escape the destination.
+/// `canonical_dest_root` is captured once at the entry of `pull()`
+/// — None means the deepest-ancestor walk failed and we fall back
+/// to lexical-only with a logged warning.
+fn resolve_pull_dest_contained(
+    dest_root: &Path,
+    canonical_dest_root: Option<&Path>,
+    relative_path: &Path,
+) -> Result<PathBuf> {
+    let target = resolve_pull_dest(dest_root, relative_path);
+    if let Some(canonical) = canonical_dest_root {
+        crate::path_safety::verify_contained(canonical, &target).map_err(|e| {
+            eyre!(
+                "server-supplied path {:?} escapes destination root: {}",
+                relative_path,
+                e
+            )
+        })?;
+    } else {
+        log::warn!(
+            "pull at '{}' has no canonical root; receive falls back \
+             to lexical-only path check (R46-F3 escape protection \
+             unavailable for {:?})",
+            dest_root.display(),
+            relative_path
+        );
+    }
+    Ok(target)
 }
 
 /// Validate a wire-supplied relative path coming from the daemon.
