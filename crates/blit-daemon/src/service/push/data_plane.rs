@@ -9,7 +9,7 @@ use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
@@ -47,6 +47,22 @@ pub(crate) fn generate_token() -> Vec<u8> {
     buf
 }
 
+/// Bounded wait for the first data-plane accept. R46-F7: pre-fix the
+/// daemon called `listener.accept().await` with no timeout — a peer
+/// that opened the control connection but never opened the data
+/// connection (or hung mid-handshake) would pin the daemon's stream
+/// task indefinitely, holding the listener and the queued
+/// FileHeaders. 30s gives a generous margin for slow networks while
+/// still bounding the worst case.
+const DATA_PLANE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounded wait for the token bytes to arrive after a TCP accept.
+/// R46-F7: pre-fix `read_exact(&mut token_buf).await` had no
+/// timeout. A peer that opened the socket and stalled would hold
+/// this stream worker forever. 15s is enough for a healthy peer to
+/// send 32 bytes; anything slower indicates a stuck or hostile
+/// peer.
+const DATA_PLANE_TOKEN_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub(crate) async fn accept_data_connection_stream(
     listener: TcpListener,
     expected_token: Vec<u8>,
@@ -61,10 +77,24 @@ pub(crate) async fn accept_data_connection_stream(
     let mut handles = Vec::with_capacity(streams);
 
     for idx in 0..streams {
-        let (accepted, addr) = listener
-            .accept()
-            .await
-            .map_err(|err| Status::internal(format!("data plane accept failed: {}", err)))?;
+        let (accepted, addr) =
+            match tokio::time::timeout(DATA_PLANE_ACCEPT_TIMEOUT, listener.accept()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(err)) => {
+                    return Err(Status::internal(format!(
+                        "data plane accept failed: {}",
+                        err
+                    )));
+                }
+                Err(_elapsed) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "data plane accept timed out after {:?} waiting for stream {}/{}",
+                        DATA_PLANE_ACCEPT_TIMEOUT,
+                        idx + 1,
+                        streams
+                    )));
+                }
+            };
         // Enable nodelay + keepalive to prevent idle stream timeouts
         // during long transfers on other streams.
         let socket = {
@@ -122,10 +152,24 @@ async fn handle_data_plane_stream(
 ) -> Result<TransferStats, Status> {
     let start = Instant::now();
     let mut token_buf = vec![0u8; expected_token.len()];
-    socket
-        .read_exact(&mut token_buf)
-        .await
-        .map_err(|err| Status::internal(format!("failed to read data plane token: {}", err)))?;
+    // R46-F7: bounded wait on the token. A stalled peer that
+    // accepted the socket but never sent bytes would otherwise hold
+    // this worker indefinitely.
+    match tokio::time::timeout(DATA_PLANE_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            return Err(Status::internal(format!(
+                "failed to read data plane token: {}",
+                err
+            )));
+        }
+        Err(_elapsed) => {
+            return Err(Status::deadline_exceeded(format!(
+                "data plane token read timed out after {:?}",
+                DATA_PLANE_TOKEN_TIMEOUT
+            )));
+        }
+    }
     if token_buf != expected_token {
         eprintln!("[data-plane] invalid token");
         return Err(Status::permission_denied("invalid data plane token"));

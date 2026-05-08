@@ -540,18 +540,45 @@ async fn stream_via_data_plane(
 
     let file_count = payload_file_count(&planned.payloads);
 
-    // Accept connection + verify token
-    let (socket, _) = listener
-        .accept()
-        .await
-        .map_err(|e| Status::internal(format!("failed to accept data plane connection: {}", e)))?;
+    // R46-F7: bounded waits on accept and token-read. Pre-fix, a
+    // peer that opened the control RPC but never opened the data
+    // socket would pin this task indefinitely, holding the
+    // listener and the queued payload work.
+    use std::time::Duration as StdDuration;
+    const PULL_SYNC_ACCEPT_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+    const PULL_SYNC_TOKEN_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+
+    let (socket, _) = match tokio::time::timeout(PULL_SYNC_ACCEPT_TIMEOUT, listener.accept()).await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            return Err(Status::internal(format!(
+                "failed to accept data plane connection: {}",
+                e
+            )));
+        }
+        Err(_elapsed) => {
+            return Err(Status::deadline_exceeded(format!(
+                "pull-sync data plane accept timed out after {:?}",
+                PULL_SYNC_ACCEPT_TIMEOUT
+            )));
+        }
+    };
     let expected_token = token;
     let mut token_buf = vec![0u8; expected_token.len()];
     let mut socket = socket;
-    socket
-        .read_exact(&mut token_buf)
-        .await
-        .map_err(|e| Status::internal(format!("failed to read token: {}", e)))?;
+    match tokio::time::timeout(PULL_SYNC_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Err(Status::internal(format!("failed to read token: {}", e)));
+        }
+        Err(_elapsed) => {
+            return Err(Status::deadline_exceeded(format!(
+                "pull-sync token read timed out after {:?}",
+                PULL_SYNC_TOKEN_TIMEOUT
+            )));
+        }
+    }
     if token_buf != expected_token {
         return Err(Status::unauthenticated("invalid data plane token"));
     }
@@ -635,20 +662,45 @@ async fn stream_via_data_plane_resume(
     .await
     .map_err(|_| Status::internal("failed to send negotiation"))?;
 
-    // Accept connection
-    let (socket, _) = listener
-        .accept()
-        .await
-        .map_err(|e| Status::internal(format!("failed to accept data plane connection: {}", e)))?;
+    // R46-F7: bounded waits on accept + token-read. Same rationale
+    // as the streaming pull-sync path (PULL_SYNC_ACCEPT_TIMEOUT /
+    // PULL_SYNC_TOKEN_TIMEOUT defined above) — a stalled peer
+    // mustn't hold the daemon's listener indefinitely.
+    use std::time::Duration as StdDuration2;
+    const ACCEPT_TIMEOUT: StdDuration2 = StdDuration2::from_secs(30);
+    const TOKEN_TIMEOUT: StdDuration2 = StdDuration2::from_secs(15);
+    let (socket, _) = match tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept()).await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            return Err(Status::internal(format!(
+                "failed to accept data plane connection: {}",
+                e
+            )));
+        }
+        Err(_elapsed) => {
+            return Err(Status::deadline_exceeded(format!(
+                "pull-sync data plane accept timed out after {:?}",
+                ACCEPT_TIMEOUT
+            )));
+        }
+    };
 
     // Verify token
     let expected_token = token;
     let mut token_buf = vec![0u8; expected_token.len()];
     let mut socket = socket;
-    socket
-        .read_exact(&mut token_buf)
-        .await
-        .map_err(|e| Status::internal(format!("failed to read token: {}", e)))?;
+    match tokio::time::timeout(TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Err(Status::internal(format!("failed to read token: {}", e)));
+        }
+        Err(_elapsed) => {
+            return Err(Status::deadline_exceeded(format!(
+                "pull-sync token read timed out after {:?}",
+                TOKEN_TIMEOUT
+            )));
+        }
+    }
     if token_buf != expected_token {
         return Err(Status::unauthenticated("invalid data plane token"));
     }
