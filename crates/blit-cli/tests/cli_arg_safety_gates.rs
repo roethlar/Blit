@@ -183,15 +183,37 @@ fn local_move_rejects_force_flag() {
     fs::create_dir_all(&dst).unwrap();
     fs::write(src.join("file.txt"), b"src content").unwrap();
 
-    assert_rejected(
-        &[
-            "move",
-            "--yes",
-            "--force",
-            &format!("{}/", src.display()),
-            &format!("{}/", dst.display()),
-        ],
-        "move does not support --force",
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--force")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(15));
+    assert!(
+        !output.status.success(),
+        "move --force must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support --force"),
+        "expected R54-F2 --force rejection, got stderr: {}",
+        stderr
+    );
+    // R55: the remediation must NOT recommend `blit copy --force`
+    // or `blit copy --ignore-times` — those flags aren't plumbed
+    // through the local or push paths either, so the recommended
+    // workaround would have the same data-loss class as the move
+    // we just rejected.
+    assert!(
+        !stderr.contains("blit copy --force") && !stderr.contains("blit copy --ignore-times"),
+        "R55: error must not recommend `blit copy --force` / \
+         `--ignore-times` — those copy flags aren't plumbed end-to-end \
+         and reusing them would have the same skip-then-delete bug. \
+         Got stderr:\n{}",
+        stderr
     );
     assert!(
         src.join("file.txt").exists(),
@@ -208,15 +230,30 @@ fn local_move_rejects_ignore_times_flag() {
     fs::create_dir_all(&dst).unwrap();
     fs::write(src.join("file.txt"), b"src content").unwrap();
 
-    assert_rejected(
-        &[
-            "move",
-            "--yes",
-            "--ignore-times",
-            &format!("{}/", src.display()),
-            &format!("{}/", dst.display()),
-        ],
-        "move does not support --ignore-times",
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--ignore-times")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(15));
+    assert!(
+        !output.status.success(),
+        "move --ignore-times must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support --ignore-times"),
+        "expected R54-F2 --ignore-times rejection, got stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("blit copy --force") && !stderr.contains("blit copy --ignore-times"),
+        "R55: error must not recommend `blit copy --force` / \
+         `--ignore-times` as the workaround. Got stderr:\n{}",
+        stderr
     );
     assert!(
         src.join("file.txt").exists(),

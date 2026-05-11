@@ -541,22 +541,28 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     }
 
     // R54-F2 (data-loss): reject `--force` and `--ignore-times`
-    // for move. The flags are documented as "unconditionally
+    // for move. Both flags are documented as "unconditionally
     // transfer regardless of size/mtime match," but neither is
     // currently plumbed through `LocalMirrorOptions` /
     // `PushControl`'s comparison-mode selection — the local and
-    // local→remote paths fall through to SizeMtime regardless.
+    // local→remote paths fall through to size+mtime regardless.
     // For move that means a stale destination with matching
     // size+mtime is treated as up-to-date, the source isn't
-    // copied, and then the source-delete step removes it. The
-    // flags ARE plumbed through PullSync (PullSyncOptions
-    // carries `force` and `ignore_times`), so remote-source move
-    // would actually honor them — but rather than ship a split
-    // contract where some move arms respect the flag and others
-    // silently lose data, refuse uniformly until the local
-    // paths catch up. Proper plumbing is a post-release item;
-    // operators can express `--force` semantics on move by
-    // doing `blit copy --force` then `blit rm src` manually.
+    // copied, and then the source-delete step removes it.
+    //
+    // R55: the error messages must NOT point users at a workaround
+    // that has the same data-loss class. Specifically:
+    //   - `blit copy --force` / `--ignore-times`: not plumbed for
+    //     local-source paths either — same skip-then-delete bug
+    //     hits in the recommended copy step.
+    //   - `blit copy --checksum`: works end-to-end for local→local
+    //     and for remote-source pull (PullSyncOptions.checksum is
+    //     honored), but local→remote push at
+    //     `daemon/src/service/push/control.rs:419` decides need-list
+    //     by size+mtime only regardless. So --checksum is safe to
+    //     recommend for local-to-local, NOT for local-to-remote.
+    // The remediation in each branch below is tailored to what
+    // the user actually has available as a safe escape hatch.
     if args.force {
         bail!(
             "move does not support --force: the local and \
@@ -565,8 +571,24 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
              destination with matching size+mtime would be \
              treated as up-to-date — the source would be \
              skipped during the transfer and then deleted by \
-             move. Run `blit copy --force` followed by \
-             `blit rm src` if that's the semantic you want."
+             move.\n\
+             \n\
+             Safe escape hatches by direction:\n\
+               local→local: `blit copy --checksum SRC DST` \
+             (content comparison) then `blit rm SRC` once you've \
+             verified the result.\n\
+               remote-source: `blit copy --checksum REMOTE DST` \
+             (--checksum is honored end-to-end on the pull path) \
+             then delete the remote source manually.\n\
+               local→remote: NO automatic safe replacement — the \
+             daemon's push receive compares by size+mtime only \
+             regardless of --checksum. `touch` source files to \
+             bump mtime before transfer, or compare contents \
+             out-of-band, then move.\n\
+             \n\
+             Proper plumbing of --force/--ignore-times through \
+             the local and push comparison paths is a post-0.1.0 \
+             item."
         );
     }
     if args.ignore_times {
@@ -576,9 +598,20 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
              through to size+mtime comparison regardless of \
              this flag, so a stale destination with matching \
              size+mtime would be treated as up-to-date and the \
-             source-delete step would lose data. Run \
-             `blit copy --ignore-times` followed by \
-             `blit rm src` if that's the semantic you want."
+             source-delete step would lose data.\n\
+             \n\
+             Safe escape hatches by direction:\n\
+               local→local: `blit copy --checksum SRC DST` then \
+             `blit rm SRC` once verified.\n\
+               remote-source: `blit copy --checksum REMOTE DST` \
+             then delete the remote source manually.\n\
+               local→remote: NO automatic safe replacement — \
+             daemon push compares by size+mtime only. `touch` \
+             source files to bump mtime first, or verify \
+             contents out-of-band, then move.\n\
+             \n\
+             Proper plumbing of --ignore-times through the local \
+             and push paths is a post-0.1.0 item."
         );
     }
 
