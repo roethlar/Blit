@@ -25,14 +25,67 @@ const SETTINGS_FILE: &str = "settings.json";
 /// Version history:
 ///   0 - implicit (records written before versioning was added)
 ///   1 - added schema_version field
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+///   2 - added `run_kind` to separate measurement lanes (real transfer
+///       vs dry-run vs null-sink vs bench). Pre-v2 records carry their
+///       lane implicitly in `options.dry_run` and
+///       `fast_path == Some("null_sink")`; migration derives `run_kind`
+///       from those without touching `mode`. R56-F1.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
-/// High-level category of a transfer run.
+/// High-level category of a transfer run (intent-side).
+///
+/// `mode` answers "what was the operator asking for?" — copy or mirror.
+/// Orthogonal to `RunKind`, which answers "what kind of measurement is
+/// this record?" — a real transfer, a dry-run, a null-sink benchmark,
+/// etc. A `(mode=Mirror, run_kind=DryRun)` record means the user asked
+/// for a mirror operation but routed it through the dry-run path; that
+/// record should NOT teach the predictor anything about real-mirror
+/// transfer cost (no writes happened).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferMode {
     Copy,
     Mirror,
+}
+
+/// Measurement lane for a [`PerformanceRecord`]. Determines whether the
+/// record is eligible to feed real-transfer predictor training or local
+/// auto-tune aggregates. R56-F1: pre-fix, `derive_local_plan_tuning`
+/// read every record indiscriminately, so dry-run records (zero writes)
+/// and null-sink benchmarks (zero writes by definition) taught the
+/// tuner that destination writes were free. Filtering by `run_kind ==
+/// Real` is the single chokepoint that closes that contamination.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    /// Normal production transfer. Eligible for predictor training and
+    /// auto-tune aggregates.
+    #[default]
+    Real,
+    /// `--dry-run`: plan-and-stop, no writes happened. Useful for
+    /// debugging but not representative of real transfer cost.
+    DryRun,
+    /// `--null` / null-sink benchmark: pipeline ran, destination
+    /// writes discarded. Useful for diagnostics but writes were zero
+    /// cost.
+    NullSink,
+    /// `blit bench transfer` (planned 0.2.0 verb): real source reads,
+    /// null destination. Separate predictor lane.
+    BenchTransfer,
+    /// `blit bench wire` (planned 0.2.0 verb): synthetic source,
+    /// null destination. Pure data-plane measurement.
+    BenchWire,
+}
+
+impl RunKind {
+    /// True iff the record is a "real transfer" — eligible to feed
+    /// the predictor's real-transfer profile and the local auto-tune
+    /// bucket aggregates. R56-F1: every consumer of historical
+    /// records that drives production behavior MUST filter on this
+    /// before consulting per-record fields.
+    pub fn is_real_transfer(&self) -> bool {
+        matches!(self, RunKind::Real)
+    }
 }
 
 /// Snapshot of the options that influence performance.
@@ -56,6 +109,14 @@ pub struct PerformanceRecord {
     pub schema_version: u32,
     pub timestamp_epoch_ms: u128,
     pub mode: TransferMode,
+    /// R56-F1: measurement lane. Pre-v2 records omit this; the
+    /// migration derives it from `options.dry_run` and
+    /// `fast_path == Some("null_sink")`. Filtering on
+    /// `run_kind.is_real_transfer()` is the single chokepoint
+    /// that keeps dry-run / null-sink / bench records out of
+    /// production training data.
+    #[serde(default)]
+    pub run_kind: RunKind,
     pub source_fs: Option<String>,
     pub dest_fs: Option<String>,
     pub file_count: usize,
@@ -99,6 +160,19 @@ impl PerformanceRecord {
         stall_events: u32,
         error_count: u32,
     ) -> Self {
+        // R56-F1: derive `run_kind` from the call-site inputs. The
+        // callers that need a specific kind (bench verbs, future
+        // synthetic source) should mutate `record.run_kind` after
+        // construction; this default infers from existing fields so
+        // we don't have to thread a new parameter through every
+        // caller right now.
+        let run_kind = if options.dry_run {
+            RunKind::DryRun
+        } else if fast_path.as_deref() == Some("null_sink") {
+            RunKind::NullSink
+        } else {
+            RunKind::Real
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -106,6 +180,7 @@ impl PerformanceRecord {
             schema_version: CURRENT_SCHEMA_VERSION,
             timestamp_epoch_ms: now.as_millis(),
             mode,
+            run_kind,
             source_fs,
             dest_fs,
             file_count,
@@ -168,9 +243,30 @@ pub fn append_local_record(record: &PerformanceRecord) -> Result<()> {
 /// Future migrations (e.g., field renames, type changes) should be added here
 /// as version-gated transformations.
 pub fn migrate_record(mut record: PerformanceRecord) -> PerformanceRecord {
-    // Version 0 → 1: no field changes needed, just stamp the version.
-    // Future migrations would go here, e.g.:
-    //   if record.schema_version < 2 { /* transform fields for v2 */ }
+    // v0 → v1: no field changes; v1 just stamped the version field.
+    //
+    // v1 → v2: introduced `run_kind`. Older records didn't carry it
+    // explicitly; the lane was implicit in `options.dry_run` and
+    // `fast_path == Some("null_sink")`. R56-F1: derive the kind
+    // without touching `mode` (which already correctly captures
+    // copy vs mirror — old mirror records stay mirror, not
+    // collapsed to Copy).
+    //
+    // We re-derive on every load below v2 — serde's #[serde(default)]
+    // on the field gives us RunKind::Real for a missing-field
+    // deserialize, which is the WRONG default for a dry-run record
+    // whose run_kind we never wrote. The explicit migration here
+    // is what makes loaded-from-v1 dry-run records actually carry
+    // the DryRun lane.
+    if record.schema_version < 2 {
+        record.run_kind = if record.options.dry_run {
+            RunKind::DryRun
+        } else if record.fast_path.as_deref() == Some("null_sink") {
+            RunKind::NullSink
+        } else {
+            RunKind::Real
+        };
+    }
     record.schema_version = CURRENT_SCHEMA_VERSION;
     record
 }
@@ -487,5 +583,167 @@ mod tests {
 
         let records = read_records_from_path(&path, 2).expect("read");
         assert_eq!(records.len(), 2, "should return only the last 2 records");
+    }
+
+    // ── R56-F1: run_kind lane + migration ──────────────────────────────
+
+    /// Pre-v2 records carried lane in `options.dry_run` and
+    /// `fast_path == Some("null_sink")`. Migration must derive the
+    /// lane without collapsing `mode` — an old mirror record stays
+    /// mirror.
+    #[test]
+    fn migration_v1_real_copy_record_lands_in_real_lane() {
+        let record: PerformanceRecord =
+            serde_json::from_str(sample_v0_json()).expect("deserialize v0");
+        let migrated = migrate_record(record);
+        assert_eq!(migrated.mode, TransferMode::Copy);
+        assert_eq!(
+            migrated.run_kind,
+            RunKind::Real,
+            "real copy record should land in Real lane"
+        );
+    }
+
+    /// GPT explicit ask: "old mirror record migrates without
+    /// becoming copy."
+    #[test]
+    fn migration_v1_mirror_record_preserves_mirror_mode_and_real_lane() {
+        let record: PerformanceRecord =
+            serde_json::from_str(sample_v1_json()).expect("deserialize v1");
+        let migrated = migrate_record(record);
+        assert_eq!(
+            migrated.mode,
+            TransferMode::Mirror,
+            "mirror must NOT be collapsed to Copy by migration"
+        );
+        assert_eq!(
+            migrated.run_kind,
+            RunKind::Real,
+            "non-dry-run mirror record should land in Real lane"
+        );
+    }
+
+    #[test]
+    fn migration_dry_run_record_lands_in_dryrun_lane() {
+        // Old v1 record with options.dry_run = true and no
+        // explicit run_kind field on the wire.
+        let json = r#"{"schema_version":1,"timestamp_epoch_ms":1700000000000,"mode":"copy","source_fs":null,"dest_fs":null,"file_count":3,"total_bytes":100,"options":{"dry_run":true,"preserve_symlinks":true,"include_symlinks":false,"skip_unchanged":false,"checksum":false,"workers":1},"fast_path":null,"planner_duration_ms":5,"transfer_duration_ms":0,"stall_events":0,"error_count":0}"#;
+        let record: PerformanceRecord = serde_json::from_str(json).expect("deserialize v1 dry-run");
+        let migrated = migrate_record(record);
+        assert_eq!(
+            migrated.run_kind,
+            RunKind::DryRun,
+            "options.dry_run=true must migrate to DryRun lane"
+        );
+        assert_eq!(migrated.mode, TransferMode::Copy);
+    }
+
+    #[test]
+    fn migration_null_sink_record_lands_in_nullsink_lane() {
+        // Old v1 record with fast_path = "null_sink".
+        let json = r#"{"schema_version":1,"timestamp_epoch_ms":1700000000000,"mode":"copy","source_fs":null,"dest_fs":null,"file_count":3,"total_bytes":100,"options":{"dry_run":false,"preserve_symlinks":true,"include_symlinks":false,"skip_unchanged":false,"checksum":false,"workers":1},"fast_path":"null_sink","planner_duration_ms":5,"transfer_duration_ms":2,"stall_events":0,"error_count":0}"#;
+        let record: PerformanceRecord =
+            serde_json::from_str(json).expect("deserialize v1 null-sink");
+        let migrated = migrate_record(record);
+        assert_eq!(
+            migrated.run_kind,
+            RunKind::NullSink,
+            "fast_path=null_sink must migrate to NullSink lane"
+        );
+    }
+
+    /// New records via the constructor pick up the lane from
+    /// `options.dry_run` and `fast_path` so callers don't have to
+    /// thread a new parameter through every existing path.
+    #[test]
+    fn new_record_with_dry_run_options_picks_dryrun_lane() {
+        let options = OptionSnapshot {
+            dry_run: true,
+            preserve_symlinks: true,
+            include_symlinks: false,
+            skip_unchanged: true,
+            checksum: false,
+            workers: 4,
+        };
+        let record = PerformanceRecord::new(
+            TransferMode::Mirror,
+            None,
+            None,
+            10,
+            1024,
+            options,
+            None,
+            5,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(record.run_kind, RunKind::DryRun);
+        assert_eq!(record.mode, TransferMode::Mirror);
+    }
+
+    #[test]
+    fn new_record_with_null_sink_fast_path_picks_nullsink_lane() {
+        let options = OptionSnapshot {
+            dry_run: false,
+            preserve_symlinks: true,
+            include_symlinks: false,
+            skip_unchanged: true,
+            checksum: false,
+            workers: 4,
+        };
+        let record = PerformanceRecord::new(
+            TransferMode::Copy,
+            None,
+            None,
+            10,
+            1024,
+            options,
+            Some("null_sink".to_string()),
+            5,
+            2,
+            0,
+            0,
+        );
+        assert_eq!(record.run_kind, RunKind::NullSink);
+    }
+
+    #[test]
+    fn new_record_default_is_real() {
+        let options = OptionSnapshot {
+            dry_run: false,
+            preserve_symlinks: true,
+            include_symlinks: false,
+            skip_unchanged: true,
+            checksum: false,
+            workers: 4,
+        };
+        let record = PerformanceRecord::new(
+            TransferMode::Copy,
+            None,
+            None,
+            10,
+            1024,
+            options,
+            None,
+            5,
+            10,
+            0,
+            0,
+        );
+        assert_eq!(record.run_kind, RunKind::Real);
+        assert!(record.run_kind.is_real_transfer());
+    }
+
+    /// The eligibility helper is the actual chokepoint other modules
+    /// gate on; pin it explicitly so changes to RunKind variants
+    /// can't accidentally shift the contract.
+    #[test]
+    fn is_real_transfer_only_true_for_real() {
+        assert!(RunKind::Real.is_real_transfer());
+        assert!(!RunKind::DryRun.is_real_transfer());
+        assert!(!RunKind::NullSink.is_real_transfer());
+        assert!(!RunKind::BenchTransfer.is_real_transfer());
+        assert!(!RunKind::BenchWire.is_real_transfer());
     }
 }

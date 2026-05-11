@@ -16,11 +16,21 @@ use crate::perf_history::{config_dir, PerformanceRecord, TransferMode};
 
 /// Bumped to v2 in §2.8 of `RELEASE_PLAN_v2_2026-05-04.md` —
 /// `PredictorProfile` now carries coefficients for two duration
-/// targets (planner + transfer) instead of one. `PerformancePredictor::load`
-/// resets state on version mismatch so the bump is transparent to
-/// existing users; they lose their prior history (which was unread
-/// in production paths anyway).
-const STATE_VERSION: u32 = 2;
+/// targets (planner + transfer) instead of one.
+///
+/// Bumped to v3 in R56-F1: previously `observe()` trained
+/// unconditionally on every record, so dry-run and null-sink
+/// records (which the orchestrator passed through anyway) shifted
+/// the transfer coefficient toward "writes are free." Filtering
+/// new training to `RunKind::Real` doesn't undo coefficients
+/// that were already nudged toward bad values; bumping the state
+/// version forces `load()` to reset and rebuild from clean
+/// real-transfer history.
+///
+/// `PerformancePredictor::load` resets state on version mismatch
+/// so the bump is transparent to existing users; they lose their
+/// prior history (which was contaminated anyway).
+const STATE_VERSION: u32 = 3;
 const STATE_FILENAME: &str = "perf_predictor.json";
 
 // Default coefficients (ms contributions).
@@ -383,7 +393,18 @@ impl PerformancePredictor {
     /// future `predict_planner` / `predict_transfer` calls see the
     /// gradient-descent update. The single observation counter is
     /// shared because the two targets always update together.
+    ///
+    /// R56-F1: silently skips non-real-transfer records (dry-run,
+    /// null-sink, bench). The predictor's job is to model
+    /// production transfer cost; a dry-run with zero transfer
+    /// duration or a null-sink run with cost-free writes would
+    /// pull the coefficients toward wrong values. Bench records
+    /// belong on a future separate predictor lane (see
+    /// `BENCH_VERB_PLAN.md` §6); for now they're just dropped.
     pub fn observe(&mut self, record: &PerformanceRecord) {
+        if !record.run_kind.is_real_transfer() {
+            return;
+        }
         let key = ProfileKey::new(record);
         let profile = self
             .state
@@ -596,9 +617,10 @@ mod tests {
         fast_path: Option<&str>,
     ) -> PerformanceRecord {
         PerformanceRecord {
-            schema_version: 1,
+            schema_version: crate::perf_history::CURRENT_SCHEMA_VERSION,
             timestamp_epoch_ms: 0,
             mode,
+            run_kind: crate::perf_history::RunKind::Real,
             source_fs: source_fs.map(str::to_string),
             dest_fs: dest_fs.map(str::to_string),
             file_count,
@@ -1060,5 +1082,229 @@ mod tests {
         };
         assert_eq!(post.version, STATE_VERSION);
         assert!(post.profiles.is_empty());
+    }
+
+    // ── R56-F1: observe() filters non-real records ────────────────────
+
+    /// Build a record with the requested durations + lane. Uses the
+    /// same shape as the existing test helpers so the contract is
+    /// "same record, different lane → different observe behavior."
+    fn record_with_lane(
+        kind: crate::perf_history::RunKind,
+        planner_ms: u128,
+        transfer_ms: u128,
+    ) -> PerformanceRecord {
+        let opts = crate::perf_history::OptionSnapshot {
+            dry_run: matches!(kind, crate::perf_history::RunKind::DryRun),
+            preserve_symlinks: false,
+            include_symlinks: false,
+            skip_unchanged: true,
+            checksum: false,
+            workers: 4,
+        };
+        let fast_path = match kind {
+            crate::perf_history::RunKind::NullSink => Some("null_sink".to_string()),
+            _ => None,
+        };
+        let mut record = PerformanceRecord::new(
+            TransferMode::Copy,
+            None,
+            None,
+            100,
+            1024 * 1024,
+            opts,
+            fast_path,
+            planner_ms,
+            transfer_ms,
+            0,
+            0,
+        );
+        record.run_kind = kind;
+        record
+    }
+
+    #[test]
+    fn observe_ignores_dry_run_records() {
+        let mut predictor =
+            PerformancePredictor::for_tests(std::path::Path::new("/tmp/blit_predictor_test"));
+        // Feed 10 dry-run records with zero transfer duration. Pre-fix,
+        // each would nudge the transfer coefficient toward zero —
+        // teaching the model that writes are free.
+        for _ in 0..10 {
+            predictor.observe(&record_with_lane(
+                crate::perf_history::RunKind::DryRun,
+                50,
+                0,
+            ));
+        }
+        // No real records yet → predict() returns None (below the
+        // observation threshold, even with the dry-run "training"
+        // not counted).
+        assert!(
+            predictor
+                .predict(
+                    DurationKind::Transfer,
+                    TransferMode::Copy,
+                    None,
+                    None,
+                    None,
+                    true,
+                    false,
+                    100,
+                    1024 * 1024,
+                )
+                .is_none(),
+            "predictor must have learned nothing from dry-run records"
+        );
+    }
+
+    #[test]
+    fn observe_ignores_null_sink_records() {
+        let mut predictor =
+            PerformancePredictor::for_tests(std::path::Path::new("/tmp/blit_predictor_test"));
+        for _ in 0..10 {
+            predictor.observe(&record_with_lane(
+                crate::perf_history::RunKind::NullSink,
+                30,
+                10,
+            ));
+        }
+        assert!(
+            predictor
+                .predict(
+                    DurationKind::Transfer,
+                    TransferMode::Copy,
+                    None,
+                    None,
+                    None,
+                    true,
+                    false,
+                    100,
+                    1024 * 1024,
+                )
+                .is_none(),
+            "predictor must have learned nothing from null-sink records"
+        );
+    }
+
+    #[test]
+    fn observe_ignores_bench_records() {
+        let mut predictor =
+            PerformancePredictor::for_tests(std::path::Path::new("/tmp/blit_predictor_test"));
+        for _ in 0..10 {
+            predictor.observe(&record_with_lane(
+                crate::perf_history::RunKind::BenchTransfer,
+                10,
+                500,
+            ));
+        }
+        for _ in 0..10 {
+            predictor.observe(&record_with_lane(
+                crate::perf_history::RunKind::BenchWire,
+                5,
+                1000,
+            ));
+        }
+        assert!(
+            predictor
+                .predict(
+                    DurationKind::Transfer,
+                    TransferMode::Copy,
+                    None,
+                    None,
+                    None,
+                    true,
+                    false,
+                    100,
+                    1024 * 1024,
+                )
+                .is_none(),
+            "predictor must have learned nothing from bench records"
+        );
+    }
+
+    #[test]
+    fn observe_real_records_does_train() {
+        // Positive control: real records DO train (otherwise the
+        // filter tests above would be vacuous).
+        let mut predictor =
+            PerformancePredictor::for_tests(std::path::Path::new("/tmp/blit_predictor_test"));
+        for _ in 0..10 {
+            predictor.observe(&record_with_lane(
+                crate::perf_history::RunKind::Real,
+                50,
+                200,
+            ));
+        }
+        let prediction = predictor
+            .predict(
+                DurationKind::Transfer,
+                TransferMode::Copy,
+                None,
+                None,
+                None,
+                true,
+                false,
+                100,
+                1024 * 1024,
+            )
+            .expect("real records cross the confidence threshold");
+        assert_eq!(prediction.observations, 10);
+    }
+
+    /// GPT explicit ask: predictor state version bump means any
+    /// state file from a previous schema that ran with the pre-R56
+    /// observe-everything semantics is invalidated. The load path
+    /// resets, so a poisoned state file from before the bump can't
+    /// contaminate new training. Pin the STATE_VERSION value
+    /// itself so a future maintainer dropping the bump trips
+    /// this test.
+    #[test]
+    fn state_version_bumped_for_r56_invalidation() {
+        // Compile-time check that STATE_VERSION moved past 2.
+        // Wrapped in a const block so clippy doesn't flag a
+        // constant-asserted assertion.
+        const _: () = assert!(STATE_VERSION >= 3);
+    }
+
+    /// Concretely verify the load-time invalidation: write a state
+    /// file with the previous version + a phony profile, load it,
+    /// and confirm the predictor came up empty.
+    #[test]
+    fn load_resets_state_on_version_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join(STATE_FILENAME);
+        // Hand-rolled v2 state with one fake profile. Profiles use
+        // a custom serde (profile_map serializes the HashMap as a
+        // sequence of [key, value] pairs), so we use the actual
+        // serialization path to produce realistic v2 bytes.
+        let mut fake_state = PredictorState::new();
+        fake_state.version = 2;
+        let key = ProfileKey {
+            source_fs: Some("apfs".into()),
+            dest_fs: Some("apfs".into()),
+            mode: TransferMode::Copy,
+            fast_path: None,
+            skip_unchanged: true,
+            checksum: false,
+        };
+        fake_state.profiles.insert(key, PredictorProfile::new());
+        let serialized = serde_json::to_string(&fake_state).expect("serialize fake v2");
+        std::fs::write(&state_path, serialized).unwrap();
+
+        // Sanity: the bytes parse as a PredictorState with version 2.
+        let bytes = std::fs::read_to_string(&state_path).unwrap();
+        let parsed: PredictorState = serde_json::from_str(&bytes).expect("parse v2 state");
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.profiles.len(), 1);
+
+        // Now load through PerformancePredictor — version mismatch
+        // (2 != STATE_VERSION = 3) must reset to a fresh state.
+        let predictor = PerformancePredictor::for_tests(dir.path());
+        assert_eq!(
+            predictor.state.profiles.len(),
+            0,
+            "load() must drop pre-R56 v2 state file with poisoned profiles"
+        );
     }
 }
