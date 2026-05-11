@@ -224,14 +224,23 @@ impl TransferSink for FsTransferSink {
                 };
                 let src_root = self.src_root.clone();
                 let dst_root = self.dst_root.clone();
+                let canonical_dst_root = self.canonical_dst_root.clone();
                 let config = self.config.clone();
                 let outcome = tokio::task::spawn_blocking(move || match payload {
-                    PreparedPayload::File(header) => {
-                        write_file_payload(&src_root, &dst_root, &header, &config)
-                    }
-                    PreparedPayload::TarShard { headers, data } => {
-                        write_tar_shard_payload(&dst_root, &headers, &data, &config)
-                    }
+                    PreparedPayload::File(header) => write_file_payload(
+                        &src_root,
+                        &dst_root,
+                        canonical_dst_root.as_deref(),
+                        &header,
+                        &config,
+                    ),
+                    PreparedPayload::TarShard { headers, data } => write_tar_shard_payload(
+                        &dst_root,
+                        canonical_dst_root.as_deref(),
+                        &headers,
+                        &data,
+                        &config,
+                    ),
                     _ => unreachable!("outer match guarantees File or TarShard"),
                 })
                 .await
@@ -360,11 +369,37 @@ impl TransferSink for FsTransferSink {
 fn write_file_payload(
     src_root: &Path,
     dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
     header: &FileHeader,
     config: &FsSinkConfig,
 ) -> Result<SinkOutcome> {
     let src = src_root.join(&header.relative_path);
-    let dst = dst_root.join(&header.relative_path);
+    // R47-F1: the FsTransferSink::write_payload arm for
+    // PreparedPayload::File hit this helper, which previously
+    // joined dst_root + header.relative_path lexically. A peer-
+    // controlled `link/file` with a pre-existing `dst/link →
+    // /outside` symlink would write outside the destination root.
+    // Route through the same canonical-containment chokepoint that
+    // write_file_stream uses.
+    let dst = match canonical_dst_root {
+        Some(canonical) => {
+            crate::path_safety::safe_join_contained(canonical, dst_root, &header.relative_path)
+                .with_context(|| {
+                    format!("validating file payload path {:?}", header.relative_path)
+                })?
+        }
+        None => {
+            log::warn!(
+                "write_file_payload at '{}' has no canonical root; \
+                 falls back to lexical-only path check (R47-F1 \
+                 escape protection unavailable)",
+                dst_root.display()
+            );
+            crate::path_safety::safe_join(dst_root, &header.relative_path).with_context(|| {
+                format!("validating file payload path {:?}", header.relative_path)
+            })?
+        }
+    };
 
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
@@ -414,6 +449,7 @@ fn write_file_payload(
 /// Extract an in-memory tar shard to the destination directory.
 fn write_tar_shard_payload(
     dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
     headers: &[FileHeader],
     data: &[u8],
     config: &FsSinkConfig,
@@ -443,6 +479,28 @@ fn write_tar_shard_payload(
 
     let opts = TarShardExtractOptions::default();
     let mut extracted = safe_extract_tar_shard(data, headers.to_vec(), dst_root, &opts)?;
+
+    // R47-F1: tar shards arriving on FsTransferSink::write_payload
+    // (push-receive on the daemon flows through here too) only had
+    // lexical safe_join inside safe_extract_tar_shard. A pre-
+    // existing dst/link → /outside escape symlink would let an
+    // entry path like `link/victim` write through the symlink.
+    // Verify each extracted entry's destination against the
+    // canonical root before writing.
+    if let Some(canonical) = canonical_dst_root {
+        for f in &extracted {
+            crate::path_safety::verify_contained(canonical, &f.dest_path).with_context(|| {
+                format!("tar shard entry {:?} escapes destination root", f.dest_path)
+            })?;
+        }
+    } else {
+        log::warn!(
+            "write_tar_shard_payload at '{}' has no canonical root; \
+             tar-shard receive falls back to lexical-only path \
+             checks (R47-F1 escape protection unavailable)",
+            dst_root.display()
+        );
+    }
 
     // Honor the sink's preserve_times toggle by stripping mtimes that
     // the helper would otherwise apply. Permissions are best-effort
@@ -1578,6 +1636,135 @@ mod tests {
         assert!(
             !outside.join("victim.txt").exists(),
             "victim file should NOT have been written outside dst"
+        );
+    }
+
+    /// R47-F1 regression: the `write_payload` arm for
+    /// `PreparedPayload::File` must reject a wire-controlled path
+    /// that would write through a pre-existing dst escape symlink.
+    /// Pre-fix `write_file_payload` lexically joined dst_root +
+    /// header.relative_path, so `dst/link → /outside` plus a
+    /// payload header for `link/victim` would land outside dst.
+    /// The daemon's push-receive path flows through this same
+    /// helper via `execute_receive_pipeline`, so this also closes
+    /// the daemon-side push escape vector.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_sink_write_payload_file_rejects_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // Source file the planner would have prepared.
+        std::fs::write(src_root.join("link/victim.txt"), b"payload").ok();
+        std::fs::create_dir_all(src_root.join("link")).unwrap();
+        std::fs::write(src_root.join("link/victim.txt"), b"payload").unwrap();
+
+        // Pre-existing escape symlink in the destination.
+        symlink(&outside, dst.join("link")).unwrap();
+
+        let sink = FsTransferSink::new(
+            src_root.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        let header = make_file_header("link/victim.txt", 7);
+        let payload = PreparedPayload::File(header);
+        let err = sink
+            .write_payload(payload)
+            .await
+            .expect_err("R47-F1: PreparedPayload::File through escape symlink must reject");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("escape") || msg.contains("escapes"),
+            "expected canonical-escape rejection, got: {msg}"
+        );
+        assert!(
+            !outside.join("victim.txt").exists(),
+            "file payload must not write outside dst"
+        );
+    }
+
+    /// R47-F1 regression: the `write_payload` arm for
+    /// `PreparedPayload::TarShard` must reject any extracted entry
+    /// whose destination path resolves outside dst via a pre-
+    /// existing dst escape symlink. Pre-fix `write_tar_shard_payload`
+    /// used `safe_extract_tar_shard` which does lexical
+    /// validation but not canonical containment, so a tar with
+    /// entry path `link/victim` plus `dst/link → /outside` would
+    /// land bytes in /outside/victim.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_sink_write_payload_tar_shard_rejects_escape() {
+        use std::os::unix::fs::symlink;
+        use tar::{Builder, EntryType, Header as TarHeader};
+
+        let tmp = tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // Pre-existing escape symlink in destination.
+        symlink(&outside, dst.join("link")).unwrap();
+
+        // Build a tar with a single entry pointing through `link/`.
+        let content = b"tar-shard payload";
+        let mut tar_buf: Vec<u8> = Vec::new();
+        {
+            let mut builder = Builder::new(&mut tar_buf);
+            let mut hdr = TarHeader::new_gnu();
+            hdr.set_entry_type(EntryType::Regular);
+            hdr.set_size(content.len() as u64);
+            hdr.set_mode(0o644);
+            hdr.set_path("link/victim.txt").unwrap();
+            hdr.set_cksum();
+            builder.append(&hdr, &content[..]).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let headers = vec![make_file_header("link/victim.txt", content.len() as u64)];
+
+        let sink = FsTransferSink::new(
+            src_root.clone(),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        let payload = PreparedPayload::TarShard {
+            headers,
+            data: tar_buf,
+        };
+        let err = sink
+            .write_payload(payload)
+            .await
+            .expect_err("R47-F1: tar shard entry through escape symlink must reject");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("escape") || msg.contains("escapes"),
+            "expected canonical-escape rejection, got: {msg}"
+        );
+        assert!(
+            !outside.join("victim.txt").exists(),
+            "tar shard must not write outside dst"
         );
     }
 }

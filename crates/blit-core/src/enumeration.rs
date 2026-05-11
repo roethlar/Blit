@@ -95,13 +95,38 @@ impl FileEnumerator {
 
     /// Enumerate local filesystem entries beneath `root`, applying the
     /// configured filters.
+    ///
+    /// **Drops suppressed errors.** This is the convenience entry
+    /// point for callers that already accept best-effort
+    /// enumeration semantics. Anything destructive — mirror-delete,
+    /// move-then-delete-source, or the daemon-side delete-list
+    /// generation in pull_sync — MUST use
+    /// [`enumerate_local_capturing`] instead and refuse the
+    /// destructive follow-up when the outcome reports suppressed
+    /// errors.
     pub fn enumerate_local(&self, root: &Path) -> Result<Vec<EnumeratedEntry>> {
+        let (results, _outcome) = self.enumerate_local_capturing(root)?;
+        Ok(results)
+    }
+
+    /// Same as [`enumerate_local`] but returns the
+    /// [`EnumerationOutcome`] alongside the entries so destructive
+    /// callers can detect an incomplete scan. R47-F3 closes the
+    /// gap where `collect_pull_entries_with_checksums` (daemon
+    /// pull_sync) used `enumerate_local` and then drove a
+    /// delete-list build off the partial header set — an
+    /// unreadable source subtree would translate into the matching
+    /// client subtree being deleted.
+    pub fn enumerate_local_capturing(
+        &self,
+        root: &Path,
+    ) -> Result<(Vec<EnumeratedEntry>, EnumerationOutcome)> {
         let mut results = Vec::new();
-        self.enumerate_local_streaming(root, |entry| {
+        let outcome = self.enumerate_local_streaming_capturing(root, |entry| {
             results.push(entry);
             Ok(())
         })?;
-        Ok(results)
+        Ok((results, outcome))
     }
 
     /// Enumerate entries and invoke `visit` for each discovered item.

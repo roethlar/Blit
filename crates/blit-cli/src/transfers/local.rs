@@ -17,7 +17,7 @@ pub async fn run_local_transfer(
     src_path: &Path,
     dest_path: &Path,
     mirror: bool,
-) -> Result<()> {
+) -> Result<LocalMirrorSummary> {
     if !src_path.exists() {
         bail!("source path does not exist: {}", src_path.display());
     }
@@ -86,7 +86,7 @@ pub async fn run_local_transfer(
         );
     }
 
-    Ok(())
+    Ok(summary)
 }
 
 fn build_local_options(

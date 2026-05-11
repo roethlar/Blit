@@ -918,12 +918,21 @@ impl RemotePullClient {
                     .map_err(|_| eyre!("failed to send block hashes"))?;
                 }
                 Some(server_pull_message::Payload::BlockTransfer(block)) => {
-                    // Server sends a block for resume - write at specified offset
+                    // Server sends a block for resume - write at specified offset.
+                    // R47-F2: route through resolve_pull_dest_contained so a
+                    // pre-existing `dst/link → /outside` escape symlink
+                    // can't have the block write follow it. The block-hash
+                    // *read* path was hardened in R46-F3 but the block
+                    // *write* path was missed.
                     use std::io::SeekFrom;
                     use tokio::io::{AsyncSeekExt, AsyncWriteExt as _};
 
                     let relative_path = sanitize_relative_path(&block.relative_path)?;
-                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
+                    let dest_path = resolve_pull_dest_contained(
+                        dest_root,
+                        canonical_dest_root.as_deref(),
+                        &relative_path,
+                    )?;
 
                     // Ensure parent directory exists
                     if let Some(parent) = dest_path.parent() {
@@ -966,9 +975,14 @@ impl RemotePullClient {
                     }
                 }
                 Some(server_pull_message::Payload::BlockComplete(complete)) => {
-                    // Server signals file resume complete - truncate to final size if needed
+                    // Server signals file resume complete - truncate to final size if needed.
+                    // R47-F2: same canonical-containment as BlockTransfer.
                     let relative_path = sanitize_relative_path(&complete.relative_path)?;
-                    let dest_path = resolve_pull_dest(dest_root, &relative_path);
+                    let dest_path = resolve_pull_dest_contained(
+                        dest_root,
+                        canonical_dest_root.as_deref(),
+                        &relative_path,
+                    )?;
 
                     // Truncate file to the correct final size
                     let file = tokio::fs::OpenOptions::new()

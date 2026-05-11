@@ -100,7 +100,7 @@ pub(crate) async fn handle_pull_sync_stream(
     // Phase 3: Enumerate server files and compare with client manifest.
     // Compute checksums if client requests checksum mode and server has checksums enabled.
     let compute_checksums = client_wants_checksum && server_checksums_enabled;
-    let server_entries = collect_pull_entries_with_checksums(
+    let (server_entries, scan_outcome) = collect_pull_entries_with_checksums(
         &module.path,
         &root,
         &requested,
@@ -108,6 +108,39 @@ pub(crate) async fn handle_pull_sync_stream(
         source_filter.clone().unwrap_or_default(),
     )
     .await?;
+
+    // R47-F3: refuse mirror mode if the source-side scan was
+    // incomplete. The pull_sync delete-list builder treats "absent
+    // at source" as "delete from destination," so an unreadable
+    // source subtree (EACCES on a directory) would translate
+    // directly into the client deleting the matching destination
+    // subtree. Mirror runs need a complete scan; non-mirror runs
+    // continue with the partial set since they only add/update
+    // files, never remove.
+    if mirror_mode && !scan_outcome.is_complete() {
+        let preview = scan_outcome
+            .suppressed_errors
+            .iter()
+            .take(5)
+            .map(|e| format!("{} ({})", e.path, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(Status::failed_precondition(format!(
+            "refusing mirror pull from module '{}': source scan was \
+             incomplete ({} unreadable entr{}); the first {} reported: \
+             {}. Resolve the scan errors (typically permissions) on \
+             the daemon side, or run without mirror.",
+            module.name,
+            scan_outcome.suppressed_errors.len(),
+            if scan_outcome.suppressed_errors.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            scan_outcome.suppressed_errors.len().min(5),
+            preview
+        )));
+    }
 
     // Convert to FileHeader for comparison
     let server_manifest: Vec<FileHeader> =

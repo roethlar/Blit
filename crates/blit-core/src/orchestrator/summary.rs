@@ -108,4 +108,14 @@ pub struct LocalMirrorSummary {
     /// leave it None — those bypass the planner entirely so a
     /// prediction wouldn't be informative.
     pub predictor_estimate: Option<PredictorEstimate>,
+    /// R47-F4: source-side paths that couldn't be scanned or read.
+    /// Populated from the streaming-pipeline `unreadable`
+    /// accumulator (same collector that feeds the R46-F2
+    /// mirror-delete gate). Empty on a clean scan. Destructive
+    /// follow-ups in the caller — most importantly `blit move`'s
+    /// source-side `remove_dir_all` — MUST inspect this and
+    /// refuse to delete the source when non-empty, otherwise
+    /// unreadable files get skipped during transfer and then
+    /// silently removed from the source.
+    pub unreadable_paths: Vec<String>,
 }

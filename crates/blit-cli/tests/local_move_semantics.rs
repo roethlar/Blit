@@ -105,3 +105,81 @@ fn local_move_preserves_unrelated_destination_entries() {
         "unrelated destination subdirectory was deleted (R46-F1)"
     );
 }
+
+/// R47-F4 regression: `blit move SRC DST/` between two local paths
+/// must refuse to delete the source if the scan was incomplete.
+/// Pre-fix, the R46-F2 gate inside the orchestrator only fired
+/// for `mirror=true`. Move passes `false`, so an unreadable
+/// source subdirectory would be silently skipped during the copy,
+/// then `fs::remove_dir_all(src)` would delete the source —
+/// including the contents we couldn't read. Net effect: data
+/// loss on files that never made it to dest.
+///
+/// unix-only because the test relies on `chmod 000` to make the
+/// subdirectory unreadable to the scanner.
+#[cfg(unix)]
+#[test]
+fn local_move_refuses_when_source_scan_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+
+    // Source has a readable file and an unreadable subdirectory.
+    fs::write(src.join("readable.txt"), b"keep").unwrap();
+    let blocked = src.join("blocked");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::write(blocked.join("inner.txt"), b"unscannable").unwrap();
+
+    // Make src/blocked unreadable so the walkdir can't enter it.
+    let mut perms = fs::metadata(&blocked).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&blocked, perms).unwrap();
+    struct PermGuard(std::path::PathBuf);
+    impl Drop for PermGuard {
+        fn drop(&mut self) {
+            if let Ok(meta) = std::fs::metadata(&self.0) {
+                let mut p = meta.permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&self.0, p);
+            }
+        }
+    }
+    let _guard = PermGuard(blocked.clone());
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        !output.status.success(),
+        "move with unreadable source must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("refusing to remove source") || stderr.contains("scan was"),
+        "expected R47-F4 scan-incomplete refusal, got stderr: {}",
+        stderr
+    );
+
+    // The unreadable subdir's contents must still be on disk —
+    // either as the unreadable file inside src/blocked (if perms
+    // permit verifying), or at minimum the src tree itself must
+    // not have been removed.
+    assert!(
+        src.exists(),
+        "src must not have been removed when scan was incomplete"
+    );
+    assert!(
+        src.join("blocked").exists(),
+        "src/blocked must still exist when move refused"
+    );
+}

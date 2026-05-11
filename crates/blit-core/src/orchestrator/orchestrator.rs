@@ -202,11 +202,17 @@ impl TransferOrchestrator {
 
         // Skip fast path when using null sink — it bypasses the sink abstraction.
         let fast_path_outcome = if options.null_sink {
-            super::fast_path::FastPathOutcome { decision: None }
+            super::fast_path::FastPathOutcome::streaming()
         } else {
             maybe_select_fast_path(src_root, dest_root, &options)?
         };
         if let Some(decision) = fast_path_outcome.decision {
+            // R47-F4: propagate the fast-path scan's suppressed
+            // errors into the per-branch summary. Each fast-path
+            // outcome below clones this into `unreadable_paths`
+            // so the CLI's source-delete step can detect a
+            // partial scan even on the Tiny/Huge/NoWork paths.
+            let fast_path_unreadable = fast_path_outcome.unreadable_paths.clone();
             let summary = match decision {
                 FastPathDecision::NoWork { examined } => {
                     let outcome = if examined == 0 {
@@ -235,6 +241,7 @@ impl TransferOrchestrator {
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
                         outcome,
+                        unreadable_paths: fast_path_unreadable.clone(),
                         ..Default::default()
                     };
                     if let Some(record) = record_performance_history(
@@ -271,6 +278,7 @@ impl TransferOrchestrator {
                         scanned_bytes: total_bytes,
                         dry_run: options.dry_run,
                         duration: start_time.elapsed(),
+                        unreadable_paths: fast_path_unreadable.clone(),
                         ..Default::default()
                     };
                     if let Some(record) = record_performance_history(
@@ -306,6 +314,7 @@ impl TransferOrchestrator {
                         duration: start_time.elapsed(),
                         large_tasks: 1,
                         large_bytes: size,
+                        unreadable_paths: fast_path_unreadable.clone(),
                         ..Default::default()
                     };
                     if let Some(record) = record_performance_history(
@@ -573,6 +582,19 @@ impl TransferOrchestrator {
         .context("transfer pipeline failed")?;
         let transfer_duration_ms = plan_done.elapsed().as_millis();
 
+        // R47-F4: snapshot unreadable paths so the CLI's source-
+        // delete step (in `blit move`) can refuse to remove a
+        // source it couldn't fully scan. The R46-F2 gate inside
+        // the orchestrator only fires on `options.mirror`, but
+        // move uses mirror=false — without this surface, an
+        // unreadable source file would get skipped during the
+        // copy and then silently deleted from the source by the
+        // CLI's `remove_dir_all` step.
+        let unreadable_snapshot: Vec<String> = unreadable
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
         let mut summary = LocalMirrorSummary {
             planned_files: pipeline_outcome.files_written,
             copied_files: pipeline_outcome.files_written,
@@ -584,27 +606,21 @@ impl TransferOrchestrator {
             dry_run: options.dry_run,
             duration: start_time.elapsed(),
             predictor_estimate: predictor_estimate.clone(),
+            unreadable_paths: unreadable_snapshot.clone(),
             ..Default::default()
         };
 
         if options.mirror {
             // R46-F2: refuse to mirror-delete when the source scan
-            // was incomplete. The `unreadable` accumulator is
-            // populated by both the per-file open path
-            // (PermissionDenied / NotFound on individual files) and,
-            // post-R46-F2, the walkdir non-root error path
-            // (unreadable subdirectories). Either case means the
-            // header set we're about to use as the source-of-truth
-            // for "what the destination should contain" is missing
-            // entries, and a delete pass would silently remove
-            // matching destination subtrees. Refuse the delete and
-            // surface the partial state instead — a noisy failure
-            // is strictly preferable to silent destination data
-            // loss.
-            let unreadable_snapshot: Vec<String> = unreadable
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default();
+            // was incomplete. The `unreadable_snapshot` captured
+            // above (R47-F4) covers the per-file open path
+            // (PermissionDenied / NotFound on individual files) and
+            // the walkdir non-root error path (unreadable
+            // subdirectories). Either case means the header set
+            // we're about to use as the source-of-truth for "what
+            // the destination should contain" is missing entries,
+            // and a delete pass would silently remove matching
+            // destination subtrees.
             if !unreadable_snapshot.is_empty() {
                 bail!(
                     "refusing to mirror-delete from {}: source scan was \

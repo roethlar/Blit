@@ -371,6 +371,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
                 matches!(mode, TransferKind::Mirror),
             )
             .await
+            .map(|_| ())
         }
         (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
             if !src_path.exists() {
@@ -465,7 +466,45 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             // (remote→local, local→remote, remote→remote) all
             // correctly pass `false`; this was a bare local arm
             // outlier.
-            run_local_transfer(ctx, args, &src_path, &dst_path, false).await?;
+            let summary = run_local_transfer(ctx, args, &src_path, &dst_path, false).await?;
+
+            // R47-F4 (data-loss): refuse to delete the source if
+            // the scan was incomplete. The R46-F2 mirror gate only
+            // fires when `mirror=true`, but move uses mirror=false,
+            // so unreadable source files would be silently skipped
+            // during the copy and then permanently removed from
+            // the source by the `remove_dir_all` below — net effect
+            // is data loss for files that never made it to the
+            // destination. The summary carries the same `unreadable`
+            // accumulator the orchestrator uses for its mirror
+            // gate, populated by both the per-file open path and
+            // the walkdir non-root error path.
+            if !summary.unreadable_paths.is_empty() {
+                let preview = summary
+                    .unreadable_paths
+                    .iter()
+                    .take(5)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                bail!(
+                    "refusing to remove source {}: scan was \
+                     incomplete ({} unreadable entr{}); the first \
+                     {} reported: {}. Files we couldn't read were \
+                     skipped during the copy — deleting the source \
+                     now would lose them. Resolve the scan errors \
+                     (typically permissions) and re-run.",
+                    src_path.display(),
+                    summary.unreadable_paths.len(),
+                    if summary.unreadable_paths.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    },
+                    summary.unreadable_paths.len().min(5),
+                    preview
+                );
+            }
 
             if src_path.is_dir() {
                 fs::remove_dir_all(&src_path)

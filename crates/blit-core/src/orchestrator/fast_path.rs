@@ -33,17 +33,32 @@ pub(super) enum FastPathDecision {
 #[derive(Clone, Debug, Default)]
 pub(super) struct FastPathOutcome {
     pub(super) decision: Option<FastPathDecision>,
+    /// R47-F4: suppressed walkdir errors observed during the
+    /// fast-path scan. Propagated into `LocalMirrorSummary.
+    /// unreadable_paths` so the CLI's source-delete step (move)
+    /// can refuse to remove a source it couldn't fully scan.
+    /// Empty on a clean walk.
+    pub(super) unreadable_paths: Vec<String>,
 }
 
 impl FastPathOutcome {
     pub(super) fn fast_path(decision: FastPathDecision) -> Self {
         Self {
             decision: Some(decision),
+            unreadable_paths: Vec::new(),
         }
     }
 
     pub(super) fn streaming() -> Self {
-        Self { decision: None }
+        Self {
+            decision: None,
+            unreadable_paths: Vec::new(),
+        }
+    }
+
+    pub(super) fn with_unreadable(mut self, paths: Vec<String>) -> Self {
+        self.unreadable_paths = paths;
+        self
     }
 }
 
@@ -82,7 +97,14 @@ pub(super) fn maybe_select_fast_path(
     let mut huge_candidate: Option<(PathBuf, u64)> = None;
     let mut examined: usize = 0;
 
-    let scan_result = enumerator.enumerate_local_streaming(src_root, |entry| {
+    // R47-F4: capture suppressed walk errors so the fast-path
+    // summary can carry them into `summary.unreadable_paths` —
+    // otherwise a move with an unreadable source subdir would
+    // route through Tiny (or NoWork on an incremental run),
+    // produce a summary with empty unreadable_paths, and the
+    // CLI's source-delete step would proceed without seeing the
+    // partial-scan signal.
+    let scan_result = enumerator.enumerate_local_streaming_capturing(src_root, |entry| {
         if let EntryKind::File { size } = entry.kind {
             examined += 1;
             let should_copy = if options.skip_unchanged {
@@ -123,39 +145,53 @@ pub(super) fn maybe_select_fast_path(
         Ok(())
     });
 
-    match scan_result {
-        Ok(()) => {}
+    let suppressed = match scan_result {
+        Ok(outcome) => outcome
+            .suppressed_errors
+            .into_iter()
+            .map(|e| format!("{} ({})", e.path, e.message))
+            .collect::<Vec<_>>(),
         Err(err) => {
             if err.downcast_ref::<FastPathAbort>().is_none() {
                 return Err(err);
             }
+            // FastPathAbort means we threw mid-walk to escape the
+            // tiny-budget tripwire. The capturing-enumerator's
+            // outcome isn't returned in that case, but the abort
+            // path always switches to streaming-planner, which
+            // does its own (capturing) source.scan() and gets a
+            // proper unreadable list — so leaving it empty here
+            // is correct.
+            Vec::new()
         }
-    }
+    };
 
     if aborted {
-        return Ok(FastPathOutcome::streaming());
+        return Ok(FastPathOutcome::streaming().with_unreadable(suppressed));
     }
 
     if files.is_empty() {
-        return Ok(FastPathOutcome::fast_path(FastPathDecision::NoWork {
-            examined,
-        }));
+        return Ok(
+            FastPathOutcome::fast_path(FastPathDecision::NoWork { examined })
+                .with_unreadable(suppressed),
+        );
     }
 
     if files.len() <= TINY_FILE_LIMIT && total_bytes <= TINY_TOTAL_BYTES {
-        return Ok(FastPathOutcome::fast_path(FastPathDecision::Tiny { files }));
+        return Ok(FastPathOutcome::fast_path(FastPathDecision::Tiny { files })
+            .with_unreadable(suppressed));
     }
 
     if let Some((file, size)) = huge_candidate {
         if size >= HUGE_SINGLE_BYTES {
-            return Ok(FastPathOutcome::fast_path(FastPathDecision::Huge {
-                file,
-                size,
-            }));
+            return Ok(
+                FastPathOutcome::fast_path(FastPathDecision::Huge { file, size })
+                    .with_unreadable(suppressed),
+            );
         }
     }
 
-    Ok(FastPathOutcome::streaming())
+    Ok(FastPathOutcome::streaming().with_unreadable(suppressed))
 }
 
 #[cfg(test)]

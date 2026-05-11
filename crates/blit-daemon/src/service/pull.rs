@@ -370,23 +370,30 @@ pub(crate) async fn collect_pull_entries(
     root: &Path,
     requested: &Path,
 ) -> Result<Vec<PullEntry>, Status> {
-    collect_pull_entries_with_checksums(
+    let (entries, _outcome) = collect_pull_entries_with_checksums(
         module_root,
         root,
         requested,
         false,
         blit_core::fs_enum::FileFilter::default(),
     )
-    .await
+    .await?;
+    Ok(entries)
 }
 
+/// R47-F3: returns the enumeration outcome alongside the entry
+/// list so destructive callers (pull_sync's delete-list builder)
+/// can detect an incomplete source scan and refuse to translate
+/// "absent at source" into "delete from destination." On a clean
+/// scan `outcome.suppressed_errors` is empty and behavior matches
+/// the historical contract.
 pub(crate) async fn collect_pull_entries_with_checksums(
     module_root: &Path,
     root: &Path,
     requested: &Path,
     compute_checksums: bool,
     filter: blit_core::fs_enum::FileFilter,
-) -> Result<Vec<PullEntry>, Status> {
+) -> Result<(Vec<PullEntry>, blit_core::enumeration::EnumerationOutcome), Status> {
     if root.is_file() {
         // Single-file root: physical path (for reads) is the requested path
         // from the module; wire path (in the header, for the client's
@@ -402,10 +409,13 @@ pub(crate) async fn collect_pull_entries_with_checksums(
         };
         let mut header = build_file_header(module_root, &physical, compute_checksums)?;
         header.relative_path = String::new();
-        return Ok(vec![PullEntry {
-            header,
-            relative_path: physical,
-        }]);
+        return Ok((
+            vec![PullEntry {
+                header,
+                relative_path: physical,
+            }],
+            blit_core::enumeration::EnumerationOutcome::default(),
+        ));
     }
 
     if !root.is_dir() {
@@ -415,56 +425,58 @@ pub(crate) async fn collect_pull_entries_with_checksums(
     let root_clone = root.to_path_buf();
     let requested_clone = requested.to_path_buf();
     let module_root = module_root.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<Vec<PullEntry>, Status> {
-        use rayon::prelude::*;
+    tokio::task::spawn_blocking(
+        move || -> Result<(Vec<PullEntry>, blit_core::enumeration::EnumerationOutcome), Status> {
+            use rayon::prelude::*;
 
-        let enumerator = blit_core::enumeration::FileEnumerator::new(filter);
-        let entries = enumerator
-            .enumerate_local(&root_clone)
-            .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;
+            let enumerator = blit_core::enumeration::FileEnumerator::new(filter);
+            let (entries, outcome) = enumerator
+                .enumerate_local_capturing(&root_clone)
+                .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;
 
-        // Filter to files only
-        let file_entries: Vec<_> = entries
-            .into_iter()
-            .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
-            .collect();
-
-        // Physical path (relative to module_root, used for reading) = requested + entry
-        // Wire path (in header.relative_path, used by client for dest_root.join) = entry only
-        // Previously both were set to the joined form, causing the client to double-nest
-        // when the CLI resolver had already appended the basename to dest_root.
-        let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
-            file_entries
-                .into_par_iter()
-                .map(|entry| {
-                    let physical = requested_clone.join(&entry.relative_path);
-                    let wire = entry.relative_path.clone();
-                    let mut header = build_file_header(&module_root, &physical, true)?;
-                    header.relative_path = wire.to_string_lossy().replace('\\', "/");
-                    Ok(PullEntry {
-                        header,
-                        relative_path: physical,
-                    })
-                })
-                .collect()
-        } else {
-            file_entries
+            // Filter to files only
+            let file_entries: Vec<_> = entries
                 .into_iter()
-                .map(|entry| {
-                    let physical = requested_clone.join(&entry.relative_path);
-                    let wire = entry.relative_path.clone();
-                    let mut header = build_file_header(&module_root, &physical, false)?;
-                    header.relative_path = wire.to_string_lossy().replace('\\', "/");
-                    Ok(PullEntry {
-                        header,
-                        relative_path: physical,
-                    })
-                })
-                .collect()
-        };
+                .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
+                .collect();
 
-        files
-    })
+            // Physical path (relative to module_root, used for reading) = requested + entry
+            // Wire path (in header.relative_path, used by client for dest_root.join) = entry only
+            // Previously both were set to the joined form, causing the client to double-nest
+            // when the CLI resolver had already appended the basename to dest_root.
+            let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
+                file_entries
+                    .into_par_iter()
+                    .map(|entry| {
+                        let physical = requested_clone.join(&entry.relative_path);
+                        let wire = entry.relative_path.clone();
+                        let mut header = build_file_header(&module_root, &physical, true)?;
+                        header.relative_path = wire.to_string_lossy().replace('\\', "/");
+                        Ok(PullEntry {
+                            header,
+                            relative_path: physical,
+                        })
+                    })
+                    .collect()
+            } else {
+                file_entries
+                    .into_iter()
+                    .map(|entry| {
+                        let physical = requested_clone.join(&entry.relative_path);
+                        let wire = entry.relative_path.clone();
+                        let mut header = build_file_header(&module_root, &physical, false)?;
+                        header.relative_path = wire.to_string_lossy().replace('\\', "/");
+                        Ok(PullEntry {
+                            header,
+                            relative_path: physical,
+                        })
+                    })
+                    .collect()
+            };
+
+            files.map(|f| (f, outcome))
+        },
+    )
     .await
     .map_err(|err| Status::internal(format!("enumeration task failed: {}", err)))?
 }
@@ -657,11 +669,31 @@ async fn accept_and_wrap_sinks(
 
     let dst_root = source_root.to_path_buf();
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
+    // R47-F5: bound the accept + token-read with the same timeouts
+    // the push / pull-sync paths use (R46-F7). Pre-fix this
+    // deprecated-but-exposed Pull RPC path had unbounded waits,
+    // so a peer that opened the control RPC but never opened the
+    // data socket would pin this task indefinitely.
+    use std::time::Duration as StdDuration;
+    const PULL_ACCEPT_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+    const PULL_TOKEN_TIMEOUT: StdDuration = StdDuration::from_secs(15);
     for idx in 0..streams {
-        let (mut socket, addr) = listener
-            .accept()
-            .await
-            .map_err(|err| Status::internal(format!("data plane accept failed: {err}")))?;
+        let (mut socket, addr) =
+            match tokio::time::timeout(PULL_ACCEPT_TIMEOUT, listener.accept()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(err)) => {
+                    return Err(Status::internal(format!("data plane accept failed: {err}")));
+                }
+                Err(_elapsed) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "pull data plane accept timed out after {:?} \
+                         waiting for stream {}/{}",
+                        PULL_ACCEPT_TIMEOUT,
+                        idx + 1,
+                        streams
+                    )));
+                }
+            };
         eprintln!(
             "[pull-data-plane] accepted connection {} from {}",
             idx, addr
@@ -669,10 +701,20 @@ async fn accept_and_wrap_sinks(
 
         // Validate token before handing the socket to a sink.
         let mut token_buf = vec![0u8; expected_token.len()];
-        socket
-            .read_exact(&mut token_buf)
-            .await
-            .map_err(|err| Status::internal(format!("failed to read pull token: {err}")))?;
+        match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                return Err(Status::internal(format!(
+                    "failed to read pull token: {err}"
+                )));
+            }
+            Err(_elapsed) => {
+                return Err(Status::deadline_exceeded(format!(
+                    "pull token read timed out after {:?}",
+                    PULL_TOKEN_TIMEOUT
+                )));
+            }
+        }
         if token_buf != expected_token {
             eprintln!("[pull-data-plane] invalid token");
             return Err(Status::permission_denied("invalid pull data plane token"));
