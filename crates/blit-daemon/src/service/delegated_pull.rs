@@ -556,7 +556,7 @@ mod tests {
 
     fn spec_with_caps(caps: PeerCapabilities) -> TransferOperationSpec {
         TransferOperationSpec {
-            spec_version: 1,
+            spec_version: 2,
             module: "m".into(),
             source_path: ".".into(),
             filter: None,
@@ -604,7 +604,7 @@ mod tests {
         // accidentally rebuilt other fields would silently change
         // operator intent.
         let mut spec_in = TransferOperationSpec {
-            spec_version: 1,
+            spec_version: 2,
             module: "alpha".into(),
             source_path: "x/y".into(),
             filter: None,

@@ -560,7 +560,7 @@ impl RemotePullClient {
         };
         let filter_spec = options.filter.clone().unwrap_or_default();
         Ok(TransferOperationSpec {
-            spec_version: 1,
+            spec_version: crate::remote::transfer::operation_spec::SUPPORTED_SPEC_VERSION,
             module,
             source_path: path_str,
             filter: Some(filter_spec),
@@ -1912,7 +1912,10 @@ mod spec_extraction_tests {
         let endpoint = module_endpoint("alpha", "x/y");
         let opts = PullSyncOptions::default();
         let spec = RemotePullClient::build_spec_from_options(&endpoint, &opts).unwrap();
-        assert_eq!(spec.spec_version, 1);
+        assert_eq!(
+            spec.spec_version,
+            crate::remote::transfer::operation_spec::SUPPORTED_SPEC_VERSION
+        );
         assert_eq!(spec.module, "alpha");
         assert_eq!(spec.source_path, "x/y");
         assert_eq!(spec.compare_mode, ComparisonMode::SizeMtime as i32);

@@ -25,6 +25,47 @@ pub async fn run_remote_to_remote_direct(
     mirror_mode: bool,
     require_complete_scan: bool,
 ) -> Result<()> {
+    run_remote_to_remote_direct_inner(args, src, dst, mirror_mode, require_complete_scan, false)
+        .await
+        .map(|_| ())
+}
+
+/// R51-F4: move's variant of [`run_remote_to_remote_direct`].
+/// Returns the delegated summary instead of printing inline so
+/// the caller can defer output until after source-delete.
+pub async fn run_remote_to_remote_direct_deferred(
+    args: &TransferArgs,
+    src: RemoteEndpoint,
+    dst: RemoteEndpoint,
+    mirror_mode: bool,
+    require_complete_scan: bool,
+) -> Result<DeferredDelegatedState> {
+    run_remote_to_remote_direct_inner(args, src, dst, mirror_mode, require_complete_scan, true)
+        .await
+}
+
+pub struct DeferredDelegatedState {
+    pub summary: blit_core::generated::DelegatedPullSummary,
+    pub src: RemoteEndpoint,
+    pub dst: RemoteEndpoint,
+}
+
+pub fn print_deferred_delegated_result(args: &TransferArgs, state: &DeferredDelegatedState) {
+    if args.json {
+        print_delegated_json(&state.summary, &state.src, &state.dst);
+    } else {
+        describe_delegated_result(&state.summary, &state.src, &state.dst);
+    }
+}
+
+async fn run_remote_to_remote_direct_inner(
+    args: &TransferArgs,
+    src: RemoteEndpoint,
+    dst: RemoteEndpoint,
+    mirror_mode: bool,
+    require_complete_scan: bool,
+    defer_output: bool,
+) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
     let pull_opts = PullSyncOptions {
         force_grpc: args.force_grpc,
@@ -149,12 +190,11 @@ pub async fn run_remote_to_remote_direct(
     }
 
     let summary = summary.ok_or_else(|| eyre!("delegation ended before summary"))?;
-    if args.json {
-        print_delegated_json(&summary, &src, &dst);
-    } else {
-        describe_delegated_result(&summary, &src, &dst);
+    let state = DeferredDelegatedState { summary, src, dst };
+    if !defer_output {
+        print_deferred_delegated_result(args, &state);
     }
-    Ok(())
+    Ok(state)
 }
 
 fn report_bytes_progress(

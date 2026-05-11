@@ -443,11 +443,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
     // the exclude rule (or that fail the include rule) are
     // skipped during the transfer — but the source-delete step
     // would still remove them, losing data the user explicitly
-    // didn't want copied. Reproduced by reviewer:
-    // `blit move --exclude '*.log' src/ dst/` exited 0, copied
-    // keep.txt, did NOT copy secret.log, but deleted src/. The
-    // user can express this safely as `blit copy --exclude ...`
-    // followed by `blit rm src/` if they really want it.
+    // didn't want copied.
     let filters_set = !args.exclude.is_empty()
         || !args.include.is_empty()
         || args.min_size.is_some()
@@ -463,6 +459,24 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
              remove files that were filtered out of the transfer. \
              Run `blit copy` with filters first, then `blit rm` the \
              remaining source manually if needed."
+        );
+    }
+
+    // R51-F1 (data-loss): reject `--ignore-existing` for the same
+    // reason as filters. The planner drops any source file whose
+    // destination already exists (diff_planner.rs:135), so
+    // `blit move --ignore-existing` would skip `src/foo` whenever
+    // `dst/foo` was already present and then delete `src/foo`
+    // along with the rest of the source tree — silent data loss
+    // for files that look pre-existing on the destination but
+    // diverged from the source side.
+    if args.ignore_existing {
+        bail!(
+            "move does not support --ignore-existing: the source \
+             file would be skipped during the transfer and then \
+             permanently removed by the source-delete step. Run \
+             `blit copy --ignore-existing` first, then `blit rm` \
+             the source manually if you really want that semantic."
         );
     }
 
@@ -569,7 +583,17 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             // R49-F2: require_complete_scan=true so the source
             // daemon refuses partial scans before we delete the
             // remote source via delete_remote_path below.
-            run_remote_pull_transfer(args, remote.clone(), &dst_path, false, true).await?;
+            // R51-F4: defer output so a failure during the
+            // remote-source delete doesn't leave a success-looking
+            // transfer summary on stdout.
+            let state = remote::run_remote_pull_transfer_deferred(
+                args,
+                remote.clone(),
+                &dst_path,
+                false,
+                true,
+            )
+            .await?;
 
             // Delete remote source
             let rel_path = match &remote.path {
@@ -579,6 +603,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&remote, &rel_path).await?;
+            remote::print_deferred_pull_result(args, &state);
             Ok(())
         }
         (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
@@ -590,9 +615,10 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             // Push uses local-source scanning on the CLI side,
             // which routes through spawn_manifest_task's unreadable
             // accumulator and surfaces failures pre-transfer.
-            // Source-delete still happens below, but a partial
-            // scan would have aborted before reaching here.
-            run_remote_push_transfer(
+            // R51-F4: defer output so a failure during the
+            // local-source delete doesn't leave a success-looking
+            // transfer summary on stdout.
+            let state = remote::run_remote_push_transfer_deferred(
                 args,
                 Endpoint::Local(src_path.clone()),
                 remote.clone(),
@@ -608,22 +634,50 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 fs::remove_file(&src_path)
                     .with_context(|| format!("removing {}", src_path.display()))?;
             }
+            remote::print_deferred_push_result(args, &state);
             Ok(())
         }
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            // R49-F2: remote→remote move sets
-            // require_complete_scan=true on the wire spec so the
-            // source daemon refuses partial scans. Applies to both
-            // the legacy relay path and the direct delegated path.
+            // R50-F1 / R51-F2 (data-loss): reject `--relay-via-cli`
+            // for remote-source move. The relay path goes through
+            // `run_remote_push_transfer` → `RemoteTransferSource::
+            // scan`, which uses the legacy metadata-only Pull RPC
+            // (`collect_pull_entries` discards
+            // EnumerationOutcome). There's no scan-complete signal
+            // to thread through that path without restructuring
+            // the legacy RPC, so for 0.1.0 we close the data-loss
+            // window by refusing the combination entirely. The
+            // direct delegated path (default) carries the
+            // require_complete_scan signal end-to-end.
             if args.relay_via_cli {
-                ensure_remote_push_supported(args)?;
-                run_remote_push_transfer(args, Endpoint::Remote(src.clone()), dst, false).await?;
-            } else {
-                ensure_remote_pull_supported(args)?;
-                run_remote_to_remote_direct(args, src.clone(), dst, false, true).await?;
+                bail!(
+                    "move does not support --relay-via-cli with a \
+                     remote source: the legacy relay path does not \
+                     verify that the source-side scan was complete, \
+                     so an unreadable subtree on the source daemon \
+                     would be silently lost when the source is \
+                     deleted. Drop --relay-via-cli to use the \
+                     direct delegated path, which enforces the \
+                     complete-scan gate."
+                );
             }
+            ensure_remote_pull_supported(args)?;
+            // R49-F2: require_complete_scan=true so the source
+            // daemon refuses partial scans before delete_remote_path
+            // below.
+            // R51-F4: defer output so a remote-source delete
+            // failure doesn't leave a success-looking delegated
+            // summary on stdout.
+            let state = remote_remote_direct::run_remote_to_remote_direct_deferred(
+                args,
+                src.clone(),
+                dst,
+                false,
+                true,
+            )
+            .await?;
 
             // Delete remote source
             let rel_path = match &src.path {
@@ -633,6 +687,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 _ => bail!("unsupported remote source for move"),
             };
             delete_remote_path(&src, &rel_path).await?;
+            remote_remote_direct::print_deferred_delegated_result(args, &state);
             Ok(())
         }
     }

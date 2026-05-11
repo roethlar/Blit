@@ -286,3 +286,77 @@ fn local_move_json_no_premature_success_output_on_refusal() {
         stdout
     );
 }
+
+/// R51-F1 regression: `blit move --ignore-existing` must refuse.
+/// The planner drops any source file whose destination already
+/// exists, then run_move deletes the whole source tree — net
+/// effect, source files that happen to look pre-existing on the
+/// destination get silently deleted from the source.
+#[test]
+fn local_move_rejects_ignore_existing() {
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("file.txt"), b"new content").unwrap();
+    fs::write(dst.join("file.txt"), b"stale dst content").unwrap();
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--ignore-existing")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        !output.status.success(),
+        "move with --ignore-existing must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support --ignore-existing"),
+        "expected R51-F1 ignore-existing rejection, got stderr: {}",
+        stderr
+    );
+    assert!(
+        src.join("file.txt").exists(),
+        "src/file.txt must survive — move rejected before any work"
+    );
+}
+
+/// R50-F1 / R51-F2 regression: `blit move --relay-via-cli` between
+/// two remote endpoints must refuse. The relay path goes through
+/// the legacy metadata-only Pull RPC whose enumeration discards
+/// EnumerationOutcome, so a partial source scan would silently
+/// succeed and the source would be deleted afterward.
+///
+/// The bail fires before any network IO, so this test doesn't
+/// need a live daemon — invalid endpoints (no daemon listening)
+/// would otherwise produce a connect error; we assert we see the
+/// rejection message first.
+#[test]
+fn remote_to_remote_move_rejects_relay_via_cli() {
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--relay-via-cli")
+        .arg("127.0.0.1:12347:/srcmod/")
+        .arg("127.0.0.1:12348:/dstmod/");
+    let output = run_with_timeout(cmd, Duration::from_secs(15));
+    assert!(
+        !output.status.success(),
+        "remote-to-remote move with --relay-via-cli must fail; \
+         stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support --relay-via-cli with a remote source"),
+        "expected R50-F1/R51-F2 relay rejection, got stderr: {}",
+        stderr
+    );
+}

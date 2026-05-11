@@ -327,6 +327,12 @@ message TransferOperationSpec {
   // Bumped when the wire shape of this message or any of its fields
   // changes in a way that requires the receiver to know. Receivers
   // should reject specs with a version they don't understand.
+  //
+  // History:
+  //   1: original (pre-0.1.0).
+  //   2: added `require_complete_scan` (R49-F2). Bumped so v1
+  //      daemons fail closed when receiving a v2 spec instead of
+  //      silently ignoring the safety-critical field.
   uint32 spec_version = 1;
 
   // Origin-side module name. Empty means "use default root export".

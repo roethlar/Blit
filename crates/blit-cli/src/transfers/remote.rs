@@ -157,6 +157,44 @@ pub async fn run_remote_push_transfer(
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<()> {
+    run_remote_push_transfer_inner(args, source, remote, mirror_mode, false)
+        .await
+        .map(|_| ())
+}
+
+/// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
+/// the push report instead of printing inline so the caller can
+/// defer output until after source-delete.
+pub async fn run_remote_push_transfer_deferred(
+    args: &TransferArgs,
+    source: Endpoint,
+    remote: RemoteEndpoint,
+    mirror_mode: bool,
+) -> Result<DeferredPushState> {
+    run_remote_push_transfer_inner(args, source, remote, mirror_mode, true).await
+}
+
+pub struct DeferredPushState {
+    pub report: blit_core::remote::push::RemotePushReport,
+    pub destination: String,
+    pub show_progress: bool,
+}
+
+pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState) {
+    if args.json {
+        print_push_json(&state.report, &state.destination);
+    } else {
+        describe_push_result(&state.report, &state.destination, state.show_progress);
+    }
+}
+
+async fn run_remote_push_transfer_inner(
+    args: &TransferArgs,
+    source: Endpoint,
+    remote: RemoteEndpoint,
+    mirror_mode: bool,
+    defer_output: bool,
+) -> Result<DeferredPushState> {
     let mut client = RemotePushClient::connect(remote.clone())
         .await
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
@@ -214,13 +252,17 @@ pub async fn run_remote_push_transfer(
     }
 
     let report = push_result?;
+    let destination = format_remote_endpoint(&remote);
 
-    if args.json {
-        print_push_json(&report, &format_remote_endpoint(&remote));
-    } else {
-        describe_push_result(&report, &format_remote_endpoint(&remote), show_progress);
+    let state = DeferredPushState {
+        report,
+        destination,
+        show_progress,
+    };
+    if !defer_output {
+        print_deferred_push_result(args, &state);
     }
-    Ok(())
+    Ok(state)
 }
 
 pub async fn run_remote_pull_transfer(
@@ -230,6 +272,78 @@ pub async fn run_remote_pull_transfer(
     mirror_mode: bool,
     require_complete_scan: bool,
 ) -> Result<()> {
+    run_remote_pull_transfer_inner(
+        args,
+        remote,
+        dest_root,
+        mirror_mode,
+        require_complete_scan,
+        false, // emit success summary inline (copy/mirror default)
+    )
+    .await
+    .map(|_| ())
+}
+
+/// R51-F4: move's variant of `run_remote_pull_transfer` — runs the
+/// transfer and the (no-op for mirror=false) purge, but does NOT
+/// emit the success summary. Caller is responsible for printing
+/// after source-delete completes (or refusing to print on
+/// source-delete failure). Returns the same `(report, purge_stats)`
+/// state the inline printer uses so the deferred print can
+/// produce byte-identical output.
+pub async fn run_remote_pull_transfer_deferred(
+    args: &TransferArgs,
+    remote: RemoteEndpoint,
+    dest_root: &Path,
+    mirror_mode: bool,
+    require_complete_scan: bool,
+) -> Result<DeferredPullState> {
+    run_remote_pull_transfer_inner(
+        args,
+        remote,
+        dest_root,
+        mirror_mode,
+        require_complete_scan,
+        true,
+    )
+    .await
+}
+
+/// Captured pull-transfer state for deferred-output callers (move).
+pub struct DeferredPullState {
+    pub report: blit_core::remote::pull::RemotePullReport,
+    pub actual_dest: PathBuf,
+    pub mirror_purge_stats: Option<LocalPurgeStats>,
+}
+
+pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState) {
+    if args.json {
+        print_pull_json(
+            &state.report,
+            &state.actual_dest,
+            state.mirror_purge_stats.as_ref(),
+        );
+    } else {
+        describe_pull_result(&state.report, &state.actual_dest);
+        if let Some(stats) = state.mirror_purge_stats.as_ref() {
+            if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
+                println!(
+                    "Mirror purge removed {} file(s) and {} directorie(s).",
+                    stats.files_deleted, stats.dirs_deleted
+                );
+            }
+        }
+    }
+}
+
+async fn run_remote_pull_transfer_inner(
+    args: &TransferArgs,
+    remote: RemoteEndpoint,
+    dest_root: &Path,
+    mirror_mode: bool,
+    require_complete_scan: bool,
+    defer_output: bool,
+) -> Result<DeferredPullState> {
     // Filter parity (Step 4B): build the wire FilterSpec here and
     // ship it on TransferOperationSpec. The daemon applies the same
     // rules during its source enumeration, so the file set the daemon
@@ -314,21 +428,21 @@ pub async fn run_remote_pull_transfer(
         None
     };
 
-    if args.json {
-        print_pull_json(&report, &actual_dest, mirror_purge_stats.as_ref());
-    } else {
-        describe_pull_result(&report, &actual_dest);
-        if let Some(stats) = mirror_purge_stats.as_ref() {
-            if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
-                println!(
-                    "Mirror purge removed {} file(s) and {} directorie(s).",
-                    stats.files_deleted, stats.dirs_deleted
-                );
-            }
-        }
+    let state = DeferredPullState {
+        report,
+        actual_dest,
+        mirror_purge_stats,
+    };
+
+    // R51-F4: when deferred, skip the inline print. The caller
+    // (move) prints via `print_deferred_pull_result` after the
+    // source-delete step succeeds — so a post-transfer failure
+    // never leaves a success-looking JSON document on stdout.
+    if !defer_output {
+        print_deferred_pull_result(args, &state);
     }
 
-    Ok(())
+    Ok(state)
 }
 
 /// Enumerate local files to build a manifest for comparison with remote.
@@ -423,7 +537,7 @@ async fn enumerate_local_manifest(root: &Path, compute_checksums: bool) -> Resul
 }
 
 #[derive(Debug)]
-struct LocalPurgeStats {
+pub struct LocalPurgeStats {
     files_deleted: u64,
     dirs_deleted: u64,
 }

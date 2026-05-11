@@ -181,7 +181,7 @@ async fn spawn_spy_with_rejection(
 
 fn hand_built_spec() -> TransferOperationSpec {
     TransferOperationSpec {
-        spec_version: 1,
+        spec_version: 2,
         // Deliberately different from the values the client's
         // endpoint would imply — that's the load-bearing assertion:
         // the spec wins, the endpoint is transport-only.

@@ -36,9 +36,15 @@ use crate::generated::{
 
 /// Highest `spec_version` we know how to interpret. Bumped whenever the
 /// wire shape changes in a way that requires the receiver to know.
-/// Currently both ends of the wire are at 1; older clients shouldn't
-/// reach this code path because they were never published.
-pub const SUPPORTED_SPEC_VERSION: u32 = 1;
+///
+/// History:
+///   - 1: original (pre-0.1.0).
+///   - 2: added `require_complete_scan` (R49-F2). Safety-critical:
+///     a v1 daemon would accept a v2 spec, silently ignore the new
+///     field, and reopen the remote-source-move data-loss case
+///     where partial source scans silently delete unread files.
+///     Bumping forces v1 daemons to fail closed (R51-F3).
+pub const SUPPORTED_SPEC_VERSION: u32 = 2;
 
 /// Normalized, internal-friendly view of a transfer operation. Folds
 /// proto-`Unspecified` into concrete defaults, converts `FilterSpec`
