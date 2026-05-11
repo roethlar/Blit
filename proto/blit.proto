@@ -374,6 +374,16 @@ message TransferOperationSpec {
   // CLI rejects `--ignore-existing` combined with `--force` since
   // those are semantically contradictory.
   bool ignore_existing = 10;
+
+  // R49-F2: initiator signals "the source will be deleted after this
+  // transfer succeeds" (the `blit move` case). The origin daemon must
+  // refuse the operation if its source-side scan was incomplete
+  // (e.g. EACCES on a child directory), because a partial scan
+  // combined with downstream source-deletion would silently lose
+  // files we couldn't read. Independent of mirror_mode — move never
+  // sets mirror_mode (it would purge dest extras), but it carries
+  // the same scan-completeness requirement that mirror does.
+  bool require_complete_scan = 11;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource

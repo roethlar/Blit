@@ -23,6 +23,7 @@ pub async fn run_remote_to_remote_direct(
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     mirror_mode: bool,
+    require_complete_scan: bool,
 ) -> Result<()> {
     let filter_spec = super::build_filter_spec(args)?;
     let pull_opts = PullSyncOptions {
@@ -37,6 +38,9 @@ pub async fn run_remote_to_remote_direct(
         checksum: args.checksum,
         resume: args.resume,
         block_size: 0,
+        // R49-F2: move arms set this true so the daemon refuses
+        // partial source scans before we delete the source.
+        require_complete_scan,
     };
     let spec = RemotePullClient::build_spec_from_options(&src, &pull_opts)?;
     let (dst_module, dst_destination_path) = destination_spec_fields(&dst)?;

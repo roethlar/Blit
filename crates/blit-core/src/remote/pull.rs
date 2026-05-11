@@ -150,6 +150,15 @@ pub struct PullSyncOptions {
     pub resume: bool,
     /// Block size for resume (0 = default 1 MiB).
     pub block_size: u32,
+    /// R49-F2: when true, the daemon must refuse the operation if
+    /// its source-side scan was incomplete. Set by `blit move`,
+    /// which deletes the source after the transfer succeeds —
+    /// without this signal an EACCES on a source subtree would
+    /// silently lose files that never got copied. Independent of
+    /// `mirror_mode`: move always uses mirror_mode=false (it
+    /// doesn't purge dest extras) but carries the same
+    /// scan-completeness requirement.
+    pub require_complete_scan: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -569,6 +578,7 @@ impl RemotePullClient {
             }),
             force_grpc: options.force_grpc,
             ignore_existing: options.ignore_existing,
+            require_complete_scan: options.require_complete_scan,
         })
     }
 

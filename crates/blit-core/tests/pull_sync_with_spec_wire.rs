@@ -210,6 +210,7 @@ fn hand_built_spec() -> TransferOperationSpec {
         }),
         force_grpc: false,
         ignore_existing: false,
+        require_complete_scan: false,
     }
 }
 
@@ -308,6 +309,7 @@ async fn pull_sync_wrapper_emits_same_spec_as_build_spec_from_options() {
         size_only: false,
         ignore_times: false,
         ignore_existing: false,
+        require_complete_scan: false,
         force: false,
         checksum: true,
         resume: true,

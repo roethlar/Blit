@@ -566,6 +566,7 @@ mod tests {
             client_capabilities: Some(caps),
             force_grpc: false,
             ignore_existing: false,
+            require_complete_scan: false,
         }
     }
 
@@ -621,6 +622,7 @@ mod tests {
             }),
             force_grpc: true,
             ignore_existing: true,
+            require_complete_scan: false,
         };
         let snapshot_module = spec_in.module.clone();
         let snapshot_source_path = spec_in.source_path.clone();

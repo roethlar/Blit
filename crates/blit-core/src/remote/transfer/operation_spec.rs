@@ -74,6 +74,15 @@ pub struct NormalizedTransferOperation {
     /// whether we look at the file at all; `compare_mode` controls
     /// what counts as "matching" once we do.
     pub ignore_existing: bool,
+    /// R49-F2: when true, the daemon must refuse the operation if
+    /// its source-side scan was incomplete. Set by `blit move`,
+    /// which deletes the source after the transfer succeeds —
+    /// without this gate an EACCES on a source subtree would
+    /// silently lose files that never got copied. Independent of
+    /// `mirror_mode`: move always uses mirror_mode=Off (it doesn't
+    /// purge dest extras) but carries the same scan-completeness
+    /// requirement that a mirror operation does.
+    pub require_complete_scan: bool,
 }
 
 impl NormalizedTransferOperation {
@@ -123,6 +132,7 @@ impl NormalizedTransferOperation {
             capabilities,
             force_grpc: spec.force_grpc,
             ignore_existing: spec.ignore_existing,
+            require_complete_scan: spec.require_complete_scan,
         })
     }
 
@@ -207,6 +217,7 @@ mod tests {
             client_capabilities: None,
             force_grpc: false,
             ignore_existing: false,
+            require_complete_scan: false,
         }
     }
 

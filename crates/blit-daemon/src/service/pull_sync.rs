@@ -63,6 +63,7 @@ pub(crate) async fn handle_pull_sync_stream(
     let force_grpc = spec.force_grpc || force_grpc_override;
     let mirror_mode = spec.mirror_enabled();
     let mirror_kind = spec.mirror_mode;
+    let require_complete_scan = spec.require_complete_scan;
     let compare_mode_kind = spec.compare_mode;
     let client_wants_checksum = matches!(compare_mode_kind, ComparisonMode::Checksum);
     // Filter parity (F10): the source-side filter from the spec is
@@ -109,15 +110,22 @@ pub(crate) async fn handle_pull_sync_stream(
     )
     .await?;
 
-    // R47-F3: refuse mirror mode if the source-side scan was
-    // incomplete. The pull_sync delete-list builder treats "absent
-    // at source" as "delete from destination," so an unreadable
-    // source subtree (EACCES on a directory) would translate
-    // directly into the client deleting the matching destination
-    // subtree. Mirror runs need a complete scan; non-mirror runs
-    // continue with the partial set since they only add/update
-    // files, never remove.
-    if mirror_mode && !scan_outcome.is_complete() {
+    // R47-F3 / R49-F2: refuse when the source scan was incomplete
+    // and either:
+    //   - mirror mode is on (pull_sync's delete-list builder
+    //     would translate "absent at source" into "delete from
+    //     destination," so a missing subtree silently deletes from
+    //     the client); or
+    //   - the initiator set `require_complete_scan` (the `blit
+    //     move` case — initiator will delete the source after the
+    //     pull, so partial scans silently lose files we couldn't
+    //     read).
+    if (mirror_mode || require_complete_scan) && !scan_outcome.is_complete() {
+        let reason = if mirror_mode {
+            "mirror pull"
+        } else {
+            "pull-then-delete-source (move)"
+        };
         let preview = scan_outcome
             .suppressed_errors
             .iter()
@@ -126,10 +134,11 @@ pub(crate) async fn handle_pull_sync_stream(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(Status::failed_precondition(format!(
-            "refusing mirror pull from module '{}': source scan was \
+            "refusing {} from module '{}': source scan was \
              incomplete ({} unreadable entr{}); the first {} reported: \
              {}. Resolve the scan errors (typically permissions) on \
-             the daemon side, or run without mirror.",
+             the daemon side.",
+            reason,
             module.name,
             scan_outcome.suppressed_errors.len(),
             if scan_outcome.suppressed_errors.len() == 1 {

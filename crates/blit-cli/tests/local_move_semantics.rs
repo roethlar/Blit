@@ -183,3 +183,106 @@ fn local_move_refuses_when_source_scan_incomplete() {
         "src/blocked must still exist when move refused"
     );
 }
+
+/// R49-F1 regression: `blit move --exclude '*.log'` must refuse,
+/// because the source-delete step would silently remove
+/// secret.log even though it wasn't transferred. Reviewer
+/// reproduced: pre-fix exited 0, kept secret.log on src deleted,
+/// kept secret.log on dst absent — real data loss.
+#[test]
+fn local_move_rejects_filter_args() {
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("keep.txt"), b"keep").unwrap();
+    fs::write(src.join("secret.log"), b"sensitive - do not lose").unwrap();
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--exclude")
+        .arg("*.log")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        !output.status.success(),
+        "move with --exclude must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support filters"),
+        "expected R49-F1 filter rejection, got stderr: {}",
+        stderr
+    );
+
+    // Source intact, including the file that would have been
+    // filtered out.
+    assert!(
+        src.join("secret.log").exists(),
+        "secret.log must survive — move rejected before any transfer"
+    );
+    assert!(src.join("keep.txt").exists());
+}
+
+/// R49-F3 regression: `blit move --json` must NOT emit a
+/// successful-looking JSON document on stdout when the source-
+/// delete refusal will follow. Pre-fix run_local_transfer printed
+/// the summary inline before returning to run_move, so a partial
+/// scan caused exit 1 while stdout contained an `"operation":
+/// "copy"` success document.
+#[cfg(unix)]
+#[test]
+fn local_move_json_no_premature_success_output_on_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+
+    fs::write(src.join("readable.txt"), b"keep").unwrap();
+    let blocked = src.join("blocked");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::write(blocked.join("inner.txt"), b"unscannable").unwrap();
+    let mut perms = fs::metadata(&blocked).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&blocked, perms).unwrap();
+    struct PermGuard(std::path::PathBuf);
+    impl Drop for PermGuard {
+        fn drop(&mut self) {
+            if let Ok(meta) = std::fs::metadata(&self.0) {
+                let mut p = meta.permissions();
+                p.set_mode(0o755);
+                let _ = std::fs::set_permissions(&self.0, p);
+            }
+        }
+    }
+    let _g = PermGuard(blocked.clone());
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--json")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        !output.status.success(),
+        "move with --json + unreadable src must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\"operation\""),
+        "stdout must NOT contain a success JSON document when move \
+         refused source-delete; pre-R49-F3 it did. Got stdout:\n{}",
+        stdout
+    );
+}

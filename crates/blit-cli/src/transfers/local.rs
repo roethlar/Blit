@@ -11,12 +11,76 @@ use blit_core::orchestrator::{
 
 use crate::util::format_bytes;
 
+/// Convenience wrapper for callers that always want the summary
+/// printed inline. Most CLI paths (copy / mirror) want this; move
+/// uses [`run_local_transfer_deferred`] so it can suppress the
+/// "success" output until after the source-delete decision is
+/// made (R49-F3).
 pub async fn run_local_transfer(
     ctx: &AppContext,
     args: &TransferArgs,
     src_path: &Path,
     dest_path: &Path,
     mirror: bool,
+) -> Result<LocalMirrorSummary> {
+    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, false).await
+}
+
+/// Same as [`run_local_transfer`] but the caller takes ownership
+/// of when (and whether) to print the final summary. Move uses
+/// this so a failure during source-delete can still surface as
+/// an error without first having emitted a successful-looking
+/// JSON document on stdout.
+pub async fn run_local_transfer_deferred(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    src_path: &Path,
+    dest_path: &Path,
+    mirror: bool,
+) -> Result<LocalMirrorSummary> {
+    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, true).await
+}
+
+/// Print the standard summary block for a completed local
+/// transfer. Exposed for `run_local_transfer_deferred` callers
+/// (move) that need to emit output AFTER their own follow-up
+/// (source-delete) succeeds. Mirrors the inline print in
+/// `run_local_transfer_inner` so deferred + inline callers
+/// produce byte-identical output.
+pub fn print_local_transfer_summary(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    mirror: bool,
+    summary: &LocalMirrorSummary,
+    elapsed: Duration,
+    src_path: &Path,
+    dest_path: &Path,
+) -> Result<()> {
+    let options = build_local_options(ctx, args, mirror)?;
+    if args.json {
+        print_summary_json(mirror, summary, elapsed, src_path, dest_path);
+    } else {
+        print_summary(
+            mirror,
+            options.dry_run,
+            options.null_sink,
+            options.verbose,
+            options.debug_mode,
+            options.workers,
+            summary,
+            elapsed,
+        );
+    }
+    Ok(())
+}
+
+async fn run_local_transfer_inner(
+    ctx: &AppContext,
+    args: &TransferArgs,
+    src_path: &Path,
+    dest_path: &Path,
+    mirror: bool,
+    defer_output: bool,
 ) -> Result<LocalMirrorSummary> {
     if !src_path.exists() {
         bail!("source path does not exist: {}", src_path.display());
@@ -78,12 +142,14 @@ pub async fn run_local_transfer(
     }
 
     let elapsed = start.elapsed();
-    if json_output {
-        print_summary_json(mirror, &summary, elapsed, src_path, dest_path);
-    } else {
-        print_summary(
-            mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
-        );
+    if !defer_output {
+        if json_output {
+            print_summary_json(mirror, &summary, elapsed, src_path, dest_path);
+        } else {
+            print_summary(
+                mirror, dry_run, null_sink, verbose, debug_mode, workers, &summary, elapsed,
+            );
+        }
     }
 
     Ok(summary)

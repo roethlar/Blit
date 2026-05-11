@@ -395,6 +395,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
                 remote,
                 &dst_path,
                 matches!(mode, TransferKind::Mirror),
+                false, // not a move — source survives
             )
             .await
         }
@@ -412,8 +413,14 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
                 .await
             } else {
                 ensure_remote_pull_supported(args)?;
-                run_remote_to_remote_direct(args, src, dst, matches!(mode, TransferKind::Mirror))
-                    .await
+                run_remote_to_remote_direct(
+                    args,
+                    src,
+                    dst,
+                    matches!(mode, TransferKind::Mirror),
+                    false, // not a move
+                )
+                .await
             }
         }
     }
@@ -427,6 +434,36 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 
     if args.dry_run {
         bail!("move does not support --dry-run");
+    }
+
+    // R49-F1 (data-loss): reject `--exclude` / `--include` /
+    // `--min-size` / `--max-size` / `--min-age` / `--max-age` /
+    // `--files-from` on `blit move`. Move means "transfer the
+    // source, then delete it." With a filter, files that match
+    // the exclude rule (or that fail the include rule) are
+    // skipped during the transfer — but the source-delete step
+    // would still remove them, losing data the user explicitly
+    // didn't want copied. Reproduced by reviewer:
+    // `blit move --exclude '*.log' src/ dst/` exited 0, copied
+    // keep.txt, did NOT copy secret.log, but deleted src/. The
+    // user can express this safely as `blit copy --exclude ...`
+    // followed by `blit rm src/` if they really want it.
+    let filters_set = !args.exclude.is_empty()
+        || !args.include.is_empty()
+        || args.min_size.is_some()
+        || args.max_size.is_some()
+        || args.min_age.is_some()
+        || args.max_age.is_some()
+        || args.files_from.is_some();
+    if filters_set {
+        bail!(
+            "move does not support filters (--exclude / --include / \
+             --min-size / --max-size / --min-age / --max-age / \
+             --files-from): the source-delete step would silently \
+             remove files that were filtered out of the transfer. \
+             Run `blit copy` with filters first, then `blit rm` the \
+             remaining source manually if needed."
+        );
     }
 
     // Prompt for confirmation before move (which deletes source)
@@ -458,27 +495,24 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             }
             // R46-F1 (data-loss): pass `mirror=false` here. `move`
             // means "copy + delete source," NOT "purge unrelated
-            // destination entries." Pre-fix this passed `true`,
-            // which made the local→local move path silently delete
-            // any destination file/dir that happened not to exist
-            // on the source side — including files the user had no
-            // intent to touch. The other three move arms
-            // (remote→local, local→remote, remote→remote) all
-            // correctly pass `false`; this was a bare local arm
-            // outlier.
-            let summary = run_local_transfer(ctx, args, &src_path, &dst_path, false).await?;
+            // destination entries."
+            //
+            // R49-F3: use the deferred-output variant so the
+            // "success" summary doesn't hit stdout until AFTER the
+            // source-delete decision. Pre-fix, run_local_transfer
+            // emitted the JSON/human summary before returning, so
+            // a subsequent unreadable-paths refusal would exit
+            // non-zero while stdout already contained a
+            // "successful copy" document.
+            let summary =
+                local::run_local_transfer_deferred(ctx, args, &src_path, &dst_path, false).await?;
 
             // R47-F4 (data-loss): refuse to delete the source if
             // the scan was incomplete. The R46-F2 mirror gate only
             // fires when `mirror=true`, but move uses mirror=false,
             // so unreadable source files would be silently skipped
             // during the copy and then permanently removed from
-            // the source by the `remove_dir_all` below — net effect
-            // is data loss for files that never made it to the
-            // destination. The summary carries the same `unreadable`
-            // accumulator the orchestrator uses for its mirror
-            // gate, populated by both the per-file open path and
-            // the walkdir non-root error path.
+            // the source by the `remove_dir_all` below.
             if !summary.unreadable_paths.is_empty() {
                 let preview = summary
                     .unreadable_paths
@@ -513,12 +547,29 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
                 fs::remove_file(&src_path)
                     .with_context(|| format!("removing {}", src_path.display()))?;
             }
+
+            // R49-F3: source-delete succeeded, emit the deferred
+            // summary now so JSON consumers see one self-contained
+            // success document (or no output at all on the failure
+            // path above).
+            local::print_local_transfer_summary(
+                ctx,
+                args,
+                false,
+                &summary,
+                summary.duration,
+                &src_path,
+                &dst_path,
+            )?;
             Ok(())
         }
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
             ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&remote)?;
-            run_remote_pull_transfer(args, remote.clone(), &dst_path, false).await?;
+            // R49-F2: require_complete_scan=true so the source
+            // daemon refuses partial scans before we delete the
+            // remote source via delete_remote_path below.
+            run_remote_pull_transfer(args, remote.clone(), &dst_path, false, true).await?;
 
             // Delete remote source
             let rel_path = match &remote.path {
@@ -536,6 +587,11 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             }
             ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&remote)?;
+            // Push uses local-source scanning on the CLI side,
+            // which routes through spawn_manifest_task's unreadable
+            // accumulator and surfaces failures pre-transfer.
+            // Source-delete still happens below, but a partial
+            // scan would have aborted before reaching here.
             run_remote_push_transfer(
                 args,
                 Endpoint::Local(src_path.clone()),
@@ -557,12 +613,16 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
+            // R49-F2: remote→remote move sets
+            // require_complete_scan=true on the wire spec so the
+            // source daemon refuses partial scans. Applies to both
+            // the legacy relay path and the direct delegated path.
             if args.relay_via_cli {
                 ensure_remote_push_supported(args)?;
                 run_remote_push_transfer(args, Endpoint::Remote(src.clone()), dst, false).await?;
             } else {
                 ensure_remote_pull_supported(args)?;
-                run_remote_to_remote_direct(args, src.clone(), dst, false).await?;
+                run_remote_to_remote_direct(args, src.clone(), dst, false, true).await?;
             }
 
             // Delete remote source

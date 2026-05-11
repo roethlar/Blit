@@ -228,6 +228,7 @@ pub async fn run_remote_pull_transfer(
     remote: RemoteEndpoint,
     dest_root: &Path,
     mirror_mode: bool,
+    require_complete_scan: bool,
 ) -> Result<()> {
     // Filter parity (Step 4B): build the wire FilterSpec here and
     // ship it on TransferOperationSpec. The daemon applies the same
@@ -264,6 +265,9 @@ pub async fn run_remote_pull_transfer(
         checksum: args.checksum,
         resume: args.resume,
         block_size: 0, // Use default (1 MiB)
+        // R49-F2: move arms set this true so the daemon refuses
+        // partial source scans before we delete the remote source.
+        require_complete_scan,
     };
 
     // Use PullSync - sends local manifest to server, server compares and only sends what's needed
