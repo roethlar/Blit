@@ -742,12 +742,44 @@ fn apply_mirror_deletions(
     let enumerator = FileEnumerator::new(filter.clone_without_cache());
     let dest_entries = enumerator.enumerate_local(dest_root)?;
 
+    // R48-F1: source.scan() only emits file headers, so
+    // `source_paths` is a set of *files*. Pre-fix this meant every
+    // destination directory was "not in source_paths" and got
+    // queued for deletion. Combined with R46-F5's hard-error
+    // policy on remove_* failures, a normal mirror containing
+    // `sub/file.txt` would keep `sub/file.txt`, then try
+    // `remove_dir("sub")` and fail the whole operation with
+    // ENOTEMPTY. Derive `source_dirs` from each file's parent
+    // chain so dest dirs that exist implicitly on the source
+    // side (because they contain a source file) get preserved.
+    let mut source_dirs: HashSet<String> = HashSet::new();
+    for path in source_paths {
+        let p = std::path::Path::new(path);
+        let mut cur = p.parent();
+        while let Some(parent) = cur {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            let parent_str = parent.to_string_lossy().replace('\\', "/");
+            // Insert and keep walking up; if already present every
+            // shallower ancestor is too, so we could break — but
+            // the walk is cheap and the eager form is simpler to
+            // reason about.
+            source_dirs.insert(parent_str);
+            cur = parent.parent();
+        }
+    }
+
     let mut files_to_delete = Vec::new();
     let mut dirs_to_delete = Vec::new();
 
     for entry in &dest_entries {
         let rel = entry.relative_path.to_string_lossy().replace('\\', "/");
-        if !source_paths.contains(&rel) {
+        let absent_at_source = match entry.kind {
+            EntryKind::Directory => !source_dirs.contains(&rel),
+            _ => !source_paths.contains(&rel),
+        };
+        if absent_at_source {
             let abs = dest_root.join(&entry.relative_path);
             match entry.kind {
                 EntryKind::Directory => dirs_to_delete.push(abs),
@@ -1283,5 +1315,80 @@ mod async_runtime_tests {
             msg.contains("mirror-delete left") && msg.contains("in place"),
             "expected mirror-delete-left-in-place message, got: {msg}"
         );
+    }
+
+    /// R48-F1 regression: a normal mirror that contains a
+    /// subdirectory with a source file must succeed. Pre-fix
+    /// `source_paths` was a set of file paths only; every dest
+    /// directory was "absent at source" and got queued for
+    /// `remove_dir`, which (after R46-F5 promoted those failures
+    /// to hard errors) failed the whole mirror with ENOTEMPTY on
+    /// the parent dir that contained the freshly-copied file.
+    #[tokio::test]
+    async fn mirror_with_subdir_does_not_treat_parent_dir_as_absent() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+
+        // Source: nested file under a subdir.
+        write_file(&src.join("sub/file.txt"), b"payload");
+
+        let mut opts = opts();
+        opts.mirror = true;
+        let orch = TransferOrchestrator::new();
+        let summary = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap_or_else(|e| panic!("mirror failed: {e:#}"));
+
+        assert!(
+            dst.join("sub/file.txt").exists(),
+            "destination subdir file must exist after mirror, got summary: {:?}",
+            summary
+        );
+        // The parent dir is implicitly in source — must not have
+        // been counted as a deletion.
+        assert_eq!(
+            summary.deleted_dirs, 0,
+            "mirror over a single nested file must not delete any \
+             destination directory; got summary: {:?}",
+            summary
+        );
+    }
+
+    /// R48-F1 sibling: a destination dir that the source *doesn't*
+    /// reference must still be deleted by mirror.
+    #[tokio::test]
+    async fn mirror_still_deletes_truly_unrelated_destination_dirs() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+
+        write_file(&src.join("kept.txt"), b"src");
+        // Pre-existing dest dir that's not part of source.
+        std::fs::create_dir_all(dst.join("stale_dir")).unwrap();
+        // Plus a stale file inside it, so the delete order has to
+        // be deepest-first.
+        write_file(&dst.join("stale_dir/extra.txt"), b"stale");
+
+        let mut opts = opts();
+        opts.mirror = true;
+        let orch = TransferOrchestrator::new();
+        let summary = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert!(dst.join("kept.txt").exists());
+        assert!(
+            !dst.join("stale_dir/extra.txt").exists(),
+            "mirror must still delete files in unrelated dest subdirs"
+        );
+        assert!(
+            !dst.join("stale_dir").exists(),
+            "mirror must still delete unrelated dest dirs once empty"
+        );
+        assert!(summary.deleted_dirs >= 1);
+        assert!(summary.deleted_files >= 1);
     }
 }
