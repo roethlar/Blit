@@ -333,6 +333,49 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
     let src_display = display_endpoint(&src_endpoint);
     let dst_display = display_endpoint(&dst_endpoint);
 
+    // R54-F1 (data-loss / silent bug): `--null` only works
+    // correctly for LOCAL COPY. Outside that envelope it's
+    // either destructive or silently ignored:
+    //   - `blit mirror --null`: the null sink discards writes,
+    //     but `apply_mirror_deletions` still runs (only
+    //     `options.dry_run` gates the actual remove_* calls)
+    //     and deletes destination-only files — turning a
+    //     supposedly read-only benchmark into a destructive op.
+    //   - `blit copy --null` to/from a remote endpoint: the
+    //     remote push/pull paths don't implement null
+    //     semantics, so the flag is silently ignored and a
+    //     normal write happens.
+    //
+    // The narrowest safe contract for 0.1.0: --null is local
+    // copy only. Reject the other combinations at the CLI;
+    // proper plumbing of null semantics through mirror-delete
+    // and the remote paths is a post-release item.
+    if args.null {
+        if matches!(mode, TransferKind::Mirror) {
+            bail!(
+                "--null is not supported with `blit mirror`: the \
+                 null sink discards writes, but mirror's \
+                 destination-purge step would still delete \
+                 destination-only files, turning what's supposed \
+                 to be a read-only benchmark into a destructive \
+                 operation. Use `blit copy --null SRC DST` (local \
+                 only) for read-path benchmarking."
+            );
+        }
+        if matches!(src_endpoint, Endpoint::Remote(_))
+            || matches!(dst_endpoint, Endpoint::Remote(_))
+        {
+            bail!(
+                "--null is not supported with remote endpoints: \
+                 the remote push/pull paths don't implement null \
+                 semantics, so the flag would be silently \
+                 ignored and a real write would happen. Use \
+                 `blit copy --null SRC DST` between two local \
+                 paths for read-path benchmarking."
+            );
+        }
+    }
+
     // For mirror operations, prompt unless --yes or --dry-run
     if matches!(mode, TransferKind::Mirror) && !args.dry_run {
         let prompt = format!(
@@ -492,8 +535,50 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             "move does not support --null: --null writes nothing \
              to the destination, but move would still delete the \
              source afterward, which would erase data with no \
-             copy. Use --null only with copy/mirror for \
-             throughput benchmarking."
+             copy. Use --null only with `blit copy SRC DST` \
+             between two local paths for read-path benchmarking."
+        );
+    }
+
+    // R54-F2 (data-loss): reject `--force` and `--ignore-times`
+    // for move. The flags are documented as "unconditionally
+    // transfer regardless of size/mtime match," but neither is
+    // currently plumbed through `LocalMirrorOptions` /
+    // `PushControl`'s comparison-mode selection — the local and
+    // local→remote paths fall through to SizeMtime regardless.
+    // For move that means a stale destination with matching
+    // size+mtime is treated as up-to-date, the source isn't
+    // copied, and then the source-delete step removes it. The
+    // flags ARE plumbed through PullSync (PullSyncOptions
+    // carries `force` and `ignore_times`), so remote-source move
+    // would actually honor them — but rather than ship a split
+    // contract where some move arms respect the flag and others
+    // silently lose data, refuse uniformly until the local
+    // paths catch up. Proper plumbing is a post-release item;
+    // operators can express `--force` semantics on move by
+    // doing `blit copy --force` then `blit rm src` manually.
+    if args.force {
+        bail!(
+            "move does not support --force: the local and \
+             local→remote transfer paths don't currently honor \
+             this flag in their comparison mode, so a stale \
+             destination with matching size+mtime would be \
+             treated as up-to-date — the source would be \
+             skipped during the transfer and then deleted by \
+             move. Run `blit copy --force` followed by \
+             `blit rm src` if that's the semantic you want."
+        );
+    }
+    if args.ignore_times {
+        bail!(
+            "move does not support --ignore-times: same reason \
+             as --force — the local and local→remote paths fall \
+             through to size+mtime comparison regardless of \
+             this flag, so a stale destination with matching \
+             size+mtime would be treated as up-to-date and the \
+             source-delete step would lose data. Run \
+             `blit copy --ignore-times` followed by \
+             `blit rm src` if that's the semantic you want."
         );
     }
 

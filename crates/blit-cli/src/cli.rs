@@ -230,16 +230,23 @@ pub struct TransferArgs {
     /// source but the CLI can reach both daemons, or for benchmarking.
     #[arg(long, help_heading = "Performance / debug")]
     pub relay_via_cli: bool,
-    /// Discard all writes (measure source read + pipeline throughput only).
+    /// Discard all writes — local copy only (read+pipeline benchmark).
     ///
-    /// Reads and prepares all source data normally but does not write to the
-    /// destination. Use this to isolate whether a bottleneck is on the source
-    /// or destination side. Example:
+    /// Reads and prepares all source data normally but does not write to
+    /// the destination. Use this to isolate whether a bottleneck is on
+    /// the source or destination side. Example:
     ///
     ///   blit copy /data/large-dataset /tmp/unused --null -v
     ///
-    /// The destination path is still required for planning but nothing is
-    /// written there. Performance records are tagged so the adaptive predictor
+    /// **Restrictions** (R54-F1): --null is supported only by `blit copy`
+    /// between two local paths. The CLI rejects it with `blit mirror`
+    /// (the destination-purge step would still delete files), with
+    /// `blit move` (the source-delete step would erase the source with
+    /// no copy), and with any remote endpoint (the remote push/pull
+    /// paths don't honor the null sink, so the flag would be silently
+    /// ignored).
+    ///
+    /// Performance records are tagged so the adaptive predictor
     /// does not learn from null-sink runs.
     #[arg(long, help_heading = "Performance / debug")]
     pub null: bool,
