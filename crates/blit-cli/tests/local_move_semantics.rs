@@ -327,6 +327,46 @@ fn local_move_rejects_ignore_existing() {
     );
 }
 
+/// R52-F1 regression: `blit move --null` must refuse. --null
+/// routes the transfer into a sink that writes nothing, and
+/// move would then delete the source — net effect, source
+/// erased with no destination contents. Reviewer-flagged
+/// command: `blit move --null --yes src/ dst/`.
+#[test]
+fn local_move_rejects_null_sink() {
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("file.txt"), b"would have been erased").unwrap();
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--null")
+        .arg("--yes")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        !output.status.success(),
+        "move --null must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support --null"),
+        "expected R52-F1 --null rejection, got stderr: {}",
+        stderr
+    );
+    // Source must be intact — the rejection fires before any work.
+    assert!(
+        src.join("file.txt").exists(),
+        "src/file.txt must survive — move rejected before any work"
+    );
+}
+
 /// R50-F1 / R51-F2 regression: `blit move --relay-via-cli` between
 /// two remote endpoints must refuse. The relay path goes through
 /// the legacy metadata-only Pull RPC whose enumeration discards

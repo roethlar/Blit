@@ -16,7 +16,7 @@ use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient};
 use tonic::Code;
 
 use super::endpoints::format_remote_endpoint;
-use super::remote::spawn_progress_monitor;
+use super::remote::spawn_progress_monitor_with_options;
 
 pub async fn run_remote_to_remote_direct(
     args: &TransferArgs,
@@ -25,14 +25,28 @@ pub async fn run_remote_to_remote_direct(
     mirror_mode: bool,
     require_complete_scan: bool,
 ) -> Result<()> {
-    run_remote_to_remote_direct_inner(args, src, dst, mirror_mode, require_complete_scan, false)
-        .await
-        .map(|_| ())
+    // Copy/mirror callers: `--relay-via-cli` is a valid escape
+    // hatch, so error messages mention it.
+    run_remote_to_remote_direct_inner(
+        args,
+        src,
+        dst,
+        mirror_mode,
+        require_complete_scan,
+        false, // defer_output
+        true,  // relay_fallback_suggestable
+    )
+    .await
+    .map(|_| ())
 }
 
 /// R51-F4: move's variant of [`run_remote_to_remote_direct`].
 /// Returns the delegated summary instead of printing inline so
 /// the caller can defer output until after source-delete.
+///
+/// R53-F2: move refuses `--relay-via-cli` (R50-F1), so error
+/// messages must not point users at it — they'd be sent to a
+/// flag the same command rejects.
 pub async fn run_remote_to_remote_direct_deferred(
     args: &TransferArgs,
     src: RemoteEndpoint,
@@ -40,8 +54,16 @@ pub async fn run_remote_to_remote_direct_deferred(
     mirror_mode: bool,
     require_complete_scan: bool,
 ) -> Result<DeferredDelegatedState> {
-    run_remote_to_remote_direct_inner(args, src, dst, mirror_mode, require_complete_scan, true)
-        .await
+    run_remote_to_remote_direct_inner(
+        args,
+        src,
+        dst,
+        mirror_mode,
+        require_complete_scan,
+        true,  // defer_output
+        false, // relay_fallback_suggestable — move refuses --relay-via-cli
+    )
+    .await
 }
 
 pub struct DeferredDelegatedState {
@@ -65,6 +87,7 @@ async fn run_remote_to_remote_direct_inner(
     mirror_mode: bool,
     require_complete_scan: bool,
     defer_output: bool,
+    relay_fallback_suggestable: bool,
 ) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
     let pull_opts = PullSyncOptions {
@@ -104,16 +127,26 @@ async fn run_remote_to_remote_direct_inner(
         .with_context(|| format!("connecting to destination {}", format_remote_endpoint(&dst)))?;
 
     let response = client.delegated_pull(request).await.map_err(|status| {
+        let relay_hint = if relay_fallback_suggestable {
+            " or pass --relay-via-cli"
+        } else {
+            ""
+        };
+        let relay_clause = if relay_fallback_suggestable {
+            "; pass --relay-via-cli to route through the CLI host"
+        } else {
+            ""
+        };
         if status.code() == Code::Unimplemented {
             eyre!(
                 "destination daemon does not implement DelegatedPull; upgrade the destination \
-                 daemon or pass --relay-via-cli"
+                 daemon{relay_hint}"
             )
         } else if status.code() == Code::Unavailable {
             eyre!(
-                "destination daemon is unavailable for delegated pull ({}); pass --relay-via-cli \
-                 to route through the CLI host",
-                status.message()
+                "destination daemon is unavailable for delegated pull ({}){}",
+                status.message(),
+                relay_clause
             )
         } else {
             eyre!(
@@ -125,8 +158,12 @@ async fn run_remote_to_remote_direct_inner(
     let mut stream = response.into_inner();
 
     let show_progress = args.effective_progress() || args.verbose;
-    let (progress_handle, progress_task) =
-        spawn_progress_monitor(show_progress, args.verbose, args.json);
+    let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
+        show_progress,
+        args.verbose,
+        args.json,
+        defer_output, // R53-F1: suppress final progress line on move
+    );
     let mut summary: Option<DelegatedPullSummary> = None;
     let mut failure: Option<eyre::Report> = None;
     let mut bytes_progress_state = DelegatedBytesProgressState::default();
@@ -137,9 +174,15 @@ async fn run_remote_to_remote_direct_inner(
             Ok(None) => break,
             Err(status) => {
                 failure = Some(if status.code() == Code::Unavailable {
+                    let relay_clause = if relay_fallback_suggestable {
+                        "; pass --relay-via-cli to route through the CLI host"
+                    } else {
+                        ""
+                    };
                     eyre!(
-                        "delegation stream lost ({}); pass --relay-via-cli to route through the CLI host",
-                        status.message()
+                        "delegation stream lost ({}){}",
+                        status.message(),
+                        relay_clause
                     )
                 } else {
                     eyre!("delegation stream failed: {}", status.message())
@@ -174,7 +217,11 @@ async fn run_remote_to_remote_direct_inner(
                 break;
             }
             Some(DelegatedPayload::Error(error)) => {
-                failure = Some(map_delegated_error(error.phase, &error.upstream_message));
+                failure = Some(map_delegated_error(
+                    error.phase,
+                    &error.upstream_message,
+                    relay_fallback_suggestable,
+                ));
                 break;
             }
             None => {}
@@ -223,17 +270,29 @@ struct DelegatedBytesProgressState {
     bytes_completed: u64,
 }
 
-fn map_delegated_error(phase: i32, message: &str) -> eyre::Report {
+fn map_delegated_error(
+    phase: i32,
+    message: &str,
+    relay_fallback_suggestable: bool,
+) -> eyre::Report {
     let phase = DelegatedPullPhase::try_from(phase).unwrap_or(DelegatedPullPhase::Unknown);
+    let relay_clause = if relay_fallback_suggestable {
+        ". Pass --relay-via-cli to route through the CLI host"
+    } else {
+        ""
+    };
+    let relay_clause_semi = if relay_fallback_suggestable {
+        "; pass --relay-via-cli to route through the CLI host"
+    } else {
+        ""
+    };
     match phase {
-        DelegatedPullPhase::DelegationRejected => eyre!(
-            "delegation rejected by destination daemon: {message}. Pass --relay-via-cli to route \
-             through the CLI host"
-        ),
-        DelegatedPullPhase::ConnectSource => eyre!(
-            "destination daemon cannot reach source ({message}); pass --relay-via-cli to route \
-             through the CLI host"
-        ),
+        DelegatedPullPhase::DelegationRejected => {
+            eyre!("delegation rejected by destination daemon: {message}{relay_clause}")
+        }
+        DelegatedPullPhase::ConnectSource => {
+            eyre!("destination daemon cannot reach source ({message}){relay_clause_semi}")
+        }
         DelegatedPullPhase::Negotiate => eyre!("source refused delegated pull: {message}"),
         DelegatedPullPhase::Transfer => eyre!("delegated transfer failed: {message}"),
         DelegatedPullPhase::Apply => {

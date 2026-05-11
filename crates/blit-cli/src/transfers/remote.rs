@@ -19,10 +19,18 @@ use std::sync::Arc;
 
 use super::endpoints::{format_remote_endpoint, Endpoint};
 
-pub(crate) fn spawn_progress_monitor(
+/// Spawn the per-transfer progress monitor. `suppress_final_line=true`
+/// lets move callers gate the post-transfer "[progress] final: …"
+/// line so a transfer-looking success summary doesn't appear on
+/// stdout before source-delete runs (and possibly fails). The
+/// per-file / per-second progress lines still emit because the
+/// user wants liveness signal during the transfer; only the
+/// post-transfer "final:" line is gated (R53-F1).
+pub(crate) fn spawn_progress_monitor_with_options(
     enabled: bool,
     verbose: bool,
     json: bool,
+    suppress_final_line: bool,
 ) -> (Option<RemoteTransferProgress>, Option<JoinHandle<()>>) {
     if !enabled {
         return (None, None);
@@ -119,7 +127,7 @@ pub(crate) fn spawn_progress_monitor(
             }
         }
 
-        if started {
+        if started && !suppress_final_line {
             let elapsed = start.elapsed().as_secs_f64().max(1e-6);
             let avg_bps = (total_bytes as f64) / elapsed;
             if json {
@@ -136,7 +144,7 @@ pub(crate) fn spawn_progress_monitor(
                     avg_mib,
                 );
             }
-        } else if total_manifest > 0 {
+        } else if !started && total_manifest > 0 {
             if json {
                 eprintln!(
                     "{{\"event\":\"manifest\",\"total_files\":{}}}",
@@ -200,8 +208,12 @@ async fn run_remote_push_transfer_inner(
         .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
 
     let show_progress = args.effective_progress() || args.verbose;
-    let (progress_handle, progress_task) =
-        spawn_progress_monitor(show_progress, args.verbose, args.json);
+    let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
+        show_progress,
+        args.verbose,
+        args.json,
+        defer_output, // R53-F1: suppress the final progress line on move
+    );
 
     // Filter built by orchestrator-side helper from CLI args. The
     // universal `FilteredSource` wrapper (single chokepoint, see
@@ -363,8 +375,12 @@ async fn run_remote_pull_transfer_inner(
     let local_manifest = enumerate_local_manifest(&actual_dest, args.checksum).await?;
 
     let show_progress = args.effective_progress() || args.verbose;
-    let (progress_handle, progress_task) =
-        spawn_progress_monitor(show_progress, args.verbose, args.json);
+    let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
+        show_progress,
+        args.verbose,
+        args.json,
+        defer_output, // R53-F1: suppress final progress line on move
+    );
 
     // Build comparison options from CLI args
     let pull_opts = PullSyncOptions {

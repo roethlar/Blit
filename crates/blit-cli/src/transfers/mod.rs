@@ -480,6 +480,23 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         );
     }
 
+    // R52-F1 (data-loss): reject `--null`. The flag routes the
+    // local transfer into `null_sink`, which deliberately writes
+    // nothing — then move's source-delete step removes the
+    // original. Net effect: `blit move --null --yes src/ dst/`
+    // erases src without ever creating dst contents. --null is
+    // a benchmarking/diagnostics primitive; it has no meaningful
+    // semantic combined with move.
+    if args.null {
+        bail!(
+            "move does not support --null: --null writes nothing \
+             to the destination, but move would still delete the \
+             source afterward, which would erase data with no \
+             copy. Use --null only with copy/mirror for \
+             throughput benchmarking."
+        );
+    }
+
     // Prompt for confirmation before move (which deletes source)
     let src_display = display_endpoint(&src_endpoint);
     let dst_display = display_endpoint(&dst_endpoint);
