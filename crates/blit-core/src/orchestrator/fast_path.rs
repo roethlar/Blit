@@ -81,6 +81,17 @@ pub(super) fn maybe_select_fast_path(
     if options.mirror || options.checksum || options.force_tar {
         return Ok(FastPathOutcome::streaming());
     }
+    // R58-F7: the fast-path's tiny/huge planners route through
+    // MirrorPlanner::should_copy_entry, which only understands
+    // SizeMtime (and Checksum via the checksum bool). SizeOnly /
+    // Force / IgnoreTimes silently became SizeMtime here, so a
+    // tiny-manifest copy with --size-only would still re-copy when
+    // mtimes differed but sizes matched. Route through the
+    // streaming planner, which honors all five ComparisonMode
+    // variants via plan_local_mirror.
+    if !matches!(options.compare_mode, super::LocalCompareMode::SizeMtime) {
+        return Ok(FastPathOutcome::streaming());
+    }
 
     let mut enumerator = FileEnumerator::new(options.filter.clone_without_cache());
     if !options.preserve_symlinks {

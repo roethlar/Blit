@@ -467,15 +467,29 @@ impl TransferOrchestrator {
         let filter = options.filter.clone_without_cache();
         let skip_unchanged = options.skip_unchanged;
         let ignore_existing = options.ignore_existing;
-        // Translate the orchestrator's bool `checksum` flag onto the
-        // unified ComparisonMode enum. Other variants (SizeOnly,
-        // IgnoreTimes, etc.) become first-class once pull_sync.rs
-        // migrates in step 4 and brings their behavior into the
-        // shared comparison primitives.
-        let compare_mode = if options.checksum {
-            ComparisonMode::Checksum
-        } else {
-            ComparisonMode::SizeMtime
+        // R58-F7: translate the orchestrator's `compare_mode` (set by
+        // the CLI from --size-only / --ignore-times / --force /
+        // --checksum / default) onto the unified ComparisonMode enum.
+        // Pre-fix this hardcoded a bool→Checksum-or-SizeMtime mapping
+        // and ignored the other flags entirely; remote pull already
+        // honored all five variants, so behavior diverged by direction.
+        //
+        // Backward-compat: the old `options.checksum` bool still
+        // wins if it's set without `compare_mode` being explicitly
+        // changed — preserves the existing `--checksum` behavior
+        // for any caller that hasn't migrated yet.
+        let compare_mode = match options.compare_mode {
+            crate::orchestrator::LocalCompareMode::Checksum => ComparisonMode::Checksum,
+            crate::orchestrator::LocalCompareMode::SizeOnly => ComparisonMode::SizeOnly,
+            crate::orchestrator::LocalCompareMode::Force => ComparisonMode::Force,
+            crate::orchestrator::LocalCompareMode::IgnoreTimes => ComparisonMode::IgnoreTimes,
+            crate::orchestrator::LocalCompareMode::SizeMtime => {
+                if options.checksum {
+                    ComparisonMode::Checksum
+                } else {
+                    ComparisonMode::SizeMtime
+                }
+            }
         };
 
         // 1. Scan source via FsTransferSource, wrapped in FilteredSource so
@@ -730,6 +744,7 @@ impl TransferOrchestrator {
                 &source_paths,
                 dest_root,
                 &options.filter,
+                options.delete_scope,
                 !options.dry_run,
                 options.verbose,
             )?;
@@ -808,16 +823,42 @@ impl TransferOrchestrator {
 }
 
 /// Delete destination files/dirs not present in the source header set.
+///
+/// R58-F6: `delete_scope` controls which destination entries are
+/// even considered for deletion:
+///   - `FilteredSubset` (default): enumerate the destination
+///     *through the user's filter*, then delete entries not in
+///     the source set. Excluded files (e.g. `*.log` when
+///     `--exclude '*.log'`) are out of scope — they're not
+///     candidates for deletion, and their parent directories are
+///     therefore non-empty from the user's perspective. When
+///     `remove_dir` fails with ENOTEMPTY on a parent whose only
+///     remaining contents are out-of-scope, we treat it as
+///     expected, not as an error.
+///   - `All`: enumerate the destination *without* the filter so
+///     every entry is in scope. ENOTEMPTY is a genuine error
+///     here (we did walk everything, so something other than
+///     filter-excluded content must be in the way).
 fn apply_mirror_deletions(
     source_paths: &HashSet<String>,
     dest_root: &Path,
     filter: &FileFilter,
+    delete_scope: crate::orchestrator::LocalMirrorDeleteScope,
     perform: bool,
     verbose: bool,
 ) -> Result<(usize, usize)> {
     use crate::enumeration::{EntryKind, FileEnumerator};
+    use crate::orchestrator::LocalMirrorDeleteScope;
 
-    let enumerator = FileEnumerator::new(filter.clone_without_cache());
+    // R58-F6: FilteredSubset uses the user's filter for the
+    // enumeration (only in-scope entries become deletion
+    // candidates). All bypasses the filter so every destination
+    // entry is considered.
+    let enum_filter = match delete_scope {
+        LocalMirrorDeleteScope::FilteredSubset => filter.clone_without_cache(),
+        LocalMirrorDeleteScope::All => FileFilter::default(),
+    };
+    let enumerator = FileEnumerator::new(enum_filter);
     let dest_entries = enumerator.enumerate_local(dest_root)?;
 
     // R48-F1: source.scan() only emits file headers, so
@@ -917,8 +958,32 @@ fn apply_mirror_deletions(
                     }
                 }
                 Err(err) => {
-                    eprintln!("Failed to delete directory {}: {}", path.display(), err);
-                    failures.push(format!("{}: {}", path.display(), err));
+                    // R58-F6: in FilteredSubset mode, ENOTEMPTY on
+                    // a destination dir means the dir contains
+                    // out-of-scope content (files matching the
+                    // user's exclude rules). Those files
+                    // intentionally aren't candidates for
+                    // deletion, so the dir genuinely can't be
+                    // empty — that's not a failure, it's the
+                    // expected behavior of the scope contract.
+                    // Skip silently in that case; surface the
+                    // error in `All` mode where the dir really
+                    // should have been empty.
+                    let is_not_empty = err.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                        || err.raw_os_error() == Some(66); // ENOTEMPTY on macOS/BSD
+                    if matches!(delete_scope, LocalMirrorDeleteScope::FilteredSubset)
+                        && is_not_empty
+                    {
+                        if verbose {
+                            eprintln!(
+                                "Kept directory {} (contains out-of-scope contents)",
+                                path.display()
+                            );
+                        }
+                    } else {
+                        eprintln!("Failed to delete directory {}: {}", path.display(), err);
+                        failures.push(format!("{}: {}", path.display(), err));
+                    }
                 }
             }
         } else {
@@ -1571,6 +1636,162 @@ mod async_runtime_tests {
             "filter exclusion must skip the file"
         );
         assert!(!dst.exists(), "excluded file must not be copied (R58-F5)");
+    }
+
+    /// R58-F6 regression: local mirror with `--exclude '*.log'`
+    /// must not try to remove an out-of-scope directory just
+    /// because the filter hid its in-scope contents. Pre-fix
+    /// `apply_mirror_deletions` enumerated the destination
+    /// through the filter, saw the .log file as out-of-scope (so
+    /// the dir looked empty), and queued the dir for
+    /// `remove_dir` — which failed with ENOTEMPTY because the
+    /// .log was actually still inside.
+    #[tokio::test]
+    async fn local_mirror_subset_keeps_excluded_only_directories() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_file(&src.join("keep.txt"), b"src-keep");
+        // Pre-existing destination structure: a directory that
+        // only contains an excluded `.log` file.
+        std::fs::create_dir_all(dst.join("logs")).unwrap();
+        write_file(&dst.join("logs/app.log"), b"excluded contents");
+
+        let mut opts = opts();
+        opts.mirror = true;
+        // FilteredSubset is the default; spell it out for clarity.
+        opts.delete_scope = crate::orchestrator::LocalMirrorDeleteScope::FilteredSubset;
+        opts.filter.exclude_files = vec!["*.log".to_string()];
+
+        let orch = TransferOrchestrator::new();
+        let summary = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap_or_else(|e| panic!("mirror failed: {e:#}"));
+
+        // Mirror must succeed even though `dst/logs/` contains an
+        // out-of-scope file. The `.log` survives, the dir
+        // survives, the in-scope file transferred.
+        assert!(dst.join("keep.txt").exists());
+        assert!(
+            dst.join("logs/app.log").exists(),
+            "excluded .log file must not be deleted by mirror"
+        );
+        assert!(
+            dst.join("logs").exists(),
+            "dir containing only excluded files must survive mirror \
+             (R58-F6 — pre-fix this failed with ENOTEMPTY)"
+        );
+        let _ = summary;
+    }
+
+    /// R58-F6 sibling: `--delete-scope=all` deletes through the
+    /// filter, including dirs that only hold excluded files. The
+    /// user explicitly opted out of subset semantics.
+    #[tokio::test]
+    async fn local_mirror_all_scope_deletes_through_filter() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_file(&src.join("keep.txt"), b"src-keep");
+        std::fs::create_dir_all(dst.join("logs")).unwrap();
+        write_file(&dst.join("logs/app.log"), b"deletable in All mode");
+
+        let mut opts = opts();
+        opts.mirror = true;
+        opts.delete_scope = crate::orchestrator::LocalMirrorDeleteScope::All;
+        opts.filter.exclude_files = vec!["*.log".to_string()];
+
+        let orch = TransferOrchestrator::new();
+        let _ = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert!(dst.join("keep.txt").exists());
+        assert!(
+            !dst.join("logs/app.log").exists(),
+            "All scope must delete excluded files at destination"
+        );
+        assert!(
+            !dst.join("logs").exists(),
+            "All scope must delete the now-empty dir"
+        );
+    }
+
+    /// R58-F7 regression: local copy honors `compare_mode =
+    /// SizeOnly`. With a destination that has the same SIZE but
+    /// different MTIME, default SizeMtime would re-copy
+    /// (mtime differs); SizeOnly must skip.
+    #[tokio::test]
+    async fn local_copy_honors_size_only_compare_mode() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_file(&src.join("file.txt"), b"AAAA"); // 4 bytes
+        write_file(&dst.join("file.txt"), b"BBBB"); // 4 bytes, different content
+
+        // Bump the source mtime so SizeMtime would re-copy.
+        let now = std::time::SystemTime::now();
+        let later = now + std::time::Duration::from_secs(10);
+        filetime::set_file_mtime(
+            src.join("file.txt"),
+            filetime::FileTime::from_system_time(later),
+        )
+        .unwrap();
+        filetime::set_file_mtime(
+            dst.join("file.txt"),
+            filetime::FileTime::from_system_time(now),
+        )
+        .unwrap();
+
+        let mut opts = opts();
+        opts.compare_mode = crate::orchestrator::LocalCompareMode::SizeOnly;
+
+        let orch = TransferOrchestrator::new();
+        let _ = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        // SizeOnly: same size → skip → dst content unchanged.
+        assert_eq!(
+            std::fs::read(dst.join("file.txt")).unwrap(),
+            b"BBBB",
+            "SizeOnly compare must skip when sizes match (R58-F7)"
+        );
+    }
+
+    /// R58-F7 regression: local copy honors `compare_mode = Force`.
+    /// With matching size+mtime, default SizeMtime would skip;
+    /// Force must always re-copy.
+    #[tokio::test]
+    async fn local_copy_honors_force_compare_mode() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_file(&src.join("file.txt"), b"CCCC");
+        write_file(&dst.join("file.txt"), b"OLD!");
+
+        // Match size+mtime so SizeMtime would skip.
+        let t = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(src.join("file.txt"), t).unwrap();
+        filetime::set_file_mtime(dst.join("file.txt"), t).unwrap();
+
+        let mut opts = opts();
+        opts.compare_mode = crate::orchestrator::LocalCompareMode::Force;
+
+        let orch = TransferOrchestrator::new();
+        let _ = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(dst.join("file.txt")).unwrap(),
+            b"CCCC",
+            "Force compare must always copy even when size+mtime match (R58-F7)"
+        );
     }
 
     /// R58-F5 regression: single-file local copy must honor

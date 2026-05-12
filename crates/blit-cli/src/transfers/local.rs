@@ -160,6 +160,42 @@ fn build_local_options(
     args: &TransferArgs,
     mirror: bool,
 ) -> Result<LocalMirrorOptions> {
+    use blit_core::orchestrator::{LocalCompareMode, LocalMirrorDeleteScope};
+
+    // R58-F7: translate the per-flag CLI args into the unified
+    // LocalCompareMode enum. The orchestrator then routes to the
+    // proper ComparisonMode for the diff_planner. Pre-fix only
+    // --checksum was honored; --size-only / --ignore-times /
+    // --force were silently dropped.
+    //
+    // Priority follows the pull-side ordering at
+    // pull.rs:538-547: ignore_times > force > size_only >
+    // checksum > default. This keeps local and pull behaviorally
+    // identical when given the same flag combination.
+    let compare_mode = if args.ignore_times {
+        LocalCompareMode::IgnoreTimes
+    } else if args.force {
+        LocalCompareMode::Force
+    } else if args.size_only {
+        LocalCompareMode::SizeOnly
+    } else if args.checksum {
+        LocalCompareMode::Checksum
+    } else {
+        LocalCompareMode::SizeMtime
+    };
+
+    // R58-F6: --delete-scope is now plumbed through to local
+    // mirror. The CLI exposes `subset` (default — filter scope)
+    // and `all`. Pre-fix LocalMirrorOptions had no field for
+    // this and apply_mirror_deletions always operated through
+    // the user's filter, then failed with ENOTEMPTY on dirs
+    // containing excluded contents.
+    let delete_scope = if args.delete_scope_all() {
+        LocalMirrorDeleteScope::All
+    } else {
+        LocalMirrorDeleteScope::FilteredSubset
+    };
+
     let mut options = LocalMirrorOptions {
         mirror,
         dry_run: args.dry_run,
@@ -168,6 +204,8 @@ fn build_local_options(
         perf_history: ctx.perf_history_enabled,
         checksum: args.checksum,
         ignore_existing: args.ignore_existing,
+        compare_mode,
+        delete_scope,
         resume: args.resume,
         null_sink: args.null,
         filter: super::build_filter(args)?,
