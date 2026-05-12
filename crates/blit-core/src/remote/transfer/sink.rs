@@ -277,15 +277,13 @@ impl TransferSink for FsTransferSink {
         let dst = self
             .resolve_destination(&header.relative_path)
             .with_context(|| format!("validating receive path {:?}", header.relative_path))?;
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
 
+        // R58-F4: dry-run must be side-effect-free. Drain the wire
+        // for protocol-stream alignment, but skip the parent-mkdir
+        // and the file write. Pre-fix the parent-mkdir ran before
+        // the dry-run check below, so `--dry-run` over a remote
+        // transfer would create destination directories.
         if self.config.dry_run {
-            // Drain the wire so the protocol stream stays aligned, but
-            // discard the bytes.
             let mut sink = tokio::io::sink();
             receive_stream_double_buffered(reader, &mut sink, header.size, RECEIVE_CHUNK_SIZE)
                 .await
@@ -294,6 +292,12 @@ impl TransferSink for FsTransferSink {
                 files_written: 1,
                 bytes_written: 0,
             });
+        }
+
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("creating directory {}", parent.display()))?;
         }
 
         {
@@ -401,16 +405,19 @@ fn write_file_payload(
         }
     };
 
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-
+    // R58-F4: dry-run must be side-effect-free. Bail before the
+    // parent-mkdir so a dry-run doesn't create destination
+    // directories on disk.
     if config.dry_run {
         return Ok(SinkOutcome {
             files_written: 1,
             bytes_written: 0,
         });
+    }
+
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
     }
 
     let mut did_copy = false;
@@ -1216,6 +1223,79 @@ mod tests {
         assert_eq!(outcome.files_written, 1);
         assert_eq!(outcome.bytes_written, 0);
         assert!(!dst.join("file.txt").exists());
+    }
+
+    /// R58-F4 regression: dry-run for `write_payload` must NOT
+    /// create destination subdirectories. Pre-fix `write_file_payload`
+    /// mkdir'd `dst/sub/` for a header `sub/file.txt` before
+    /// returning from the dry-run check.
+    #[tokio::test]
+    async fn fs_sink_dry_run_does_not_create_destination_dirs() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/file.txt"), b"data").unwrap();
+
+        let sink = FsTransferSink::new(
+            src,
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: true,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        let header = make_file_header("sub/file.txt", 4);
+        let _ = sink
+            .write_payload(PreparedPayload::File(header))
+            .await
+            .unwrap();
+
+        assert!(
+            !dst.join("sub").exists(),
+            "dry-run must not create destination subdirectories \
+             (R58-F4 — pre-fix mkdir ran before the dry-run check)"
+        );
+    }
+
+    /// R58-F4 regression for the streaming receive path. `write_file_stream`
+    /// is used by remote pull receive on the CLI side and by daemon push
+    /// receive — the pre-fix create_dir_all ran above the dry-run
+    /// short-circuit on both.
+    #[tokio::test]
+    async fn fs_sink_dry_run_write_file_stream_does_not_create_dirs() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let sink = FsTransferSink::new(
+            src,
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: true,
+                checksum: None,
+                resume: false,
+            },
+        );
+
+        let header = make_file_header("nested/dir/file.txt", 4);
+        let mut reader: &[u8] = b"data";
+        let outcome = sink.write_file_stream(&header, &mut reader).await.unwrap();
+
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(outcome.bytes_written, 0);
+        assert!(
+            !dst.join("nested").exists(),
+            "dry-run streaming receive must not create destination dirs"
+        );
     }
 
     #[tokio::test]

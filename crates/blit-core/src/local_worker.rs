@@ -99,11 +99,15 @@ fn copy_path_maybe(
     let dst = dest_root.join(rel);
 
     if config.dry_run {
-        if file_needs_copy_with_checksum_type(&src, &dst, config.checksum)? {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-        }
+        // R58-F4: --dry-run promises "no changes." Pre-fix, this
+        // path created parent directories on disk before returning.
+        // The mkdir is a real side effect — `blit copy src/ dst/
+        // --dry-run` would create `dst/` even though dry-run is
+        // documented as side-effect-free. Drop the create here;
+        // any logging-only signal the caller wants for "would
+        // have copied this file" goes through the return value,
+        // not the filesystem.
+        let _ = file_needs_copy_with_checksum_type(&src, &dst, config.checksum)?;
         return Ok(());
     }
 

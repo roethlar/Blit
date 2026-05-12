@@ -1044,6 +1044,56 @@ fn execute_single_file_copy(
         None
     };
 
+    // R58-F5: the single-file short-circuit (orchestrator.rs:125)
+    // bypasses the enumerator + planner, which is where the
+    // streaming-pipeline path checks filter / ignore_existing.
+    // Apply both here so single-file copies honor the same
+    // CLI contract.
+    //
+    // Filter: the source root is itself the only entry. Run
+    // `filter.allows_entry` against the source name. If excluded,
+    // return a "scanned 1 / copied 0" summary so the user sees
+    // "no work performed" rather than the file being copied
+    // anyway.
+    let src_name = src_root.file_name().map(PathBuf::from);
+    let allows = match src_name {
+        Some(name) => {
+            let mtime = src_meta.modified().ok();
+            options
+                .filter
+                .allows_entry(Some(&name), src_root, size, mtime)
+        }
+        None => true,
+    };
+    if !allows {
+        return Ok(LocalMirrorSummary {
+            planned_files: 0,
+            copied_files: 0,
+            total_bytes: 0,
+            scanned_files: 1,
+            scanned_bytes: size,
+            duration: start_time.elapsed(),
+            outcome: TransferOutcome::UpToDate,
+            ..Default::default()
+        });
+    }
+
+    // ignore_existing: if the destination file already exists,
+    // skip the copy entirely. Matches the diff_planner behavior
+    // for the streaming-pipeline path (diff_planner.rs).
+    if options.ignore_existing && dest_root.exists() {
+        return Ok(LocalMirrorSummary {
+            planned_files: 0,
+            copied_files: 0,
+            total_bytes: 0,
+            scanned_files: 1,
+            scanned_bytes: size,
+            duration: start_time.elapsed(),
+            outcome: TransferOutcome::UpToDate,
+            ..Default::default()
+        });
+    }
+
     if options.dry_run {
         return Ok(LocalMirrorSummary {
             planned_files: 1,
@@ -1468,6 +1518,90 @@ mod async_runtime_tests {
         );
         assert!(summary.deleted_dirs >= 1);
         assert!(summary.deleted_files >= 1);
+    }
+
+    /// R58-F4 regression: local dry-run on a directory source must
+    /// not create the destination directory. Pre-fix `blit copy
+    /// src/ dst/ --dry-run` would create `dst/` on disk.
+    #[tokio::test]
+    async fn local_dry_run_does_not_create_destination() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("brand_new_dst");
+        write_file(&src.join("a.txt"), b"hello");
+
+        let mut opts = opts();
+        opts.dry_run = true;
+        let orch = TransferOrchestrator::new();
+        let _ = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert!(!dst.exists(), "dry-run must not create destination dir");
+    }
+
+    /// R58-F5 regression: single-file local copy must honor
+    /// `options.filter`. Pre-fix `execute_single_file_copy`
+    /// short-circuited around the enumerator/planner and copied
+    /// regardless of filter rules.
+    #[tokio::test]
+    async fn single_file_copy_honors_filter_excludes() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src.txt");
+        let dst = tmp.path().join("dst.txt");
+        std::fs::write(&src, b"would-be-copied").unwrap();
+
+        let mut opts = opts();
+        // Build a filter that excludes `*.txt`. FileFilter has
+        // private compiled-glob caches so we go through
+        // clone_without_cache() to construct one cleanly.
+        let mut filter = crate::fs_enum::FileFilter::default();
+        filter.exclude_files = vec!["*.txt".to_string()];
+        opts.filter = filter.clone_without_cache();
+
+        let orch = TransferOrchestrator::new();
+        let summary = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            summary.copied_files, 0,
+            "filter exclusion must skip the file"
+        );
+        assert!(!dst.exists(), "excluded file must not be copied (R58-F5)");
+    }
+
+    /// R58-F5 regression: single-file local copy must honor
+    /// `--ignore-existing`. Pre-fix the short-circuit overwrote
+    /// the destination regardless.
+    #[tokio::test]
+    async fn single_file_copy_honors_ignore_existing() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src.txt");
+        let dst = tmp.path().join("dst.txt");
+        std::fs::write(&src, b"new-content").unwrap();
+        std::fs::write(&dst, b"existing-pre-existing").unwrap();
+
+        let mut opts = opts();
+        opts.ignore_existing = true;
+
+        let orch = TransferOrchestrator::new();
+        let summary = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            summary.copied_files, 0,
+            "--ignore-existing must skip when destination exists"
+        );
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"existing-pre-existing",
+            "destination content must be preserved (R58-F5)"
+        );
     }
 }
 
