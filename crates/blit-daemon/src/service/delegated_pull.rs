@@ -386,9 +386,14 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
 }
 
 /// Apply the daemon's authoritative mirror delete list against the
-/// destination tree. Every path is routed through `safe_join` before
-/// the unlink, so a hostile source daemon's `..`-traversal entry is
-/// rejected at the chokepoint (R5-F1 of the 2026-05-01 review).
+/// destination tree. Every path is routed through
+/// `safe_join_contained` (R5-F1 lexical check + R46-F3 canonical
+/// containment) before the unlink. R58-F3 closed the symmetry gap:
+/// the CLI's `delete_listed_paths` upgraded to `safe_join_contained`
+/// in R46-F3, but this daemon-side delegated path was still on bare
+/// `safe_join`. With `dest_root/link → /outside` a peer-controlled
+/// delete-list entry like `link/victim` would have removed an
+/// outside file.
 ///
 /// Returns the count of files actually removed (after which the
 /// caller may surface it via `entries_deleted` on the summary). On
@@ -397,14 +402,24 @@ async fn apply_delete_list(
     dest_root: &Path,
     relative_paths: &[String],
 ) -> std::result::Result<u64, String> {
-    use blit_core::path_safety::safe_join;
+    use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
     use std::collections::BTreeSet;
+
+    // R58-F3: capture the canonical destination root once. Fail
+    // closed if it can't be canonicalized — on the destructive
+    // side, lexical-only fallback would be the bug we're closing.
+    let canonical = canonical_dest_root(dest_root).map_err(|e| {
+        format!(
+            "cannot canonicalize destination '{}' for mirror-purge containment: {e:#}",
+            dest_root.display()
+        )
+    })?;
 
     let mut files_deleted: u64 = 0;
     let mut candidate_parents: BTreeSet<PathBuf> = BTreeSet::new();
 
     for rel in relative_paths {
-        let target = safe_join(dest_root, rel)
+        let target = safe_join_contained(&canonical, dest_root, rel)
             .map_err(|e| format!("source delete list contained unsafe path '{rel}': {e:#}"))?;
         // safe_join("") returns dest_root itself; we never delete it.
         if target == dest_root {
@@ -815,5 +830,55 @@ mod tests {
         // the contract is "from_spec rejects malformed globs", and
         // its message wording can vary across glob crate versions.
         assert!(validate_spec(spec).is_err());
+    }
+
+    // ── R58-F3: apply_delete_list canonical containment ─────────────
+
+    /// A delete-list entry that traverses a pre-existing escape
+    /// symlink under `dest_root` MUST be rejected by the
+    /// destination daemon's mirror-purge step. Pre-fix this path
+    /// used bare `safe_join` (lexical-only); a peer-controlled
+    /// `link/victim` entry would have removed
+    /// `/outside/victim`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_delete_list_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let dest_root = tmp.path().join("dst");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("victim.txt"), b"do not lose").unwrap();
+        // Pre-existing escape symlink under dest_root.
+        symlink(&outside, dest_root.join("link")).unwrap();
+
+        let err = apply_delete_list(&dest_root, &["link/victim.txt".to_string()])
+            .await
+            .expect_err("R58-F3: delete through escape symlink must reject");
+        assert!(
+            err.contains("escape") || err.contains("escapes"),
+            "expected canonical-escape rejection, got: {err}"
+        );
+        // The outside file must be intact.
+        assert!(
+            outside.join("victim.txt").exists(),
+            "victim file must survive — apply_delete_list rejected the unsafe entry"
+        );
+    }
+
+    /// Sanity: in-scope deletes still work after R58-F3.
+    #[tokio::test]
+    async fn apply_delete_list_removes_in_scope_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&dest_root).unwrap();
+        std::fs::write(dest_root.join("victim.txt"), b"goodbye").unwrap();
+
+        let count = apply_delete_list(&dest_root, &["victim.txt".to_string()])
+            .await
+            .expect("in-scope delete should succeed");
+        assert_eq!(count, 1);
+        assert!(!dest_root.join("victim.txt").exists());
     }
 }
