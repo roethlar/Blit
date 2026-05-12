@@ -22,8 +22,6 @@ pub struct LocalMirrorOptions {
     pub workers: usize,
     pub preserve_times: bool,
     pub debug_mode: bool,
-    /// Maximum retries for failed file operations (0-255, default: 1).
-    pub retries: u8,
     /// Resume interrupted transfers using block-level comparison.
     pub resume: bool,
     /// Discard writes (NullSink). Measures source read + pipeline throughput.
@@ -48,7 +46,6 @@ impl Default for LocalMirrorOptions {
             workers: num_cpus::get().max(1),
             preserve_times: true,
             debug_mode: false,
-            retries: 1,
             resume: false,
             null_sink: false,
         }

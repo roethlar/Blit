@@ -97,7 +97,18 @@ impl RemoteEndpoint {
     }
 
     pub fn control_plane_uri(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
+        // R58-F10: IPv6 literals must be bracketed in the URI's
+        // authority component. The host field is stored bracket-
+        // less (the parser strips them), so we re-bracket here.
+        // A colon-containing host can only be IPv6 in our schema —
+        // hostnames and IPv4 addresses never contain colons. Bare
+        // `2001:db8::1:9031` is parsed by HTTP libraries as host
+        // `2001` with garbage trailing, which is the bug.
+        if self.host.contains(':') {
+            format!("http://[{}]:{}", self.host, self.port)
+        } else {
+            format!("http://{}:{}", self.host, self.port)
+        }
     }
 
     /// Display helper used by CLI for canonical formatting.

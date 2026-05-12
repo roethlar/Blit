@@ -126,6 +126,40 @@ impl FileFilter {
         })
     }
 
+    /// R58-F12: pre-validate patterns at filter-construction time.
+    /// The default build_globset() above silently drops invalid
+    /// patterns; that's acceptable as a runtime fallback (a
+    /// corrupted profile shouldn't crash the binary), but at the
+    /// CLI we want to reject malformed globs up front with a
+    /// pointer to the bad pattern.
+    ///
+    /// Returns `Ok(())` if every pattern in `include_files`,
+    /// `exclude_files`, and `exclude_dirs` compiles. The error
+    /// message includes the bad pattern verbatim so the user
+    /// knows what to fix.
+    pub fn validate_globs(&self) -> std::result::Result<(), String> {
+        for (label, patterns) in [
+            ("--include", &self.include_files),
+            ("--exclude", &self.exclude_files),
+        ] {
+            for pat in patterns {
+                if let Err(err) = globset::Glob::new(pat) {
+                    return Err(format!(
+                        "{label} pattern {pat:?} is not a valid glob: {err}"
+                    ));
+                }
+            }
+        }
+        for pat in &self.exclude_dirs {
+            if let Err(err) = globset::Glob::new(pat) {
+                return Err(format!(
+                    "--exclude-dir pattern {pat:?} is not a valid glob: {err}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn include_globs(&self) -> &globset::GlobSet {
         self.compiled_includes
             .get_or_init(|| Self::build_globset(&self.include_files))

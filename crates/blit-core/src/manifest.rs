@@ -162,12 +162,14 @@ fn compare_file(
             FileStatus::Modified
         }
         CompareMode::Force => {
-            // Transfer if size differs OR source is different time (either direction)
-            if src.size != target_size || src.mtime_seconds != target_mtime {
-                FileStatus::Modified
-            } else {
-                FileStatus::Unchanged
-            }
+            // R58-F9: Force means "transfer regardless of target
+            // state" per the proto contract (proto/blit.proto:443)
+            // and the diff_planner's always-copy behavior. The
+            // size/mtime comparison previously here disagreed with
+            // both — if the user said --force, the manifest layer
+            // should NOT second-guess them. Always Modified.
+            let _ = (target_size, target_mtime, target_checksum);
+            FileStatus::Modified
         }
         CompareMode::SizeOnly => {
             // Compare only by size, ignore mtime

@@ -186,9 +186,11 @@ pub struct TransferArgs {
     /// Resume interrupted transfers using block-level comparison
     #[arg(long, help_heading = "Reliability")]
     pub resume: bool,
-    /// Number of retries for failed transfers (0-255, default: 1)
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8), help_heading = "Reliability")]
-    pub retries: u8,
+    // R58-F8: removed --retries flag. It was defined and stored
+    // into LocalMirrorOptions but never consumed by transfer
+    // code — a dead-code knob that lied to operators about
+    // having a retry budget. Re-add once we wire it to actual
+    // retry behavior in the transfer pipelines.
 
     // -- Filtering: restrict which files are eligible for transfer.
     // Filters apply identically to all source/destination combinations

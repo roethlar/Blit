@@ -7,7 +7,7 @@ pub use endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
 
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
-use eyre::{bail, Context, Result};
+use eyre::{bail, eyre, Context, Result};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -296,6 +296,17 @@ pub(crate) fn build_filter_from_inputs(inputs: &FilterInputs<'_>) -> Result<File
     if let Some(path) = inputs.files_from {
         filter.files_from = Some(FileFilter::load_files_from(path)?);
     }
+    // R58-F12: validate glob patterns at CLI filter-construction
+    // time. The runtime build_globset silently drops invalid
+    // patterns (which is OK as a defense-in-depth fallback for
+    // corrupted profiles), but at the CLI layer we want to
+    // reject malformed globs up front with a pointer to the bad
+    // pattern. Operation-spec normalization already validates on
+    // the remote-pull path; this closes the symmetry gap for
+    // local / push paths.
+    filter
+        .validate_globs()
+        .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
     Ok(filter)
 }
 
@@ -861,7 +872,6 @@ mod tests {
             ignore_times: false,
             ignore_existing: false,
             force: false,
-            retries: 1,
             verbose: false,
             progress: false,
             yes: true, // Skip prompts in tests
@@ -908,7 +918,6 @@ mod tests {
             ignore_times: false,
             ignore_existing: false,
             force: false,
-            retries: 1,
             verbose: false,
             progress: false,
             yes: true, // Skip prompts in tests

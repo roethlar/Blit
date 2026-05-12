@@ -168,7 +168,6 @@ fn build_local_options(
         perf_history: ctx.perf_history_enabled,
         checksum: args.checksum,
         ignore_existing: args.ignore_existing,
-        retries: args.retries,
         resume: args.resume,
         null_sink: args.null,
         filter: super::build_filter(args)?,

@@ -103,7 +103,16 @@ pub fn copy_file(
                 .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
                 .open(dst)?
         };
-        #[cfg(not(windows))]
+        // R58-F11: on macOS, clonefile(2) requires the destination
+        // to NOT exist (returns EEXIST otherwise). Pre-fix the
+        // unconditional `File::create(dst)` above created an empty
+        // file before the clone attempt, so clonefile ALWAYS failed
+        // with EEXIST and APFS clones never succeeded. Defer the
+        // create to the fallback streaming path; the clone branch
+        // doesn't need a pre-existing destination handle.
+        #[cfg(target_os = "macos")]
+        let dst_file: Option<File> = None;
+        #[cfg(all(unix, not(target_os = "macos")))]
         let dst_file = File::create(dst)?;
 
         let (total_bytes, clone_succeeded) = {
@@ -151,13 +160,20 @@ pub fn copy_file(
             }
             #[cfg(target_os = "macos")]
             {
+                let _ = dst_file; // silence unused on this branch (always None)
+                                  // R58-F11: try clone primitives FIRST (they need
+                                  // dst to not exist), then fall back to streaming
+                                  // copy if neither clone succeeded. The streaming
+                                  // path creates the destination itself when it
+                                  // opens its writer.
                 let cloned = clone::attempt_clonefile_macos(src, dst).unwrap_or(false)
                     || clone::attempt_fcopyfile_macos(src, dst).unwrap_or(false);
                 if cloned {
                     (file_size, true)
                 } else {
+                    let dst_for_stream = File::create(dst)?;
                     let mut reader = BufReader::with_capacity(buffer_size, src_file);
-                    let mut writer = BufWriter::with_capacity(buffer_size, dst_file);
+                    let mut writer = BufWriter::with_capacity(buffer_size, dst_for_stream);
                     let n = io::copy(&mut reader, &mut writer)?;
                     writer.flush()?;
                     (n, false)
