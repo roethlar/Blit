@@ -417,6 +417,7 @@ async fn read_tar_shard(socket: &mut TcpStream) -> Result<(Vec<FileHeader>, Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generated::ComparisonMode;
     use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
     use crate::remote::transfer::source::FsTransferSource;
     use std::path::{Path, PathBuf};
@@ -466,6 +467,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         ));
 
@@ -513,6 +515,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         ));
 
@@ -576,6 +579,7 @@ mod tests {
                     dry_run: false,
                     checksum: None,
                     resume: false,
+                    compare_mode: ComparisonMode::SizeMtime,
                 },
             )) as Arc<dyn TransferSink>
         };
@@ -632,6 +636,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         ));
 

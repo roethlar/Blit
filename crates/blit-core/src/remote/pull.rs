@@ -1644,6 +1644,10 @@ async fn receive_data_plane_stream_inner(
         dry_run: false,
         checksum: None,
         resume: false,
+        // Receive path uses write_file_stream (wire payloads), not
+        // write_file_payload, so this field is inert here. Kept
+        // at default to satisfy the type.
+        compare_mode: ComparisonMode::SizeMtime,
     };
     let mut sink = FsTransferSink::new(PathBuf::new(), dest_root.to_path_buf(), config);
     let path_tracker = if track_paths {

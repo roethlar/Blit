@@ -555,6 +555,14 @@ impl TransferOrchestrator {
                     dry_run: copy_config.dry_run,
                     checksum: copy_config.checksum,
                     resume: copy_config.resume,
+                    // R58-followup: thread the orchestrator's
+                    // compare_mode into the sink. Pre-fix the sink
+                    // hard-coded SizeMtime via
+                    // file_needs_copy_with_checksum_type, defeating
+                    // --force / --ignore-times: the planner emitted
+                    // the file but the sink decided "skip" when
+                    // mtime+size matched.
+                    compare_mode,
                 },
             ))
         };
@@ -1104,7 +1112,7 @@ fn execute_single_file_copy(
     start_time: Instant,
 ) -> Result<LocalMirrorSummary> {
     use crate::buffer::BufferSizer;
-    use crate::copy::{copy_file, file_needs_copy_with_checksum_type, resume_copy_file};
+    use crate::copy::{copy_file, file_needs_copy_with_mode, resume_copy_file};
     use crate::logger::NoopLogger;
     use filetime::FileTime;
 
@@ -1112,10 +1120,24 @@ fn execute_single_file_copy(
         .with_context(|| format!("stat source file {}", src_root.display()))?;
     let size = src_meta.len();
 
-    let checksum = if options.checksum {
-        Some(crate::checksum::ChecksumType::Blake3)
-    } else {
-        None
+    // R58-followup: route compare-mode for the single-file path
+    // through the same translation the directory path uses
+    // (orchestrator.rs:481). Pre-fix the short-circuit only looked
+    // at `options.checksum`, so `--size-only` / `--ignore-times` /
+    // `--force` were silently dropped — repro: copy src.txt dst.txt
+    // --size-only re-copied even when sizes matched.
+    let compare_mode = match options.compare_mode {
+        crate::orchestrator::LocalCompareMode::Checksum => ComparisonMode::Checksum,
+        crate::orchestrator::LocalCompareMode::SizeOnly => ComparisonMode::SizeOnly,
+        crate::orchestrator::LocalCompareMode::Force => ComparisonMode::Force,
+        crate::orchestrator::LocalCompareMode::IgnoreTimes => ComparisonMode::IgnoreTimes,
+        crate::orchestrator::LocalCompareMode::SizeMtime => {
+            if options.checksum {
+                ComparisonMode::Checksum
+            } else {
+                ComparisonMode::SizeMtime
+            }
+        }
     };
 
     // R58-F5: the single-file short-circuit (orchestrator.rs:125)
@@ -1204,7 +1226,7 @@ fn execute_single_file_copy(
         bytes_copied = outcome.bytes_transferred;
     } else {
         let needs_copy = !options.skip_unchanged
-            || file_needs_copy_with_checksum_type(src_root, dest_root, checksum).unwrap_or(true);
+            || file_needs_copy_with_mode(src_root, dest_root, compare_mode).unwrap_or(true);
         if needs_copy {
             let sizer = BufferSizer::default();
             let logger = NoopLogger;
@@ -1832,6 +1854,87 @@ mod async_runtime_tests {
             b"existing-pre-existing",
             "destination content must be preserved (R58-F5)"
         );
+    }
+
+    /// R58-followup: single-file `--size-only` must skip when sizes
+    /// match. Reviewer-reproduced: `blit copy src.txt dst.txt
+    /// --size-only` was overwriting a same-size destination because
+    /// the short-circuit called `file_needs_copy_with_checksum_type`
+    /// (SizeMtime-or-Checksum) instead of routing through the new
+    /// `file_needs_copy_with_mode(compare_mode)` helper.
+    #[tokio::test]
+    async fn single_file_copy_size_only_skips_same_size() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src.txt");
+        let dst = tmp.path().join("dst.txt");
+        std::fs::write(&src, b"AAAA").unwrap();
+        std::fs::write(&dst, b"BBBB").unwrap(); // same size, different content
+        let now = std::time::SystemTime::now();
+        filetime::set_file_mtime(
+            &src,
+            filetime::FileTime::from_system_time(now + std::time::Duration::from_secs(10)),
+        )
+        .unwrap();
+        filetime::set_file_mtime(&dst, filetime::FileTime::from_system_time(now)).unwrap();
+
+        let mut opts = opts();
+        opts.compare_mode = crate::orchestrator::LocalCompareMode::SizeOnly;
+
+        let orch = TransferOrchestrator::new();
+        let _ = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"BBBB",
+            "single-file --size-only must skip when sizes match"
+        );
+    }
+
+    /// R58-followup: `--force` must copy through the sink layer
+    /// even when size+mtime match. Reviewer-reproduced: the
+    /// planner queued the file but `write_file_payload`'s defensive
+    /// `file_needs_copy_with_checksum_type` second-guess returned
+    /// false, dropping the write — `blit copy src/ dst/ --force`
+    /// reported 0 B and left the destination untouched.
+    #[tokio::test]
+    async fn directory_copy_force_overrides_sink_second_guess() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        // Two files (>1 so we route through the streaming pipeline,
+        // not the tiny fast-path). The fast-path gate (R58-F7
+        // followup) also bounces non-default compare_modes to
+        // streaming, but having multiple files makes the intent
+        // explicit.
+        write_file(&src.join("a.txt"), b"NEW!");
+        write_file(&src.join("b.txt"), b"NEW!");
+        write_file(&dst.join("a.txt"), b"OLD!");
+        write_file(&dst.join("b.txt"), b"OLD!");
+        let t = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        for name in ["a.txt", "b.txt"] {
+            filetime::set_file_mtime(src.join(name), t).unwrap();
+            filetime::set_file_mtime(dst.join(name), t).unwrap();
+        }
+
+        let mut opts = opts();
+        opts.compare_mode = crate::orchestrator::LocalCompareMode::Force;
+
+        let orch = TransferOrchestrator::new();
+        let _ = orch
+            .execute_local_mirror_async(&src, &dst, opts)
+            .await
+            .unwrap();
+
+        for name in ["a.txt", "b.txt"] {
+            assert_eq!(
+                std::fs::read(dst.join(name)).unwrap(),
+                b"NEW!",
+                "--force must overwrite even when size+mtime match (sink-layer regression)"
+            );
+        }
     }
 }
 

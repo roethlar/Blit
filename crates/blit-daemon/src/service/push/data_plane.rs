@@ -205,6 +205,7 @@ async fn handle_data_plane_stream(
         dry_run: false,
         checksum: None,
         resume: false,
+        compare_mode: blit_core::generated::ComparisonMode::SizeMtime,
     };
     let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
         PathBuf::new(),

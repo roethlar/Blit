@@ -12,8 +12,8 @@ use filetime::FileTime;
 
 use crate::buffer::BufferSizer;
 use crate::checksum::ChecksumType;
-use crate::copy::{copy_file, file_needs_copy_with_checksum_type, resume_copy_file};
-use crate::generated::FileHeader;
+use crate::copy::{copy_file, resume_copy_file};
+use crate::generated::{ComparisonMode, FileHeader};
 use crate::logger::NoopLogger;
 use crate::remote::transfer::payload::PreparedPayload;
 use crate::remote::transfer::source::TransferSource;
@@ -84,6 +84,28 @@ pub struct FsSinkConfig {
     pub dry_run: bool,
     pub checksum: Option<ChecksumType>,
     pub resume: bool,
+    /// R58-followup: comparison policy the sink uses when deciding
+    /// whether to copy a `PreparedPayload::File`. The diff_planner
+    /// upstream already filters by `compare_mode`, but
+    /// `write_file_payload` re-checks before copying as a defense
+    /// layer; pre-fix it called `file_needs_copy_with_checksum_type`
+    /// which only knows SizeMtime + Checksum, so `Force` and
+    /// `IgnoreTimes` were silently downgraded to SizeMtime and
+    /// dropped at the sink layer. The default `SizeMtime` keeps
+    /// pre-fix behavior for callers that haven't migrated.
+    pub compare_mode: ComparisonMode,
+}
+
+impl Default for FsSinkConfig {
+    fn default() -> Self {
+        Self {
+            preserve_times: true,
+            dry_run: false,
+            checksum: None,
+            resume: false,
+            compare_mode: ComparisonMode::SizeMtime,
+        }
+    }
 }
 
 /// Writes files directly to a local filesystem using zero-copy primitives
@@ -427,7 +449,7 @@ fn write_file_payload(
         let outcome = resume_copy_file(&src, &dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
-    } else if file_needs_copy_with_checksum_type(&src, &dst, config.checksum)? {
+    } else if crate::copy::file_needs_copy_with_mode(&src, &dst, config.compare_mode)? {
         let sizer = BufferSizer::default();
         let logger = NoopLogger;
         let outcome = copy_file(&src, &dst, &sizer, false, &logger)
@@ -1179,6 +1201,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1211,6 +1234,7 @@ mod tests {
                 dry_run: true,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1247,6 +1271,7 @@ mod tests {
                 dry_run: true,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1283,6 +1308,7 @@ mod tests {
                 dry_run: true,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1318,6 +1344,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1374,6 +1401,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1408,6 +1436,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1542,6 +1571,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
         let header = make_file_header(rel, 4);
@@ -1615,6 +1645,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1650,6 +1681,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1697,6 +1729,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1756,6 +1789,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 
@@ -1826,6 +1860,7 @@ mod tests {
                 dry_run: false,
                 checksum: None,
                 resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
             },
         );
 

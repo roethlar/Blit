@@ -26,8 +26,6 @@ use std::path::Path;
 
 use eyre::{Context, Result};
 
-use crate::checksum::{self, ChecksumType};
-use crate::copy::file_needs_copy_with_checksum_type;
 use crate::generated::{ComparisonMode, FileHeader};
 use crate::remote::transfer::payload::{plan_transfer_payloads, PlannedPayloads};
 use crate::transfer_plan::PlanOptions;
@@ -141,60 +139,11 @@ pub fn filter_unchanged(
         .collect()
 }
 
-/// Per-mode comparison predicate. Returns `true` when the source file
-/// should be transferred to the destination given the comparison mode.
-///
-/// All variants are implemented:
-///
-///   - `SizeMtime` / `Unspecified`: copy when missing, when sizes
-///     differ, or when source is newer than dest by >2s. The 2s
-///     tolerance matches the historical `file_needs_copy` primitive
-///     and FAT/exFAT mtime granularity.
-///   - `Checksum`: copy when missing, when sizes differ, or when
-///     Blake3 hashes differ. mtime is not consulted.
-///   - `SizeOnly`: copy when missing or sizes differ; mtime ignored.
-///   - `IgnoreTimes`: always copy. Equivalent to rsync's
-///     `--ignore-times` — destination is unconditionally rewritten.
-///   - `Force`: always copy, even if dest is newer than source.
-///     Equivalent to `IgnoreTimes` for one-way mirroring; named
-///     differently because the rsync semantic also disables some
-///     "skip newer" guards in mirror flows.
-///
-/// "Skip if destination exists" is not a `ComparisonMode` variant —
-/// it's the orthogonal `ignore_existing` flag handled in
-/// `filter_unchanged` before this function runs.
+/// Per-mode comparison predicate. Delegates to the centralized helper
+/// in `copy::compare` so the diff planner, the single-file copy path,
+/// and the sink all share one decision tree.
 fn local_needs_copy(src: &Path, dst: &Path, mode: ComparisonMode) -> Result<bool> {
-    match mode {
-        ComparisonMode::IgnoreTimes | ComparisonMode::Force => Ok(true),
-        ComparisonMode::SizeOnly => {
-            if !dst.exists() {
-                return Ok(true);
-            }
-            let src_meta = src.metadata().context("stat source for size compare")?;
-            let dst_meta = dst.metadata().context("stat dest for size compare")?;
-            Ok(src_meta.len() != dst_meta.len())
-        }
-        ComparisonMode::Checksum => {
-            if !dst.exists() {
-                return Ok(true);
-            }
-            let src_meta = src.metadata().context("stat source for checksum compare")?;
-            let dst_meta = dst.metadata().context("stat dest for checksum compare")?;
-            if src_meta.len() != dst_meta.len() {
-                return Ok(true);
-            }
-            let src_hash = checksum::hash_file(src, ChecksumType::Blake3)
-                .with_context(|| format!("hashing source {}", src.display()))?;
-            let dst_hash = checksum::hash_file(dst, ChecksumType::Blake3)
-                .with_context(|| format!("hashing dest {}", dst.display()))?;
-            Ok(src_hash != dst_hash)
-        }
-        // Unspecified folds to the historical default. Callers that
-        // run NormalizedTransferOperation never hit this branch.
-        ComparisonMode::Unspecified | ComparisonMode::SizeMtime => {
-            file_needs_copy_with_checksum_type(src, dst, None)
-        }
-    }
+    crate::copy::file_needs_copy_with_mode(src, dst, mode)
 }
 
 #[cfg(test)]
