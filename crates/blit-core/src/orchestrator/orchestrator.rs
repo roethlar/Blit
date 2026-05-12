@@ -56,6 +56,15 @@ fn select_tuning_window(
         .filter(|record| record.options.checksum == checksum)
         .filter(|record| record.options.skip_unchanged == skip_unchanged)
         .filter(|record| record.fast_path.as_deref() != Some("tiny_manifest"))
+        // R58-followup: require a tuning signal. `derive_local_plan_tuning`
+        // only aggregates `tar_shard_*` + `raw_bundle_*`; records with
+        // `tar_shard_tasks == 0 && raw_bundle_tasks == 0` (no_work,
+        // journal_no_work, single_huge_file, streaming no-ops) are
+        // RunKind::Real and pass every other gate but contribute
+        // nothing. Pre-fix they could fill the 20-slot window and
+        // hide older bucket-bearing records. If the tuner ever
+        // starts consuming `large_tasks`, add it here too.
+        .filter(|record| record.tar_shard_tasks > 0 || record.raw_bundle_tasks > 0)
         .take(TUNING_WINDOW_SIZE)
         .cloned()
         .collect()
@@ -2047,6 +2056,63 @@ mod select_tuning_window_tests {
         );
         assert!(window.iter().all(|r| r.run_kind.is_real_transfer()));
         assert!(derive_local_plan_tuning(&window).is_some());
+    }
+
+    /// R58-followup: Real records with no tuning signal
+    /// (`tar_shard_tasks == 0 && raw_bundle_tasks == 0`) must not
+    /// crowd out older bucket-bearing records. These exist when a
+    /// run took the no_work / journal_no_work / single_huge_file
+    /// fast-path or was a streaming run that copied nothing — they
+    /// pass `is_real_transfer`, pass the per-operation discriminants,
+    /// pass the !=tiny_manifest gate, but contribute zero to
+    /// `derive_local_plan_tuning`. Pre-fix the 20-record window
+    /// could fill with them and the tuner fell back to defaults.
+    #[test]
+    fn no_signal_real_records_do_not_crowd_out_bucket_bearing_records() {
+        let mut history = Vec::new();
+        // 5 older Real records WITH bucket signal (timestamps lowest).
+        for i in 0..5 {
+            history.push(record(
+                RunKind::Real,
+                TransferMode::Copy,
+                4,
+                16 * 1024 * 1024,
+                100 + i,
+            ));
+        }
+        // 30 recent Real records WITHOUT bucket signal: tar_tasks=0,
+        // bytes=0 — same shape `single_huge_file` / `no_work` /
+        // `journal_no_work` / streaming-no-op records produce.
+        for i in 0..30 {
+            let mut r = record(RunKind::Real, TransferMode::Copy, 0, 0, 10_000 + i);
+            // Vary fast_path across the no-signal categories to
+            // mirror real history. None of these exclude the record
+            // from the existing gates.
+            r.fast_path = match i % 4 {
+                0 => Some("no_work".to_string()),
+                1 => Some("journal_no_work".to_string()),
+                2 => Some("single_huge_file".to_string()),
+                _ => None,
+            };
+            history.push(r);
+        }
+
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert!(
+            !window.is_empty(),
+            "older bucket-bearing records must reach the window; \
+             30 no-signal Real records crowded them out pre-fix"
+        );
+        assert!(
+            window
+                .iter()
+                .all(|r| r.tar_shard_tasks > 0 || r.raw_bundle_tasks > 0),
+            "every record in the window must carry a tuning signal"
+        );
+        assert!(
+            derive_local_plan_tuning(&window).is_some(),
+            "tuner must return a value, not fall back to defaults"
+        );
     }
 
     // ── R57-F1: wrapper's "ask for all records" invariant ────────────
