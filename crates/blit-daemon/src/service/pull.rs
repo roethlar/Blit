@@ -407,6 +407,26 @@ pub(crate) async fn collect_pull_entries_with_checksums(
         } else {
             requested.to_path_buf()
         };
+        // R59 finding #4: apply the user filter to single-file roots
+        // too. Pre-fix the daemon returned the entry unconditionally,
+        // so `blit pull host:module/file.txt --exclude '*.txt'` still
+        // pulled the file even though the local single-file path
+        // (orchestrator.rs:1132) correctly skipped on the same flag.
+        // Filter against the basename (matches what allows_entry
+        // does for directory enumeration of leaf files).
+        let name = physical.file_name().map(PathBuf::from);
+        let size = std::fs::metadata(root).map(|m| m.len()).unwrap_or(0);
+        let mtime = std::fs::metadata(root).and_then(|m| m.modified()).ok();
+        let allows = match name.as_deref() {
+            Some(name_path) => filter.allows_entry(Some(name_path), root, size, mtime),
+            None => true,
+        };
+        if !allows {
+            return Ok((
+                Vec::new(),
+                blit_core::enumeration::EnumerationOutcome::default(),
+            ));
+        }
         let mut header = build_file_header(module_root, &physical, compute_checksums)?;
         header.relative_path = String::new();
         return Ok((
@@ -951,5 +971,68 @@ fn payload_bytes(payload: &TransferPayload) -> u64 {
         TransferPayload::TarShard { headers } => headers.iter().map(|h| h.size).sum(),
         TransferPayload::FileBlock { size, .. } => *size,
         TransferPayload::FileBlockComplete { .. } => 0,
+    }
+}
+
+#[cfg(test)]
+mod single_file_filter_tests {
+    //! R59 finding #4: the daemon pull single-file fast path
+    //! returned the entry unconditionally, ignoring the user-supplied
+    //! filter. Local single-file copy (orchestrator.rs:1132) already
+    //! honored the filter, so the two paths drifted apart.
+
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn single_file_root_excluded_by_filter_returns_empty() {
+        let tmp = tempdir().unwrap();
+        let module = tmp.path();
+        let file = module.join("payload.txt");
+        fs::write(&file, b"hello").unwrap();
+
+        let mut filter = blit_core::fs_enum::FileFilter::default();
+        filter.exclude_files = vec!["*.txt".to_string()];
+
+        let (entries, outcome) = collect_pull_entries_with_checksums(
+            module,
+            &file,
+            Path::new("payload.txt"),
+            false,
+            filter,
+        )
+        .await
+        .unwrap();
+        assert!(
+            entries.is_empty(),
+            "single-file root matching --exclude must yield no entries"
+        );
+        assert!(outcome.suppressed_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_file_root_included_by_filter_passes() {
+        let tmp = tempdir().unwrap();
+        let module = tmp.path();
+        let file = module.join("payload.txt");
+        fs::write(&file, b"hello").unwrap();
+
+        let mut filter = blit_core::fs_enum::FileFilter::default();
+        filter.include_files = vec!["*.txt".to_string()];
+
+        let (entries, _) = collect_pull_entries_with_checksums(
+            module,
+            &file,
+            Path::new("payload.txt"),
+            false,
+            filter,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        // Wire path stays empty (preserves the single-file dest target
+        // contract — client appends nothing).
+        assert!(entries[0].header.relative_path.is_empty());
     }
 }

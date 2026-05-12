@@ -601,7 +601,7 @@ impl PerformancePredictor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perf_history::OptionSnapshot;
+    use crate::perf_history::{CompareModeSnapshot, OptionSnapshot};
 
     fn make_record(
         mode: TransferMode,
@@ -650,6 +650,7 @@ mod tests {
                 include_symlinks: false,
                 skip_unchanged: true,
                 checksum: false,
+                compare_mode: CompareModeSnapshot::SizeMtime,
                 workers: 4,
             },
             fast_path: fast_path.map(str::to_string),
@@ -1119,6 +1120,7 @@ mod tests {
             include_symlinks: false,
             skip_unchanged: true,
             checksum: false,
+            compare_mode: CompareModeSnapshot::SizeMtime,
             workers: 4,
         };
         let fast_path = match kind {

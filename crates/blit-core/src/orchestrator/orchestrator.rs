@@ -45,7 +45,7 @@ const TUNING_WINDOW_SIZE: usize = 20;
 fn select_tuning_window(
     history: &[crate::perf_history::PerformanceRecord],
     target_mode: TransferMode,
-    checksum: bool,
+    compare_mode: crate::perf_history::CompareModeSnapshot,
     skip_unchanged: bool,
 ) -> Vec<crate::perf_history::PerformanceRecord> {
     history
@@ -53,7 +53,12 @@ fn select_tuning_window(
         .rev()
         .filter(|record| record.run_kind.is_real_transfer())
         .filter(|record| record.mode == target_mode)
-        .filter(|record| record.options.checksum == checksum)
+        // R59 finding #5: key on the full comparison policy
+        // (not just `checksum: bool`) so SizeMtime / SizeOnly /
+        // Force / IgnoreTimes runs don't mix into the same tuning
+        // bucket. Pre-fix a session of `--size-only` runs trained
+        // the SizeMtime bucket (and vice versa).
+        .filter(|record| record.options.compare_mode == compare_mode)
         .filter(|record| record.options.skip_unchanged == skip_unchanged)
         .filter(|record| record.fast_path.as_deref() != Some("tiny_manifest"))
         // R58-followup: require a tuning signal. `derive_local_plan_tuning`
@@ -89,7 +94,7 @@ fn select_tuning_window(
 fn select_tuning_window_from_history<F>(
     reader: F,
     target_mode: TransferMode,
-    checksum: bool,
+    compare_mode: crate::perf_history::CompareModeSnapshot,
     skip_unchanged: bool,
 ) -> Option<Vec<crate::perf_history::PerformanceRecord>>
 where
@@ -100,7 +105,7 @@ where
     // is the load-bearing literal — passing anything else
     // reintroduces R57-F1.
     let history = reader(0).ok()?;
-    let window = select_tuning_window(&history, target_mode, checksum, skip_unchanged);
+    let window = select_tuning_window(&history, target_mode, compare_mode, skip_unchanged);
     if window.is_empty() {
         None
     } else {
@@ -455,10 +460,35 @@ impl TransferOrchestrator {
             } else {
                 TransferMode::Copy
             };
+            // R59 finding #5: tuning window keys on full compare_mode,
+            // not just options.checksum. Translate via the same enum
+            // the history snapshot uses so the bucket lookup matches
+            // what the writer recorded.
+            let query_compare_mode = match options.compare_mode {
+                crate::orchestrator::LocalCompareMode::Checksum => {
+                    crate::perf_history::CompareModeSnapshot::Checksum
+                }
+                crate::orchestrator::LocalCompareMode::SizeOnly => {
+                    crate::perf_history::CompareModeSnapshot::SizeOnly
+                }
+                crate::orchestrator::LocalCompareMode::Force => {
+                    crate::perf_history::CompareModeSnapshot::Force
+                }
+                crate::orchestrator::LocalCompareMode::IgnoreTimes => {
+                    crate::perf_history::CompareModeSnapshot::IgnoreTimes
+                }
+                crate::orchestrator::LocalCompareMode::SizeMtime => {
+                    if options.checksum {
+                        crate::perf_history::CompareModeSnapshot::Checksum
+                    } else {
+                        crate::perf_history::CompareModeSnapshot::SizeMtime
+                    }
+                }
+            };
             if let Some(filtered) = select_tuning_window_from_history(
                 read_recent_records,
                 target_mode,
-                options.checksum,
+                query_compare_mode,
                 options.skip_unchanged,
             ) {
                 if let Some(tuning) = derive_local_plan_tuning(&filtered) {
@@ -1947,7 +1977,9 @@ mod select_tuning_window_tests {
     //! older real records existed.
 
     use super::*;
-    use crate::perf_history::{OptionSnapshot, PerformanceRecord, RunKind, TransferMode};
+    use crate::perf_history::{
+        CompareModeSnapshot, OptionSnapshot, PerformanceRecord, RunKind, TransferMode,
+    };
 
     fn record(
         kind: RunKind,
@@ -1968,6 +2000,7 @@ mod select_tuning_window_tests {
                 include_symlinks: false,
                 skip_unchanged: true,
                 checksum: false,
+                compare_mode: CompareModeSnapshot::SizeMtime,
                 workers: 4,
             },
             None,
@@ -2015,7 +2048,12 @@ mod select_tuning_window_tests {
             ));
         }
 
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert!(
             !window.is_empty(),
             "real records must reach the window; 30 NullSink records crowded them out pre-R56-F2"
@@ -2053,7 +2091,12 @@ mod select_tuning_window_tests {
                 10_000 + i,
             ));
         }
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert_eq!(
             window.len(),
             3,
@@ -2093,7 +2136,12 @@ mod select_tuning_window_tests {
                 20_000 + i,
             ));
         }
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert_eq!(window.len(), 2);
         assert!(window.iter().all(|r| r.run_kind == RunKind::Real));
     }
@@ -2112,7 +2160,12 @@ mod select_tuning_window_tests {
                 )
             })
             .collect();
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert_eq!(window.len(), 20, "expected the 20 most recent real records");
     }
 
@@ -2151,7 +2204,12 @@ mod select_tuning_window_tests {
         }
         // Real records were appended last (highest timestamps);
         // select_tuning_window iterates .rev() so they come first.
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert_eq!(
             window.len(),
             5,
@@ -2200,7 +2258,12 @@ mod select_tuning_window_tests {
             history.push(r);
         }
 
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert!(
             !window.is_empty(),
             "older bucket-bearing records must reach the window; \
@@ -2247,7 +2310,12 @@ mod select_tuning_window_tests {
     fn wrapper_passes_zero_to_reader() {
         let captured: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
         let reader = recording_reader(captured.clone(), vec![]);
-        let _ = select_tuning_window_from_history(reader, TransferMode::Copy, false, true);
+        let _ = select_tuning_window_from_history(
+            reader,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert_eq!(
             captured.get(),
             Some(0),
@@ -2261,7 +2329,12 @@ mod select_tuning_window_tests {
         let reader = |_limit: usize| -> Result<Vec<PerformanceRecord>> {
             Err(eyre!("simulated read failure"))
         };
-        let result = select_tuning_window_from_history(reader, TransferMode::Copy, false, true);
+        let result = select_tuning_window_from_history(
+            reader,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert!(result.is_none());
     }
 
@@ -2275,7 +2348,12 @@ mod select_tuning_window_tests {
                 record(RunKind::NullSink, TransferMode::Copy, 4, 1024 * 1024, 200),
             ],
         );
-        let result = select_tuning_window_from_history(reader, TransferMode::Copy, false, true);
+        let result = select_tuning_window_from_history(
+            reader,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert!(result.is_none());
     }
 
@@ -2289,8 +2367,13 @@ mod select_tuning_window_tests {
                 record(RunKind::DryRun, TransferMode::Copy, 4, 1024 * 1024, 200),
             ],
         );
-        let result =
-            select_tuning_window_from_history(reader, TransferMode::Copy, false, true).unwrap();
+        let result = select_tuning_window_from_history(
+            reader,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].run_kind, RunKind::Real);
         assert_eq!(captured.get(), Some(0));
@@ -2320,8 +2403,64 @@ mod select_tuning_window_tests {
             8 * 1024 * 1024,
             500,
         ));
-        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
         assert_eq!(window.len(), 1);
         assert_eq!(window[0].mode, TransferMode::Copy);
+    }
+
+    /// R59 finding #5: SizeOnly / Force / IgnoreTimes runs must
+    /// not contaminate the SizeMtime tuning bucket. Pre-fix the
+    /// window filtered on `options.checksum == checksum_bool`, so a
+    /// `--size-only` run (checksum=false) landed in the same bucket
+    /// as a default `SizeMtime` run.
+    #[test]
+    fn compare_mode_buckets_are_separate() {
+        let mut history = Vec::new();
+        // 10 SizeOnly Real records (signal-bearing).
+        for i in 0..10 {
+            let mut r = record(
+                RunKind::Real,
+                TransferMode::Copy,
+                4,
+                16 * 1024 * 1024,
+                100 + i,
+            );
+            r.options.compare_mode = CompareModeSnapshot::SizeOnly;
+            history.push(r);
+        }
+        // One SizeMtime Real record.
+        let mut sm = record(RunKind::Real, TransferMode::Copy, 2, 8 * 1024 * 1024, 500);
+        sm.options.compare_mode = CompareModeSnapshot::SizeMtime;
+        history.push(sm);
+
+        // Querying SizeMtime must NOT pick up the 10 SizeOnly records.
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeMtime,
+            true,
+        );
+        assert_eq!(window.len(), 1);
+        assert_eq!(
+            window[0].options.compare_mode,
+            CompareModeSnapshot::SizeMtime
+        );
+
+        // Querying SizeOnly returns the SizeOnly records.
+        let window = select_tuning_window(
+            &history,
+            TransferMode::Copy,
+            CompareModeSnapshot::SizeOnly,
+            true,
+        );
+        assert_eq!(window.len(), 10);
+        assert!(window
+            .iter()
+            .all(|r| r.options.compare_mode == CompareModeSnapshot::SizeOnly));
     }
 }

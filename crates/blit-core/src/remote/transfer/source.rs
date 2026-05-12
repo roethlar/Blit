@@ -366,7 +366,15 @@ impl TransferSource for FilteredSource {
         }
         let filter = self.filter.clone_without_cache();
         let (tx, rx_filtered) = mpsc::channel::<FileHeader>(64);
-        tokio::spawn(filter_headers(header_rx, tx, filter));
+        // R59 finding #4: pass the inner source root so filter_headers
+        // can fall back to the root's basename when relative_path is
+        // empty. For single-file push, FsTransferSource emits the
+        // entry with relative_path = "" (see open_file at source.rs:100);
+        // pre-fix filter_headers asked allows_entry to match against
+        // an empty PathBuf, so basename globs like `*.txt` silently
+        // rejected the file.
+        let source_root = self.inner.root().to_path_buf();
+        tokio::spawn(filter_headers(header_rx, tx, filter, source_root));
         (rx_filtered, scan_handle)
     }
 
@@ -400,6 +408,7 @@ async fn filter_headers(
     mut rx: mpsc::Receiver<FileHeader>,
     tx: mpsc::Sender<FileHeader>,
     filter: FileFilter,
+    source_root: PathBuf,
 ) {
     use std::time::{Duration, UNIX_EPOCH};
     while let Some(header) = rx.recv().await {
@@ -409,7 +418,20 @@ async fn filter_headers(
         } else {
             None
         };
-        if !filter.allows_entry(Some(&rel), &rel, header.size, mtime) {
+        // R59 finding #4: an empty relative_path is the wire signal
+        // for "this entry IS the source root" (single-file push).
+        // Use the source root itself for filter matching so basename
+        // globs work — otherwise filename derives from PathBuf::new(),
+        // which has no file_name(), and `--include '*.txt'` rejects
+        // every single-file push regardless of the actual filename.
+        let (rel_for_filter, abs_for_filter): (Option<&Path>, &Path) = if rel.as_os_str().is_empty()
+        {
+            let root_name = source_root.file_name().map(Path::new);
+            (root_name, source_root.as_path())
+        } else {
+            (Some(rel.as_path()), rel.as_path())
+        };
+        if !filter.allows_entry(rel_for_filter, abs_for_filter, header.size, mtime) {
             continue;
         }
         if tx.send(header).await.is_err() {
@@ -437,6 +459,13 @@ mod filtered_source_tests {
             Self {
                 headers: StdMutex::new(Some(headers)),
                 root: PathBuf::from("/stub"),
+            }
+        }
+
+        fn with_root(headers: Vec<FileHeader>, root: PathBuf) -> Self {
+            Self {
+                headers: StdMutex::new(Some(headers)),
+                root,
             }
         }
     }
@@ -564,6 +593,51 @@ mod filtered_source_tests {
         let (rx, _h) = filtered.scan(None, Arc::new(Mutex::new(Vec::new())));
         let names = collect(rx).await;
         assert_eq!(names, vec!["medium"]);
+    }
+
+    /// R59 finding #4: single-file push emits a header with an
+    /// empty `relative_path`. Pre-fix the filter ran allows_entry
+    /// against an empty PathBuf, so `--include '*.txt'` rejected
+    /// the file even when the source root's basename matched.
+    /// Post-fix the filter falls back to the source root's
+    /// basename when the relative path is empty.
+    #[tokio::test]
+    async fn single_file_root_matches_basename_globs() {
+        let inner: Arc<dyn TransferSource> = Arc::new(StubSource::with_root(
+            vec![header("", 42)],
+            PathBuf::from("/tmp/payload.txt"),
+        ));
+        let mut filter = FileFilter::default();
+        filter.include_files = vec!["*.txt".to_string()];
+        let filtered = FilteredSource::new(inner, filter);
+        let (rx, _h) = filtered.scan(None, Arc::new(Mutex::new(Vec::new())));
+        let names = collect(rx).await;
+        assert_eq!(
+            names,
+            vec![""],
+            "single-file root with basename matching --include must pass"
+        );
+    }
+
+    /// R59 finding #4 (negative case): with the same wire shape,
+    /// a non-matching basename glob must reject — confirms the
+    /// fallback uses the actual basename, not a permissive
+    /// "anything passes when rel is empty" shortcut.
+    #[tokio::test]
+    async fn single_file_root_basename_glob_can_exclude() {
+        let inner: Arc<dyn TransferSource> = Arc::new(StubSource::with_root(
+            vec![header("", 42)],
+            PathBuf::from("/tmp/payload.log"),
+        ));
+        let mut filter = FileFilter::default();
+        filter.include_files = vec!["*.txt".to_string()];
+        let filtered = FilteredSource::new(inner, filter);
+        let (rx, _h) = filtered.scan(None, Arc::new(Mutex::new(Vec::new())));
+        let names = collect(rx).await;
+        assert!(
+            names.is_empty(),
+            "single-file root that doesn't match --include must be rejected"
+        );
     }
 
     #[tokio::test]

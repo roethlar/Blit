@@ -189,6 +189,7 @@ mod local_tests {
                 include_symlinks: true,
                 skip_unchanged: true,
                 checksum: false,
+                compare_mode: crate::perf_history::CompareModeSnapshot::SizeMtime,
                 workers: 4,
             },
             None,

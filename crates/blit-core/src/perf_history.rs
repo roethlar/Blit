@@ -88,6 +88,24 @@ impl RunKind {
     }
 }
 
+/// Comparison policy snapshot for performance history. Distinct
+/// from `generated::ComparisonMode` (proto enum) because the perf
+/// history file is JSONL and shouldn't depend on the generated
+/// proto serialization surface. R59 finding #5: pre-fix the
+/// tuning window keyed on `checksum: bool` alone, mixing
+/// SizeMtime / SizeOnly / Force / IgnoreTimes records into the
+/// same bucket.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CompareModeSnapshot {
+    #[default]
+    SizeMtime,
+    Checksum,
+    SizeOnly,
+    Force,
+    IgnoreTimes,
+}
+
 /// Snapshot of the options that influence performance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OptionSnapshot {
@@ -95,7 +113,17 @@ pub struct OptionSnapshot {
     pub preserve_symlinks: bool,
     pub include_symlinks: bool,
     pub skip_unchanged: bool,
+    /// Legacy boolean — kept for back-compat with pre-R59
+    /// history records. New records also set `compare_mode` to
+    /// preserve the user's intent across the four non-default
+    /// comparison policies. Tuning window selection should key
+    /// on `compare_mode`; this bool stays as the legacy fallback.
     pub checksum: bool,
+    /// R59 finding #5: full comparison policy. `serde(default)`
+    /// so old records (which lack this field) deserialize as
+    /// `SizeMtime`, which is the historical default behavior.
+    #[serde(default)]
+    pub compare_mode: CompareModeSnapshot,
     pub workers: usize,
 }
 
@@ -552,6 +580,7 @@ mod tests {
             include_symlinks: false,
             skip_unchanged: true,
             checksum: false,
+            compare_mode: CompareModeSnapshot::SizeMtime,
             workers: 4,
         };
         let record = PerformanceRecord::new(
@@ -663,6 +692,7 @@ mod tests {
             include_symlinks: false,
             skip_unchanged: true,
             checksum: false,
+            compare_mode: CompareModeSnapshot::SizeMtime,
             workers: 4,
         };
         let record = PerformanceRecord::new(
@@ -690,6 +720,7 @@ mod tests {
             include_symlinks: false,
             skip_unchanged: true,
             checksum: false,
+            compare_mode: CompareModeSnapshot::SizeMtime,
             workers: 4,
         };
         let record = PerformanceRecord::new(
@@ -716,6 +747,7 @@ mod tests {
             include_symlinks: false,
             skip_unchanged: true,
             checksum: false,
+            compare_mode: CompareModeSnapshot::SizeMtime,
             workers: 4,
         };
         let record = PerformanceRecord::new(
