@@ -219,21 +219,7 @@ pub struct PerformancePredictor {
 impl PerformancePredictor {
     pub fn load() -> Result<Self> {
         let path = config_dir()?.join(STATE_FILENAME);
-        if let Ok(mut file) = File::open(&path) {
-            let mut buf = String::new();
-            file.read_to_string(&mut buf)?;
-            let mut state: PredictorState =
-                serde_json::from_str(&buf).context("parse predictor state")?;
-            if state.version != STATE_VERSION {
-                state = PredictorState::new();
-            }
-            Ok(Self { state, path })
-        } else {
-            Ok(Self {
-                state: PredictorState::new(),
-                path,
-            })
-        }
+        load_state_from_path(path)
     }
 
     /// Predict a duration for a workload, walking the profile-key
@@ -569,6 +555,30 @@ fn bytes_to_mb(bytes: u64) -> f64 {
     bytes as f64 / 1_048_576.0
 }
 
+/// R57-F2: the single load-from-disk path. Production `load()` and
+/// the test-only `load_from_dir()` both call this so they can't
+/// drift. The version-mismatch reset is the load-time invariant
+/// that protects against contaminated pre-R56 state files, and
+/// having one implementation means a test that verifies the
+/// reset also verifies the production behavior.
+fn load_state_from_path(path: PathBuf) -> Result<PerformancePredictor> {
+    if let Ok(mut file) = File::open(&path) {
+        let mut buf = String::new();
+        file.read_to_string(&mut buf)?;
+        let mut state: PredictorState =
+            serde_json::from_str(&buf).context("parse predictor state")?;
+        if state.version != STATE_VERSION {
+            state = PredictorState::new();
+        }
+        Ok(PerformancePredictor { state, path })
+    } else {
+        Ok(PerformancePredictor {
+            state: PredictorState::new(),
+            path,
+        })
+    }
+}
+
 #[cfg(test)]
 impl PerformancePredictor {
     pub fn for_tests(dir: &Path) -> Self {
@@ -578,33 +588,13 @@ impl PerformancePredictor {
         }
     }
 
-    /// Test variant that exercises the actual load path. Used by
-    /// R56-F2 to verify load-time state invalidation: writing a
-    /// fake v2 state file and then calling `for_tests` was the
-    /// gap GPT caught — `for_tests` constructs a fresh state
-    /// without reading the file, so the test would pass even if
-    /// `load()` stopped resetting mismatched versions. This
-    /// helper goes through the same file-read + version-check
-    /// the production `load()` does, parameterized on a custom
-    /// directory so the production config-dir resolution doesn't
-    /// interfere.
+    /// Test variant that exercises the actual production load
+    /// path against a custom directory. R57-F2: shares
+    /// `load_state_from_path` with production `load()` so the
+    /// two can't drift — a regression that broke version
+    /// invalidation in production would also break it here.
     pub fn load_from_dir(dir: &Path) -> Result<Self> {
-        let path = dir.join(STATE_FILENAME);
-        if let Ok(mut file) = File::open(&path) {
-            let mut buf = String::new();
-            file.read_to_string(&mut buf)?;
-            let mut state: PredictorState =
-                serde_json::from_str(&buf).context("parse predictor state")?;
-            if state.version != STATE_VERSION {
-                state = PredictorState::new();
-            }
-            Ok(Self { state, path })
-        } else {
-            Ok(Self {
-                state: PredictorState::new(),
-                path,
-            })
-        }
+        load_state_from_path(dir.join(STATE_FILENAME))
     }
 }
 

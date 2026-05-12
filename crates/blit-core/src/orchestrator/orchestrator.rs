@@ -61,6 +61,44 @@ fn select_tuning_window(
         .collect()
 }
 
+/// R57-F1: wrapper that always reads the FULL history before
+/// applying the run_kind filter. The caller used to pass
+/// `read_recent_records(50)`, which pre-capped the input slice
+/// at 50 records — so 50 recent non-real records could hide
+/// older real records before `select_tuning_window` ever saw
+/// them. Baking the "ask for all records" invariant into the
+/// wrapper means the limit can't drift back to a finite value.
+/// The history file is already size-capped at ~1 MiB upstream
+/// (DEFAULT_MAX_BYTES in perf_history.rs), so reading all
+/// records is bounded.
+///
+/// Generic over the reader so unit tests can inject a synthetic
+/// history; production passes `read_recent_records` directly.
+/// Returns `None` if the reader errored OR no eligible records
+/// were found; the caller treats either case as "fall back to
+/// defaults."
+fn select_tuning_window_from_history<F>(
+    reader: F,
+    target_mode: TransferMode,
+    checksum: bool,
+    skip_unchanged: bool,
+) -> Option<Vec<crate::perf_history::PerformanceRecord>>
+where
+    F: FnOnce(usize) -> Result<Vec<crate::perf_history::PerformanceRecord>>,
+{
+    // `0` means "all records" per read_recent_records' contract
+    // (see read_records_from_path in perf_history.rs:298). This
+    // is the load-bearing literal — passing anything else
+    // reintroduces R57-F1.
+    let history = reader(0).ok()?;
+    let window = select_tuning_window(&history, target_mode, checksum, skip_unchanged);
+    if window.is_empty() {
+        None
+    } else {
+        Some(window)
+    }
+}
+
 pub struct TransferOrchestrator;
 
 impl TransferOrchestrator {
@@ -393,18 +431,27 @@ impl TransferOrchestrator {
         };
 
         if options.perf_history {
-            if let Ok(history) = read_recent_records(50) {
-                let target_mode = if options.mirror {
-                    TransferMode::Mirror
-                } else {
-                    TransferMode::Copy
-                };
-                let filtered = select_tuning_window(
-                    &history,
-                    target_mode,
-                    options.checksum,
-                    options.skip_unchanged,
-                );
+            // R57-F1: read ALL history, not a pre-cap window. The
+            // R56-F2 fix correctly filtered run_kind before the
+            // 20-record cap inside `select_tuning_window`, but the
+            // caller was still pre-capping at 50 records from the
+            // JSONL — so 50 recent non-real records could still
+            // hide older real records one layer up. The file is
+            // already size-capped at ~1 MiB upstream
+            // (DEFAULT_MAX_BYTES in perf_history.rs), so reading
+            // all records is bounded; `read_recent_records(0)`
+            // means "all" per its limit semantics.
+            let target_mode = if options.mirror {
+                TransferMode::Mirror
+            } else {
+                TransferMode::Copy
+            };
+            if let Some(filtered) = select_tuning_window_from_history(
+                read_recent_records,
+                target_mode,
+                options.checksum,
+                options.skip_unchanged,
+            ) {
                 if let Some(tuning) = derive_local_plan_tuning(&filtered) {
                     plan_options.small_target = Some(tuning.small_target_bytes);
                     plan_options.small_count_target = Some(tuning.small_count_target);
@@ -1600,6 +1647,129 @@ mod select_tuning_window_tests {
             .collect();
         let window = select_tuning_window(&history, TransferMode::Copy, false, true);
         assert_eq!(window.len(), 20, "expected the 20 most recent real records");
+    }
+
+    /// R57-F1 regression: the call site is now
+    /// `select_tuning_window_from_history` which bakes the
+    /// "ask for all records" invariant into the wrapper — see
+    /// the dedicated tests below for the synthetic-reader
+    /// regression that catches a future drift back to a finite
+    /// limit. The pure-helper test below verifies that the
+    /// in-function logic copes with arbitrarily large histories
+    /// even if the wrapper were bypassed.
+    #[test]
+    fn handles_large_history_with_non_real_records_at_the_front() {
+        let mut history = Vec::new();
+        // 200 recent NullSink records (would have fit inside the
+        // old 50-record pre-cap with room to spare).
+        for i in 0..200 {
+            history.push(record(
+                RunKind::NullSink,
+                TransferMode::Copy,
+                4,
+                512 * 1024 * 1024,
+                10_000 + i,
+            ));
+        }
+        // 5 older Real records (would never have been seen with
+        // pre-cap=50, since the 200 NullSinks alone exceed it).
+        for i in 0..5 {
+            history.push(record(
+                RunKind::Real,
+                TransferMode::Copy,
+                4,
+                16 * 1024 * 1024,
+                100 + i,
+            ));
+        }
+        // Real records were appended last (highest timestamps);
+        // select_tuning_window iterates .rev() so they come first.
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert_eq!(
+            window.len(),
+            5,
+            "expected the 5 real records to survive a flood of non-real history"
+        );
+        assert!(window.iter().all(|r| r.run_kind.is_real_transfer()));
+        assert!(derive_local_plan_tuning(&window).is_some());
+    }
+
+    // ── R57-F1: wrapper's "ask for all records" invariant ────────────
+    //
+    // The bug class isn't about what `select_tuning_window` does
+    // with a slice; it's about which slice the caller passes in.
+    // `select_tuning_window_from_history` wraps the reader call so
+    // a future maintainer can't drift the limit back to a finite
+    // value. These tests catch that drift by asserting on the
+    // limit value the wrapper passes to its reader.
+
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// Captures the `limit` argument every call to the reader.
+    /// The reader returns a fixed slice; we just want to see what
+    /// the wrapper asks for.
+    fn recording_reader(
+        captured_limit: Rc<Cell<Option<usize>>>,
+        records: Vec<PerformanceRecord>,
+    ) -> impl FnOnce(usize) -> Result<Vec<PerformanceRecord>> {
+        move |limit| {
+            captured_limit.set(Some(limit));
+            Ok(records)
+        }
+    }
+
+    #[test]
+    fn wrapper_passes_zero_to_reader() {
+        let captured: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+        let reader = recording_reader(captured.clone(), vec![]);
+        let _ = select_tuning_window_from_history(reader, TransferMode::Copy, false, true);
+        assert_eq!(
+            captured.get(),
+            Some(0),
+            "R57-F1: the wrapper must ask for all records (limit=0); any \
+             finite limit reintroduces the JSONL-layer crowd-out bug"
+        );
+    }
+
+    #[test]
+    fn wrapper_returns_none_when_reader_errors() {
+        let reader = |_limit: usize| -> Result<Vec<PerformanceRecord>> {
+            Err(eyre!("simulated read failure"))
+        };
+        let result = select_tuning_window_from_history(reader, TransferMode::Copy, false, true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn wrapper_returns_none_when_no_eligible_records() {
+        let captured: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+        let reader = recording_reader(
+            captured,
+            vec![
+                record(RunKind::DryRun, TransferMode::Copy, 4, 1024 * 1024, 100),
+                record(RunKind::NullSink, TransferMode::Copy, 4, 1024 * 1024, 200),
+            ],
+        );
+        let result = select_tuning_window_from_history(reader, TransferMode::Copy, false, true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn wrapper_returns_some_window_when_real_records_present() {
+        let captured: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+        let reader = recording_reader(
+            captured.clone(),
+            vec![
+                record(RunKind::Real, TransferMode::Copy, 4, 16 * 1024 * 1024, 100),
+                record(RunKind::DryRun, TransferMode::Copy, 4, 1024 * 1024, 200),
+            ],
+        );
+        let result =
+            select_tuning_window_from_history(reader, TransferMode::Copy, false, true).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].run_kind, RunKind::Real);
+        assert_eq!(captured.get(), Some(0));
     }
 
     /// Sanity: mode and option filters still apply post-R56-F2.
