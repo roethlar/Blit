@@ -89,10 +89,38 @@ message ServerPushResponse {
 
 message PushHeader {
   string module = 1;
+  // Master switch: when true, the daemon will purge destination
+  // entries absent from the source manifest. The scope is governed
+  // by `mirror_kind` (R59 #1 F2).
   bool mirror_mode = 2;
   string destination_path = 3;
   bool force_grpc = 4;
-  // Note: Other options like checksum type can be added here.
+
+  // R59 #1 F2: source-side filter the client used during scan.
+  // Daemon-side purge enumerator MUST apply this filter when
+  // `mirror_kind == FILTERED_SUBSET` so it doesn't classify
+  // user-excluded destination entries as "extraneous" and delete them.
+  FilterSpec filter = 5;
+
+  // R59 #1 F2: scope of mirror deletions. Pre-fix the daemon
+  // unconditionally enumerated with FileFilter::default() and
+  // purged anything not in `expected_rel_files`, so a push of
+  // `--include '*.bin' --mirror` deleted the destination's
+  // non-bin files even though they were out of scope. Default
+  // FILTERED_SUBSET preserves user intent; ALL bypasses the
+  // filter for explicit "destination exactly mirrors filtered
+  // source" intent.
+  MirrorMode mirror_kind = 6;
+
+  // R59 #1 F1: client signals it intends the source-side scan
+  // to be complete (no unreadable subtrees). When true, the
+  // daemon refuses to purge any destination entries if the
+  // client's ManifestComplete.scan_complete arrives as false —
+  // because a partial scan would let absent-due-to-unreadable
+  // files be deleted from the destination. Independent of
+  // mirror_kind: required for mirror correctness, also useful
+  // for move-like pushes once those exist.
+  bool require_complete_scan = 7;
 }
 
 message FileHeader {
@@ -118,7 +146,16 @@ message TarShardChunk {
 
 message TarShardComplete {}
 
-message ManifestComplete {}
+message ManifestComplete {
+  // R59 #1 F1: client tells the daemon whether its source-side
+  // scan finished cleanly. False when any subtree was unreadable
+  // (EACCES, ELOOP, IO errors). Required for the daemon to
+  // safely purge in mirror mode — see PushHeader.require_complete_scan.
+  // Pre-fix the daemon purged destination entries unconditionally
+  // after upload, so a permission error mid-scan caused silent
+  // data loss on the destination.
+  bool scan_complete = 1;
+}
 message UploadComplete {}
 message Ack {}
 

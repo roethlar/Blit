@@ -275,8 +275,15 @@ pub fn destination_path(rel: &Path) -> String {
     }
 }
 
-pub async fn send_manifest_complete(tx: &mpsc::Sender<ClientPushRequest>) -> Result<()> {
-    send_payload(tx, ClientPayload::ManifestComplete(ManifestComplete {})).await
+pub async fn send_manifest_complete(
+    tx: &mpsc::Sender<ClientPushRequest>,
+    scan_complete: bool,
+) -> Result<()> {
+    send_payload(
+        tx,
+        ClientPayload::ManifestComplete(ManifestComplete { scan_complete }),
+    )
+    .await
 }
 
 pub fn module_and_path(

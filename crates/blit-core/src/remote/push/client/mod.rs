@@ -310,7 +310,9 @@ impl RemotePushClient {
         source: Arc<dyn TransferSource>,
         filter: &FileFilter,
         mirror_mode: bool,
+        mirror_kind: crate::generated::MirrorMode,
         force_grpc: bool,
+        require_complete_scan: bool,
         progress: Option<&RemotePushProgress>,
         trace_data_plane: bool,
     ) -> Result<RemotePushReport> {
@@ -342,6 +344,27 @@ impl RemotePushClient {
         let (module, rel_path) = module_and_path(&self.endpoint)?;
         let destination_path = destination_path(&rel_path);
 
+        // R59 #1 F2: translate the client's FileFilter to wire FilterSpec
+        // so the daemon's purge enumerator can honor scope. Pre-fix the
+        // daemon used FileFilter::default() and would delete user-excluded
+        // destination entries it considered "extraneous".
+        let wire_filter = crate::generated::FilterSpec {
+            include: filter.include_files.clone(),
+            exclude: filter.exclude_files.clone(),
+            min_size: filter.min_size,
+            max_size: filter.max_size,
+            min_age_secs: filter.min_age.map(|d| d.as_secs()),
+            max_age_secs: filter.max_age.map(|d| d.as_secs()),
+            files_from: filter
+                .files_from
+                .as_ref()
+                .map(|set| {
+                    set.iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
         send_payload(
             &tx,
             ClientPayload::Header(crate::generated::PushHeader {
@@ -349,6 +372,9 @@ impl RemotePushClient {
                 mirror_mode,
                 destination_path,
                 force_grpc,
+                filter: Some(wire_filter),
+                mirror_kind: mirror_kind as i32,
+                require_complete_scan,
             }),
         )
         .await?;
@@ -802,7 +828,17 @@ impl RemotePushClient {
                         }
                         None => {
                             manifest_done = true;
-                            send_manifest_complete(&tx).await?;
+                            // R59 #1 F1: report scan completeness to the
+                            // daemon at ManifestComplete time. Walkdir
+                            // errors land in `unreadable_paths` synchronously
+                            // during the scan; the channel closing (None)
+                            // guarantees the manifest task has finished
+                            // pushing them, so reading here is race-free.
+                            let scan_complete = unreadable_paths
+                                .lock()
+                                .map(|g| g.is_empty())
+                                .unwrap_or(false);
+                            send_manifest_complete(&tx, scan_complete).await?;
                         }
                     }
                 }

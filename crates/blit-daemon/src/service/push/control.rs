@@ -43,6 +43,13 @@ pub(crate) async fn handle_push_stream(
     let mut mirror_mode = false;
     let mut expected_rel_files: Vec<PathBuf> = Vec::new();
     let mut force_grpc_client = false;
+    // R59 #1 F1/F2: state captured from PushHeader + ManifestComplete
+    // so the purge phase can refuse on a partial scan (F1) and
+    // honor the user's filter scope (F2).
+    let mut require_complete_scan = false;
+    let mut mirror_kind = blit_core::generated::MirrorMode::Unspecified;
+    let mut purge_filter = blit_core::fs_enum::FileFilter::default();
+    let mut scan_complete = false;
     let mut need_list_sender = FileListBatcher::new(tx.clone());
     let (upload_tx, upload_rx) = mpsc::channel::<FileHeader>(FILE_UPLOAD_CHANNEL_CAPACITY);
     let mut upload_rx_opt = Some(upload_rx);
@@ -68,6 +75,26 @@ pub(crate) async fn handle_push_stream(
                 mirror_mode = header.mirror_mode;
                 force_grpc_client = header.force_grpc;
                 force_grpc_effective = force_grpc_data || force_grpc_client;
+                // R59 #1: capture F1 / F2 fields from the new wire shape.
+                require_complete_scan = header.require_complete_scan;
+                mirror_kind = blit_core::generated::MirrorMode::try_from(header.mirror_kind)
+                    .unwrap_or(blit_core::generated::MirrorMode::Unspecified);
+                if let Some(wire_filter) = header.filter.as_ref() {
+                    let mut f = blit_core::fs_enum::FileFilter::default();
+                    f.include_files = wire_filter.include.clone();
+                    f.exclude_files = wire_filter.exclude.clone();
+                    f.min_size = wire_filter.min_size;
+                    f.max_size = wire_filter.max_size;
+                    f.min_age = wire_filter.min_age_secs.map(std::time::Duration::from_secs);
+                    f.max_age = wire_filter.max_age_secs.map(std::time::Duration::from_secs);
+                    f.reference_time = Some(std::time::SystemTime::now());
+                    f.files_from = if wire_filter.files_from.is_empty() {
+                        None
+                    } else {
+                        Some(wire_filter.files_from.iter().map(PathBuf::from).collect())
+                    };
+                    purge_filter = f;
+                }
                 let dest_path = header.destination_path.trim();
                 if !dest_path.is_empty() {
                     let rel = resolve_relative_path(dest_path)?;
@@ -206,8 +233,9 @@ pub(crate) async fn handle_push_stream(
                     }
                 }
             }
-            Some(client_push_request::Payload::ManifestComplete(_)) => {
+            Some(client_push_request::Payload::ManifestComplete(mc)) => {
                 manifest_complete = true;
+                scan_complete = mc.scan_complete;
                 break;
             }
             Some(client_push_request::Payload::FileData(_)) => {
@@ -282,10 +310,37 @@ pub(crate) async fn handle_push_stream(
 
     let mut entries_deleted = 0u64;
     if mirror_mode {
+        // R59 #1 F1: if the client demanded a complete source scan
+        // (mandatory for mirror), refuse to purge when the actual
+        // scan was incomplete. Pre-fix the daemon purged
+        // unconditionally, so a permission error mid-scan caused
+        // silent dest-side data loss when files absent from the
+        // (incomplete) manifest were deleted from destination.
+        if require_complete_scan && !scan_complete {
+            return Err(Status::failed_precondition(
+                "source scan was incomplete (unreadable paths); \
+                 refusing to purge destination to prevent data loss. \
+                 Resolve the unreadable source path(s) and retry.",
+            ));
+        }
+        // R59 #1 F2: choose the purge filter based on mirror_kind.
+        // ALL = full destination tree (no filter, historical
+        // behavior). FILTERED_SUBSET (default) = honor user's filter
+        // so out-of-scope destination entries aren't deleted.
+        let scoped_filter = match mirror_kind {
+            blit_core::generated::MirrorMode::All => blit_core::fs_enum::FileFilter::default(),
+            // FilteredSubset is the default for mirror_mode=true with
+            // an unspecified mirror_kind (back-compat: older clients
+            // that don't send the field still get the safe scope).
+            blit_core::generated::MirrorMode::Unspecified
+            | blit_core::generated::MirrorMode::FilteredSubset
+            | blit_core::generated::MirrorMode::Off => purge_filter.clone_without_cache(),
+        };
         let purge_stats = purge_extraneous_entries(
             module.path.clone(),
             module.canonical_root.clone(),
             expected_rel_files,
+            scoped_filter,
         )
         .await?;
         entries_deleted = purge_stats.total();

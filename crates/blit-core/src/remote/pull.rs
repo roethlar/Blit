@@ -699,7 +699,14 @@ impl RemotePullClient {
             tx_for_manifest
                 .send(ClientPullMessage {
                     payload: Some(client_pull_message::Payload::ManifestDone(
-                        ManifestComplete {},
+                        // Pull side: client manifest is locally enumerated and
+                        // always complete (we error early on enumeration
+                        // failure rather than streaming a partial manifest).
+                        // scan_complete is reused from the push-side wire
+                        // shape for symmetry; daemon ignores it on pull.
+                        ManifestComplete {
+                            scan_complete: true,
+                        },
                     )),
                 })
                 .await

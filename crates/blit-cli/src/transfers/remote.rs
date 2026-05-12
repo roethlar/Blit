@@ -240,12 +240,31 @@ async fn run_remote_push_transfer_inner(
     let transfer_source: Arc<dyn TransferSource> =
         Arc::new(FilteredSource::new(inner, filter.clone()));
 
+    // R59 #1 F2: translate the user's --delete-scope flag to the wire
+    // MirrorMode enum. Default to FilteredSubset so `push --include …
+    // --mirror` deletes only files in scope. R59 #1 F1: require a
+    // complete source scan for any mirror operation — a partial scan
+    // could cause silent dest-side data loss when the daemon purges
+    // entries it (wrongly) thinks are absent from the source.
+    let mirror_kind = if mirror_mode {
+        if args.delete_scope_all() {
+            blit_core::generated::MirrorMode::All
+        } else {
+            blit_core::generated::MirrorMode::FilteredSubset
+        }
+    } else {
+        blit_core::generated::MirrorMode::Off
+    };
+    let require_complete_scan = mirror_mode;
+
     let push_result = client
         .push(
             transfer_source.clone(),
             &filter,
             mirror_mode,
+            mirror_kind,
             args.force_grpc,
+            require_complete_scan,
             progress_handle.as_ref(),
             args.trace_data_plane,
         )
