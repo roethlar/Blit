@@ -26,6 +26,41 @@ use super::history::{record_performance_history, update_predictor};
 use super::options::LocalMirrorOptions;
 use super::summary::{LocalMirrorSummary, TransferOutcome};
 
+/// Maximum number of recent eligible records the local tuner looks
+/// at. The cap exists so a recent regime change (new disk, fresh
+/// install) propagates into tuning within ~20 transfers instead of
+/// being diluted by older history.
+const TUNING_WINDOW_SIZE: usize = 20;
+
+/// R56-F2: select the window of recent records that should feed
+/// `derive_local_plan_tuning`. Filters on `run_kind.is_real_transfer()`
+/// FIRST, then the per-operation discriminants, THEN takes the
+/// last `TUNING_WINDOW_SIZE`. Pre-fix the take() ran before the
+/// run_kind filter, so 20 recent dry-run / null-sink records with
+/// matching mode could fill the window and force tuning to fall
+/// back to defaults even when older real records existed.
+///
+/// Extracted so the contract is unit-testable without touching
+/// the global perf-history JSONL.
+fn select_tuning_window(
+    history: &[crate::perf_history::PerformanceRecord],
+    target_mode: TransferMode,
+    checksum: bool,
+    skip_unchanged: bool,
+) -> Vec<crate::perf_history::PerformanceRecord> {
+    history
+        .iter()
+        .rev()
+        .filter(|record| record.run_kind.is_real_transfer())
+        .filter(|record| record.mode == target_mode)
+        .filter(|record| record.options.checksum == checksum)
+        .filter(|record| record.options.skip_unchanged == skip_unchanged)
+        .filter(|record| record.fast_path.as_deref() != Some("tiny_manifest"))
+        .take(TUNING_WINDOW_SIZE)
+        .cloned()
+        .collect()
+}
+
 pub struct TransferOrchestrator;
 
 impl TransferOrchestrator {
@@ -364,16 +399,12 @@ impl TransferOrchestrator {
                 } else {
                     TransferMode::Copy
                 };
-                let filtered: Vec<_> = history
-                    .iter()
-                    .rev()
-                    .filter(|record| record.mode == target_mode)
-                    .filter(|record| record.options.checksum == options.checksum)
-                    .filter(|record| record.options.skip_unchanged == options.skip_unchanged)
-                    .filter(|record| record.fast_path.as_deref() != Some("tiny_manifest"))
-                    .take(20)
-                    .cloned()
-                    .collect();
+                let filtered = select_tuning_window(
+                    &history,
+                    target_mode,
+                    options.checksum,
+                    options.skip_unchanged,
+                );
                 if let Some(tuning) = derive_local_plan_tuning(&filtered) {
                     plan_options.small_target = Some(tuning.small_target_bytes);
                     plan_options.small_count_target = Some(tuning.small_count_target);
@@ -1390,5 +1421,213 @@ mod async_runtime_tests {
         );
         assert!(summary.deleted_dirs >= 1);
         assert!(summary.deleted_files >= 1);
+    }
+}
+
+#[cfg(test)]
+mod select_tuning_window_tests {
+    //! R56-F2: ensure non-real records are filtered BEFORE the
+    //! 20-record window, not after. Pre-fix, recent
+    //! dry-run/null-sink records with matching mode could fill the
+    //! window and force tuning to fall back to defaults even when
+    //! older real records existed.
+
+    use super::*;
+    use crate::perf_history::{OptionSnapshot, PerformanceRecord, RunKind, TransferMode};
+
+    fn record(
+        kind: RunKind,
+        mode: TransferMode,
+        tar_tasks: u32,
+        tar_bytes: u64,
+        timestamp_ms: u128,
+    ) -> PerformanceRecord {
+        let mut r = PerformanceRecord::new(
+            mode,
+            None,
+            None,
+            10,
+            1024,
+            OptionSnapshot {
+                dry_run: false,
+                preserve_symlinks: true,
+                include_symlinks: false,
+                skip_unchanged: true,
+                checksum: false,
+                workers: 4,
+            },
+            None,
+            10,
+            100,
+            0,
+            0,
+        );
+        r.run_kind = kind;
+        r.tar_shard_tasks = tar_tasks;
+        r.tar_shard_files = tar_tasks * 100;
+        r.tar_shard_bytes = tar_bytes;
+        r.timestamp_epoch_ms = timestamp_ms;
+        r
+    }
+
+    /// 30 recent NullSink records (matching the target operation
+    /// shape) followed by 5 older Real records. Pre-fix .take(20)
+    /// ran first, grabbed 20 NullSinks, derive_local_plan_tuning
+    /// skipped them all internally and returned None — tuning
+    /// fell back to defaults despite real history being available.
+    /// Post-fix, the filter eats the NullSinks before the take, so
+    /// the 5 Real records make it through and tuning succeeds.
+    #[test]
+    fn null_sink_records_do_not_crowd_out_older_real_records() {
+        let mut history = Vec::new();
+        // Older real records (timestamps lowest = oldest).
+        for i in 0..5 {
+            history.push(record(
+                RunKind::Real,
+                TransferMode::Copy,
+                4,
+                16 * 1024 * 1024,
+                100 + i,
+            ));
+        }
+        // Recent null-sink records (higher timestamps = more recent).
+        for i in 0..30 {
+            history.push(record(
+                RunKind::NullSink,
+                TransferMode::Copy,
+                4,
+                512 * 1024 * 1024,
+                10_000 + i,
+            ));
+        }
+
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert!(
+            !window.is_empty(),
+            "real records must reach the window; 30 NullSink records crowded them out pre-R56-F2"
+        );
+        assert!(
+            window.iter().all(|r| r.run_kind.is_real_transfer()),
+            "only Real records should land in the tuning window"
+        );
+        // derive_local_plan_tuning succeeds → tuner sees its 5 Real
+        // records with 16 MiB tar bytes / 4 tar tasks = 4 MiB avg
+        // (clamped to the 4 MiB floor).
+        let tuning = derive_local_plan_tuning(&window).expect("tuning must succeed");
+        assert!(tuning.small_target_bytes >= 4 * 1024 * 1024);
+        assert!(tuning.small_target_bytes <= 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn dry_run_records_do_not_crowd_out_real_records() {
+        let mut history = Vec::new();
+        for i in 0..3 {
+            history.push(record(
+                RunKind::Real,
+                TransferMode::Copy,
+                2,
+                8 * 1024 * 1024,
+                100 + i,
+            ));
+        }
+        for i in 0..25 {
+            history.push(record(
+                RunKind::DryRun,
+                TransferMode::Copy,
+                10,
+                1024 * 1024 * 1024,
+                10_000 + i,
+            ));
+        }
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert_eq!(
+            window.len(),
+            3,
+            "expected the 3 real records, got {} entries",
+            window.len()
+        );
+        assert!(derive_local_plan_tuning(&window).is_some());
+    }
+
+    #[test]
+    fn bench_records_do_not_crowd_out_real_records() {
+        let mut history = Vec::new();
+        for i in 0..2 {
+            history.push(record(
+                RunKind::Real,
+                TransferMode::Copy,
+                1,
+                4 * 1024 * 1024,
+                100 + i,
+            ));
+        }
+        for i in 0..50 {
+            history.push(record(
+                RunKind::BenchTransfer,
+                TransferMode::Copy,
+                100,
+                512 * 1024 * 1024,
+                10_000 + i,
+            ));
+        }
+        for i in 0..50 {
+            history.push(record(
+                RunKind::BenchWire,
+                TransferMode::Copy,
+                100,
+                512 * 1024 * 1024,
+                20_000 + i,
+            ));
+        }
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert_eq!(window.len(), 2);
+        assert!(window.iter().all(|r| r.run_kind == RunKind::Real));
+    }
+
+    /// Sanity: with abundant real records, the window caps at 20.
+    #[test]
+    fn window_caps_at_20_real_records() {
+        let history: Vec<_> = (0..50)
+            .map(|i| {
+                record(
+                    RunKind::Real,
+                    TransferMode::Copy,
+                    2,
+                    8 * 1024 * 1024,
+                    100 + i,
+                )
+            })
+            .collect();
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert_eq!(window.len(), 20, "expected the 20 most recent real records");
+    }
+
+    /// Sanity: mode and option filters still apply post-R56-F2.
+    /// A Real record with the wrong mode/checksum/skip_unchanged
+    /// must NOT land in the window.
+    #[test]
+    fn mode_and_option_filters_still_apply() {
+        let mut history = Vec::new();
+        // Real Mirror records (wrong mode).
+        for i in 0..10 {
+            history.push(record(
+                RunKind::Real,
+                TransferMode::Mirror,
+                4,
+                16 * 1024 * 1024,
+                100 + i,
+            ));
+        }
+        // Real Copy record.
+        history.push(record(
+            RunKind::Real,
+            TransferMode::Copy,
+            2,
+            8 * 1024 * 1024,
+            500,
+        ));
+        let window = select_tuning_window(&history, TransferMode::Copy, false, true);
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].mode, TransferMode::Copy);
     }
 }

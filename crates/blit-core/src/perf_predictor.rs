@@ -577,6 +577,35 @@ impl PerformancePredictor {
             path: dir.join(STATE_FILENAME),
         }
     }
+
+    /// Test variant that exercises the actual load path. Used by
+    /// R56-F2 to verify load-time state invalidation: writing a
+    /// fake v2 state file and then calling `for_tests` was the
+    /// gap GPT caught — `for_tests` constructs a fresh state
+    /// without reading the file, so the test would pass even if
+    /// `load()` stopped resetting mismatched versions. This
+    /// helper goes through the same file-read + version-check
+    /// the production `load()` does, parameterized on a custom
+    /// directory so the production config-dir resolution doesn't
+    /// interfere.
+    pub fn load_from_dir(dir: &Path) -> Result<Self> {
+        let path = dir.join(STATE_FILENAME);
+        if let Ok(mut file) = File::open(&path) {
+            let mut buf = String::new();
+            file.read_to_string(&mut buf)?;
+            let mut state: PredictorState =
+                serde_json::from_str(&buf).context("parse predictor state")?;
+            if state.version != STATE_VERSION {
+                state = PredictorState::new();
+            }
+            Ok(Self { state, path })
+        } else {
+            Ok(Self {
+                state: PredictorState::new(),
+                path,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1268,15 +1297,17 @@ mod tests {
     }
 
     /// Concretely verify the load-time invalidation: write a state
-    /// file with the previous version + a phony profile, load it,
-    /// and confirm the predictor came up empty.
+    /// file with the previous version + a phony profile, load it
+    /// THROUGH THE LOAD PATH (not the bare for_tests constructor —
+    /// that was R56-F2's gap, GPT caught it). The mismatched
+    /// version must reset to a fresh state.
     #[test]
     fn load_resets_state_on_version_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_path = dir.path().join(STATE_FILENAME);
         // Hand-rolled v2 state with one fake profile. Profiles use
         // a custom serde (profile_map serializes the HashMap as a
-        // sequence of [key, value] pairs), so we use the actual
+        // sequence of [key, value] pairs), so use the actual
         // serialization path to produce realistic v2 bytes.
         let mut fake_state = PredictorState::new();
         fake_state.version = 2;
@@ -1298,13 +1329,48 @@ mod tests {
         assert_eq!(parsed.version, 2);
         assert_eq!(parsed.profiles.len(), 1);
 
-        // Now load through PerformancePredictor — version mismatch
-        // (2 != STATE_VERSION = 3) must reset to a fresh state.
-        let predictor = PerformancePredictor::for_tests(dir.path());
+        // R56-F2: load THROUGH the real load path so the test
+        // actually exercises version invalidation. Pre-fix this
+        // called for_tests() which never reads the file — the test
+        // passed even when the production load() skipped the
+        // version check.
+        let predictor =
+            PerformancePredictor::load_from_dir(dir.path()).expect("load fake v2 state");
         assert_eq!(
             predictor.state.profiles.len(),
             0,
             "load() must drop pre-R56 v2 state file with poisoned profiles"
+        );
+        assert_eq!(predictor.state.version, STATE_VERSION);
+    }
+
+    /// Positive control for the new load_from_dir helper: a v3 file
+    /// with a profile loads intact (no version mismatch).
+    #[test]
+    fn load_preserves_state_when_version_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join(STATE_FILENAME);
+        let mut state = PredictorState::new();
+        // STATE_VERSION-version, which is the current shipped value.
+        let key = ProfileKey {
+            source_fs: Some("apfs".into()),
+            dest_fs: Some("apfs".into()),
+            mode: TransferMode::Copy,
+            fast_path: None,
+            skip_unchanged: true,
+            checksum: false,
+        };
+        state.profiles.insert(key, PredictorProfile::new());
+        let serialized = serde_json::to_string(&state).expect("serialize current state");
+        std::fs::write(&state_path, serialized).unwrap();
+
+        let predictor =
+            PerformancePredictor::load_from_dir(dir.path()).expect("load current state");
+        assert_eq!(predictor.state.version, STATE_VERSION);
+        assert_eq!(
+            predictor.state.profiles.len(),
+            1,
+            "load() must preserve profiles when version matches"
         );
     }
 }
