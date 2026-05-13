@@ -23,7 +23,7 @@ snapshot. Bird's-eye view:
 | 2.7 | `POST_REVIEW_FIXES` Round 1 | ✅ Closed `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
 | 2.8 | Predictor wire-or-delete | ✅ Wired (Option: wire) — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
 | 3.1 | Daemon `TransferMetrics` decision | ⏳ Pending — D5 default is "keep + document as dormant" |
-| 3.2 | mDNS TXT enrichment | ✅ Closed `<this commit>` (D4 default taken — `module_count` + `delegation_enabled` added) |
+| 3.2 | mDNS TXT enrichment | ✅ Closed `0d76c4f` (D4 default taken — `module_count` + `delegation_enabled` added) |
 | 3.3 | Phase 4.8 daemon FS capability | ⏳ Pending — doc-only re-scoping (D6 default: defer to 0.2.0) |
 | 4 | Doc cleanup table | ✅ Closed `aac13bf` (followup `8d43e4d` caught binary-path stragglers) |
 
