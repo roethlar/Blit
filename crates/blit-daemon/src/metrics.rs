@@ -11,12 +11,15 @@
 //! RAII handle that decrements on `Drop` so panics or task cancellation
 //! can't leak the gauge (F5 of `docs/reviews/codebase_review_2026-05-01.md`).
 //!
-//! No exposure mechanism (no HTTP, no RPC) yet. Counters exist so that
-//! a future GUI/TUI gRPC `GetState`-style RPC can read them — design in
-//! `docs/plan/TUI_DESIGN.md`. Until then this is internal scaffolding.
+//! On-screen output (§3.1 / D5): when `--metrics` is on, the daemon
+//! emits a one-line summary to stderr at each RPC completion — like
+//! `rclone --stats` or rsync's `--stats`, but per-transfer from the
+//! daemon side. Operator running the daemon under systemd / in a
+//! foreground terminal gets visible feedback without needing the TUI.
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Default)]
 pub struct TransferMetrics {
@@ -90,6 +93,41 @@ impl TransferMetrics {
         ActiveGuard {
             metrics: Some(self),
         }
+    }
+
+    /// §3.1 / D5: emit a one-line summary to stderr at RPC completion
+    /// when `--metrics` is enabled. Operator-facing visibility for
+    /// daemon foreground / systemd journal use. No-op when metrics
+    /// are disabled — atomics aren't even loaded.
+    ///
+    /// Format is intentionally compact (one line, structured key=val
+    /// pairs) so a log aggregator can parse it without regex
+    /// gymnastics. The format string is exposed via
+    /// `format_completion_line` for unit tests.
+    pub fn log_completion(&self, op_kind: &str, duration: Duration, ok: bool) {
+        if !self.enabled {
+            return;
+        }
+        let line = self.format_completion_line(op_kind, duration, ok);
+        eprintln!("{line}");
+    }
+
+    /// Extracted formatter so the format contract is unit-testable
+    /// without capturing stderr. Reads atomics with the same `Relaxed`
+    /// ordering the inc_* writers use — counters are observability,
+    /// not synchronization.
+    pub fn format_completion_line(&self, op_kind: &str, duration: Duration, ok: bool) -> String {
+        let push = self.push_operations.load(Relaxed);
+        let pull = self.pull_operations.load(Relaxed);
+        let purge = self.purge_operations.load(Relaxed);
+        let active = self.active_transfers.load(Relaxed);
+        let errors = self.transfer_errors.load(Relaxed);
+        let status = if ok { "ok" } else { "err" };
+        format!(
+            "[metrics] {op_kind} {status} in {duration:.2?} \
+             (push_ops={push} pull_ops={pull} purge_ops={purge} \
+             active={active} errors={errors})"
+        )
     }
 }
 
@@ -188,5 +226,54 @@ mod tests {
         drop(g1);
         drop(g3);
         assert_eq!(m.active_transfers.load(Relaxed), 0);
+    }
+
+    /// §3.1 / D5: format_completion_line must include the op kind,
+    /// status, duration, and every cumulative counter. The format
+    /// is intentionally compact one-line key=value pairs so a log
+    /// aggregator can parse without regex gymnastics.
+    #[test]
+    fn completion_line_format_is_stable() {
+        let m = TransferMetrics::enabled();
+        m.inc_push();
+        m.inc_pull();
+        m.inc_pull();
+        m.inc_purge();
+        m.inc_error();
+        let line = m.format_completion_line("push", Duration::from_millis(1234), true);
+        assert!(line.starts_with("[metrics] push ok in "), "{line}");
+        assert!(line.contains("push_ops=1"), "{line}");
+        assert!(line.contains("pull_ops=2"), "{line}");
+        assert!(line.contains("purge_ops=1"), "{line}");
+        assert!(line.contains("active=0"), "{line}");
+        assert!(line.contains("errors=1"), "{line}");
+    }
+
+    /// §3.1 / D5: failing handlers tag the line `err` so an operator
+    /// `grep err` over the daemon's stderr surfaces problem RPCs
+    /// without parsing the counter block.
+    #[test]
+    fn completion_line_marks_errors_explicitly() {
+        let m = TransferMetrics::enabled();
+        let line = m.format_completion_line("pull_sync", Duration::from_secs(0), false);
+        assert!(line.contains("pull_sync err"), "{line}");
+    }
+
+    /// `--metrics` off is the default; `log_completion` and the
+    /// formatter must skip atomics entirely. Disabled-state line is
+    /// never expected to be emitted (gated by `enabled` in
+    /// `log_completion`); the formatter still runs in test for
+    /// shape parity but reads zeros across the board.
+    #[test]
+    fn disabled_completion_line_reads_zero_counters() {
+        let m = TransferMetrics::disabled();
+        // Pretend something tried to push — disabled state must drop the inc.
+        m.inc_push();
+        m.inc_error();
+        let line = m.format_completion_line("push", Duration::from_millis(10), true);
+        assert!(
+            line.contains("push_ops=0") && line.contains("errors=0"),
+            "{line}"
+        );
     }
 }

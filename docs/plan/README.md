@@ -24,7 +24,6 @@ checkpoint reference.
 - **[RELEASE_PLAN_v2_2026-05-04.md](./RELEASE_PLAN_v2_2026-05-04.md)** — Live 0.1.0 release plan (P0/P1/P2 + decisions)
 - **[PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md)** — 2026-04-07 phase-4 snapshot (superseded for current state by the release plan)
 - **[MASTER_WORKFLOW.md](./MASTER_WORKFLOW.md)** — Phase coordination and quality gates
-- **[AI_TELEMETRY_ANALYSIS.md](./AI_TELEMETRY_ANALYSIS.md)** — Scoping doc for optional performance analysis features
 
 ### Architecture & Design
 

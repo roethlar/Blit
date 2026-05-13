@@ -4,6 +4,14 @@
 **Owner:** mcoelho
 **Supersedes:** the "Remote→remote re-evaluation" entry in `TODO.md`'s Deferred design calls.
 
+> **Auth note (2026-05-13):** `BlitAuth` and the
+> `RemoteSourceLocator.delegated_credential` passthrough field were
+> removed from project scope. Mentions of either in the body below
+> describe the original forward-compat design intent and are now
+> obsolete — the trust model is operator network controls (firewall
+> / VPN / SSH tunnel). Body kept verbatim as a historical design
+> record per `RELEASE_PLAN_v2_2026-05-04.md` §5.2.
+
 **v2 changes vs v1 (in response to Round 21):**
 - §4.1 — `DelegatedPullRequest` now embeds existing `TransferOperationSpec`
   instead of duplicating fields (R21-F1).

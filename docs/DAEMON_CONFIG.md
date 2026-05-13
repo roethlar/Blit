@@ -259,21 +259,19 @@ purpose):
    operator writes `allowed_source_hosts = ["127.0.0.1"]` or
    `["127.0.0.0/8"]`, not just the hostname.
 
-##### Auth posture (current and future)
+##### Auth posture
 
-In 0.1.0 there is no daemon authentication — the trust model is
-"reachable on a trusted network." The delegation gate is policy,
-not authentication; it does not turn an internet-exposed daemon
-into a safely-internet-exposed one. For internet-exposed
-deployments, both the gate and external auth (TLS termination,
-WireGuard, SSH tunnel, etc.) are required.
+There is no daemon authentication. The trust model is "reachable
+on a trusted network." The delegation gate is policy, not
+authentication; it does not turn an internet-exposed daemon into
+a safely-internet-exposed one. For deployments that need to span
+untrusted networks, use external auth (TLS termination,
+WireGuard, SSH tunnel, etc.) at the network edge.
 
-`RemoteSourceLocator.delegated_credential` is a forward-compatible
-field defined in the wire format and currently ignored. When
-operator-issued bearer tokens land (post-0.1.0), the CLI will mint
-a token scoped to "operator + dst-host" and pass it through; the
-destination daemon will present it on its outbound connection to
-src.
+This is intentional and not on the roadmap. The `BlitAuth` proto
+stub and the `delegated_credential` passthrough field were
+removed 2026-05-13 — auth is out of project scope. If you need
+authentication, terminate it outside the daemon.
 
 ## Command-Line Options
 

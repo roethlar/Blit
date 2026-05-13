@@ -48,10 +48,13 @@ service Blit {
   rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
 }
 
-// Optional service for handling authentication if needed in the future.
-service BlitAuth {
-  rpc Authenticate(AuthRequest) returns (AuthResponse);
-}
+// Removed: `BlitAuth` service stub (2026-05-13). Original design
+// reserved an `Authenticate(token) -> bool` RPC for a future token
+// auth layer. Removed entirely from 0.1.0 scope — the trust model is
+// "operator network controls + per-transfer data-plane tokens"
+// (`docs/DAEMON_CONFIG.md` Trust Model). If a real auth scheme is
+// ever needed, design it from scratch rather than retain a misleading
+// stub.
 
 // --- Message Definitions ---
 
@@ -344,8 +347,7 @@ message FilesystemStatsResponse {
   uint64 free_bytes = 4;
 }
 
-message AuthRequest { string token = 1; }
-message AuthResponse { bool authenticated = 1; }
+// Removed 2026-05-13: AuthRequest / AuthResponse — see BlitAuth note above.
 
 // ─────────────────────────────────────────────────────────────────────
 // TransferOperationSpec — the unified contract handed from initiator
@@ -565,11 +567,12 @@ message RemoteSourceLocator {
   string host = 1;
   uint32 port = 2;
 
-  // Auth-passthrough hook. Empty in 0.1.0 (no auth implemented yet).
-  // When BlitAuth lands, the operator-minted, dst-scoped bearer token
-  // travels here and dst presents it on its outbound connection to
-  // src.
-  bytes delegated_credential = 10;
+  // Field 10 was `bytes delegated_credential` (forward-compat
+  // auth-passthrough hook for the removed BlitAuth service).
+  // Removed 2026-05-13 — auth is out of project scope. Reserved
+  // so it can't be reused for unrelated semantics by accident.
+  reserved 10;
+  reserved "delegated_credential";
 }
 
 message DelegatedPullProgress {

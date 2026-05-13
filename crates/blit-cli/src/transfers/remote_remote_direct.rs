@@ -115,7 +115,6 @@ async fn run_remote_to_remote_direct_inner(
         src: Some(RemoteSourceLocator {
             host: src.host.clone(),
             port: src.port as u32,
-            delegated_credential: Vec::new(),
         }),
         spec: Some(spec),
         trace_data_plane: args.trace_data_plane,

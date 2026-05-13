@@ -58,7 +58,6 @@ All notable changes to Blit are documented in this file.
 - Architecture guide (`docs/ARCHITECTURE.md`)
 - Daemon configuration guide (`docs/DAEMON_CONFIG.md`)
 - Performance roadmap (`docs/PERFORMANCE_ROADMAP.md`)
-- AI telemetry analysis scoping doc
 
 ### Testing
 - Integration tests: admin verbs (10), admin commands (21, in `crates/blit-cli/tests/blit_utils.rs`), remote transfers, transfer edges, parity, resume, move, remote-to-remote

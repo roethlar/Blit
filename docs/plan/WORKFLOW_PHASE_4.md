@@ -73,18 +73,35 @@
 | 4.7.2 | Document project code style and lint expectations (README/dev guide). | Style guide section. |
 
 ### 4.8 Filesystem Capability Probes *(P1)*
+
+> **Scope note (2026-05-13):** 0.1.0 ships **4.8.1 only**
+> (client-side `fs_capability` cache + probes). 4.8.2 (daemon
+> startup/idle persistence) and 4.8.3 (`blit diagnostics profile`
+> capability probes) are deferred to 0.2.0 per
+> `RELEASE_PLAN_v2_2026-05-04.md` §3.3 (D6 owner sign-off).
+> `blit diagnostics dump` does include client-side probes today —
+> the deferred work is making the daemon do it too.
+
 | Task | Description | Deliverable |
 |------|-------------|-------------|
 | 4.8.1 | Build per-mount capability detector (reflink, sparse files, xattrs, checksum offload) with a curated FS-type table and on-demand probes. | `fs_capability` cache + planner-facing API. |
-| 4.8.2 | Have `blit-daemon` probe during startup/idle windows and persist results per export; surface warnings for unknown filesystems with guidance to run profile. | Daemon capability cache + logs. |
-| 4.8.3 | Extend `blit diagnostics profile` to run local probes and attach results to performance history/telemetry. | CLI profile output updated + docs. |
+| 4.8.2 | *(0.2.0)* Have `blit-daemon` probe during startup/idle windows and persist results per export; surface warnings for unknown filesystems with guidance to run profile. | Daemon capability cache + logs. |
+| 4.8.3 | *(0.2.0)* Extend `blit diagnostics profile` to run local probes and attach results to performance history/telemetry. | CLI profile output updated + docs. |
 
 ### 4.9 Telemetry Intelligence Exploration
+
+> **Scope note (2026-05-13):** **Removed from project scope.**
+> Per `RELEASE_PLAN_v2_2026-05-04.md` §5.4 (owner decision
+> 2026-05-13), AI telemetry analysis is not on the roadmap.
+> Performance history will continue to be collected for the
+> predictor (§2.8) but no "analyze my history" feature is
+> planned. Section retained for historical record.
+
 | Task | Description | Deliverable |
 |------|-------------|-------------|
-| 4.9.1 | Scope optional AI-powered telemetry analysis (anomaly detection, workload recommendations) leveraging local performance history; ensure privacy and offline guarantees. | Design note outlining MVP + guardrails. |
-| 4.9.2 | Prototype `blit diagnose --ai` or similar opt-in command that summarises recent runs and highlights anomalies. | Experimental CLI command behind feature flag. |
-| 4.9.3 | Document policy for shipping/deferring the feature (e.g., post-v2 toggle, user consent, data retention). | Updated plan/TODO entries. |
+| 4.9.1 | ~~Scope optional AI-powered telemetry analysis~~ — **removed** | — |
+| 4.9.2 | ~~Prototype `blit diagnose --ai`~~ — **removed** | — |
+| 4.9.3 | ~~Document policy for shipping/deferring~~ — **removed** | — |
 
 
 

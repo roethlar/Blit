@@ -22,20 +22,19 @@ snapshot. Bird's-eye view:
 | 2.6 | Live remote benchmark capture | ⏳ **Pending** — hardware-bound (two-daemon network) |
 | 2.7 | `POST_REVIEW_FIXES` Round 1 | ✅ Closed `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
 | 2.8 | Predictor wire-or-delete | ✅ Wired (Option: wire) — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
-| 3.1 | Daemon `TransferMetrics` decision | ⏳ Pending — D5 default is "keep + document as dormant" |
+| 3.1 | Daemon `TransferMetrics` decision | ✅ Closed (D5 modified by owner — `--metrics` now emits per-RPC summary lines, no longer dormant) |
 | 3.2 | mDNS TXT enrichment | ✅ Closed `0d76c4f` (D4 default taken — `module_count` + `delegation_enabled` added) |
-| 3.3 | Phase 4.8 daemon FS capability | ⏳ Pending — doc-only re-scoping (D6 default: defer to 0.2.0) |
+| 3.3 | Phase 4.8 daemon FS capability | ✅ Deferred to 0.2.0 (D6 default taken — owner sign-off 2026-05-13) |
 | 4 | Doc cleanup table | ✅ Closed `aac13bf` (followup `8d43e4d` caught binary-path stragglers) |
 
 Decision-default outcomes (§7 table): D1=blit (rename), D2=merged,
-D3=smart-dispatch, D7=glob, D8=Option A (clap_complete), D9=wire
-were all taken. D4/D5/D6 still pending owner sign-off — they gate
-the §3.1/§3.2/§3.3 closures.
+D3=smart-dispatch, D4=mDNS TXT yes, D5=modified (per-RPC stderr
+summary instead of "dormant"), D6=defer to 0.2.0, D7=glob,
+D8=Option A (clap_complete), D9=wire — all taken (2026-05-13
+owner sign-off for D5/D6 + 5.2/5.4 removals).
 
 **Net release-blocker count:** §2.6 (hardware-bound benchmark
-capture) is the last remaining P0. Everything else either closed
-or sits in P1 (§3.x) where the defaults from §7 are unambiguous
-and the cost is small.
+capture) is the last remaining P0. All P1 items closed.
 
 **Inputs:** `docs/audit/2026-05-04_roadmap_audit.md` (deep technical
 audit, ~95 features classified across 17 plan docs) and
@@ -485,12 +484,16 @@ that reviewers and early users will hit.
 
 ### 3.1 Daemon `TransferMetrics` decision
 
-**Status (2026-05-07):** ⏳ Pending. D5 default ("keep + document
-as dormant") has not been actioned in code yet — `metrics.rs:14`
-docstring already says "scaffolding for a future GUI/TUI", but
-the `--metrics` flag's `--help` text and the module-level rustdoc
-have not been updated to spell out "dormant, intended for 0.2.0
-TUI." ~30 min of doc-only work when picked up.
+**Status (2026-05-13):** ✅ Closed (D5 outcome modified by owner).
+Rather than ship `--metrics` as dormant scaffolding, the daemon
+now emits a one-line stderr summary at the end of each push /
+pull / pull_sync RPC when `--metrics` is on. Format is structured
+key=value pairs (`[metrics] push ok in 1.23s push_ops=N
+pull_ops=N ...`) — rsync/rclone style end-of-transfer
+visibility, operator-facing under systemd / foreground.
+Counters themselves remain in place and feed future TUI work,
+but `--metrics` is no longer "scaffolding with no consumer."
+3 new unit tests pin the line format.
 
 **Source:** Roadmap audit headline.
 
@@ -549,9 +552,12 @@ records actually surface in `blit scan`.
 
 ### 3.3 Phase 4.8 — daemon FS capability per-export
 
-**Status (2026-05-07):** ⏳ Pending. D6 default ("defer to 0.2.0;
-doc only") not yet recorded in `WORKFLOW_PHASE_4.md` §4.8.2 / 4.8.3.
-~30 min of doc-only work when picked up; non-release-blocking.
+**Status (2026-05-13):** ✅ Deferred to 0.2.0 (owner sign-off,
+D6 default taken). 0.1.0 ships client-side capability probing
+only (`blit diagnostics dump`); daemon-startup and idle-probe
+mechanisms (`WORKFLOW_PHASE_4.md` §4.8.2 / §4.8.3) are
+explicitly out of 0.1.0 scope. Workflow doc carries a post-phase
+note pointing at this section.
 
 **Source:** GPT review.
 
@@ -597,10 +603,12 @@ Drive-bys outside the original table caught by the `8d43e4d`
 followup: `docs/plan/BENCHMARK_10GBE_PLAN.md` (active 10 GbE
 benchmark playbook) and `docs/WHITEPAPER.md` (build/run example,
 crate description) had `target/release/blit-cli` paths replaced
-with `blit`; `docs/plan/AI_TELEMETRY_ANALYSIS.md` "Phase 3:
-blit-utils Integration" section rewritten; `docs/plan/TUI_DESIGN.md`
-ScanResponse-effort line corrected to point at `blit-cli`'s scan
-parsing (was "blit-utils-merged").
+with `blit`; `docs/plan/TUI_DESIGN.md` ScanResponse-effort line
+corrected to point at `blit-cli`'s scan parsing (was
+"blit-utils-merged"). The §4 sweep also touched
+`docs/plan/AI_TELEMETRY_ANALYSIS.md`, but that doc was
+subsequently removed entirely (2026-05-13, owner decision —
+see §5.4 below).
 
 ---
 
@@ -617,23 +625,29 @@ structured `log` migration is a 1-2 week effort. Explicitly
 deferred per `PROJECT_STATE_ASSESSMENT.md`. Re-open in 0.2.0 once
 operational pain demonstrates need.
 
-### 5.2 BlitAuth
+### 5.2 BlitAuth — REMOVED (2026-05-13)
 
-Proto stub exists at `proto/blit.proto:40-42` (`BlitAuth.Authenticate`)
-with zero implementations. The `RemoteSourceLocator.delegated_credential`
-field is plumbed for forward-compat. 0.1.0 trust model is operator
-network controls + per-transfer data-plane tokens; documented in
-`DAEMON_CONFIG.md` Trust Model section.
+**Status:** Removed from scope, not deferred. The `BlitAuth`
+service stub and `RemoteSourceLocator.delegated_credential`
+forward-compat field were stripped from `proto/blit.proto`. Auth
+is out of project scope — the trust model is "operator network
+controls" (firewall / VPN / SSH tunnel). If authentication is
+ever needed, design from scratch rather than retaining a
+misleading stub. Documented in `DAEMON_CONFIG.md` Trust Model
+section.
 
 ### 5.3 RDMA / RoCE data plane (Phase 3.5)
 
 Proto-only reservation. Hardware-bound, post-release investigation.
 
-### 5.4 AI telemetry analysis
+### 5.4 AI telemetry analysis — REMOVED (2026-05-13)
 
-`AI_TELEMETRY_ANALYSIS.md` exists as design doc. No `perf_analysis`
-module, no `blit diagnostics analyze`. Local-only, opt-in,
-no-network guardrails are documented.
+**Status:** Removed from scope, not deferred. The scoping doc
+`docs/plan/AI_TELEMETRY_ANALYSIS.md` was deleted (owner
+decision). Performance history will continue to be collected
+for the predictor (`docs/plan/RELEASE_PLAN_v2_2026-05-04.md`
+§2.8), but no "analyze my history" feature is planned. If
+anomaly detection becomes useful later, design from scratch.
 
 ### 5.5 TUI
 
@@ -711,9 +725,9 @@ default and the cost is small.
 | D1 | Binary name: `blit` or `blit-cli`? | `blit` (rename via `[[bin]]`) | ✅ Taken — `0ca489b` |
 | D2 | `blit-utils` artifact: standalone or merged? | Merged | ✅ Taken — `aac13bf` |
 | D3 | `blit list` semantics: smart-dispatch or `list-modules`-only? | Smart-dispatch | ✅ Taken — `4d07177` |
-| D4 | mDNS TXT enrichment in 0.1.0? | Yes (small, useful) | ⏳ Open — §3.2 not yet started |
-| D5 | `TransferMetrics` keep-as-scaffolding or remove? | Keep + document as dormant | ⏳ Open — §3.1 doc-only work pending |
-| D6 | Phase 4.8.2/4.8.3 daemon FS capability in 0.1.0? | Defer to 0.2.0; doc only | ⏳ Open — §3.3 doc-only work pending |
+| D4 | mDNS TXT enrichment in 0.1.0? | Yes (small, useful) | ✅ Taken — `0d76c4f` |
+| D5 | `TransferMetrics` keep-as-scaffolding or remove? | Keep + document as dormant | ✅ Modified — owner chose "keep + emit per-RPC summary line" instead of dormant (2026-05-13) |
+| D6 | Phase 4.8.2/4.8.3 daemon FS capability in 0.1.0? | Defer to 0.2.0; doc only | ✅ Taken — owner sign-off 2026-05-13 |
 | D7 | `find --pattern` glob or substring? | Glob | ✅ Taken — `090f5cd` |
 | D8 | Shell completions: clap_complete generation OR README edit? | Option A (clap_complete) | ✅ Taken — `0139a71` |
 | D9 | Predictor: wire OR delete? | Wire | ✅ Taken — `ebcbb45` + `da6ced2` |

@@ -103,6 +103,9 @@ impl Blit for BlitService {
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_push();
         let guard = Arc::clone(&metrics).enter_transfer();
+        // §3.1 / D5: capture start time so `--metrics` can emit a
+        // per-RPC duration line at completion.
+        let started = std::time::Instant::now();
 
         tokio::spawn(async move {
             // `guard` is moved into the task; its Drop fires no
@@ -111,10 +114,12 @@ impl Blit for BlitService {
             let result =
                 handle_push_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
                     .await;
+            let ok = result.is_ok();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            metrics.log_completion("push", started.elapsed(), ok);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -133,14 +138,17 @@ impl Blit for BlitService {
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_pull();
         let guard = Arc::clone(&metrics).enter_transfer();
+        let started = std::time::Instant::now();
 
         tokio::spawn(async move {
             let _guard = guard;
             let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
+            let ok = result.is_ok();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            metrics.log_completion("pull", started.elapsed(), ok);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -159,6 +167,7 @@ impl Blit for BlitService {
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_pull();
         let guard = Arc::clone(&metrics).enter_transfer();
+        let started = std::time::Instant::now();
 
         tokio::spawn(async move {
             let _guard = guard;
@@ -171,10 +180,12 @@ impl Blit for BlitService {
                 server_checksums_enabled,
             )
             .await;
+            let ok = result.is_ok();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            metrics.log_completion("pull_sync", started.elapsed(), ok);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))

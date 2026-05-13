@@ -73,7 +73,6 @@ post-release investigations (RDMA, ReFS privilege).
   (no separate blit-utils manpage — admin verbs documented under blit(1))
 - ARCHITECTURE.md, DAEMON_CONFIG.md, PERFORMANCE_ROADMAP.md
 - CHANGELOG.md with full 0.1.0 feature inventory
-- AI telemetry analysis scoping doc
 
 ### Packaging & CI
 - `scripts/build-release.sh` (Unix) with tarball creation
@@ -97,7 +96,6 @@ implementation work is done — only the measurement runs remain.
 - [ ] ReFS block clone SeManageVolumePrivilege investigation on Windows
 
 ### Nice-to-Have (Implementation Deferred)
-- AI telemetry analysis (scoped in `docs/plan/AI_TELEMETRY_ANALYSIS.md`)
 - Full structured logging migration (eprintln → log macros across ~50 sites)
 
 ---
