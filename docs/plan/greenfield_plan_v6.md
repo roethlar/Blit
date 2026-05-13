@@ -4,6 +4,17 @@
 **Status**: Proposed
 **Strategy**: A greenfield Cargo Workspace using a hybrid transport model: gRPC for control and a raw TCP data plane for maximum performance.
 
+> **Implementation note (post-phase, 2026-05-13):** this plan
+> originally scoped a separate `blit-utils` crate / binary for
+> discovery and admin verbs. During Phase 3/4 those verbs were
+> merged into the single `blit` binary (see
+> `RELEASE_PLAN_v2_2026-05-04.md` §1 and §2.2). References below
+> to `blit-utils` / `crates/blit-utils` describe the original
+> design intent; the as-shipped surface is `blit <subcommand>`
+> built from `crates/blit-cli`. Kept verbatim as a historical
+> architectural record — closes the gap left by the §4 doc sweep
+> (`aac13bf` + `8d43e4d`).
+
 ## 1. Architecture: A Hybrid Transport Model
 
 This plan's core architectural decision is to use **two channels** for communication:
