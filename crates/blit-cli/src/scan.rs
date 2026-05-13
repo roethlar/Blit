@@ -12,6 +12,15 @@ struct ScanEntryJson {
     addresses: Vec<String>,
     version: Option<String>,
     modules: Vec<String>,
+    /// §3.2: total module count as advertised by the daemon.
+    /// Distinct from `modules.len()` because `modules` may be
+    /// truncated for daemons exporting many modules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module_count: Option<u32>,
+    /// §3.2: whether the daemon accepts DelegatedPull requests
+    /// (remote→remote initiator). Absent for pre-§3.2 daemons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delegation_enabled: Option<bool>,
 }
 
 pub async fn run_scan(args: ScanArgs) -> Result<()> {
@@ -32,6 +41,8 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
                 addresses: s.addresses.iter().map(|a| a.to_string()).collect(),
                 version: s.properties.get("version").cloned(),
                 modules: s.modules(),
+                module_count: s.module_count(),
+                delegation_enabled: s.delegation_enabled(),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -73,8 +84,24 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
             println!("  Version: {}", version);
         }
         let modules = service.modules();
-        if !modules.is_empty() {
-            println!("  Modules: {}", modules.join(", "));
+        let module_count = service.module_count();
+        match (modules.is_empty(), module_count) {
+            (false, Some(count)) if (count as usize) > modules.len() => {
+                // Module list truncated; show count + visible names.
+                println!("  Modules ({}): {} ...", count, modules.join(", "));
+            }
+            (false, _) => {
+                println!("  Modules: {}", modules.join(", "));
+            }
+            (true, Some(count)) if count > 0 => {
+                // Daemon reports modules exist but TXT didn't carry
+                // the list (compact daemon variant).
+                println!("  Modules: {} (names not advertised)", count);
+            }
+            _ => {}
+        }
+        if let Some(true) = service.delegation_enabled() {
+            println!("  Delegation: accepts DelegatedPull");
         }
     }
 

@@ -39,6 +39,29 @@ impl MdnsDiscoveredService {
             })
             .unwrap_or_default()
     }
+
+    /// Module count as advertised in the `module_count` TXT record.
+    /// Distinct from `modules().len()` because `modules` is truncated
+    /// past ~180 bytes (mDNS TXT size cap); `module_count` always
+    /// reflects the true module count even when the modules list is
+    /// abbreviated. Returns `None` if the daemon didn't advertise it
+    /// (pre-§3.2 daemon).
+    pub fn module_count(&self) -> Option<u32> {
+        self.properties
+            .get("module_count")
+            .and_then(|v| v.parse::<u32>().ok())
+    }
+
+    /// Whether the daemon accepts `DelegatedPull` requests (remote→
+    /// remote initiator). Used by `blit scan` so operators can spot
+    /// at a glance which daemons can act as a delegation destination.
+    /// Returns `None` if the daemon didn't advertise it (pre-§3.2
+    /// daemon).
+    pub fn delegation_enabled(&self) -> Option<bool> {
+        self.properties
+            .get("delegation_enabled")
+            .map(|v| matches!(v.as_str(), "1" | "true"))
+    }
 }
 
 /// Options for advertising a daemon over mDNS.
@@ -46,6 +69,12 @@ pub struct AdvertiseOptions<'a> {
     pub port: u16,
     pub instance_name: Option<&'a str>,
     pub module_names: &'a [String],
+    /// Whether the daemon accepts DelegatedPull requests. Surfaces
+    /// as the `delegation_enabled` TXT record so `blit scan` can
+    /// show operators at-a-glance which daemons can act as a
+    /// remote→remote delegation destination (§3.2 of
+    /// RELEASE_PLAN_v2.1).
+    pub delegation_enabled: bool,
 }
 
 /// Guard that keeps the mDNS daemon and registration alive for as long as it is held.
@@ -109,6 +138,19 @@ pub fn advertise(options: AdvertiseOptions<'_>) -> Result<MdnsAdvertiser> {
 
     let mut properties = HashMap::new();
     properties.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+    // §3.2: module_count is the authoritative count. The `modules`
+    // string is human-readable but truncated past ~180 bytes (mDNS
+    // TXT size cap), so a daemon exporting hundreds of modules
+    // shows "first-few-modules,...(+N more)" in `modules` and the
+    // full N+few in `module_count`.
+    properties.insert(
+        "module_count".to_string(),
+        options.module_names.len().to_string(),
+    );
+    properties.insert(
+        "delegation_enabled".to_string(),
+        if options.delegation_enabled { "1" } else { "0" }.to_string(),
+    );
     if let Some(mods) = modules_txt {
         properties.insert("modules".to_string(), mods);
     }
@@ -245,4 +287,74 @@ fn default_instance_name() -> String {
         .filter(|name| !name.is_empty())
         .map(|hostname| format!("blit@{hostname}"))
         .unwrap_or_else(|| "blit".to_string())
+}
+
+#[cfg(test)]
+mod accessor_tests {
+    //! §3.2: TXT accessor helpers parse the wire shape correctly,
+    //! including the legacy case where pre-§3.2 daemons don't
+    //! advertise `module_count` / `delegation_enabled`.
+
+    use super::*;
+
+    fn service(props: &[(&str, &str)]) -> MdnsDiscoveredService {
+        let mut properties = HashMap::new();
+        for (k, v) in props {
+            properties.insert((*k).to_string(), (*v).to_string());
+        }
+        MdnsDiscoveredService {
+            fullname: "test._blit._tcp.local.".into(),
+            instance_name: "test".into(),
+            hostname: "host.local.".into(),
+            port: 9031,
+            addresses: vec![],
+            properties,
+        }
+    }
+
+    #[test]
+    fn module_count_parses_advertised_value() {
+        let s = service(&[("module_count", "42")]);
+        assert_eq!(s.module_count(), Some(42));
+    }
+
+    #[test]
+    fn module_count_returns_none_for_pre_v3_2_daemon() {
+        let s = service(&[("version", "0.1.0")]);
+        assert_eq!(s.module_count(), None);
+    }
+
+    #[test]
+    fn delegation_enabled_recognizes_truthy_values() {
+        assert_eq!(
+            service(&[("delegation_enabled", "1")]).delegation_enabled(),
+            Some(true)
+        );
+        assert_eq!(
+            service(&[("delegation_enabled", "true")]).delegation_enabled(),
+            Some(true)
+        );
+        assert_eq!(
+            service(&[("delegation_enabled", "0")]).delegation_enabled(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn delegation_enabled_absent_returns_none() {
+        let s = service(&[("version", "0.1.0")]);
+        assert_eq!(s.delegation_enabled(), None);
+    }
+
+    #[test]
+    fn modules_accessor_unaffected_by_new_fields() {
+        let s = service(&[
+            ("modules", "alpha,beta,gamma"),
+            ("module_count", "3"),
+            ("delegation_enabled", "1"),
+        ]);
+        assert_eq!(s.modules(), vec!["alpha", "beta", "gamma"]);
+        assert_eq!(s.module_count(), Some(3));
+        assert_eq!(s.delegation_enabled(), Some(true));
+    }
 }

@@ -58,6 +58,11 @@ async fn main() -> Result<()> {
             port,
             instance_name: mdns.name.as_deref(),
             module_names: &module_names,
+            // §3.2: surface delegation availability so `blit scan`
+            // can show which daemons can act as remote→remote
+            // delegation destinations without operators having to
+            // probe each one.
+            delegation_enabled: delegation.allow_delegated_pull,
         }) {
             Ok(handle) => {
                 eprintln!(

@@ -23,7 +23,7 @@ snapshot. Bird's-eye view:
 | 2.7 | `POST_REVIEW_FIXES` Round 1 | ✅ Closed `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
 | 2.8 | Predictor wire-or-delete | ✅ Wired (Option: wire) — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
 | 3.1 | Daemon `TransferMetrics` decision | ⏳ Pending — D5 default is "keep + document as dormant" |
-| 3.2 | mDNS TXT enrichment | ⏳ Pending — see D4 |
+| 3.2 | mDNS TXT enrichment | ✅ Closed `<this commit>` (D4 default taken — `module_count` + `delegation_enabled` added) |
 | 3.3 | Phase 4.8 daemon FS capability | ⏳ Pending — doc-only re-scoping (D6 default: defer to 0.2.0) |
 | 4 | Doc cleanup table | ✅ Closed `aac13bf` (followup `8d43e4d` caught binary-path stragglers) |
 
@@ -519,9 +519,15 @@ that they're dormant.
 
 ### 3.2 mDNS TXT enrichment
 
-**Status (2026-05-07):** ⏳ Pending. D4 default is "Yes (small,
-useful)" but has not been implemented. ~1-2 hours when picked up;
-non-release-blocking.
+**Status (2026-05-13):** ✅ Closed. D4 default ("Yes (small,
+useful)") taken. `_blit._tcp.local.` advertisements now carry
+`module_count` (authoritative count even when the `modules`
+list is truncated past the ~180-byte TXT cap) and
+`delegation_enabled` (`1`/`0`, whether the daemon accepts
+`DelegatedPull` requests). `blit scan` surfaces both in text
+and JSON output; pre-§3.2 daemons that don't advertise the new
+fields gracefully degrade (accessors return `None`). 5 unit
+tests pin the accessor contract including the back-compat case.
 
 **Source:** Roadmap audit. `TUI_DESIGN.md` flagged this as
 "do early."
