@@ -454,35 +454,150 @@ observation overhead unless the operator opted in.
 
 ## 7. Crate / dependency shape
 
-Proposal: new crate `crates/blit-tui` producing a `blit-tui`
-binary.
+### 7.1 Target shape
 
-Rationale:
-- The TUI pulls in `ratatui` + `crossterm` (~500 KB compiled
-  weight). Bundling into `crates/blit-cli` would push the `blit`
-  binary up for users who never touch the TUI.
-- Separate crate keeps `cargo build -p blit-cli` fast and
-  release-tarball size minimal.
-- The TUI imports `blit-core` for transfer clients and `blit-core`
-  proto types directly — no duplication.
+Two new crates land in this phase:
 
-Alternative: subcommand `blit tui` inside the existing CLI crate,
-gated behind a `tui` feature flag. Smaller binary footprint when
-disabled, but `cargo build --release` for the default install
-still pays the dep weight unless we cargo-feature it carefully.
+- **`crates/blit-app`** — library only. Houses the orchestration
+  glue currently buried inside `blit-cli`'s binary modules:
+  endpoint parsing, transfer dispatch (local vs push vs pull vs
+  delegated), filter assembly from inputs, the local-tree
+  comparison core, the diagnostics-dump emitter. **No** clap,
+  **no** indicatif, **no** stdout formatting — pure
+  programmatic API returning structured results.
+- **`crates/blit-tui`** — binary, depends on `blit-app` +
+  `blit-core` + `ratatui`. Renders four screens (§5), wires
+  events into the `ratatui` event loop, dispatches transfer
+  actions into `blit-app`.
 
-**Recommendation:** start with the separate crate. Easier to ship
-opt-in, easier to swap the rendering layer (ratatui → web → ...)
-later without touching the CLI.
+`blit-cli` is rewritten as a thin wrapper over `blit-app`:
+- clap argument parsing (unchanged)
+- indicatif progress-bar rendering driven by `blit-app` events
+- stdout formatters for human / JSON output (unchanged)
+- routes every verb through the `blit_app::*` entry points
+
+### 7.2 Why `blit-app` is a prerequisite (not an optional polish)
+
+Today `blit-cli` is a **binary-only** crate (no `[lib]` in
+`crates/blit-cli/Cargo.toml`). Every reusable orchestration
+entry point lives under `crates/blit-cli/src/<module>.rs` and is
+reachable only from `main.rs`. Examples:
+
+- `transfers::mod::run_transfer_dispatch` (the local↔remote↔
+  remote-remote routing core)
+- `transfers::local::run_local_transfer`
+- `transfers::remote::run_remote_push_transfer`,
+  `run_remote_pull_transfer`
+- `transfers::remote_remote_direct::run_remote_remote_direct`
+- `transfers::endpoints::Endpoint::parse`
+- `check::run_check` (local tree compare)
+- `diagnostics::run_dump`
+
+A sibling `blit-tui` crate **cannot import any of these
+directly** — they're not exported as a library. The reviewer
+flagged this in the round that produced this section.
+
+The three available paths:
+
+1. **Add `[lib]` to `blit-cli`.** Cheapest. But the existing
+   modules are coupled to `clap::Args` shapes (`TransferArgs`,
+   `CheckArgs`, etc.), indicatif progress bars, and `println!`
+   summary formatting. The TUI would inherit all of that — it
+   needs custom progress + custom rendering, not the CLI's.
+2. **Extract a clean `blit-app` library.** More work, but right
+   architecture: orchestration owns the work, presentation
+   owns the rendering. The CLI becomes one presenter; the TUI
+   becomes another; a future GUI / web client becomes a third.
+3. **Shell out from `blit-tui` to `blit`.** Subprocess
+   management, parsing `--json` output, no shared progress
+   channel, fragile error handling. Rejected.
+
+**Decision: option 2 — extract `blit-app`.** This is the
+right boundary, and it pays off again as soon as a third
+presenter (web/GUI) becomes interesting.
+
+### 7.3 What moves to `blit-app` (concretely)
+
+| From | To |
+|---|---|
+| `crates/blit-cli/src/transfers/mod.rs` (dispatch + filter helpers) | `blit-app::transfers::{dispatch, filter}` |
+| `crates/blit-cli/src/transfers/local.rs` (core; sans indicatif) | `blit-app::transfers::local` |
+| `crates/blit-cli/src/transfers/remote.rs` (core; sans indicatif/println) | `blit-app::transfers::remote` |
+| `crates/blit-cli/src/transfers/remote_remote_direct.rs` | `blit-app::transfers::remote_remote_direct` |
+| `crates/blit-cli/src/transfers/endpoints.rs` | `blit-app::endpoints` |
+| `crates/blit-cli/src/check.rs` (the comparison; sans clap args) | `blit-app::check` |
+| `crates/blit-cli/src/diagnostics.rs` (the dump emitter) | `blit-app::diagnostics` |
+| Progress events the orchestration emits | `blit-app::progress::AppProgressEvent` (new) |
+
+What stays in `blit-cli`:
+- `cli.rs` — clap definitions and arg structs
+- `main.rs` — the dispatcher mapping clap args to `blit-app`
+- the indicatif progress integration (consumes
+  `AppProgressEvent`)
+- the human / JSON output formatters
+- `context.rs` — config / env wiring
+
+What `blit-tui` adds:
+- ratatui screens (§5)
+- its own consumer of `AppProgressEvent` that pushes events to
+  the UI event loop
+- a small input-modal system for collecting source / destination
+  / option choices
+
+### 7.4 Progress event boundary
+
+Today the CLI's progress rendering is wired in two places:
+indicatif `ProgressBar` updates driven by core `ProgressEvent`s
+(`crates/blit-core/src/remote/transfer/progress.rs`), and ad-hoc
+`println!` calls in `transfers/*.rs` around start / completion.
+
+`blit-app` exposes a single event channel. Every orchestration
+entry point takes an `Option<&dyn AppProgressSink>` (or returns a
+`Receiver` — to be decided during the refactor). Both `blit-cli`
+and `blit-tui` plug their own sinks; the orchestration code
+doesn't care which.
+
+This is also the architectural seat for the Milestone C
+byte-level progress work (§6.2): the daemon-side instrumentation
+flows over `Subscribe`, the TUI consumes via its own sink, and
+the CLI optionally consumes via its own sink to upgrade its
+indicatif bar from file-complete to byte-level granularity.
+
+### 7.5 Scope of the prerequisite
+
+This isn't a one-evening refactor — it's a few-day chunk:
+- Decide the trait shape for `AppProgressSink` (or pick a
+  channel-based design).
+- Move each module, splitting clap/output coupling out.
+- Re-wire `blit-cli/src/main.rs` to call through `blit-app`.
+- Re-run the workspace test suite. Most of the test surface is
+  in `blit-core` and integration tests under `blit-cli/tests/`
+  — those need to keep working without changes.
+- Update CI / packaging scripts that reference module paths.
+
+Rough estimate: 2–3 days of focused work. **Belongs in
+Milestone A**, before any TUI screen code is written. Treat it
+as the "Milestone A.0" preamble.
 
 ## 8. Milestones (each independently shippable)
 
 ### Milestone A — Discovery + browse + trigger (NO new wire)
 
-Scope: F1 (Daemons list, no counters / no active pane yet), F3
-(Browse, with `du` and `find` working), trigger transfer (calls
-existing Push/PullSync/Purge), F4 Profile pane reading
-`~/.config/blit/perf_local.jsonl` directly.
+**A.0 (prerequisite): extract `crates/blit-app` library.**
+Move orchestration glue out of `blit-cli`'s binary modules so a
+sibling `blit-tui` crate can import it. No behavior change —
+this is a refactor that lifts the boundary between
+"orchestration" and "presentation." See §7.2 for the rationale
+and §7.3 for the file-level mapping. Workspace test suite must
+stay green; CI / packaging scripts that reference module paths
+get updated. ~2–3 days.
+
+**A.1 (the TUI proper):** F1 (Daemons list, no counters / no
+active pane yet), F3 (Browse, with `du` and `find` working),
+trigger transfer (calls `blit_app::transfers::*` entry points,
+which in turn call the existing Push/PullSync/Purge clients),
+F4 Profile pane reading `~/.config/blit/perf_local.jsonl`
+directly.
 
 Counters pane in F1 shows "(unavailable — needs GetState)".
 F2 Transfers screen exists but only renders the **history**
@@ -598,16 +713,19 @@ Still open, listed in the order they become decision-blockers:
 
 | Milestone | Wire changes | LOC band | Independently useful? |
 |---|---|---|---|
-| A | none | ~3000 (new `blit-tui` crate, screens, TUI lifecycle, local-endpoint integration) | ✅ |
+| A.0 | none (refactor only) | ~0 net (move + glue, mostly mechanical) | ✅ (CLI keeps working; library now consumable) |
+| A.1 | none | ~3000 (new `blit-tui` crate, screens, TUI lifecycle, local-endpoint integration) | ✅ |
 | B | +`GetState` | ~500 daemon + ~300 TUI | ✅ |
 | C | +`Subscribe` + byte-level instrumentation + per-transfer state machine | ~1500 daemon + ~500 TUI | ✅ |
 | D | none (F4 Verify local-only) | ~400 TUI | ✅ |
 | E | none (optional Prometheus bridge is a separate binary) | ~600 | ✅ |
 
-Total roughly 6–7 kLOC for the full feature surface. Milestone A
-alone is shippable as a useful product. Milestone C is the
-heaviest because byte-level progress instrumentation doesn't
-exist today — see §6.2 for the four pieces of work it folds in.
+Total roughly 6–7 kLOC for the full feature surface (plus the
+A.0 refactor, which nets near zero new code — it relocates
+existing modules into a library crate). Milestone A.1 alone is
+shippable as a useful product, but only after A.0 lands.
+Milestone C is the heaviest single milestone because byte-level
+progress instrumentation doesn't exist today — see §6.2.
 
 ## 12. What this design intentionally does NOT lock in
 
