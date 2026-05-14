@@ -76,11 +76,20 @@ already exercise.
 | Live in-flight transfer events | gRPC `Subscribe` | **new RPC** — see §6.2 | ⏳ Not yet on the wire |
 | Snapshot daemon state | gRPC `GetState` | **new RPC** — see §6.3 | ⏳ Not yet on the wire |
 | Aggregate counters | `TransferMetrics` on `BlitService` | currently exposed only via `--metrics` stderr summaries (§3.1) | Exposed over wire by `GetState` |
+| Job lifecycle (cancel + daemon-owned transfers) | gRPC `CancelJob` + `detach` field on transfer specs | **new** — see §6.5 | ⏳ Not yet on the wire |
+| Job-id-scoped event attach | `Subscribe.transfer_id_filter` | **new field** — see §6.2 | ⏳ Not yet on the wire |
 
-The two missing wire pieces are `Subscribe` and `GetState`. Both
-were sketched in the original draft and remain the right shape; §6
-re-states them with the corrections that fall out of the §3.x
-decisions.
+The wire-surface gaps:
+- `GetState` (snapshot of active + recent + counters)
+- `Subscribe` (live event stream) with a `transfer_id_filter` field
+- `CancelJob` (cancel without holding the transfer's stream)
+- `detach: bool` field on `TransferOperationSpec` (decouples
+  transfer lifetime from initiating-client connection)
+
+Together these enable the single-pane-of-glass model: any TUI on
+the LAN can list, watch, cancel, or initiate transfers on any
+reachable daemon, and transfers survive their initiator
+disconnecting.
 
 ## 4. Design principles
 
@@ -173,12 +182,16 @@ bottom; modal overlays for confirmation / option entry.
 - Active rows come from `Subscribe` events (one event stream per
   daemon the TUI is watching). Each row is a state machine driven
   by `TransferStarted` → `TransferProgress*` → `TransferComplete |
-  TransferError`.
+  TransferError`. Transfers the TUI didn't initiate appear here
+  too — that's the single-pane-of-glass guarantee.
 - History from `GetState.recent[]` snapshot at TUI launch +
   appended from `Subscribe.transfer_complete` events.
 - Selecting an active row gives a detail modal with file-level
-  list (if available) and "cancel" hotkey (uses existing Ctrl-C
-  cancellation path on the client end of `Push`/`PullSync`).
+  list (if available) and "cancel" hotkey, which fires the new
+  `CancelJob(transfer_id)` RPC (§6.5). Cancellation works on
+  transfers the TUI didn't initiate.
+- Transfers kicked off from the TUI always use `detach=true` on
+  the spec (§6.5) so closing the TUI doesn't kill the transfer.
 
 ### 5.3 F3 — Browse
 
@@ -269,6 +282,14 @@ message SubscribeRequest {
   uint32 event_mask = 1;
   // If true, replay the in-memory recent-event ring on connect.
   bool replay_recent = 2;
+  // Empty = events for every active transfer (and module /
+  // heartbeat / error events per event_mask). Set to a job's
+  // transfer_id to receive only that job's events plus a
+  // per-job replay buffer if the transfer is already in flight
+  // when the subscription opens. Lets a TUI that connects
+  // mid-transfer pick up the bytes-completed history of an
+  // in-flight job without missing the early progress.
+  string transfer_id_filter = 3;
 }
 
 message DaemonEvent {
@@ -445,12 +466,127 @@ buffered in a small in-memory ring (size = `recent_limit` default
 
 ### 6.4 Wire-surface impact on `--metrics`
 
-Per the §3.1 owner decision, `--metrics` enables stderr summary
-lines plus atomic counter collection. **The same flag also
-enables Subscribe/GetState event emission** so a daemon without
-`--metrics` returns counters of zero and an empty active/recent
-list when polled. This keeps the cost story symmetric: no
-observation overhead unless the operator opted in.
+`--metrics` ships unchanged from the §3.1 owner decision:
+- gates atomic counter increments (`push_operations` &c.)
+- gates the per-RPC stderr summary lines
+
+It does **not** gate the TUI observability surface. `GetState`
+and `Subscribe` always work; an operator running the daemon
+expects to be able to ask it what it's doing without a separate
+opt-in. When `--metrics` is off the `GetState.counters` block
+returns zero (because the underlying atomics weren't
+incremented), but `GetState.active[]` / `GetState.recent[]` and
+the Subscribe event stream remain fully populated — those come
+from the always-on `ActiveJobs` table (§6.5), not from
+`TransferMetrics`.
+
+This is a refinement of the original draft, which claimed
+`--metrics` gated event emission. Doing that would make the TUI
+mostly useless against daemons that hadn't opted in, which is
+the wrong default for the single-pane-of-glass model.
+
+### 6.5 `CancelJob` + `detach` — daemon-owned transfer lifecycle
+
+Today the daemon ties transfer lifetime to the initiating
+client's connection. The push/pull/pull_sync spawn closures plus
+the `delegated_pull` cancellation race (R30-F2) all kill the
+transfer when the originating stream closes. That's the right
+default for CLI users (`blit copy ... && echo done` should mean
+done) but exactly wrong for a TUI that wants to act as a network
+monitor.
+
+**M-Jobs introduces** (in this order):
+
+1. **`detach: bool` field on `TransferOperationSpec`.** Spec
+   field, not a new RPC. Push / PullSync / DelegatedPull all
+   propagate the bit through their existing spec carrier. The
+   CLI defaults it to `false`; the TUI sets it to `true` on
+   every transfer it initiates. The new CLI `--detach` flag
+   sets it to `true`.
+
+2. **Always-on `ActiveJobs` table.** A `Mutex<HashMap<String,
+   ActiveJob>>` on `BlitService` keyed by `transfer_id`. Populated
+   at the dispatch boundary in `service/core.rs` (next to where
+   `metrics.inc_push()` fires; same site that mints the
+   transfer_id). Drained on `TransferComplete` /
+   `TransferError`. Same table feeds `GetState.active[]` (§6.3),
+   the per-job event ring (§6.2 `transfer_id_filter`), and the
+   `CancelJob` cancellation handle.
+
+   Always on regardless of `--metrics` — see §6.4. Cost is a
+   small per-job allocation plus a HashMap insert/remove on
+   transfer boundaries; cheap relative to the transfer cost
+   itself.
+
+3. **Spawn-closure lifecycle change.** The push / pull /
+   pull_sync / delegated_pull dispatch sites consult
+   `spec.detach`. When false (default), behavior is unchanged —
+   `tx.closed()` cancellation race still arms (R30-F2). When
+   true, the cancellation race is **disarmed**: the daemon owns
+   the transfer through to completion or `CancelJob(id)`.
+
+4. **`CancelJob` RPC.**
+
+   ```protobuf
+   service Blit {
+     // ...
+     rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+   }
+
+   message CancelJobRequest {
+     string transfer_id = 1;
+   }
+
+   message CancelJobResponse {
+     // True if the job existed and cancellation was initiated.
+     // False if the transfer_id wasn't found (already complete,
+     // never existed, or wrong daemon).
+     bool cancelled = 1;
+     // Human-readable reason; empty when cancelled = true.
+     string reason = 2;
+   }
+   ```
+
+   Implementation reaches into the `ActiveJobs` entry, fires a
+   `CancellationToken` the spawn closure is watching, and waits
+   briefly for the transfer to wind down (sink finish, partial-
+   file cleanup if any). Returns once the job is removed from
+   the active table or after a 5-second timeout, whichever
+   first.
+
+5. **Per-job event ring (~50 events).** Each `ActiveJob` keeps
+   the last N events seen for that job in addition to the
+   global event ring. `Subscribe` with `transfer_id_filter`
+   set replays this ring on connect, then attaches to the live
+   broadcast. Gives a TUI that connects mid-transfer the
+   bytes-completed history it needs to render a sensible
+   progress bar.
+
+**Explicitly NOT in M-Jobs** (deferred to 0.2.0+):
+
+- **Durability across daemon restart.** Job state lives in
+  memory only. If the daemon restarts, in-flight detached
+  transfers fail; the user re-kicks; block-level resume picks
+  up where it left off. On-disk job state + replay-on-startup
+  is a heavier 0.2.0 design.
+- **Cross-daemon job aggregation.** Each daemon owns its own
+  jobs. A TUI that wants "show me everything running on every
+  daemon I can see" opens N parallel Subscribe streams and
+  aggregates client-side.
+
+**CLI surface (`--detach` + `blit jobs`):**
+
+- `blit copy <src> <dst> --detach` — initiates, prints
+  `transfer_id`, exits. Daemon owns the transfer.
+- `blit jobs list <remote>` — calls `GetState` against
+  `<remote>`, prints `active` + `recent`.
+- `blit jobs cancel <remote> <transfer_id>` — calls `CancelJob`.
+- `blit jobs watch <remote> <transfer_id>` — opens `Subscribe`
+  with `transfer_id_filter` and renders progress until the job
+  completes. Useful for "I detached, want to follow now."
+
+All four are thin CLI wrappers over the new RPCs; the TUI uses
+the same wire surface.
 
 ## 7. Crate / dependency shape
 
@@ -551,17 +687,28 @@ indicatif `ProgressBar` updates driven by core `ProgressEvent`s
 (`crates/blit-core/src/remote/transfer/progress.rs`), and ad-hoc
 `println!` calls in `transfers/*.rs` around start / completion.
 
-`blit-app` exposes a single event channel. Every orchestration
-entry point takes an `Option<&dyn AppProgressSink>` (or returns a
-`Receiver` — to be decided during the refactor). Both `blit-cli`
-and `blit-tui` plug their own sinks; the orchestration code
-doesn't care which.
+`blit-app` exposes a single event channel pattern. Every
+orchestration entry point takes an
+`Option<mpsc::UnboundedSender<AppProgressEvent>>` (channel-based,
+mirroring `RemoteTransferProgress`'s existing shape). Both
+`blit-cli` and `blit-tui` plug their own consumers; the
+orchestration code doesn't care which.
 
-This is also the architectural seat for the Milestone C
-byte-level progress work (§6.2): the daemon-side instrumentation
-flows over `Subscribe`, the TUI consumes via its own sink, and
-the CLI optionally consumes via its own sink to upgrade its
-indicatif bar from file-complete to byte-level granularity.
+State-machine ownership splits across two milestones:
+- **M-Jobs** introduces the always-on `ActiveJobs` table
+  (§6.5). After M-Jobs every transfer has a daemon-side
+  identity, a cancellation handle, and a place to drop events.
+  No byte-level data flowing yet — the table is fed by today's
+  file-complete-granularity events.
+- **C** adds the byte-level instrumentation that fills the
+  `ActiveJob.bytes_completed` field meaningfully and lets
+  `TransferProgress` carry useful throughput. See §6.2 for the
+  four pieces of write-loop work.
+
+This split is why M-Jobs lands before C in the new sequencing:
+the table is what `CancelJob` cancels against and what
+`Subscribe.transfer_id_filter` indexes into. Byte-level fill is
+a quality-of-progress upgrade on top.
 
 ### 7.5 Scope of the prerequisite
 
@@ -581,58 +728,90 @@ as the "Milestone A.0" preamble.
 
 ## 8. Milestones (each independently shippable)
 
-### Milestone A — Discovery + browse + trigger (NO new wire)
+**Sequencing (owner-confirmed 2026-05-14):** foundation-first.
+The TUI's first release ships as a real single-pane-of-glass —
+discover daemons, watch transfers initiated anywhere, cancel
+them, kick off new ones that survive closing the laptop. That
+requires job-lifecycle work landed daemon-side before TUI
+screens exist. Hence A.0 → B → M-Jobs → C → A.1 → D → E.
 
-**A.0 (prerequisite): extract `crates/blit-app` library.**
-Move orchestration glue out of `blit-cli`'s binary modules so a
-sibling `blit-tui` crate can import it. No behavior change —
-this is a refactor that lifts the boundary between
-"orchestration" and "presentation." See §7.2 for the rationale
-and §7.3 for the file-level mapping. Workspace test suite must
-stay green; CI / packaging scripts that reference module paths
-get updated. ~2–3 days.
+### Milestone A.0 — Extract `crates/blit-app` library
 
-**A.1 (the TUI proper):** F1 (Daemons list, no counters / no
-active pane yet), F3 (Browse, with `du` and `find` working),
-trigger transfer (calls `blit_app::transfers::*` entry points,
-which in turn call the existing Push/PullSync/Purge clients),
-F4 Profile pane reading `~/.config/blit/perf_local.jsonl`
-directly.
+Refactor only. Move orchestration glue out of `blit-cli`'s
+binary modules so a sibling `blit-tui` crate can import it. No
+behavior change. See §7.2 for rationale and §7.3 for the
+file-level mapping. Workspace test suite must stay green; CI /
+packaging scripts that reference module paths get updated.
 
-Counters pane in F1 shows "(unavailable — needs GetState)".
-F2 Transfers screen exists but only renders the **history**
-populated from the TUI's own session (transfers it kicked off);
-no Subscribe means no view into transfers initiated elsewhere.
+CLI keeps working unchanged. Library now consumable.
 
-Result: a useful TUI you can ship without touching the proto.
+~2–3 days.
 
-### Milestone B — `GetState` RPC + daemon detail pane
+### Milestone B — `GetState` RPC + daemon detail pane (no TUI yet)
 
-Scope: proto change adding `GetState`, daemon-side
-`TransferRecord` ring buffer, TUI F1 detail pane lights up with
-real counters, uptime, modules-with-capacity, recent transfers.
+Proto change adding `GetState`, daemon-side `ActiveJobs` table
+and `recent` ring buffer (§6.5), filling `counters` from
+existing `TransferMetrics`. CLI gets a new `blit jobs list
+<remote>` admin verb that consumes the new RPC.
 
-Single-point daemon-state read; no streaming yet.
+No TUI work yet — but the wire surface and daemon-side
+bookkeeping land here so M-Jobs can build on the same table.
 
-### Milestone C — `Subscribe` RPC + live in-flight progress
+### Milestone M-Jobs — Daemon-owned transfer lifecycle
 
-Scope: proto change adding `Subscribe` + `DaemonEvent` family,
-daemon-side `tokio::broadcast` and event-emission shim, TUI F2
-Active pane lights up with live bars + throughput.
+The foundational decoupling. Adds (see §6.5 for detail):
 
-This is the milestone that fulfills the "watch transfers initiated
-elsewhere" use case.
+- `detach: bool` field on `TransferOperationSpec`
+- Spawn-closure lifecycle change: when `detach=true`,
+  `tx.closed()` cancellation race disarms
+- `CancelJob(transfer_id)` RPC
+- Per-job event ring inside each `ActiveJob` entry
+- `transfer_id_filter` field on `SubscribeRequest` (defined
+  here even though `Subscribe` lands in C)
+- CLI surface:
+  - `blit copy / mirror / move ... --detach` — initiates and
+    exits, prints `transfer_id`
+  - `blit jobs cancel <remote> <transfer_id>`
+  - `blit jobs watch <remote> <transfer_id>` — uses Subscribe
+    (when C lands) or `GetState` polling as a stopgap
+
+After M-Jobs the daemon is fully ready to be a network resource
+the TUI can drive. The CLI is more capable too.
+
+### Milestone C — `Subscribe` RPC + byte-level instrumentation
+
+Proto change adding `Subscribe` + `DaemonEvent` family, daemon-
+side `tokio::broadcast`, the four byte-level progress
+instrumentation pieces (§6.2 steps 1–4). After C the daemon
+emits live byte-level progress that any subscriber renders.
+
+`blit jobs watch` upgrades from polling to streaming.
+
+### Milestone A.1 — The TUI itself
+
+Now the TUI screens land. All foundation is in place:
+- F1 Daemons: mDNS list, per-daemon detail pane lit up by
+  `GetState`, "local" sentinel endpoint as a first-class row
+- F2 Transfers: active pane fed by `Subscribe`, history fed by
+  `GetState.recent`. Watches transfers initiated by anyone on
+  the network. Cancel hotkey fires `CancelJob`.
+- F3 Browse: `List`/`Find`/`DiskUsage`/`FilesystemStats` per
+  selected daemon. Multi-select + `c`/`m`/`v`/`D` modal actions
+  dispatch through `blit_app` with `detach=true`.
+- F4 Profile: reads `~/.config/blit/perf_local.jsonl` directly.
+
+Result: real single-pane-of-glass from day one.
 
 ### Milestone D — Verify + diagnostics screens
 
-Scope: F4 Verify (wraps `blit check`), F4 Diagnostics dump
-button. Mostly TUI-side glue around existing CLI internals.
+F4 Verify (wraps `blit check`, local-only — see §10 Q7),
+diagnostics-dump action. TUI-side glue.
 
 ### Milestone E — Polish
 
 Theme support, dark/light, configurable refresh rates, key
-remapping, JSON config for default endpoints, optional Prometheus
-bridge as a separate binary that scrapes `GetState`.
+remapping, JSON config for default endpoints, optional
+Prometheus bridge as a separate binary scraping `GetState`.
 
 ## 9. Non-goals
 
@@ -659,6 +838,21 @@ Decisions already taken (owner sign-off 2026-05-14):
   symmetrically with remote daemons. Driving a `blit copy`
   between two local paths must work from inside the TUI.
 
+More decisions taken (owner sign-off 2026-05-14):
+
+- **Foundation-first milestone order.** A.0 → B → M-Jobs → C →
+  A.1 → D → E. TUI ships as a real network resource from its
+  first release.
+- **Cancellation: server-side via `CancelJob`.** TUI's cancel
+  hotkey fires `CancelJob(transfer_id)` (M-Jobs, §6.5). Works
+  on transfers the TUI didn't initiate. Replaces the original
+  draft's "client-side Ctrl-C" approach.
+- **CLI `--detach` ships with M-Jobs.** Plus `blit jobs list /
+  cancel / watch` admin verbs.
+- **`AppProgressEvent` is channel-based** (`mpsc::UnboundedSender`),
+  mirroring the existing `RemoteTransferProgress` shape. See
+  §7.4.
+
 Still open, listed in the order they become decision-blockers:
 
 1. **Recent-transfer persistence.** `GetState.recent[]` populated
@@ -684,19 +878,13 @@ Still open, listed in the order they become decision-blockers:
    designated "primary" daemon that fans out? Recommend simple
    N-streams approach. **Blocker for: Milestone C.**
 
-5. **Cancellation UX.** From F2 Active, selecting a row and
-   hitting `Ctrl-C` cancels the transfer via the existing client
-   cancellation path. Does the TUI also expose a server-side
-   "cancel this transfer" RPC for transfers initiated elsewhere?
-   That requires a new `CancelTransfer(transfer_id)` RPC.
-   Probably defer to a milestone after E.
+5. **Transfer-id allocation.** UUIDv4 daemon-side at the
+   dispatch boundary (next to `metrics.inc_push()`), stable for
+   the duration of the RPC, surfaced to the initiating client
+   via the existing summary path. **Decision: take this default
+   unless owner objects — daemon-internal, low-risk.**
 
-6. **Transfer-id allocation.** UUIDv4 daemon-side at
-   `TransferStarted` emission time. Stable for the duration of
-   the RPC. Confirmed by the client via the existing per-RPC
-   summary path? **Minor — daemon-internal — but flag now.**
-
-7. **Remote tree verify (F4 Verify scope expansion).** Today's
+6. **Remote tree verify (F4 Verify scope expansion).** Today's
    `blit check` (`crates/blit-cli/src/check.rs`) calls
    `Path::exists()` directly on both inputs — local paths only.
    Extending F4 Verify to remote endpoints requires a new tree-
@@ -709,23 +897,33 @@ Still open, listed in the order they become decision-blockers:
    (matches today's `blit check`); revisit remote-verify in a
    later milestone if operator demand justifies it.**
 
+7. **Job durability across daemon restart.** Out of Phase 5
+   scope per §6.5. If the daemon restarts, in-flight detached
+   jobs fail; the TUI shows them as errored; the user re-kicks
+   and block-level resume picks up. Worth revisiting for 0.2.0
+   with an on-disk job-state design if operators report pain.
+
 ## 11. Phasing summary
 
-| Milestone | Wire changes | LOC band | Independently useful? |
-|---|---|---|---|
-| A.0 | none (refactor only) | ~0 net (move + glue, mostly mechanical) | ✅ (CLI keeps working; library now consumable) |
-| A.1 | none | ~3000 (new `blit-tui` crate, screens, TUI lifecycle, local-endpoint integration) | ✅ |
-| B | +`GetState` | ~500 daemon + ~300 TUI | ✅ |
-| C | +`Subscribe` + byte-level instrumentation + per-transfer state machine | ~1500 daemon + ~500 TUI | ✅ |
-| D | none (F4 Verify local-only) | ~400 TUI | ✅ |
-| E | none (optional Prometheus bridge is a separate binary) | ~600 | ✅ |
+| # | Milestone | Wire changes | LOC band | Independently useful? |
+|---|---|---|---|---|
+| 1 | A.0 — extract `blit-app` | none (refactor only) | ~0 net (mostly mechanical) | ✅ CLI keeps working; library now consumable |
+| 2 | B — `GetState` + ActiveJobs table + recent ring | +`GetState` | ~500 daemon + ~100 CLI (`jobs list`) | ✅ Daemon introspectable from `blit jobs list` |
+| 3 | M-Jobs — daemon-owned lifecycle + `CancelJob` + `detach` | +`CancelJob`, +`detach` field, +`transfer_id_filter` defined | ~700 daemon + ~200 CLI (`--detach`, `jobs cancel/watch`) | ✅ CLI gains detach + cancel; daemon ready for TUI |
+| 4 | C — `Subscribe` + byte-level instrumentation | +`Subscribe` | ~1500 daemon + ~100 CLI (`jobs watch` upgrade) | ✅ Live byte-level progress on the wire |
+| 5 | A.1 — the TUI itself | none | ~3000 (new `blit-tui` crate, four screens, event integration) | ✅ Single-pane-of-glass |
+| 6 | D — Verify + diagnostics | none | ~400 TUI | ✅ |
+| 7 | E — polish | none (optional Prometheus bridge is a separate binary) | ~600 | ✅ |
 
-Total roughly 6–7 kLOC for the full feature surface (plus the
+Total roughly 7–8 kLOC for the full feature surface (plus the
 A.0 refactor, which nets near zero new code — it relocates
-existing modules into a library crate). Milestone A.1 alone is
-shippable as a useful product, but only after A.0 lands.
-Milestone C is the heaviest single milestone because byte-level
-progress instrumentation doesn't exist today — see §6.2.
+existing modules into a library crate). The TUI itself (A.1)
+ships as **the fifth milestone**, on top of a daemon that has
+already been turned into a network resource by milestones 2–4.
+The CLI gets meaningful capability upgrades at every milestone
+along the way (`jobs list`, `--detach`, `jobs cancel`, `jobs
+watch`), so the runway to A.1 is itself useful work — not
+purely scaffolding for the TUI.
 
 ## 12. What this design intentionally does NOT lock in
 
@@ -740,9 +938,17 @@ progress instrumentation doesn't exist today — see §6.2.
 
 The structural commitments are:
 - Four-screen architecture (F1 / F2 / F3 / F4).
-- Two new RPCs (`Subscribe`, `GetState`) — names and message
-  fields are the contract.
-- Separate `blit-tui` crate.
+- Three new RPCs (`GetState`, `Subscribe`, `CancelJob`) plus the
+  `detach: bool` field on `TransferOperationSpec` — names and
+  message fields are the contract.
+- Always-on `ActiveJobs` table on `BlitService` (decoupled from
+  `--metrics`).
+- Daemon-owned transfer lifecycle when `detach=true`; client-
+  owned (today's behavior) when `detach=false` (CLI default).
+- Separate `blit-app` library crate and separate `blit-tui`
+  binary crate.
 - Reuse the unified pipeline; no shadow transfer code.
+- Foundation-first milestone order: A.0 → B → M-Jobs → C → A.1
+  → D → E.
 
 Everything else is a tuning knob.

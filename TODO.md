@@ -256,20 +256,22 @@ don't get lost, not so the next agent reimplements them on a hunch.
 
 See **`docs/plan/TUI_DESIGN.md`** for the active plan — covers
 CLI-verb-to-screen mapping (full parity), four-screen architecture
-(Daemons / Transfers / Browse / Profile-Verify), the two new RPCs
-(`Subscribe` + `GetState`), `blit-tui` crate proposal, and
-milestone phasing A–E (each independently shippable).
+(Daemons / Transfers / Browse / Profile-Verify), wire surface
+(`GetState`, `Subscribe`, `CancelJob`, `detach` field), `blit-app`
+library + `blit-tui` binary, and foundation-first milestone
+phasing A.0 → B → M-Jobs → C → A.1 → D → E (each independently
+shippable; the TUI itself is the fifth milestone, after daemon
+foundation work makes single-pane-of-glass possible).
 
-- [ ] **Phase 5 — Milestone A.0 (prerequisite).** Extract `crates/blit-app` library from `blit-cli`. Today `blit-cli` is a binary-only crate (no `[lib]` in Cargo.toml); every orchestration entry point lives under `src/<module>.rs` reachable only from `main.rs`, so a sibling `blit-tui` can't import any of it. Move `transfers/{mod,local,remote,remote_remote_direct,endpoints}` + `check.rs` core + `diagnostics.rs` dump emitter into `blit-app`; introduce `blit_app::progress::AppProgressEvent` as the presenter-agnostic progress boundary; rewrite `blit-cli` as a thin clap+indicatif wrapper over `blit-app`. No behavior change. Workspace tests stay green. See `TUI_DESIGN.md` §7.2–7.5. ~2–3 days.
-- [ ] **Phase 5 — Milestone A.1 (the TUI proper).** Discovery + browse + trigger; no new wire. `blit-tui` crate using `ratatui` consumes `blit-app`; mDNS daemon list with §3.2 TXT info inline; "local" is a first-class endpoint in the F1 list so two local paths can drive a copy from inside the TUI; F3 Browse with `List` / `Find` / `DiskUsage` / `FilesystemStats` and copy/mirror/move/rm dispatching through `blit-app`; F4 Profile reads `~/.config/blit/perf_local.jsonl` directly. Counters pane shows "(unavailable — needs GetState)" in this milestone.
-- [ ] **Phase 5 — Milestone B.** `GetState` RPC + daemon-side ring buffer for recent transfers. F1 daemon detail pane lights up with real counters, uptime, modules-with-capacity, recent transfers list.
-- [ ] **Phase 5 — Milestone C.** `Subscribe` RPC + `DaemonEvent` family + daemon-side `tokio::broadcast` + **byte-level progress instrumentation**. Today's progress events fire on file-complete only (`crates/blit-core/src/remote/transfer/progress.rs`), so a 10 GiB single-file transfer emits zero in-flight bytes. Milestone C adds (1) byte counters in the data-plane write loops, (2) a per-`transfer_id` state machine in `BlitService`, (3) daemon-side throughput EWMA, (4) `transfer_id` plumbing through every handler. Then `Subscribe` fans `TransferProgress` snapshots to subscribers. See `TUI_DESIGN.md` §6.2 for detail.
-- [ ] **Phase 5 — Milestone D.** F4 Verify (wraps `blit check`, **local paths only** — matches today's check semantics, remote verify deferred per `TUI_DESIGN.md` §10 Q7) + diagnostics dump action.
+- [ ] **Phase 5 — Milestone A.0.** Extract `crates/blit-app` library from `blit-cli`. Today `blit-cli` is a binary-only crate (no `[lib]` in Cargo.toml); every orchestration entry point lives under `src/<module>.rs` reachable only from `main.rs`, so a sibling `blit-tui` can't import any of it. Move `transfers/{mod,local,remote,remote_remote_direct,endpoints}` + `check.rs` core + `diagnostics.rs` dump emitter into `blit-app`; introduce `blit_app::progress::AppProgressEvent` (channel-based, mirroring `RemoteTransferProgress`) as the presenter-agnostic progress boundary; rewrite `blit-cli` as a thin clap+indicatif wrapper over `blit-app`. No behavior change. Workspace tests stay green. See `TUI_DESIGN.md` §7.2–7.5. ~2–3 days.
+- [ ] **Phase 5 — Milestone B.** `GetState` RPC + always-on `ActiveJobs` table + `recent` ring. Daemon-side bookkeeping that M-Jobs will build on. CLI gets `blit jobs list <remote>` admin verb.
+- [ ] **Phase 5 — Milestone M-Jobs.** Daemon-owned transfer lifecycle. Adds `detach: bool` field on `TransferOperationSpec`, `CancelJob` RPC, per-job event ring, `transfer_id_filter` on `SubscribeRequest`. When `detach=true`, the daemon disarms the `tx.closed()` cancellation race and owns the transfer to completion or `CancelJob`. CLI gains `--detach` flag on copy/mirror/move plus `blit jobs cancel` and `blit jobs watch` admin verbs. After M-Jobs the daemon is fully ready to be a network resource the TUI can drive. See `TUI_DESIGN.md` §6.5.
+- [ ] **Phase 5 — Milestone C.** `Subscribe` RPC + `DaemonEvent` family + daemon-side `tokio::broadcast` + **byte-level progress instrumentation**. Today's progress events fire on file-complete only (`crates/blit-core/src/remote/transfer/progress.rs`), so a 10 GiB single-file transfer emits zero in-flight bytes. Milestone C adds (1) byte counters in the data-plane write loops, (2) a daemon-side throughput EWMA fed into the per-`transfer_id` `ActiveJob` row, (3) `transfer_id` plumbing through every handler. `Subscribe` then fans `TransferProgress` snapshots to subscribers. `blit jobs watch` upgrades from polling to streaming. See `TUI_DESIGN.md` §6.2.
+- [ ] **Phase 5 — Milestone A.1.** The TUI itself. Separate `blit-tui` crate using `ratatui`; F1 Daemons list (mDNS with §3.2 TXT inline + `GetState` detail pane); F2 Transfers fed by `Subscribe` — watches transfers initiated by anyone on the network, cancels via `CancelJob`; F3 Browse via `List`/`Find`/`DiskUsage`/`FilesystemStats` with multi-select copy/mirror/move/rm dispatching through `blit-app` with `detach=true`; F4 Profile reads `~/.config/blit/perf_local.jsonl` directly. "local" is a first-class endpoint in F1 — TUI works without any daemon on the LAN. Real single-pane-of-glass from day one.
+- [ ] **Phase 5 — Milestone D.** F4 Verify (wraps `blit check`, **local paths only** — matches today's check semantics, remote verify deferred per `TUI_DESIGN.md` §10 Q6) + diagnostics dump action.
 - [ ] **Phase 5 — Milestone E.** Polish: theme, configurable refresh, key remapping, optional Prometheus bridge as a separate binary scraping `GetState`.
 
-**Milestone A decisions taken** (`TUI_DESIGN.md` §10): separate
-`blit-tui` crate (not bundled into `blit`); local-only mode is
-first-class with "local" as a sentinel endpoint in F1.
+**Decisions taken** (`TUI_DESIGN.md` §10): separate `blit-app` library + `blit-tui` binary; local-only TUI mode first-class with "local" as a sentinel endpoint in F1; foundation-first milestone order; cancellation via server-side `CancelJob`; `--detach` CLI flag ships with M-Jobs; `AppProgressEvent` is channel-based.
 
 ## Phase 3.5: RDMA Enablement (post-release)
 
