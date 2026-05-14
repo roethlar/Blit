@@ -260,15 +260,15 @@ CLI-verb-to-screen mapping (full parity), four-screen architecture
 (`Subscribe` + `GetState`), `blit-tui` crate proposal, and
 milestone phasing A–E (each independently shippable).
 
-- [ ] **Phase 5 — Milestone A.** Discovery + browse + trigger; no new wire. Useful TUI with `blit-tui` crate using `ratatui`; mDNS daemon list with §3.2 TXT info inline; F3 Browse with `List` / `Find` / `DiskUsage` / `FilesystemStats` and copy/mirror/move/rm dispatching to existing clients; F4 Profile reads `perf_history.jsonl` directly. Counters pane shows "(unavailable — needs GetState)" in this milestone.
+- [ ] **Phase 5 — Milestone A.** Discovery + browse + trigger; no new wire. Useful TUI with separate `blit-tui` crate using `ratatui`; mDNS daemon list with §3.2 TXT info inline; "local" is a first-class endpoint in the F1 list so two local paths can drive a copy from inside the TUI; F3 Browse with `List` / `Find` / `DiskUsage` / `FilesystemStats` and copy/mirror/move/rm dispatching to existing clients; F4 Profile reads `~/.config/blit/perf_local.jsonl` directly. Counters pane shows "(unavailable — needs GetState)" in this milestone.
 - [ ] **Phase 5 — Milestone B.** `GetState` RPC + daemon-side ring buffer for recent transfers. F1 daemon detail pane lights up with real counters, uptime, modules-with-capacity, recent transfers list.
-- [ ] **Phase 5 — Milestone C.** `Subscribe` RPC + `DaemonEvent` family + daemon-side `tokio::broadcast`. F2 Active pane shows live in-flight transfers with throughput + ETA from any daemon (not just the TUI's own session).
-- [ ] **Phase 5 — Milestone D.** F4 Verify (wraps `blit check`) + diagnostics dump action.
+- [ ] **Phase 5 — Milestone C.** `Subscribe` RPC + `DaemonEvent` family + daemon-side `tokio::broadcast` + **byte-level progress instrumentation**. Today's progress events fire on file-complete only (`crates/blit-core/src/remote/transfer/progress.rs`), so a 10 GiB single-file transfer emits zero in-flight bytes. Milestone C adds (1) byte counters in the data-plane write loops, (2) a per-`transfer_id` state machine in `BlitService`, (3) daemon-side throughput EWMA, (4) `transfer_id` plumbing through every handler. Then `Subscribe` fans `TransferProgress` snapshots to subscribers. See `TUI_DESIGN.md` §6.2 for detail.
+- [ ] **Phase 5 — Milestone D.** F4 Verify (wraps `blit check`, **local paths only** — matches today's check semantics, remote verify deferred per `TUI_DESIGN.md` §10 Q7) + diagnostics dump action.
 - [ ] **Phase 5 — Milestone E.** Polish: theme, configurable refresh, key remapping, optional Prometheus bridge as a separate binary scraping `GetState`.
 
-**Open decisions blocking Milestone A** (see TUI_DESIGN.md §10):
-crate split vs subcommand (recommend separate); local-only TUI
-mode (recommend yes, "local" as first-class endpoint).
+**Milestone A decisions taken** (`TUI_DESIGN.md` §10): separate
+`blit-tui` crate (not bundled into `blit`); local-only mode is
+first-class with "local" as a sentinel endpoint in F1.
 
 ## Phase 3.5: RDMA Enablement (post-release)
 

@@ -54,7 +54,7 @@ thing in the TUI without dropping back to a shell.
 | `blit move <src> <dst>` | F2 Transfer (start action) | Same flow; flag in modal. |
 | `blit check <a> <b>` | F4 Verify | Read-only tree comparison; renders as a diff pane. |
 | `blit completions ...` | N/A | Shell-only; the TUI has its own input affordances. |
-| `blit profile` | F4 Profile / status bar | Local perf-history summary; one-shot read of `~/.config/blit/perf_history.jsonl`. |
+| `blit profile` | F4 Profile / status bar | Local perf-history summary; one-shot read of `~/.config/blit/perf_local.jsonl`. |
 | `blit diagnostics perf` | F4 settings panel | Enable / disable / clear toggles. |
 | `blit diagnostics dump` | F4 → `dump snapshot` action | Saves a snapshot file; reuses the existing dump emitter. |
 
@@ -223,9 +223,9 @@ Hotkeys: enter/→: into  ←: up  space: multi-select  c: copy
 │                                                              │
 │  [c] clear  [d] disable  [e] enable                          │
 └──────────────────────────────────────────────────────────────┘
-┌─ Verify ─────────────────────────────────────────────────────┐
-│ Source:      [path or remote endpoint                     ]  │
-│ Destination: [path or remote endpoint                     ]  │
+┌─ Verify (local paths only — see note) ───────────────────────┐
+│ Source:      [local path                                  ]  │
+│ Destination: [local path                                  ]  │
 │ Mode: (•) size+mtime ( ) checksum                            │
 │                                                              │
 │  [enter] run check    [esc] clear                            │
@@ -235,11 +235,16 @@ Hotkeys: enter/→: into  ←: up  space: multi-select  c: copy
 └──────────────────────────────────────────────────────────────┘
 ```
 
-- Profile pane reads `perf_history.jsonl` directly — no RPC
+- Profile pane reads `perf_local.jsonl` directly — no RPC
   needed; mirrors what `blit profile` does today.
 - Verify pane wraps the existing `blit check` code path,
   rendered as a diff (matches / size-diff / mtime-diff /
-  missing-on-side rows).
+  missing-on-side rows). **Local paths only** in Milestone D —
+  matches current `blit check` semantics (see
+  `crates/blit-cli/src/check.rs`, which calls `Path::exists()`
+  directly on both inputs). Remote-side verification requires a
+  new "tree compare" affordance that doesn't exist today; see
+  §10 open question on remote verify.
 - Diagnostics dump reuses the existing emitter.
 
 ## 6. Wire surface
@@ -315,12 +320,66 @@ events from the existing push/pull/purge handlers. `Subscribe`
 clients subscribe to the channel. Slow consumers drop with a
 `Lagged` notification (TUI re-fetches via `GetState`).
 
-**Source of progress events:** the unified pipeline already
-tracks files-completed / bytes-completed in the `SinkOutcome`
-merge step. A thin shim turns those into `TransferProgress`
-events at a configurable cadence (default ~10 Hz). Throughput is
-a 1-second EWMA computed daemon-side so every subscriber sees
-identical numbers.
+**Source of progress events — honest accounting.** Today's
+progress pipeline (`crates/blit-core/src/remote/transfer/
+progress.rs`) emits three event kinds:
+
+- `ManifestBatch { files }` — fires when the daemon discovers
+  a batch of files; good for the "files discovered" denominator.
+- `Payload { files, bytes }` — fires per planned payload group
+  (tar shard or raw bundle), NOT per byte streamed.
+- `FileComplete { path, bytes }` — fires when a file's bytes
+  finish landing on the destination.
+
+So **today a 10 GiB single-file transfer produces exactly one
+progress event — at completion.** A "thin shim at 10 Hz over
+SinkOutcome" wouldn't help: SinkOutcome is also coarse, computed
+from completed payloads. Milestone C therefore needs real
+byte-level instrumentation, not just a broadcast shim:
+
+1. **Per-payload byte counters in the data-plane write loop.**
+   Add a `report_payload_bytes(transfer_id, delta_bytes)` call
+   inside `receive_stream_double_buffered` (data_plane.rs:135)
+   and the equivalent local-sink write loops. Cadence: every
+   N bytes (e.g. 1 MiB) OR every M milliseconds, whichever
+   fires first. Bounded so we don't drown the broadcast channel
+   on a fast NVMe-to-NVMe local transfer.
+
+2. **Per-transfer state machine in `BlitService`.** Today the
+   service has no notion of "transfer X is running, here's its
+   cumulative byte count." Milestone C introduces an
+   `ActiveTransferTable: HashMap<transfer_id, ActiveState>`
+   keyed by the UUID minted at `TransferStarted` time. The
+   byte-counter calls feed this table; the broadcast emits
+   `TransferProgress` snapshots derived from it.
+
+3. **Throughput EWMA daemon-side.** 1-second exponential moving
+   average over the byte counter so every subscriber sees
+   identical numbers. Computed in the table updater, not in
+   each subscriber.
+
+4. **Plumbing `transfer_id` through the existing handlers.**
+   `transfer_id` is minted at the dispatch boundary in
+   `service/core.rs` (next to where `metrics.inc_push()` fires)
+   and threaded through `handle_push_stream` / `stream_pull` /
+   `handle_pull_sync_stream` / `handle_delegated_pull` to the
+   write loops. Roughly the same plumbing path the §3.1
+   `--metrics` work already added, but with the id rather than
+   just a `started` Instant.
+
+Effort estimate moves Milestone C from "~800 daemon + ~500 TUI"
+in the earlier draft to **~1500 daemon + ~500 TUI** (table +
+state machine + byte-level instrumentation + the broadcast).
+TUI side is unchanged — once events arrive the renderer is the
+same.
+
+**What this implicitly buys for the CLI:** once byte-level
+progress is on the wire, the CLI's existing progress bar
+(today driven by file-complete events from
+`report_file_complete`) can become a true byte-level bar by
+consuming `Subscribe` against the local daemon — or by routing
+its own progress events through the same instrumentation. That's
+not a Phase 5 deliverable, but it's a free byproduct.
 
 ### 6.3 `GetState` — daemon snapshot
 
@@ -423,7 +482,7 @@ later without touching the CLI.
 Scope: F1 (Daemons list, no counters / no active pane yet), F3
 (Browse, with `du` and `find` working), trigger transfer (calls
 existing Push/PullSync/Purge), F4 Profile pane reading
-`perf_history.jsonl` directly.
+`~/.config/blit/perf_local.jsonl` directly.
 
 Counters pane in F1 shows "(unavailable — needs GetState)".
 F2 Transfers screen exists but only renders the **history**
@@ -475,63 +534,80 @@ bridge as a separate binary that scrapes `GetState`.
 
 ## 10. Open questions
 
-These need owner input before code starts on the relevant
-milestone. Listed in the order they become decision-blockers:
+Decisions already taken (owner sign-off 2026-05-14):
 
-1. **Crate split vs. subcommand** (§7 alternative). Recommend
-   separate `blit-tui` crate. **Blocker for: Milestone A.**
+- **Crate split:** separate `blit-tui` crate using `ratatui`.
+  Not bundled into the default `blit` binary.
+- **Local-only TUI mode is first-class.** `blit-tui` works
+  without any daemon on the network. "Local" appears in the F1
+  daemon list as a sentinel row so the F3 / F2 flows treat it
+  symmetrically with remote daemons. Driving a `blit copy`
+  between two local paths must work from inside the TUI.
 
-2. **Recent-transfer persistence.** `GetState.recent[]` populated
+Still open, listed in the order they become decision-blockers:
+
+1. **Recent-transfer persistence.** `GetState.recent[]` populated
    from an in-memory ring (cheap, lost on restart) or from
-   `perf_history` (durable, reuses existing storage)?
+   `perf_local.jsonl` (durable, reuses existing storage)?
    **Blocker for: Milestone B.** Recommendation: in-memory ring
-   for B; if persistence is wanted later, reuse `perf_history`
+   for B; if persistence is wanted later, reuse `perf_local`
    in Milestone E.
 
-3. **`Subscribe` subscriber cap.** N concurrent subscribers,
+2. **`Subscribe` subscriber cap.** N concurrent subscribers,
    N=? Default 8 seems reasonable for a single-operator TUI.
    **Blocker for: Milestone C.**
 
-4. **`TransferProgress` cadence.** 10 Hz default, configurable
+3. **`TransferProgress` cadence.** 10 Hz default, configurable
    via `SubscribeRequest`? Or fixed? Higher cadence is nice for
-   the TUI but costs more in broadcast traffic.
+   the TUI but costs more in broadcast traffic AND in the
+   byte-counter write-loop overhead (see §6.2 step 1).
    **Blocker for: Milestone C.**
 
-5. **Multi-daemon Subscribe.** TUI watches N daemons
+4. **Multi-daemon Subscribe.** TUI watches N daemons
    simultaneously by opening N Subscribe streams; aggregation
    happens client-side. Is that ok or should the TUI talk to a
    designated "primary" daemon that fans out? Recommend simple
    N-streams approach. **Blocker for: Milestone C.**
 
-6. **Cancellation UX.** From F2 Active, selecting a row and
+5. **Cancellation UX.** From F2 Active, selecting a row and
    hitting `Ctrl-C` cancels the transfer via the existing client
    cancellation path. Does the TUI also expose a server-side
    "cancel this transfer" RPC for transfers initiated elsewhere?
    That requires a new `CancelTransfer(transfer_id)` RPC.
    Probably defer to a milestone after E.
 
-7. **Transfer-id allocation.** UUIDv4 daemon-side at
+6. **Transfer-id allocation.** UUIDv4 daemon-side at
    `TransferStarted` emission time. Stable for the duration of
    the RPC. Confirmed by the client via the existing per-RPC
    summary path? **Minor — daemon-internal — but flag now.**
 
-8. **Local-only TUI mode.** Does `blit-tui` work without any
-   daemon on the network — i.e. as a pure local-file browser
-   that can drive `blit copy`? Recommend yes; treat "local" as a
-   first-class endpoint in the daemon list (sentinel entry).
+7. **Remote tree verify (F4 Verify scope expansion).** Today's
+   `blit check` (`crates/blit-cli/src/check.rs`) calls
+   `Path::exists()` directly on both inputs — local paths only.
+   Extending F4 Verify to remote endpoints requires a new tree-
+   compare affordance: either (a) the TUI streams two
+   `Find`/`List` manifests, diffs them client-side, and renders
+   the result; or (b) the daemon grows a `CompareTrees` RPC that
+   does the diff server-side and returns a structured report.
+   (a) is cheaper but slower for large trees; (b) needs new
+   wire. **Recommend: ship F4 Verify local-only in Milestone D
+   (matches today's `blit check`); revisit remote-verify in a
+   later milestone if operator demand justifies it.**
 
 ## 11. Phasing summary
 
 | Milestone | Wire changes | LOC band | Independently useful? |
 |---|---|---|---|
-| A | none | ~3000 (new crate, screens, TUI lifecycle) | ✅ |
+| A | none | ~3000 (new `blit-tui` crate, screens, TUI lifecycle, local-endpoint integration) | ✅ |
 | B | +`GetState` | ~500 daemon + ~300 TUI | ✅ |
-| C | +`Subscribe` | ~800 daemon + ~500 TUI | ✅ |
-| D | none | ~400 TUI | ✅ |
-| E | none (optional Prometheus bridge is separate crate) | ~600 | ✅ |
+| C | +`Subscribe` + byte-level instrumentation + per-transfer state machine | ~1500 daemon + ~500 TUI | ✅ |
+| D | none (F4 Verify local-only) | ~400 TUI | ✅ |
+| E | none (optional Prometheus bridge is a separate binary) | ~600 | ✅ |
 
-Total roughly 5–6 kLOC for the full feature surface. Milestone A
-alone is shippable as a useful product.
+Total roughly 6–7 kLOC for the full feature surface. Milestone A
+alone is shippable as a useful product. Milestone C is the
+heaviest because byte-level progress instrumentation doesn't
+exist today — see §6.2 for the four pieces of work it folds in.
 
 ## 12. What this design intentionally does NOT lock in
 
