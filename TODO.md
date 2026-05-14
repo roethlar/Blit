@@ -254,13 +254,21 @@ don't get lost, not so the next agent reimplements them on a hunch.
 
 ## Phase 5: TUI / UI (next major phase, post-0.1.0)
 
-- [ ] **Phase 5** TUI for daemon discovery + interactive transfer. Cross-network blit-daemon explorer: discover all daemons via mDNS (consumes `_blit._tcp.local.` plus the §3.2 `module_count` / `delegation_enabled` TXT records), list their exported modules + free/used capacity (existing `FilesystemStats` RPC), and drive copy/mirror/move transfers between any two daemons (or local↔daemon) without re-typing CLI invocations. Likely scope:
-    - Live in-flight progress: the load-bearing path is the long-deferred `Subscribe` / `GetState` RPCs in `proto/blit.proto` (per `docs/plan/TUI_DESIGN.md`) — those need to land before the TUI can show per-RPC throughput while a transfer is running. The existing `--metrics` flag is NOT a substitute: it only emits completion-time aggregate counters on the daemon's stderr (`[metrics] push ok in 1.23s push_ops=N ...`), with no throughput stream and no remote-state API. `--metrics` is useful for operator observability but cannot drive a live TUI bar.
-    - Active-transfer counters pane: the existing `TransferMetrics` counters (push/pull/pull_sync/delegated_pull/purge attempts + active gauge + errors) are exposed today only via stderr summary lines. The TUI will need the `GetState` RPC (also from `TUI_DESIGN.md`) to read these over the wire. The counter infrastructure was kept for exactly this use case; only the read-side RPC is missing.
-    - Path browser per module (consumes existing `Find` / `DiskUsage` / `List` RPCs — these are already on the wire).
-    - Transfer queue with start/pause/cancel; Ctrl-C honored as today.
-    - Single binary, optional dependency (TUI subcommand inside `blit` or a separate `blit-tui` crate — decide during design).
-    - Design doc: extend `docs/plan/TUI_DESIGN.md` with the discovery panel + transfer-orchestrator screens, the wire shape for `Subscribe`/`GetState`, and the per-byte progress event schema before writing code.
+See **`docs/plan/TUI_DESIGN.md`** for the active plan — covers
+CLI-verb-to-screen mapping (full parity), four-screen architecture
+(Daemons / Transfers / Browse / Profile-Verify), the two new RPCs
+(`Subscribe` + `GetState`), `blit-tui` crate proposal, and
+milestone phasing A–E (each independently shippable).
+
+- [ ] **Phase 5 — Milestone A.** Discovery + browse + trigger; no new wire. Useful TUI with `blit-tui` crate using `ratatui`; mDNS daemon list with §3.2 TXT info inline; F3 Browse with `List` / `Find` / `DiskUsage` / `FilesystemStats` and copy/mirror/move/rm dispatching to existing clients; F4 Profile reads `perf_history.jsonl` directly. Counters pane shows "(unavailable — needs GetState)" in this milestone.
+- [ ] **Phase 5 — Milestone B.** `GetState` RPC + daemon-side ring buffer for recent transfers. F1 daemon detail pane lights up with real counters, uptime, modules-with-capacity, recent transfers list.
+- [ ] **Phase 5 — Milestone C.** `Subscribe` RPC + `DaemonEvent` family + daemon-side `tokio::broadcast`. F2 Active pane shows live in-flight transfers with throughput + ETA from any daemon (not just the TUI's own session).
+- [ ] **Phase 5 — Milestone D.** F4 Verify (wraps `blit check`) + diagnostics dump action.
+- [ ] **Phase 5 — Milestone E.** Polish: theme, configurable refresh, key remapping, optional Prometheus bridge as a separate binary scraping `GetState`.
+
+**Open decisions blocking Milestone A** (see TUI_DESIGN.md §10):
+crate split vs subcommand (recommend separate); local-only TUI
+mode (recommend yes, "local" as first-class endpoint).
 
 ## Phase 3.5: RDMA Enablement (post-release)
 
