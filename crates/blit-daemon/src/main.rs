@@ -80,10 +80,12 @@ async fn main() -> Result<()> {
     };
 
     // Counters are off by default; the `--metrics` flag turns collection
-    // on. No exposure mechanism today (no HTTP, no RPC) — these are
-    // scaffolding for a future GUI/TUI gRPC reader. See docs/plan/TUI_DESIGN.md.
+    // on AND wires the daemon to emit a one-line stderr summary at the
+    // end of each push / pull / pull_sync / delegated_pull / purge RPC
+    // — operator-facing visibility under systemd or foreground without
+    // needing the (future) TUI. See `metrics::TransferMetrics::log_completion`.
     let metrics = if args.metrics {
-        eprintln!("[info] internal RPC metrics enabled");
+        eprintln!("[info] internal RPC metrics enabled; per-RPC summary lines on stderr");
         TransferMetrics::enabled()
     } else {
         TransferMetrics::disabled()

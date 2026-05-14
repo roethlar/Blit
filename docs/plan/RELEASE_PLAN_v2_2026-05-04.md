@@ -497,28 +497,32 @@ but `--metrics` is no longer "scaffolding with no consumer."
 
 **Source:** Roadmap audit headline.
 
-`crates/blit-daemon/src/metrics.rs` has push/pull/purge attempt
-counters, error counter, active-transfer gauge (with R5-F2
-RAII guard). `--metrics` opt-in, off by default. **No reader.**
-Module docstring (`metrics.rs:14`) explicitly says "scaffolding for
-a future GUI/TUI gRPC `GetState`-style RPC." `TUI_DESIGN.md`
-specifies the RPCs. Neither `Subscribe` nor `GetState` exists in
-`proto/blit.proto`.
+**Resolved 2026-05-13:** owner picked a third option not in the
+original recommendation set — wire `TransferMetrics` to a real
+consumer right now (per-RPC stderr summary line) rather than
+ship it dormant. The original audit-time analysis below is kept
+verbatim as historical context but does not describe current
+state: the daemon now emits `[metrics] {op} {ok|err} in {dt}
+(push_ops=N pull_ops=N purge_ops=N active=N errors=N)` lines on
+push / pull / pull_sync / delegated_pull / purge completion when
+`--metrics` is on. Counters are correct and live; the TUI
+remains future work but `--metrics` itself is no longer
+scaffolding-without-a-reader.
 
-**Recommendation:** For 0.1.0, **do not** ship the TUI RPCs.
-Either:
+*Original audit analysis (2026-05-07, now stale — see resolution
+above):*
 
-- (a) Drop `--metrics` and `TransferMetrics` entirely. ~30 LOC of
-  removal. Honest.
-- (b) Keep `TransferMetrics` and `--metrics` flag, but explicitly
-  document in the module docstring + `--help` text that this is
-  scaffolding with no current consumer, intended for 0.2.0 TUI.
-
-I recommend **(b)**. The counters are correct and tested; deleting
-them and re-adding them later is wasted churn. Just be explicit
-that they're dormant.
-
-**Cost:** ~30 minutes for option (b). 1 hour for option (a).
+> `crates/blit-daemon/src/metrics.rs` has push/pull/purge
+> attempt counters, error counter, active-transfer gauge (with
+> R5-F2 RAII guard). `--metrics` opt-in, off by default. **No
+> reader.** Module docstring (`metrics.rs:14`) explicitly says
+> "scaffolding for a future GUI/TUI gRPC `GetState`-style RPC."
+> `TUI_DESIGN.md` specifies the RPCs. Neither `Subscribe` nor
+> `GetState` exists in `proto/blit.proto`.
+>
+> Recommendation: For 0.1.0, **do not** ship the TUI RPCs.
+> Either (a) drop `--metrics` and `TransferMetrics` entirely or
+> (b) keep + document as dormant. Audit recommended (b).
 
 ### 3.2 mDNS TXT enrichment
 

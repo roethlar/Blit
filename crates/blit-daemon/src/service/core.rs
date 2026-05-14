@@ -75,6 +75,33 @@ impl BlitService {
             crate::delegation_gate::DelegationConfig::default(),
         )
     }
+
+    /// Inner purge body. Extracted from the trait method so the
+    /// `--metrics` completion log can wrap a single call site and
+    /// branch on Result without duplicating the response shape.
+    /// §3.1 followup.
+    async fn purge_inner(&self, req: PurgeRequest) -> Result<Response<PurgeResponse>, Status> {
+        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
+        if module.read_only {
+            return Err(Status::permission_denied(format!(
+                "module '{}' is read-only",
+                module.name
+            )));
+        }
+        let sanitized = sanitize_request_paths(req.paths_to_delete)?;
+        if sanitized.is_empty() {
+            return Ok(Response::new(PurgeResponse { files_deleted: 0 }));
+        }
+        let stats = delete_rel_paths(
+            module.path.clone(),
+            module.canonical_root.clone(),
+            sanitized,
+        )
+        .await?;
+        Ok(Response::new(PurgeResponse {
+            files_deleted: stats.total(),
+        }))
+    }
 }
 
 #[tonic::async_trait]
@@ -110,7 +137,7 @@ impl Blit for BlitService {
         tokio::spawn(async move {
             // `guard` is moved into the task; its Drop fires no
             // matter how the task ends.
-            let _guard = guard;
+            let guard = guard;
             let result =
                 handle_push_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
                     .await;
@@ -119,6 +146,12 @@ impl Blit for BlitService {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            // §3.1 followup: drop the active-transfer guard BEFORE the
+            // completion log so `active=N` reflects state AFTER the
+            // just-finished RPC is removed from the gauge. Pre-fix
+            // a single-transfer log showed `active=1`, which is
+            // misleading for an end-of-RPC summary.
+            drop(guard);
             metrics.log_completion("push", started.elapsed(), ok);
         });
 
@@ -141,13 +174,14 @@ impl Blit for BlitService {
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
-            let _guard = guard;
+            let guard = guard;
             let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
             let ok = result.is_ok();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            drop(guard);
             metrics.log_completion("pull", started.elapsed(), ok);
         });
 
@@ -170,7 +204,7 @@ impl Blit for BlitService {
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
-            let _guard = guard;
+            let guard = guard;
             let result = handle_pull_sync_stream(
                 modules,
                 default_root,
@@ -185,6 +219,7 @@ impl Blit for BlitService {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            drop(guard);
             metrics.log_completion("pull_sync", started.elapsed(), ok);
         });
 
@@ -200,7 +235,14 @@ impl Blit for BlitService {
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);
         let metrics = Arc::clone(&self.metrics);
+        let metrics_for_log = Arc::clone(&self.metrics);
         let (tx, rx) = mpsc::channel(32);
+        // §3.1 followup: cover delegated_pull in the per-RPC summary
+        // log too. The handler increments `pull_ops` + the active
+        // gauge inside `run_delegated_pull` (delegated_pull.rs:227),
+        // so without this site `delegated_pull` would count toward
+        // `pull_ops` but never emit its own completion line.
+        let started = std::time::Instant::now();
 
         // R30-F2: race the handler against tx.closed() so a CLI
         // disconnect drops the inner pull future. tonic's response
@@ -217,6 +259,7 @@ impl Blit for BlitService {
         // long enough for tx.closed() to be the racing future.
         let handler_tx = tx.clone();
         tokio::spawn(async move {
+            let cancelled;
             tokio::select! {
                 biased;
                 _ = tx.closed() => {
@@ -224,6 +267,7 @@ impl Blit for BlitService {
                     // happens at end of the select branch) and
                     // dropping the outer task drops the handler
                     // future implicitly via select cancellation.
+                    cancelled = true;
                 }
                 _ = super::delegated_pull::handle_delegated_pull(
                     req,
@@ -232,8 +276,19 @@ impl Blit for BlitService {
                     delegation,
                     metrics,
                     handler_tx,
-                ) => {}
+                ) => {
+                    cancelled = false;
+                }
             }
+            // The handler's RAII guard releases the active gauge as
+            // its scope ends with the spawn task above, so by the
+            // time we log here `active` already excludes this RPC.
+            // `ok = !cancelled` is a best-effort: a successful
+            // transfer that ends after the caller hangs up still
+            // logs `ok=false`, but the alternative (threading the
+            // handler's Result back across the select arm) requires
+            // restructuring the cancellation race for limited gain.
+            metrics_for_log.log_completion("delegated_pull", started.elapsed(), !cancelled);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -319,29 +374,17 @@ impl Blit for BlitService {
         // semantics). Previously inc_purge fired only after a
         // successful delete, contradicting the metrics-module doc.
         self.metrics.inc_purge();
-        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-        if module.read_only {
-            return Err(Status::permission_denied(format!(
-                "module '{}' is read-only",
-                module.name
-            )));
+        // §3.1 followup: purge needs its own completion line.
+        // Pre-fix `purge_ops` was visible only on later push/pull
+        // logs, never on the purge RPC itself.
+        let started = std::time::Instant::now();
+        let result = self.purge_inner(req).await;
+        let ok = result.is_ok();
+        if result.is_err() {
+            self.metrics.inc_error();
         }
-
-        let sanitized = sanitize_request_paths(req.paths_to_delete)?;
-        if sanitized.is_empty() {
-            return Ok(Response::new(PurgeResponse { files_deleted: 0 }));
-        }
-
-        let stats = delete_rel_paths(
-            module.path.clone(),
-            module.canonical_root.clone(),
-            sanitized,
-        )
-        .await?;
-
-        Ok(Response::new(PurgeResponse {
-            files_deleted: stats.total(),
-        }))
+        self.metrics.log_completion("purge", started.elapsed(), ok);
+        result
     }
 
     async fn complete_path(

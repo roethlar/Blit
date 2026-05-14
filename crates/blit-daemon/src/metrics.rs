@@ -276,4 +276,27 @@ mod tests {
             "{line}"
         );
     }
+
+    /// §3.1 followup: the active-transfer gauge in the completion
+    /// line must reflect state AFTER the just-finished RPC is
+    /// removed. Call-site contract is "drop the ActiveGuard before
+    /// `log_completion`". This test asserts the formatter's
+    /// behavior matches the contract: with the guard dropped,
+    /// `active` reads 0 for a single completed transfer (and N-1
+    /// for N concurrent transfers where one just finished).
+    #[test]
+    fn completion_line_reflects_active_after_guard_drop() {
+        let m = TransferMetrics::enabled();
+        // Simulate one in-flight + one finishing.
+        let _other = Arc::clone(&m).enter_transfer();
+        let finishing = Arc::clone(&m).enter_transfer();
+        assert_eq!(m.active_transfers.load(Relaxed), 2);
+        // Call-site contract: drop the guard before logging.
+        drop(finishing);
+        let line = m.format_completion_line("push", Duration::from_millis(1), true);
+        assert!(
+            line.contains("active=1"),
+            "expected active=1 (one transfer still in flight); got {line}"
+        );
+    }
 }
