@@ -259,17 +259,20 @@ impl Blit for BlitService {
         // long enough for tx.closed() to be the racing future.
         let handler_tx = tx.clone();
         tokio::spawn(async move {
-            let cancelled;
-            tokio::select! {
+            // None        = cancelled by client hangup (handler future dropped)
+            // Some(true)  = handler returned success
+            // Some(false) = handler returned failure (phased error already
+            //               sent to client over handler_tx)
+            let outcome: Option<bool> = tokio::select! {
                 biased;
                 _ = tx.closed() => {
                     // Caller hung up. Dropping handler_tx (which
                     // happens at end of the select branch) and
                     // dropping the outer task drops the handler
                     // future implicitly via select cancellation.
-                    cancelled = true;
+                    None
                 }
-                _ = super::delegated_pull::handle_delegated_pull(
+                handler_ok = super::delegated_pull::handle_delegated_pull(
                     req,
                     modules,
                     default_root,
@@ -277,18 +280,26 @@ impl Blit for BlitService {
                     metrics,
                     handler_tx,
                 ) => {
-                    cancelled = false;
+                    Some(handler_ok)
                 }
-            }
+            };
             // The handler's RAII guard releases the active gauge as
             // its scope ends with the spawn task above, so by the
             // time we log here `active` already excludes this RPC.
-            // `ok = !cancelled` is a best-effort: a successful
-            // transfer that ends after the caller hangs up still
-            // logs `ok=false`, but the alternative (threading the
-            // handler's Result back across the select arm) requires
-            // restructuring the cancellation race for limited gain.
-            metrics_for_log.log_completion("delegated_pull", started.elapsed(), !cancelled);
+            //
+            // R-followup: distinguish handler-failure from client-
+            // cancellation. Both log `ok=false` (the transfer didn't
+            // complete), but only the former is a daemon error and
+            // increments `errors`. Pre-fix every non-cancelled run
+            // logged `ok=true` regardless of whether
+            // `run_delegated_pull` returned Err — a real failure
+            // could log `delegated_pull ok … errors=N` with N
+            // unchanged.
+            let ok = matches!(outcome, Some(true));
+            if matches!(outcome, Some(false)) {
+                metrics_for_log.inc_error();
+            }
+            metrics_for_log.log_completion("delegated_pull", started.elapsed(), ok);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))

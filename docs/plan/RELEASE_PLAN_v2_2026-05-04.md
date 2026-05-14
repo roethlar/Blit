@@ -691,38 +691,39 @@ Both are post-release tracking items.
 
 ## 6. Suggested commit sequence
 
-**Status (2026-05-07):** all P0 commits below have landed except
-step 2 (live remote benchmark). Recorded original ordering plus
-actual closing commits for traceability.
+**Status (2026-05-14):** every step except §2.6 has landed. The
+P1 closures (§3.1/§3.2/§3.3) landed 2026-05-13, plus the §5.2
+BlitAuth and §5.4 AI-telemetry removals from owner decision.
 
 | # | Item | Status / closing commit |
 |---|---|---|
-| 1 | Decide D1-D9 (§7) | ✅ D1/D2/D3/D7/D8/D9 taken; D4/D5/D6 still open (P1 / doc-only) |
+| 1 | Decide D1-D9 (§7) | ✅ All taken — D5 modified by owner (per-RPC summary instead of dormant); see §7 table for per-decision commits |
 | 2 | §2.6 — Run remote benchmark | ⏳ **Pending** (last open P0; hardware-bound) |
 | 3 | §2.4 — `find --pattern` glob | ✅ `090f5cd` (R41 followup `e8f6aec`) |
 | 4 | §2.5 — Shell completions (Option A) | ✅ `0139a71` |
 | 5 | §2.1 — Binary rename `blit-cli` → `blit` | ✅ `0ca489b` (R41 followup `e8f6aec`) |
 | 6 | §2.3 — `blit list` smart-dispatch | ✅ `4d07177` |
-| 7 | §2.2 + §4 doc cleanup | ✅ `aac13bf` (followup `8d43e4d`) |
+| 7 | §2.2 + §4 doc cleanup | ✅ `aac13bf` (followups `8d43e4d`, `508883a`) |
 | 8 | §2.7 — POST_REVIEW_FIXES Round 1 | ✅ `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
-| 9 | §3.2 — mDNS TXT enrichment (P1) | ⏳ Not started; deferrable |
-| 10 | §3.1 — `TransferMetrics` doc-only | ⏳ Not started; deferrable |
-| 11 | §3.3 — Phase 4.8 doc-only rescope | ⏳ Not started; deferrable |
+| 9 | §3.2 — mDNS TXT enrichment (P1) | ✅ `0d76c4f` (pinned `724ab95`) |
+| 10 | §3.1 — `TransferMetrics` per-RPC summary | ✅ `6e750b9` (review followups `edc11aa`) |
+| 11 | §3.3 — Phase 4.8 doc-only rescope | ✅ `6e750b9` (deferred 4.8.2/4.8.3 to 0.2.0) |
 | 12 | §2.8 — Predictor wire-or-delete | ✅ Wired — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
-| 13 | Tag 0.1.0 | ⏳ Blocked on step 2 (and product-owner ack of P1 deferrals) |
+| 13 | Tag 0.1.0 | ⏳ Blocked on step 2 only — all P1 cleared |
 
-**Cost band actuals:** P0 work ran ~3 days of focused effort plus
-the still-pending §2.6 benchmark wall-clock. Steps 9-11 (P1) total
-~3 hours when scheduled and can land post-tag if owner agrees the
-defaults are acceptable.
+**Cost band actuals:** P0 + P1 work ran ~4 days of focused
+effort plus the still-pending §2.6 benchmark wall-clock. Tag is
+ready as soon as benchmark numbers are captured.
 
 ---
 
 ## 7. Decisions still owed
 
-**Status (2026-05-07):** D1, D2, D3, D7, D8, D9 were taken (default
-recommendations). D4, D5, D6 still open but each has a clear
-default and the cost is small.
+**Status (2026-05-14):** all D1–D9 are decided. D1/D2/D3/D7/D8/D9
+taken at plan defaults; D4 taken (§3.2 implemented); D5 modified
+by owner (per-RPC summary line replaces "dormant"); D6 taken
+(deferred to 0.2.0). Section name retained for historical
+reference but nothing is owed anymore.
 
 | # | Decision | Default | Outcome |
 |---|---|---|---|

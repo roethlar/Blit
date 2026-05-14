@@ -103,6 +103,13 @@ fn err_progress(phase: i32, message: impl Into<String>) -> DelegatedPullProgress
 /// request into a streaming response. The `tx` is the reply channel
 /// the gRPC layer hands us; the handler is responsible for emitting
 /// progress events and final summary/error onto it.
+///
+/// Returns `true` if `run_delegated_pull` completed without error,
+/// `false` if it failed (and the phased error was sent on `tx`).
+/// §3.1 followup: the caller uses this to flip the `--metrics`
+/// completion line `ok` bit and increment `errors`. Pre-fix the
+/// function returned `()` so a handler failure looked identical to
+/// success on the operator-facing metric line.
 pub(crate) async fn handle_delegated_pull(
     req: DelegatedPullRequest,
     modules: Arc<tokio::sync::Mutex<std::collections::HashMap<String, ModuleConfig>>>,
@@ -110,7 +117,7 @@ pub(crate) async fn handle_delegated_pull(
     delegation: Arc<crate::delegation_gate::DelegationConfig>,
     metrics: Arc<TransferMetrics>,
     tx: mpsc::Sender<Result<DelegatedPullProgress, Status>>,
-) {
+) -> bool {
     let resolver = StdResolver;
     let result = run_delegated_pull(
         req,
@@ -123,11 +130,15 @@ pub(crate) async fn handle_delegated_pull(
     )
     .await;
 
-    if let Err(error_progress) = result {
-        // Surface the phased error to the CLI. We use a one-shot
-        // send-and-ignore here: if the CLI has already disconnected we
-        // can't (and don't need to) report.
-        let _ = tx.send(Ok(error_progress)).await;
+    match result {
+        Ok(()) => true,
+        Err(error_progress) => {
+            // Surface the phased error to the CLI. We use a one-shot
+            // send-and-ignore here: if the CLI has already disconnected we
+            // can't (and don't need to) report.
+            let _ = tx.send(Ok(error_progress)).await;
+            false
+        }
     }
 }
 
@@ -880,5 +891,46 @@ mod tests {
             .expect("in-scope delete should succeed");
         assert_eq!(count, 1);
         assert!(!dest_root.join("victim.txt").exists());
+    }
+
+    /// R-followup: `handle_delegated_pull` must return `false` when
+    /// the inner pipeline fails so the caller (`service/core.rs`)
+    /// can `inc_error` and log `ok=false`. Pre-fix the function
+    /// returned `()` and a real failure showed `ok=true` on the
+    /// `--metrics` line. Drive the failure with the cheapest path:
+    /// a request with a blank source locator host, which trips the
+    /// `DelegationRejected` phase before any DNS/connect/IO.
+    #[tokio::test]
+    async fn handle_delegated_pull_returns_false_on_handler_failure() {
+        use blit_core::generated::{
+            DelegatedPullRequest, RemoteSourceLocator, TransferOperationSpec,
+        };
+
+        let req = DelegatedPullRequest {
+            dst_module: String::new(),
+            dst_destination_path: String::new(),
+            src: Some(RemoteSourceLocator {
+                host: String::new(), // blank → DelegationRejected at step 1
+                port: 0,
+            }),
+            spec: Some(TransferOperationSpec {
+                spec_version: 1,
+                ..Default::default()
+            }),
+            trace_data_plane: false,
+        };
+        let modules = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            ModuleConfig,
+        >::new()));
+        let delegation = Arc::new(crate::delegation_gate::DelegationConfig::default());
+        let metrics = TransferMetrics::disabled();
+        let (tx, _rx) = mpsc::channel(8);
+
+        let ok = handle_delegated_pull(req, modules, None, delegation, metrics, tx).await;
+        assert!(
+            !ok,
+            "handler with blank source locator must return false so caller can inc_error"
+        );
     }
 }
