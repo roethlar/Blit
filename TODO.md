@@ -255,12 +255,12 @@ don't get lost, not so the next agent reimplements them on a hunch.
 ## Phase 5: TUI / UI (next major phase, post-0.1.0)
 
 - [ ] **Phase 5** TUI for daemon discovery + interactive transfer. Cross-network blit-daemon explorer: discover all daemons via mDNS (consumes `_blit._tcp.local.` plus the §3.2 `module_count` / `delegation_enabled` TXT records), list their exported modules + free/used capacity (existing `FilesystemStats` RPC), and drive copy/mirror/move transfers between any two daemons (or local↔daemon) without re-typing CLI invocations. Likely scope:
-    - Live progress: hook the daemon's `--metrics` summary lines and/or build the long-deferred `Subscribe`/`GetState` RPCs in `proto/blit.proto` (per `docs/plan/TUI_DESIGN.md`) so the TUI sees per-RPC throughput in flight, not just at completion.
-    - Active-transfer pane consumes the existing `TransferMetrics` counters (push/pull/pull_sync/delegated_pull/purge attempts + active gauge + errors) — the counter infrastructure was kept for exactly this use case.
-    - Path browser per module (consumes existing `Find` / `DiskUsage` / `List` RPCs).
+    - Live in-flight progress: the load-bearing path is the long-deferred `Subscribe` / `GetState` RPCs in `proto/blit.proto` (per `docs/plan/TUI_DESIGN.md`) — those need to land before the TUI can show per-RPC throughput while a transfer is running. The existing `--metrics` flag is NOT a substitute: it only emits completion-time aggregate counters on the daemon's stderr (`[metrics] push ok in 1.23s push_ops=N ...`), with no throughput stream and no remote-state API. `--metrics` is useful for operator observability but cannot drive a live TUI bar.
+    - Active-transfer counters pane: the existing `TransferMetrics` counters (push/pull/pull_sync/delegated_pull/purge attempts + active gauge + errors) are exposed today only via stderr summary lines. The TUI will need the `GetState` RPC (also from `TUI_DESIGN.md`) to read these over the wire. The counter infrastructure was kept for exactly this use case; only the read-side RPC is missing.
+    - Path browser per module (consumes existing `Find` / `DiskUsage` / `List` RPCs — these are already on the wire).
     - Transfer queue with start/pause/cancel; Ctrl-C honored as today.
     - Single binary, optional dependency (TUI subcommand inside `blit` or a separate `blit-tui` crate — decide during design).
-    - Design doc: extend `docs/plan/TUI_DESIGN.md` with the discovery panel + transfer-orchestrator screens before writing code.
+    - Design doc: extend `docs/plan/TUI_DESIGN.md` with the discovery panel + transfer-orchestrator screens, the wire shape for `Subscribe`/`GetState`, and the per-byte progress event schema before writing code.
 
 ## Phase 3.5: RDMA Enablement (post-release)
 

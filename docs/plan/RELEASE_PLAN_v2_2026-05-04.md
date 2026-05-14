@@ -788,8 +788,9 @@ benchmarks pending), confidence is high.
 ---
 
 **Owner:** mcoelho
-**Last updated:** 2026-05-07 (per-section status added; closure
-tracker at the top reflects the §2.1/§2.2/§2.3/§2.4/§2.5/§2.7/§2.8
-+ §4 closures; §2.6 + §3.x still pending)
+**Last updated:** 2026-05-14 (all P0 except §2.6 closed; all P1
+§3.x closed via owner sign-off + §5.2/§5.4 removed from scope;
+§2.6 hardware-bound benchmark capture is the sole remaining
+release-blocker)
 **Next review:** after §2.6 benchmark capture, or before tagging
 0.1.0.
