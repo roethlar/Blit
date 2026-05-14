@@ -252,6 +252,16 @@ don't get lost, not so the next agent reimplements them on a hunch.
 - [x] Review logging/error output for production readiness. *(2026-04-07: Audited all crates. Removed duplicate println/eprintln debug output from block clone paths. Added expect() messages to bare unwrap() calls. No dbg!()/todo!() found. Remaining eprintln calls in orchestrator/daemon are intentional verbose output. Full migration to structured logging deferred to post-release.)*
 - [x] Prepare release notes/changelog with benchmark data and support matrix. *(2026-04-07: Created `CHANGELOG.md` with full feature inventory, platform support matrix, known limitations. Benchmark data to be added when hardware runs complete.)*
 
+## Phase 5: TUI / UI (next major phase, post-0.1.0)
+
+- [ ] **Phase 5** TUI for daemon discovery + interactive transfer. Cross-network blit-daemon explorer: discover all daemons via mDNS (consumes `_blit._tcp.local.` plus the §3.2 `module_count` / `delegation_enabled` TXT records), list their exported modules + free/used capacity (existing `FilesystemStats` RPC), and drive copy/mirror/move transfers between any two daemons (or local↔daemon) without re-typing CLI invocations. Likely scope:
+    - Live progress: hook the daemon's `--metrics` summary lines and/or build the long-deferred `Subscribe`/`GetState` RPCs in `proto/blit.proto` (per `docs/plan/TUI_DESIGN.md`) so the TUI sees per-RPC throughput in flight, not just at completion.
+    - Active-transfer pane consumes the existing `TransferMetrics` counters (push/pull/pull_sync/delegated_pull/purge attempts + active gauge + errors) — the counter infrastructure was kept for exactly this use case.
+    - Path browser per module (consumes existing `Find` / `DiskUsage` / `List` RPCs).
+    - Transfer queue with start/pause/cancel; Ctrl-C honored as today.
+    - Single binary, optional dependency (TUI subcommand inside `blit` or a separate `blit-tui` crate — decide during design).
+    - Design doc: extend `docs/plan/TUI_DESIGN.md` with the discovery panel + transfer-orchestrator screens before writing code.
+
 ## Phase 3.5: RDMA Enablement (post-release)
 
 - [ ] Track deferred RDMA/RoCE work (control-plane negotiation, transport abstraction, benchmarking) for future planning.
