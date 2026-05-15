@@ -190,8 +190,12 @@ bottom; modal overlays for confirmation / option entry.
   list (if available) and "cancel" hotkey, which fires the new
   `CancelJob(transfer_id)` RPC (§6.5). Cancellation works on
   transfers the TUI didn't initiate.
-- Transfers kicked off from the TUI always use `detach=true` on
-  the spec (§6.5) so closing the TUI doesn't kill the transfer.
+- Transfers kicked off from the TUI use `detach=true` on the
+  `DelegatedPullRequest` **for remote→remote transfers only**
+  (§6.5: detach is structurally delegated-only). For
+  local-endpoint transfers (local↔daemon, local↔local) the TUI
+  stays attached for the duration and shows a banner on the
+  transfer-options modal noting that closing the TUI cancels.
 
 ### 5.3 F3 — Browse
 
@@ -632,8 +636,13 @@ So `detach` is a **delegated-only** feature in M-Jobs.
 
 **CLI surface (`--detach` + `blit jobs`):**
 
-- `blit copy <src> <dst> --detach` — initiates, prints
-  `transfer_id`, exits. Daemon owns the transfer.
+- `blit copy <hostA>:/src <hostB>:/dst --detach` — accepted
+  **only on remote→remote transfers**. Initiates, prints
+  `transfer_id`, exits. Destination daemon owns the transfer.
+  Push (local→remote) and pull (remote→local) reject `--detach`
+  with a clean error message ("CLI is in the byte path for
+  this transfer shape; --detach only applies to remote→remote
+  transfers"). Same matrix as §6.5's structural table.
 - `blit jobs list <remote>` — calls `GetState` against
   `<remote>`, prints `active` + `recent`.
 - `blit jobs cancel <remote> <transfer_id>` — calls `CancelJob`.
