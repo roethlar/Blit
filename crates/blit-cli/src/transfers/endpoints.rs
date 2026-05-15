@@ -1,37 +1,22 @@
+//! Endpoint shim. The pure parsing / formatting / source-and-
+//! destination-validation helpers moved to `blit_app::endpoints`
+//! in Phase 5 A.0. This file keeps the clap-coupled gate
+//! functions (which read `TransferArgs`) until they're reshaped
+//! to take primitive inputs in a later A.0 commit.
+//!
+//! Re-exports preserve the call sites at
+//! `crate::transfers::endpoints::{Endpoint, parse_transfer_endpoint,
+//! format_remote_endpoint, ensure_remote_destination_supported,
+//! ensure_remote_source_supported}` so this commit moves the code
+//! without touching consumers.
+
 use crate::cli::TransferArgs;
 use eyre::{bail, Result};
-use std::path::PathBuf;
 
-use blit_core::remote::{RemoteEndpoint, RemotePath};
-
-#[derive(Debug, Clone)]
-pub enum Endpoint {
-    Local(PathBuf),
-    Remote(RemoteEndpoint),
-}
-
-pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
-    match RemoteEndpoint::parse(input) {
-        Ok(endpoint) => Ok(Endpoint::Remote(endpoint)),
-        Err(err) => {
-            // Check if this is the "use forward slashes" error - propagate it
-            let err_msg = err.to_string();
-            if err_msg.contains("forward slashes") {
-                return Err(err);
-            }
-            // Check for remote-like patterns that failed parsing
-            if input.contains("://") || input.contains(":/") {
-                Err(err)
-            } else {
-                Ok(Endpoint::Local(PathBuf::from(input)))
-            }
-        }
-    }
-}
-
-pub fn format_remote_endpoint(remote: &RemoteEndpoint) -> String {
-    remote.display()
-}
+pub use blit_app::endpoints::{
+    ensure_remote_destination_supported, ensure_remote_source_supported, format_remote_endpoint,
+    parse_transfer_endpoint, Endpoint,
+};
 
 /// Common gate shared by every remote-touching path.
 fn ensure_remote_common(args: &TransferArgs) -> Result<()> {
@@ -70,26 +55,4 @@ pub fn ensure_remote_push_supported(args: &TransferArgs) -> Result<()> {
         );
     }
     Ok(())
-}
-
-pub fn ensure_remote_destination_supported(remote: &RemoteEndpoint) -> Result<()> {
-    match &remote.path {
-        RemotePath::Module { .. } | RemotePath::Root { .. } => Ok(()),
-        RemotePath::Discovery => {
-            bail!(
-                "remote destination must include a module or root (e.g., server:/module/ or server://path)"
-            )
-        }
-    }
-}
-
-pub fn ensure_remote_source_supported(remote: &RemoteEndpoint) -> Result<()> {
-    match remote.path {
-        RemotePath::Module { .. } | RemotePath::Root { .. } => Ok(()),
-        RemotePath::Discovery => {
-            bail!(
-                "remote source must include a module or root (e.g., server:/module/ or server://path)"
-            )
-        }
-    }
 }
