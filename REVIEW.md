@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| b-3-recent-ring | Feature  | TransferRecord ring + outcome capture       | `[~]`  | `phase5/getstate`   | `eab1a17` |
 
 ## Open findings
 
