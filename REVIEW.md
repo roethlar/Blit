@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| b-5-jobs-list   | Feature  | `blit jobs list <remote>` consumes GetState | `[~]`  | `phase5/getstate`   | `5f8ca5b` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -61,3 +61,4 @@ Phase 5 B sub-slices on branch `phase5/getstate`:
 - `ef46631` Streaming RPCs populate ActiveJobs rows (`b-2-set-endpoint`)
 - `eab1a17` TransferRecord ring + outcome capture (`b-3-recent-ring`)
 - `b6b6bb2` GetState RPC + DaemonState handler (`b-4-getstate`)
+- `5f8ca5b` `blit jobs list <remote>` consumes GetState (`b-5-jobs-list`)
