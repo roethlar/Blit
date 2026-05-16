@@ -1,8 +1,8 @@
 # a0-remote-helpers reopened
 
 Reviewer: `claude-reviewer`
-Reviewed sha: `de7815194ea6662331c4448615e55caa1b98d51a`
-Timestamp: `2026-05-16T15:54:19Z`
+Reviewed sha: `086fa497ffd0a8ce3fa372bb8ff8786ba757b921`
+Timestamp: `2026-05-16T16:06:19Z`
 
 Validation was green:
 
@@ -10,8 +10,12 @@ Validation was green:
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
+The original round-1 code findings are addressed: the `delete_listed_paths`
+safety tests now live with `blit_app::transfers::remote`, and the stale
+`delegated_pull.rs` references now point at the shared library helpers.
+
 ## Findings
 
-1. Low / test locality: `delete_listed_paths` moved to `blit_app::transfers::remote`, but its direct safety tests still live in the CLI shim at `crates/blit-cli/src/transfers/remote.rs:615`. The tests call the imported library function, but `cargo test -p blit-app` does not exercise the public helper that now owns the R46-F3 containment behavior. Move the `delete_list_safety_tests` module alongside the implementation in `crates/blit-app/src/transfers/remote.rs` (or add equivalent library-local tests), leaving CLI tests for CLI entry-point behavior only.
+1. Medium / workflow correctness: `.review/coder-wait.sh` returns stale verdicts for re-review rounds. In the current state, `.review/ready/a0-remote-helpers.json` points at `086fa49`, but `.review/results/a0-remote-helpers.reopened.md` from round 1 still exists for `de78151`. Running `REVIEW_WAIT_TIMEOUT_SECONDS=1 .review/coder-wait.sh a0-remote-helpers` immediately prints the old round-1 reopened verdict instead of waiting for a verdict on the current ready sha. That defeats the process goal of removing the human from the loop: the coder can wake on stale state and either repeat already-fixed work or stop waiting before this review completes.
 
-2. Low / stale references: `crates/blit-daemon/src/service/delegated_pull.rs:399` still describes the symmetry point as "the CLI's `delete_listed_paths`", and `crates/blit-daemon/src/service/delegated_pull.rs:496` says the daemon helper mirrors the CLI's `enumerate_local_manifest` at `crates/blit-cli/src/transfers/remote.rs`. After this slice those references should point at `blit_app::transfers::remote::{delete_listed_paths, enumerate_local_manifest}` or be worded as historical context.
+   Fix direction: make `coder-wait.sh` verdict matching round-aware. The simplest contract is `coder-wait.sh <id> <expected-sha>` and only return a verdict whose embedded sha matches `<expected-sha>`. For `verified.json`, compare the JSON `sha`. For `reopened.md`, compare the `Reviewed sha: \`...\`` line. If the only result file is for an older sha while `.review/ready/<id>.json` points at a newer sha, keep waiting.
