@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| m-jobs-3-detach | Feature  | detach field + spawn-closure disarm + CLI gates | `[~]` | `phase5/m-jobs`     | `d3e3a4d` |
 
 ## Open findings
 
