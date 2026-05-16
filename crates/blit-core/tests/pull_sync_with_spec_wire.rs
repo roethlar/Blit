@@ -151,6 +151,13 @@ impl Blit for SpyServer {
     ) -> Result<Response<blit_core::generated::DaemonState>, Status> {
         unimplemented!()
     }
+
+    async fn cancel_job(
+        &self,
+        _: Request<blit_core::generated::CancelJobRequest>,
+    ) -> Result<Response<blit_core::generated::CancelJobResponse>, Status> {
+        unimplemented!()
+    }
 }
 
 async fn spawn_spy(captured: Arc<Mutex<Option<TransferOperationSpec>>>) -> u16 {

@@ -90,6 +90,8 @@ pub enum Commands {
 pub enum JobsCommand {
     /// List active and recent transfers on a remote daemon
     List(JobsListArgs),
+    /// Cancel an active transfer on a remote daemon
+    Cancel(JobsCancelArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -100,6 +102,18 @@ pub struct JobsListArgs {
     /// the daemon's default (50).
     #[arg(long, default_value_t = 0)]
     pub recent_limit: u32,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsCancelArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Transfer id to cancel — typically obtained from
+    /// `blit jobs list <remote>`.
+    pub transfer_id: String,
     /// Output as JSON
     #[arg(long)]
     pub json: bool,

@@ -1,5 +1,6 @@
-use crate::cli::{JobsCommand, JobsListArgs};
+use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs};
 use blit_app::admin::jobs;
+use blit_app::admin::jobs::CancelJobOutcome;
 use blit_core::generated::DaemonState;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
@@ -7,6 +8,7 @@ use eyre::{Context, Result};
 pub async fn run_jobs(command: JobsCommand) -> Result<()> {
     match command {
         JobsCommand::List(args) => run_jobs_list(args).await,
+        JobsCommand::Cancel(args) => run_jobs_cancel(args).await,
     }
 }
 
@@ -21,6 +23,73 @@ async fn run_jobs_list(args: JobsListArgs) -> Result<()> {
         print_human(&remote, &state);
     }
     Ok(())
+}
+
+async fn run_jobs_cancel(args: JobsCancelArgs) -> Result<()> {
+    let remote = RemoteEndpoint::parse(&args.remote)
+        .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
+    let outcome = jobs::cancel(&remote, &args.transfer_id).await?;
+    if args.json {
+        print_cancel_json(&outcome);
+    } else {
+        print_cancel_human(&remote, &outcome);
+    }
+    // Distinguish exit codes so scripts can branch:
+    //   Cancelled  → 0
+    //   NotFound   → 1 (the transfer wasn't there to cancel)
+    //   Unsupported→ 2 (the kind doesn't honor cancellation —
+    //                  caller misuse, not a transient state)
+    match outcome {
+        CancelJobOutcome::Cancelled { .. } => Ok(()),
+        CancelJobOutcome::NotFound { .. } => Err(eyre::eyre!("transfer not found")),
+        CancelJobOutcome::Unsupported { message, .. } => Err(eyre::eyre!(message)),
+    }
+}
+
+fn print_cancel_json(outcome: &CancelJobOutcome) {
+    use serde_json::json;
+    let body = match outcome {
+        CancelJobOutcome::Cancelled { transfer_id } => json!({
+            "outcome": "cancelled",
+            "transfer_id": transfer_id,
+        }),
+        CancelJobOutcome::NotFound { transfer_id } => json!({
+            "outcome": "not_found",
+            "transfer_id": transfer_id,
+        }),
+        CancelJobOutcome::Unsupported {
+            transfer_id,
+            message,
+        } => json!({
+            "outcome": "unsupported",
+            "transfer_id": transfer_id,
+            "message": message,
+        }),
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body).unwrap_or_default()
+    );
+}
+
+fn print_cancel_human(remote: &RemoteEndpoint, outcome: &CancelJobOutcome) {
+    match outcome {
+        CancelJobOutcome::Cancelled { transfer_id } => {
+            println!("Cancelled transfer {transfer_id} on {}", remote.display());
+        }
+        CancelJobOutcome::NotFound { transfer_id } => {
+            eprintln!(
+                "No active transfer with id '{transfer_id}' on {}",
+                remote.display()
+            );
+        }
+        CancelJobOutcome::Unsupported {
+            transfer_id,
+            message,
+        } => {
+            eprintln!("Cannot cancel transfer '{transfer_id}': {message}");
+        }
+    }
 }
 
 fn print_json(state: &DaemonState) -> Result<()> {

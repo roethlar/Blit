@@ -55,6 +55,25 @@ service Blit {
   // off), but active[] / recent[] always populate from the
   // always-on ActiveJobs table introduced in milestone B.
   rpc GetState(GetStateRequest) returns (DaemonState);
+
+  // Cancel a daemon-side in-flight transfer by transfer_id.
+  // M-Jobs of docs/plan/TUI_DESIGN.md §6.5. Only delegated
+  // remote→remote pulls support cancellation today —
+  // push / pull / pull_sync have the CLI in the byte path,
+  // so a client-side cancel already drops the handler future
+  // and `CancelJob` from another client wouldn't have a
+  // meaningful semantic.
+  //
+  // Status semantics:
+  //   OK                    → the cancellation token was fired;
+  //                           the handler will tear down on its
+  //                           next .await resolve.
+  //   NOT_FOUND             → no active transfer matches the
+  //                           requested transfer_id (already
+  //                           completed, or never existed).
+  //   FAILED_PRECONDITION   → the transfer exists but its kind
+  //                           doesn't honor cancellation today.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
 }
 
 // Removed: `BlitAuth` service stub (2026-05-13). Original design
@@ -738,4 +757,21 @@ message Counters {
   uint64 purge_operations_total = 3;
   uint64 active_transfers = 4;
   uint64 transfer_errors_total = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CancelJob — fire the cancellation token of an active transfer.
+// See §6.5 of docs/plan/TUI_DESIGN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message CancelJobRequest {
+  string transfer_id = 1;
+}
+
+message CancelJobResponse {
+  // The transfer_id that was cancelled. Echoed back for the
+  // CLI's confirmation message. Empty body otherwise — the
+  // cancellation outcome (cancelled / unsupported / not found)
+  // is encoded in the gRPC Status, not the response.
+  string transfer_id = 1;
 }

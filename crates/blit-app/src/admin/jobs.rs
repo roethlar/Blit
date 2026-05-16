@@ -7,9 +7,10 @@
 //! does its own formatting.
 
 use blit_core::generated::blit_client::BlitClient;
-use blit_core::generated::{DaemonState, GetStateRequest};
+use blit_core::generated::{CancelJobRequest, DaemonState, GetStateRequest};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
+use tonic::Code;
 
 /// Issue the `GetState` RPC against `remote`. `recent_limit = 0`
 /// asks the daemon for its default ring depth (50 today).
@@ -28,6 +29,74 @@ pub async fn query(remote: &RemoteEndpoint, recent_limit: u32) -> Result<DaemonS
         .map_err(|status| eyre::eyre!(status.message().to_string()))?;
 
     Ok(response.into_inner())
+}
+
+/// Outcome of a `CancelJob` RPC. The wire surface encodes
+/// cancel / not-found / unsupported via gRPC status codes;
+/// this enum is the typed view CLI / TUI consumers match on
+/// without re-deriving status semantics each time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelJobOutcome {
+    /// The daemon fired the cancellation token. The handler
+    /// will tear down on its next `.await` resolve.
+    Cancelled { transfer_id: String },
+    /// No active transfer matched the requested id.
+    NotFound { transfer_id: String },
+    /// The transfer exists but its kind doesn't honor
+    /// cancellation from another client (push / pull /
+    /// pull_sync — CLI is in the byte path).
+    Unsupported {
+        transfer_id: String,
+        message: String,
+    },
+}
+
+/// Issue the `CancelJob` RPC against `remote`. Errors only on
+/// transport failures or an unexpected status; outcomes that
+/// are part of the contract (NotFound, FailedPrecondition,
+/// Ok) get mapped onto [`CancelJobOutcome`] for the caller to
+/// render.
+pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<CancelJobOutcome> {
+    let uri = remote.control_plane_uri();
+    let mut client = BlitClient::connect(uri.clone())
+        .await
+        .with_context(|| format!("connecting to {}", uri))?;
+
+    let result = client
+        .cancel_job(CancelJobRequest {
+            transfer_id: transfer_id.to_string(),
+        })
+        .await;
+
+    match result {
+        Ok(response) => {
+            let body = response.into_inner();
+            // The daemon echoes the transfer_id back; fall
+            // back to the request id if the server returned
+            // empty (shouldn't happen with the current
+            // implementation, but defensive).
+            let id = if body.transfer_id.is_empty() {
+                transfer_id.to_string()
+            } else {
+                body.transfer_id
+            };
+            Ok(CancelJobOutcome::Cancelled { transfer_id: id })
+        }
+        Err(status) => match status.code() {
+            Code::NotFound => Ok(CancelJobOutcome::NotFound {
+                transfer_id: transfer_id.to_string(),
+            }),
+            Code::FailedPrecondition => Ok(CancelJobOutcome::Unsupported {
+                transfer_id: transfer_id.to_string(),
+                message: status.message().to_string(),
+            }),
+            _ => Err(eyre::eyre!(
+                "CancelJob failed ({}): {}",
+                status.code(),
+                status.message()
+            )),
+        },
+    }
 }
 
 /// Human-readable label for a `TransferKind` proto enum value.

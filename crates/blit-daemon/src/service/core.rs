@@ -9,18 +9,18 @@ use super::util::{
     metadata_mtime_seconds, resolve_contained_path, resolve_module, resolve_relative_path,
 };
 use super::{DiskUsageSender, FindSender};
-use crate::active_jobs::{ActiveJobKind, ActiveJobs};
+use crate::active_jobs::{ActiveJobKind, ActiveJobs, CancelOutcome};
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
-    ActiveTransfer, ClientPullMessage, ClientPushRequest, CompletionRequest, CompletionResponse,
-    Counters, DaemonState, DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry,
-    DiskUsageRequest, FileInfo, FilesystemStatsRequest, FilesystemStatsResponse, FindEntry,
-    FindRequest, GetStateRequest, ListModulesRequest, ListModulesResponse, ListRequest,
-    ListResponse, ModuleInfo, PullChunk, PullRequest, PurgeRequest, PurgeResponse,
-    ServerPullMessage, ServerPushResponse, TransferRecord,
+    ActiveTransfer, CancelJobRequest, CancelJobResponse, ClientPullMessage, ClientPushRequest,
+    CompletionRequest, CompletionResponse, Counters, DaemonState, DelegatedPullProgress,
+    DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo, FilesystemStatsRequest,
+    FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest, ListModulesRequest,
+    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
+    PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse, TransferRecord,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -677,6 +677,36 @@ impl Blit for BlitService {
         }))
     }
 
+    async fn cancel_job(
+        &self,
+        request: Request<CancelJobRequest>,
+    ) -> Result<Response<CancelJobResponse>, Status> {
+        let req = request.into_inner();
+        if req.transfer_id.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "CancelJobRequest.transfer_id must not be empty",
+            ));
+        }
+        // `ActiveJobs::cancel` is synchronous and short — the
+        // critical section is one `HashMap::get` + (when the
+        // kind supports it) one `CancellationToken::cancel()`.
+        // No async work to do.
+        match self.active_jobs.cancel(&req.transfer_id) {
+            CancelOutcome::Cancelled => Ok(Response::new(CancelJobResponse {
+                transfer_id: req.transfer_id,
+            })),
+            CancelOutcome::Unsupported => Err(Status::failed_precondition(format!(
+                "transfer '{}' is not cancellable from another client (CLI is in the byte path; \
+                 cancel from the originating client instead)",
+                req.transfer_id
+            ))),
+            CancelOutcome::NotFound => Err(Status::not_found(format!(
+                "no active transfer matches transfer_id '{}'",
+                req.transfer_id
+            ))),
+        }
+    }
+
     async fn disk_usage(
         &self,
         request: Request<DiskUsageRequest>,
@@ -948,6 +978,86 @@ mod tests {
             .expect("get_state ok");
         let state = resp.into_inner();
         assert_eq!(state.recent.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn cancel_job_ok_for_delegated_pull() {
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "mod".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        let token = guard.cancellation_token().clone();
+
+        let resp = svc
+            .cancel_job(Request::new(CancelJobRequest {
+                transfer_id: id.clone(),
+            }))
+            .await
+            .expect("cancel_job ok");
+        assert_eq!(resp.into_inner().transfer_id, id);
+        assert!(token.is_cancelled(), "delegated_pull token must be fired");
+
+        // The active row stays in the table until Drop runs;
+        // letting the guard fall out of scope here.
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn cancel_job_failed_precondition_for_non_delegated_kind() {
+        let svc = empty_service();
+        for kind in [
+            ActiveJobKind::Push,
+            ActiveJobKind::Pull,
+            ActiveJobKind::PullSync,
+        ] {
+            let guard =
+                svc.active_jobs
+                    .register(kind, "p".to_string(), "mod".to_string(), "/".to_string());
+            let id = guard.transfer_id().to_string();
+            let token = guard.cancellation_token().clone();
+
+            let err = svc
+                .cancel_job(Request::new(CancelJobRequest {
+                    transfer_id: id.clone(),
+                }))
+                .await
+                .expect_err("non-delegated kind must reject CancelJob");
+            assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                !token.is_cancelled(),
+                "{}: token must NOT be fired when CancelJob is unsupported",
+                kind.as_str()
+            );
+            drop(guard);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_job_not_found_for_unknown_transfer_id() {
+        let svc = empty_service();
+        let err = svc
+            .cancel_job(Request::new(CancelJobRequest {
+                transfer_id: "t-nope".to_string(),
+            }))
+            .await
+            .expect_err("unknown id must NotFound");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn cancel_job_invalid_argument_for_empty_id() {
+        let svc = empty_service();
+        let err = svc
+            .cancel_job(Request::new(CancelJobRequest {
+                transfer_id: String::new(),
+            }))
+            .await
+            .expect_err("empty id must InvalidArgument");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[tokio::test]
