@@ -89,6 +89,18 @@ impl ActiveJobKind {
             ActiveJobKind::DelegatedPull => "delegated_pull",
         }
     }
+
+    /// Wire-shape conversion to the `TransferKind` proto enum.
+    /// Used by the `GetState` handler.
+    pub fn to_wire(self) -> blit_core::generated::TransferKind {
+        use blit_core::generated::TransferKind as Wire;
+        match self {
+            ActiveJobKind::Push => Wire::Push,
+            ActiveJobKind::Pull => Wire::Pull,
+            ActiveJobKind::PullSync => Wire::PullSync,
+            ActiveJobKind::DelegatedPull => Wire::DelegatedPull,
+        }
+    }
 }
 
 /// One row of the `ActiveJobs` table. Fields mirror the

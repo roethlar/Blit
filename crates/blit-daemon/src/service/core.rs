@@ -15,11 +15,12 @@ use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
-    ClientPullMessage, ClientPushRequest, CompletionRequest, CompletionResponse,
-    DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo,
-    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, ListModulesRequest,
-    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
-    PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
+    ActiveTransfer, ClientPullMessage, ClientPushRequest, CompletionRequest, CompletionResponse,
+    Counters, DaemonState, DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry,
+    DiskUsageRequest, FileInfo, FilesystemStatsRequest, FilesystemStatsResponse, FindEntry,
+    FindRequest, GetStateRequest, ListModulesRequest, ListModulesResponse, ListRequest,
+    ListResponse, ModuleInfo, PullChunk, PullRequest, PurgeRequest, PurgeResponse,
+    ServerPullMessage, ServerPushResponse, TransferRecord,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -45,6 +46,11 @@ pub struct BlitService {
     /// `GetState.active[]` once that RPC lands (milestone B
     /// sub-slice). See `crate::active_jobs`.
     pub(crate) active_jobs: ActiveJobs,
+    /// Wall-clock at construction. `GetState.uptime_seconds`
+    /// reports `Instant::now().duration_since(started_at)`.
+    /// Captured once so a clock jump between construction and
+    /// the GetState call doesn't show up as negative uptime.
+    started_at: std::time::Instant,
 }
 
 impl BlitService {
@@ -64,6 +70,7 @@ impl BlitService {
             metrics,
             delegation: Arc::new(delegation),
             active_jobs: ActiveJobs::new(),
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -543,6 +550,95 @@ impl Blit for BlitService {
         Ok(Response::new(ListModulesResponse { modules }))
     }
 
+    async fn get_state(
+        &self,
+        request: Request<GetStateRequest>,
+    ) -> Result<Response<DaemonState>, Status> {
+        use std::sync::atomic::Ordering;
+        let _req = request.into_inner();
+        // `recent_limit` semantics: 0 means "use the daemon's
+        // default" which is what `active_jobs.recent()` already
+        // returns. A non-zero value is a per-request truncation —
+        // the daemon doesn't grow the ring for one request, just
+        // returns the most recent `recent_limit` entries.
+        //
+        // Truncation lands when the CLI verb wires this; for the
+        // handler-only slice we always return the full ring and
+        // let the caller drop. The proto field is reserved on the
+        // wire so the future truncation is non-breaking.
+        let modules = {
+            let guard = self.modules.lock().await;
+            let mut ms: Vec<ModuleInfo> = guard
+                .values()
+                .map(|module| ModuleInfo {
+                    name: module.name.clone(),
+                    path: module.path.to_string_lossy().into_owned(),
+                    read_only: module.read_only,
+                })
+                .collect();
+            ms.sort_by(|a, b| a.name.cmp(&b.name));
+            ms
+        };
+
+        let active: Vec<ActiveTransfer> = self
+            .active_jobs
+            .snapshot()
+            .into_iter()
+            .map(|j| ActiveTransfer {
+                transfer_id: j.transfer_id,
+                kind: j.kind.to_wire() as i32,
+                peer: j.peer,
+                module: j.module,
+                path: j.path,
+                start_unix_ms: j.start_unix_ms,
+                // Byte-level progress fields come from milestone
+                // C's write-loop instrumentation; zero for now.
+                bytes_completed: 0,
+                bytes_total: 0,
+            })
+            .collect();
+
+        let recent: Vec<TransferRecord> = self
+            .active_jobs
+            .recent()
+            .into_iter()
+            .map(|r| TransferRecord {
+                transfer_id: r.transfer_id,
+                kind: r.kind.to_wire() as i32,
+                peer: r.peer,
+                module: r.module,
+                path: r.path,
+                start_unix_ms: r.start_unix_ms,
+                duration_ms: r.duration_ms,
+                // Byte/file totals come from milestone C.
+                bytes: 0,
+                files: 0,
+                ok: r.ok,
+                error_message: r.error_message,
+            })
+            .collect();
+
+        let counters = Counters {
+            push_operations_total: self.metrics.push_operations.load(Ordering::Relaxed),
+            pull_operations_total: self.metrics.pull_operations.load(Ordering::Relaxed),
+            purge_operations_total: self.metrics.purge_operations.load(Ordering::Relaxed),
+            active_transfers: self.metrics.active_transfers.load(Ordering::Relaxed),
+            transfer_errors_total: self.metrics.transfer_errors.load(Ordering::Relaxed),
+        };
+
+        let uptime_seconds = self.started_at.elapsed().as_secs();
+
+        Ok(Response::new(DaemonState {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_seconds,
+            modules,
+            active,
+            recent,
+            counters: Some(counters),
+            delegation_enabled: self.delegation.allow_delegated_pull,
+        }))
+    }
+
     async fn disk_usage(
         &self,
         request: Request<DiskUsageRequest>,
@@ -689,5 +785,105 @@ fn outcome_from_status<T>(result: &Result<T, Status>) -> (bool, Option<String>) 
     match result {
         Ok(_) => (true, None),
         Err(status) => (false, Some(status.message().to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::active_jobs::ActiveJobKind;
+    use blit_core::generated::TransferKind as WireKind;
+
+    fn empty_service() -> BlitService {
+        BlitService::with_modules(HashMap::new(), false)
+    }
+
+    #[tokio::test]
+    async fn get_state_empty_daemon_returns_zero_active_and_recent() {
+        let svc = empty_service();
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert_eq!(state.version, env!("CARGO_PKG_VERSION"));
+        assert!(state.active.is_empty());
+        assert!(state.recent.is_empty());
+        assert!(state.modules.is_empty());
+        // Counters present but zero because `with_modules` builds
+        // a metrics-disabled service.
+        let counters = state.counters.expect("counters present");
+        assert_eq!(counters.push_operations_total, 0);
+        assert_eq!(counters.pull_operations_total, 0);
+        assert_eq!(counters.transfer_errors_total, 0);
+    }
+
+    #[tokio::test]
+    async fn get_state_surfaces_live_active_row_and_recent_row() {
+        let svc = empty_service();
+        // Live row.
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::Pull,
+            "10.0.0.5:443".to_string(),
+            "mod-a".to_string(),
+            "sub/dir".to_string(),
+        );
+
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert_eq!(state.active.len(), 1);
+        let row = &state.active[0];
+        assert_eq!(row.kind, WireKind::Pull as i32);
+        assert_eq!(row.peer, "10.0.0.5:443");
+        assert_eq!(row.module, "mod-a");
+        assert_eq!(row.path, "sub/dir");
+        // Byte-level fields are zero in milestone B.
+        assert_eq!(row.bytes_completed, 0);
+        assert_eq!(row.bytes_total, 0);
+
+        // Drop the active row + record outcome → it should now
+        // appear in `recent[]`.
+        guard.record_outcome(true, None);
+        drop(guard);
+
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert!(state.active.is_empty());
+        assert_eq!(state.recent.len(), 1);
+        let rec = &state.recent[0];
+        assert_eq!(rec.kind, WireKind::Pull as i32);
+        assert!(rec.ok);
+        assert_eq!(rec.error_message, "");
+        // bytes / files come from milestone C — zero for now.
+        assert_eq!(rec.bytes, 0);
+        assert_eq!(rec.files, 0);
+    }
+
+    #[tokio::test]
+    async fn get_state_failure_record_carries_error_message() {
+        let svc = empty_service();
+        {
+            let guard = svc.active_jobs.register(
+                ActiveJobKind::Push,
+                "p".to_string(),
+                String::new(),
+                String::new(),
+            );
+            guard.record_outcome(false, Some("module not found".to_string()));
+        }
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert_eq!(state.recent.len(), 1);
+        assert!(!state.recent[0].ok);
+        assert_eq!(state.recent[0].error_message, "module not found");
     }
 }

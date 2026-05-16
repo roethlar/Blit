@@ -46,6 +46,15 @@ service Blit {
   // (gate ordering, allowlist semantics, client_capabilities
   // override boundary).
   rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
+
+  // Daemon-state snapshot for the TUI's F1 (Daemons) and F2
+  // (Transfers) panes, plus `blit jobs list <remote>`. Always
+  // available regardless of `--metrics`; see §6.4 of
+  // docs/plan/TUI_DESIGN.md. Counters read from the
+  // TransferMetrics atomics (so they're zero when the flag is
+  // off), but active[] / recent[] always populate from the
+  // always-on ActiveJobs table introduced in milestone B.
+  rpc GetState(GetStateRequest) returns (DaemonState);
 }
 
 // Removed: `BlitAuth` service stub (2026-05-13). Original design
@@ -630,4 +639,103 @@ message DelegatedPullError {
     APPLY = 5;               // dst-side apply failure (containment, disk, perms)
   }
   Phase phase = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GetState — daemon snapshot. See §6.3 of docs/plan/TUI_DESIGN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message GetStateRequest {
+  // Maximum number of recent[] entries to return. 0 = use the
+  // daemon's default (50). Ignored if larger than what the daemon
+  // is tracking; the response simply contains all rows the ring
+  // currently holds.
+  uint32 recent_limit = 1;
+}
+
+message DaemonState {
+  // Daemon's own version (CARGO_PKG_VERSION), e.g. "0.1.0".
+  string version = 1;
+  // Seconds since the daemon process started serving RPCs.
+  uint64 uptime_seconds = 2;
+  // Currently-exported modules. Reuses the existing ModuleInfo
+  // message so clients that already render ListModules output can
+  // reuse the same rendering pipeline.
+  repeated ModuleInfo modules = 3;
+  // Live transfers — populated from the always-on ActiveJobs table.
+  // Not gated on `--metrics`; an operator can always ask the daemon
+  // what it's doing right now.
+  repeated ActiveTransfer active = 4;
+  // Recent completed transfers, oldest-first. Bounded by the
+  // daemon's recent-runs ring depth (default 50, configurable via
+  // GetStateRequest.recent_limit). Drained when the ring fills.
+  repeated TransferRecord recent = 5;
+  // Counter snapshot. Reads from the TransferMetrics atomics —
+  // when `--metrics` is off the atomics never incremented, so all
+  // fields are zero. active[] and recent[] are independent of this
+  // and remain populated.
+  Counters counters = 6;
+  // Mirrors the mDNS TXT advertisement: whether the daemon will
+  // accept inbound DelegatedPull requests.
+  bool delegation_enabled = 7;
+}
+
+// What kind of transfer an ActiveTransfer or TransferRecord row
+// represents. Defined at top level (not nested under
+// TransferStarted) so milestone C's Subscribe events can share the
+// same enum without a cycle.
+enum TransferKind {
+  TRANSFER_KIND_UNSPECIFIED = 0;
+  TRANSFER_KIND_PUSH = 1;
+  TRANSFER_KIND_PULL = 2;
+  TRANSFER_KIND_PULL_SYNC = 3;
+  TRANSFER_KIND_DELEGATED_PULL = 4;
+}
+
+message ActiveTransfer {
+  string transfer_id = 1;
+  TransferKind kind = 2;
+  // `<ip>:<port>` of the connecting peer, or "unknown" when the
+  // transport didn't surface one (in-process tests).
+  string peer = 3;
+  string module = 4;
+  // Module-relative path the transfer targets. Empty until the
+  // streaming RPCs (push / pull_sync) parse their first stream
+  // frame; populated immediately for pull / delegated_pull.
+  string path = 5;
+  uint64 start_unix_ms = 6;
+  // Byte-level progress fields. Always zero in milestone B —
+  // milestone C feeds them from the write-loop instrumentation.
+  uint64 bytes_completed = 7;
+  uint64 bytes_total = 8;
+}
+
+message TransferRecord {
+  string transfer_id = 1;
+  TransferKind kind = 2;
+  string peer = 3;
+  string module = 4;
+  string path = 5;
+  uint64 start_unix_ms = 6;
+  // `drop_unix_ms - start_unix_ms`, saturating at zero so a
+  // backwards clock jump can't underflow.
+  uint64 duration_ms = 7;
+  // Byte-level totals. Zero in milestone B — milestone C fills
+  // them from the write-loop instrumentation.
+  uint64 bytes = 8;
+  uint64 files = 9;
+  bool ok = 10;
+  // Empty when ok=true. Otherwise the handler's Status::message()
+  // for the failure, or a short "cancelled before outcome
+  // recorded" marker when the spawn task didn't reach the
+  // outcome-capture call.
+  string error_message = 11;
+}
+
+message Counters {
+  uint64 push_operations_total = 1;
+  uint64 pull_operations_total = 2;
+  uint64 purge_operations_total = 3;
+  uint64 active_transfers = 4;
+  uint64 transfer_errors_total = 5;
 }

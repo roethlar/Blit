@@ -144,6 +144,13 @@ impl Blit for SpyServer {
     ) -> Result<Response<Self::DelegatedPullStream>, Status> {
         unimplemented!()
     }
+
+    async fn get_state(
+        &self,
+        _: Request<blit_core::generated::GetStateRequest>,
+    ) -> Result<Response<blit_core::generated::DaemonState>, Status> {
+        unimplemented!()
+    }
 }
 
 async fn spawn_spy(captured: Arc<Mutex<Option<TransferOperationSpec>>>) -> u16 {

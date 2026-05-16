@@ -688,6 +688,13 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     ) -> Result<tonic::Response<Self::DelegatedPullStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
+
+    async fn get_state(
+        &self,
+        _: tonic::Request<blit_core::generated::GetStateRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DaemonState>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
 }
 
 struct RejectingPullSyncBlit;
@@ -807,6 +814,15 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         &self,
         _: tonic::Request<blit_core::generated::DelegatedPullRequest>,
     ) -> Result<tonic::Response<Self::DelegatedPullStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
+        ))
+    }
+
+    async fn get_state(
+        &self,
+        _: tonic::Request<blit_core::generated::GetStateRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DaemonState>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))
