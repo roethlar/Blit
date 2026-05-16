@@ -61,7 +61,12 @@ async fn main() -> Result<ExitCode> {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
             DiagnosticsCommand::Dump(args) => run_diagnostics_dump(&args)?,
         },
-        Commands::Jobs { command } => run_jobs(command).await?,
+        // `jobs cancel` exits 0/1/2 (Cancelled / NotFound /
+        // Unsupported) per the §6.5 contract; `jobs list`
+        // always exits 0. The runner returns the right
+        // `ExitCode` for both; propagate it directly like
+        // `check`.
+        Commands::Jobs { command } => return run_jobs(command).await,
     }
 
     Ok(ExitCode::SUCCESS)

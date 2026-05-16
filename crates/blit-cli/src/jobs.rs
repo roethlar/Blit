@@ -4,10 +4,25 @@ use blit_app::admin::jobs::CancelJobOutcome;
 use blit_core::generated::DaemonState;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
+use std::process::ExitCode;
 
-pub async fn run_jobs(command: JobsCommand) -> Result<()> {
+/// Return shape from [`run_jobs`]. `list` always exits with
+/// success once the RPC returned cleanly; `cancel` carries
+/// the per-outcome exit code mandated by the CLI contract
+/// (`docs/plan/TUI_DESIGN.md` §6.5):
+///
+///   Cancelled  → 0
+///   NotFound   → 1
+///   Unsupported → 2
+///
+/// Same pattern as `run_check`: the verb owns the
+/// `ExitCode`, `main` returns it.
+pub async fn run_jobs(command: JobsCommand) -> Result<ExitCode> {
     match command {
-        JobsCommand::List(args) => run_jobs_list(args).await,
+        JobsCommand::List(args) => {
+            run_jobs_list(args).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         JobsCommand::Cancel(args) => run_jobs_cancel(args).await,
     }
 }
@@ -25,7 +40,7 @@ async fn run_jobs_list(args: JobsListArgs) -> Result<()> {
     Ok(())
 }
 
-async fn run_jobs_cancel(args: JobsCancelArgs) -> Result<()> {
+async fn run_jobs_cancel(args: JobsCancelArgs) -> Result<ExitCode> {
     let remote = RemoteEndpoint::parse(&args.remote)
         .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
     let outcome = jobs::cancel(&remote, &args.transfer_id).await?;
@@ -34,15 +49,17 @@ async fn run_jobs_cancel(args: JobsCancelArgs) -> Result<()> {
     } else {
         print_cancel_human(&remote, &outcome);
     }
-    // Distinguish exit codes so scripts can branch:
-    //   Cancelled  → 0
-    //   NotFound   → 1 (the transfer wasn't there to cancel)
-    //   Unsupported→ 2 (the kind doesn't honor cancellation —
-    //                  caller misuse, not a transient state)
+    Ok(cancel_exit_code(&outcome))
+}
+
+/// Map [`CancelJobOutcome`] to the contract's exit codes.
+/// Pulled out as a sync helper so unit tests can pin the
+/// mapping without spinning up a tonic server.
+pub(crate) fn cancel_exit_code(outcome: &CancelJobOutcome) -> ExitCode {
     match outcome {
-        CancelJobOutcome::Cancelled { .. } => Ok(()),
-        CancelJobOutcome::NotFound { .. } => Err(eyre::eyre!("transfer not found")),
-        CancelJobOutcome::Unsupported { message, .. } => Err(eyre::eyre!(message)),
+        CancelJobOutcome::Cancelled { .. } => ExitCode::SUCCESS,
+        CancelJobOutcome::NotFound { .. } => ExitCode::from(1),
+        CancelJobOutcome::Unsupported { .. } => ExitCode::from(2),
     }
 }
 
@@ -306,5 +323,42 @@ mod tests {
         assert_eq!(module_path("", "p"), "p");
         assert_eq!(module_path("mod", ""), "mod");
         assert_eq!(module_path("mod", "sub/dir"), "mod/sub/dir");
+    }
+
+    /// `ExitCode` doesn't implement `PartialEq`, so we compare
+    /// via the `Debug` repr — stable across releases of std
+    /// and good enough to pin the contract.
+    fn exit_code_repr(c: ExitCode) -> String {
+        format!("{:?}", c)
+    }
+
+    #[test]
+    fn cancel_exit_code_maps_each_outcome_to_the_contract_code() {
+        let cancelled = CancelJobOutcome::Cancelled {
+            transfer_id: "t1".to_string(),
+        };
+        let not_found = CancelJobOutcome::NotFound {
+            transfer_id: "t2".to_string(),
+        };
+        let unsupported = CancelJobOutcome::Unsupported {
+            transfer_id: "t3".to_string(),
+            message: "kind not cancellable".to_string(),
+        };
+
+        assert_eq!(
+            exit_code_repr(cancel_exit_code(&cancelled)),
+            exit_code_repr(ExitCode::SUCCESS),
+            "Cancelled must exit 0",
+        );
+        assert_eq!(
+            exit_code_repr(cancel_exit_code(&not_found)),
+            exit_code_repr(ExitCode::from(1)),
+            "NotFound must exit 1",
+        );
+        assert_eq!(
+            exit_code_repr(cancel_exit_code(&unsupported)),
+            exit_code_repr(ExitCode::from(2)),
+            "Unsupported must exit 2",
+        );
     }
 }
