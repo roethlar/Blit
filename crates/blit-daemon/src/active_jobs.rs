@@ -19,14 +19,21 @@
 //!   their handlers fill the row once the first stream frame
 //!   parses. All four `ActiveJobKind` variants are now
 //!   actually constructed on the wire path.
+//! - `b-3-recent-ring`: bounded recent-runs ring of
+//!   [`TransferRecord`] entries on `ActiveJobs`, pushed by
+//!   Drop alongside the table removal. Outcome capture via
+//!   [`ActiveJobGuard::record_outcome`]; spawn closures in
+//!   `service/core.rs` call it before dropping the guard.
+//!   Default ring depth [`DEFAULT_RECENT_LIMIT`] (50);
+//!   configurable via `ActiveJobs::with_recent_limit`.
 //!
 //! Out of scope (next sub-slices):
 //!
-//! - Recent-runs ring buffer (drains-out side).
-//! - `GetState` RPC reading from this table.
+//! - `GetState` RPC reading from `snapshot()` + `recent()`.
 //! - `CancelJob` plumbing (M-Jobs adds the `CancellationToken`
 //!   field on each row).
-//! - Byte-level progress (`bytes_completed`/`bytes_total`) —
+//! - Byte-level progress (`bytes_completed` / `bytes_total`
+//!   on active rows; `bytes` / `files` on records) —
 //!   milestone C extends rows from the write-loop
 //!   instrumentation.
 //!
@@ -46,10 +53,16 @@
 //! Round-1 of this slice used `tokio::sync::Mutex` + the
 //! try_lock-then-spawn pattern; the reviewer caught it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Default depth of the recent-runs ring buffer. Mirrors the
+/// `GetStateRequest.recent_limit = 0 → 50` default the design
+/// doc (§6.3) calls for. Carried as a constant here so b-3
+/// can land before the proto types.
+pub const DEFAULT_RECENT_LIMIT: usize = 50;
 
 /// What kind of transfer a row represents. Mirrors the
 /// dispatch sites in `service/core.rs`. When milestone C
@@ -108,6 +121,43 @@ pub struct ActiveJob {
     pub start_unix_ms: u64,
 }
 
+/// One entry in the recent-runs ring buffer. Fields mirror
+/// the `TransferRecord` proto message planned for
+/// `GetState.recent[]` in §6.3 of the TUI design doc. Missing
+/// wire fields (`bytes`, `files`) land in milestone C from
+/// the write-loop instrumentation.
+///
+/// Fields are `#[allow(dead_code)]` for this slice because
+/// the read consumer (`GetState` handler) lands in b-4; the
+/// `recent()` tests in this module exercise them so the
+/// shape is locked in now.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TransferRecord {
+    pub transfer_id: String,
+    pub kind: ActiveJobKind,
+    pub peer: String,
+    pub module: String,
+    pub path: String,
+    pub start_unix_ms: u64,
+    /// `unix_ms_at_drop - start_unix_ms`, saturating at zero
+    /// so a clock skew between registration and drain doesn't
+    /// produce a wraparound.
+    pub duration_ms: u64,
+    /// `true` if the handler reported success (Subscribe-era
+    /// `TransferComplete`); `false` if it failed or the
+    /// guard drained without a recorded outcome (panic,
+    /// client cancellation before the handler reached the
+    /// outcome-capture call).
+    pub ok: bool,
+    /// Empty when `ok == true`. Otherwise the handler's
+    /// `Status::message()` for failures, or a short
+    /// "cancelled before outcome recorded" marker when the
+    /// guard drained without [`ActiveJobGuard::record_outcome`]
+    /// being called.
+    pub error_message: String,
+}
+
 /// In-memory registry, shared between the dispatch boundary and
 /// future `GetState` reads.
 #[derive(Clone)]
@@ -117,6 +167,16 @@ pub struct ActiveJobs {
 
 struct Inner {
     table: Mutex<HashMap<String, ActiveJob>>,
+    /// Bounded ring of completed transfers, drained from
+    /// `table` by [`ActiveJobGuard::Drop`]. Push at the back,
+    /// trim from the front, so iteration order is
+    /// oldest-first; callers reading `GetState.recent[]` will
+    /// typically reverse for display.
+    recent: Mutex<VecDeque<TransferRecord>>,
+    /// Maximum number of entries kept in `recent`. Sized at
+    /// construction so the `DEFAULT_RECENT_LIMIT` constant
+    /// stays the only place the default is named.
+    recent_limit: usize,
     /// Monotonic counter feeding [`mint_transfer_id`]. Keeps ids
     /// unique within a single millisecond when multiple
     /// transfers register at the same instant.
@@ -124,10 +184,24 @@ struct Inner {
 }
 
 impl ActiveJobs {
+    /// Construct a registry with the default recent-runs
+    /// ring depth ([`DEFAULT_RECENT_LIMIT`] = 50).
     pub fn new() -> Self {
+        Self::with_recent_limit(DEFAULT_RECENT_LIMIT)
+    }
+
+    /// Construct a registry with a custom recent-runs ring
+    /// depth. `limit == 0` is allowed and disables the ring
+    /// (Drop still removes the active row; nothing is
+    /// preserved). Will be reached by the future
+    /// `GetState.GetStateRequest.recent_limit` plumbing.
+    #[allow(dead_code)]
+    pub fn with_recent_limit(limit: usize) -> Self {
         Self {
             inner: Arc::new(Inner {
                 table: Mutex::new(HashMap::new()),
+                recent: Mutex::new(VecDeque::with_capacity(limit)),
+                recent_limit: limit,
                 counter: AtomicU64::new(0),
             }),
         }
@@ -171,6 +245,7 @@ impl ActiveJobs {
         ActiveJobGuard {
             inner: Arc::clone(&self.inner),
             transfer_id,
+            outcome: Mutex::new(None),
         }
     }
 
@@ -187,6 +262,20 @@ impl ActiveJobs {
             .cloned()
             .collect()
     }
+
+    /// Snapshot of the recent-runs ring, oldest first. Will
+    /// be consumed by `GetState.recent[]` once the RPC
+    /// handler lands.
+    #[allow(dead_code)]
+    pub fn recent(&self) -> Vec<TransferRecord> {
+        self.inner
+            .recent
+            .lock()
+            .expect("active_jobs recent poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 impl Default for ActiveJobs {
@@ -198,14 +287,30 @@ impl Default for ActiveJobs {
 /// RAII guard tying an `ActiveJob` row's lifetime to the
 /// dispatcher's spawned task. Drop removes the row whether the
 /// task completed, errored, or was cancelled — same posture as
-/// the metrics active-transfers gauge.
+/// the metrics active-transfers gauge — and pushes a
+/// [`TransferRecord`] onto the registry's recent-runs ring.
 ///
 /// Drop is **synchronous and deterministic**: after the guard
-/// is dropped, the row is gone. This is the contract
-/// `GetState.active[]` relies on.
+/// is dropped, the row is gone and the ring has been updated.
+/// This is the contract `GetState.active[]` /
+/// `GetState.recent[]` rely on.
 pub struct ActiveJobGuard {
     inner: Arc<Inner>,
     transfer_id: String,
+    /// Filled by [`record_outcome`] before Drop. If still
+    /// `None` at Drop time the spawn task either panicked or
+    /// was cancelled before reaching the outcome-capture call,
+    /// and the ring entry records `ok=false` +
+    /// `"cancelled before outcome recorded"`.
+    outcome: Mutex<Option<RecordedOutcome>>,
+}
+
+/// Outcome handed to [`ActiveJobGuard::record_outcome`].
+/// `error_message` is required when `ok == false`; empty
+/// otherwise.
+struct RecordedOutcome {
+    ok: bool,
+    error_message: String,
 }
 
 impl ActiveJobGuard {
@@ -245,19 +350,81 @@ impl ActiveJobGuard {
             row.path = path;
         }
     }
+
+    /// Capture the transfer's outcome before Drop. Spawn
+    /// closures in `service/core.rs` call this with the
+    /// handler's `Result` translated to `(ok, error_message)`
+    /// just before the guard goes out of scope.
+    ///
+    /// Last writer wins — if a closure happens to call it
+    /// twice (e.g. one branch records success then a follow-up
+    /// branch overrides) the most recent value is used. In
+    /// practice each spawn closure calls it once.
+    ///
+    /// If never called, Drop records the entry with
+    /// `ok=false` and a "cancelled before outcome recorded"
+    /// error_message so the ring carries a placeholder rather
+    /// than silently dropping the run.
+    pub fn record_outcome(&self, ok: bool, error_message: Option<String>) {
+        let mut cell = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
+        *cell = Some(RecordedOutcome {
+            ok,
+            error_message: error_message.unwrap_or_default(),
+        });
+    }
 }
 
 impl Drop for ActiveJobGuard {
     fn drop(&mut self) {
-        // Synchronous removal. PoisonError still hands us the
-        // inner guard via `into_inner`, so the row is drained
-        // even if a panic poisoned the mutex on the way in.
-        // This matches the rest of the codebase's stance on
-        // poisoning — surface the failure, but don't leak
-        // state.
+        // Synchronous remove-and-record. PoisonError still
+        // hands us the inner guards via `into_inner`, so both
+        // the active row and the ring are updated even if a
+        // panic poisoned the mutex on the way in. This matches
+        // the rest of the codebase's stance on poisoning —
+        // surface the failure, but don't leak state.
         let id = std::mem::take(&mut self.transfer_id);
-        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
-        table.remove(&id);
+        let outcome = {
+            let mut cell = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
+            cell.take()
+        };
+        let row = {
+            let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
+            table.remove(&id)
+        };
+        if let Some(row) = row {
+            if self.inner.recent_limit > 0 {
+                let record = build_record(row, outcome);
+                push_recent(&self.inner.recent, record, self.inner.recent_limit);
+            }
+        }
+    }
+}
+
+fn build_record(row: ActiveJob, outcome: Option<RecordedOutcome>) -> TransferRecord {
+    let drop_unix_ms = unix_ms_now();
+    let duration_ms = drop_unix_ms.saturating_sub(row.start_unix_ms);
+    let (ok, error_message) = match outcome {
+        Some(o) => (o.ok, o.error_message),
+        None => (false, "cancelled before outcome recorded".to_string()),
+    };
+    TransferRecord {
+        transfer_id: row.transfer_id,
+        kind: row.kind,
+        peer: row.peer,
+        module: row.module,
+        path: row.path,
+        start_unix_ms: row.start_unix_ms,
+        duration_ms,
+        ok,
+        error_message,
+    }
+}
+
+fn push_recent(recent: &Mutex<VecDeque<TransferRecord>>, record: TransferRecord, limit: usize) {
+    let mut buf = recent.lock().unwrap_or_else(|e| e.into_inner());
+    buf.push_back(record);
+    while buf.len() > limit {
+        buf.pop_front();
     }
 }
 
@@ -503,6 +670,111 @@ mod tests {
         // already-empty table.
         drop(guard);
         assert!(table.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drop_with_recorded_outcome_pushes_to_recent() {
+        let table = ActiveJobs::new();
+        {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                "peer".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+        let recent = table.recent();
+        assert_eq!(recent.len(), 1);
+        let r = &recent[0];
+        assert_eq!(r.kind, ActiveJobKind::Pull);
+        assert_eq!(r.peer, "peer");
+        assert_eq!(r.module, "mod");
+        assert_eq!(r.path, "p");
+        assert!(r.ok);
+        assert!(r.error_message.is_empty());
+        // duration_ms is `unix_ms - start_unix_ms`; can be 0
+        // if the test ran in the same millisecond, but the
+        // field must be present.
+        let _ = r.duration_ms;
+    }
+
+    #[tokio::test]
+    async fn drop_with_error_outcome_carries_message() {
+        let table = ActiveJobs::new();
+        {
+            let guard = table.register(
+                ActiveJobKind::Push,
+                "p".to_string(),
+                String::new(),
+                String::new(),
+            );
+            guard.record_outcome(false, Some("module not found".to_string()));
+        }
+        let recent = table.recent();
+        assert_eq!(recent.len(), 1);
+        assert!(!recent[0].ok);
+        assert_eq!(recent[0].error_message, "module not found");
+    }
+
+    #[tokio::test]
+    async fn drop_without_recorded_outcome_marks_cancelled() {
+        // If the spawn task panics or is cancelled before
+        // reaching `record_outcome`, the ring should still
+        // carry a placeholder rather than silently dropping
+        // the run.
+        let table = ActiveJobs::new();
+        {
+            let _guard = table.register(
+                ActiveJobKind::DelegatedPull,
+                "p".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            // No record_outcome call.
+        }
+        let recent = table.recent();
+        assert_eq!(recent.len(), 1);
+        assert!(!recent[0].ok);
+        assert_eq!(recent[0].error_message, "cancelled before outcome recorded");
+    }
+
+    #[tokio::test]
+    async fn recent_ring_bounded_evicts_oldest() {
+        let table = ActiveJobs::with_recent_limit(3);
+        // Push 5 entries; only the last 3 should survive.
+        for i in 0..5 {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                format!("peer{i}"),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+        let recent = table.recent();
+        assert_eq!(recent.len(), 3);
+        // Oldest-first ordering: the 3 survivors are peer2, peer3, peer4.
+        assert_eq!(recent[0].peer, "peer2");
+        assert_eq!(recent[1].peer, "peer3");
+        assert_eq!(recent[2].peer, "peer4");
+    }
+
+    #[tokio::test]
+    async fn recent_ring_zero_limit_disables_history() {
+        let table = ActiveJobs::with_recent_limit(0);
+        {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                "p".to_string(),
+                "m".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+        // Active row drained, but no ring entry pushed.
+        assert!(table.snapshot().is_empty());
+        assert!(table.recent().is_empty());
     }
 
     #[test]

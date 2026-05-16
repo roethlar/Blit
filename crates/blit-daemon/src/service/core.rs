@@ -163,11 +163,17 @@ impl Blit for BlitService {
                 &job,
             )
             .await;
-            let ok = result.is_ok();
+            let (ok, err_msg) = outcome_from_status(&result);
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            // Record the outcome before dropping the
+            // ActiveJob guard — Drop builds the recent-runs
+            // TransferRecord and reads this cell. If we
+            // dropped the guard first the record would say
+            // "cancelled before outcome recorded."
+            job.record_outcome(ok, err_msg);
             drop(job);
             // §3.1 followup: drop the active-transfer guard BEFORE the
             // completion log so `active=N` reflects state AFTER the
@@ -211,11 +217,12 @@ impl Blit for BlitService {
             let guard = guard;
             let job = job;
             let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
-            let ok = result.is_ok();
+            let (ok, err_msg) = outcome_from_status(&result);
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            job.record_outcome(ok, err_msg);
             drop(guard);
             drop(job);
             metrics.log_completion("pull", started.elapsed(), ok);
@@ -259,11 +266,12 @@ impl Blit for BlitService {
                 &job,
             )
             .await;
-            let ok = result.is_ok();
+            let (ok, err_msg) = outcome_from_status(&result);
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            job.record_outcome(ok, err_msg);
             drop(guard);
             drop(job);
             metrics.log_completion("pull_sync", started.elapsed(), ok);
@@ -349,6 +357,24 @@ impl Blit for BlitService {
                     Some(handler_ok)
                 }
             };
+            // Map the select outcome onto the ActiveJobs ring
+            // shape:
+            //   Some(true)  → ok, no error
+            //   Some(false) → handler-failure; the handler
+            //                  already sent the phased error to
+            //                  the client and surfaced it via
+            //                  `metrics.inc_error` below. We
+            //                  don't have the message string at
+            //                  this level — the C milestone
+            //                  routes structured errors. Use a
+            //                  short marker.
+            //   None        → client cancellation
+            let (job_ok, job_err) = match outcome {
+                Some(true) => (true, None),
+                Some(false) => (false, Some("delegated_pull handler failed".to_string())),
+                None => (false, Some("client cancelled".to_string())),
+            };
+            job.record_outcome(job_ok, job_err);
             drop(job);
             // The handler's RAII guard releases the active gauge as
             // its scope ends with the spawn task above, so by the
@@ -652,4 +678,16 @@ fn peer_addr_string<T>(request: &Request<T>) -> String {
         .remote_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Translate a handler's `Result<_, Status>` into the
+/// `(ok, error_message)` pair the ActiveJobs guard expects.
+/// Used by `push`, `pull`, and `pull_sync` dispatchers.
+/// `delegated_pull` has its own shape (handler returns `bool`
+/// inside a select) and inlines the equivalent mapping there.
+fn outcome_from_status<T>(result: &Result<T, Status>) -> (bool, Option<String>) {
+    match result {
+        Ok(_) => (true, None),
+        Err(status) => (false, Some(status.message().to_string())),
+    }
 }
