@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                    | Severity | Title                                       | Status | Branch     | Commit    |
-|-----------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-1a-byte-counter-api | Medium   | Byte progress API crosses crate dep boundary | [~]    | `phase5/c` | `234d2c6` |
+_none_
 
 ## Open findings
 
@@ -69,3 +67,7 @@ Phase 5 M-Jobs sub-slices on branch `phase5/m-jobs`:
 - `66df256` CancelJob RPC + `blit jobs cancel` CLI (`m-jobs-2-cancel-rpc`)
 - `1221d60` detach field + fire-and-forget CLI path (`m-jobs-3-detach`)
 - `09cffbb` `blit jobs watch` polling surface (`m-jobs-6-watch`)
+
+Phase 5 C sub-slices on branch `phase5/c`:
+
+- `234d2c6` Byte counter API in `blit-core` + ActiveJobs row wiring (`c-1a-byte-counter-api`)
