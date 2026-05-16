@@ -128,4 +128,38 @@ Workspace: 532 passed (was 528; +4 handler tests).
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `a96ca93`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. One
+medium-severity finding: the contract on `blit jobs cancel`
+exit codes (0 / 1 / 2) was documented but not implemented.
+Round 1 returned `Err(eyre)` for both NotFound and
+Unsupported, which went through `main`'s generic error path
+and collapsed onto a single non-zero exit code. Scripts
+couldn't distinguish the two outcomes as advertised.
+
+### Round 2 (sha pending) — addresses the exit-code finding
+
+`run_jobs` now returns `Result<ExitCode>`; `main` propagates
+the value directly via `return run_jobs(command).await`,
+mirroring the `run_check` pattern. The cancel branch uses a
+sync helper `cancel_exit_code(&outcome)` to map
+`CancelJobOutcome` → `ExitCode`, so the mapping is
+unit-testable without standing up a tonic server.
+
+New test
+`cancel_exit_code_maps_each_outcome_to_the_contract_code`
+pins:
+
+- `Cancelled` → `ExitCode::SUCCESS`
+- `NotFound`  → `ExitCode::from(1)`
+- `Unsupported` → `ExitCode::from(2)`
+
+`ExitCode` doesn't implement `PartialEq` in stable std, so
+the test compares the `Debug` repr (stable across std
+releases and good enough to pin the contract).
+
+`jobs list` continues to always return `ExitCode::SUCCESS`;
+no semantic exit codes on that side.
+
+Workspace: 533 passed (was 532; +1).
