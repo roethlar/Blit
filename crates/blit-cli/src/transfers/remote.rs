@@ -8,7 +8,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
 use blit_app::transfers::remote::{
-    run_remote_pull, LocalPurgeStats, PullExecution, PullExecutionOutcome,
+    apply_pull_mirror_purge, run_pull_sync, LocalPurgeStats, PullExecutionOutcome,
+    PullSyncExecution,
 };
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::source::{
@@ -398,7 +399,7 @@ async fn run_remote_pull_transfer_inner(
         defer_output, // R53-F1: suppress final progress line on move
     );
 
-    let execution = PullExecution {
+    let execution = PullSyncExecution {
         remote: remote.clone(),
         dest_root: dest_root.to_path_buf(),
         options: PullSyncOptions {
@@ -422,20 +423,37 @@ async fn run_remote_pull_transfer_inner(
         remote_label: format_remote_endpoint(&remote),
     };
 
-    // CLI owns the progress monitor lifecycle (R53-F1: the
-    // `suppress_final_line` gate is presentation policy, so it
-    // lives here). Library borrows the channel for the duration of
-    // the RPC; CLI drops the handle and drains the task afterward.
+    // Lifecycle (round-2 fix for a0-pull-execution):
     //
-    // R46-F6 ordering — mirror-purge runs inside the library
-    // before it returns, so the purge stats are available for the
-    // same JSON document as the transfer report.
-    let state = run_remote_pull(execution, progress_handle.as_ref()).await?;
+    //   1. PullSync RPC with progress monitor live.
+    //   2. Tear down progress channel + drain monitor task.
+    //   3. Apply mirror-purge in the now-quiet state.
+    //   4. Print summary (or defer to the move caller).
+    //
+    // Round-1 bundled steps 1 and 3 into a single library call,
+    // which kept the monitor alive through purge and let stale
+    // [progress] ticks emit during destructive cleanup. The
+    // library now exposes the two halves separately so the CLI
+    // (and TUI) can place the lifecycle boundary at step 2.
+    //
+    // R53-F1 (`suppress_final_line`) and R46-F6 (purge stats in
+    // the same JSON document as the report) both still hold —
+    // R46-F6 is about ordering relative to *printing*, which
+    // still happens at the very end below.
+    let sync_outcome = run_pull_sync(execution, progress_handle.as_ref()).await?;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
+
+    let mirror_purge_stats = apply_pull_mirror_purge(&sync_outcome, mirror_mode).await?;
+
+    let state = PullExecutionOutcome {
+        report: sync_outcome.report,
+        actual_dest: sync_outcome.actual_dest,
+        mirror_purge_stats,
+    };
 
     // R51-F4: when deferred, skip the inline print. The caller
     // (move) prints via `print_deferred_pull_result` after the

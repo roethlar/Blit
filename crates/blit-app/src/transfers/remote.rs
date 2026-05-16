@@ -9,10 +9,15 @@
 //! - [`delete_listed_paths`] + [`LocalPurgeStats`] — applies the
 //!   daemon-authored delete list during a mirror pull, with
 //!   canonical-containment safety.
-//! - [`run_remote_pull`] + [`PullExecution`] + [`PullExecutionOutcome`]
-//!   — pull entry-point orchestration. The CLI's
-//!   `run_remote_pull_transfer_inner` builds a `PullExecution`
-//!   from `&TransferArgs`, the future TUI builds it directly.
+//! - [`run_pull_sync`] + [`apply_pull_mirror_purge`] +
+//!   [`PullSyncExecution`] / [`PullSyncOutcome`] /
+//!   [`PullExecutionOutcome`] — pull entry-point orchestration,
+//!   split into the pull_sync RPC half (returns intermediate
+//!   state) and the mirror-purge half. The caller composes them
+//!   so it can tear down its progress channel between the two
+//!   steps. Round-1 of this slice bundled both halves into a
+//!   single library call, which kept the progress monitor alive
+//!   through purge — round-2 split fixes that regression.
 //!   Presentation (progress monitor spawn, summary printing)
 //!   stays in `blit-cli` until the M-C `AppProgressEvent`
 //!   reshape lands.
@@ -225,7 +230,7 @@ pub async fn delete_listed_paths(
     Ok(stats)
 }
 
-/// Inputs for [`run_remote_pull`]. Primitive fields only — no
+/// Inputs for [`run_pull_sync`]. Primitive fields only — no
 /// clap, no presentation types — so the CLI and the future TUI
 /// can both build it without sharing a dependency.
 ///
@@ -233,7 +238,7 @@ pub async fn delete_listed_paths(
 /// context (e.g. `pulling from <label> into <dest>`). The CLI
 /// passes `format_remote_endpoint(&remote)`; the TUI passes
 /// whatever string it shows the user in the picker.
-pub struct PullExecution {
+pub struct PullSyncExecution {
     pub remote: RemoteEndpoint,
     pub dest_root: PathBuf,
     pub options: PullSyncOptions,
@@ -242,40 +247,57 @@ pub struct PullExecution {
     pub remote_label: String,
 }
 
-/// Captured outcome of [`run_remote_pull`]. Carries everything
-/// the CLI's pull printer (`print_deferred_pull_result`) needs
-/// to render output; the TUI consumes the same struct.
+/// Output of [`run_pull_sync`]. The PullSync handshake is done
+/// and the daemon's report (including any mirror-mode delete
+/// list) is in hand, but no destination filesystem mutation
+/// has happened yet. The caller is expected to tear down its
+/// progress channel here and then call
+/// [`apply_pull_mirror_purge`] to run the destructive half of
+/// the flow — that ordering is the round-2 fix for the
+/// behavior regression where purge ran while the progress
+/// monitor was still alive.
+pub struct PullSyncOutcome {
+    pub report: RemotePullReport,
+    pub actual_dest: PathBuf,
+}
+
+/// Full post-pull state for the CLI printer / TUI summary —
+/// PullSync report + actual destination + (mirror-mode) purge
+/// stats. Composed by the caller from [`PullSyncOutcome`] plus
+/// the result of [`apply_pull_mirror_purge`].
 pub struct PullExecutionOutcome {
     pub report: RemotePullReport,
     pub actual_dest: PathBuf,
     pub mirror_purge_stats: Option<LocalPurgeStats>,
 }
 
-/// Run a remote pull end-to-end: connect, enumerate the local
-/// manifest, run the PullSync handshake, and (in mirror mode)
-/// apply the daemon-authored delete list. Returns the captured
-/// state without printing — presentation is the caller's job.
+/// Run the PullSync half of a remote pull: connect, enumerate
+/// the local manifest, and run the PullSync handshake. Does
+/// **not** apply any mirror-mode delete list — that's
+/// [`apply_pull_mirror_purge`], called by the caller after it
+/// has had a chance to tear down the progress channel.
 ///
-/// `progress` is borrowed for the duration of the PullSync RPC.
-/// The caller (CLI) owns the channel + monitor task; this
-/// function never spawns or awaits the monitor. Lifecycle:
+/// `progress` is borrowed for the duration of the PullSync RPC
+/// only. The split exists so the caller can run the lifecycle:
 ///
 /// ```text
 /// let (handle, task) = spawn_progress_monitor(...);
-/// let outcome = run_remote_pull(execution, handle.as_ref()).await?;
+/// let sync = run_pull_sync(execution, handle.as_ref()).await?;
 /// drop(handle);
 /// if let Some(t) = task { let _ = t.await; }
+/// let purge = apply_pull_mirror_purge(&sync, mirror_mode).await?;
 /// ```
 ///
-/// R46-F6 ordering is preserved: mirror-purge runs *before*
-/// the function returns, so the caller can include
-/// `mirror_purge_stats` in the same JSON document as the
-/// transfer report (pre-fix, the success line was already on
-/// stdout when purge ran, which broke single-document JSON).
-pub async fn run_remote_pull(
-    execution: PullExecution,
+/// Round 2 of `a0-pull-execution` introduced this split. Round
+/// 1 had a single `run_remote_pull` that did pull_sync **and**
+/// purge before returning, which forced the progress monitor
+/// to stay alive across the (potentially long) purge — a
+/// regression vs the pre-Phase-5 CLI lifecycle that the
+/// reviewer caught.
+pub async fn run_pull_sync(
+    execution: PullSyncExecution,
     progress: Option<&RemoteTransferProgress>,
-) -> Result<PullExecutionOutcome> {
+) -> Result<PullSyncOutcome> {
     let mut client = RemotePullClient::connect(execution.remote.clone())
         .await
         .with_context(|| format!("connecting to {}", execution.remote.control_plane_uri()))?;
@@ -301,25 +323,42 @@ pub async fn run_remote_pull(
             )
         })?;
 
-    let mirror_purge_stats = if execution.mirror_mode {
-        if let Some(ref delete_paths) = report.paths_to_delete {
-            if !delete_paths.is_empty() {
-                Some(delete_listed_paths(&actual_dest, delete_paths).await?)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    Ok(PullExecutionOutcome {
+    Ok(PullSyncOutcome {
         report,
         actual_dest,
-        mirror_purge_stats,
     })
+}
+
+/// Apply the daemon-authored mirror-delete list when
+/// `mirror_mode` is true. No-op (returns `Ok(None)`) for plain
+/// copy pulls or when the report carries no paths to delete.
+/// Splits the purge step out of the pull_sync RPC so the
+/// caller's progress monitor can be torn down between the two
+/// (see [`run_pull_sync`] doc comment).
+///
+/// R46-F6 ordering still holds at the caller level: the
+/// printer is invoked **after** this returns, so the purge
+/// stats appear in the same JSON document as the transfer
+/// report. The R46-F6 fix was about ordering relative to
+/// *printing*, not relative to the progress monitor — the
+/// monitor lifecycle was lost in round 1 by trying to bundle
+/// pull_sync + purge into a single library call.
+pub async fn apply_pull_mirror_purge(
+    outcome: &PullSyncOutcome,
+    mirror_mode: bool,
+) -> Result<Option<LocalPurgeStats>> {
+    if !mirror_mode {
+        return Ok(None);
+    }
+    let Some(ref delete_paths) = outcome.report.paths_to_delete else {
+        return Ok(None);
+    };
+    if delete_paths.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        delete_listed_paths(&outcome.actual_dest, delete_paths).await?,
+    ))
 }
 
 #[cfg(test)]
