@@ -1,7 +1,7 @@
 # Reopened: m-jobs-6-watch
 
-Reviewed sha: `5ab9eefae622ae02ff5554e669cfa6c5185c6719`
-Reviewed at: `2026-05-16T23:16:58Z`
+Reviewed sha: `6ff54803d1d8fddff9f9ab9f349058b4d3871822`
+Reviewed at: `2026-05-16T23:21:51Z`
 Reviewer: `codex-reviewer`
 
 Validation:
@@ -12,8 +12,8 @@ Validation:
 
 ## Findings
 
-1. Medium - `TUI_DESIGN.md` still has stale M-Jobs ownership text for Subscribe-scoped pieces.
+1. Low - §7.4 still says M-Jobs introduces the `ActiveJobs` table.
 
-   Round 2 fixed the CLI-surface paragraph and TODO rows, and the code fixes for timeout JSON plus `WatchSnapshot` rustdoc look correct. The design doc still contradicts the new scope in its later phasing section: Milestone M-Jobs still lists "Per-job event ring inside each `ActiveJob` row" and "`transfer_id_filter` field on `SubscribeRequest`" ([docs/plan/TUI_DESIGN.md](/Users/michael/Dev/Blit/docs/plan/TUI_DESIGN.md:882)), the phasing summary still says M-Jobs adds `transfer_id_filter` ([docs/plan/TUI_DESIGN.md](/Users/michael/Dev/Blit/docs/plan/TUI_DESIGN.md:1030)), and the structural commitments still call the `transfer_id_filter` field part of the fixed contract without reflecting that it lands in C ([docs/plan/TUI_DESIGN.md](/Users/michael/Dev/Blit/docs/plan/TUI_DESIGN.md:1065)).
+   Round 3 fixes the remaining `transfer_id_filter` and per-job-ring ownership text. One stale ownership statement remains in the same design doc: §7.4 says "**M-Jobs** introduces the always-on `ActiveJobs` table" ([docs/plan/TUI_DESIGN.md](/Users/michael/Dev/Blit/docs/plan/TUI_DESIGN.md:816)), but §6.3 and the phasing table correctly say B introduces the table and M-Jobs extends it with cancellation/lifecycle fields ([docs/plan/TUI_DESIGN.md](/Users/michael/Dev/Blit/docs/plan/TUI_DESIGN.md:482)).
 
-   Please finish the doc sweep so every M-Jobs/C section agrees: M-Jobs ships detach, CancelJob, cancellation-token rows, and `jobs watch` polling; milestone C ships the per-job event ring, `Subscribe`, `transfer_id_filter`, and the streaming watch upgrade. The code does not need changes for this finding.
+   Please update §7.4 to use the same three-step ownership model as §6.3: B introduces the always-on table and recent ring, M-Jobs adds cancellation/job lifecycle identity, and C adds byte-level progress/event streaming. Code is fine; this is just the last stale planning sentence.
