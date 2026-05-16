@@ -124,6 +124,7 @@ impl Blit for BlitService {
         &self,
         request: Request<Streaming<ClientPushRequest>>,
     ) -> Result<Response<Self::PushStream>, Status> {
+        let peer = peer_addr_string(&request);
         let modules = Arc::clone(&self.modules);
         let (tx, rx) = mpsc::channel(32);
         let stream = request.into_inner();
@@ -137,22 +138,37 @@ impl Blit for BlitService {
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_push();
         let guard = Arc::clone(&metrics).enter_transfer();
+        // ActiveJobs row registered with empty module/path —
+        // those arrive in the first stream frame; the handler
+        // calls `job.set_endpoint(...)` once the header is
+        // parsed (b-2-set-endpoint).
+        let job =
+            self.active_jobs
+                .register(ActiveJobKind::Push, peer, String::new(), String::new());
         // §3.1 / D5: capture start time so `--metrics` can emit a
         // per-RPC duration line at completion.
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
-            // `guard` is moved into the task; its Drop fires no
-            // matter how the task ends.
+            // `guard` and `job` are moved into the task; their
+            // Drop fires no matter how the task ends.
             let guard = guard;
-            let result =
-                handle_push_stream(modules, default_root, stream, tx.clone(), force_grpc_data)
-                    .await;
+            let job = job;
+            let result = handle_push_stream(
+                modules,
+                default_root,
+                stream,
+                tx.clone(),
+                force_grpc_data,
+                &job,
+            )
+            .await;
             let ok = result.is_ok();
             if let Err(status) = result {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
+            drop(job);
             // §3.1 followup: drop the active-transfer guard BEFORE the
             // completion log so `active=N` reflects state AFTER the
             // just-finished RPC is removed from the gauge. Pre-fix
@@ -212,6 +228,7 @@ impl Blit for BlitService {
         &self,
         request: Request<Streaming<ClientPullMessage>>,
     ) -> Result<Response<Self::PullSyncStream>, Status> {
+        let peer = peer_addr_string(&request);
         let modules = Arc::clone(&self.modules);
         let (tx, rx) = mpsc::channel(32);
         let stream = request.into_inner();
@@ -221,10 +238,17 @@ impl Blit for BlitService {
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_pull();
         let guard = Arc::clone(&metrics).enter_transfer();
+        // Same shape as `push` above: module + path arrive in
+        // the first stream frame; handler calls
+        // `job.set_endpoint(...)` after parsing the spec.
+        let job =
+            self.active_jobs
+                .register(ActiveJobKind::PullSync, peer, String::new(), String::new());
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
             let guard = guard;
+            let job = job;
             let result = handle_pull_sync_stream(
                 modules,
                 default_root,
@@ -232,6 +256,7 @@ impl Blit for BlitService {
                 tx.clone(),
                 force_grpc_data,
                 server_checksums_enabled,
+                &job,
             )
             .await;
             let ok = result.is_ok();
@@ -240,6 +265,7 @@ impl Blit for BlitService {
                 let _ = tx.send(Err(status)).await;
             }
             drop(guard);
+            drop(job);
             metrics.log_completion("pull_sync", started.elapsed(), ok);
         });
 

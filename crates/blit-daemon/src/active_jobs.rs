@@ -6,24 +6,22 @@
 //! dispatch boundary in `service/core.rs`; rows are drained on
 //! RPC completion via the RAII guard returned by [`register`].
 //!
-//! Scope of this slice (`b-1-active-jobs`):
+//! Scope so far:
 //!
-//! - Table struct + `ActiveJob` row + `ActiveJobKind`.
-//! - `register(kind, peer, module, path) -> ActiveJobGuard`
-//!   inserts a row and returns a guard whose `Drop` removes it
-//!   synchronously.
-//! - `snapshot()` for tests (and the future `GetState`).
-//! - Wiring at the two RPC dispatch sites where module + path
-//!   are known synchronously: `pull` and `delegated_pull`.
+//! - `b-1-active-jobs`: table struct + `ActiveJob` row +
+//!   `ActiveJobKind`, `register(...) -> ActiveJobGuard` with
+//!   a synchronous Drop that removes the row, `snapshot()`
+//!   for the future `GetState` reader, and wiring at the
+//!   `pull` and `delegated_pull` dispatch sites.
+//! - `b-2-set-endpoint`: `ActiveJobGuard::set_endpoint(module,
+//!   path)` for the streaming-RPC case. Push and pull_sync now
+//!   register at dispatch with empty module/path strings and
+//!   their handlers fill the row once the first stream frame
+//!   parses. All four `ActiveJobKind` variants are now
+//!   actually constructed on the wire path.
 //!
-//! Out of scope (next sub-slice `b-2`):
+//! Out of scope (next sub-slices):
 //!
-//! - Streaming RPCs (`push`, `pull_sync`) — their module + path
-//!   arrive in the first stream frame, not in the request
-//!   metadata. Filling those rows needs a handler-side
-//!   `guard.set_endpoint(...)` update path; deferred so the
-//!   register/drain plumbing can be reviewed independently
-//!   from the streaming-init plumbing.
 //! - Recent-runs ring buffer (drains-out side).
 //! - `GetState` RPC reading from this table.
 //! - `CancelJob` plumbing (M-Jobs adds the `CancellationToken`
@@ -57,16 +55,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// dispatch sites in `service/core.rs`. When milestone C
 /// introduces the `TransferStarted.Kind` wire enum, the
 /// conversion will live in the GetState handler.
-///
-/// `Push` and `PullSync` variants are defined here but not
-/// yet constructed at any dispatch site — those are
-/// streaming RPCs whose module + path arrive in the first
-/// stream frame, and the guard update path needed to fill
-/// the row asynchronously lands in b-2. The variants exist
-/// now so the table's wire shape doesn't change between
-/// slices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ActiveJobKind {
     Push,
     Pull,
@@ -146,12 +135,12 @@ impl ActiveJobs {
 
     /// Insert a row and return a guard that removes it on drop.
     ///
-    /// Module + path are eagerly required because the
-    /// dispatch sites this slice wires (`pull`,
-    /// `delegated_pull`) have them synchronously available.
-    /// Streaming RPCs (`push`, `pull_sync`) — where module
-    /// arrives in the first stream frame — are deferred to
-    /// b-2, which will add a guard update API.
+    /// For RPCs whose module + path are known at dispatch
+    /// (`pull`, `delegated_pull`) the caller passes them
+    /// directly. For streaming RPCs (`push`, `pull_sync`) the
+    /// caller passes empty strings and the handler fills the
+    /// row via [`ActiveJobGuard::set_endpoint`] once it has
+    /// parsed the first stream frame.
     ///
     /// Sync because the table is `std::sync::Mutex`-guarded;
     /// callers in async dispatch handlers don't need to
@@ -229,6 +218,32 @@ impl ActiveJobGuard {
     #[allow(dead_code)]
     pub fn transfer_id(&self) -> &str {
         &self.transfer_id
+    }
+
+    /// Update the row's `module` and `path` fields. Used by
+    /// streaming-RPC handlers (`handle_push_stream`,
+    /// `handle_pull_sync_stream`) once they've parsed the
+    /// first stream frame and know the transfer's endpoint.
+    ///
+    /// At dispatch the streaming RPCs register a row with
+    /// empty strings for `module` / `path` because the
+    /// `BlitService` doesn't see those fields synchronously
+    /// (they arrive in `ClientPushRequest::Header` /
+    /// `TransferOperationSpec` mid-stream). After this call,
+    /// the row matches what `pull` / `delegated_pull` register
+    /// at dispatch.
+    ///
+    /// No-op if the row has already been drained — handlers
+    /// may parse the header right around when the client
+    /// cancels, and we'd rather silently skip the update than
+    /// re-insert a row that the dispatcher's spawned task has
+    /// already cleaned up.
+    pub fn set_endpoint(&self, module: String, path: String) {
+        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(row) = table.get_mut(&self.transfer_id) {
+            row.module = module;
+            row.path = path;
+        }
     }
 }
 
@@ -420,6 +435,73 @@ mod tests {
 
         // The dropper's `Drop` has now run to completion under
         // genuine contention — and the row must be gone.
+        assert!(table.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_updates_row_in_place() {
+        // Streaming-RPC dispatchers register with empty
+        // module/path; the handler fills them in via
+        // `set_endpoint` once the first stream frame parses.
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::Push,
+            "10.0.0.5:443".to_string(),
+            String::new(),
+            String::new(),
+        );
+
+        // Initial snapshot: empty module/path.
+        let initial = table.snapshot();
+        assert_eq!(initial.len(), 1);
+        assert!(initial[0].module.is_empty());
+        assert!(initial[0].path.is_empty());
+
+        guard.set_endpoint("mod-streaming".to_string(), "sub/dir".to_string());
+
+        // After set_endpoint: same row, populated fields.
+        let updated = table.snapshot();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].transfer_id, initial[0].transfer_id);
+        assert_eq!(updated[0].module, "mod-streaming");
+        assert_eq!(updated[0].path, "sub/dir");
+        // start_unix_ms is unchanged — set_endpoint doesn't
+        // re-stamp the registration time.
+        assert_eq!(updated[0].start_unix_ms, initial[0].start_unix_ms);
+    }
+
+    #[tokio::test]
+    async fn set_endpoint_is_noop_after_guard_drops() {
+        // Catches the race where a handler parses the first
+        // frame just as the client cancels: by the time
+        // `set_endpoint` fires, the row is already gone.
+        // `set_endpoint` must NOT re-insert a stale row.
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::PullSync,
+            "p".to_string(),
+            String::new(),
+            String::new(),
+        );
+        let id_before_drop = guard.transfer_id().to_string();
+
+        // Manually remove the row to simulate "drained while
+        // the handler was still preparing the set_endpoint
+        // call." This is the same path Drop takes.
+        table.inner.table.lock().unwrap().remove(&id_before_drop);
+        assert!(table.snapshot().is_empty());
+
+        // The handler then calls set_endpoint. No row exists,
+        // so the call must be a no-op — not a re-insert.
+        guard.set_endpoint("mod".to_string(), "p".to_string());
+        assert!(
+            table.snapshot().is_empty(),
+            "set_endpoint must not re-insert a drained row"
+        );
+
+        // Letting the guard's Drop run is also a no-op on the
+        // already-empty table.
+        drop(guard);
         assert!(table.snapshot().is_empty());
     }
 
