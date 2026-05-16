@@ -37,6 +37,18 @@
 //!   the token against the handler future, so a
 //!   forthcoming `CancelJob` RPC can drop in-flight
 //!   delegated transfers.
+//! - `c-1a-byte-counter-api`: per-row [`Arc<AtomicU64>`] for
+//!   `bytes_completed`. [`ActiveJobGuard::bytes_counter`]
+//!   hands out a clonable [`ByteProgressSink`] that handlers
+//!   can pass into the data-plane write loop; reports land
+//!   in `GetState.active[].bytes_completed` and (on Drop)
+//!   `GetState.recent[].bytes`. The sink type is public so
+//!   the data-plane crate (blit-core) can take it as a
+//!   parameter once c-1b wires the receive loop. This slice
+//!   adds only the registry-side machinery; the sink is
+//!   never called yet — current behavior is unchanged
+//!   except the proto byte fields now carry the (still
+//!   zero) atomic value instead of a hardcoded zero.
 //!
 //! Out of scope (next sub-slices):
 //!
@@ -47,10 +59,12 @@
 //! - `SubscribeRequest.transfer_id_filter` proto field
 //!   (`m-jobs-5-subscribe-filter`).
 //! - `blit jobs watch` polling CLI (`m-jobs-6-watch`).
-//! - Byte-level progress (`bytes_completed` / `bytes_total`
-//!   on active rows; `bytes` / `files` on records) —
-//!   milestone C extends rows from the write-loop
-//!   instrumentation.
+//! - Data-plane wiring of [`ByteProgressSink`]
+//!   (`c-1b-byte-counter-wiring`): `receive_stream_double_buffered`
+//!   grows an optional `&ByteProgressSink` and
+//!   `handle_delegated_pull` passes the counter through.
+//! - Throughput EWMA, files-completed counter, bytes_total
+//!   wiring from the manifest stage (subsequent C sub-slices).
 //!
 //! ## Locking
 //!
@@ -177,6 +191,14 @@ pub struct ActiveJob {
     pub path: String,
     /// Unix milliseconds at which the row was registered.
     pub start_unix_ms: u64,
+    /// Cumulative bytes the data plane has reported writing for
+    /// this transfer. Read from the per-row atomic at
+    /// `snapshot()` time. Zero until c-1b wires the receive
+    /// loop to call [`ByteProgressSink::report`]; the field is
+    /// already plumbed onto the wire (`ActiveTransfer.bytes_completed`)
+    /// so future Subscribe events and GetState consumers don't
+    /// see a shape change.
+    pub bytes_completed: u64,
 }
 
 /// One entry in the recent-runs ring buffer. Fields mirror
@@ -202,6 +224,12 @@ pub struct TransferRecord {
     /// so a clock skew between registration and drain doesn't
     /// produce a wraparound.
     pub duration_ms: u64,
+    /// Total bytes the data plane reported for this transfer.
+    /// Snapshotted from the per-row atomic at Drop time. Zero
+    /// until c-1b wires the receive loop; field already lives
+    /// on `TransferRecord.bytes` so future consumers don't
+    /// see a shape change.
+    pub bytes: u64,
     /// `true` if the handler reported success (Subscribe-era
     /// `TransferComplete`); `false` if it failed or the
     /// guard drained without a recorded outcome (panic,
@@ -214,6 +242,35 @@ pub struct TransferRecord {
     /// guard drained without [`ActiveJobGuard::record_outcome`]
     /// being called.
     pub error_message: String,
+}
+
+/// Clonable handle to a transfer's byte counter. Held by the
+/// data-plane write loop so it can call [`ByteProgressSink::report`]
+/// for each chunk it writes; updates land on the per-row atomic
+/// inside the table.
+///
+/// Cheap to clone (`Arc` bump); cheap to call (`AtomicU64::fetch_add`
+/// with `Relaxed` ordering). Outlives the `ActiveJobGuard` it was
+/// minted from — Drop only removes the table row, the atomic itself
+/// is reference-counted. A stray report after Drop is a no-op write
+/// to a soon-to-be-dropped atomic; it does not resurrect the row.
+#[derive(Clone)]
+pub struct ByteProgressSink {
+    counter: Arc<AtomicU64>,
+}
+
+impl ByteProgressSink {
+    /// Add `delta` bytes to the cumulative counter. Called by the
+    /// data plane after each chunk write. `Relaxed` ordering is
+    /// sufficient: readers only need eventual visibility, not
+    /// synchronization with other memory operations.
+    ///
+    /// Called by the test suite in this slice; the data-plane
+    /// callsite lands in c-1b.
+    #[allow(dead_code)]
+    pub fn report(&self, delta: u64) {
+        self.counter.fetch_add(delta, Ordering::Relaxed);
+    }
 }
 
 /// In-memory registry, shared between the dispatch boundary and
@@ -239,8 +296,17 @@ pub struct ActiveJobs {
 /// returning `false`, and `cancel` returning `true` for kinds
 /// that ignore the token).
 struct TableEntry {
+    /// Snapshot fields. Cloned into the public `ActiveJob`
+    /// shape at `snapshot()` time, with `bytes_completed`
+    /// loaded from `bytes_counter`.
     job: ActiveJob,
     cancellation: CancellationToken,
+    /// Per-row byte counter. Cloned (Arc bump) into every
+    /// [`ByteProgressSink`] handed out by
+    /// [`ActiveJobGuard::bytes_counter`]; loaded by
+    /// `snapshot()` and by Drop when building the
+    /// `TransferRecord`.
+    bytes_counter: Arc<AtomicU64>,
 }
 
 struct Inner {
@@ -314,11 +380,14 @@ impl ActiveJobs {
             module,
             path,
             start_unix_ms,
+            bytes_completed: 0,
         };
         let cancellation = CancellationToken::new();
+        let bytes_counter = Arc::new(AtomicU64::new(0));
         let entry = TableEntry {
             job: row,
             cancellation: cancellation.clone(),
+            bytes_counter: Arc::clone(&bytes_counter),
         };
         self.inner
             .table
@@ -330,6 +399,7 @@ impl ActiveJobs {
             transfer_id,
             outcome: Mutex::new(None),
             cancellation,
+            bytes_counter,
         }
     }
 
@@ -365,6 +435,12 @@ impl ActiveJobs {
     /// Snapshot of every active row. Used by tests in this
     /// slice; will be used by `GetState.active[]` once the
     /// RPC handler lands in a later sub-slice.
+    ///
+    /// `bytes_completed` is loaded from the per-row atomic
+    /// inside the lock so the snapshot reflects every report
+    /// that landed before the snapshot acquired the lock.
+    /// Reports that arrive concurrently (or after the lock
+    /// is released) show up in the next snapshot.
     #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<ActiveJob> {
         self.inner
@@ -372,7 +448,11 @@ impl ActiveJobs {
             .lock()
             .expect("active_jobs table poisoned")
             .values()
-            .map(|e| e.job.clone())
+            .map(|e| {
+                let mut job = e.job.clone();
+                job.bytes_completed = e.bytes_counter.load(Ordering::Relaxed);
+                job
+            })
             .collect()
     }
 
@@ -423,6 +503,11 @@ pub struct ActiveJobGuard {
     /// handlers that opt in race the token against their
     /// transfer future.
     cancellation: CancellationToken,
+    /// Same atomic the [`TableEntry::bytes_counter`] holds —
+    /// kept here so Drop can read the final value without
+    /// re-acquiring the table lock just to inspect it before
+    /// removal. Cloned Arc, not a separate counter.
+    bytes_counter: Arc<AtomicU64>,
 }
 
 /// Outcome handed to [`ActiveJobGuard::record_outcome`].
@@ -480,6 +565,24 @@ impl ActiveJobGuard {
         &self.cancellation
     }
 
+    /// Clonable handle to this transfer's byte counter. Handers
+    /// pass it into the data-plane write loop; each chunk write
+    /// calls [`ByteProgressSink::report`] with the bytes just
+    /// written. Reports show up in `GetState.active[].bytes_completed`
+    /// on the next snapshot, and in `GetState.recent[].bytes`
+    /// once the guard drops.
+    ///
+    /// The sink is reference-counted; cloning it is cheap and
+    /// keeping a clone alive past Drop is harmless — reports
+    /// after Drop just bump an orphaned atomic, no row to
+    /// resurrect.
+    #[allow(dead_code)]
+    pub fn bytes_counter(&self) -> ByteProgressSink {
+        ByteProgressSink {
+            counter: Arc::clone(&self.bytes_counter),
+        }
+    }
+
     /// Capture the transfer's outcome before Drop. Spawn
     /// closures in `service/core.rs` call this with the
     /// handler's `Result` translated to `(ok, error_message)`
@@ -527,14 +630,21 @@ impl Drop for ActiveJobGuard {
         };
         if let Some(entry) = entry {
             if self.inner.recent_limit > 0 {
-                let record = build_record(entry.job, outcome);
+                // Final byte count: load before the entry's
+                // Arc<AtomicU64> goes out of scope. The
+                // ActiveJobGuard's clone is still alive (we're
+                // inside its Drop), but reading off the entry
+                // is equivalent and keeps the lookup paired
+                // with the row being drained.
+                let bytes = entry.bytes_counter.load(Ordering::Relaxed);
+                let record = build_record(entry.job, outcome, bytes);
                 push_recent(&self.inner.recent, record, self.inner.recent_limit);
             }
         }
     }
 }
 
-fn build_record(row: ActiveJob, outcome: Option<RecordedOutcome>) -> TransferRecord {
+fn build_record(row: ActiveJob, outcome: Option<RecordedOutcome>, bytes: u64) -> TransferRecord {
     let drop_unix_ms = unix_ms_now();
     let duration_ms = drop_unix_ms.saturating_sub(row.start_unix_ms);
     let (ok, error_message) = match outcome {
@@ -549,6 +659,7 @@ fn build_record(row: ActiveJob, outcome: Option<RecordedOutcome>) -> TransferRec
         path: row.path,
         start_unix_ms: row.start_unix_ms,
         duration_ms,
+        bytes,
         ok,
         error_message,
     }
@@ -1030,5 +1141,110 @@ mod tests {
         assert_eq!(ActiveJobKind::Pull.as_str(), "pull");
         assert_eq!(ActiveJobKind::PullSync.as_str(), "pull_sync");
         assert_eq!(ActiveJobKind::DelegatedPull.as_str(), "delegated_pull");
+    }
+
+    #[tokio::test]
+    async fn bytes_counter_starts_at_zero_and_reflects_reports() {
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let snap = table.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].bytes_completed, 0);
+
+        let sink = guard.bytes_counter();
+        sink.report(1024);
+        sink.report(2048);
+        let snap = table.snapshot();
+        assert_eq!(
+            snap[0].bytes_completed, 3072,
+            "snapshot must reflect both reports"
+        );
+    }
+
+    #[tokio::test]
+    async fn bytes_counter_clones_share_state() {
+        // The data plane is welcome to clone the sink — every
+        // clone hits the same atomic. A clone outliving the
+        // guard's Drop is also fine: it just bumps an orphaned
+        // counter, no row reappears.
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let sink_a = guard.bytes_counter();
+        let sink_b = sink_a.clone();
+        let sink_c = guard.bytes_counter();
+        sink_a.report(10);
+        sink_b.report(20);
+        sink_c.report(30);
+        let snap = table.snapshot();
+        assert_eq!(snap[0].bytes_completed, 60);
+    }
+
+    #[tokio::test]
+    async fn drop_records_final_bytes_in_recent() {
+        let table = ActiveJobs::new();
+        {
+            let guard = table.register(
+                ActiveJobKind::DelegatedPull,
+                "p".to_string(),
+                "m".to_string(),
+                "/".to_string(),
+            );
+            let sink = guard.bytes_counter();
+            sink.report(5 * 1024 * 1024);
+            guard.record_outcome(true, None);
+        }
+        let recent = table.recent();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].bytes,
+            5 * 1024 * 1024,
+            "recent record must carry final byte count"
+        );
+        assert!(recent[0].ok);
+    }
+
+    #[tokio::test]
+    async fn report_after_drop_does_not_resurrect_row() {
+        // A held sink whose guard has already dropped is a
+        // benign no-op writer: the atomic is orphaned, the
+        // table row is gone, and the next snapshot is still
+        // empty.
+        let table = ActiveJobs::new();
+        let sink = {
+            let guard = table.register(
+                ActiveJobKind::DelegatedPull,
+                "p".to_string(),
+                "m".to_string(),
+                "/".to_string(),
+            );
+            let sink = guard.bytes_counter();
+            guard.record_outcome(true, None);
+            sink
+        };
+        assert!(table.snapshot().is_empty(), "row drained on Drop");
+
+        sink.report(999);
+        assert!(
+            table.snapshot().is_empty(),
+            "post-Drop report must not re-insert"
+        );
+        // The TransferRecord captured at Drop reflects bytes
+        // reported BEFORE the drop (zero here, since we
+        // reported only after). The post-Drop report is lost
+        // to consumers, which is the intended behavior — Drop
+        // is the snapshot point for the ring entry.
+        let recent = table.recent();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].bytes, 0);
     }
 }

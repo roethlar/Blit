@@ -632,9 +632,14 @@ impl Blit for BlitService {
                 module: j.module,
                 path: j.path,
                 start_unix_ms: j.start_unix_ms,
-                // Byte-level progress fields come from milestone
-                // C's write-loop instrumentation; zero for now.
-                bytes_completed: 0,
+                // `bytes_completed` reads from the per-row atomic
+                // (c-1a-byte-counter-api). Stays at zero until
+                // c-1b wires the data-plane receive loop to call
+                // `ByteProgressSink::report`; the wire shape is
+                // already correct.
+                bytes_completed: j.bytes_completed,
+                // `bytes_total` lands in a subsequent C slice
+                // from the manifest stage.
                 bytes_total: 0,
             })
             .collect();
@@ -661,8 +666,11 @@ impl Blit for BlitService {
                 path: r.path,
                 start_unix_ms: r.start_unix_ms,
                 duration_ms: r.duration_ms,
-                // Byte/file totals come from milestone C.
-                bytes: 0,
+                // Final byte count from the per-row atomic
+                // (c-1a-byte-counter-api). Zero until c-1b
+                // wires the data-plane receive loop.
+                bytes: r.bytes,
+                // `files` lands in a subsequent C slice.
                 files: 0,
                 ok: r.ok,
                 error_message: r.error_message,
@@ -921,9 +929,24 @@ mod tests {
         assert_eq!(row.peer, "10.0.0.5:443");
         assert_eq!(row.module, "mod-a");
         assert_eq!(row.path, "sub/dir");
-        // Byte-level fields are zero in milestone B.
+        // Byte-level fields are zero with no reports against
+        // the per-row counter — c-1a wired the atomic but no
+        // call site reports against it yet (c-1b lands the
+        // data-plane wiring); `bytes_total` lands in a later C
+        // slice from the manifest stage.
         assert_eq!(row.bytes_completed, 0);
         assert_eq!(row.bytes_total, 0);
+
+        // Confirm the wire field tracks the atomic by
+        // reporting through the sink and re-snapshotting.
+        guard.bytes_counter().report(4096);
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok");
+        let state2 = resp.into_inner();
+        assert_eq!(state2.active.len(), 1);
+        assert_eq!(state2.active[0].bytes_completed, 4096);
 
         // Drop the active row + record outcome → it should now
         // appear in `recent[]`.
@@ -941,8 +964,10 @@ mod tests {
         assert_eq!(rec.kind, WireKind::Pull as i32);
         assert!(rec.ok);
         assert_eq!(rec.error_message, "");
-        // bytes / files come from milestone C — zero for now.
-        assert_eq!(rec.bytes, 0);
+        // `bytes` is the final value of the per-row atomic
+        // captured at Drop. The earlier `bytes_counter().report(4096)`
+        // is what lands here; `files` is a later C slice.
+        assert_eq!(rec.bytes, 4096);
         assert_eq!(rec.files, 0);
     }
 
