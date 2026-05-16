@@ -126,4 +126,34 @@ library function through the wrappers.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `c392f37`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. One low-severity
+finding:
+
+1. The module-level doc on `crates/blit-app/src/endpoints.rs`
+   still said the two clap-coupled gates stayed in `blit-cli`
+   and would move in a "later" commit. This commit IS the
+   move — `ensure_remote_transfer_supported`,
+   `ensure_remote_pull_supported`, and
+   `ensure_remote_push_supported` now live in
+   `blit_app::endpoints` with primitive inputs. Public-doc
+   contract issue, not a behavior bug.
+
+   Fix direction: update the module doc to describe current
+   ownership.
+
+### Round 2 (sha pending) — addresses round-1 finding
+
+Reworded the module doc block to describe current ownership:
+
+- Endpoint parsing (`parse_transfer_endpoint` /
+  `parse_endpoint_or_local`) — same as before.
+- Three remote-transfer support gates now in `blit-app` with
+  primitive-bool inputs; CLI keeps two paper-thin
+  `&TransferArgs` wrappers. Documented the rationale for
+  keeping CLI flag names in the error messages.
+- Endpoint-shape gates (Discovery-rejection) — was previously
+  undocumented in the module preamble; added a line.
+
+No code changes. Workspace still at 503 passed.
