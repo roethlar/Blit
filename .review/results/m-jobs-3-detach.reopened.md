@@ -1,7 +1,7 @@
 # Reopened: m-jobs-3-detach
 
-Reviewed sha: `d3e3a4d75c3f6230bc6b181691b7a50feaed6f1c`
-Reviewed at: `2026-05-16T22:09:11Z`
+Reviewed sha: `18f1cb28901ce986c3613c3da34f448663e926ca`
+Reviewed at: `2026-05-16T22:22:42Z`
 Reviewer: `codex-reviewer`
 
 Validation:
@@ -12,10 +12,14 @@ Validation:
 
 ## Findings
 
-1. Medium - `--detach` does not actually detach the CLI.
+1. Medium - detach accepts an empty `transfer_id` as success.
 
-   The new flag is documented as "Detach the transfer from the CLI process" ([crates/blit-cli/src/cli.rs](/Users/michael/Dev/Blit/crates/blit-cli/src/cli.rs:273)), and the wire comment says the CLI is free to exit after the daemon's `Started` event ([proto/blit.proto](/Users/michael/Dev/Blit/proto/blit.proto:597)). But the valid remote-to-remote path still awaits `run_delegated_pull(...).await` ([crates/blit-cli/src/transfers/remote_remote_direct.rs](/Users/michael/Dev/Blit/crates/blit-cli/src/transfers/remote_remote_direct.rs:140)), and the library loop continues reading the stream until `Summary` or `Error` ([crates/blit-app/src/transfers/remote.rs](/Users/michael/Dev/Blit/crates/blit-app/src/transfers/remote.rs:734)).
+   Round 2 correctly adds `DelegatedPullStarted.transfer_id`, but the proto explicitly says it is empty when the daemon is older than m-jobs-3 ([proto/blit.proto](/Users/michael/Dev/Blit/proto/blit.proto:647)). `run_delegated_pull_until_started` returns any `Started` payload without validating that field ([crates/blit-app/src/transfers/remote.rs](/Users/michael/Dev/Blit/crates/blit-app/src/transfers/remote.rs:870)), and the CLI then prints/serializes the empty id as a detached success ([crates/blit-cli/src/transfers/remote_remote_direct.rs](/Users/michael/Dev/Blit/crates/blit-cli/src/transfers/remote_remote_direct.rs:157)).
 
-   The daemon-side `tx.closed()` disarm is useful, but from the CLI contract this is currently "survive manual client disconnect", not "detach". A normal `blit copy --detach ...` invocation still blocks until the transfer completes, and the default non-verbose path does not give the operator a clear "daemon owns it now" signal before they terminate the client themselves.
+   Against an older daemon that ignores the new `detach` field, this is especially bad: dropping the stream after `Started` will let the old daemon's `tx.closed()` path cancel the transfer, while the CLI reports a detached job with no usable id. Please treat an empty Started transfer id as an incompatibility/error instead of success, and add coverage for that branch.
 
-   Please either implement the promised exit-after-Started behavior for `--detach` (including enough output to let the operator find/cancel the job, such as a transfer id or explicit `jobs list` guidance), or narrow the user-facing flag/proto/help text so it does not claim detach/fire-and-forget semantics. Add coverage for the chosen contract.
+2. Medium - the human cancel/status hints drop ports and break IPv6 destinations.
+
+   `destination_host_hint` uses `split_once(':')` ([crates/blit-cli/src/transfers/remote_remote_direct.rs](/Users/michael/Dev/Blit/crates/blit-cli/src/transfers/remote_remote_direct.rs:233)). For `host:9444:/module/path`, the printed follow-up command becomes `blit jobs cancel host <id>`, which targets the default port instead of `9444`. For bracketed IPv6 such as `[::1]:9444:/module/path`, the hint becomes just `[`, which is unusable.
+
+   Please derive the hint from the parsed destination endpoint rather than string-splitting the raw argument. Preserve non-default ports and bracketed IPv6, and add unit coverage for at least `host:port:/module/path` and bracketed IPv6.
