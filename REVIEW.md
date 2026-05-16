@@ -13,7 +13,6 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| a0-push-execution   | Refactor | Phase 5 A.0 — push entry-point orchestration                | `[~]`  | `phase5/blit-app-extract`    | `cb96331` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -48,6 +47,7 @@ follows the full contract.
 | transfers/remote — pull entry-point (R1) | `7f75539` | `[x]` reopened → r2 |
 | transfers/remote — pull entry-point (R2) | `e9e168f` | `[x]` reopened → r3 |
 | **transfers/remote — pull entry-point (R3)** | **`e25707e`** | **`[x]` verified** |
+| **transfers/remote — push entry-point** | **`cb96331`** | **`[x]` verified** |
 
 ## Phase 5 A.0 — remaining slices
 
@@ -57,7 +57,7 @@ These will get individual rows + finding docs + sentinels as they land.
 |------------------------------------------------|--------|
 | transfers/remote — pull-flow helpers           | `[x]` (a0-remote-helpers verified — 4 rounds) |
 | transfers/remote — pull entry-point            | `[x]` (a0-pull-execution verified — 3 rounds) |
-| transfers/remote — push entry-point            | `[~]` (a0-push-execution pending) |
+| transfers/remote — push entry-point            | `[x]` (a0-push-execution verified) |
 | transfers/remote_remote_direct                 | `[ ]`  |
 | transfers/dispatcher (`run_transfer`, `run_move`, `TransferKind`) | `[ ]` |
 | Endpoints clap-coupled gates → primitive inputs | `[ ]`  |
