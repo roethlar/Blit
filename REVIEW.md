@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                    | Severity | Title                                       | Status | Branch     | Commit    |
+|-----------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-1a-byte-counter-api | Medium   | Byte progress API crosses crate dep boundary | [~]    | `phase5/c` | `234d2c6` |
 
 ## Open findings
 
@@ -20,7 +22,6 @@ _none_
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
-| c-1a-byte-counter-api | Medium | Byte progress API crosses crate dependency boundary      | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |

@@ -75,8 +75,19 @@ the cost of an acquire/release barrier on every chunk write.
 
 ## Files changed
 
+- `crates/blit-core/src/remote/transfer/progress.rs` (round 2):
+  - `+ByteProgressSink` public type (Clone, `report`,
+    `new`, `from_counter`).
+  - +3 unit tests:
+    - `report_accumulates_on_single_sink`
+    - `clones_share_underlying_counter`
+    - `from_counter_wraps_external_arc`
+- `crates/blit-core/src/remote/transfer/mod.rs` (round 2):
+  - Re-export `ByteProgressSink` alongside `ProgressEvent` and
+    `RemoteTransferProgress`.
 - `crates/blit-daemon/src/active_jobs.rs`:
-  - `+ByteProgressSink` public type (Clone, `report`).
+  - Round 1 added a local `ByteProgressSink`; round 2 deleted
+    it and imports the blit-core type.
   - `+ActiveJob.bytes_completed: u64` snapshot field.
   - `+TransferRecord.bytes: u64` record field.
   - `+TableEntry.bytes_counter: Arc<AtomicU64>`.
@@ -140,6 +151,48 @@ test in `service::core::tests`. Workspace: 548 passed (was
 3. **`bytes_total` and `files_completed` stay at zero.** The
    wire shape carries them but no producer feeds them in this
    slice. They are explicit out-of-scope deferrals listed above.
+
+## Round 2 (sha `234d2c6`)
+
+Reviewer caught a crate-dependency direction bug: round 1
+placed `ByteProgressSink` inside `blit-daemon::active_jobs`,
+but the documented c-1b plan was for
+`blit-core::receive_stream_double_buffered` to take the sink
+as a parameter. `blit-core` is the lower crate; it cannot name
+a `blit-daemon` type without a cycle.
+
+Fix: moved `ByteProgressSink` into
+`blit-core::remote::transfer::progress` (re-exported from
+`blit_core::remote::transfer`). The type now sits next to
+`RemoteTransferProgress` / `ProgressEvent`, which is the
+natural neighbor — they're all transfer-progress reporters at
+different granularities (file-level vs. byte-level).
+
+API additions in blit-core:
+
+- `ByteProgressSink::new()` constructs a fresh sink with a new
+  Arc<AtomicU64> (general purpose).
+- `ByteProgressSink::from_counter(Arc<AtomicU64>)` wraps an
+  existing counter. Daemon uses this so the sink it hands the
+  data plane shares the atomic that lives on the `ActiveJobs`
+  row.
+
+`blit-daemon::active_jobs` now imports the type and constructs
+sinks via `ByteProgressSink::from_counter(Arc::clone(&row_counter))`.
+Wire-up to the per-row atomic is unchanged.
+
+Docs updated: module preamble in `active_jobs.rs` and the
+"Files changed" section below now point at the cross-crate
+location.
+
+Tests: +3 blit-core unit tests in `progress::tests`:
+
+- `report_accumulates_on_single_sink`
+- `clones_share_underlying_counter`
+- `from_counter_wraps_external_arc`
+
+Workspace: 551 passing serially (was 548; +3 from the new
+blit-core tests).
 
 ## Reviewer comments
 
