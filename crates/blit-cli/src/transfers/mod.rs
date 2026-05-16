@@ -103,11 +103,7 @@ fn confirm_destructive_operation(message: &str, skip_prompt: bool) -> Result<boo
     Ok(decision == "y" || decision == "yes")
 }
 
-#[derive(Copy, Clone)]
-pub enum TransferKind {
-    Copy,
-    Mirror,
-}
+pub use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
 
 pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
@@ -140,7 +136,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
     // proper plumbing of null semantics through mirror-delete
     // and the remote paths is a post-release item.
     if args.null {
-        if matches!(mode, TransferKind::Mirror) {
+        if mode.is_mirror() {
             bail!(
                 "--null is not supported with `blit mirror`: the \
                  null sink discards writes, but mirror's \
@@ -166,7 +162,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
     }
 
     // For mirror operations, prompt unless --yes or --dry-run
-    if matches!(mode, TransferKind::Mirror) && !args.dry_run {
+    if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
             "Mirror will delete extraneous files at destination '{}'. Continue?",
             dst_display
@@ -190,70 +186,42 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
-    match (src_endpoint, dst_endpoint) {
-        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
-            if !src_path.exists() {
-                bail!("source path does not exist: {}", src_path.display());
+    match select_transfer_route(src_endpoint, dst_endpoint, mode, args.relay_via_cli) {
+        TransferRoute::LocalToLocal { src, dst, mirror } => {
+            if !src.exists() {
+                bail!("source path does not exist: {}", src.display());
             }
-            run_local_transfer(
-                ctx,
-                args,
-                &src_path,
-                &dst_path,
-                matches!(mode, TransferKind::Mirror),
-            )
-            .await
-            .map(|_| ())
+            run_local_transfer(ctx, args, &src, &dst, mirror)
+                .await
+                .map(|_| ())
         }
-        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
-            if !src_path.exists() {
-                bail!("source path does not exist: {}", src_path.display());
+        TransferRoute::LocalToRemote { src, dst, mirror } => {
+            if !src.exists() {
+                bail!("source path does not exist: {}", src.display());
             }
             ensure_remote_push_supported(args)?;
-            ensure_remote_destination_supported(&remote)?;
-            run_remote_push_transfer(
-                args,
-                Endpoint::Local(src_path),
-                remote,
-                matches!(mode, TransferKind::Mirror),
-            )
-            .await
+            ensure_remote_destination_supported(&dst)?;
+            run_remote_push_transfer(args, Endpoint::Local(src), dst, mirror).await
         }
-        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
+        TransferRoute::RemoteToLocal { src, dst, mirror } => {
             ensure_remote_pull_supported(args)?;
-            ensure_remote_source_supported(&remote)?;
+            ensure_remote_source_supported(&src)?;
             run_remote_pull_transfer(
-                args,
-                remote,
-                &dst_path,
-                matches!(mode, TransferKind::Mirror),
-                false, // not a move — source survives
+                args, src, &dst, mirror, false, // not a move — source survives
             )
             .await
         }
-        (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
+        TransferRoute::RemoteToRemoteRelay { src, dst, mirror } => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            if args.relay_via_cli {
-                ensure_remote_push_supported(args)?;
-                run_remote_push_transfer(
-                    args,
-                    Endpoint::Remote(src),
-                    dst,
-                    matches!(mode, TransferKind::Mirror),
-                )
-                .await
-            } else {
-                ensure_remote_pull_supported(args)?;
-                run_remote_to_remote_direct(
-                    args,
-                    src,
-                    dst,
-                    matches!(mode, TransferKind::Mirror),
-                    false, // not a move
-                )
-                .await
-            }
+            ensure_remote_push_supported(args)?;
+            run_remote_push_transfer(args, Endpoint::Remote(src), dst, mirror).await
+        }
+        TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
+            ensure_remote_source_supported(&src)?;
+            ensure_remote_destination_supported(&dst)?;
+            ensure_remote_pull_supported(args)?;
+            run_remote_to_remote_direct(args, src, dst, mirror, false /* not a move */).await
         }
     }
 }
