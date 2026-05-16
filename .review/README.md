@@ -90,26 +90,41 @@ When in doubt, default to per-finding branches.
 
 ## Reviewer loop
 
-Wakes on each new sentinel in `.review/ready/`. To arm the
-wake-on-sentinel monitor in the reviewer's session:
+The reviewer must use a wake mechanism that returns control to
+the agent when a sentinel exists. A plain background shell loop is
+not enough in agent harnesses where stdout buffers until manually
+polled; that leaves the human in the loop.
+
+Default wake command:
 
 ```bash
-cd /Users/michael/Dev/Blit && last=""
-while true; do
-  current=$(ls .review/ready/*.json 2>/dev/null | xargs -n1 basename 2>/dev/null | sort | tr '\n' ' ')
-  for name in $current; do
-    case " $last " in
-      *" $name "*) ;;
-      *) echo "READY: $name" ;;
-    esac
-  done
-  last="$current"
-  sleep 5
-done
+cd /Users/michael/Dev/Blit
+.review/reviewer-wait.sh
 ```
 
-(Or call this from the agent harness's `Monitor` tool — each new
-sentinel produces one `READY: <id>.json` notification.)
+`reviewer-wait.sh` is a one-shot blocking poll. It exits as soon
+as `.review/ready/*.json` contains at least one sentinel, prints
+`READY: <id>.json`, prints the sentinel JSON payload, and returns
+control to the reviewer. After grading and committing the verdict,
+run it again to wait for the next item.
+
+Optional tuning:
+
+```bash
+REVIEW_POLL_INTERVAL_SECONDS=2 .review/reviewer-wait.sh
+REVIEW_WAIT_TIMEOUT_SECONDS=300 .review/reviewer-wait.sh
+```
+
+`REVIEW_WAIT_TIMEOUT_SECONDS=0` (the default) waits forever. A
+non-zero timeout prints `NO_READY` and exits 2 if no sentinel
+appears in time.
+
+If the harness provides a real Monitor/watch tool that wakes the
+agent on stdout lines, it may wrap `.review/reviewer-wait.sh` or
+an equivalent watcher. Before relying on that mode, prove it with
+a probe sentinel: the reviewer must receive and grade the probe
+without the human prompting "check the queue." If that proof has
+not happened, use the blocking wait command above.
 
 Per-sentinel steps:
 
