@@ -192,3 +192,60 @@ reviewer wrote `"sha": "..."` with whitespace and the
 extractor's regex was compact-only). Defensive — the reviewer
 has since started normalizing to compact, but the script
 should work either way.
+
+### Round 2 verdict (reviewed sha `e9e168f`) — reopened
+
+Code finding 1 (progress lifecycle) is closed: the split
+function-pair landed and the CLI lifecycle is correct now.
+Two new findings against round 2:
+
+1. **Workflow correctness (medium)** — `reviewer-wait.sh`
+   wakes on any filesystem-visible sentinel including
+   untracked or staged-only files. The race fired this round:
+   reviewer printed `READY: a0-pull-execution.json` while the
+   coder's tree still showed the sentinel + finding doc as
+   untracked. Reviewer manually rechecked, but the contract
+   is still fragile.
+
+   Fix direction: filter ready files before printing. Require
+   `git ls-files --error-unmatch` to succeed and both
+   `git diff --quiet` and `git diff --cached --quiet` to be
+   clean. Skip dirty/untracked entries and keep polling.
+
+2. **Stale comment (low)** — block comment in
+   `crates/blit-cli/src/transfers/remote.rs` near the inner
+   function still named the round-1 API (`PullExecution` /
+   `run_remote_pull`). Round 2 replaced those names; the
+   comment should point at the new ones or be reworded as
+   historical context.
+
+### Round 3 (sha pending) — addresses both findings
+
+**Finding 1 — `reviewer-wait.sh` wake-on-committed:**
+
+`sentinel_is_committed()` now gates each candidate file:
+
+```bash
+git ls-files --error-unmatch -- "$file" >/dev/null 2>&1 || return 1
+git diff --quiet -- "$file" || return 1
+git diff --cached --quiet -- "$file" || return 1
+```
+
+Verified locally with three states:
+
+- Untracked sentinel → `NO_READY` (timeout 1s).
+- Staged-only sentinel → `NO_READY`.
+- Committed sentinel → `READY: <name>` + payload, exit 0.
+
+Skipped entries don't abort the wait — the script keeps
+polling, so a slow coder commit doesn't trigger a false
+negative either.
+
+**Finding 2 — stale comment:**
+
+Updated the trailing block comment at the bottom of
+`crates/blit-cli/src/transfers/remote.rs` to name the
+round-2 split (`PullSyncExecution` / `PullSyncOutcome` /
+`PullExecutionOutcome` + `run_pull_sync` +
+`apply_pull_mirror_purge`) and to flag the progress
+lifecycle responsibility the inner function now carries.
