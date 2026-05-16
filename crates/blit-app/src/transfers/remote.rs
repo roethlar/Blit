@@ -865,9 +865,28 @@ pub async fn run_delegated_pull_until_started(
     // daemon's first emitted payload per the
     // DelegatedPullProgress protocol; anything else (or
     // stream end) is a clear error.
+    //
+    // Empty `transfer_id` is a daemon-too-old signal: the
+    // `Started.transfer_id` field arrived in m-jobs-3 and
+    // older daemons leave it empty (proto3 default). We
+    // **must** refuse here rather than return success,
+    // because an older daemon also doesn't honor the
+    // `detach=true` we asked for — dropping `stream` after
+    // Started would let its tx.closed() race drop the
+    // transfer. The caller would print a detached-success
+    // message with no usable id while the transfer was
+    // already cancelled.
     match stream.message().await {
         Ok(Some(message)) => match message.payload {
             Some(DelegatedPayload::Started(started)) => {
+                if started.transfer_id.is_empty() {
+                    return Err(eyre!(
+                        "destination daemon is older than m-jobs-3 and cannot detach \
+                         this transfer (Started.transfer_id was empty, and dropping \
+                         the stream would cancel the transfer on an older daemon). \
+                         Upgrade the destination daemon, or retry without --detach."
+                    ));
+                }
                 // Dropping `stream` here closes the receiver
                 // → daemon's tx.closed() resolves. With
                 // detach=true the daemon ignores that and

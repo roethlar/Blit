@@ -154,6 +154,17 @@ async fn run_remote_to_remote_direct_inner(
         }
 
         let dst_for_state = execution.dst.clone();
+        // The cancel/status hint references the destination
+        // host as the argument to `blit jobs`. Derive it
+        // from the parsed `RemoteEndpoint` rather than the
+        // raw CLI input — string-splitting `args.destination`
+        // breaks `host:port:/module/path` (port dropped) and
+        // bracketed IPv6 (`[::1]:9031:/m/p` truncates to
+        // just `[`). `host_port_display` handles both via
+        // the same helper `RemoteEndpoint::display` already
+        // uses.
+        let dst_host_hint = dst_for_state.host_port_display();
+
         let (started, _dst) = run_delegated_pull_until_started(execution).await?;
         let transfer_id = started.transfer_id.clone();
         let summary = DelegatedPullSummary {
@@ -172,7 +183,7 @@ async fn run_remote_to_remote_direct_inner(
         if args.json {
             print_detach_json(&transfer_id);
         } else {
-            print_detach_human(&transfer_id, args, defer_output);
+            print_detach_human(&transfer_id, &dst_host_hint);
         }
         return Ok(state);
     }
@@ -204,11 +215,7 @@ async fn run_remote_to_remote_direct_inner(
     Ok(state)
 }
 
-fn print_detach_human(transfer_id: &str, args: &TransferArgs, _defer_output: bool) {
-    // Use the user's original CLI input for the destination
-    // host so the cancel hint matches exactly what they
-    // typed — saves them looking up the canonical form.
-    let dst_host_hint = destination_host_hint(&args.destination);
+fn print_detach_human(transfer_id: &str, dst_host_hint: &str) {
     eprintln!(
         "Detached transfer {transfer_id}; daemon owns it to completion or cancel.\n  cancel: blit jobs cancel {dst_host_hint} {transfer_id}\n  status: blit jobs list {dst_host_hint}"
     );
@@ -223,18 +230,6 @@ fn print_detach_json(transfer_id: &str) {
         }))
         .unwrap_or_default()
     );
-}
-
-/// Pull the host portion out of a remote endpoint string for
-/// the cancel hint. Best-effort: returns everything before
-/// the first `:` (which matches `host:/module/path` and
-/// `host:port`). Falls back to the original string when no
-/// `:` is present.
-fn destination_host_hint(destination: &str) -> &str {
-    destination
-        .split_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(destination)
 }
 
 fn print_delegated_json(
