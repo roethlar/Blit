@@ -183,15 +183,12 @@ impl Blit for BlitService {
         // both are RAII-scoped to the spawned task so they
         // drain together on every termination path (success,
         // error, panic, client cancellation).
-        let job = self
-            .active_jobs
-            .register(
-                ActiveJobKind::Pull,
-                peer,
-                req.module.clone(),
-                req.path.clone(),
-            )
-            .await;
+        let job = self.active_jobs.register(
+            ActiveJobKind::Pull,
+            peer,
+            req.module.clone(),
+            req.path.clone(),
+        );
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
@@ -262,15 +259,12 @@ impl Blit for BlitService {
         // request; they're synchronously available here unlike
         // the streaming RPCs (push, pull_sync) which b-2 will
         // wire via a guard update API.
-        let job = self
-            .active_jobs
-            .register(
-                ActiveJobKind::DelegatedPull,
-                peer,
-                req.dst_module.clone(),
-                req.dst_destination_path.clone(),
-            )
-            .await;
+        let job = self.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            peer,
+            req.dst_module.clone(),
+            req.dst_destination_path.clone(),
+        );
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);

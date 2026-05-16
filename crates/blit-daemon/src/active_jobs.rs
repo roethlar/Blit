@@ -10,7 +10,8 @@
 //!
 //! - Table struct + `ActiveJob` row + `ActiveJobKind`.
 //! - `register(kind, peer, module, path) -> ActiveJobGuard`
-//!   inserts a row and returns a guard whose `Drop` removes it.
+//!   inserts a row and returns a guard whose `Drop` removes it
+//!   synchronously.
 //! - `snapshot()` for tests (and the future `GetState`).
 //! - Wiring at the two RPC dispatch sites where module + path
 //!   are known synchronously: `pull` and `delegated_pull`.
@@ -30,12 +31,27 @@
 //! - Byte-level progress (`bytes_completed`/`bytes_total`) —
 //!   milestone C extends rows from the write-loop
 //!   instrumentation.
+//!
+//! ## Locking
+//!
+//! The table is guarded by [`std::sync::Mutex`] rather than
+//! `tokio::sync::Mutex`. The protected work is purely
+//! in-memory (HashMap insert / remove / cloned-values
+//! collect) so the critical section is short — bounded by the
+//! number of active transfers, which is small relative to the
+//! cost of any single transfer. A standard mutex gives Drop a
+//! deterministic synchronous removal path: after
+//! `ActiveJobGuard` is dropped, the row is gone. An async
+//! mutex would force Drop to either spawn an unawaited
+//! cleanup task or use `try_lock` with a fallback — both leak
+//! the RAII contract `GetState.active[]` will rely on.
+//! Round-1 of this slice used `tokio::sync::Mutex` + the
+//! try_lock-then-spawn pattern; the reviewer caught it.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
 
 /// What kind of transfer a row represents. Mirrors the
 /// dispatch sites in `service/core.rs`. When milestone C
@@ -104,8 +120,7 @@ pub struct ActiveJob {
 }
 
 /// In-memory registry, shared between the dispatch boundary and
-/// future `GetState` reads. `Arc<Mutex<...>>` mirrors the
-/// metrics + delegation patterns on `BlitService`.
+/// future `GetState` reads.
 #[derive(Clone)]
 pub struct ActiveJobs {
     inner: Arc<Inner>,
@@ -137,7 +152,12 @@ impl ActiveJobs {
     /// Streaming RPCs (`push`, `pull_sync`) — where module
     /// arrives in the first stream frame — are deferred to
     /// b-2, which will add a guard update API.
-    pub async fn register(
+    ///
+    /// Sync because the table is `std::sync::Mutex`-guarded;
+    /// callers in async dispatch handlers don't need to
+    /// `.await` (the critical section is bounded by the size
+    /// of the table, which is small).
+    pub fn register(
         &self,
         kind: ActiveJobKind,
         peer: String,
@@ -157,7 +177,7 @@ impl ActiveJobs {
         self.inner
             .table
             .lock()
-            .await
+            .expect("active_jobs table poisoned")
             .insert(transfer_id.clone(), row);
         ActiveJobGuard {
             inner: Arc::clone(&self.inner),
@@ -169,8 +189,14 @@ impl ActiveJobs {
     /// slice; will be used by `GetState.active[]` once the
     /// RPC handler lands in a later sub-slice.
     #[allow(dead_code)]
-    pub async fn snapshot(&self) -> Vec<ActiveJob> {
-        self.inner.table.lock().await.values().cloned().collect()
+    pub fn snapshot(&self) -> Vec<ActiveJob> {
+        self.inner
+            .table
+            .lock()
+            .expect("active_jobs table poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -184,6 +210,10 @@ impl Default for ActiveJobs {
 /// dispatcher's spawned task. Drop removes the row whether the
 /// task completed, errored, or was cancelled — same posture as
 /// the metrics active-transfers gauge.
+///
+/// Drop is **synchronous and deterministic**: after the guard
+/// is dropped, the row is gone. This is the contract
+/// `GetState.active[]` relies on.
 pub struct ActiveJobGuard {
     inner: Arc<Inner>,
     transfer_id: String,
@@ -204,27 +234,15 @@ impl ActiveJobGuard {
 
 impl Drop for ActiveJobGuard {
     fn drop(&mut self) {
-        // Use `try_lock` first to stay sync-friendly in Drop;
-        // fall back to a brief async cleanup task if the table
-        // is contended (reachable only when an RPC ends while
-        // another task holds the lock for a snapshot — bounded
-        // by the table's size, finishes promptly).
+        // Synchronous removal. PoisonError still hands us the
+        // inner guard via `into_inner`, so the row is drained
+        // even if a panic poisoned the mutex on the way in.
+        // This matches the rest of the codebase's stance on
+        // poisoning — surface the failure, but don't leak
+        // state.
         let id = std::mem::take(&mut self.transfer_id);
-        let removed_inline = {
-            match self.inner.table.try_lock() {
-                Ok(mut guard) => {
-                    guard.remove(&id);
-                    true
-                }
-                Err(_) => false,
-            }
-        };
-        if !removed_inline {
-            let inner = Arc::clone(&self.inner);
-            tokio::spawn(async move {
-                inner.table.lock().await.remove(&id);
-            });
-        }
+        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
+        table.remove(&id);
     }
 }
 
@@ -248,20 +266,19 @@ fn unix_ms_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Barrier;
 
     #[tokio::test]
     async fn register_inserts_then_drop_removes() {
         let table = ActiveJobs::new();
         {
-            let _guard = table
-                .register(
-                    ActiveJobKind::Pull,
-                    "127.0.0.1:9000".to_string(),
-                    "mod-a".to_string(),
-                    "sub/dir".to_string(),
-                )
-                .await;
-            let snap = table.snapshot().await;
+            let _guard = table.register(
+                ActiveJobKind::Pull,
+                "127.0.0.1:9000".to_string(),
+                "mod-a".to_string(),
+                "sub/dir".to_string(),
+            );
+            let snap = table.snapshot();
             assert_eq!(snap.len(), 1);
             assert_eq!(snap[0].kind, ActiveJobKind::Pull);
             assert_eq!(snap[0].peer, "127.0.0.1:9000");
@@ -270,50 +287,131 @@ mod tests {
             assert!(snap[0].transfer_id.starts_with('t'));
             assert!(snap[0].start_unix_ms > 0);
         }
-        // Guard dropped — give the cleanup spawn a moment if it
-        // chose the fallback path. try_lock will succeed here
-        // (no contention), so the sync removal usually runs.
-        tokio::task::yield_now().await;
-        assert!(table.snapshot().await.is_empty());
+        // Drop is synchronous now; no need to yield.
+        assert!(table.snapshot().is_empty());
     }
 
     #[tokio::test]
     async fn transfer_ids_unique_under_concurrent_registers() {
-        let table = ActiveJobs::new();
+        // Deterministic concurrent-registration test: barrier
+        // gates registration so the parent only inspects the
+        // table once all N rows are live; a second barrier
+        // gates drop so the parent observes the empty table
+        // after every guard releases. No sleep-based timing.
         let n = 64;
+        let table = ActiveJobs::new();
+        let registered = Arc::new(Barrier::new(n + 1));
+        let release = Arc::new(Barrier::new(n + 1));
         let mut handles = Vec::with_capacity(n);
         for _ in 0..n {
             let t = table.clone();
+            let registered = Arc::clone(&registered);
+            let release = Arc::clone(&release);
             handles.push(tokio::spawn(async move {
-                let g = t
-                    .register(
-                        ActiveJobKind::DelegatedPull,
-                        "peer".to_string(),
-                        "mod".to_string(),
-                        "/".to_string(),
-                    )
-                    .await;
-                let id = g.transfer_id().to_string();
-                // Hold the guard long enough for the snapshot
-                // assertion below to observe all rows.
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let guard = t.register(
+                    ActiveJobKind::DelegatedPull,
+                    "peer".to_string(),
+                    "mod".to_string(),
+                    "/".to_string(),
+                );
+                let id = guard.transfer_id().to_string();
+                // Signal "I'm registered" and block until the
+                // parent says we may drop.
+                registered.wait().await;
+                release.wait().await;
+                drop(guard);
                 id
             }));
         }
-        let mut ids = Vec::with_capacity(n);
-        // Wait briefly for all spawns to register.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let mid_snap = table.snapshot().await;
+
+        // Parent rendezvous with all spawned tasks at the
+        // registration barrier. Every row is live when this
+        // returns.
+        registered.wait().await;
+        let mid_snap = table.snapshot();
         assert_eq!(mid_snap.len(), n, "all rows should be live");
+
+        // Release the spawned tasks; they each drop their
+        // guard immediately after the second barrier.
+        release.wait().await;
+
+        // Await every spawn so its Drop has definitely run by
+        // the time we re-snapshot.
+        let mut ids = Vec::with_capacity(n);
         for h in handles {
             ids.push(h.await.unwrap());
         }
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), n, "transfer ids must be unique");
-        // After all guards drop, the table drains.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(table.snapshot().await.is_empty());
+        assert!(table.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drop_blocks_on_contended_lock_then_removes() {
+        // Force a contended Drop by holding the registry's
+        // mutex on the main task while a spawned task drops
+        // its guard. The std::sync::Mutex makes Drop block
+        // until the held guard is released — and once it
+        // does, the row is gone. This is the deterministic
+        // RAII contract `GetState.active[]` will rely on.
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+
+        let started_drop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished_drop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Hold the registry's mutex on a blocking thread; the
+        // dropper's spawned task should block on the mutex
+        // for the duration of this hold.
+        let table_for_holder = table.clone();
+        let started_drop_for_holder = Arc::clone(&started_drop);
+        let finished_drop_for_holder = Arc::clone(&finished_drop);
+        let holder = tokio::task::spawn_blocking(move || {
+            let _held = table_for_holder
+                .inner
+                .table
+                .lock()
+                .expect("active_jobs table poisoned");
+            // Wait until the dropper has had a real chance to
+            // run and is parked on the mutex. We can't observe
+            // mutex contention directly, so observe via the
+            // dropper's "started" flag — set just before drop
+            // — and a small yield-and-spin loop.
+            while !started_drop_for_holder.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            // Spin a few times so the dropper definitely
+            // reaches the lock call before we release.
+            for _ in 0..1000 {
+                std::thread::yield_now();
+            }
+            assert!(
+                !finished_drop_for_holder.load(std::sync::atomic::Ordering::Acquire),
+                "dropper completed while the registry mutex was held — Drop is not blocking on the lock as required"
+            );
+            // _held drops here; the dropper unblocks.
+        });
+
+        // Spawn the dropper — drops the guard, which acquires
+        // the mutex.
+        let dropper = tokio::task::spawn_blocking(move || {
+            started_drop.store(true, std::sync::atomic::Ordering::Release);
+            drop(guard);
+            finished_drop.store(true, std::sync::atomic::Ordering::Release);
+        });
+
+        holder.await.unwrap();
+        dropper.await.unwrap();
+
+        // Holder is gone, dropper is gone → the row must be
+        // gone too.
+        assert!(table.snapshot().is_empty());
     }
 
     #[test]
