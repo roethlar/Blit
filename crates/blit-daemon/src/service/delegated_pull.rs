@@ -400,8 +400,10 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
 /// destination tree. Every path is routed through
 /// `safe_join_contained` (R5-F1 lexical check + R46-F3 canonical
 /// containment) before the unlink. R58-F3 closed the symmetry gap:
-/// the CLI's `delete_listed_paths` upgraded to `safe_join_contained`
-/// in R46-F3, but this daemon-side delegated path was still on bare
+/// the non-delegated `blit_app::transfers::remote::delete_listed_paths`
+/// upgraded to `safe_join_contained` in R46-F3 (the helper lived in
+/// `blit-cli` at the time of that fix; Phase 5 A.0 moved it to
+/// `blit-app`), but this daemon-side delegated path was still on bare
 /// `safe_join`. With `dest_root/link → /outside` a peer-controlled
 /// delete-list entry like `link/victim` would have removed an
 /// outside file.
@@ -458,7 +460,7 @@ async fn apply_delete_list(
 
     // Prune empty directories deepest-first. Failures here are
     // ignored (dir not empty / dir doesn't exist) — same posture as
-    // the CLI's `delete_listed_paths`.
+    // `blit_app::transfers::remote::delete_listed_paths`.
     let mut dirs: Vec<_> = candidate_parents.into_iter().collect();
     dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for dir in dirs {
@@ -494,8 +496,9 @@ fn build_summary(
 }
 
 /// Walk the destination tree and emit a manifest the source can use
-/// to decide which files need transfer. Mirror of the CLI's
-/// `enumerate_local_manifest` (`crates/blit-cli/src/transfers/remote.rs`)
+/// to decide which files need transfer. Mirror of
+/// `blit_app::transfers::remote::enumerate_local_manifest` (which was
+/// the CLI-side helper pre-Phase 5 A.0, now a shared library helper)
 /// but lives on the daemon side because the destination owns this
 /// view in the delegated path. Sequential walk; for a 0.1.0 release
 /// targeting modest module sizes this is fine. Parallelize later if

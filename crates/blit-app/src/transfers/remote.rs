@@ -215,3 +215,72 @@ pub async fn delete_listed_paths(
     }
     Ok(stats)
 }
+
+#[cfg(test)]
+mod tests {
+    //! R46-F3 canonical-containment safety tests for
+    //! `delete_listed_paths`. Moved from
+    //! `crates/blit-cli/src/transfers/remote.rs::delete_list_safety_tests`
+    //! in the a0-remote-helpers reopen pass so the public library
+    //! function carries its own coverage — `cargo test -p blit-app`
+    //! now exercises the safety property directly.
+
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn rejects_parent_traversal() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(tmp.path().join("victim.txt"), b"keep me").unwrap();
+        std::fs::write(outside.parent().unwrap().join("victim.txt"), b"keep me").unwrap();
+
+        let bad = vec!["../victim.txt".to_string()];
+        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe path"),
+            "expected unsafe-path error, got: {err}"
+        );
+        // The sibling file the daemon was trying to reach must still exist.
+        assert!(tmp.path().join("victim.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_absolute_path() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(tmp.path().join("victim.txt"), b"keep me").unwrap();
+
+        let bad = vec!["/etc/passwd".to_string(), "/tmp/victim.txt".to_string()];
+        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
+        assert!(err.to_string().contains("unsafe path"));
+        assert!(tmp.path().join("victim.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn deletes_in_scope_paths() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("ok.txt"), b"goodbye").unwrap();
+
+        let good = vec!["ok.txt".to_string()];
+        let stats = delete_listed_paths(&dest, &good).await.unwrap();
+        assert_eq!(stats.files_deleted, 1);
+        assert!(!dest.join("ok.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_root_self_reference() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        // Empty string normalizes to dest_root via safe_join.
+        let bad = vec!["".to_string()];
+        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
+        assert!(err.to_string().contains("destination root"));
+    }
+}
