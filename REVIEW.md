@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| a0-endpoints-gates  | Refactor | Phase 5 A.0 — endpoint gates doc refresh (r2)               | `[~]`  | `phase5/blit-app-extract`    | `6eeb214` |
+| _none_              |          |                                                             |        |                              |           |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -52,6 +52,7 @@ follows the full contract.
 | **transfers/remote_remote_direct — delegated execution** | **`1879019`** | **`[x]` verified** |
 | **transfers/dispatch — route selector** | **`8860cac`** | **`[x]` verified** |
 | endpoints — remote-transfer support gates (R1) | `c392f37` | `[x]` reopened → r2 |
+| **endpoints — remote-transfer support gates (R2)** | **`6eeb214`** | **`[x]` verified** |
 
 ## Phase 5 A.0 — remaining slices
 
@@ -64,7 +65,7 @@ These will get individual rows + finding docs + sentinels as they land.
 | transfers/remote — push entry-point            | `[x]` (a0-push-execution verified) |
 | transfers/remote_remote_direct                 | `[x]` (a0-delegated-execution verified) |
 | transfers/dispatch (`TransferKind` + route selector)             | `[x]` (a0-dispatch verified; `run_transfer`/`run_move` intentionally stay in CLI — see finding doc) |
-| Endpoints clap-coupled gates → primitive inputs | `[~]` (a0-endpoints-gates r2 pending — module doc refresh) |
+| Endpoints clap-coupled gates → primitive inputs | `[x]` (a0-endpoints-gates verified — 2 rounds) |
 | Final cleanup (drop CLI shim re-exports if any remain) | `[ ]` |
 
 ## Bigger Phase 5 milestones (planned, not yet started)

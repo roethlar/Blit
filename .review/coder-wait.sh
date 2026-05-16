@@ -72,14 +72,25 @@ extract_verified_sha() {
   # (`"sha": "…"` or `"sha" : "…"`) JSON. Earlier `coder-wait.sh`
   # rounds assumed compact only and exited 1 when the reviewer
   # produced pretty JSON (sentinel deleted → no sha-matched
-  # verdict found).
-  grep -Eo '"sha"[[:space:]]*:[[:space:]]*"[a-f0-9]+"' "$1" \
+  # verdict found). The trailing `|| true` keeps a no-match grep
+  # from tripping `set -e + pipefail` in the caller's `rsha=$(...)`
+  # assignment.
+  { grep -Eo '"sha"[[:space:]]*:[[:space:]]*"[a-f0-9]+"' "$1" \
     | head -1 \
-    | sed -E 's/.*"([a-f0-9]+)"/\1/'
+    | sed -E 's/.*"([a-f0-9]+)"/\1/'; } || true
 }
 
 extract_reopened_sha() {
-  grep -o 'Reviewed sha: `[a-f0-9]*`' "$1" | head -1 | sed 's/^Reviewed sha: `//; s/`$//'
+  # Reviewers have used both `Reviewed sha:` and
+  # `Reviewed commit:` labels in `.reopened.md`; accept either
+  # so a wording difference doesn't strand the wait. The
+  # trailing `|| true` matters: bare `grep` returns non-zero on
+  # no-match, which would otherwise propagate out of a
+  # `$(...)` capture under `set -euo pipefail` and exit the
+  # script before the next poll cycle.
+  { grep -Eo '^Reviewed (sha|commit): `[a-f0-9]+`' "$1" \
+    | head -1 \
+    | sed -E 's/^Reviewed (sha|commit): `([a-f0-9]+)`/\2/'; } || true
 }
 
 while true; do
