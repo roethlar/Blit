@@ -13,13 +13,12 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| m-jobs-6-watch  | Medium   | Finish M-Jobs/C doc sweep for `jobs watch`  | [~]    | `phase5/m-jobs`     | `6ff5480` |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
-| m-jobs-6-watch | Medium | Finish M-Jobs/C doc sweep for `jobs watch`               | `phase5/m-jobs` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |

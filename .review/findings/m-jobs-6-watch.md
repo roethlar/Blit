@@ -179,6 +179,33 @@ Addressed all three reviewer findings:
      its own docstring; `kind_label`'s "Human-readable label..."
      doc-block lives directly above the function again.
 
+## Round 3 (sha `6ff5480`)
+
+Reviewer's round-2 verdict left one Medium open: round 2's doc
+sweep had fixed the §6.5 CLI-surface paragraph and the TODO rows
+but missed three later sections in `TUI_DESIGN.md` that still
+claimed M-Jobs ownership of `Subscribe`-scoped pieces. Round 3
+finishes the sweep:
+
+- **§6.5 "M-Jobs introduces" list.** Removed the bullets for
+  the per-job event ring and `SubscribeRequest.transfer_id_filter`.
+  Replaced them with a bullet for the `blit jobs watch` verb
+  (the thing M-Jobs actually ships) and added a new "Deferred
+  from M-Jobs to milestone C" subsection that explicitly owns
+  the event ring and the filter field, with the reasoning
+  (dead infrastructure without `Subscribe`).
+- **§11 Phasing summary table.** M-Jobs row's wire-changes
+  column no longer claims `transfer_id_filter`; C row now lists
+  `Subscribe` + `transfer_id_filter` + per-job event ring +
+  jobs-watch streaming upgrade.
+- **§12 Structural commitments.** Spelled out which milestone
+  lands which field in the RPC contract list: M-Jobs ships
+  `GetState` / `CancelJob` / `detach` / `DelegatedPullStarted.transfer_id`;
+  milestone C ships `Subscribe` and `SubscribeRequest.transfer_id_filter`.
+
+No code changes (per the reviewer's note "the code does not
+need changes for this finding").
+
 ## Reviewer comments
 
 (empty — pending grade)
