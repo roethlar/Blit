@@ -153,10 +153,11 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
 ///
 /// The per-endpoint snapshot helpers (`endpoint_snapshot`,
 /// `endpoint_display`, `same_device`) live in `blit_app::diagnostics
-/// ::dump`; the rsync-resolution helpers
-/// (`source_is_contents`, `dest_is_container`, `resolve_destination`)
-/// still live in `crate::transfers::mod` and move when the
-/// transfers track lands. This function orchestrates both sets.
+/// ::dump`; the rsync-resolution helpers (`source_is_contents`,
+/// `dest_is_container`, `resolve_destination`) live in
+/// `blit_app::transfers::resolution` — this function still imports
+/// them via the `crate::transfers::*` re-export so the call sites
+/// stay short. This function orchestrates both sets.
 pub fn run_diagnostics_dump(args: &DiagnosticsDumpArgs) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let raw_dst = parse_transfer_endpoint(&args.destination)?;

@@ -170,3 +170,228 @@ pub fn resolve_destination(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Rsync-compat unit tests. Moved from
+    //! `crates/blit-cli/src/transfers/mod.rs` in A.0 to live with
+    //! the implementation they exercise. The CLI's `transfers/mod`
+    //! test module retains its end-to-end dispatcher tests but no
+    //! longer duplicates the resolution-helper unit coverage.
+
+    use super::*;
+    use blit_core::remote::{RemoteEndpoint, RemotePath};
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    // rsync-compat: "copy contents" detection matches flist.c:send_file_list
+    #[test]
+    fn source_is_contents_trailing_slash() {
+        assert!(source_is_contents("src/"));
+        assert!(source_is_contents("/a/b/src/"));
+        assert!(source_is_contents("src///"));
+    }
+
+    #[test]
+    fn source_is_contents_trailing_dot_slash() {
+        assert!(source_is_contents("src/."));
+        assert!(source_is_contents("/a/b/src/."));
+    }
+
+    #[test]
+    fn source_is_contents_just_dot() {
+        assert!(source_is_contents("."));
+    }
+
+    #[test]
+    fn source_is_contents_no_trailing() {
+        assert!(!source_is_contents("src"));
+        assert!(!source_is_contents("/a/b/src"));
+        assert!(!source_is_contents(""));
+        assert!(!source_is_contents("src.txt"));
+        // second-to-last char is not a slash, so trailing '.' is part of filename
+        assert!(!source_is_contents("foo.bar"));
+    }
+
+    #[test]
+    fn source_is_contents_trims_whitespace() {
+        assert!(source_is_contents("src/  "));
+        assert!(source_is_contents("src/.\t"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_is_contents_windows_backslash() {
+        assert!(source_is_contents("src\\"));
+        assert!(source_is_contents("src\\."));
+        assert!(source_is_contents("C:\\path\\"));
+    }
+
+    // resolve_destination: core rsync-style semantics
+    //
+    // Rules (applied identically to local→local, local→remote, remote→local,
+    // remote→remote, since resolution happens at the top-level dispatch):
+    //   source contents form (SRC/, SRC/., .) → dest as-is (merge)
+    //   dest trailing slash OR existing local dir → append source basename (nest)
+    //   else → dest as-is (rename / exact target)
+
+    #[test]
+    fn resolve_destination_existing_dir_appends_basename() {
+        let tmp = tempdir().unwrap();
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Local(tmp.path().to_path_buf());
+        let dst_raw = tmp.path().to_string_lossy().into_owned();
+        let resolved = resolve_destination("/a/GameDir", &dst_raw, &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, tmp.path().join("GameDir")),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_trailing_slash_on_dest_appends_basename() {
+        // Dest doesn't exist, but has trailing slash → still a container.
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Local(PathBuf::from("/b/new_dst"));
+        let resolved = resolve_destination("/a/GameDir", "/b/new_dst/", &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/b/new_dst/GameDir")),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_nonexistent_no_slash_uses_dest_as_target() {
+        // rsync: `rsync src newdst` where newdst doesn't exist → newdst becomes src copy
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Local(PathBuf::from("/definitely/does/not/exist/newdst"));
+        let resolved =
+            resolve_destination("/a/GameDir", "/definitely/does/not/exist/newdst", &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/definitely/does/not/exist/newdst")),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_source_trailing_slash_keeps_dest() {
+        let tmp = tempdir().unwrap();
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Local(tmp.path().to_path_buf());
+        let dst_before = tmp.path().to_path_buf();
+        let dst_raw = tmp.path().to_string_lossy().into_owned();
+        let resolved = resolve_destination("/a/GameDir/", &dst_raw, &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, dst_before),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_source_dot_slash_keeps_dest() {
+        let tmp = tempdir().unwrap();
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Local(tmp.path().to_path_buf());
+        let dst_before = tmp.path().to_path_buf();
+        let dst_raw = tmp.path().to_string_lossy().into_owned();
+        let resolved = resolve_destination("/a/GameDir/.", &dst_raw, &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, dst_before),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_file_to_existing_dir_appends_filename() {
+        let tmp = tempdir().unwrap();
+        let src = Endpoint::Local(PathBuf::from("/a/file.txt"));
+        let dst = Endpoint::Local(tmp.path().to_path_buf());
+        let dst_raw = tmp.path().to_string_lossy().into_owned();
+        let resolved = resolve_destination("/a/file.txt", &dst_raw, &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, tmp.path().join("file.txt")),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_file_to_exact_path_is_rename() {
+        // Dest doesn't exist, no trailing slash → exact rename.
+        let src = Endpoint::Local(PathBuf::from("/a/file.txt"));
+        let dst = Endpoint::Local(PathBuf::from("/b/renamed.txt"));
+        let resolved = resolve_destination("/a/file.txt", "/b/renamed.txt", &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/b/renamed.txt")),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_remote_dest_with_trailing_slash_appends() {
+        // Remote dest with trailing slash is a container (same rule as local).
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Remote(RemoteEndpoint {
+            host: "h".into(),
+            port: 9031,
+            path: RemotePath::Module {
+                module: "m".into(),
+                rel_path: PathBuf::from("common"),
+            },
+        });
+        let resolved = resolve_destination("/a/GameDir", "h:/m/common/", &src, dst);
+        match resolved {
+            Endpoint::Remote(r) => match r.path {
+                RemotePath::Module { rel_path, .. } => {
+                    assert_eq!(rel_path, PathBuf::from("common/GameDir"))
+                }
+                _ => panic!("expected module path"),
+            },
+            _ => panic!("expected remote endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_remote_dest_no_slash_preserves_target() {
+        // No trailing slash + remote dest (can't stat) → treat as exact target.
+        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
+        let dst = Endpoint::Remote(RemoteEndpoint {
+            host: "h".into(),
+            port: 9031,
+            path: RemotePath::Module {
+                module: "m".into(),
+                rel_path: PathBuf::from("common/target"),
+            },
+        });
+        let resolved = resolve_destination("/a/GameDir", "h:/m/common/target", &src, dst);
+        match resolved {
+            Endpoint::Remote(r) => match r.path {
+                RemotePath::Module { rel_path, .. } => {
+                    // No trailing slash on dest, can't stat remote → preserve target
+                    assert_eq!(rel_path, PathBuf::from("common/target"))
+                }
+                _ => panic!("expected module path"),
+            },
+            _ => panic!("expected remote endpoint"),
+        }
+    }
+
+    #[test]
+    fn resolve_destination_remote_source_appends_basename_on_container() {
+        let tmp = tempdir().unwrap();
+        let src = Endpoint::Remote(RemoteEndpoint {
+            host: "h".into(),
+            port: 9031,
+            path: RemotePath::Module {
+                module: "m".into(),
+                rel_path: PathBuf::from("Games/DOOM"),
+            },
+        });
+        let dst = Endpoint::Local(tmp.path().to_path_buf());
+        let dst_raw = tmp.path().to_string_lossy().into_owned();
+        let resolved = resolve_destination("h:/m/Games/DOOM", &dst_raw, &src, dst);
+        match resolved {
+            Endpoint::Local(p) => assert_eq!(p, tmp.path().join("DOOM")),
+            _ => panic!("expected local endpoint"),
+        }
+    }
+}
