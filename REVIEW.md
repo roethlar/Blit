@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| m-jobs-1-cancel-token | Feature | Per-row CancellationToken + delegated_pull race | `[~]` | `phase5/m-jobs`     | `1e493c0` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -62,3 +62,7 @@ Phase 5 B sub-slices on branch `phase5/getstate`:
 - `eab1a17` TransferRecord ring + outcome capture (`b-3-recent-ring`)
 - `b6b6bb2` GetState RPC + DaemonState handler (`b-4-getstate`)
 - `5f8ca5b` `blit jobs list <remote>` consumes GetState (`b-5-jobs-list`)
+
+Phase 5 M-Jobs sub-slices on branch `phase5/m-jobs`:
+
+- `1e493c0` Per-row CancellationToken + delegated_pull race (`m-jobs-1-cancel-token`)
