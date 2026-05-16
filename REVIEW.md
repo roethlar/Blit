@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| b-5-jobs-list   | Feature  | `blit jobs list <remote>` consumes GetState | `[~]`  | `phase5/getstate`   | `5f8ca5b` |
 
 ## Open findings
 
