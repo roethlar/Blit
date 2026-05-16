@@ -110,4 +110,19 @@ Workspace: 509 passed (was 507; +2).
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `c874ef6`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. One low-severity
+finding: the `delegated_pull` ActiveJobs comment in
+`service/core.rs` still said streaming RPCs "b-2 will wire
+via a guard update API." This commit IS b-2 — the comment
+went stale immediately at HEAD.
+
+### Round 2 (sha pending) — addresses round-1 finding
+
+Reworded the comment in present tense: streaming RPCs
+"register with empty endpoint strings and have their
+handlers fill them in via `ActiveJobGuard::set_endpoint`
+once the first stream frame parses."
+
+No other change. Validation unchanged at 509 / 0.
