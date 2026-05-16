@@ -22,18 +22,35 @@
 //!   stays in `blit-cli` until the M-C `AppProgressEvent`
 //!   reshape lands.
 //!
-//! The push entry-point functions
-//! (`run_remote_push_transfer`) and the CLI-side progress
-//! monitor stay in `blit-cli` for now and move in subsequent
-//! A.0 sub-slices.
+//! - [`run_remote_push`] + [`PushExecution`] +
+//!   [`PushExecutionOutcome`] — push entry-point orchestration.
+//!   The library builds the `Arc<dyn TransferSource>` from the
+//!   [`Endpoint`] passed in (Local → `FsTransferSource`,
+//!   Remote → `RemoteTransferSource` over a pull-client) and
+//!   wraps it in the [`FilteredSource`] before invoking
+//!   `RemotePushClient::push`. The CLI-side progress monitor
+//!   stays in `blit-cli` (M-C `AppProgressEvent` reshape is
+//!   its own pause point).
+//!
+//! No further `transfers/remote.rs` orchestration lives in
+//! `blit-cli` after this slice — the CLI's `transfers/remote.rs`
+//! retains only the clap-arg wrappers and presentation
+//! (progress monitor + JSON / human printers).
 
-use blit_core::generated::FileHeader;
+use crate::endpoints::Endpoint;
+use blit_core::fs_enum::FileFilter;
+use blit_core::generated::{FileHeader, MirrorMode};
 use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
 use blit_core::remote::pull::{PullSyncOptions, RemotePullReport};
+use blit_core::remote::push::RemotePushReport;
+use blit_core::remote::transfer::source::{
+    FilteredSource, FsTransferSource, RemoteTransferSource, TransferSource,
+};
 use blit_core::remote::transfer::RemoteTransferProgress;
-use blit_core::remote::{RemoteEndpoint, RemotePullClient};
+use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient, RemotePushClient};
 use eyre::{bail, eyre, Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Enumerate local files under `root` and build the manifest the
 /// pull-sync handshake sends to the daemon. Returns an empty vec
@@ -359,6 +376,127 @@ pub async fn apply_pull_mirror_purge(
     Ok(Some(
         delete_listed_paths(&outcome.actual_dest, delete_paths).await?,
     ))
+}
+
+/// Inputs for [`run_remote_push`]. Primitive fields only — no
+/// clap, no presentation. CLI builds this from `&TransferArgs`;
+/// the future TUI builds it directly.
+///
+/// `source` is the [`Endpoint`] the user picked (local path or
+/// a remote module). The library handles the dispatch internally:
+/// `Endpoint::Local(path)` → `FsTransferSource`,
+/// `Endpoint::Remote(endpoint)` → `RemoteTransferSource` over a
+/// pull-client connected at call time. The library then wraps
+/// the inner source with [`FilteredSource`] before invoking
+/// `RemotePushClient::push`, so the universal filter chokepoint
+/// (R49) applies on push the same way it applies on
+/// local→local and remote→remote.
+///
+/// `filter` is the runtime `FileFilter` (not the wire
+/// `FilterSpec`); the CLI builds it via
+/// `blit_app::transfers::filter::build`. `mirror_kind`
+/// communicates the user's `--delete-scope` choice to the
+/// daemon (R59 #1 F2: `--mirror --include …` deletes only
+/// in-scope entries via `FilteredSubset`).
+pub struct PushExecution {
+    pub source: Endpoint,
+    pub remote: RemoteEndpoint,
+    pub filter: FileFilter,
+    pub mirror_mode: bool,
+    pub mirror_kind: MirrorMode,
+    pub force_grpc: bool,
+    pub trace_data_plane: bool,
+    pub require_complete_scan: bool,
+    pub remote_label: String,
+}
+
+/// Output of [`run_remote_push`]. `destination` is the
+/// caller-supplied `remote_label` echoed back — the printer
+/// consumes it. `show_progress` is intentionally **not** here;
+/// it's a CLI-side presentation hint that the CLI threads
+/// directly into its own `DeferredPushState`.
+pub struct PushExecutionOutcome {
+    pub report: RemotePushReport,
+    pub destination: String,
+}
+
+/// Run a remote push end-to-end: connect to the destination,
+/// build the `Arc<dyn TransferSource>` from the [`Endpoint`]
+/// (resolving any pull-client connection for remote sources),
+/// wrap it in the universal [`FilteredSource`], and invoke
+/// `RemotePushClient::push`. No mirror-purge step exists on
+/// the push side — mirror deletes happen on the daemon and
+/// surface through the returned [`RemotePushReport`].
+///
+/// `progress` is borrowed for the duration of the push RPC.
+/// The caller owns the channel + monitor task; this function
+/// never spawns or awaits the monitor. Standard lifecycle:
+///
+/// ```text
+/// let (handle, task) = spawn_progress_monitor(...);
+/// let outcome = run_remote_push(execution, handle.as_ref()).await?;
+/// drop(handle);
+/// if let Some(t) = task { let _ = t.await; }
+/// ```
+///
+/// Unlike the pull side, there is no need to split this into
+/// pre-/post-purge halves — push has no post-RPC destructive
+/// step on the caller's filesystem, so the monitor's lifetime
+/// already lines up cleanly with the RPC.
+pub async fn run_remote_push(
+    execution: PushExecution,
+    progress: Option<&RemoteTransferProgress>,
+) -> Result<PushExecutionOutcome> {
+    let mut client = RemotePushClient::connect(execution.remote.clone())
+        .await
+        .with_context(|| format!("connecting to {}", execution.remote.control_plane_uri()))?;
+
+    let inner: Arc<dyn TransferSource> = match execution.source {
+        Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
+        Endpoint::Remote(endpoint) => {
+            let pull_client = RemotePullClient::connect(endpoint.clone())
+                .await
+                .with_context(|| {
+                    format!("connecting to source {}", endpoint.control_plane_uri())
+                })?;
+            // Resolve the source's root path from its `RemotePath`
+            // variant. Mirrors the pre-A.0 CLI code; semantics unchanged.
+            let root = match &endpoint.path {
+                RemotePath::Module { rel_path, .. } => rel_path.clone(),
+                RemotePath::Root { rel_path } => rel_path.clone(),
+                RemotePath::Discovery => PathBuf::from("."),
+            };
+            Arc::new(RemoteTransferSource::new(pull_client, root))
+        }
+    };
+
+    let transfer_source: Arc<dyn TransferSource> =
+        Arc::new(FilteredSource::new(inner, execution.filter.clone()));
+
+    let push_result = client
+        .push(
+            transfer_source.clone(),
+            &execution.filter,
+            execution.mirror_mode,
+            execution.mirror_kind,
+            execution.force_grpc,
+            execution.require_complete_scan,
+            progress,
+            execution.trace_data_plane,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "negotiating push manifest for {} -> {}",
+                transfer_source.root().display(),
+                execution.remote_label
+            )
+        })?;
+
+    Ok(PushExecutionOutcome {
+        report: push_result,
+        destination: execution.remote_label,
+    })
 }
 
 #[cfg(test)]

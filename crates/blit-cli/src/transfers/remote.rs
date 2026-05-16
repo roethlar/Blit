@@ -1,24 +1,18 @@
 use crate::cli::TransferArgs;
-use eyre::{Context, Result};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use eyre::Result;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
 use blit_app::transfers::remote::{
-    apply_pull_mirror_purge, run_pull_sync, LocalPurgeStats, PullExecutionOutcome,
-    PullSyncExecution,
+    apply_pull_mirror_purge, run_pull_sync, run_remote_push, LocalPurgeStats, PullExecutionOutcome,
+    PullSyncExecution, PushExecution,
 };
 use blit_core::remote::pull::PullSyncOptions;
-use blit_core::remote::transfer::source::{
-    FilteredSource, FsTransferSource, RemoteTransferSource, TransferSource,
-};
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
-use blit_core::remote::{
-    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
-};
+use blit_core::remote::{RemoteEndpoint, RemotePullReport, RemotePushReport};
 
 use super::endpoints::{format_remote_endpoint, Endpoint};
 
@@ -213,10 +207,6 @@ async fn run_remote_push_transfer_inner(
     mirror_mode: bool,
     defer_output: bool,
 ) -> Result<DeferredPushState> {
-    let mut client = RemotePushClient::connect(remote.clone())
-        .await
-        .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
-
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
         show_progress,
@@ -230,25 +220,6 @@ async fn run_remote_push_transfer_inner(
     // remote/transfer/source.rs) applies it identically to local→remote,
     // remote→remote, and local→local — full src/dst combination parity.
     let filter = super::build_filter(args)?;
-    let inner: Arc<dyn TransferSource> = match source {
-        Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
-        Endpoint::Remote(endpoint) => {
-            let client = RemotePullClient::connect(endpoint.clone())
-                .await
-                .with_context(|| {
-                    format!("connecting to source {}", endpoint.control_plane_uri())
-                })?;
-            // Use the relative path from the endpoint as the root
-            let root = match &endpoint.path {
-                blit_core::remote::RemotePath::Module { rel_path, .. } => rel_path.clone(),
-                blit_core::remote::RemotePath::Root { rel_path } => rel_path.clone(),
-                blit_core::remote::RemotePath::Discovery => PathBuf::from("."),
-            };
-            Arc::new(RemoteTransferSource::new(client, root))
-        }
-    };
-    let transfer_source: Arc<dyn TransferSource> =
-        Arc::new(FilteredSource::new(inner, filter.clone()));
 
     // R59 #1 F2: translate the user's --delete-scope flag to the wire
     // MirrorMode enum. Default to FilteredSubset so `push --include …
@@ -265,39 +236,35 @@ async fn run_remote_push_transfer_inner(
     } else {
         blit_core::generated::MirrorMode::Off
     };
-    let require_complete_scan = mirror_mode;
 
-    let push_result = client
-        .push(
-            transfer_source.clone(),
-            &filter,
-            mirror_mode,
-            mirror_kind,
-            args.force_grpc,
-            require_complete_scan,
-            progress_handle.as_ref(),
-            args.trace_data_plane,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "negotiating push manifest for {} -> {}",
-                transfer_source.root().display(),
-                format_remote_endpoint(&remote)
-            )
-        });
+    let execution = PushExecution {
+        source,
+        remote: remote.clone(),
+        filter,
+        mirror_mode,
+        mirror_kind,
+        force_grpc: args.force_grpc,
+        trace_data_plane: args.trace_data_plane,
+        require_complete_scan: mirror_mode,
+        remote_label: format_remote_endpoint(&remote),
+    };
+
+    // Push has no caller-side destructive step (mirror-delete is
+    // daemon-side and surfaces via the report), so unlike the pull
+    // lifecycle there is no need to drop the progress handle
+    // *before* a follow-up library call — the monitor's lifetime
+    // already matches the RPC.
+    let outcome = run_remote_push(execution, progress_handle.as_ref()).await;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
 
-    let report = push_result?;
-    let destination = format_remote_endpoint(&remote);
-
+    let outcome = outcome?;
     let state = DeferredPushState {
-        report,
-        destination,
+        report: outcome.report,
+        destination: outcome.destination,
         show_progress,
     };
     if !defer_output {
