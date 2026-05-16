@@ -21,18 +21,41 @@ pub struct PerfReport {
     pub records: Vec<PerformanceRecord>,
 }
 
-/// One-call read of the three perf-history surfaces the CLI's
-/// `diagnostics perf` verb cares about. `limit` matches the CLI's
-/// `--limit N` arg; `0` means "all records" per
-/// `read_recent_records`'s contract.
+/// Read the persisted "perf history enabled" flag. Separate
+/// from [`query`] because the CLI's `diagnostics perf` verb
+/// treats the post-toggle refresh as best-effort: a malformed
+/// `settings.json` shows the startup warning and falls back to
+/// the caller's existing value rather than failing the verb.
+/// Callers that want the bundled read (TUI F4 pane, scripted
+/// consumers) use [`query`] and propagate the error.
+pub fn read_enabled() -> Result<bool> {
+    perf_history::perf_history_enabled()
+}
+
+/// Path to `perf_local.jsonl`. Pre-A.0 callers used
+/// `perf_history::config_dir()?.join("perf_local.jsonl")`
+/// inline; centralizing the join here keeps the filename out of
+/// presenter code.
+pub fn history_path() -> Result<PathBuf> {
+    Ok(perf_history::config_dir()?.join("perf_local.jsonl"))
+}
+
+/// Read up to `limit` most recent records. `0` means "all" per
+/// `blit_core::perf_history::read_recent_records`'s contract.
+pub fn read_records(limit: usize) -> Result<Vec<PerformanceRecord>> {
+    perf_history::read_recent_records(limit)
+}
+
+/// One-call read of the three perf-history surfaces. Convenience
+/// for callers that want one-shot reads and don't need the
+/// best-effort split (TUI's F4 pane will likely use this; the
+/// CLI uses the granular functions above so it can keep
+/// pre-A.0's best-effort enabled-refresh semantics).
 pub fn query(limit: usize) -> Result<PerfReport> {
-    let enabled = perf_history::perf_history_enabled()?;
-    let history_path = perf_history::config_dir()?.join("perf_local.jsonl");
-    let records = perf_history::read_recent_records(limit)?;
     Ok(PerfReport {
-        enabled,
-        history_path,
-        records,
+        enabled: read_enabled()?,
+        history_path: history_path()?,
+        records: read_records(limit)?,
     })
 }
 

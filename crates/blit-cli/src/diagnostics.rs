@@ -30,17 +30,24 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         }
     }
 
-    let report = perf::query(args.limit)?;
-    // Refresh status from disk in case multiple toggles happened
-    // earlier — `query` re-reads the persisted flag.
-    ctx.perf_history_enabled = report.enabled;
+    // Best-effort refresh of the cached enabled flag — matches
+    // pre-A.0 semantics. A malformed `settings.json` here doesn't
+    // block the rest of the verb: the startup warning already
+    // surfaced the parse error, and we fall back to whatever
+    // value AppContext loaded with.
+    if let Ok(enabled) = perf::read_enabled() {
+        ctx.perf_history_enabled = enabled;
+    }
+
+    let history_path = perf::history_path()?;
+    let records = perf::read_records(args.limit)?;
 
     if args.json {
         let output = json!({
-            "enabled": report.enabled,
-            "history_path": report.history_path.to_string_lossy(),
-            "record_count": report.records.len(),
-            "records": report.records,
+            "enabled": ctx.perf_history_enabled,
+            "history_path": history_path.to_string_lossy(),
+            "record_count": records.len(),
+            "records": records,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -49,13 +56,13 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
     println!(
         "Performance history (showing up to {} entries): {}",
         args.limit,
-        report.records.len()
+        records.len()
     );
-    println!("History file: {}", report.history_path.display());
+    println!("History file: {}", history_path.display());
     println!(
         "Status: {}",
-        if report.enabled {
-            if report.records.is_empty() {
+        if ctx.perf_history_enabled {
+            if records.is_empty() {
                 "enabled (no entries yet)"
             } else {
                 "enabled"
@@ -65,29 +72,23 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         }
     );
 
-    if report.records.is_empty() {
+    if records.is_empty() {
         return Ok(());
     }
 
-    let total_runs = report.records.len();
+    let total_runs = records.len();
     let total_runs_f64 = total_runs as f64;
-    let avg_planner = report
-        .records
+    let avg_planner = records
         .iter()
         .map(|r| r.planner_duration_ms as f64)
         .sum::<f64>()
         / total_runs_f64;
-    let avg_transfer = report
-        .records
+    let avg_transfer = records
         .iter()
         .map(|r| r.transfer_duration_ms as f64)
         .sum::<f64>()
         / total_runs_f64;
-    let fast_path_runs = report
-        .records
-        .iter()
-        .filter(|r| r.fast_path.is_some())
-        .count();
+    let fast_path_runs = records.iter().filter(|r| r.fast_path.is_some()).count();
     let fast_pct = if total_runs == 0 {
         0.0
     } else {
@@ -105,7 +106,7 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         avg_planner, avg_transfer
     );
 
-    if let Some(last) = report.records.last() {
+    if let Some(last) = records.last() {
         let millis = last.timestamp_epoch_ms.min(u64::MAX as u128) as u64;
         let timestamp = DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_millis(millis));
         let mode = match last.mode {
