@@ -13,13 +13,12 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| b-1-active-jobs | Feature  | Introduce `ActiveJobs` table on `BlitService` | `[~]`  | `phase5/getstate`   | `10259ec` |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
-| b-1-active-jobs | Feature | ActiveJobs table on BlitService — reopened after r2 test failure | `phase5/getstate` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  |        |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |
