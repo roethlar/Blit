@@ -13,6 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
+| a0-remote-helpers   | Refactor | Phase 5 A.0 — pull-flow helpers (enumerate + delete-list)  | `[~]`  | `phase5/blit-app-extract`    | *pending* |
 | a0-resolution-fixup | Low      | Phase 5 A.0 — resolution: stale refs + tests-with-impl     | `[x]`  | `phase5/blit-app-extract`    | `65f6031` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
@@ -48,7 +49,8 @@ These will get individual rows + finding docs + sentinels as they land.
 
 | Slice                                          | Status |
 |------------------------------------------------|--------|
-| transfers/remote (push + pull orchestration)   | `[ ]`  |
+| transfers/remote — pull-flow helpers           | `[~]` (a0-remote-helpers, pending) |
+| transfers/remote — push + pull entry-points    | `[ ]`  |
 | transfers/remote_remote_direct                 | `[ ]`  |
 | transfers/dispatcher (`run_transfer`, `run_move`, `TransferKind`) | `[ ]` |
 | Endpoints clap-coupled gates → primitive inputs | `[ ]`  |
