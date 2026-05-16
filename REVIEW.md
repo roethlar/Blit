@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| b-2-set-endpoint | Feature | Streaming RPCs populate ActiveJobs rows     | `[~]`  | `phase5/getstate`   | `ef46631` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -58,3 +58,4 @@ Sub-slices on branch `phase5/blit-app-extract`:
 Phase 5 B sub-slices on branch `phase5/getstate`:
 
 - `10259ec` ActiveJobs table on `BlitService` (`b-1-active-jobs`)
+- `ef46631` Streaming RPCs populate ActiveJobs rows (`b-2-set-endpoint`)
