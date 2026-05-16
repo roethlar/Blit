@@ -12,7 +12,6 @@ mod profile;
 mod rm;
 mod scan;
 mod transfers;
-mod util;
 
 use crate::check::run_check;
 use crate::cli::{Cli, Commands, DiagnosticsCommand};

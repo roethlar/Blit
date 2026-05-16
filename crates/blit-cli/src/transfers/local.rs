@@ -9,7 +9,7 @@ use blit_core::orchestrator::{
     LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator, TransferOutcome,
 };
 
-use crate::util::format_bytes;
+use blit_app::display::format_bytes;
 
 /// Convenience wrapper for callers that always want the summary
 /// printed inline. Most CLI paths (copy / mirror) want this; move

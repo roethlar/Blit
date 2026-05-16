@@ -29,6 +29,8 @@ use blit_core::fs_enum::FileFilter;
 use eyre::{Context, Result};
 use serde::Serialize;
 
+use crate::display::format_bytes;
+
 /// One source/destination file that differs. `reason` is the
 /// human-readable explanation — pre-A.0 the CLI's `--json`
 /// output emitted this verbatim; A.0 preserves the string shape
@@ -185,25 +187,6 @@ fn compare_hashes(src: &Path, dst: &Path) -> Result<bool> {
     let d = hash_file(dst, ChecksumType::Blake3)
         .with_context(|| format!("hashing {}", dst.display()))?;
     Ok(s == d)
-}
-
-/// Private duplicate of `blit_cli::util::format_bytes` so the
-/// `DiffEntry.reason` strings stay byte-identical to the pre-A.0
-/// CLI output (the formatter is part of the no-behavior-change
-/// contract for `--json`). Consolidated when `util.rs` is split
-/// in a later A.0 commit (reviewer-flagged pause point).
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    format!("{size:.2} {}", UNITS[unit])
 }
 
 #[cfg(unix)]

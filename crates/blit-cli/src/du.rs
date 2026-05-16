@@ -1,6 +1,8 @@
 use crate::cli::DuArgs;
-use crate::util::{module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint};
 use blit_app::admin::du::{self, DiskUsageEntry};
+use blit_app::endpoints::{
+    module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
+};
 use eyre::{bail, Result};
 
 pub async fn run_du(args: DuArgs) -> Result<()> {

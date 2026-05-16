@@ -1,6 +1,6 @@
 use crate::cli::RmArgs;
-use crate::util::{parse_endpoint_or_local, Endpoint};
 use blit_app::admin::rm;
+use blit_app::endpoints::{parse_endpoint_or_local, Endpoint};
 use eyre::{bail, Result};
 use serde::Serialize;
 use std::io::{self, Write};
