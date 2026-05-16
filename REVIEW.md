@@ -13,12 +13,13 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| m-jobs-2-cancel-rpc | Feature | CancelJob RPC + `blit jobs cancel` CLI    | `[~]`  | `phase5/m-jobs`     | `a96ca93` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
+| m-jobs-2-cancel-rpc | Feature | `blit jobs cancel` exit-code contract mismatch           | `phase5/m-jobs` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |
