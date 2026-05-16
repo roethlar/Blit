@@ -1,4 +1,4 @@
-//! Endpoint parsing for transfer sources / destinations.
+//! Endpoint parsing + remote-transfer support gates.
 //!
 //! Moved from `crates/blit-cli/src/transfers/endpoints.rs` and
 //! `crates/blit-cli/src/util.rs` as part of the Phase 5 A.0
@@ -11,10 +11,25 @@
 //! (falls back to `Local` for any input the strict parser
 //! rejects).
 //!
-//! Two clap-coupled gate functions (`ensure_remote_pull_supported`
-//! and `ensure_remote_push_supported`) stay in `blit-cli` for
-//! now; they'll move once their inputs are reshaped to primitives
-//! (final A.0 cleanup commit).
+//! The three remote-transfer support gates
+//! ([`ensure_remote_transfer_supported`],
+//! [`ensure_remote_pull_supported`], and
+//! [`ensure_remote_push_supported`]) take primitive booleans —
+//! the CLI's `crates/blit-cli/src/transfers/endpoints.rs` keeps
+//! two paper-thin wrappers that map `&TransferArgs` →
+//! primitives, and the future TUI will call the library
+//! functions directly. Error messages reference the CLI flag
+//! names (`--dry-run`, `--workers`, `--checksum`) because those
+//! are the documented user surface; if the TUI ever surfaces
+//! the refusal verbatim it can remap to its own labels at the
+//! catch point.
+//!
+//! Endpoint-shape gates ([`ensure_remote_destination_supported`],
+//! [`ensure_remote_source_supported`]) reject
+//! `RemotePath::Discovery` inputs on transfer paths — the
+//! parser produces `Discovery` for bare-host shapes like
+//! `host:` with no module / root, which the wire protocol
+//! can't route.
 
 use blit_core::remote::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Result};
