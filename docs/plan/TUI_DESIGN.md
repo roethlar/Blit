@@ -812,21 +812,29 @@ mirroring `RemoteTransferProgress`'s existing shape). Both
 `blit-cli` and `blit-tui` plug their own consumers; the
 orchestration code doesn't care which.
 
-State-machine ownership splits across two milestones:
-- **M-Jobs** introduces the always-on `ActiveJobs` table
-  (§6.5). After M-Jobs every transfer has a daemon-side
-  identity, a cancellation handle, and a place to drop events.
-  No byte-level data flowing yet — the table is fed by today's
-  file-complete-granularity events.
+State-machine ownership splits across three milestones:
+- **B** introduces the always-on `ActiveJobs` table and the
+  `recent[]` ring (§6.3). After B every transfer has a daemon-
+  side identity surfaced via `GetState.active[]` /
+  `GetState.recent[]`, no byte-level data flowing yet — the
+  table is fed by today's file-complete-granularity events.
+- **M-Jobs** extends each row with a `CancellationToken`
+  field and a lifecycle hook (§6.5): when `detach=true` on
+  a delegated pull, the spawn closure's `tx.closed()`
+  cancellation race disarms and ownership transfers to the
+  daemon, cancellable via `CancelJob`. Same table, more on
+  each row.
 - **C** adds the byte-level instrumentation that fills the
-  `ActiveJob.bytes_completed` field meaningfully and lets
-  `TransferProgress` carry useful throughput. See §6.2 for the
-  four pieces of write-loop work.
+  `ActiveJob.bytes_completed` field meaningfully, the per-job
+  event ring that `Subscribe` replays on connect, and the
+  `Subscribe` RPC + `TransferProgress` event family that
+  fans live updates to subscribers. See §6.2 for the four
+  pieces of write-loop work.
 
 This split is why M-Jobs lands before C in the new sequencing:
 the table is what `CancelJob` cancels against and what
-`Subscribe.transfer_id_filter` indexes into. Byte-level fill is
-a quality-of-progress upgrade on top.
+`Subscribe.transfer_id_filter` will eventually index into.
+Byte-level fill is a quality-of-progress upgrade on top.
 
 ### 7.5 Scope of the prerequisite
 
