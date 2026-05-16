@@ -1,8 +1,7 @@
 //! Remote transfer orchestration helpers.
 //!
-//! Moved from `crates/blit-cli/src/transfers/remote.rs` in A.0.
-//! Two pure helpers used by the pull-sync flow (and reused by
-//! the TUI's future pull-trigger affordance):
+//! Moved from `crates/blit-cli/src/transfers/remote.rs` in A.0
+//! across two sub-slices:
 //!
 //! - [`enumerate_local_manifest`] — walks a local destination
 //!   tree and produces the `Vec<FileHeader>` that PullSync
@@ -10,15 +9,25 @@
 //! - [`delete_listed_paths`] + [`LocalPurgeStats`] — applies the
 //!   daemon-authored delete list during a mirror pull, with
 //!   canonical-containment safety.
+//! - [`run_remote_pull`] + [`PullExecution`] + [`PullExecutionOutcome`]
+//!   — pull entry-point orchestration. The CLI's
+//!   `run_remote_pull_transfer_inner` builds a `PullExecution`
+//!   from `&TransferArgs`, the future TUI builds it directly.
+//!   Presentation (progress monitor spawn, summary printing)
+//!   stays in `blit-cli` until the M-C `AppProgressEvent`
+//!   reshape lands.
 //!
-//! The push / pull entry-point functions
-//! (`run_remote_push_transfer`, `run_remote_pull_transfer`) and
-//! the CLI-side progress monitor stay in `blit-cli` for now and
-//! move in subsequent A.0 sub-slices.
+//! The push entry-point functions
+//! (`run_remote_push_transfer`) and the CLI-side progress
+//! monitor stay in `blit-cli` for now and move in subsequent
+//! A.0 sub-slices.
 
 use blit_core::generated::FileHeader;
 use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
-use eyre::{bail, eyre, Result};
+use blit_core::remote::pull::{PullSyncOptions, RemotePullReport};
+use blit_core::remote::transfer::RemoteTransferProgress;
+use blit_core::remote::{RemoteEndpoint, RemotePullClient};
+use eyre::{bail, eyre, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Enumerate local files under `root` and build the manifest the
@@ -214,6 +223,103 @@ pub async fn delete_listed_paths(
         }
     }
     Ok(stats)
+}
+
+/// Inputs for [`run_remote_pull`]. Primitive fields only — no
+/// clap, no presentation types — so the CLI and the future TUI
+/// can both build it without sharing a dependency.
+///
+/// `remote_label` is the human-readable string used in error
+/// context (e.g. `pulling from <label> into <dest>`). The CLI
+/// passes `format_remote_endpoint(&remote)`; the TUI passes
+/// whatever string it shows the user in the picker.
+pub struct PullExecution {
+    pub remote: RemoteEndpoint,
+    pub dest_root: PathBuf,
+    pub options: PullSyncOptions,
+    pub compute_checksums: bool,
+    pub mirror_mode: bool,
+    pub remote_label: String,
+}
+
+/// Captured outcome of [`run_remote_pull`]. Carries everything
+/// the CLI's pull printer (`print_deferred_pull_result`) needs
+/// to render output; the TUI consumes the same struct.
+pub struct PullExecutionOutcome {
+    pub report: RemotePullReport,
+    pub actual_dest: PathBuf,
+    pub mirror_purge_stats: Option<LocalPurgeStats>,
+}
+
+/// Run a remote pull end-to-end: connect, enumerate the local
+/// manifest, run the PullSync handshake, and (in mirror mode)
+/// apply the daemon-authored delete list. Returns the captured
+/// state without printing — presentation is the caller's job.
+///
+/// `progress` is borrowed for the duration of the PullSync RPC.
+/// The caller (CLI) owns the channel + monitor task; this
+/// function never spawns or awaits the monitor. Lifecycle:
+///
+/// ```text
+/// let (handle, task) = spawn_progress_monitor(...);
+/// let outcome = run_remote_pull(execution, handle.as_ref()).await?;
+/// drop(handle);
+/// if let Some(t) = task { let _ = t.await; }
+/// ```
+///
+/// R46-F6 ordering is preserved: mirror-purge runs *before*
+/// the function returns, so the caller can include
+/// `mirror_purge_stats` in the same JSON document as the
+/// transfer report (pre-fix, the success line was already on
+/// stdout when purge ran, which broke single-document JSON).
+pub async fn run_remote_pull(
+    execution: PullExecution,
+    progress: Option<&RemoteTransferProgress>,
+) -> Result<PullExecutionOutcome> {
+    let mut client = RemotePullClient::connect(execution.remote.clone())
+        .await
+        .with_context(|| format!("connecting to {}", execution.remote.control_plane_uri()))?;
+
+    let actual_dest = execution.dest_root;
+    let local_manifest =
+        enumerate_local_manifest(&actual_dest, execution.compute_checksums).await?;
+
+    let report = client
+        .pull_sync(
+            &actual_dest,
+            local_manifest,
+            &execution.options,
+            execution.mirror_mode,
+            progress,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "pulling from {} into {}",
+                execution.remote_label,
+                actual_dest.display()
+            )
+        })?;
+
+    let mirror_purge_stats = if execution.mirror_mode {
+        if let Some(ref delete_paths) = report.paths_to_delete {
+            if !delete_paths.is_empty() {
+                Some(delete_listed_paths(&actual_dest, delete_paths).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(PullExecutionOutcome {
+        report,
+        actual_dest,
+        mirror_purge_stats,
+    })
 }
 
 #[cfg(test)]

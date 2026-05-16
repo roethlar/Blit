@@ -1,12 +1,15 @@
 use crate::cli::TransferArgs;
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use blit_app::transfers::remote::{delete_listed_paths, enumerate_local_manifest, LocalPurgeStats};
+use blit_app::transfers::remote::{
+    run_remote_pull, LocalPurgeStats, PullExecution, PullExecutionOutcome,
+};
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::source::{
     FilteredSource, FsTransferSource, RemoteTransferSource, TransferSource,
@@ -15,9 +18,15 @@ use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{
     RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
 };
-use std::sync::Arc;
 
 use super::endpoints::{format_remote_endpoint, Endpoint};
+
+/// CLI-facing alias for the library's pull-outcome struct.
+/// Field shape unchanged across the A.0 move — this preserves
+/// the public name `DeferredPullState` that `transfers::mod`
+/// already imports while letting the orchestration body live
+/// in `blit-app`.
+pub type DeferredPullState = PullExecutionOutcome;
 
 /// Spawn the per-transfer progress monitor. `suppress_final_line=true`
 /// lets move callers gate the post-transfer "[progress] final: …"
@@ -340,12 +349,11 @@ pub async fn run_remote_pull_transfer_deferred(
     .await
 }
 
-/// Captured pull-transfer state for deferred-output callers (move).
-pub struct DeferredPullState {
-    pub report: blit_core::remote::pull::RemotePullReport,
-    pub actual_dest: PathBuf,
-    pub mirror_purge_stats: Option<LocalPurgeStats>,
-}
+// `DeferredPullState` is now a type alias for
+// `blit_app::transfers::remote::PullExecutionOutcome` (see the
+// top of this file). Same field shape, same callers — the
+// orchestration body that builds it lives in `blit-app` after
+// this A.0 sub-slice.
 
 pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState) {
     if args.json {
@@ -382,17 +390,6 @@ async fn run_remote_pull_transfer_inner(
     // have produced for an equivalent push.
     let filter_spec = super::build_filter_spec(args)?;
 
-    let mut client = RemotePullClient::connect(remote.clone())
-        .await
-        .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
-
-    // Destination is already resolved by the caller (see transfers::resolve_destination).
-    let actual_dest = dest_root.to_path_buf();
-
-    // Enumerate local files to build manifest
-    // Compute checksums if --checksum mode is requested
-    let local_manifest = enumerate_local_manifest(&actual_dest, args.checksum).await?;
-
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
         show_progress,
@@ -401,73 +398,44 @@ async fn run_remote_pull_transfer_inner(
         defer_output, // R53-F1: suppress final progress line on move
     );
 
-    // Build comparison options from CLI args
-    let pull_opts = PullSyncOptions {
-        force_grpc: args.force_grpc,
+    let execution = PullExecution {
+        remote: remote.clone(),
+        dest_root: dest_root.to_path_buf(),
+        options: PullSyncOptions {
+            force_grpc: args.force_grpc,
+            mirror_mode,
+            delete_all_scope: args.delete_scope_all(),
+            filter: Some(filter_spec),
+            size_only: args.size_only,
+            ignore_times: args.ignore_times,
+            ignore_existing: args.ignore_existing,
+            force: args.force,
+            checksum: args.checksum,
+            resume: args.resume,
+            block_size: 0, // Use default (1 MiB)
+            // R49-F2: move arms set this true so the daemon refuses
+            // partial source scans before we delete the remote source.
+            require_complete_scan,
+        },
+        compute_checksums: args.checksum,
         mirror_mode,
-        delete_all_scope: args.delete_scope_all(),
-        filter: Some(filter_spec),
-        size_only: args.size_only,
-        ignore_times: args.ignore_times,
-        ignore_existing: args.ignore_existing,
-        force: args.force,
-        checksum: args.checksum,
-        resume: args.resume,
-        block_size: 0, // Use default (1 MiB)
-        // R49-F2: move arms set this true so the daemon refuses
-        // partial source scans before we delete the remote source.
-        require_complete_scan,
+        remote_label: format_remote_endpoint(&remote),
     };
 
-    // Use PullSync - sends local manifest to server, server compares and only sends what's needed
-    let report = client
-        .pull_sync(
-            &actual_dest,
-            local_manifest,
-            &pull_opts,
-            mirror_mode, // track_paths for mirror mode deletion
-            progress_handle.as_ref(),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "pulling from {} into {}",
-                format_remote_endpoint(&remote),
-                actual_dest.display()
-            )
-        })?;
+    // CLI owns the progress monitor lifecycle (R53-F1: the
+    // `suppress_final_line` gate is presentation policy, so it
+    // lives here). Library borrows the channel for the duration of
+    // the RPC; CLI drops the handle and drains the task afterward.
+    //
+    // R46-F6 ordering — mirror-purge runs inside the library
+    // before it returns, so the purge stats are available for the
+    // same JSON document as the transfer report.
+    let state = run_remote_pull(execution, progress_handle.as_ref()).await?;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
-
-    // R46-F6: run mirror purge BEFORE emitting final JSON/human
-    // output, so deletion counts and failures show up in the
-    // structured summary. Pre-fix, the success line was already on
-    // stdout when purge ran; in JSON mode the purge's println!
-    // appended non-JSON text after the JSON document, and a purge
-    // failure surfaced too late for downstream tools that had
-    // already parsed the success state.
-    let mirror_purge_stats = if mirror_mode {
-        if let Some(ref delete_paths) = report.paths_to_delete {
-            if !delete_paths.is_empty() {
-                Some(delete_listed_paths(&actual_dest, delete_paths).await?)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let state = DeferredPullState {
-        report,
-        actual_dest,
-        mirror_purge_stats,
-    };
 
     // R51-F4: when deferred, skip the inline print. The caller
     // (move) prints via `print_deferred_pull_result` after the
@@ -480,11 +448,13 @@ async fn run_remote_pull_transfer_inner(
     Ok(state)
 }
 
-// `enumerate_local_manifest`, `delete_listed_paths`, and
-// `LocalPurgeStats` moved to `blit_app::transfers::remote` in
-// this A.0 sub-slice. Pure orchestration helpers — the TUI's
-// future pull-trigger affordance will consume them too. CLI
-// imports them at the top of this file.
+// `enumerate_local_manifest`, `delete_listed_paths`,
+// `LocalPurgeStats`, and as of this slice the pull-execution
+// orchestration (`PullExecution` / `PullExecutionOutcome` /
+// `run_remote_pull`) live in `blit_app::transfers::remote`. CLI
+// imports them at the top of this file; the inner function above
+// is now a thin wrapper that handles clap arg → primitive input
+// translation and the progress-monitor lifecycle.
 
 fn print_pull_json(
     report: &RemotePullReport,
