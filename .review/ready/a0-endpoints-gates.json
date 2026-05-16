@@ -1,1 +1,0 @@
-{"id":"a0-endpoints-gates","branch":"phase5/blit-app-extract","sha":"c392f37fdf9ea92bda2641afd1043393486e452a","ts":"2026-05-16T17:16:11Z","note":"Remote-transfer support gates move to blit_app::endpoints with primitive-bool inputs. CLI keeps two thin wrappers that map &TransferArgs → bools. Penultimate A.0 slice — only Final cleanup remains. 503 tests, same baseline."}
