@@ -104,6 +104,48 @@ pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<Cancel
 /// render to this string. Unknown values (from a forward-version
 /// daemon emitting a kind we don't know yet) render as
 /// `"unknown"` so the row stays visible.
+/// Single-poll snapshot for the watch path. Either we found
+/// the row alive in `GetState.active[]`, or it had already
+/// drained into `recent[]`, or it isn't in either (transfer
+/// completed before the ring rotated it out, or never
+/// existed).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum WatchSnapshot {
+    /// Transfer is in flight. Embeds the active row.
+    Active(blit_core::generated::ActiveTransfer),
+    /// Transfer has completed (success or failure). Embeds
+    /// the record from the ring.
+    Finished(blit_core::generated::TransferRecord),
+    /// No row found in either table. The transfer either
+    /// never existed or rotated out of the recent ring.
+    NotFound,
+}
+
+/// Look the transfer up in a freshly fetched daemon state.
+/// Pure helper used by the watch loop; carved out so unit
+/// tests can drive it with synthetic `DaemonState` values
+/// without standing up a tonic server.
+///
+/// `recent[]` precedence intentional: if the same id somehow
+/// appears in both (it shouldn't — Drop removes-then-pushes
+/// atomically under the table lock), we report Finished
+/// rather than Active because the row's terminal record is
+/// the authoritative one.
+pub fn watch_snapshot(state: &DaemonState, transfer_id: &str) -> WatchSnapshot {
+    for r in state.recent.iter().rev() {
+        if r.transfer_id == transfer_id {
+            return WatchSnapshot::Finished(r.clone());
+        }
+    }
+    for a in &state.active {
+        if a.transfer_id == transfer_id {
+            return WatchSnapshot::Active(a.clone());
+        }
+    }
+    WatchSnapshot::NotFound
+}
+
 pub fn kind_label(kind: i32) -> &'static str {
     use blit_core::generated::TransferKind;
     match TransferKind::try_from(kind) {
@@ -138,5 +180,89 @@ mod tests {
         // daemon) shouldn't panic and shouldn't be silently
         // miscategorised.
         assert_eq!(kind_label(999), "unknown");
+    }
+
+    fn empty_state() -> DaemonState {
+        DaemonState::default()
+    }
+
+    fn active_row(id: &str) -> blit_core::generated::ActiveTransfer {
+        blit_core::generated::ActiveTransfer {
+            transfer_id: id.to_string(),
+            kind: TransferKind::DelegatedPull as i32,
+            peer: "p".to_string(),
+            module: "m".to_string(),
+            path: "/".to_string(),
+            start_unix_ms: 1,
+            bytes_completed: 0,
+            bytes_total: 0,
+        }
+    }
+
+    fn recent_row(id: &str, ok: bool, err: &str) -> blit_core::generated::TransferRecord {
+        blit_core::generated::TransferRecord {
+            transfer_id: id.to_string(),
+            kind: TransferKind::DelegatedPull as i32,
+            peer: "p".to_string(),
+            module: "m".to_string(),
+            path: "/".to_string(),
+            start_unix_ms: 1,
+            duration_ms: 100,
+            bytes: 0,
+            files: 0,
+            ok,
+            error_message: err.to_string(),
+        }
+    }
+
+    #[test]
+    fn watch_snapshot_finds_active_row() {
+        let mut state = empty_state();
+        state.active.push(active_row("t-1"));
+        match watch_snapshot(&state, "t-1") {
+            WatchSnapshot::Active(a) => assert_eq!(a.transfer_id, "t-1"),
+            other => panic!("expected Active, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watch_snapshot_finds_finished_row() {
+        let mut state = empty_state();
+        state.recent.push(recent_row("t-2", true, ""));
+        match watch_snapshot(&state, "t-2") {
+            WatchSnapshot::Finished(r) => {
+                assert_eq!(r.transfer_id, "t-2");
+                assert!(r.ok);
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watch_snapshot_not_found_when_absent_from_both() {
+        let state = empty_state();
+        assert!(matches!(
+            watch_snapshot(&state, "t-nope"),
+            WatchSnapshot::NotFound
+        ));
+    }
+
+    #[test]
+    fn watch_snapshot_prefers_finished_when_both_present() {
+        // If a Drop-then-push race somehow leaves the same
+        // id in both tables, the terminal record wins —
+        // that's the authoritative outcome.
+        let mut state = empty_state();
+        state.active.push(active_row("t-3"));
+        state
+            .recent
+            .push(recent_row("t-3", false, "handler failed"));
+        match watch_snapshot(&state, "t-3") {
+            WatchSnapshot::Finished(r) => {
+                assert!(!r.ok);
+                assert_eq!(r.error_message, "handler failed");
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
     }
 }

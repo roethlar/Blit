@@ -1,10 +1,11 @@
-use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs};
+use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsWatchArgs};
 use blit_app::admin::jobs;
-use blit_app::admin::jobs::CancelJobOutcome;
+use blit_app::admin::jobs::{CancelJobOutcome, WatchSnapshot};
 use blit_core::generated::DaemonState;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 /// Return shape from [`run_jobs`]. `list` always exits with
 /// success once the RPC returned cleanly; `cancel` carries
@@ -24,6 +25,7 @@ pub async fn run_jobs(command: JobsCommand) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         JobsCommand::Cancel(args) => run_jobs_cancel(args).await,
+        JobsCommand::Watch(args) => run_jobs_watch(args).await,
     }
 }
 
@@ -60,6 +62,154 @@ pub(crate) fn cancel_exit_code(outcome: &CancelJobOutcome) -> ExitCode {
         CancelJobOutcome::Cancelled { .. } => ExitCode::SUCCESS,
         CancelJobOutcome::NotFound { .. } => ExitCode::from(1),
         CancelJobOutcome::Unsupported { .. } => ExitCode::from(2),
+    }
+}
+
+/// Poll `GetState` on `remote` until the transfer drains
+/// into `recent[]` or the timeout fires. Each poll renders
+/// a status line (human ticker or JSON-Lines, depending on
+/// `args.json`).
+///
+/// Exit codes:
+///
+///   Finished + ok=true  → 0
+///   Finished + ok=false → 1
+///   NotFound            → 2 (id never seen)
+///   Timeout while active → 3 (transfer was still running
+///                              when the deadline fired)
+///
+/// `--detach` callers should `blit jobs watch <remote> <id>`
+/// right after the daemon emits Started; the watch loop
+/// will see the row in `active[]` immediately on first poll.
+/// If they wait too long after the transfer completes, the
+/// recent ring may rotate the row out — they'll see
+/// NotFound. That's correct behavior under the polling
+/// model; Subscribe (milestone C) will replace polling and
+/// remove the race.
+async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
+    let remote = RemoteEndpoint::parse(&args.remote)
+        .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
+    if args.transfer_id.trim().is_empty() {
+        eyre::bail!("transfer_id must not be empty");
+    }
+    let interval = Duration::from_millis(args.interval_ms.max(50));
+    let deadline = if args.timeout_secs > 0 {
+        Some(Instant::now() + Duration::from_secs(args.timeout_secs))
+    } else {
+        None
+    };
+
+    if !args.json {
+        eprintln!(
+            "Watching transfer {} on {} (poll {}ms)...",
+            args.transfer_id,
+            remote.display(),
+            interval.as_millis()
+        );
+    }
+
+    loop {
+        let state = jobs::query(&remote, 0).await?;
+        let snap = jobs::watch_snapshot(&state, &args.transfer_id);
+        if args.json {
+            print_watch_json(&snap);
+        }
+        match snap {
+            WatchSnapshot::Active(ref a) => {
+                if !args.json {
+                    let age_ms = age_ms_since(a.start_unix_ms);
+                    eprintln!(
+                        "[active] {} {} peer={} age={}",
+                        jobs::kind_label(a.kind),
+                        module_path(&a.module, &a.path),
+                        a.peer,
+                        format_ms(age_ms),
+                    );
+                }
+            }
+            WatchSnapshot::Finished(ref r) => {
+                if !args.json {
+                    let status = if r.ok {
+                        "ok".to_string()
+                    } else {
+                        format!("FAILED: {}", r.error_message)
+                    };
+                    eprintln!(
+                        "[done] {} {} duration={} {}",
+                        jobs::kind_label(r.kind),
+                        module_path(&r.module, &r.path),
+                        format_ms(r.duration_ms),
+                        status,
+                    );
+                }
+                return Ok(if r.ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                });
+            }
+            WatchSnapshot::NotFound => {
+                if !args.json {
+                    eprintln!(
+                        "[not-found] transfer '{}' is not on {} (already completed and \
+                         rotated out of the recent ring, or never existed)",
+                        args.transfer_id,
+                        remote.display()
+                    );
+                }
+                return Ok(ExitCode::from(2));
+            }
+        }
+
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                if !args.json {
+                    eprintln!(
+                        "[timeout] transfer '{}' still active after {}s",
+                        args.transfer_id, args.timeout_secs
+                    );
+                }
+                return Ok(ExitCode::from(3));
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn print_watch_json(snap: &WatchSnapshot) {
+    use serde_json::json;
+    let body = match snap {
+        WatchSnapshot::Active(a) => json!({
+            "state": "active",
+            "transfer_id": a.transfer_id,
+            "kind": jobs::kind_label(a.kind),
+            "peer": a.peer,
+            "module": a.module,
+            "path": a.path,
+            "start_unix_ms": a.start_unix_ms,
+            "bytes_completed": a.bytes_completed,
+            "bytes_total": a.bytes_total,
+        }),
+        WatchSnapshot::Finished(r) => json!({
+            "state": "finished",
+            "transfer_id": r.transfer_id,
+            "kind": jobs::kind_label(r.kind),
+            "peer": r.peer,
+            "module": r.module,
+            "path": r.path,
+            "start_unix_ms": r.start_unix_ms,
+            "duration_ms": r.duration_ms,
+            "ok": r.ok,
+            "error_message": r.error_message,
+        }),
+        WatchSnapshot::NotFound => json!({
+            "state": "not_found",
+        }),
+    };
+    // JSON-Lines: one object per poll, no trailing newline
+    // from to_string (println! adds it).
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
     }
 }
 

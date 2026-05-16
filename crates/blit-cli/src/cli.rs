@@ -92,6 +92,8 @@ pub enum JobsCommand {
     List(JobsListArgs),
     /// Cancel an active transfer on a remote daemon
     Cancel(JobsCancelArgs),
+    /// Watch an active transfer until it completes
+    Watch(JobsWatchArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -103,6 +105,31 @@ pub struct JobsListArgs {
     #[arg(long, default_value_t = 0)]
     pub recent_limit: u32,
     /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsWatchArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Transfer id to watch — typically obtained from
+    /// `blit jobs list <remote>` or the `--detach` output.
+    pub transfer_id: String,
+    /// Poll interval in milliseconds. Default 1000ms. A future
+    /// milestone-C `Subscribe` RPC will replace polling with a
+    /// streaming subscription; until then this flag controls
+    /// the GetState polling cadence.
+    #[arg(long, default_value_t = 1000)]
+    pub interval_ms: u64,
+    /// Maximum wall-clock seconds to watch before giving up.
+    /// 0 = wait forever. Useful for scripts that don't want
+    /// to hang on a stuck transfer.
+    #[arg(long, default_value_t = 0)]
+    pub timeout_secs: u64,
+    /// Output as JSON-Lines (one object per poll, plus a
+    /// final outcome line). Default is a human-readable
+    /// updating ticker.
     #[arg(long)]
     pub json: bool,
 }
