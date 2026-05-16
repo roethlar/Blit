@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| m-jobs-2-cancel-rpc | Feature | CancelJob RPC + `blit jobs cancel` CLI    | `[~]`  | `phase5/m-jobs`     | `66df256` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -66,3 +66,4 @@ Phase 5 B sub-slices on branch `phase5/getstate`:
 Phase 5 M-Jobs sub-slices on branch `phase5/m-jobs`:
 
 - `1e493c0` Per-row CancellationToken + delegated_pull race (`m-jobs-1-cancel-token`)
+- `66df256` CancelJob RPC + `blit jobs cancel` CLI (`m-jobs-2-cancel-rpc`)
