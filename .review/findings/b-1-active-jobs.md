@@ -122,4 +122,45 @@ Workspace test count: 506 (was 503, +3).
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `a842a00`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. Two findings:
+
+1. **Medium** — `ActiveJobGuard::Drop` used `try_lock` +
+   spawned-fallback. Drop wasn't deterministic; contended
+   drops left the row in the next `snapshot()` and the
+   spawned cleanup could leak on shutdown.
+2. **Low** — concurrent-registers test used fixed sleeps
+   (`5ms` / `20ms`), flake-prone under load.
+
+### Round 2 (sha pending) — addresses both
+
+**Finding 1**: switched the registry from
+`tokio::sync::Mutex` to `std::sync::Mutex`. The critical
+sections are in-memory HashMap ops bounded by the size of
+the active table — sync locking is appropriate. Drop now
+blocks on `Mutex::lock()` (clippy `if_let_mutex`-friendly:
+single `lock()` call with `unwrap_or_else(|e| e.into_inner())`
+for poison handling) and is sync + deterministic. Callers in
+`service/core.rs` lost their `.await`. Module doc carries a
+"## Locking" section explaining why std mutex is the right
+choice here and crediting the reviewer for catching the
+round-1 leak.
+
+**Finding 2**: replaced the sleeps with two
+`tokio::sync::Barrier`s. The `registered` barrier
+synchronizes the parent's snapshot with all spawns having
+registered; the `release` barrier synchronizes drop. Parent
+also `.await`s every join handle so every Drop is observable
+before the final empty-table assertion. No timing assumption.
+
+**New test**: `drop_blocks_on_contended_lock_then_removes`
+forces the contended path with a `spawn_blocking` holder
+thread holding the mutex while a `spawn_blocking` dropper
+thread drops its guard. Uses an `AtomicBool` to assert the
+dropper hasn't progressed past the lock acquisition while
+the holder still holds it. Once the holder releases, the
+dropper completes, the row is gone. This is the explicit
+coverage the reviewer asked for in finding 1.
+
+Workspace: 507 passed (was 506; +1 contended-drop test).
