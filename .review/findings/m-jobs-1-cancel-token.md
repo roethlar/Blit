@@ -122,4 +122,52 @@ Workspace: 526 passed (was 523; +3).
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `4a2eb0a`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. Two findings:
+
+1. **Medium** — `cancel(id) -> bool` returned `true` for any
+   row in the cancellations map. Only `delegated_pull` races
+   the token in its handler select; push / pull / pull_sync
+   would silently keep running while the caller saw
+   "cancelled". Suggested: return a structured outcome and
+   encode "this kind doesn't support cancellation" as a
+   distinct variant rather than treating token-presence as
+   cancellation support.
+2. **Low** — `register` inserted into `table` first, then
+   into a parallel `cancellations` map. Snapshot-then-cancel
+   could observe the row before the token entry existed and
+   get `false` back. Suggested: publish the token before the
+   row, or merge into a single locked struct.
+
+### Round 2 (sha pending) — addresses both
+
+**Finding 1**: `ActiveJobKind::supports_cancellation()`
+predicate encodes the policy (DelegatedPull-only today).
+`CancelOutcome` enum (Cancelled / Unsupported / NotFound)
+replaces the bool. `cancel(id)` consults the kind and
+returns `Unsupported` synchronously WITHOUT firing the
+token when the kind doesn't honor it, so callers can't be
+lied to.
+
+**Finding 2**: Merged `table` + `cancellations` into a
+single `Mutex<HashMap<String, TableEntry>>` where
+`TableEntry { job: ActiveJob, cancellation: CancellationToken }`.
+One insert + one remove + one read path. "Visible in
+snapshot" strictly implies "cancel can be evaluated" —
+no scheduler window between maps. Lock-order doc reduced
+to "table → recent."
+
+Tests reorganized:
+
+- 3 round-1 tests replaced with the structured-outcome
+  versions.
+- `cancel_returns_unsupported_for_non_delegated_kinds`
+  (new) loops over push / pull / pull_sync, asserts
+  `Unsupported` outcome AND the token was NOT fired (catches
+  the regression the reviewer flagged).
+- `supports_cancellation_matches_dispatch_policy` (new)
+  pins the predicate so dispatch-site policy can't drift
+  silently from the table API.
+
+Workspace: 528 passed (was 526; +2 net).
