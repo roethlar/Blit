@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| b-1-active-jobs | Feature  | Introduce `ActiveJobs` table on `BlitService` | `[~]`  | `phase5/getstate`   | `10259ec` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -54,3 +54,7 @@ Sub-slices on branch `phase5/blit-app-extract`:
 - `8860cac` transfers/dispatch (`a0-dispatch`)
 - `6eeb214` endpoints — support gates (`a0-endpoints-gates`)
 - `29a2026` final cleanup — drop CLI shim re-exports (`a0-final-cleanup`)
+
+Phase 5 B sub-slices on branch `phase5/getstate`:
+
+- `10259ec` ActiveJobs table on `BlitService` (`b-1-active-jobs`)
