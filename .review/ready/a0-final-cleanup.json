@@ -1,1 +1,0 @@
-{"id":"a0-final-cleanup","branch":"phase5/blit-app-extract","sha":"29a202669365fbc48dd06fc792cb60634ae3ae8a","ts":"2026-05-16T17:29:42Z","note":"Final A.0 sub-slice — drops CLI shim re-exports. After this slice every remaining CLI transfers/*.rs symbol is clap, presentation, or interactive. 503 tests, same baseline."}
