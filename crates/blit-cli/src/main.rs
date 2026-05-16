@@ -6,6 +6,7 @@ mod df;
 mod diagnostics;
 mod du;
 mod find;
+mod jobs;
 mod list_modules;
 mod ls;
 mod profile;
@@ -17,6 +18,7 @@ use crate::check::run_check;
 use crate::cli::{Cli, Commands, DiagnosticsCommand};
 use crate::context::AppContext;
 use crate::diagnostics::{run_diagnostics_dump, run_diagnostics_perf};
+use crate::jobs::run_jobs;
 use crate::transfers::{run_move, run_transfer};
 use blit_app::transfers::dispatch::TransferKind;
 use blit_core::config;
@@ -59,6 +61,7 @@ async fn main() -> Result<ExitCode> {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
             DiagnosticsCommand::Dump(args) => run_diagnostics_dump(&args)?,
         },
+        Commands::Jobs { command } => run_jobs(command).await?,
     }
 
     Ok(ExitCode::SUCCESS)

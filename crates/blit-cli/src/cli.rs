@@ -79,6 +79,30 @@ pub enum Commands {
         #[command(subcommand)]
         command: DiagnosticsCommand,
     },
+    /// Inspect transfer jobs on a remote daemon
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JobsCommand {
+    /// List active and recent transfers on a remote daemon
+    List(JobsListArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsListArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Maximum number of recent transfers to return. 0 means
+    /// the daemon's default (50).
+    #[arg(long, default_value_t = 0)]
+    pub recent_limit: u32,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]

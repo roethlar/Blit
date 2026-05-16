@@ -9,6 +9,7 @@
 pub mod df;
 pub mod du;
 pub mod find;
+pub mod jobs;
 pub mod list_modules;
 pub mod ls;
 pub mod rm;
