@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| b-4-getstate    | Feature  | GetState RPC + DaemonState handler          | `[~]`  | `phase5/getstate`   | `36536e9` |
 
 ## Open findings
 
