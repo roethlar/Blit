@@ -467,12 +467,15 @@ async fn run_remote_pull_transfer_inner(
 }
 
 // `enumerate_local_manifest`, `delete_listed_paths`,
-// `LocalPurgeStats`, and as of this slice the pull-execution
-// orchestration (`PullExecution` / `PullExecutionOutcome` /
-// `run_remote_pull`) live in `blit_app::transfers::remote`. CLI
-// imports them at the top of this file; the inner function above
-// is now a thin wrapper that handles clap arg → primitive input
-// translation and the progress-monitor lifecycle.
+// `LocalPurgeStats`, and the pull-execution orchestration
+// (`PullSyncExecution` / `PullSyncOutcome` /
+// `PullExecutionOutcome` plus `run_pull_sync` and
+// `apply_pull_mirror_purge`) all live in
+// `blit_app::transfers::remote`. CLI imports them at the top of
+// this file; the inner function above is now a thin wrapper that
+// handles clap arg → primitive input translation, the
+// progress-monitor lifecycle (drop/await between pull_sync and
+// purge), and presentation.
 
 fn print_pull_json(
     report: &RemotePullReport,
