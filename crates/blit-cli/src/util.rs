@@ -1,6 +1,5 @@
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Result};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 pub enum Endpoint {
@@ -59,17 +58,4 @@ pub fn format_bytes(bytes: u64) -> String {
         unit += 1;
     }
     format!("{size:.2} {}", UNITS[unit])
-}
-
-pub fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
-    use std::time::UNIX_EPOCH;
-
-    let modified = meta.modified().ok()?;
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => Some(duration.as_secs() as i64),
-        Err(err) => {
-            let dur = err.duration();
-            Some(-(dur.as_secs() as i64))
-        }
-    }
 }
