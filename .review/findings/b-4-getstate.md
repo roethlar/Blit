@@ -117,4 +117,32 @@ Workspace: 517 passed (was 514; +3 unit tests).
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `36536e9`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. One
+medium-severity finding: the wire contract on
+`GetStateRequest.recent_limit` was documented in the proto
+("max number of recent[] entries to return") but the
+handler ignored the field. Non-zero `recent_limit` values
+silently overran the contract.
+
+Note from this round's finding doc: I'd justified deferring
+truncation to b-5 because b-5 wires the CLI verb. The
+reviewer correctly insisted on shipping the contract whole —
+once a proto field is defined, the handler shouldn't lie about
+its semantics.
+
+### Round 2 (sha pending) — addresses the truncation finding
+
+`get_state` now reads `req.recent_limit` and truncates
+`active_jobs.recent()` from the front (oldest-first storage,
+so dropping the front leaves the most-recent N). `0` keeps
+the daemon-default behavior. A limit larger than the ring
+returns everything.
+
+New test `get_state_recent_limit_truncates_to_most_recent_n`
+covers three cases: `recent_limit=3` (truncate), `=0`
+(default = full), `=999` (larger than ring → full). Asserts
+oldest-first ordering inside the truncated window.
+
+Workspace: 518 passed (was 517; +1).
