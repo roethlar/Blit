@@ -9,3 +9,4 @@ pub mod filter;
 pub mod local;
 pub mod remote;
 pub mod remote_remote_direct;
+pub mod resolution;
