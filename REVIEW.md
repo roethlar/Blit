@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| b-2-set-endpoint | Feature | Streaming RPCs populate ActiveJobs rows     | `[~]`  | `phase5/getstate`   | `c874ef6` |
 
 ## Open findings
 
