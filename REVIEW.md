@@ -13,12 +13,13 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| m-jobs-1-cancel-token | Feature | Per-row CancellationToken + delegated_pull race | `[~]` | `phase5/m-jobs`     | `4a2eb0a` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
+| m-jobs-1-cancel-token | Feature | Cancellation API can acknowledge uncancellable rows       | `phase5/m-jobs` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |
