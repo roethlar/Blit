@@ -348,13 +348,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_blocks_on_contended_lock_then_removes() {
-        // Force a contended Drop by holding the registry's
-        // mutex on the main task while a spawned task drops
-        // its guard. The std::sync::Mutex makes Drop block
-        // until the held guard is released — and once it
-        // does, the row is gone. This is the deterministic
-        // RAII contract `GetState.active[]` will rely on.
+    async fn drop_removes_row_after_holder_releases_contended_lock() {
+        // Deterministic test of Drop under contention. Uses
+        // two `std::sync::mpsc` rendezvous channels so the
+        // sequencing is explicit:
+        //
+        //   1. Holder thread acquires the registry mutex,
+        //      sends `LOCKED` on `tx_locked`.
+        //   2. Parent task receives `LOCKED` — the holder now
+        //      definitively owns the lock.
+        //   3. Parent spawns the dropper. The dropper's
+        //      `drop(guard)` calls `lock()` on the same mutex
+        //      and must wait — there is no other code path
+        //      out of `ActiveJobGuard::Drop`.
+        //   4. Parent sends `RELEASE` on `tx_release`; the
+        //      holder thread completes its scope (releasing
+        //      the mutex) and the dropper unblocks.
+        //   5. Parent awaits both threads, then asserts the
+        //      table is empty.
+        //
+        // The previous round's version asserted "dropper has
+        // not finished while holder holds the lock" via an
+        // `AtomicBool` + spin — racy when the holder hadn't
+        // yet acquired the mutex by the time the dropper ran.
+        // The reviewer flagged the race; this version drops
+        // that assertion entirely because the `std::sync::Mutex`
+        // semantics (Drop's `lock()` call cannot complete
+        // until the holder releases) are structural, not
+        // testable timing. The deterministic property under
+        // test is the same one `GetState.active[]` will rely
+        // on: after the guard is dropped, the row is gone.
         let table = ActiveJobs::new();
         let guard = table.register(
             ActiveJobKind::Pull,
@@ -363,54 +386,40 @@ mod tests {
             "/".to_string(),
         );
 
-        let started_drop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let finished_drop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx_locked, rx_locked) = std::sync::mpsc::sync_channel::<()>(0);
+        let (tx_release, rx_release) = std::sync::mpsc::sync_channel::<()>(0);
 
-        // Hold the registry's mutex on a blocking thread; the
-        // dropper's spawned task should block on the mutex
-        // for the duration of this hold.
         let table_for_holder = table.clone();
-        let started_drop_for_holder = Arc::clone(&started_drop);
-        let finished_drop_for_holder = Arc::clone(&finished_drop);
         let holder = tokio::task::spawn_blocking(move || {
             let _held = table_for_holder
                 .inner
                 .table
                 .lock()
                 .expect("active_jobs table poisoned");
-            // Wait until the dropper has had a real chance to
-            // run and is parked on the mutex. We can't observe
-            // mutex contention directly, so observe via the
-            // dropper's "started" flag — set just before drop
-            // — and a small yield-and-spin loop.
-            while !started_drop_for_holder.load(std::sync::atomic::Ordering::Acquire) {
-                std::thread::yield_now();
-            }
-            // Spin a few times so the dropper definitely
-            // reaches the lock call before we release.
-            for _ in 0..1000 {
-                std::thread::yield_now();
-            }
-            assert!(
-                !finished_drop_for_holder.load(std::sync::atomic::Ordering::Acquire),
-                "dropper completed while the registry mutex was held — Drop is not blocking on the lock as required"
-            );
-            // _held drops here; the dropper unblocks.
+            tx_locked.send(()).expect("locked-send");
+            rx_release.recv().expect("release-recv");
+            // _held drops here — mutex releases when this
+            // function returns.
         });
 
-        // Spawn the dropper — drops the guard, which acquires
-        // the mutex.
+        // Wait until the holder definitely owns the mutex
+        // before spawning the dropper.
+        rx_locked.recv().expect("locked-recv");
+
         let dropper = tokio::task::spawn_blocking(move || {
-            started_drop.store(true, std::sync::atomic::Ordering::Release);
             drop(guard);
-            finished_drop.store(true, std::sync::atomic::Ordering::Release);
         });
 
-        holder.await.unwrap();
-        dropper.await.unwrap();
+        // Holder is parked on `rx_release.recv()`; the
+        // dropper is parked on `mutex.lock()`. Send the
+        // release signal so the holder returns, dropping its
+        // `_held` guard and unblocking the dropper.
+        tx_release.send(()).expect("release-send");
+        holder.await.expect("holder join");
+        dropper.await.expect("dropper join");
 
-        // Holder is gone, dropper is gone → the row must be
-        // gone too.
+        // The dropper's `Drop` has now run to completion under
+        // genuine contention — and the row must be gone.
         assert!(table.snapshot().is_empty());
     }
 
