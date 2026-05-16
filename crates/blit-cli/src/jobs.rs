@@ -163,7 +163,9 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
 
         if let Some(deadline) = deadline {
             if Instant::now() >= deadline {
-                if !args.json {
+                if args.json {
+                    print_watch_timeout_json(&args.transfer_id, args.timeout_secs);
+                } else {
                     eprintln!(
                         "[timeout] transfer '{}' still active after {}s",
                         args.transfer_id, args.timeout_secs
@@ -208,6 +210,23 @@ fn print_watch_json(snap: &WatchSnapshot) {
     };
     // JSON-Lines: one object per poll, no trailing newline
     // from to_string (println! adds it).
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
+    }
+}
+
+/// Emit the terminal `state: "timeout"` line when --timeout-secs
+/// fires while the transfer is still in active[]. JSON consumers
+/// rely on the stream having a terminal state line — exit code 3
+/// is for shells; the JSON object is for the same stream that's
+/// been seeing `state: "active"` rows.
+fn print_watch_timeout_json(transfer_id: &str, timeout_secs: u64) {
+    use serde_json::json;
+    let body = json!({
+        "state": "timeout",
+        "transfer_id": transfer_id,
+        "timeout_secs": timeout_secs,
+    });
     if let Ok(line) = serde_json::to_string(&body) {
         println!("{}", line);
     }

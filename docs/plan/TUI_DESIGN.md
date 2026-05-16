@@ -646,9 +646,12 @@ So `detach` is a **delegated-only** feature in M-Jobs.
 - `blit jobs list <remote>` — calls `GetState` against
   `<remote>`, prints `active` + `recent`.
 - `blit jobs cancel <remote> <transfer_id>` — calls `CancelJob`.
-- `blit jobs watch <remote> <transfer_id>` — opens `Subscribe`
-  with `transfer_id_filter` and renders progress until the job
-  completes. Useful for "I detached, want to follow now."
+- `blit jobs watch <remote> <transfer_id>` — follows a transfer
+  to completion. Ships in M-Jobs as a `GetState` polling loop
+  (`--interval-ms`, `--timeout-secs`, `--json`); milestone C
+  upgrades it to a `Subscribe` stream with `transfer_id_filter`
+  once that RPC exists. Useful for "I detached, want to follow
+  now."
 
 All four are thin CLI wrappers over the new RPCs; the TUI uses
 the same wire surface.

@@ -99,11 +99,6 @@ pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<Cancel
     }
 }
 
-/// Human-readable label for a `TransferKind` proto enum value.
-/// Stable across releases — the CLI formatter and any TUI both
-/// render to this string. Unknown values (from a forward-version
-/// daemon emitting a kind we don't know yet) render as
-/// `"unknown"` so the row stays visible.
 /// Single-poll snapshot for the watch path. Either we found
 /// the row alive in `GetState.active[]`, or it had already
 /// drained into `recent[]`, or it isn't in either (transfer
@@ -146,6 +141,11 @@ pub fn watch_snapshot(state: &DaemonState, transfer_id: &str) -> WatchSnapshot {
     WatchSnapshot::NotFound
 }
 
+/// Human-readable label for a `TransferKind` proto enum value.
+/// Stable across releases — the CLI formatter and any TUI both
+/// render to this string. Unknown values (from a forward-version
+/// daemon emitting a kind we don't know yet) render as
+/// `"unknown"` so the row stays visible.
 pub fn kind_label(kind: i32) -> &'static str {
     use blit_core::generated::TransferKind;
     match TransferKind::try_from(kind) {
