@@ -13,12 +13,13 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| b-4-getstate    | Feature  | GetState RPC + DaemonState handler          | `[~]`  | `phase5/getstate`   | `36536e9` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
+| b-4-getstate | Feature | GetState RPC recent_limit contract mismatch              | `phase5/getstate` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  |        |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |
