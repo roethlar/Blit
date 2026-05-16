@@ -1,6 +1,6 @@
 use crate::cli::ListArgs;
 use crate::util::{format_bytes, parse_endpoint_or_local, rel_path_to_string, Endpoint};
-use blit_app::admin::ls::{self, DirEntry};
+use blit_app::admin::ls::{self, DirEntry, LocalListing};
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use eyre::{bail, Result};
 use std::path::Path;
@@ -13,38 +13,33 @@ pub async fn run_ls(args: ListArgs) -> Result<()> {
 }
 
 fn list_local_path(path: &Path, json: bool) -> Result<()> {
-    let entries = ls::list_local(path)?;
+    let listing = ls::list_local(path)?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        // Pre-A.0 the JSON path emitted a single-entry vec for the
+        // non-directory case and the full sorted vec for the
+        // directory case. `LocalListing::into_entries` preserves
+        // that shape.
+        println!("{}", serde_json::to_string_pretty(&listing.into_entries())?);
         return Ok(());
     }
 
-    let is_single_file = entries.len() == 1 && !entries[0].is_dir && {
-        // Heuristic matching pre-A.0 behavior: a single non-dir
-        // entry with the same basename as the target was the "stat
-        // a file" case. blit-app returns the same shape for "ls a
-        // file" and "ls a 1-entry dir", but the CLI's pre-A.0 text
-        // output formatted them differently — file mode showed the
-        // full path, dir mode showed the basename.
-        path.is_file()
-    };
-
-    if is_single_file {
-        println!(
-            "FILE {:>12} {}",
-            format_bytes(entries[0].size),
-            path.display()
-        );
-        return Ok(());
-    }
-
-    println!("Listing {}:", path.display());
-    for entry in entries {
-        if entry.is_dir {
-            println!("DIR  {:>12} {}/", "-", entry.name);
-        } else {
-            println!("FILE {:>12} {}", format_bytes(entry.size), entry.name);
+    match listing {
+        LocalListing::Target { entry } => {
+            // Single non-directory target (file, device, FIFO,
+            // socket). Pre-A.0 text printed the full path here,
+            // not the basename — preserved.
+            println!("FILE {:>12} {}", format_bytes(entry.size), path.display());
+        }
+        LocalListing::Directory { entries } => {
+            println!("Listing {}:", path.display());
+            for entry in entries {
+                if entry.is_dir {
+                    println!("DIR  {:>12} {}/", "-", entry.name);
+                } else {
+                    println!("FILE {:>12} {}", format_bytes(entry.size), entry.name);
+                }
+            }
         }
     }
     Ok(())

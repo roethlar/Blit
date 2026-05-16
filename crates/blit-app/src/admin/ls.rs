@@ -27,6 +27,38 @@ pub struct DirEntry {
     pub mtime_seconds: i64,
 }
 
+/// Outcome of `list_local`. Discriminates "target is a directory,
+/// here are its contents" from "target is a single non-directory
+/// (file, device, FIFO, socket, symlink); here is its stat
+/// summary." Pre-A.0 the CLI used `!metadata.is_dir()` to decide
+/// the second branch; doing the same in the CLI by re-checking
+/// `Path::is_file()` would silently misclassify devices/FIFOs/
+/// sockets as directories. Returning the discriminator lifts the
+/// decision out of presentation.
+#[derive(Debug, Clone)]
+pub enum LocalListing {
+    /// Target was a directory. Entries are sorted by path to
+    /// match the pre-A.0 text layout.
+    Directory { entries: Vec<DirEntry> },
+    /// Target was a single non-directory. Single-entry summary,
+    /// basename in `entry.name`. Pre-A.0 the CLI's text path
+    /// rendered this as `FILE {size} {full path}`; that
+    /// rendering is the CLI's responsibility.
+    Target { entry: DirEntry },
+}
+
+impl LocalListing {
+    /// Flatten into a single entry vec. Used for the CLI's `--json`
+    /// output which has always emitted "one entry per target"
+    /// regardless of whether the target was a directory.
+    pub fn into_entries(self) -> Vec<DirEntry> {
+        match self {
+            LocalListing::Directory { entries } => entries,
+            LocalListing::Target { entry } => vec![entry],
+        }
+    }
+}
+
 /// List entries under a remote `module:path`. Caller has already
 /// resolved the smart-dispatch (bare host → list-modules) on its
 /// own — this function assumes a real module/path target.
@@ -57,11 +89,12 @@ pub async fn list_remote(
         .collect())
 }
 
-/// Stat-or-list a local path. A directory expands into its
-/// entries (sorted by name to match the pre-A.0 CLI behavior); a
-/// file becomes a single-entry vec with the file's basename.
-/// Entries are not recursed.
-pub fn list_local(path: &Path) -> Result<Vec<DirEntry>> {
+/// Stat-or-list a local path. Mirrors pre-A.0 branching: a
+/// directory expands into its entries (sorted by path); any
+/// non-directory (regular file, device, FIFO, socket, symlink
+/// to a non-directory) returns a single-entry `Target`.
+/// Recursion is the caller's responsibility.
+pub fn list_local(path: &Path) -> Result<LocalListing> {
     let metadata =
         fs::metadata(path).with_context(|| format!("reading metadata for {}", path.display()))?;
 
@@ -85,18 +118,20 @@ pub fn list_local(path: &Path) -> Result<Vec<DirEntry>> {
                 mtime_seconds: metadata_mtime_seconds(&meta).unwrap_or(0),
             });
         }
-        Ok(entries)
+        Ok(LocalListing::Directory { entries })
     } else {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| ".".to_string());
-        Ok(vec![DirEntry {
-            name,
-            is_dir: false,
-            size: metadata.len(),
-            mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
-        }])
+        Ok(LocalListing::Target {
+            entry: DirEntry {
+                name,
+                is_dir: false,
+                size: metadata.len(),
+                mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            },
+        })
     }
 }
 
