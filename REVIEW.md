@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| b-3-recent-ring | Feature  | TransferRecord ring + outcome capture       | `[~]`  | `phase5/getstate`   | `eab1a17` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -59,3 +59,4 @@ Phase 5 B sub-slices on branch `phase5/getstate`:
 
 - `10259ec` ActiveJobs table on `BlitService` (`b-1-active-jobs`)
 - `ef46631` Streaming RPCs populate ActiveJobs rows (`b-2-set-endpoint`)
+- `eab1a17` TransferRecord ring + outcome capture (`b-3-recent-ring`)
