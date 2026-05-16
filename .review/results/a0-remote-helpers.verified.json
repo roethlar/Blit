@@ -1,0 +1,11 @@
+{
+  "id": "a0-remote-helpers",
+  "verdict": "verified",
+  "sha": "b2d6c9cdfbe1bd42156fab594c38321204700d0e",
+  "reviewed_at": "2026-05-16T16:42:00-04:00",
+  "notes": [
+    ".review/check-state.sh now uses bash 3.2-safe iteration for possibly-empty verified/reopened arrays.",
+    ".review/check-state.sh exits 0 with the current mixed pending/verdict state.",
+    "cargo fmt, clippy, and workspace tests had already passed in this review on the same Rust tree; round 4 only changed .review workflow files."
+  ]
+}

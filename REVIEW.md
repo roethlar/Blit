@@ -13,7 +13,6 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| a0-remote-helpers   | Workflow | Phase 5 A.0 — check-state.sh nounset (r4)                  | `[~]`  | `phase5/blit-app-extract`    | `b2d6c9c` |
 | a0-pull-execution   | Refactor | Phase 5 A.0 — pull entry-point orchestration                | `[~]`  | `phase5/blit-app-extract`    | `7f75539` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
@@ -44,7 +43,8 @@ follows the full contract.
 | transfers/resolution — followups | `65f6031` | `[x]` verified |
 | transfers/remote — pull-flow helpers (R1) | `de78151` | `[x]` reopened → r2 |
 | transfers/remote — pull-flow helpers (R2) | `086fa49` | `[x]` reopened → r3 |
-| **transfers/remote — pull-flow helpers (R3)** | **`2c9029e`** | **`[x]` verified** |
+| transfers/remote — pull-flow helpers (R3) | `2c9029e` | `[x]` reopened → r4 |
+| **transfers/remote — pull-flow helpers (R4 workflow fix)** | **`b2d6c9c`** | **`[x]` verified** |
 
 ## Phase 5 A.0 — remaining slices
 
@@ -52,7 +52,7 @@ These will get individual rows + finding docs + sentinels as they land.
 
 | Slice                                          | Status |
 |------------------------------------------------|--------|
-| transfers/remote — pull-flow helpers           | `[x]` (a0-remote-helpers verified — 3 rounds) |
+| transfers/remote — pull-flow helpers           | `[x]` (a0-remote-helpers verified — 4 rounds) |
 | transfers/remote — pull entry-point            | `[~]` (a0-pull-execution pending) |
 | transfers/remote — push entry-point            | `[ ]`  |
 | transfers/remote_remote_direct                 | `[ ]`  |
