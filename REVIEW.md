@@ -11,14 +11,15 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID | Severity | Title | Status | Branch | Commit |
-|----|----------|-------|--------|--------|--------|
+| ID              | Severity | Title                                       | Status | Branch              | Commit    |
+|-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
+| b-1-active-jobs | Feature  | Introduce `ActiveJobs` table on `BlitService` | `[~]`  | `phase5/getstate`   | `a842a00` |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
-| B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        |        |
+| B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  |        |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |
 | A.1        | Feature  | TUI implementation                                       |        |
