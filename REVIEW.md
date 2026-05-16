@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| a0-pull-execution   | Refactor | Phase 5 A.0 — pull entry-point orchestration (r2)           | `[~]`  | `phase5/blit-app-extract`    | `e9e168f` |
+| a0-pull-execution   | Refactor | Phase 5 A.0 — pull entry-point orchestration (r2)           | `[ ]`  | `phase5/blit-app-extract`    | `e9e168f` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -46,6 +46,7 @@ follows the full contract.
 | transfers/remote — pull-flow helpers (R3) | `2c9029e` | `[x]` reopened → r4 |
 | **transfers/remote — pull-flow helpers (R4 workflow fix)** | **`b2d6c9c`** | **`[x]` verified** |
 | transfers/remote — pull entry-point (R1) | `7f75539` | `[x]` reopened → r2 |
+| transfers/remote — pull entry-point (R2) | `e9e168f` | `[x]` reopened → r3 |
 
 ## Phase 5 A.0 — remaining slices
 
@@ -54,7 +55,7 @@ These will get individual rows + finding docs + sentinels as they land.
 | Slice                                          | Status |
 |------------------------------------------------|--------|
 | transfers/remote — pull-flow helpers           | `[x]` (a0-remote-helpers verified — 4 rounds) |
-| transfers/remote — pull entry-point            | `[~]` (a0-pull-execution r2 pending) |
+| transfers/remote — pull entry-point            | `[ ]` (a0-pull-execution r2 reopened) |
 | transfers/remote — push entry-point            | `[ ]`  |
 | transfers/remote_remote_direct                 | `[ ]`  |
 | transfers/dispatcher (`run_transfer`, `run_move`, `TransferKind`) | `[ ]` |
