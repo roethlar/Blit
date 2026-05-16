@@ -614,13 +614,28 @@ So `detach` is a **delegated-only** feature in M-Jobs.
    the active table or after a 5-second timeout, whichever
    first.
 
-5. **Per-job event ring (~50 events).** Each `ActiveJob` keeps
-   the last N events seen for that job in addition to the
-   global event ring. `Subscribe` with `transfer_id_filter`
-   set replays this ring on connect, then attaches to the live
-   broadcast. Gives a TUI that connects mid-transfer the
-   bytes-completed history it needs to render a sensible
-   progress bar.
+5. **`blit jobs watch <remote> <transfer_id>` CLI verb.**
+   Polls `GetState` until the transfer drains into `recent[]`
+   or `--timeout-secs` fires. Exit codes 0 (finished + ok),
+   1 (finished + failed), 2 (not found), 3 (timeout). Stopgap
+   until milestone C's `Subscribe` stream lands; the verb name
+   stays, the implementation upgrades.
+
+**Deferred from M-Jobs to milestone C** (they only feed
+`Subscribe`, which doesn't exist yet):
+
+- **Per-job event ring (~50 events).** Each `ActiveJob` will
+  keep the last N events seen for that job in addition to the
+  global event ring. `Subscribe` with `transfer_id_filter`
+  set replays this ring on connect, then attaches to the live
+  broadcast. Gives a TUI that connects mid-transfer the
+  bytes-completed history it needs to render a sensible
+  progress bar. Building it in M-Jobs would create dead
+  infrastructure with no consumer — C lands the ring
+  alongside its `Subscribe` producer and subscriber.
+- **`transfer_id_filter` field on `SubscribeRequest`.** Can't
+  add a field to a message that doesn't exist yet; C defines
+  both the message and the field together.
 
 **Explicitly NOT in M-Jobs** (deferred to 0.2.0+):
 
@@ -879,17 +894,21 @@ with the cancellation + detach lifecycle bits. Adds (see §6.5):
   disarms; transfer owned by the daemon to completion or
   `CancelJob(id)`
 - `CancelJob(transfer_id)` RPC
-- Per-job event ring inside each `ActiveJob` row
-- `transfer_id_filter` field on `SubscribeRequest` (defined
-  here even though `Subscribe` itself lands in C)
 - CLI surface:
   - `blit copy / mirror / move ... --detach` — accepted only
     on remote→remote transfers; rejected with a clear error
     on push / pull / pull_sync transfers (CLI is in the byte
     path for those)
   - `blit jobs cancel <remote> <transfer_id>`
-  - `blit jobs watch <remote> <transfer_id>` — uses Subscribe
-    (when C lands) or `GetState` polling as a stopgap
+  - `blit jobs watch <remote> <transfer_id>` — `GetState`
+    polling loop (with `--interval-ms` / `--timeout-secs` /
+    `--json`). Upgraded to a `Subscribe` stream in milestone C.
+
+Deferred to milestone C (they only feed `Subscribe`, which
+doesn't exist yet):
+
+- Per-job event ring inside each `ActiveJob` row
+- `transfer_id_filter` field on `SubscribeRequest`
 
 After M-Jobs the daemon is fully ready to be a network resource
 the TUI can drive — for remote→remote workloads. Local-endpoint
@@ -1027,8 +1046,8 @@ Still open, listed in the order they become decision-blockers:
 |---|---|---|---|---|
 | 1 | A.0 — extract `blit-app` (full verb surface; see §7.3) | none (refactor only) | ~0 net; ~4–5 days of mechanical moves | ✅ CLI keeps working; library now consumable |
 | 2 | B — `GetState` + `ActiveJobs` table + recent ring | +`GetState` | ~500 daemon + ~100 CLI (`jobs list`) | ✅ Daemon introspectable from `blit jobs list` |
-| 3 | M-Jobs — daemon-owned lifecycle (delegated-only) + `CancelJob` + `detach` | +`CancelJob`, +`detach` on `DelegatedPullRequest`, +`transfer_id_filter` on `SubscribeRequest` (defined here) | ~500 daemon + ~200 CLI (`--detach` on remote→remote only, `jobs cancel/watch`) | ✅ Remote→remote transfers detachable; CLI gains cancel; daemon ready for TUI |
-| 4 | C — `Subscribe` + byte-level instrumentation | +`Subscribe` | ~1500 daemon + ~100 CLI (`jobs watch` upgrade) | ✅ Live byte-level progress on the wire |
+| 3 | M-Jobs — daemon-owned lifecycle (delegated-only) + `CancelJob` + `detach` | +`CancelJob`, +`detach` on `DelegatedPullRequest`, +`transfer_id` on `DelegatedPullStarted` | ~500 daemon + ~200 CLI (`--detach` on remote→remote only, `jobs cancel/watch` polling) | ✅ Remote→remote transfers detachable; CLI gains cancel + polling watch; daemon ready for TUI |
+| 4 | C — `Subscribe` + per-job event ring + byte-level instrumentation | +`Subscribe`, +`SubscribeRequest.transfer_id_filter` | ~1500 daemon + ~100 CLI (`jobs watch` upgrade from polling to streaming) | ✅ Live byte-level progress on the wire |
 | 5 | A.1 — the TUI itself | none | ~3000 (new `blit-tui` crate, four screens, event integration) | ✅ Single-pane-of-glass |
 | 6 | D — Verify + diagnostics | none | ~400 TUI | ✅ |
 | 7 | E — polish | none (optional Prometheus bridge is a separate binary) | ~600 | ✅ |
@@ -1063,9 +1082,12 @@ byte path. See §6.5 "Why detach is delegated-only."
 The structural commitments are:
 - Four-screen architecture (F1 / F2 / F3 / F4).
 - Three new RPCs (`GetState`, `Subscribe`, `CancelJob`) plus
-  the `detach: bool` field on `DelegatedPullRequest` and the
+  the `detach: bool` field on `DelegatedPullRequest`, the
+  `transfer_id` field on `DelegatedPullStarted`, and the
   `transfer_id_filter` field on `SubscribeRequest` — names and
-  message fields are the contract.
+  message fields are the contract. M-Jobs lands `GetState` /
+  `CancelJob` / `detach`; C lands `Subscribe` and
+  `transfer_id_filter`.
 - Always-on `ActiveJobs` table on `BlitService` (decoupled from
   `--metrics`). Ships in Milestone B; M-Jobs and C extend rows.
 - Daemon-owned transfer lifecycle for remote→remote (delegated)
