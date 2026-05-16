@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| m-jobs-6-watch  | Feature  | `blit jobs watch` polls GetState until drain | [~]    | `phase5/m-jobs`     | `16c5201` |
 
 ## Open findings
 
