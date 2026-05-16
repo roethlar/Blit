@@ -11,8 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                    | Severity | Title                                                       | Status | Branch                       | Commit    |
-|-----------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
+| ID            | Severity | Title                                                       | Status | Branch                       | Commit    |
+|---------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
+| a0-dispatch   | Refactor | Phase 5 A.0 — TransferKind + route selector                 | `[~]`  | `phase5/blit-app-extract`    | `8860cac` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -60,7 +61,7 @@ These will get individual rows + finding docs + sentinels as they land.
 | transfers/remote — pull entry-point            | `[x]` (a0-pull-execution verified — 3 rounds) |
 | transfers/remote — push entry-point            | `[x]` (a0-push-execution verified) |
 | transfers/remote_remote_direct                 | `[x]` (a0-delegated-execution verified) |
-| transfers/dispatcher (`run_transfer`, `run_move`, `TransferKind`) | `[ ]` |
+| transfers/dispatch (`TransferKind` + route selector)             | `[~]` (a0-dispatch pending; `run_transfer`/`run_move` intentionally stay in CLI — see finding doc) |
 | Endpoints clap-coupled gates → primitive inputs | `[ ]`  |
 | Final cleanup (drop CLI shim re-exports if any remain) | `[ ]` |
 
