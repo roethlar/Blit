@@ -11,9 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID              | Severity | Title                                       | Status | Branch              | Commit    |
-|-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| _none_          |          |                                             |        |                     |           |
+| ID                   | Severity | Title                                       | Status | Branch          | Commit    |
+|----------------------|----------|---------------------------------------------|--------|-----------------|-----------|
+| c-1a-byte-counter-api | Feature  | Per-row `Arc<AtomicU64>` + `ByteProgressSink` | [~]  | `phase5/c`      | `ff36a8e` |
 
 ## Open findings
 
@@ -21,7 +21,7 @@ See `.review/findings/<id>.md` for per-finding details.
 |------------|----------|----------------------------------------------------------|--------|
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
-| C          | Feature  | `Subscribe` RPC + byte-level instrumentation             |        |
+| C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
