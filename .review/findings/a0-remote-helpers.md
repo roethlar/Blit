@@ -105,4 +105,31 @@ low-severity findings:
   historical context naming the new
   `blit_app::transfers::remote::{delete_listed_paths,
   enumerate_local_manifest}` locations.
-- Re-armed sentinel; pending re-review.
+
+### Round 2 verdict (reviewed sha `086fa49`) — reopened
+
+Code findings closed. One new medium-severity
+workflow-correctness finding: `.review/coder-wait.sh` returned
+stale verdicts on re-review rounds — it matched any verdict
+file existing, ignoring whether the verdict's embedded sha
+matched the sentinel's sha. Reviewer's fix direction:
+`coder-wait.sh <id> [<expected-sha>]` with sha-matched verdict
+parsing.
+
+### Round 3 (sha pending) — addresses round-2 workflow finding
+
+- Rewrote `.review/coder-wait.sh` per the reviewer's suggested
+  contract:
+  - Reads expected sha from the sentinel at startup, or accepts
+    explicit `<expected-sha>` arg (overrides sentinel).
+  - Snapshots sha before the wait loop so reviewer-side sentinel
+    deletion mid-wait doesn't lose context.
+  - Returns a verdict only when its embedded sha matches:
+    `verified.json` uses the JSON `"sha":"..."` field;
+    `reopened.md` uses the `Reviewed sha: \`...\`` line.
+  - Fixed a sed greediness bug in the reopened-sha extractor
+    (`s/.*\`//` ate both backticks; replaced with anchored
+    `s/^Reviewed sha: \`//; s/\`$//`).
+- Verified locally: passing the round-2 sha returns the round-2
+  verdict; passing the round-1 sha times out (correct).
+- No code changes outside `.review/`.
