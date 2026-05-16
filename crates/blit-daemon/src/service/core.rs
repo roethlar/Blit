@@ -308,6 +308,14 @@ impl Blit for BlitService {
             req.dst_module.clone(),
             req.dst_destination_path.clone(),
         );
+        // Captured before `req` moves into the handler call.
+        // Drives the conditional select arm below: when
+        // `detach=true` the `tx.closed()` race is disabled, so
+        // a CLI disconnect no longer drops the transfer
+        // future. The transfer then runs to completion,
+        // failure, or `CancelJob(transfer_id)` regardless of
+        // client connection state.
+        let detach = req.detach;
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);
@@ -346,8 +354,10 @@ impl Blit for BlitService {
             // metrics guard; its Drop runs on every exit path
             // from the select below.
             let job = job;
-            // Three-way race:
-            //   tx.closed()             → client hung up (R30-F2)
+            // Three-way race (the tx.closed arm is gated by
+            // `!detach` — see m-jobs-3):
+            //   tx.closed()             → client hung up (R30-F2);
+            //                              disabled when detach=true
             //   cancel_token.cancelled() → `CancelJob` RPC fired the
             //                              token from another task
             //                              (m-jobs-1)
@@ -362,11 +372,12 @@ impl Blit for BlitService {
             //                  handler_tx)
             let outcome: Option<bool> = tokio::select! {
                 biased;
-                _ = tx.closed() => {
-                    // Caller hung up. Dropping handler_tx (which
-                    // happens at end of the select branch) and
-                    // dropping the outer task drops the handler
-                    // future implicitly via select cancellation.
+                _ = tx.closed(), if !detach => {
+                    // Caller hung up and we're NOT detached.
+                    // Dropping handler_tx (which happens at end
+                    // of the select branch) and dropping the
+                    // outer task drops the handler future
+                    // implicitly via select cancellation.
                     None
                 }
                 _ = cancel_token.cancelled() => {

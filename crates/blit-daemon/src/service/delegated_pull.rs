@@ -921,6 +921,7 @@ mod tests {
                 ..Default::default()
             }),
             trace_data_plane: false,
+            detach: false,
         };
         let modules = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
             String,

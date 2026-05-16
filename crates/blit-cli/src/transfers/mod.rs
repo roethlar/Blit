@@ -154,6 +154,29 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
+    // `--detach` is only honored on daemon-to-daemon
+    // delegated transfers. The CLI gates it up-front so a
+    // misuse fails before any RPCs fire — clearer than
+    // letting the daemon emit a phased error mid-stream.
+    if args.detach {
+        match (&src_endpoint, &dst_endpoint) {
+            (Endpoint::Local(_), _) | (_, Endpoint::Local(_)) => bail!(
+                "--detach is only supported for remote→remote transfers \
+                 (the CLI is in the byte path for any local endpoint, so \
+                 disconnecting would drop the bytes)"
+            ),
+            (Endpoint::Remote(_), Endpoint::Remote(_)) if args.relay_via_cli => bail!(
+                "--detach is incompatible with --relay-via-cli: the relay \
+                 path puts the CLI in the byte path, so detach would drop \
+                 the bytes. Drop --relay-via-cli to use the daemon-to-daemon \
+                 delegated path (which is the default for remote→remote)."
+            ),
+            (Endpoint::Remote(_), Endpoint::Remote(_)) => {
+                // Delegated remote→remote — detach is valid.
+            }
+        }
+    }
+
     // For mirror operations, prompt unless --yes or --dry-run
     if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
@@ -227,6 +250,23 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 
     if args.dry_run {
         bail!("move does not support --dry-run");
+    }
+
+    if args.detach {
+        // `blit move` runs a source-delete step after the
+        // transfer completes. With --detach the CLI exits as
+        // soon as the daemon's Started event arrives, so the
+        // delete step would never fire — either leaving the
+        // source around forever (silent move-becomes-copy) or
+        // racing the still-running transfer with rm. Refuse
+        // up front.
+        bail!(
+            "move does not support --detach: the source-delete step \
+             needs the CLI to await transfer completion, so detaching \
+             would silently turn a move into a copy. Use \
+             `blit copy --detach SRC DST` and `blit rm SRC` once you've \
+             confirmed the transfer completed via `blit jobs list`."
+        );
     }
 
     // R49-F1 (data-loss): reject `--exclude` / `--include` /
@@ -617,6 +657,7 @@ mod tests {
             trace_data_plane: false,
             force_grpc: false,
             relay_via_cli: false,
+            detach: false,
             resume: false,
             null: false,
             json: false,
@@ -663,6 +704,7 @@ mod tests {
             trace_data_plane: false,
             force_grpc: false,
             relay_via_cli: false,
+            detach: false,
             resume: false,
             null: false,
             json: false,
@@ -686,4 +728,94 @@ mod tests {
     // module's tests retain only the end-to-end dispatcher tests
     // above (`copy_local_transfers_file`,
     // `copy_local_dry_run_creates_no_files`).
+
+    /// Build a minimal `TransferArgs` for the gate-rejection
+    /// tests below. Source / destination are stringy and never
+    /// touched by the path we're exercising — the bail happens
+    /// before any RPC fires.
+    fn detach_args(
+        source: &str,
+        destination: &str,
+        detach: bool,
+        relay_via_cli: bool,
+    ) -> TransferArgs {
+        TransferArgs {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            dry_run: false,
+            checksum: false,
+            size_only: false,
+            ignore_times: false,
+            ignore_existing: false,
+            force: false,
+            verbose: false,
+            progress: false,
+            yes: true,
+            workers: None,
+            trace_data_plane: false,
+            force_grpc: false,
+            relay_via_cli,
+            detach,
+            resume: false,
+            null: false,
+            json: false,
+            exclude: vec![],
+            include: vec![],
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+            delete_scope: "subset".into(),
+        }
+    }
+
+    fn ctx() -> AppContext {
+        AppContext {
+            perf_history_enabled: false,
+        }
+    }
+
+    #[test]
+    fn detach_rejected_for_local_to_local() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        let ctx = ctx();
+        let args = detach_args(src.to_str().unwrap(), dst.to_str().unwrap(), true, false);
+        let err = runtime()
+            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
+            .expect_err("local→local must reject --detach");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--detach is only supported for remote→remote"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn detach_rejected_with_relay_via_cli() {
+        let ctx = ctx();
+        let args = detach_args("host-a:/m/", "host-b:/m/", true, true);
+        let err = runtime()
+            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
+            .expect_err("--relay-via-cli + --detach must bail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--detach is incompatible with --relay-via-cli"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn detach_rejected_on_blit_move() {
+        let ctx = ctx();
+        let args = detach_args("host-a:/m/", "host-b:/m/", true, false);
+        let err = runtime()
+            .block_on(run_move(&ctx, &args))
+            .expect_err("move + --detach must bail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("move does not support --detach"), "got: {msg}");
+    }
 }

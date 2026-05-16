@@ -122,6 +122,14 @@ async fn run_remote_to_remote_direct_inner(
         trace_data_plane: args.trace_data_plane,
         relay_fallback_suggestable,
         dst_label,
+        // `--detach` is only honored on remote→remote
+        // delegated pulls (this code path). `run_transfer`
+        // rejects the flag on push / pull / pull_sync routes
+        // upstream, so we don't need to gate it here — but
+        // the daemon also refuses to honor it on those
+        // RPCs, so a misbehaving caller can't escape the
+        // CLI in-byte-path guarantee.
+        detach: args.detach,
     };
 
     // CLI-side presentation hook for the destination's `Started`

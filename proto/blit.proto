@@ -586,6 +586,29 @@ message DelegatedPullRequest {
 
   // Diagnostics-only.
   bool trace_data_plane = 31;
+
+  // Detach the transfer from the calling client.
+  //
+  // When false (the historical behavior), the destination
+  // daemon races the transfer against `tx.closed()` so a CLI
+  // disconnect drops the in-flight pull future and the data
+  // plane tears down (R30-F2).
+  //
+  // When true, the `tx.closed()` race disarms: the
+  // destination daemon owns the transfer through completion,
+  // failure, or `CancelJob(transfer_id)`. The CLI is free to
+  // exit immediately after the daemon's `Started` event
+  // arrives — useful for long-running remote→remote
+  // transfers that should outlive the operator's shell
+  // session.
+  //
+  // Only valid on `DelegatedPull` (the daemon-to-daemon byte
+  // path). Push / pull / pull_sync put the CLI in the byte
+  // path — detach is meaningless there because the CLI
+  // disconnecting drops the bytes. The CLI rejects `--detach`
+  // for those routes; the daemon-side flag is therefore
+  // unused on non-delegated kinds.
+  bool detach = 32;
 }
 
 message RemoteSourceLocator {

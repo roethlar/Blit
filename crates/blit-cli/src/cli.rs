@@ -270,6 +270,22 @@ pub struct TransferArgs {
     /// source but the CLI can reach both daemons, or for benchmarking.
     #[arg(long, help_heading = "Performance / debug")]
     pub relay_via_cli: bool,
+    /// Detach the transfer from the CLI process — daemon-owned.
+    ///
+    /// Only valid for remote→remote transfers that use the
+    /// daemon-to-daemon delegated byte path (no `--relay-via-cli`,
+    /// not a `blit move`). The destination daemon completes the
+    /// transfer regardless of the CLI's connection; cancel later
+    /// via `blit jobs cancel <remote> <transfer_id>`.
+    ///
+    /// Rejected with a clear error for:
+    /// - local-source or local-destination transfers (CLI is in
+    ///   the byte path)
+    /// - `--relay-via-cli` (CLI is in the byte path)
+    /// - `blit move` (the source-delete step needs the CLI to
+    ///   await transfer completion)
+    #[arg(long)]
+    pub detach: bool,
     /// Discard all writes — local copy only (read+pipeline benchmark).
     ///
     /// Reads and prepares all source data normally but does not write to

@@ -534,6 +534,14 @@ pub struct DelegatedPullExecution {
     pub trace_data_plane: bool,
     pub relay_fallback_suggestable: bool,
     pub dst_label: String,
+    /// Detach the transfer from the calling CLI. When true,
+    /// the destination daemon's `tx.closed()` race disarms,
+    /// so client disconnect no longer drops the transfer.
+    /// The CLI can exit after observing the daemon's
+    /// `Started` event. Only valid on remote→remote
+    /// delegated transfers (push / pull / pull_sync have the
+    /// CLI in the byte path and reject the flag upstream).
+    pub detach: bool,
 }
 
 /// Output of [`run_delegated_pull`]. The `src` / `dst` endpoints
@@ -680,6 +688,7 @@ where
         }),
         spec: Some(spec),
         trace_data_plane: execution.trace_data_plane,
+        detach: execution.detach,
     };
 
     let uri = execution.dst.control_plane_uri();
