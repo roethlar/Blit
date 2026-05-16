@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID              | Severity | Title                                       | Status | Branch              | Commit    |
 |-----------------|----------|---------------------------------------------|--------|---------------------|-----------|
-| m-jobs-3-detach | Feature  | detach field + spawn-closure disarm + CLI gates | `[~]` | `phase5/m-jobs`     | `1221d60` |
+| _none_          |          |                                             |        |                     |           |
 
 ## Open findings
 
@@ -67,3 +67,4 @@ Phase 5 M-Jobs sub-slices on branch `phase5/m-jobs`:
 
 - `1e493c0` Per-row CancellationToken + delegated_pull race (`m-jobs-1-cancel-token`)
 - `66df256` CancelJob RPC + `blit jobs cancel` CLI (`m-jobs-2-cancel-rpc`)
+- `1221d60` detach field + fire-and-forget CLI path (`m-jobs-3-detach`)
