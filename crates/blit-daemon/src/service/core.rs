@@ -555,17 +555,13 @@ impl Blit for BlitService {
         request: Request<GetStateRequest>,
     ) -> Result<Response<DaemonState>, Status> {
         use std::sync::atomic::Ordering;
-        let _req = request.into_inner();
-        // `recent_limit` semantics: 0 means "use the daemon's
-        // default" which is what `active_jobs.recent()` already
-        // returns. A non-zero value is a per-request truncation —
-        // the daemon doesn't grow the ring for one request, just
-        // returns the most recent `recent_limit` entries.
-        //
-        // Truncation lands when the CLI verb wires this; for the
-        // handler-only slice we always return the full ring and
-        // let the caller drop. The proto field is reserved on the
-        // wire so the future truncation is non-breaking.
+        let req = request.into_inner();
+        // `recent_limit` semantics (`proto/blit.proto`): 0 means
+        // "use the daemon's default" — return the full ring as
+        // sized by `with_recent_limit`. A non-zero value caps
+        // the response to the most-recent N entries; the daemon
+        // doesn't grow the ring for one request, just truncates
+        // for this response.
         let modules = {
             let guard = self.modules.lock().await;
             let mut ms: Vec<ModuleInfo> = guard
@@ -598,9 +594,19 @@ impl Blit for BlitService {
             })
             .collect();
 
-        let recent: Vec<TransferRecord> = self
-            .active_jobs
-            .recent()
+        // `recent()` returns oldest-first; truncate from the
+        // front when capping to the most-recent N. `as usize`
+        // is well-defined: even on 32-bit targets the proto u32
+        // can't exceed `usize::MAX`.
+        let mut recent_rows = self.active_jobs.recent();
+        if req.recent_limit > 0 {
+            let limit = req.recent_limit as usize;
+            if recent_rows.len() > limit {
+                let drop_n = recent_rows.len() - limit;
+                recent_rows.drain(0..drop_n);
+            }
+        }
+        let recent: Vec<TransferRecord> = recent_rows
             .into_iter()
             .map(|r| TransferRecord {
                 transfer_id: r.transfer_id,
@@ -863,6 +869,53 @@ mod tests {
         // bytes / files come from milestone C — zero for now.
         assert_eq!(rec.bytes, 0);
         assert_eq!(rec.files, 0);
+    }
+
+    #[tokio::test]
+    async fn get_state_recent_limit_truncates_to_most_recent_n() {
+        // Push 5 records into the ring, request recent_limit=3,
+        // expect the 3 most recent in oldest-first order.
+        let svc = empty_service();
+        for i in 0..5u32 {
+            let guard = svc.active_jobs.register(
+                ActiveJobKind::Pull,
+                format!("peer{i}"),
+                "mod".to_string(),
+                "/".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+
+        // recent_limit=3 → most-recent 3 only.
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 3 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert_eq!(state.recent.len(), 3);
+        // Oldest-first within the truncated window: peer2, peer3, peer4.
+        assert_eq!(state.recent[0].peer, "peer2");
+        assert_eq!(state.recent[1].peer, "peer3");
+        assert_eq!(state.recent[2].peer, "peer4");
+
+        // recent_limit=0 → full ring (the daemon's default).
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert_eq!(state.recent.len(), 5);
+        assert_eq!(state.recent[0].peer, "peer0");
+        assert_eq!(state.recent[4].peer, "peer4");
+
+        // recent_limit larger than what the daemon has → returns
+        // everything (no error).
+        let resp = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 999 }))
+            .await
+            .expect("get_state ok");
+        let state = resp.into_inner();
+        assert_eq!(state.recent.len(), 5);
     }
 
     #[tokio::test]
