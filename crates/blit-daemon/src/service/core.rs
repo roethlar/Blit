@@ -9,6 +9,7 @@ use super::util::{
     metadata_mtime_seconds, resolve_contained_path, resolve_module, resolve_relative_path,
 };
 use super::{DiskUsageSender, FindSender};
+use crate::active_jobs::{ActiveJobKind, ActiveJobs};
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
@@ -39,6 +40,11 @@ pub struct BlitService {
     /// make this daemon initiate outbound connects until the operator
     /// flips `[delegation] allow_delegated_pull = true`.
     pub(crate) delegation: Arc<crate::delegation_gate::DelegationConfig>,
+    /// Always-on registry of in-flight transfers. Populated
+    /// from the dispatch boundary in this file; read by
+    /// `GetState.active[]` once that RPC lands (milestone B
+    /// sub-slice). See `crate::active_jobs`.
+    pub(crate) active_jobs: ActiveJobs,
 }
 
 impl BlitService {
@@ -57,6 +63,7 @@ impl BlitService {
             server_checksums_enabled,
             metrics,
             delegation: Arc::new(delegation),
+            active_jobs: ActiveJobs::new(),
         }
     }
 
@@ -162,6 +169,7 @@ impl Blit for BlitService {
         &self,
         request: Request<PullRequest>,
     ) -> Result<Response<Self::PullStream>, Status> {
+        let peer = peer_addr_string(&request);
         let req = request.into_inner();
         let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
 
@@ -171,10 +179,24 @@ impl Blit for BlitService {
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_pull();
         let guard = Arc::clone(&metrics).enter_transfer();
+        // ActiveJobs row registered alongside the metrics gauge:
+        // both are RAII-scoped to the spawned task so they
+        // drain together on every termination path (success,
+        // error, panic, client cancellation).
+        let job = self
+            .active_jobs
+            .register(
+                ActiveJobKind::Pull,
+                peer,
+                req.module.clone(),
+                req.path.clone(),
+            )
+            .await;
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
             let guard = guard;
+            let job = job;
             let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
             let ok = result.is_ok();
             if let Err(status) = result {
@@ -182,6 +204,7 @@ impl Blit for BlitService {
                 let _ = tx.send(Err(status)).await;
             }
             drop(guard);
+            drop(job);
             metrics.log_completion("pull", started.elapsed(), ok);
         });
 
@@ -230,7 +253,24 @@ impl Blit for BlitService {
         &self,
         request: Request<DelegatedPullRequest>,
     ) -> Result<Response<Self::DelegatedPullStream>, Status> {
+        let peer = peer_addr_string(&request);
         let req = request.into_inner();
+        // ActiveJobs row mirrors the metrics gauge — both are
+        // owned by the spawned task so the row drains on every
+        // termination path (success, handler failure, client
+        // hangup). Module + dst path come straight off the
+        // request; they're synchronously available here unlike
+        // the streaming RPCs (push, pull_sync) which b-2 will
+        // wire via a guard update API.
+        let job = self
+            .active_jobs
+            .register(
+                ActiveJobKind::DelegatedPull,
+                peer,
+                req.dst_module.clone(),
+                req.dst_destination_path.clone(),
+            )
+            .await;
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);
@@ -259,6 +299,10 @@ impl Blit for BlitService {
         // long enough for tx.closed() to be the racing future.
         let handler_tx = tx.clone();
         tokio::spawn(async move {
+            // `job` moves into the spawned task alongside the
+            // metrics guard; its Drop runs on every exit path
+            // from the select below.
+            let job = job;
             // None        = cancelled by client hangup (handler future dropped)
             // Some(true)  = handler returned success
             // Some(false) = handler returned failure (phased error already
@@ -283,6 +327,7 @@ impl Blit for BlitService {
                     Some(handler_ok)
                 }
             };
+            drop(job);
             // The handler's RAII guard releases the active gauge as
             // its scope ends with the spawn task above, so by the
             // time we log here `active` already excludes this RPC.
@@ -575,4 +620,14 @@ impl Blit for BlitService {
 
         Ok(Response::new(stats))
     }
+}
+
+/// Format the remote peer of a tonic request as `<ip>:<port>`,
+/// or `"unknown"` when the transport didn't surface one (eg.
+/// in-process tests that bypass the network).
+fn peer_addr_string<T>(request: &Request<T>) -> String {
+    request
+        .remote_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
