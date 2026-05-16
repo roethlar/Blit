@@ -14,7 +14,7 @@ use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
 use blit_core::remote::{RemoteEndpoint, RemotePullReport, RemotePushReport};
 
-use super::endpoints::{format_remote_endpoint, Endpoint};
+use blit_app::endpoints::{format_remote_endpoint, Endpoint};
 
 /// CLI-facing alias for the library's pull-outcome struct.
 /// Field shape unchanged across the A.0 move — this preserves

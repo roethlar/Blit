@@ -8,8 +8,8 @@ use blit_core::generated::DelegatedPullSummary;
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::RemoteEndpoint;
 
-use super::endpoints::format_remote_endpoint;
 use super::remote::spawn_progress_monitor_with_options;
+use blit_app::endpoints::format_remote_endpoint;
 
 /// CLI-facing alias for the library's delegated-pull outcome.
 /// Field shape unchanged across the A.0 move; preserves the

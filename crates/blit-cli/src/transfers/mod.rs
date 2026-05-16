@@ -3,7 +3,12 @@ mod local;
 mod remote;
 mod remote_remote_direct;
 
-pub use endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
+// Endpoint types come from `blit_app::endpoints` directly. The
+// `transfers/endpoints.rs` shim now contains only the two
+// clap-arg adapter wrappers (`ensure_remote_pull_supported` /
+// `ensure_remote_push_supported`) — every other consumer
+// imports from `blit_app::endpoints` directly.
+use blit_app::endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
 
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
@@ -12,7 +17,9 @@ use std::fs;
 use std::io::{self, Write};
 
 use crate::rm::delete_remote_path;
+use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
 use blit_app::transfers::filter::{self, FilterInputs};
+use blit_app::transfers::resolution::resolve_destination;
 use blit_core::fs_enum::FileFilter;
 use blit_core::remote::RemotePath;
 
@@ -32,10 +39,8 @@ fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
         max_age: args.max_age.as_deref(),
     }
 }
-use endpoints::{
-    ensure_remote_destination_supported, ensure_remote_pull_supported,
-    ensure_remote_push_supported, ensure_remote_source_supported,
-};
+use blit_app::endpoints::{ensure_remote_destination_supported, ensure_remote_source_supported};
+use endpoints::{ensure_remote_pull_supported, ensure_remote_push_supported};
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
 use remote_remote_direct::run_remote_to_remote_direct;
@@ -66,16 +71,6 @@ fn collapse_slashes(s: &str) -> String {
     out
 }
 
-// Rsync-style source/destination resolution helpers moved to
-// `blit_app::transfers::resolution` in this A.0 sub-slice.
-// Re-exported below so existing call sites within `transfers/*`
-// (and `crate::check`, `crate::diagnostics`) keep working
-// without import changes. New code should import directly from
-// the blit-app path.
-pub(crate) use blit_app::transfers::resolution::{
-    dest_is_container, resolve_destination, source_is_contents,
-};
-
 /// Build a `FileFilter` from a transfer command's args. Thin
 /// clap-side wrapper around `blit_app::transfers::filter::build`.
 pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
@@ -102,8 +97,6 @@ fn confirm_destructive_operation(message: &str, skip_prompt: bool) -> Result<boo
     let decision = input.trim().to_ascii_lowercase();
     Ok(decision == "y" || decision == "yes")
 }
-
-pub use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
 
 pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
