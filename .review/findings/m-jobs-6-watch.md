@@ -206,6 +206,23 @@ finishes the sweep:
 No code changes (per the reviewer's note "the code does not
 need changes for this finding").
 
+## Round 4 (sha `09cffbb`)
+
+Reviewer's round-3 verdict left one Low: §7.4 still said
+"M-Jobs introduces the always-on `ActiveJobs` table", which
+contradicted §6.3 ("B introduces the table") and §11 (phasing
+table). Round 4 rewrites that paragraph using the three-
+milestone ownership model:
+
+- **B** introduces the always-on `ActiveJobs` table + recent
+  ring.
+- **M-Jobs** extends each row with a `CancellationToken` field
+  and the detach lifecycle hook (CancelJob fires the token).
+- **C** adds byte-level instrumentation, per-job event ring,
+  and the `Subscribe` RPC + `TransferProgress` event family.
+
+No code changes per reviewer.
+
 ## Reviewer comments
 
 (empty — pending grade)
