@@ -335,15 +335,31 @@ impl Blit for BlitService {
         // Cloning tx for the handler so the original tx survives
         // long enough for tx.closed() to be the racing future.
         let handler_tx = tx.clone();
+        // Clone the cancellation token off the guard before
+        // moving the guard into the spawn task. The future's
+        // select needs a `.cancelled()` future; cloning the
+        // token (cheap, internal Arc) lets us hold the
+        // cancelled-future on its own line.
+        let cancel_token = job.cancellation_token().clone();
         tokio::spawn(async move {
             // `job` moves into the spawned task alongside the
             // metrics guard; its Drop runs on every exit path
             // from the select below.
             let job = job;
-            // None        = cancelled by client hangup (handler future dropped)
-            // Some(true)  = handler returned success
-            // Some(false) = handler returned failure (phased error already
-            //               sent to client over handler_tx)
+            // Three-way race:
+            //   tx.closed()             → client hung up (R30-F2)
+            //   cancel_token.cancelled() → `CancelJob` RPC fired the
+            //                              token from another task
+            //                              (m-jobs-1)
+            //   handle_delegated_pull → handler ran to completion or
+            //                              failure
+            //
+            // Outcome encoding:
+            //   None         → cancelled (client OR CancelJob)
+            //   Some(true)   → handler returned success
+            //   Some(false)  → handler returned failure (phased
+            //                  error already sent to client over
+            //                  handler_tx)
             let outcome: Option<bool> = tokio::select! {
                 biased;
                 _ = tx.closed() => {
@@ -351,6 +367,14 @@ impl Blit for BlitService {
                     // happens at end of the select branch) and
                     // dropping the outer task drops the handler
                     // future implicitly via select cancellation.
+                    None
+                }
+                _ = cancel_token.cancelled() => {
+                    // `CancelJob` fired the token. Same
+                    // teardown path as a client hangup — the
+                    // handler future is dropped and the data
+                    // plane cleans up via the existing
+                    // cancellation chain.
                     None
                 }
                 handler_ok = super::delegated_pull::handle_delegated_pull(
@@ -375,10 +399,18 @@ impl Blit for BlitService {
             //                  this level — the C milestone
             //                  routes structured errors. Use a
             //                  short marker.
-            //   None        → client cancellation
+            //   None        → client hangup or CancelJob.
+            //                  Distinguish by inspecting the
+            //                  cancellation token: if it was
+            //                  cancelled, the cause was
+            //                  CancelJob; otherwise it was the
+            //                  client.
             let (job_ok, job_err) = match outcome {
                 Some(true) => (true, None),
                 Some(false) => (false, Some("delegated_pull handler failed".to_string())),
+                None if cancel_token.is_cancelled() => {
+                    (false, Some("cancelled via CancelJob".to_string()))
+                }
                 None => (false, Some("client cancelled".to_string())),
             };
             job.record_outcome(job_ok, job_err);
