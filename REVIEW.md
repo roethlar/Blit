@@ -11,8 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
-|---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
+| ID                    | Severity | Title                                                       | Status | Branch                       | Commit    |
+|-----------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
+| a0-delegated-execution| Refactor | Phase 5 A.0 — delegated remote→remote orchestration         | `[~]`  | `phase5/blit-app-extract`    | `1879019` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -58,7 +59,7 @@ These will get individual rows + finding docs + sentinels as they land.
 | transfers/remote — pull-flow helpers           | `[x]` (a0-remote-helpers verified — 4 rounds) |
 | transfers/remote — pull entry-point            | `[x]` (a0-pull-execution verified — 3 rounds) |
 | transfers/remote — push entry-point            | `[x]` (a0-push-execution verified) |
-| transfers/remote_remote_direct                 | `[ ]`  |
+| transfers/remote_remote_direct                 | `[~]` (a0-delegated-execution pending) |
 | transfers/dispatcher (`run_transfer`, `run_move`, `TransferKind`) | `[ ]` |
 | Endpoints clap-coupled gates → primitive inputs | `[ ]`  |
 | Final cleanup (drop CLI shim re-exports if any remain) | `[ ]` |
