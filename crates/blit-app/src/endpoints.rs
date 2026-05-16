@@ -78,6 +78,58 @@ pub fn ensure_remote_source_supported(remote: &RemoteEndpoint) -> Result<()> {
     }
 }
 
+/// Common transfer-flag gate shared by every remote-touching
+/// path. Takes primitive booleans rather than `&TransferArgs`
+/// so both the CLI and the future TUI can call it without a
+/// clap dependency. CLI passes `args.dry_run` and
+/// `args.workers.is_some()`.
+///
+/// Error messages reference the CLI flag names (`--dry-run`,
+/// `--workers`) because those are the documented surface the
+/// user knows; the TUI can map them to its own labels if it
+/// surfaces the refusal verbatim.
+pub fn ensure_remote_transfer_supported(dry_run: bool, workers_limit_set: bool) -> Result<()> {
+    if dry_run {
+        bail!("--dry-run is not supported for remote transfers");
+    }
+    if workers_limit_set {
+        bail!("--workers limiter is not supported for remote transfers");
+    }
+    Ok(())
+}
+
+/// Gate for **remote-source / local-destination** pulls. Allows
+/// `--checksum`: the pull-sync handshake negotiates checksum
+/// support with the daemon and bails at the ack if the daemon has
+/// `--no-server-checksums`. Closes R15-F1 of
+/// `docs/reviews/followup_review_2026-05-02.md`: the previous
+/// blanket `--checksum` rejection made the F11 ack-mismatch error
+/// path unreachable from the CLI.
+pub fn ensure_remote_pull_supported(dry_run: bool, workers_limit_set: bool) -> Result<()> {
+    ensure_remote_transfer_supported(dry_run, workers_limit_set)
+}
+
+/// Gate for **local-source / remote-destination** pushes and
+/// **remote-remote** relays. The push protocol has no per-transfer
+/// capability negotiation yet, so `--checksum` is rejected here
+/// rather than silently degrading. Symmetric pull-side support
+/// arrived through the F11 ack negotiation; push needs its own
+/// equivalent before this gate can lift.
+pub fn ensure_remote_push_supported(
+    dry_run: bool,
+    workers_limit_set: bool,
+    checksum: bool,
+) -> Result<()> {
+    ensure_remote_transfer_supported(dry_run, workers_limit_set)?;
+    if checksum {
+        bail!(
+            "--checksum is not supported for remote-destination transfers \
+             (push protocol has no checksum capability negotiation today)"
+        );
+    }
+    Ok(())
+}
+
 /// Loose parser: returns `Endpoint::Remote` when the input parses
 /// as a remote URI, falls back to `Endpoint::Local` for anything
 /// else. Used by the admin verbs (`df`, `du`, `find`, `ls`,
