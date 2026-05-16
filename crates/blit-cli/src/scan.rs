@@ -1,6 +1,6 @@
 use crate::cli::ScanArgs;
-use blit_core::mdns;
-use eyre::{Context, Result};
+use blit_app::scan;
+use eyre::Result;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -26,10 +26,7 @@ struct ScanEntryJson {
 pub async fn run_scan(args: ScanArgs) -> Result<()> {
     let json = args.json;
     let wait_secs = args.wait;
-    let wait = Duration::from_secs(wait_secs);
-    let services = tokio::task::spawn_blocking(move || mdns::discover(wait))
-        .await
-        .context("mDNS discovery task panicked")??;
+    let services = scan::discover(Duration::from_secs(wait_secs)).await?;
 
     if json {
         let entries: Vec<ScanEntryJson> = services
