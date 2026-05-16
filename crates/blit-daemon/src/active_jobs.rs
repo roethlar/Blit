@@ -39,16 +39,19 @@
 //!   delegated transfers.
 //! - `c-1a-byte-counter-api`: per-row [`Arc<AtomicU64>`] for
 //!   `bytes_completed`. [`ActiveJobGuard::bytes_counter`]
-//!   hands out a clonable [`ByteProgressSink`] that handlers
-//!   can pass into the data-plane write loop; reports land
-//!   in `GetState.active[].bytes_completed` and (on Drop)
-//!   `GetState.recent[].bytes`. The sink type is public so
-//!   the data-plane crate (blit-core) can take it as a
-//!   parameter once c-1b wires the receive loop. This slice
-//!   adds only the registry-side machinery; the sink is
-//!   never called yet — current behavior is unchanged
-//!   except the proto byte fields now carry the (still
-//!   zero) atomic value instead of a hardcoded zero.
+//!   hands out a clonable
+//!   [`blit_core::remote::transfer::ByteProgressSink`] wrapping
+//!   that Arc. Reports against the sink land in
+//!   `GetState.active[].bytes_completed` and (on Drop)
+//!   `GetState.recent[].bytes`. The sink type lives in
+//!   `blit-core` so the data-plane write loop
+//!   (`receive_stream_double_buffered`) can take it as a
+//!   parameter in c-1b without `blit-core` depending on
+//!   `blit-daemon` (the dependency goes the other way).
+//!   This slice adds only the registry-side machinery; the
+//!   sink is never called yet — current behavior is
+//!   unchanged except the proto byte fields now carry the
+//!   (still zero) atomic value instead of a hardcoded zero.
 //!
 //! Out of scope (next sub-slices):
 //!
@@ -59,7 +62,7 @@
 //! - `SubscribeRequest.transfer_id_filter` proto field
 //!   (`m-jobs-5-subscribe-filter`).
 //! - `blit jobs watch` polling CLI (`m-jobs-6-watch`).
-//! - Data-plane wiring of [`ByteProgressSink`]
+//! - Data-plane wiring of `ByteProgressSink`
 //!   (`c-1b-byte-counter-wiring`): `receive_stream_double_buffered`
 //!   grows an optional `&ByteProgressSink` and
 //!   `handle_delegated_pull` passes the counter through.
@@ -82,6 +85,7 @@
 //! Round-1 of this slice used `tokio::sync::Mutex` + the
 //! try_lock-then-spawn pattern; the reviewer caught it.
 
+use blit_core::remote::transfer::ByteProgressSink;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -242,35 +246,6 @@ pub struct TransferRecord {
     /// guard drained without [`ActiveJobGuard::record_outcome`]
     /// being called.
     pub error_message: String,
-}
-
-/// Clonable handle to a transfer's byte counter. Held by the
-/// data-plane write loop so it can call [`ByteProgressSink::report`]
-/// for each chunk it writes; updates land on the per-row atomic
-/// inside the table.
-///
-/// Cheap to clone (`Arc` bump); cheap to call (`AtomicU64::fetch_add`
-/// with `Relaxed` ordering). Outlives the `ActiveJobGuard` it was
-/// minted from — Drop only removes the table row, the atomic itself
-/// is reference-counted. A stray report after Drop is a no-op write
-/// to a soon-to-be-dropped atomic; it does not resurrect the row.
-#[derive(Clone)]
-pub struct ByteProgressSink {
-    counter: Arc<AtomicU64>,
-}
-
-impl ByteProgressSink {
-    /// Add `delta` bytes to the cumulative counter. Called by the
-    /// data plane after each chunk write. `Relaxed` ordering is
-    /// sufficient: readers only need eventual visibility, not
-    /// synchronization with other memory operations.
-    ///
-    /// Called by the test suite in this slice; the data-plane
-    /// callsite lands in c-1b.
-    #[allow(dead_code)]
-    pub fn report(&self, delta: u64) {
-        self.counter.fetch_add(delta, Ordering::Relaxed);
-    }
 }
 
 /// In-memory registry, shared between the dispatch boundary and
@@ -572,15 +547,13 @@ impl ActiveJobGuard {
     /// on the next snapshot, and in `GetState.recent[].bytes`
     /// once the guard drops.
     ///
-    /// The sink is reference-counted; cloning it is cheap and
-    /// keeping a clone alive past Drop is harmless — reports
-    /// after Drop just bump an orphaned atomic, no row to
-    /// resurrect.
+    /// The sink wraps an `Arc` of the same atomic the table row
+    /// holds; cloning is cheap and keeping a clone alive past
+    /// Drop is harmless — reports after Drop just bump an
+    /// orphaned atomic, no row to resurrect.
     #[allow(dead_code)]
     pub fn bytes_counter(&self) -> ByteProgressSink {
-        ByteProgressSink {
-            counter: Arc::clone(&self.bytes_counter),
-        }
+        ByteProgressSink::from_counter(Arc::clone(&self.bytes_counter))
     }
 
     /// Capture the transfer's outcome before Drop. Spawn
