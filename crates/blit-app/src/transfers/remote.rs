@@ -793,6 +793,105 @@ where
     })
 }
 
+/// "Fire and forget" variant of [`run_delegated_pull`] for the
+/// CLI's `--detach` flow. Opens the delegated_pull RPC,
+/// receives the first `Started` event (which now carries the
+/// daemon-assigned `transfer_id` after m-jobs-3), and returns
+/// without consuming the rest of the stream. Dropping the
+/// returned tuple's response stream closes the receiver — but
+/// the daemon-side spawn closure honors `execution.detach` and
+/// completes the transfer regardless.
+///
+/// Returns the `DelegatedPullStarted` payload (which the CLI
+/// uses to print the transfer id + cancel hint) plus the
+/// destination endpoint so the caller can format display
+/// strings without re-parsing.
+///
+/// Refuses to proceed if `execution.detach` is `false` — the
+/// detached semantic is meaningless on a tx.closed-armed
+/// daemon, and the caller would mistakenly return success
+/// while the daemon drops the transfer the moment we drop the
+/// stream.
+pub async fn run_delegated_pull_until_started(
+    execution: DelegatedPullExecution,
+) -> Result<(DelegatedPullStarted, RemoteEndpoint)> {
+    if !execution.detach {
+        return Err(eyre!(
+            "run_delegated_pull_until_started requires execution.detach=true"
+        ));
+    }
+
+    let spec = RemotePullClient::build_spec_from_options(&execution.src, &execution.options)?;
+    let (dst_module, dst_destination_path) = destination_spec_fields(&execution.dst)?;
+
+    let request = DelegatedPullRequest {
+        dst_module,
+        dst_destination_path,
+        src: Some(RemoteSourceLocator {
+            host: execution.src.host.clone(),
+            port: execution.src.port as u32,
+        }),
+        spec: Some(spec),
+        trace_data_plane: execution.trace_data_plane,
+        detach: execution.detach,
+    };
+
+    let uri = execution.dst.control_plane_uri();
+    let mut client = BlitClient::connect(uri.clone())
+        .await
+        .with_context(|| format!("connecting to destination {}", execution.dst_label))?;
+
+    let response = client.delegated_pull(request).await.map_err(|status| {
+        if status.code() == Code::Unimplemented {
+            eyre!(
+                "destination daemon does not implement DelegatedPull; \
+                 cannot detach against this daemon"
+            )
+        } else if status.code() == Code::Unavailable {
+            eyre!(
+                "destination daemon is unavailable for delegated pull ({})",
+                status.message()
+            )
+        } else {
+            eyre!(
+                "delegated remote-to-remote transfer failed: {}",
+                status.message()
+            )
+        }
+    })?;
+    let mut stream = response.into_inner();
+
+    // Read the first frame and resolve. Started is the
+    // daemon's first emitted payload per the
+    // DelegatedPullProgress protocol; anything else (or
+    // stream end) is a clear error.
+    match stream.message().await {
+        Ok(Some(message)) => match message.payload {
+            Some(DelegatedPayload::Started(started)) => {
+                // Dropping `stream` here closes the receiver
+                // → daemon's tx.closed() resolves. With
+                // detach=true the daemon ignores that and
+                // keeps the transfer running.
+                drop(stream);
+                Ok((started, execution.dst))
+            }
+            Some(DelegatedPayload::Error(error)) => Err(map_delegated_error(
+                error.phase,
+                &error.upstream_message,
+                execution.relay_fallback_suggestable,
+            )),
+            _ => Err(eyre!(
+                "delegated pull emitted a non-Started payload before Started"
+            )),
+        },
+        Ok(None) => Err(eyre!("delegated pull stream closed before Started")),
+        Err(status) => Err(eyre!(
+            "delegation stream failed before Started: {}",
+            status.message()
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! R46-F3 canonical-containment safety tests for
@@ -804,6 +903,42 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn run_delegated_pull_until_started_refuses_non_detach() {
+        // Guard: if a caller asks for the "exit after Started"
+        // path without setting `execution.detach = true`, the
+        // function refuses synchronously instead of opening
+        // the RPC. Otherwise dropping the stream after Started
+        // would let the daemon's tx.closed() race drop the
+        // transfer.
+        use blit_core::remote::endpoint::RemoteEndpoint;
+        use blit_core::remote::RemotePath;
+        let endpoint = RemoteEndpoint {
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            path: RemotePath::Module {
+                module: "m".to_string(),
+                rel_path: PathBuf::new(),
+            },
+        };
+        let execution = DelegatedPullExecution {
+            src: endpoint.clone(),
+            dst: endpoint,
+            options: PullSyncOptions::default(),
+            trace_data_plane: false,
+            relay_fallback_suggestable: false,
+            dst_label: "x".to_string(),
+            detach: false,
+        };
+        let err = run_delegated_pull_until_started(execution)
+            .await
+            .expect_err("non-detach execution must be refused");
+        assert!(
+            err.to_string().contains("requires execution.detach=true"),
+            "got: {err}"
+        );
+    }
 
     #[tokio::test]
     async fn rejects_parent_traversal() {

@@ -117,6 +117,7 @@ pub(crate) async fn handle_delegated_pull(
     delegation: Arc<crate::delegation_gate::DelegationConfig>,
     metrics: Arc<TransferMetrics>,
     tx: mpsc::Sender<Result<DelegatedPullProgress, Status>>,
+    transfer_id: String,
 ) -> bool {
     let resolver = StdResolver;
     let result = run_delegated_pull(
@@ -125,6 +126,7 @@ pub(crate) async fn handle_delegated_pull(
         default_root,
         delegation,
         metrics,
+        transfer_id,
         &tx,
         &resolver,
     )
@@ -151,6 +153,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     default_root: Option<RootExport>,
     delegation: Arc<crate::delegation_gate::DelegationConfig>,
     metrics: Arc<TransferMetrics>,
+    transfer_id: String,
     tx: &mpsc::Sender<Result<DelegatedPullProgress, Status>>,
     resolver: &R,
 ) -> Result<(), DelegatedPullProgress> {
@@ -284,6 +287,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             payload: Some(ProgressPayload::Started(DelegatedPullStarted {
                 source_data_plane_endpoint: format!("tcp:{}:{}", resolved.ip(), resolved.port()),
                 stream_count: 0,
+                transfer_id: transfer_id.clone(),
             })),
         }))
         .await;
@@ -931,7 +935,16 @@ mod tests {
         let metrics = TransferMetrics::disabled();
         let (tx, _rx) = mpsc::channel(8);
 
-        let ok = handle_delegated_pull(req, modules, None, delegation, metrics, tx).await;
+        let ok = handle_delegated_pull(
+            req,
+            modules,
+            None,
+            delegation,
+            metrics,
+            tx,
+            "t-test".to_string(),
+        )
+        .await;
         assert!(
             !ok,
             "handler with blank source locator must return false so caller can inc_error"

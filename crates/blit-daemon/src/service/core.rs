@@ -316,6 +316,7 @@ impl Blit for BlitService {
         // failure, or `CancelJob(transfer_id)` regardless of
         // client connection state.
         let detach = req.detach;
+        let transfer_id_for_started = job.transfer_id().to_string();
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);
@@ -395,6 +396,7 @@ impl Blit for BlitService {
                     delegation,
                     metrics,
                     handler_tx,
+                    transfer_id_for_started,
                 ) => {
                     Some(handler_ok)
                 }

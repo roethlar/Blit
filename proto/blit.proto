@@ -644,6 +644,12 @@ message DelegatedPullStarted {
   // assertion in tests is the CLI-side byte counter.
   string source_data_plane_endpoint = 1;
   uint32 stream_count = 2;
+  // Daemon-assigned transfer id (from the ActiveJobs table).
+  // Stable for the lifetime of the transfer; used by
+  // `blit jobs cancel <remote> <transfer_id>` and by
+  // `--detach` callers that exit after the Started event.
+  // Empty when the daemon is older than m-jobs-3.
+  string transfer_id = 3;
 }
 
 message BytesProgress {

@@ -270,13 +270,19 @@ pub struct TransferArgs {
     /// source but the CLI can reach both daemons, or for benchmarking.
     #[arg(long, help_heading = "Performance / debug")]
     pub relay_via_cli: bool,
-    /// Detach the transfer from the CLI process — daemon-owned.
+    /// Fire-and-forget: hand the transfer to the destination
+    /// daemon and exit as soon as it starts.
+    ///
+    /// The CLI awaits the daemon's `Started` event (which
+    /// includes the daemon-assigned `transfer_id`), prints
+    /// it plus a `blit jobs cancel` hint, and returns. The
+    /// destination daemon completes the transfer regardless
+    /// of CLI connection state. Useful for long remote→remote
+    /// transfers that should outlive the operator's shell.
     ///
     /// Only valid for remote→remote transfers that use the
     /// daemon-to-daemon delegated byte path (no `--relay-via-cli`,
-    /// not a `blit move`). The destination daemon completes the
-    /// transfer regardless of the CLI's connection; cancel later
-    /// via `blit jobs cancel <remote> <transfer_id>`.
+    /// not a `blit move`).
     ///
     /// Rejected with a clear error for:
     /// - local-source or local-destination transfers (CLI is in

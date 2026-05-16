@@ -2,7 +2,8 @@ use crate::cli::TransferArgs;
 use eyre::Result;
 
 use blit_app::transfers::remote::{
-    run_delegated_pull, DelegatedPullExecution, DelegatedPullOutcome,
+    run_delegated_pull, run_delegated_pull_until_started, DelegatedPullExecution,
+    DelegatedPullOutcome,
 };
 use blit_core::generated::DelegatedPullSummary;
 use blit_core::remote::pull::PullSyncOptions;
@@ -132,6 +133,50 @@ async fn run_remote_to_remote_direct_inner(
         detach: args.detach,
     };
 
+    // --detach exit-after-Started path. Opens the stream
+    // just long enough to learn the daemon-assigned
+    // transfer_id (which arrives on the Started event after
+    // m-jobs-3) and then drops the receiver. The daemon's
+    // tx.closed race is disarmed by `detach=true`, so the
+    // transfer continues. We synthesize a zero-summary
+    // outcome so the existing callers (`run_remote_to_remote_direct`
+    // which discards it; `_deferred` which is rejected up
+    // front for detach via run_move's gate) see a stable
+    // shape.
+    if args.detach {
+        // Tear down the progress monitor before printing —
+        // same posture as the non-detach success path, so
+        // any in-flight `[progress]` line doesn't get
+        // interleaved with the detach output.
+        drop(progress_handle);
+        if let Some(task) = progress_task {
+            let _ = task.await;
+        }
+
+        let dst_for_state = execution.dst.clone();
+        let (started, _dst) = run_delegated_pull_until_started(execution).await?;
+        let transfer_id = started.transfer_id.clone();
+        let summary = DelegatedPullSummary {
+            files_transferred: 0,
+            bytes_transferred: 0,
+            bytes_zero_copy: 0,
+            tcp_fallback_used: false,
+            entries_deleted: 0,
+            source_peer_observed: started.source_data_plane_endpoint.clone(),
+        };
+        let state = DeferredDelegatedState {
+            summary,
+            src: dst_for_state.clone(), // source endpoint not surfaced on Started
+            dst: dst_for_state,
+        };
+        if args.json {
+            print_detach_json(&transfer_id);
+        } else {
+            print_detach_human(&transfer_id, args, defer_output);
+        }
+        return Ok(state);
+    }
+
     // CLI-side presentation hook for the destination's `Started`
     // event. M-C's `AppProgressEvent` reshape will replace the
     // callback with a stream variant that both CLI and TUI
@@ -157,6 +202,39 @@ async fn run_remote_to_remote_direct_inner(
         print_deferred_delegated_result(args, &state);
     }
     Ok(state)
+}
+
+fn print_detach_human(transfer_id: &str, args: &TransferArgs, _defer_output: bool) {
+    // Use the user's original CLI input for the destination
+    // host so the cancel hint matches exactly what they
+    // typed — saves them looking up the canonical form.
+    let dst_host_hint = destination_host_hint(&args.destination);
+    eprintln!(
+        "Detached transfer {transfer_id}; daemon owns it to completion or cancel.\n  cancel: blit jobs cancel {dst_host_hint} {transfer_id}\n  status: blit jobs list {dst_host_hint}"
+    );
+}
+
+fn print_detach_json(transfer_id: &str) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "outcome": "detached",
+            "transfer_id": transfer_id,
+        }))
+        .unwrap_or_default()
+    );
+}
+
+/// Pull the host portion out of a remote endpoint string for
+/// the cancel hint. Best-effort: returns everything before
+/// the first `:` (which matches `host:/module/path` and
+/// `host:port`). Falls back to the original string when no
+/// `:` is present.
+fn destination_host_hint(destination: &str) -> &str {
+    destination
+        .split_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(destination)
 }
 
 fn print_delegated_json(
