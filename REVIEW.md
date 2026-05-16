@@ -11,9 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID            | Severity | Title                                                       | Status | Branch                       | Commit    |
-|---------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| _none_        |          |                                                             |        |                              |           |
+| ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
+|---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
+| a0-endpoints-gates  | Refactor | Phase 5 A.0 — remote-transfer support gates take primitives | `[~]`  | `phase5/blit-app-extract`    | `c392f37` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -63,7 +63,7 @@ These will get individual rows + finding docs + sentinels as they land.
 | transfers/remote — push entry-point            | `[x]` (a0-push-execution verified) |
 | transfers/remote_remote_direct                 | `[x]` (a0-delegated-execution verified) |
 | transfers/dispatch (`TransferKind` + route selector)             | `[x]` (a0-dispatch verified; `run_transfer`/`run_move` intentionally stay in CLI — see finding doc) |
-| Endpoints clap-coupled gates → primitive inputs | `[ ]`  |
+| Endpoints clap-coupled gates → primitive inputs | `[~]` (a0-endpoints-gates pending) |
 | Final cleanup (drop CLI shim re-exports if any remain) | `[ ]` |
 
 ## Bigger Phase 5 milestones (planned, not yet started)
