@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| _none_              |          |                                                             |        |                              |           |
+| a0-final-cleanup    | Refactor | Phase 5 A.0 — drop CLI shim re-exports                      | `[~]`  | `phase5/blit-app-extract`    | `29a2026` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -66,7 +66,7 @@ These will get individual rows + finding docs + sentinels as they land.
 | transfers/remote_remote_direct                 | `[x]` (a0-delegated-execution verified) |
 | transfers/dispatch (`TransferKind` + route selector)             | `[x]` (a0-dispatch verified; `run_transfer`/`run_move` intentionally stay in CLI — see finding doc) |
 | Endpoints clap-coupled gates → primitive inputs | `[x]` (a0-endpoints-gates verified — 2 rounds) |
-| Final cleanup (drop CLI shim re-exports if any remain) | `[ ]` |
+| Final cleanup (drop CLI shim re-exports if any remain) | `[~]` (a0-final-cleanup pending) |
 
 ## Bigger Phase 5 milestones (planned, not yet started)
 
