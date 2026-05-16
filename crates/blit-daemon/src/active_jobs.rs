@@ -117,6 +117,36 @@ impl ActiveJobKind {
             ActiveJobKind::DelegatedPull => Wire::DelegatedPull,
         }
     }
+
+    /// Whether the daemon side honors a cancellation token for
+    /// this kind of transfer. Only `DelegatedPull` today —
+    /// push / pull / pull_sync have the CLI in the byte path
+    /// (a client-side cancel already drops the handler future
+    /// via `tx.closed()`), so `CancelJob` from another client
+    /// has no meaningful semantic. M-Jobs may flip this for
+    /// future locally-spawned daemon transfers.
+    pub fn supports_cancellation(self) -> bool {
+        matches!(self, ActiveJobKind::DelegatedPull)
+    }
+}
+
+/// Outcome of an [`ActiveJobs::cancel`] call. The upcoming
+/// `CancelJob` RPC handler will map each variant onto a
+/// distinct gRPC status:
+///
+/// - `Cancelled` → `Code::Ok` with a body acknowledging the
+///   cancel was fired.
+/// - `Unsupported` → `Code::FailedPrecondition` — the
+///   transfer kind doesn't support cancellation today
+///   (push / pull / pull_sync; the CLI is in the byte path).
+/// - `NotFound` → `Code::NotFound` — no active row matches
+///   the requested transfer_id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum CancelOutcome {
+    Cancelled,
+    Unsupported,
+    NotFound,
 }
 
 /// One row of the `ActiveJobs` table. Fields mirror the
@@ -193,18 +223,28 @@ pub struct ActiveJobs {
     inner: Arc<Inner>,
 }
 
+/// Internal table row pairing the wire-shape `ActiveJob`
+/// snapshot data with the per-transfer cancellation token.
+/// Stored in a single locked map so:
+///
+/// 1. `snapshot()` and `cancel(id)` see a consistent view —
+///    a row visible in `snapshot()` always has a cancellation
+///    entry, and vice versa.
+/// 2. `cancel(id)` can inspect the row's `kind` to decide
+///    cancellable / unsupported atomically with the token
+///    lookup, no parallel-map race.
+///
+/// Round-1 of m-jobs-1 used parallel `table` + `cancellations`
+/// maps; the reviewer caught two races (snapshot-then-cancel
+/// returning `false`, and `cancel` returning `true` for kinds
+/// that ignore the token).
+struct TableEntry {
+    job: ActiveJob,
+    cancellation: CancellationToken,
+}
+
 struct Inner {
-    table: Mutex<HashMap<String, ActiveJob>>,
-    /// Per-row cancellation tokens, keyed by transfer_id.
-    /// Mutated in lockstep with `table`: register inserts
-    /// both, Drop removes both. `cancel(id)` looks up the
-    /// token and fires it; handlers race against it.
-    ///
-    /// Kept as a parallel map rather than embedded in
-    /// `ActiveJob` because `ActiveJob` is the snapshot row
-    /// returned over the wire and the token isn't a
-    /// user-visible field.
-    cancellations: Mutex<HashMap<String, CancellationToken>>,
+    table: Mutex<HashMap<String, TableEntry>>,
     /// Bounded ring of completed transfers, drained from
     /// `table` by [`ActiveJobGuard::Drop`]. Push at the back,
     /// trim from the front, so iteration order is
@@ -238,7 +278,6 @@ impl ActiveJobs {
         Self {
             inner: Arc::new(Inner {
                 table: Mutex::new(HashMap::new()),
-                cancellations: Mutex::new(HashMap::new()),
                 recent: Mutex::new(VecDeque::with_capacity(limit)),
                 recent_limit: limit,
                 counter: AtomicU64::new(0),
@@ -277,16 +316,15 @@ impl ActiveJobs {
             start_unix_ms,
         };
         let cancellation = CancellationToken::new();
+        let entry = TableEntry {
+            job: row,
+            cancellation: cancellation.clone(),
+        };
         self.inner
             .table
             .lock()
             .expect("active_jobs table poisoned")
-            .insert(transfer_id.clone(), row);
-        self.inner
-            .cancellations
-            .lock()
-            .expect("active_jobs cancellations poisoned")
-            .insert(transfer_id.clone(), cancellation.clone());
+            .insert(transfer_id.clone(), entry);
         ActiveJobGuard {
             inner: Arc::clone(&self.inner),
             transfer_id,
@@ -295,30 +333,32 @@ impl ActiveJobs {
         }
     }
 
-    /// Fire the cancellation token of an active row, if it
-    /// exists. Returns `true` if a matching row was found and
-    /// its token was fired (whether or not the handler was
-    /// listening yet); `false` if the transfer_id wasn't
-    /// active. `CancelJob` (m-jobs-2) calls this from the
-    /// gRPC handler.
+    /// Try to cancel an active transfer by id. Returns a
+    /// [`CancelOutcome`] distinguishing the three outcomes
+    /// the upcoming `CancelJob` RPC needs to map onto gRPC
+    /// status codes.
     ///
-    /// Idempotent: firing an already-cancelled token is a
-    /// no-op. The token stays in the map until the guard
-    /// drops; a second call against the same id while the
-    /// transfer is still draining returns `true` again.
+    /// Idempotent for `Cancelled`: firing an
+    /// already-cancelled token is a no-op. The entry stays
+    /// in the map until the guard drops; a second call
+    /// against the same live id keeps returning `Cancelled`.
+    ///
+    /// `Unsupported` is returned synchronously when the row's
+    /// kind does not honor cancellation
+    /// ([`ActiveJobKind::supports_cancellation`]). The token
+    /// is **not** fired in that case — handlers that don't
+    /// race the token would silently keep running, and the
+    /// caller would be lied to.
     #[allow(dead_code)]
-    pub fn cancel(&self, transfer_id: &str) -> bool {
-        let guard = self
-            .inner
-            .cancellations
-            .lock()
-            .expect("active_jobs cancellations poisoned");
+    pub fn cancel(&self, transfer_id: &str) -> CancelOutcome {
+        let guard = self.inner.table.lock().expect("active_jobs table poisoned");
         match guard.get(transfer_id) {
-            Some(token) => {
-                token.cancel();
-                true
+            None => CancelOutcome::NotFound,
+            Some(entry) if !entry.job.kind.supports_cancellation() => CancelOutcome::Unsupported,
+            Some(entry) => {
+                entry.cancellation.cancel();
+                CancelOutcome::Cancelled
             }
-            None => false,
         }
     }
 
@@ -332,7 +372,7 @@ impl ActiveJobs {
             .lock()
             .expect("active_jobs table poisoned")
             .values()
-            .cloned()
+            .map(|e| e.job.clone())
             .collect()
     }
 
@@ -425,9 +465,9 @@ impl ActiveJobGuard {
     /// already cleaned up.
     pub fn set_endpoint(&self, module: String, path: String) {
         let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(row) = table.get_mut(&self.transfer_id) {
-            row.module = module;
-            row.path = path;
+        if let Some(entry) = table.get_mut(&self.transfer_id) {
+            entry.job.module = module;
+            entry.job.path = path;
         }
     }
 
@@ -467,36 +507,27 @@ impl Drop for ActiveJobGuard {
     fn drop(&mut self) {
         // Synchronous remove-and-record. PoisonError still
         // hands us the inner guards via `into_inner`, so the
-        // active row, the cancellations map, and the ring are
-        // all updated even if a panic poisoned a mutex on the
-        // way in. This matches the rest of the codebase's
-        // stance on poisoning — surface the failure, but
-        // don't leak state.
+        // active row and the ring are updated even if a panic
+        // poisoned a mutex on the way in. This matches the
+        // rest of the codebase's stance on poisoning — surface
+        // the failure, but don't leak state.
         //
-        // Lock order: table → cancellations → recent. Held
-        // sequentially (no nested acquisitions). `cancel(id)`
-        // takes only the cancellations lock, so it can't
-        // deadlock against this Drop path.
+        // Lock order: table → recent. Held sequentially (no
+        // nested acquisitions). `cancel(id)` takes only the
+        // table lock, so it can't deadlock against this Drop
+        // path.
         let id = std::mem::take(&mut self.transfer_id);
         let outcome = {
             let mut cell = self.outcome.lock().unwrap_or_else(|e| e.into_inner());
             cell.take()
         };
-        let row = {
+        let entry = {
             let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
             table.remove(&id)
         };
-        {
-            let mut cancellations = self
-                .inner
-                .cancellations
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            cancellations.remove(&id);
-        }
-        if let Some(row) = row {
+        if let Some(entry) = entry {
             if self.inner.recent_limit > 0 {
-                let record = build_record(row, outcome);
+                let record = build_record(entry.job, outcome);
                 push_recent(&self.inner.recent, record, self.inner.recent_limit);
             }
         }
@@ -881,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_fires_token_for_known_transfer_id() {
+    async fn cancel_fires_token_for_cancellable_kind() {
         let table = ActiveJobs::new();
         let guard = table.register(
             ActiveJobKind::DelegatedPull,
@@ -893,25 +924,55 @@ mod tests {
         let token = guard.cancellation_token().clone();
         assert!(!token.is_cancelled(), "fresh token must not be cancelled");
 
-        let fired = table.cancel(&id);
-        assert!(fired, "cancel must return true for an active row");
+        assert_eq!(table.cancel(&id), CancelOutcome::Cancelled);
         assert!(token.is_cancelled(), "token must be observably cancelled");
 
-        // Idempotent: a second cancel call returns true while
-        // the row is still alive, even though the token is
-        // already cancelled.
-        assert!(table.cancel(&id));
+        // Idempotent: a second cancel call still reports
+        // Cancelled while the row is alive, even though the
+        // token is already in the cancelled state.
+        assert_eq!(table.cancel(&id), CancelOutcome::Cancelled);
     }
 
     #[tokio::test]
-    async fn cancel_returns_false_for_unknown_transfer_id() {
+    async fn cancel_returns_unsupported_for_non_delegated_kinds() {
+        // Push / pull / pull_sync register tokens for
+        // consistent shape, but their handlers don't race the
+        // token (CLI is in the byte path). `cancel` must
+        // surface that policy as `Unsupported` rather than
+        // firing the token and reporting `Cancelled`.
         let table = ActiveJobs::new();
-        assert!(!table.cancel("not-a-real-id"));
+        for kind in [
+            ActiveJobKind::Push,
+            ActiveJobKind::Pull,
+            ActiveJobKind::PullSync,
+        ] {
+            let guard = table.register(kind, "p".to_string(), "m".to_string(), "/".to_string());
+            let id = guard.transfer_id().to_string();
+            let token = guard.cancellation_token().clone();
+            assert_eq!(
+                table.cancel(&id),
+                CancelOutcome::Unsupported,
+                "{} should not be cancellable today",
+                kind.as_str()
+            );
+            assert!(
+                !token.is_cancelled(),
+                "{}: token must NOT have been fired for an unsupported kind",
+                kind.as_str()
+            );
+            drop(guard);
+        }
+    }
 
-        // After a guard drops, its id should no longer cancel.
+    #[tokio::test]
+    async fn cancel_returns_not_found_for_unknown_or_drained_id() {
+        let table = ActiveJobs::new();
+        assert_eq!(table.cancel("not-a-real-id"), CancelOutcome::NotFound);
+
+        // After a guard drops, its id is no longer active.
         let id = {
             let guard = table.register(
-                ActiveJobKind::Pull,
+                ActiveJobKind::DelegatedPull,
                 "p".to_string(),
                 "m".to_string(),
                 "/".to_string(),
@@ -921,10 +982,7 @@ mod tests {
             drop(guard);
             id
         };
-        assert!(
-            !table.cancel(&id),
-            "cancel must return false for a drained row"
-        );
+        assert_eq!(table.cancel(&id), CancelOutcome::NotFound);
     }
 
     #[tokio::test]
@@ -952,10 +1010,18 @@ mod tests {
         // overkill here; CancellationToken is well-behaved
         // and a yield is enough.
         tokio::task::yield_now().await;
-        assert!(table.cancel(&id));
+        assert_eq!(table.cancel(&id), CancelOutcome::Cancelled);
 
         // The waiter resolves now that the token is cancelled.
         waiter.await.expect("waiter joined");
+    }
+
+    #[test]
+    fn supports_cancellation_matches_dispatch_policy() {
+        assert!(!ActiveJobKind::Push.supports_cancellation());
+        assert!(!ActiveJobKind::Pull.supports_cancellation());
+        assert!(!ActiveJobKind::PullSync.supports_cancellation());
+        assert!(ActiveJobKind::DelegatedPull.supports_cancellation());
     }
 
     #[test]
