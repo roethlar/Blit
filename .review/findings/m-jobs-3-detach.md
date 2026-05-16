@@ -203,3 +203,39 @@ Tests:
   this slice unit-test wise. Documented as a known gap.
 
 Workspace: 537 passed (was 536; +1).
+
+### Round 2 verdict (reviewed sha `18f1cb2`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. Two
+medium-severity findings:
+
+1. The empty-`transfer_id` from older daemons was treated
+   as detached-success. Combined with the older daemon
+   ignoring `detach=true`, dropping the stream would
+   cancel the transfer while the CLI claimed success.
+2. `destination_host_hint` mangled `host:port:/module/path`
+   (port dropped) and `[::1]:9444:/m/p` IPv6 forms (hint
+   became just `[`).
+
+### Round 3 (sha pending) — addresses both
+
+**Finding 1**:
+`run_delegated_pull_until_started` now refuses on
+`started.transfer_id.is_empty()` with a clear "destination
+daemon is older than m-jobs-3" error. The CLI surfaces it
+instead of printing detached-success.
+
+**Finding 2**:
+`RemoteEndpoint::host_port_display(&self) -> String` in
+`blit-core` renders the `host[:port]` form correctly,
+brackets IPv6 via the existing `display_host` helper, drops
+the default port. CLI derives the hint from the parsed
+`execution.dst` rather than string-splitting the raw CLI
+input. The obsolete `destination_host_hint` helper is gone.
+
+New tests in `blit_core::remote::endpoint::tests`:
+- `host_port_display_drops_default_port`
+- `host_port_display_preserves_non_default_port`
+- `host_port_display_brackets_ipv6`
+
+Workspace: 540 passed (was 537; +3).
