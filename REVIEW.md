@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                  | Severity | Title                                                       | Status | Branch                       | Commit    |
 |---------------------|----------|-------------------------------------------------------------|--------|------------------------------|-----------|
-| a0-resolution-fixup | Low      | Phase 5 A.0 — resolution: stale refs + tests-with-impl     | `[~]`  | `phase5/blit-app-extract`    | `65f6031` |
+| a0-resolution-fixup | Low      | Phase 5 A.0 — resolution: stale refs + tests-with-impl     | `[x]`  | `phase5/blit-app-extract`    | `65f6031` |
 
 ## Phase 5 A.0 — `blit-app` library extraction
 
@@ -40,7 +40,7 @@ follows the full contract.
 | transfers/local — doc fix    | `(this branch)` | `[x]` graded (folded into 8c4174a) |
 | transfers/filter             | `8c4174a` | `[x]` graded   |
 | transfers/resolution         | `3639159` | `[x]` graded   |
-| **transfers/resolution — followups** | **`65f6031`** | **`[~]` pending** |
+| **transfers/resolution — followups** | **`65f6031`** | **`[x]` verified** |
 
 ## Phase 5 A.0 — remaining slices
 
