@@ -28,9 +28,11 @@ pub use blit_core::orchestrator::TransferOutcome;
 /// verbatim; caller handles presentation (spinner clear,
 /// stdout / JSON / TUI render).
 ///
-/// `mirror` is taken from `options.mirror`; the parameter exists
-/// for the error-message wording ("failed to mirror" vs "failed
-/// to copy") which was inline in the pre-A.0 CLI version.
+/// `options.mirror` decides copy vs mirror semantics inside the
+/// orchestrator and also drives the error-message wording
+/// ("failed to mirror …" vs "failed to copy …") when the
+/// underlying call fails — matching the pre-A.0 CLI version
+/// of this site.
 pub async fn run(
     src: &Path,
     dst: &Path,

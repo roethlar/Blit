@@ -7,42 +7,30 @@ pub use endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
 
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
-use eyre::{bail, eyre, Context, Result};
+use eyre::{bail, Context, Result};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::time::SystemTime;
 
 use crate::rm::delete_remote_path;
-use blit_core::fs_enum::{parse_duration, parse_size, FileFilter};
+use blit_app::transfers::filter::{self, FilterInputs};
+use blit_core::fs_enum::FileFilter;
 use blit_core::remote::RemotePath;
 
-/// Common shape of the filter inputs across commands. Both `TransferArgs`
-/// (copy/mirror/move) and `CheckArgs` (check) populate this. The single
-/// `build_filter_from_inputs` helper consumes it so all commands route
-/// through identical filter semantics.
-pub(crate) struct FilterInputs<'a> {
-    pub include: &'a [String],
-    pub exclude: &'a [String],
-    pub files_from: Option<&'a PathBuf>,
-    pub min_size: Option<&'a str>,
-    pub max_size: Option<&'a str>,
-    pub min_age: Option<&'a str>,
-    pub max_age: Option<&'a str>,
-}
-
-impl<'a> FilterInputs<'a> {
-    pub fn from_transfer(args: &'a TransferArgs) -> Self {
-        Self {
-            include: &args.include,
-            exclude: &args.exclude,
-            files_from: args.files_from.as_ref(),
-            min_size: args.min_size.as_deref(),
-            max_size: args.max_size.as_deref(),
-            min_age: args.min_age.as_deref(),
-            max_age: args.max_age.as_deref(),
-        }
+/// Build a `FilterInputs` view over a `TransferArgs`. Lives here
+/// because the orphan rule prevents `impl From<&TransferArgs>` on
+/// `FilterInputs` (the struct moved to `blit-app::transfers::filter`,
+/// `TransferArgs` stays in `blit-cli`). Inlined wrapper keeps the
+/// `build_filter` / `build_filter_spec` call sites readable.
+fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
+    FilterInputs {
+        include: &args.include,
+        exclude: &args.exclude,
+        files_from: args.files_from.as_ref(),
+        min_size: args.min_size.as_deref(),
+        max_size: args.max_size.as_deref(),
+        min_age: args.min_age.as_deref(),
+        max_age: args.max_age.as_deref(),
     }
 }
 use endpoints::{
@@ -216,98 +204,16 @@ pub(crate) fn resolve_destination(
     }
 }
 
-/// Build a `FileFilter` from a transfer command's args. Convenience wrapper
-/// around `build_filter_from_inputs`.
+/// Build a `FileFilter` from a transfer command's args. Thin
+/// clap-side wrapper around `blit_app::transfers::filter::build`.
 pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
-    build_filter_from_inputs(&FilterInputs::from_transfer(args))
+    filter::build(&filter_inputs(args))
 }
 
-/// Build the wire-side `FilterSpec` proto message from CLI args.
-/// Used by the remote pull path so the daemon enforces the same
-/// filter the CLI would have applied locally. `--files-from` is
-/// read here and shipped expanded so the daemon doesn't have to
-/// reach back into the client's filesystem.
+/// Build the wire-side `FilterSpec` proto from CLI args. Thin
+/// wrapper around `blit_app::transfers::filter::build_spec`.
 pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::generated::FilterSpec> {
-    use blit_core::generated::FilterSpec;
-    let mut spec = FilterSpec {
-        include: args.include.clone(),
-        exclude: args.exclude.clone(),
-        min_size: None,
-        max_size: None,
-        min_age_secs: None,
-        max_age_secs: None,
-        files_from: Vec::new(),
-    };
-    if let Some(s) = args.min_size.as_deref() {
-        spec.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
-    }
-    if let Some(s) = args.max_size.as_deref() {
-        spec.max_size = Some(parse_size(s).with_context(|| format!("--max-size {s}"))?);
-    }
-    if let Some(s) = args.min_age.as_deref() {
-        spec.min_age_secs = Some(
-            parse_duration(s)
-                .with_context(|| format!("--min-age {s}"))?
-                .as_secs(),
-        );
-    }
-    if let Some(s) = args.max_age.as_deref() {
-        spec.max_age_secs = Some(
-            parse_duration(s)
-                .with_context(|| format!("--max-age {s}"))?
-                .as_secs(),
-        );
-    }
-    if let Some(path) = args.files_from.as_ref() {
-        let entries = FileFilter::load_files_from(path)?;
-        spec.files_from = entries
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-    }
-    Ok(spec)
-}
-
-/// Build a `FileFilter` from filter inputs. Single helper used by all
-/// commands (copy/mirror/move/check) so filter behavior is identical
-/// regardless of which CLI verb invoked it. The orchestrator-side
-/// helper — not the leaf code — is what calculates the filter.
-pub(crate) fn build_filter_from_inputs(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
-    let mut filter = FileFilter::default();
-    filter.include_files = inputs.include.to_vec();
-    filter.exclude_files = inputs.exclude.to_vec();
-    if let Some(s) = inputs.min_size {
-        filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
-    }
-    if let Some(s) = inputs.max_size {
-        filter.max_size = Some(parse_size(s).with_context(|| format!("--max-size {s}"))?);
-    }
-    if let Some(s) = inputs.min_age {
-        filter.min_age = Some(parse_duration(s).with_context(|| format!("--min-age {s}"))?);
-    }
-    if let Some(s) = inputs.max_age {
-        filter.max_age = Some(parse_duration(s).with_context(|| format!("--max-age {s}"))?);
-    }
-    if filter.min_age.is_some() || filter.max_age.is_some() {
-        // Captured once per command invocation — calculated by orchestrator-side
-        // helper, not by leaf code each time `allows_entry` is called.
-        filter.reference_time = Some(SystemTime::now());
-    }
-    if let Some(path) = inputs.files_from {
-        filter.files_from = Some(FileFilter::load_files_from(path)?);
-    }
-    // R58-F12: validate glob patterns at CLI filter-construction
-    // time. The runtime build_globset silently drops invalid
-    // patterns (which is OK as a defense-in-depth fallback for
-    // corrupted profiles), but at the CLI layer we want to
-    // reject malformed globs up front with a pointer to the bad
-    // pattern. Operation-spec normalization already validates on
-    // the remote-pull path; this closes the symmetry gap for
-    // local / push paths.
-    filter
-        .validate_globs()
-        .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
-    Ok(filter)
+    filter::build_spec(&filter_inputs(args))
 }
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.

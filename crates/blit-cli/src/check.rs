@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use blit_app::check::{compare_trees, CheckResult};
+use blit_app::transfers::filter::{self, FilterInputs};
 use eyre::{bail, Context, Result};
 
 use crate::cli::CheckArgs;
-use crate::transfers::{build_filter_from_inputs, FilterInputs};
 
 pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     let src = PathBuf::from(&args.source);
@@ -30,7 +30,7 @@ pub async fn run_check(args: &CheckArgs) -> Result<ExitCode> {
 
     // Build filter via the same chokepoint that copy/mirror/move use, so
     // `blit check --exclude '*.tmp'` matches `blit copy --exclude '*.tmp'`.
-    let filter = build_filter_from_inputs(&FilterInputs {
+    let filter = filter::build(&FilterInputs {
         include: &args.include,
         exclude: &args.exclude,
         files_from: args.files_from.as_ref(),
