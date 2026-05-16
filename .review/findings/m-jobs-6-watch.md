@@ -147,6 +147,38 @@ Workspace: 544 passed (was 540; +4).
    this slice; same posture as the rest of the `blit jobs`
    surface.
 
+## Round 2 (sha `5ab9eef`)
+
+Addressed all three reviewer findings:
+
+1. **Planning docs aligned with M-Jobs vs C scope.**
+   - `docs/plan/TUI_DESIGN.md` §6.5 CLI surface: `blit jobs watch`
+     now documented as a GetState polling loop in M-Jobs (with
+     `--interval-ms` / `--timeout-secs` / `--json`), with the
+     `Subscribe`-stream upgrade explicitly deferred to milestone C.
+   - `TODO.md` Phase 5 M-Jobs row: detach + cancel + watch-as-
+     polling now described; per-job event ring +
+     `SubscribeRequest.transfer_id_filter` explicitly listed as
+     deferred to C.
+   - `TODO.md` Phase 5 C row: absorbs both deferred items (event
+     ring and `transfer_id_filter`) plus the streaming upgrade.
+
+2. **JSON timeout now produces a terminal state line.**
+   - New `print_watch_timeout_json(transfer_id, timeout_secs)` in
+     `crates/blit-cli/src/jobs.rs` emits
+     `{"state":"timeout","transfer_id":"...","timeout_secs":N}`
+     before the timeout branch returns exit code 3.
+   - Stream contract is now consistent: every terminal exit (0, 1,
+     2, 3) emits one final JSON object describing the outcome.
+   - The `--json` flag docstring in `JobsWatchArgs` already said
+     "one object per poll, plus a final outcome line" — the
+     implementation now matches that contract for all four exits.
+
+3. **`WatchSnapshot` rustdoc no longer inherits `kind_label`'s.**
+   - Split the doc comments cleanly: `WatchSnapshot` carries only
+     its own docstring; `kind_label`'s "Human-readable label..."
+     doc-block lives directly above the function again.
+
 ## Reviewer comments
 
 (empty — pending grade)
