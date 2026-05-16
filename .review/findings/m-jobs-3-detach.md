@@ -151,4 +151,55 @@ Workspace: 536 passed (was 533; +3).
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `d3e3a4d`) — reopened
+
+Reviewer: `codex-reviewer`. Validation green. One
+medium-severity finding: `--detach` was documented as
+"detach the transfer from the CLI process" + the proto
+comment said "the CLI is free to exit after the daemon's
+Started event," but the CLI still `await`ed
+`run_delegated_pull(...).await` and the library loop
+consumed the stream all the way to Summary. So the flag
+implemented "survive manual CLI disconnect" but not the
+advertised fire-and-forget.
+
+### Round 2 (sha pending) — addresses the finding
+
+Implemented the advertised behavior end-to-end:
+
+1. **transfer_id on Started.** `DelegatedPullStarted.transfer_id`
+   field added; daemon threads `job.transfer_id()` into the
+   handler, which fills the wire field. Proto3 default
+   keeps older daemons compatible.
+2. **Library exit-after-Started function.**
+   `run_delegated_pull_until_started(execution) ->
+   Result<(DelegatedPullStarted, RemoteEndpoint)>` opens
+   the RPC, reads the first frame, returns if Started.
+   Refuses synchronously when `execution.detach != true`
+   (otherwise dropping the stream would drop the transfer
+   against the disarmed-only-when-detach daemon side).
+3. **CLI dispatch branch.** `args.detach` shortcuts the
+   inner runner to the new library function, prints
+   transfer_id + cancel/status hints, and returns. Builds
+   a synthetic zero-summary outcome so the existing return
+   shape stays stable.
+4. **Output.** Human stderr:
+   `Detached transfer <id>; daemon owns it to completion or
+   cancel.` plus a `cancel: blit jobs cancel <host> <id>`
+   line and `status: blit jobs list <host>` line. JSON:
+   `{"outcome":"detached","transfer_id":"…"}`.
+5. **Help text.** Reworded to "Fire-and-forget: hand the
+   transfer to the destination daemon and exit as soon as
+   it starts."
+
+Tests:
+
+- `run_delegated_pull_until_started_refuses_non_detach`
+  asserts the synchronous refusal guard.
+- The dispatch-test side of the new path needs an
+  in-process tonic server to exercise end-to-end; same
+  posture as the existing `run_delegated_pull` coverage,
+  which lives under integration tests. Out of scope for
+  this slice unit-test wise. Documented as a known gap.
+
+Workspace: 537 passed (was 536; +1).
