@@ -82,4 +82,27 @@ before any `remove_file` call. No lexical fallback.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reviewed sha `de78151`) — reopened
+
+Validation green (fmt + clippy + workspace tests). Two
+low-severity findings:
+
+1. Test locality: `delete_listed_paths` moved to `blit-app`
+   but its R46-F3 safety tests still lived at
+   `crates/blit-cli/src/transfers/remote.rs:615`, so
+   `cargo test -p blit-app` didn't exercise the public
+   helper that now owns the containment behavior.
+2. Stale daemon-side references: `delegated_pull.rs:399` and
+   `:496` still pointed at "the CLI's" helpers.
+
+### Round 2 (sha `086fa49`) — addressed
+
+- Tests moved into `blit_app::transfers::remote::tests` as
+  a private `#[cfg(test)] mod tests` block (4 tests).
+  `cargo test -p blit-app transfers::remote` runs them.
+  CLI side keeps a pointer comment for greppability.
+- Both `delegated_pull.rs` doc references reworded as
+  historical context naming the new
+  `blit_app::transfers::remote::{delete_listed_paths,
+  enumerate_local_manifest}` locations.
+- Re-armed sentinel; pending re-review.

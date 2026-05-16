@@ -5,9 +5,12 @@ set -euo pipefail
 #
 #   1. Every .review/ready/<id>.json has a matching
 #      .review/findings/<id>.md.
-#   2. No .review/results/<id>.{verified.json,reopened.md} collides
-#      with an existing .review/ready/<id>.json (the reviewer must
-#      delete the sentinel when writing a verdict).
+#   2. A sentinel may only coexist with a verdict for the *previous*
+#      round — i.e. when the coder re-armed for round N+1 after a
+#      reopen, the round-N reopened.md is preserved as audit trail.
+#      A sentinel pointing at the *same* sha as a verdict file means
+#      the reviewer forgot to delete the sentinel after writing the
+#      verdict (workflow bug).
 #   3. Both verdict files for the same id must not coexist.
 #   4. Sentinel JSON has the four required fields (id, branch, sha,
 #      ts) and the id matches the filename.
@@ -64,14 +67,24 @@ else
       ok "$name (branch=$json_branch sha=${json_sha:0:7})"
     fi
 
-    # Collision: a sentinel with a verdict file already present is wedged.
+    # Collision: a sentinel + verdict with the *same* sha means the
+    # reviewer forgot to delete the sentinel after writing the
+    # verdict. A sentinel + verdict with *different* shas is the
+    # normal re-arm-after-reopen audit trail.
     verified=".review/results/${id}.verified.json"
     reopened=".review/results/${id}.reopened.md"
     if [[ -f "$verified" ]]; then
-      warn "$name: collides with existing $verified — reviewer must delete the sentinel after writing verdict"
+      vsha="$(grep -o '"sha":"[^"]*"' "$verified" | head -1 | sed 's/.*:"//;s/"$//' || true)"
+      if [[ -n "$json_sha" && -n "$vsha" && "$json_sha" == "$vsha" ]]; then
+        warn "$name: collides with $verified at same sha ${vsha:0:7} — reviewer must delete the sentinel after writing verdict"
+      fi
     fi
     if [[ -f "$reopened" ]]; then
-      warn "$name: collides with existing $reopened — reviewer must delete the sentinel after writing verdict"
+      # reopened.md has "Reviewed sha: \`<sha>\`" as free text.
+      rsha="$(grep -o 'Reviewed sha: \`[a-f0-9]*\`' "$reopened" | head -1 | sed 's/.*\`//;s/\`$//' || true)"
+      if [[ -n "$json_sha" && -n "$rsha" && "$json_sha" == "$rsha" ]]; then
+        warn "$name: collides with $reopened at same sha ${rsha:0:7} — reviewer must delete the sentinel after writing verdict"
+      fi
     fi
   done
 fi
