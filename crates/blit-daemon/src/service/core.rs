@@ -283,8 +283,10 @@ impl Blit for BlitService {
         // termination path (success, handler failure, client
         // hangup). Module + dst path come straight off the
         // request; they're synchronously available here unlike
-        // the streaming RPCs (push, pull_sync) which b-2 will
-        // wire via a guard update API.
+        // the streaming RPCs (push, pull_sync), which register
+        // with empty endpoint strings and have their handlers
+        // fill them in via `ActiveJobGuard::set_endpoint` once
+        // the first stream frame parses.
         let job = self.active_jobs.register(
             ActiveJobKind::DelegatedPull,
             peer,
