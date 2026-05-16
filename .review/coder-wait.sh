@@ -68,7 +68,14 @@ else
 fi
 
 extract_verified_sha() {
-  grep -o '"sha":"[a-f0-9]*"' "$1" | head -1 | sed 's/.*:"//;s/"$//'
+  # Tolerate both compact (`"sha":"…"`) and pretty
+  # (`"sha": "…"` or `"sha" : "…"`) JSON. Earlier `coder-wait.sh`
+  # rounds assumed compact only and exited 1 when the reviewer
+  # produced pretty JSON (sentinel deleted → no sha-matched
+  # verdict found).
+  grep -Eo '"sha"[[:space:]]*:[[:space:]]*"[a-f0-9]+"' "$1" \
+    | head -1 \
+    | sed -E 's/.*"([a-f0-9]+)"/\1/'
 }
 
 extract_reopened_sha() {

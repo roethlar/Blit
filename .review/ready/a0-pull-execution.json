@@ -1,0 +1,1 @@
+{"id":"a0-pull-execution","branch":"phase5/blit-app-extract","sha":"e9e168fb79ae6e9ff950d3dd1f486bc69f713bc7","ts":"2026-05-16T16:35:57Z","round":2,"note":"Round 2: split pull_sync from purge so CLI/TUI can tear down progress between them. Restores pre-Phase-5 lifecycle ordering. Finding doc + sentinel committed atomically per round-1 workflow finding."}
