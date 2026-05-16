@@ -116,7 +116,7 @@ matched the sentinel's sha. Reviewer's fix direction:
 `coder-wait.sh <id> [<expected-sha>]` with sha-matched verdict
 parsing.
 
-### Round 3 (sha pending) — addresses round-2 workflow finding
+### Round 3 (sha `2c9029e`) — addresses round-2 workflow finding
 
 - Rewrote `.review/coder-wait.sh` per the reviewer's suggested
   contract:
@@ -132,4 +132,39 @@ parsing.
     `s/^Reviewed sha: \`//; s/\`$//`).
 - Verified locally: passing the round-2 sha returns the round-2
   verdict; passing the round-1 sha times out (correct).
+- No code changes outside `.review/`.
+
+### Round 3 verdict (reviewed sha `2c9029e`) — reopened
+
+`coder-wait.sh` behavior confirmed by the reviewer's
+verification probe. One new medium-severity
+workflow-correctness finding: `.review/check-state.sh` blows up
+under `set -u` in the clean post-verify state — when
+`verified.json` exists but no `reopened.md` does (or vice
+versa), `nullglob`-assigned empty arrays raise
+`arr[@]: unbound variable` on bash 3.2 (macOS default). Repro:
+
+```
+$ shopt -s nullglob; set -u
+$ arr=(/nonexistent/*.txt)
+$ echo ${#arr[@]}            # 0
+$ for f in "${arr[@]}"; do … # arr[@]: unbound variable
+```
+
+Fix direction: bash 3.2-safe iteration via
+`${arr[@]+"${arr[@]}"}` (or guard with a length check before
+the loop).
+
+### Round 4 (sha pending) — addresses round-3 workflow finding
+
+- Rewrote the verdict-array loops in `.review/check-state.sh`
+  using `${arr[@]+"${arr[@]}"}` so the script no longer aborts
+  when one of `verified_files` / `reopened_files` is empty.
+- Repro verified locally:
+  - The naive `"${arr[@]}"` form aborts on bash 3.2 when the
+    nullglob array is empty.
+  - The fixed form iterates zero times and continues cleanly.
+- Confirmed end-to-end: synthetic verified-only + sentinel
+  state runs `check-state.sh` to `STATE: consistent` with
+  exit 0.
 - No code changes outside `.review/`.

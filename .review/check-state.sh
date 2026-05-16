@@ -100,14 +100,21 @@ else
   # macOS ships bash 3.2 which lacks `declare -A`; use a
   # newline-separated list instead. Verdict counts are tiny, so
   # the O(n) scan per insert is fine.
+  #
+  # `"${arr[@]+"${arr[@]}"}"` is the bash 3.2-safe way to iterate
+  # a possibly-empty array under `set -u`. The naive
+  # `"${arr[@]}"` form treats an empty nullglob-assigned array
+  # as an unset variable and aborts (`arr[@]: unbound variable`).
+  # Only one of the two arrays may be empty in a clean
+  # post-verdict state, so we must guard both loops.
   seen_ids=""
-  for f in "${verified_files[@]}"; do
+  for f in ${verified_files[@]+"${verified_files[@]}"}; do
     name="$(basename "$f")"
     id="${name%.verified.json}"
     seen_ids="$seen_ids"$'\n'"$id"
     ok "$name"
   done
-  for f in "${reopened_files[@]}"; do
+  for f in ${reopened_files[@]+"${reopened_files[@]}"}; do
     name="$(basename "$f")"
     id="${name%.reopened.md}"
     if printf '%s\n' "$seen_ids" | grep -Fxq "$id"; then
