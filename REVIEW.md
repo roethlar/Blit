@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch     | Commit    |
-|-------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-7-watch-replay  | Feature  | `blit jobs watch` enables replay_recent    | [~]    | `phase5/c` | `7d3ff3f` |
+_none_
 
 ## Open findings
 
@@ -86,3 +84,4 @@ Phase 5 C sub-slices on branch `phase5/c`:
 - `b71fd6d` Per-job event ring + `replay_recent` (`c-5b-event-ring`)
 - `ea7a8d7` `blit jobs watch` consumes Subscribe stream (`c-6-jobs-watch-stream`)
 - `f7edcc9` Subscribe-first watch race fix + stable terminal JSON (`c-6-jobs-watch-stream` round 2)
+- `7d3ff3f` `blit jobs watch` enables `replay_recent` (`c-7-watch-replay`)
