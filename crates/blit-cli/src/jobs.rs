@@ -1,7 +1,7 @@
 use crate::cli::{JobsCancelArgs, JobsCommand, JobsListArgs, JobsWatchArgs};
 use blit_app::admin::jobs;
 use blit_app::admin::jobs::{CancelJobOutcome, WatchSnapshot};
-use blit_core::generated::DaemonState;
+use blit_core::generated::{daemon_event, DaemonState};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::process::ExitCode;
@@ -65,34 +65,46 @@ pub(crate) fn cancel_exit_code(outcome: &CancelJobOutcome) -> ExitCode {
     }
 }
 
-/// Poll `GetState` on `remote` until the transfer drains
-/// into `recent[]` or the timeout fires. Each poll renders
-/// a status line (human ticker or JSON-Lines, depending on
-/// `args.json`).
+/// Stream live progress for a single transfer until it
+/// terminates or the optional timeout fires. Uses the c-2
+/// `Subscribe` RPC scoped by c-5a's `transfer_id_filter` so
+/// the CLI only receives events for the watched transfer.
 ///
 /// Exit codes:
 ///
-///   Finished + ok=true  → 0
-///   Finished + ok=false → 1
-///   NotFound            → 2 (id never seen)
-///   Timeout while active → 3 (transfer was still running
-///                              when the deadline fired)
+///   Finished + ok=true   → 0
+///   Finished + ok=false  → 1
+///   NotFound             → 2 (id never seen, or completed
+///                              before subscribe + rotated out
+///                              of the recent ring)
+///   Timeout while active → 3 (deadline fired before any
+///                              terminal event arrived)
 ///
-/// `--detach` callers should `blit jobs watch <remote> <id>`
-/// right after the daemon emits Started; the watch loop
-/// will see the row in `active[]` immediately on first poll.
-/// If they wait too long after the transfer completes, the
-/// recent ring may rotate the row out — they'll see
-/// NotFound. That's correct behavior under the polling
-/// model; Subscribe (milestone C) will replace polling and
-/// remove the race.
+/// Flow:
+/// 1. Snapshot daemon state via GetState. Three branches:
+///    - Already in recent[] → emit terminal line, return.
+///    - In active[]        → emit initial line, open Subscribe.
+///    - NotFound           → emit not-found line, return 2.
+/// 2. With Subscribe open + filtered to `transfer_id`, loop
+///    on stream events:
+///    - TransferProgress → update progress line / JSON.
+///    - TransferComplete → emit terminal line, return 0.
+///    - TransferError    → emit failed line, return 1.
+///    - TransferStarted  → ignored (initial GetState already
+///      reported state).
+/// 3. Stream errors fall back to a final GetState query so a
+///    Subscribe Lagged or daemon disconnect doesn't leave the
+///    operator without a terminal answer.
+///
+/// `args.interval_ms` is preserved on the CLI for backward
+/// compatibility but has no effect under the streaming model
+/// — Subscribe pushes; no polling cadence to configure.
 async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
     let remote = RemoteEndpoint::parse(&args.remote)
         .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;
     if args.transfer_id.trim().is_empty() {
         eyre::bail!("transfer_id must not be empty");
     }
-    let interval = Duration::from_millis(args.interval_ms.max(50));
     let deadline = if args.timeout_secs > 0 {
         Some(Instant::now() + Duration::from_secs(args.timeout_secs))
     } else {
@@ -101,80 +113,303 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
 
     if !args.json {
         eprintln!(
-            "Watching transfer {} on {} (poll {}ms)...",
+            "Watching transfer {} on {} (streaming)...",
             args.transfer_id,
             remote.display(),
-            interval.as_millis()
         );
     }
 
-    loop {
-        let state = jobs::query(&remote, 0).await?;
-        let snap = jobs::watch_snapshot(&state, &args.transfer_id);
-        if args.json {
-            print_watch_json(&snap);
+    // Step 1: initial GetState snapshot so we handle the
+    // already-completed and never-existed cases without
+    // waiting on Subscribe.
+    let state = jobs::query(&remote, 0).await?;
+    let snap = jobs::watch_snapshot(&state, &args.transfer_id);
+    match &snap {
+        WatchSnapshot::Finished(r) => {
+            if args.json {
+                print_watch_json(&snap);
+            } else {
+                emit_human_finished(r);
+            }
+            return Ok(if r.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            });
         }
-        match snap {
-            WatchSnapshot::Active(ref a) => {
-                if !args.json {
-                    let age_ms = age_ms_since(a.start_unix_ms);
-                    eprintln!(
-                        "[active] {} {} peer={} age={}",
-                        jobs::kind_label(a.kind),
-                        module_path(&a.module, &a.path),
-                        a.peer,
-                        format_ms(age_ms),
-                    );
-                }
+        WatchSnapshot::NotFound => {
+            if args.json {
+                print_watch_json(&snap);
+            } else {
+                eprintln!(
+                    "[not-found] transfer '{}' is not on {} (already completed \
+                     and rotated out of the recent ring, or never existed)",
+                    args.transfer_id,
+                    remote.display()
+                );
             }
-            WatchSnapshot::Finished(ref r) => {
-                if !args.json {
-                    let status = if r.ok {
-                        "ok".to_string()
-                    } else {
-                        format!("FAILED: {}", r.error_message)
-                    };
-                    eprintln!(
-                        "[done] {} {} duration={} {}",
-                        jobs::kind_label(r.kind),
-                        module_path(&r.module, &r.path),
-                        format_ms(r.duration_ms),
-                        status,
-                    );
-                }
-                return Ok(if r.ok {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::from(1)
-                });
-            }
-            WatchSnapshot::NotFound => {
-                if !args.json {
-                    eprintln!(
-                        "[not-found] transfer '{}' is not on {} (already completed and \
-                         rotated out of the recent ring, or never existed)",
-                        args.transfer_id,
-                        remote.display()
-                    );
-                }
-                return Ok(ExitCode::from(2));
+            return Ok(ExitCode::from(2));
+        }
+        WatchSnapshot::Active(a) => {
+            if args.json {
+                print_watch_json(&snap);
+            } else {
+                emit_human_active(a, None);
             }
         }
+    }
 
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                if args.json {
-                    print_watch_timeout_json(&args.transfer_id, args.timeout_secs);
-                } else {
-                    eprintln!(
-                        "[timeout] transfer '{}' still active after {}s",
-                        args.transfer_id, args.timeout_secs
-                    );
+    // Step 2: open Subscribe with transfer_id_filter. The
+    // daemon only forwards events for this transfer (c-5a).
+    let mut stream = jobs::subscribe(&remote, &args.transfer_id).await?;
+
+    loop {
+        // tonic's `Streaming::message()` returns
+        // `Result<Option<T>, Status>`:
+        //   Ok(Some(msg))  → forward frame
+        //   Ok(None)        → stream ended cleanly
+        //   Err(status)     → stream error (Aborted = Lagged)
+        let next_message = match deadline {
+            Some(d) => {
+                let remaining = d.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    if args.json {
+                        print_watch_timeout_json(&args.transfer_id, args.timeout_secs);
+                    } else {
+                        eprintln!(
+                            "[timeout] transfer '{}' still active after {}s",
+                            args.transfer_id, args.timeout_secs
+                        );
+                    }
+                    return Ok(ExitCode::from(3));
                 }
-                return Ok(ExitCode::from(3));
+                match tokio::time::timeout(remaining, stream.message()).await {
+                    Ok(item) => item,
+                    Err(_) => {
+                        if args.json {
+                            print_watch_timeout_json(&args.transfer_id, args.timeout_secs);
+                        } else {
+                            eprintln!(
+                                "[timeout] transfer '{}' still active after {}s",
+                                args.transfer_id, args.timeout_secs
+                            );
+                        }
+                        return Ok(ExitCode::from(3));
+                    }
+                }
+            }
+            None => stream.message().await,
+        };
+        match next_message {
+            Ok(Some(event)) => match event.payload {
+                Some(daemon_event::Payload::TransferProgress(p)) => {
+                    if args.json {
+                        print_watch_progress_json(&p);
+                    } else {
+                        emit_human_progress(&args.transfer_id, &p);
+                    }
+                }
+                Some(daemon_event::Payload::TransferComplete(c)) => {
+                    if args.json {
+                        print_watch_complete_json(&c);
+                    } else {
+                        emit_human_complete(&c);
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
+                Some(daemon_event::Payload::TransferError(e)) => {
+                    if args.json {
+                        print_watch_error_json(&e);
+                    } else {
+                        eprintln!("[failed] transfer '{}' error: {}", e.transfer_id, e.message);
+                    }
+                    return Ok(ExitCode::from(1));
+                }
+                Some(daemon_event::Payload::TransferStarted(_)) | None => {
+                    // Started already covered by the initial
+                    // GetState. None happens for a future
+                    // wire variant we don't recognize — drop.
+                }
+            },
+            Err(status) => {
+                // Stream error (typically Lagged → Aborted).
+                // Fall back to a final GetState so the operator
+                // gets a terminal answer rather than a stream
+                // failure.
+                eprintln!(
+                    "[stream-error] subscribe failed ({}); reconciling via GetState...",
+                    status.message()
+                );
+                return reconcile_via_get_state(&args, &remote).await;
+            }
+            Ok(None) => {
+                // Daemon closed the stream — likely shutting
+                // down. Same fallback.
+                eprintln!(
+                    "[stream-end] daemon closed the subscribe stream; \
+                     reconciling via GetState..."
+                );
+                return reconcile_via_get_state(&args, &remote).await;
             }
         }
-        tokio::time::sleep(interval).await;
+    }
+}
+
+/// On Subscribe stream error / end, query GetState once more
+/// to decide the terminal exit. Mirrors the initial-snapshot
+/// branches so the operator always gets a coherent answer.
+async fn reconcile_via_get_state(
+    args: &JobsWatchArgs,
+    remote: &RemoteEndpoint,
+) -> Result<ExitCode> {
+    let state = jobs::query(remote, 0).await?;
+    let snap = jobs::watch_snapshot(&state, &args.transfer_id);
+    if args.json {
+        print_watch_json(&snap);
+    }
+    match snap {
+        WatchSnapshot::Finished(r) => {
+            if !args.json {
+                emit_human_finished(&r);
+            }
+            Ok(if r.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        WatchSnapshot::Active(a) => {
+            if !args.json {
+                emit_human_active(&a, Some("still active after stream loss"));
+            }
+            // Stream is gone and the transfer is still active.
+            // Without polling we can't follow it further; exit
+            // 3 (timeout-equivalent: "we gave up watching").
+            Ok(ExitCode::from(3))
+        }
+        WatchSnapshot::NotFound => {
+            if !args.json {
+                eprintln!(
+                    "[not-found] transfer '{}' is no longer on {}",
+                    args.transfer_id,
+                    remote.display()
+                );
+            }
+            Ok(ExitCode::from(2))
+        }
+    }
+}
+
+fn emit_human_active(a: &blit_core::generated::ActiveTransfer, note: Option<&str>) {
+    let age_ms = age_ms_since(a.start_unix_ms);
+    if let Some(note) = note {
+        eprintln!(
+            "[active] {} {} peer={} age={} ({})",
+            jobs::kind_label(a.kind),
+            module_path(&a.module, &a.path),
+            a.peer,
+            format_ms(age_ms),
+            note,
+        );
+    } else {
+        eprintln!(
+            "[active] {} {} peer={} age={}",
+            jobs::kind_label(a.kind),
+            module_path(&a.module, &a.path),
+            a.peer,
+            format_ms(age_ms),
+        );
+    }
+}
+
+fn emit_human_finished(r: &blit_core::generated::TransferRecord) {
+    let status = if r.ok {
+        "ok".to_string()
+    } else {
+        format!("FAILED: {}", r.error_message)
+    };
+    eprintln!(
+        "[done] {} {} duration={} {}",
+        jobs::kind_label(r.kind),
+        module_path(&r.module, &r.path),
+        format_ms(r.duration_ms),
+        status,
+    );
+}
+
+fn emit_human_progress(transfer_id: &str, p: &blit_core::generated::TransferProgress) {
+    let bps = p.throughput_bps;
+    eprintln!(
+        "[progress] {} bytes={} throughput={}/s",
+        transfer_id,
+        p.bytes_completed,
+        format_bps(bps),
+    );
+}
+
+fn emit_human_complete(c: &blit_core::generated::TransferComplete) {
+    eprintln!(
+        "[done] transfer {} bytes={} duration={} ok",
+        c.transfer_id,
+        c.bytes,
+        format_ms(c.duration_ms),
+    );
+}
+
+fn format_bps(bps: u64) -> String {
+    if bps >= 1_000_000_000 {
+        format!("{:.2} GB", bps as f64 / 1_000_000_000.0)
+    } else if bps >= 1_000_000 {
+        format!("{:.2} MB", bps as f64 / 1_000_000.0)
+    } else if bps >= 1_000 {
+        format!("{:.2} KB", bps as f64 / 1_000.0)
+    } else {
+        format!("{} B", bps)
+    }
+}
+
+fn print_watch_progress_json(p: &blit_core::generated::TransferProgress) {
+    use serde_json::json;
+    let body = json!({
+        "state": "progress",
+        "transfer_id": p.transfer_id,
+        "bytes_completed": p.bytes_completed,
+        "bytes_total": p.bytes_total,
+        "files_completed": p.files_completed,
+        "files_total": p.files_total,
+        "throughput_bps": p.throughput_bps,
+    });
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
+    }
+}
+
+fn print_watch_complete_json(c: &blit_core::generated::TransferComplete) {
+    use serde_json::json;
+    let body = json!({
+        "state": "finished",
+        "transfer_id": c.transfer_id,
+        "bytes": c.bytes,
+        "files": c.files,
+        "duration_ms": c.duration_ms,
+        "tcp_fallback_used": c.tcp_fallback_used,
+        "ok": true,
+    });
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
+    }
+}
+
+fn print_watch_error_json(e: &blit_core::generated::TransferError) {
+    use serde_json::json;
+    let body = json!({
+        "state": "finished",
+        "transfer_id": e.transfer_id,
+        "ok": false,
+        "error_message": e.message,
+    });
+    if let Ok(line) = serde_json::to_string(&body) {
+        println!("{}", line);
     }
 }
 

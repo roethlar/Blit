@@ -7,7 +7,9 @@
 //! does its own formatting.
 
 use blit_core::generated::blit_client::BlitClient;
-use blit_core::generated::{CancelJobRequest, DaemonState, GetStateRequest};
+use blit_core::generated::{
+    CancelJobRequest, DaemonEvent, DaemonState, GetStateRequest, SubscribeRequest,
+};
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use tonic::Code;
@@ -97,6 +99,33 @@ pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<Cancel
             )),
         },
     }
+}
+
+/// Open a `Subscribe` stream against `remote`, optionally
+/// filtered to a single `transfer_id`. Returns the raw tonic
+/// streaming response — CLI / TUI consumers iterate the stream
+/// and map `DaemonEvent` payloads to their own rendering shape.
+///
+/// `transfer_id_filter` of `""` subscribes to all transfer-
+/// related events on the daemon; a non-empty value scopes the
+/// stream to that transfer_id (c-5a). `event_mask` is reserved
+/// for future event-category filtering and passed through as 0.
+pub async fn subscribe(
+    remote: &RemoteEndpoint,
+    transfer_id_filter: &str,
+) -> Result<tonic::Streaming<DaemonEvent>> {
+    let uri = remote.control_plane_uri();
+    let mut client = BlitClient::connect(uri.clone())
+        .await
+        .with_context(|| format!("connecting to {}", uri))?;
+    let response = client
+        .subscribe(SubscribeRequest {
+            event_mask: 0,
+            transfer_id_filter: transfer_id_filter.to_string(),
+        })
+        .await
+        .map_err(|status| eyre::eyre!(status.message().to_string()))?;
+    Ok(response.into_inner())
 }
 
 /// Single-poll snapshot for the watch path. Either we found
