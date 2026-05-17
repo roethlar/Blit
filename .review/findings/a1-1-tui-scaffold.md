@@ -182,6 +182,60 @@ Workspace: 578 passing serially (was 575; +3).
 - **a1-6-screen-router**: F1↔F2↔F3↔F4 navigation + the
   global keymap.
 
+## Round 2 (sha `a880559`)
+
+Reviewer caught the load-bearing gap: round 1's restore
+only fired after a fully successful setup AND a normal-
+return event loop. Setup failures (EnterAlternateScreen,
+Terminal::new, terminal.clear, hide_cursor) and panics
+during the loop both left the terminal in raw / alternate-
+screen / cursor-hidden until the user manually `reset`'d.
+
+The scaffold's only deliverable is terminal lifecycle
+correctness, so this had to land before verification.
+
+Fix:
+
+1. **`TuiGuard` RAII wrapper.** Owns the terminal handle.
+   `new()` is transactional — every stage that committed
+   side-effects is rolled back if any subsequent stage
+   fails. `Drop` runs `restore_terminal()` unconditionally
+   on every exit path (normal return, `?`-propagated error
+   from setup or loop, panic unwinding through main).
+2. **Panic hook.** `install_panic_hook` chains the original
+   hook with a `restore_terminal()` call. Catches panics
+   that abort the process too quickly for Drop to compete.
+   On normal unwind Drop fires first; the hook's restore
+   is a cheap no-op via the `TUI_ACTIVE` flag swap.
+3. **`restore_terminal()` is idempotent.** Uses an
+   `AtomicBool TUI_ACTIVE` and `swap`s it to false on the
+   first call — subsequent calls early-return. Both Drop
+   and panic hook can fire safely.
+
+The four paths the reviewer flagged are now covered:
+
+- **Partial setup failure**: `TuiGuard::new()` rewinds any
+  state it committed and returns Err. `main` sees the Err
+  and returns; no guard exists, but `restore_terminal`'s
+  rollback path already ran inline.
+- **Normal error from loop**: `?` propagates → `run_event_loop`
+  returns Err → guard drops as `main` returns → restore.
+- **Normal quit**: loop returns Ok → guard drops → restore.
+- **Panic**: panic hook fires first → restore. On normal
+  unwind the guard's Drop also fires (no-op via
+  TUI_ACTIVE swap).
+
++2 unit tests:
+
+- `restore_terminal_is_noop_when_not_active` — flag-false
+  path is a clean return.
+- `restore_terminal_idempotent_across_repeated_calls` —
+  repeated calls swap → no-op semantics, validates the
+  Drop + panic-hook safety contract.
+
+Workspace: 580 passing serially (was 578; +2 new in
+blit-tui).
+
 ## Reviewer comments
 
 (empty — pending grade)
