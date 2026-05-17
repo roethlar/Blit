@@ -225,6 +225,48 @@ EWMA slice will naturally provide via its time-based hooks).
    c-3's throughput EWMA work needs the same hook and will
    add it naturally.
 
+## Round 2 (sha `14eeda7`)
+
+Reviewer caught that round 1 only instrumented the
+`DATA_PLANE_RECORD_FILE` path via
+`FsTransferSink::write_file_stream`. Tar-shard
+(`DATA_PLANE_RECORD_TAR_SHARD`) and resume-block
+(`DATA_PLANE_RECORD_BLOCK`) records flow through
+`write_payload` instead and were bypassing the byte counter.
+
+`delegated_pull`'s capabilities advertisement enables both
+tar shards (the many-small-files batching path) and resume,
+so a real delegated transfer of, say, 10 000 small files
+could complete with `bytes_completed` undercounted or
+still zero — exactly the bug GetState's wire shape is
+supposed to surface to operators.
+
+Fix: extend the byte-progress reporting to `write_payload`
+itself. Now the reporting site is at the FsTransferSink
+boundary: after every successful `write_payload` arm we call
+`self.byte_progress.as_ref().map(|bp| bp.report(outcome.bytes_written))`.
+All four payload shapes (File, TarShard, FileBlock,
+FileBlockComplete) get reported through one site.
+
+Dry-run write paths inside `write_file_payload` and
+`write_tar_shard_payload` already return `bytes_written: 0`,
+so the reporter adds 0 for previews — same dry-run semantics
+as `write_file_stream`'s explicit `None` parameter.
+
+Restructured `write_payload` to bind `outcome` from a single
+match expression instead of returning per-arm, so the post-
+match reporter has one obvious place to live.
+
++2 regression tests added to `sink::tests`:
+
+- `write_payload_reports_tar_shard_bytes_against_byte_progress`
+  — 2-file tar shard, asserts counter == sum of file sizes.
+- `write_payload_reports_file_block_bytes_against_byte_progress`
+  — 32-byte resume block written at offset 16 into a
+  pre-existing destination, asserts counter == 32.
+
+Workspace: 556 passing serially (was 554; +2 new tests).
+
 ## Reviewer comments
 
 (empty — pending grade)
