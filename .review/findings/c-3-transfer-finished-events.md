@@ -221,6 +221,57 @@ Workspace: 561 passing serially (was 559; +2).
    end-to-end test requires standing up a tonic server +
    subscribing in the same process; deferred.
 
+## Round 2 (sha `7d4fd28`)
+
+Reviewer caught a real ordering bug: round 1 broadcast the
+terminal event while the `ActiveJobGuard` and metrics gauges
+were still alive (and, for delegated_pull, before
+`inc_error()` incremented). A subscriber that received
+`TransferComplete` / `TransferError` and immediately
+refreshed GetState could observe the transfer still in
+`active[]`, missing from `recent[]`, or with stale
+`counters.transfer_errors_total` / `counters.active_transfers`.
+
+That contradicts the terminal-event contract — the event is
+supposed to signal reconcilable state.
+
+Fix: in each of the four spawn closures, **build → drain →
+broadcast**. Concretely:
+
+```rust
+// 1. Build the event while the guard is alive (we still
+//    need its byte counter + start_unix_ms).
+let finished_event = build_transfer_finished_event(&job, ok, err);
+
+// 2. Drain the daemon bookkeeping.
+drop(job);              // active row → recent ring
+drop(guard);            // active-transfers gauge -1
+if matches!(outcome, Some(false)) {
+    metrics_for_log.inc_error();   // delegated_pull only
+}
+
+// 3. Broadcast. Subscribers can now race GetState and see
+//    drained state.
+let _ = events_tx.send(finished_event);
+```
+
+Applied identically at push (lines ~333-340), pull (~395-403),
+pull_sync (~454-463), and delegated_pull (~625-650). The
+delegated_pull path also moves `inc_error()` ahead of the
+broadcast.
+
+Coverage:
+
+- `+terminal_event_observable_only_after_active_row_drained`
+  asserts the ordering invariant. Replays the dispatch-site
+  build→drain→broadcast sequence directly (the spawn
+  closures themselves are anonymous and can't be unit-tested
+  in isolation). Subscriber's `next()` resolves only after
+  `events_tx.send(event)` returns, and at that point the
+  active-jobs table is empty + recent ring carries the row.
+
+Workspace: 562 passing serially (was 561; +1).
+
 ## Reviewer comments
 
 (empty — pending grade)
