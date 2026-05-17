@@ -139,6 +139,56 @@ Workspace: 569 passing serially (was 566; +3).
 3. **`SubscribeRequest.event_mask` still parsed-and-ignored.**
    Same posture as c-2 — locked tag, no producer yet.
 
+## Round 2 (sha `7587b46`)
+
+Reviewer caught a real bug: round 1 wrapped the broadcast
+Receiver in `BroadcastStream::filter_map`, which is lazy.
+The Receiver's cursor still advanced through every daemon
+event — so a `jobs watch <id>` consumer could be aborted
+with `Status::aborted("subscriber lagged ...")` when
+unrelated transfers' events overflowed the 256-slot global
+broadcast ring, even though the filter rejected those events
+anyway. The feature was nominally implemented but didn't
+deliver its load-bearing semantic.
+
+Fix: per-subscriber forwarder task.
+
+- Spawned inside the `subscribe` handler before the response
+  returns.
+- Eagerly `recv()`s on the broadcast Receiver — cursor stays
+  caught up independent of client read pace.
+- Applies `event_matches_filter` to each event.
+- Forwards only matching events into a bounded
+  `mpsc::channel<Result<DaemonEvent, Status>>` of capacity
+  `SUBSCRIBE_MPSC_CAPACITY = 64`.
+- The mpsc receiver is what tonic streams to the client.
+
+Lagged semantics now correctly distinguish two cases:
+
+- **Forwarder can't keep up with daemon-side event rate**
+  (`broadcast::error::RecvError::Lagged`) — emits
+  `Status::aborted` and the stream ends. Daemon-side CPU
+  issue; rare in practice.
+- **Client too slow on filtered subset** — backs up the mpsc
+  first. Forwarder's `send().await` blocks; while it's
+  blocked, the broadcast cursor stalls; eventually broadcast
+  over-capacity fires Lagged through the normal path. The
+  "really too slow" signal still surfaces.
+
++1 regression test that reproduces the reviewer's scenario:
+
+- `filtered_subscriber_survives_overflow_of_other_transfer_events`
+  emits `SUBSCRIBE_BROADCAST_CAPACITY + 50` events for `id_b`
+  while yielding periodically (so the forwarder gets
+  airtime), then emits one for `id_a`. The filtered
+  subscriber receives `id_a`, not `Status::aborted`.
+  Uses `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`
+  so the forwarder runs in parallel with the emit loop;
+  under the default `current_thread` runtime a tight sync
+  emit loop would starve the forwarder regardless of design.
+
+Workspace: 570 passing serially (was 569; +1).
+
 ## Reviewer comments
 
 (empty — pending grade)
