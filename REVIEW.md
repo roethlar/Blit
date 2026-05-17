@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch     | Commit    |
+|-------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-5b-event-ring   | Feature  | Per-job event ring + replay_recent         | [~]    | `phase5/c` | `b71fd6d` |
 
 ## Open findings
 
