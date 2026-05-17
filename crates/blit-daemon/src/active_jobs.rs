@@ -522,6 +522,23 @@ impl ActiveJobGuard {
         self.start_unix_ms
     }
 
+    /// Current value of the per-row byte counter. Read by the
+    /// terminal-event builder (`TransferComplete.bytes`) so the
+    /// emitted event carries the same total `TransferRecord.bytes`
+    /// will freeze into the ring on Drop. Relaxed load matches
+    /// the c-1a contract — readers only need eventual visibility.
+    pub fn bytes_completed_load(&self) -> u64 {
+        self.bytes_counter.load(Ordering::Relaxed)
+    }
+
+    /// Wall-clock duration since registration, in milliseconds.
+    /// Used to populate `TransferComplete.duration_ms`. Saturates
+    /// at zero on a backwards clock jump, same posture as the
+    /// `TransferRecord.duration_ms` build at Drop.
+    pub fn elapsed_ms(&self) -> u64 {
+        unix_ms_now().saturating_sub(self.start_unix_ms)
+    }
+
     /// Update the row's `module` and `path` fields. Used by
     /// streaming-RPC handlers (`handle_push_stream`,
     /// `handle_pull_sync_stream`) once they've parsed the

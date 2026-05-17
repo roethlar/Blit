@@ -21,7 +21,7 @@ use blit_core::generated::{
     FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest,
     ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk,
     PullRequest, PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
-    SubscribeRequest, TransferRecord, TransferStarted,
+    SubscribeRequest, TransferComplete, TransferError, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -169,6 +169,55 @@ impl BlitService {
         };
         let _ = self.events_tx.send(event);
     }
+
+    /// Clone of the broadcast sender, handed to spawn closures
+    /// that need to fire terminal `TransferComplete` /
+    /// `TransferError` events after `record_outcome` but before
+    /// the guard drops. The closures don't otherwise see `&self`,
+    /// so the dispatch site clones this once and moves the clone
+    /// into the spawned task. Each `broadcast::Sender::clone` is
+    /// an Arc bump; effectively free.
+    pub(crate) fn events_tx(&self) -> broadcast::Sender<DaemonEvent> {
+        self.events_tx.clone()
+    }
+}
+
+/// Build the terminal event for a transfer that's draining. Called
+/// from each RPC's spawn closure after `record_outcome` and before
+/// `drop(job)`, with the same `(ok, error_message)` pair that the
+/// ActiveJobs ring records. Pairs with `emit_transfer_started` on
+/// the receive side: every transfer that emitted Started will also
+/// emit either Complete or Error.
+///
+/// Sourced from the guard so byte total and duration match what
+/// `GetState.recent[]` will surface on the same row.
+pub(crate) fn build_transfer_finished_event(
+    guard: &crate::active_jobs::ActiveJobGuard,
+    ok: bool,
+    error_message: Option<&str>,
+) -> DaemonEvent {
+    if ok {
+        DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
+                transfer_id: guard.transfer_id().to_string(),
+                bytes: guard.bytes_completed_load(),
+                // `files` is wired in a follow-up C sub-slice
+                // (file-level counter analogous to bytes).
+                files: 0,
+                duration_ms: guard.elapsed_ms(),
+                // `tcp_fallback_used` plumbs through the handler's
+                // result struct in a follow-up; false today.
+                tcp_fallback_used: false,
+            })),
+        }
+    } else {
+        DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferError(TransferError {
+                transfer_id: guard.transfer_id().to_string(),
+                message: error_message.unwrap_or("").to_string(),
+            })),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -247,6 +296,10 @@ impl Blit for BlitService {
         // §3.1 / D5: capture start time so `--metrics` can emit a
         // per-RPC duration line at completion.
         let started = std::time::Instant::now();
+        // c-3: clone the broadcast Sender into the spawn closure
+        // so the terminal-event emit (TransferComplete on success,
+        // TransferError on failure) can fire without `&self`.
+        let events_tx = self.events_tx();
 
         tokio::spawn(async move {
             // `guard` and `job` are moved into the task; their
@@ -272,7 +325,11 @@ impl Blit for BlitService {
             // TransferRecord and reads this cell. If we
             // dropped the guard first the record would say
             // "cancelled before outcome recorded."
-            job.record_outcome(ok, err_msg);
+            job.record_outcome(ok, err_msg.clone());
+            // c-3: emit the terminal Subscribe event while the
+            // guard is still alive (we still need to read its
+            // byte counter + start_unix_ms).
+            let _ = events_tx.send(build_transfer_finished_event(&job, ok, err_msg.as_deref()));
             drop(job);
             // §3.1 followup: drop the active-transfer guard BEFORE the
             // completion log so `active=N` reflects state AFTER the
@@ -315,6 +372,7 @@ impl Blit for BlitService {
         // the first event.
         self.emit_transfer_started(&job, ActiveJobKind::Pull, &peer, &req.module, &req.path);
         let started = std::time::Instant::now();
+        let events_tx = self.events_tx();
 
         tokio::spawn(async move {
             let guard = guard;
@@ -325,7 +383,8 @@ impl Blit for BlitService {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
-            job.record_outcome(ok, err_msg);
+            job.record_outcome(ok, err_msg.clone());
+            let _ = events_tx.send(build_transfer_finished_event(&job, ok, err_msg.as_deref()));
             drop(guard);
             drop(job);
             metrics.log_completion("pull", started.elapsed(), ok);
@@ -362,6 +421,7 @@ impl Blit for BlitService {
         // GetState.active[].
         self.emit_transfer_started(&job, ActiveJobKind::PullSync, &peer, "", "");
         let started = std::time::Instant::now();
+        let events_tx = self.events_tx();
 
         tokio::spawn(async move {
             let guard = guard;
@@ -381,7 +441,8 @@ impl Blit for BlitService {
                 metrics.inc_error();
                 let _ = tx.send(Err(status)).await;
             }
-            job.record_outcome(ok, err_msg);
+            job.record_outcome(ok, err_msg.clone());
+            let _ = events_tx.send(build_transfer_finished_event(&job, ok, err_msg.as_deref()));
             drop(guard);
             drop(job);
             metrics.log_completion("pull_sync", started.elapsed(), ok);
@@ -467,6 +528,7 @@ impl Blit for BlitService {
         // token (cheap, internal Arc) lets us hold the
         // cancelled-future on its own line.
         let cancel_token = job.cancellation_token().clone();
+        let events_tx = self.events_tx();
         tokio::spawn(async move {
             // `job` moves into the spawned task alongside the
             // metrics guard; its Drop runs on every exit path
@@ -544,7 +606,12 @@ impl Blit for BlitService {
                 }
                 None => (false, Some("client cancelled".to_string())),
             };
-            job.record_outcome(job_ok, job_err);
+            job.record_outcome(job_ok, job_err.clone());
+            let _ = events_tx.send(build_transfer_finished_event(
+                &job,
+                job_ok,
+                job_err.as_deref(),
+            ));
             drop(job);
             // The handler's RAII guard releases the active gauge as
             // its scope ends with the spawn task above, so by the
@@ -1265,6 +1332,7 @@ mod tests {
                 assert_eq!(ev.path, "sub/dir");
                 assert!(ev.start_unix_ms > 0);
             }
+            other => panic!("expected TransferStarted, got {other:?}"),
         }
     }
 
@@ -1304,11 +1372,66 @@ mod tests {
             .expect("b frame ok");
         let id_a = match event_a.payload.unwrap() {
             daemon_event::Payload::TransferStarted(e) => e.transfer_id,
+            other => panic!("expected TransferStarted, got {other:?}"),
         };
         let id_b = match event_b.payload.unwrap() {
             daemon_event::Payload::TransferStarted(e) => e.transfer_id,
+            other => panic!("expected TransferStarted, got {other:?}"),
         };
         assert_eq!(id_a, id_b, "both subscribers see the same transfer_id");
+    }
+
+    #[tokio::test]
+    async fn build_transfer_finished_event_ok_emits_transfer_complete() {
+        // Drives the c-3 builder directly. Asserts:
+        // - TransferComplete variant is selected when ok=true.
+        // - bytes field reflects the per-row counter.
+        // - duration_ms is non-zero (start_unix_ms < unix_ms_now()).
+        // - files/tcp_fallback_used follow the documented zero/
+        //   false defaults until follow-up slices wire them.
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        // Land some bytes against the per-row atomic so the
+        // emitted event carries a non-zero `bytes` field.
+        guard.bytes_counter().report(2048);
+
+        let ev = build_transfer_finished_event(&guard, true, None);
+        match ev.payload.unwrap() {
+            daemon_event::Payload::TransferComplete(c) => {
+                assert_eq!(c.transfer_id, guard.transfer_id());
+                assert_eq!(c.bytes, 2048);
+                assert_eq!(c.files, 0);
+                // duration_ms is `unix_ms_now() - start_unix_ms`
+                // — small (test runs fast) but not negative.
+                let _ = c.duration_ms;
+                assert!(!c.tcp_fallback_used);
+            }
+            other => panic!("expected TransferComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_transfer_finished_event_err_emits_transfer_error() {
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::Push,
+            "p".to_string(),
+            String::new(),
+            String::new(),
+        );
+        let ev = build_transfer_finished_event(&guard, false, Some("module not found"));
+        match ev.payload.unwrap() {
+            daemon_event::Payload::TransferError(err) => {
+                assert_eq!(err.transfer_id, guard.transfer_id());
+                assert_eq!(err.message, "module not found");
+            }
+            other => panic!("expected TransferError, got {other:?}"),
+        }
     }
 
     #[tokio::test]

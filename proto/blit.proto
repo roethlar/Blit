@@ -852,11 +852,14 @@ message SubscribeRequest {
 // TransferError, ModuleListChanged, DaemonHeartbeat.
 message DaemonEvent {
   oneof payload {
-    TransferStarted transfer_started = 1;
-    // 2..6 reserved for the variants listed above so this initial
-    // slice doesn't accidentally pick numbers a later slice needs.
+    TransferStarted  transfer_started  = 1;
+    // tag 2 reserved for TransferProgress (next C sub-slice).
+    TransferComplete transfer_complete = 3;
+    TransferError    transfer_error    = 4;
+    // 5..6 reserved for ModuleListChanged, DaemonHeartbeat
+    // (later C sub-slices).
   }
-  reserved 2 to 6;
+  reserved 2, 5, 6;
 }
 
 // Fired when the daemon registers a new active transfer in its
@@ -881,4 +884,39 @@ message TransferStarted {
   string path = 5;
   // Unix milliseconds at which the active row was registered.
   uint64 start_unix_ms = 6;
+}
+
+// Fired when a transfer drains successfully (`ActiveJobGuard`
+// dropped with `record_outcome(ok=true, ...)`). Carries the
+// terminal byte/file totals and the wall-clock duration. Pairs
+// with `TransferStarted` to bracket a transfer's lifetime on the
+// event stream.
+message TransferComplete {
+  string transfer_id = 1;
+  // Cumulative bytes that landed on disk. Sourced from the
+  // per-row atomic that c-1a/c-1b wired (the same value
+  // `TransferRecord.bytes` carries at GetState.recent[]).
+  uint64 bytes = 2;
+  // Files completed. Always zero until a future C sub-slice
+  // wires the files counter; field reserved here so subscribers
+  // don't need a proto roll to render it.
+  uint64 files = 3;
+  uint64 duration_ms = 4;
+  // True when the transfer fell back to the gRPC control plane
+  // because the data plane couldn't be reserved. Always false
+  // in this slice — a future C sub-slice plumbs the bit through
+  // from the handler's result.
+  bool tcp_fallback_used = 5;
+}
+
+// Fired when a transfer drains in a failure state
+// (`ActiveJobGuard` dropped with `record_outcome(ok=false, ...)`
+// or with no outcome recorded, e.g. spawn-task cancellation).
+message TransferError {
+  string transfer_id = 1;
+  // Handler's failure message. Empty when the outcome was
+  // recorded with no message; "cancelled before outcome
+  // recorded" when the spawn task didn't reach the
+  // record_outcome call.
+  string message = 2;
 }
