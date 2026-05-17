@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                          | Severity | Title                                       | Status | Branch     | Commit    |
-|-----------------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-3-transfer-finished-events | Medium  | Terminal events can beat ActiveJobs drain  | [~]    | `phase5/c` | `7d4fd28` |
+_none_
 
 ## Open findings
 
@@ -76,3 +74,5 @@ Phase 5 C sub-slices on branch `phase5/c`:
 - `14eeda7` Delegated-pull data-plane byte reporting, including tar-shard/block paths (`c-1b-byte-counter-wiring`)
 - `0ffaac7` Subscribe RPC + DaemonEvent + TransferStarted (`c-2-subscribe-skeleton`)
 - `df8249d` SubscribeRequest reserved-tag order aligned with `TUI_DESIGN.md` (`c-2-subscribe-skeleton` round 2)
+- `5be5f10` TransferComplete + TransferError terminal events (`c-3-transfer-finished-events`)
+- `7d4fd28` Terminal events broadcast after ActiveJobs/GetState drain (`c-3-transfer-finished-events` round 2)
