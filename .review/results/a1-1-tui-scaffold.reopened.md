@@ -1,6 +1,6 @@
 # a1-1-tui-scaffold reopened
 
-Reviewed sha: 63975ef40e8ed144d3fa5f072edca883e9d34890
+Reviewed sha: `63975ef40e8ed144d3fa5f072edca883e9d34890`
 Reviewed at: 2026-05-17T17:57:42Z
 Reviewer: reviewer
 Verdict: reopened
