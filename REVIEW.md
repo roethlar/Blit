@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                     | Severity | Title                                       | Status | Branch     | Commit    |
+|------------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-2-subscribe-skeleton | Feature  | Subscribe RPC + DaemonEvent + TransferStarted | [~]    | `phase5/c` | `0ffaac7` |
 
 ## Open findings
 
