@@ -372,6 +372,7 @@ impl ActiveJobs {
         ActiveJobGuard {
             inner: Arc::clone(&self.inner),
             transfer_id,
+            start_unix_ms,
             outcome: Mutex::new(None),
             cancellation,
             bytes_counter,
@@ -465,6 +466,12 @@ impl Default for ActiveJobs {
 pub struct ActiveJobGuard {
     inner: Arc<Inner>,
     transfer_id: String,
+    /// Registration timestamp, captured at the same instant the
+    /// row's `start_unix_ms` was stamped. Exposed via
+    /// [`ActiveJobGuard::start_unix_ms`] so subscribers building
+    /// `TransferStarted` events don't need to hit the table lock
+    /// just to read this field.
+    start_unix_ms: u64,
     /// Filled by [`record_outcome`] before Drop. If still
     /// `None` at Drop time the spawn task either panicked or
     /// was cancelled before reaching the outcome-capture call,
@@ -503,6 +510,16 @@ impl ActiveJobGuard {
     #[allow(dead_code)]
     pub fn transfer_id(&self) -> &str {
         &self.transfer_id
+    }
+
+    /// Unix-milliseconds timestamp captured at `register()` time.
+    /// Exposed so the Subscribe dispatch site can build a
+    /// `TransferStarted` event without re-stamping the clock
+    /// (and so the start time on the event matches the one
+    /// `GetState.active[].start_unix_ms` will surface for the
+    /// same row).
+    pub fn start_unix_ms(&self) -> u64 {
+        self.start_unix_ms
     }
 
     /// Update the row's `module` and `path` fields. Used by

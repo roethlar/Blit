@@ -74,6 +74,24 @@ service Blit {
   //   FAILED_PRECONDITION   → the transfer exists but its kind
   //                           doesn't honor cancellation today.
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+
+  // Server-streaming subscription to live daemon events. Used by the
+  // TUI's F2 (Transfers) pane and by future `blit jobs watch` callers
+  // that want a push stream rather than `GetState` polling.
+  //
+  // c-2-subscribe-skeleton lands the wire surface with a single event
+  // variant (TransferStarted) and the daemon-side broadcast channel.
+  // Subsequent C sub-slices fan more variants into the oneof
+  // (TransferProgress, TransferComplete, TransferError,
+  // ModuleListChanged, DaemonHeartbeat) and add `transfer_id_filter`
+  // / `replay_recent` request fields. The field numbers in
+  // `DaemonEvent.payload` are stable; new variants append.
+  //
+  // Slow consumers receive a `gRPC Status::Aborted` on the stream
+  // (the daemon's broadcast channel dropped events while they fell
+  // behind). TUI consumers handle this by re-subscribing and
+  // refreshing snapshot state via `GetState`.
+  rpc Subscribe(SubscribeRequest) returns (stream DaemonEvent);
 }
 
 // Removed: `BlitAuth` service stub (2026-05-13). Original design
@@ -803,4 +821,63 @@ message CancelJobResponse {
   // cancellation outcome (cancelled / unsupported / not found)
   // is encoded in the gRPC Status, not the response.
   string transfer_id = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Subscribe — server-streaming live daemon events.
+// See §6.2 of docs/plan/TUI_DESIGN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message SubscribeRequest {
+  // Reserved for the event-category bitfield in a future slice
+  // (TRANSFERS=1, ERRORS=2, MODULES=4, HEARTBEAT=8). Today the
+  // single defined event variant is TransferStarted, so the
+  // mask has nothing to filter; field is parsed and ignored.
+  // Locking the tag here keeps the wire shape stable.
+  uint32 event_mask = 1;
+
+  // Future C sub-slices add:
+  //   string transfer_id_filter = 2;  // per-job replay + filter
+  //   bool   replay_recent = 3;       // emit recent-event ring on connect
+  // Reserved here so we don't accidentally pick those numbers
+  // for some other purpose later.
+  reserved 2, 3;
+}
+
+// One frame on the Subscribe stream. New event variants are added by
+// appending to the oneof — field numbers are part of the wire
+// contract. c-2-subscribe-skeleton ships only TransferStarted; future
+// slices in milestone C add TransferProgress, TransferComplete,
+// TransferError, ModuleListChanged, DaemonHeartbeat.
+message DaemonEvent {
+  oneof payload {
+    TransferStarted transfer_started = 1;
+    // 2..6 reserved for the variants listed above so this initial
+    // slice doesn't accidentally pick numbers a later slice needs.
+  }
+  reserved 2 to 6;
+}
+
+// Fired when the daemon registers a new active transfer in its
+// `ActiveJobs` table (the same registration that surfaces it in
+// `GetState.active[]`). Streaming RPCs (push, pull_sync) fire this
+// with empty `module`/`path` because those values arrive in the first
+// stream frame, not at dispatch time — subscribers can reconcile via
+// a follow-up GetState query if they need the populated endpoint
+// before the transfer completes.
+message TransferStarted {
+  string transfer_id = 1;
+  TransferKind kind = 2;
+  // `<ip>:<port>` of the connecting peer, or "unknown" when the
+  // transport didn't surface one (in-process tests).
+  string peer = 3;
+  // Module name on the daemon. Empty for streaming RPCs at
+  // registration time — populated by GetState.active[] once the
+  // first stream frame parses.
+  string module = 4;
+  // Module-relative path. Same "empty until first frame" caveat
+  // as `module`.
+  string path = 5;
+  // Unix milliseconds at which the active row was registered.
+  uint64 start_unix_ms = 6;
 }

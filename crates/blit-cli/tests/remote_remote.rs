@@ -611,6 +611,13 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
     >;
+    type SubscribeStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<blit_core::generated::DaemonEvent, tonic::Status>,
+                > + Send,
+        >,
+    >;
 
     async fn push(
         &self,
@@ -630,6 +637,13 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
     ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
+
+    async fn subscribe(
+        &self,
+        _: tonic::Request<blit_core::generated::SubscribeRequest>,
+    ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -726,6 +740,13 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
     >;
+    type SubscribeStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<blit_core::generated::DaemonEvent, tonic::Status>,
+                > + Send,
+        >,
+    >;
 
     async fn push(
         &self,
@@ -751,6 +772,15 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
     ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
         Err(tonic::Status::permission_denied(
             "source ACL rejected delegated peer",
+        ))
+    }
+
+    async fn subscribe(
+        &self,
+        _: tonic::Request<blit_core::generated::SubscribeRequest>,
+    ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
         ))
     }
 

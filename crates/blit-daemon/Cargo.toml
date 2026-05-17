@@ -8,7 +8,7 @@ license.workspace = true
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 blit-core = { path = "../blit-core" }
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = "0.7"
 eyre = "0.6"
 base64 = "0.22"

@@ -50,6 +50,19 @@ impl Blit for SpyServer {
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
+    type SubscribeStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<blit_core::generated::DaemonEvent, Status>>
+                + Send,
+        >,
+    >;
+
+    async fn subscribe(
+        &self,
+        _: Request<blit_core::generated::SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        unimplemented!("test only exercises pull_sync")
+    }
 
     async fn push(
         &self,

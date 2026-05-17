@@ -15,20 +15,30 @@ use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
-    ActiveTransfer, CancelJobRequest, CancelJobResponse, ClientPullMessage, ClientPushRequest,
-    CompletionRequest, CompletionResponse, Counters, DaemonState, DelegatedPullProgress,
-    DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo, FilesystemStatsRequest,
-    FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest, ListModulesRequest,
-    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
-    PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse, TransferRecord,
+    daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClientPullMessage,
+    ClientPushRequest, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
+    DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo,
+    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest,
+    ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk,
+    PullRequest, PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
+    SubscribeRequest, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
+
+/// Capacity of the daemon's `Subscribe` event broadcast channel.
+/// Sized for a handful of subscribers (operator TUI + maybe a
+/// Prometheus scraper bridge) plus burst headroom — enough that a
+/// momentary stall on the subscriber side doesn't immediately drop
+/// events. Slow consumers that lag more than this many events behind
+/// receive a `tonic::Status::aborted` and re-subscribe.
+const SUBSCRIBE_BROADCAST_CAPACITY: usize = 256;
 
 pub struct BlitService {
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
@@ -46,6 +56,13 @@ pub struct BlitService {
     /// `GetState.active[]` once that RPC lands (milestone B
     /// sub-slice). See `crate::active_jobs`.
     pub(crate) active_jobs: ActiveJobs,
+    /// Daemon-side event broadcast channel feeding the `Subscribe`
+    /// RPC. Producers (dispatch sites in this file) send `DaemonEvent`
+    /// payloads; subscribers receive their own `Receiver` via
+    /// `events_tx.subscribe()`. Default capacity
+    /// `SUBSCRIBE_BROADCAST_CAPACITY` (256) — slow subscribers that
+    /// lag past that get a `tonic::Status::aborted` and re-subscribe.
+    events_tx: broadcast::Sender<DaemonEvent>,
     /// Wall-clock at construction. `GetState.uptime_seconds`
     /// reports `Instant::now().duration_since(started_at)`.
     /// Captured once so a clock jump between construction and
@@ -62,6 +79,7 @@ impl BlitService {
         metrics: Arc<TransferMetrics>,
         delegation: crate::delegation_gate::DelegationConfig,
     ) -> Self {
+        let (events_tx, _) = broadcast::channel(SUBSCRIBE_BROADCAST_CAPACITY);
         Self {
             modules: Arc::new(Mutex::new(modules)),
             default_root,
@@ -70,6 +88,7 @@ impl BlitService {
             metrics,
             delegation: Arc::new(delegation),
             active_jobs: ActiveJobs::new(),
+            events_tx,
             started_at: std::time::Instant::now(),
         }
     }
@@ -116,6 +135,40 @@ impl BlitService {
             files_deleted: stats.total(),
         }))
     }
+
+    /// Send a `TransferStarted` event onto the broadcast channel.
+    /// Called from each RPC dispatch site immediately after the
+    /// `ActiveJob` is registered, with the same values that
+    /// populated the row. A `SendError` return from `broadcast::Sender::send`
+    /// just means there are no current subscribers — that is the
+    /// normal state and we ignore it.
+    ///
+    /// Caller-passed values rather than re-reading from the
+    /// `ActiveJobGuard`: the dispatch site already has all the
+    /// inputs in scope as locals, and using them here avoids a
+    /// table lookup + clone on every transfer. Module/path are
+    /// empty strings for streaming RPCs at registration time;
+    /// that matches `GetState.active[]`'s view of the same row.
+    pub(crate) fn emit_transfer_started(
+        &self,
+        guard: &crate::active_jobs::ActiveJobGuard,
+        kind: ActiveJobKind,
+        peer: &str,
+        module: &str,
+        path: &str,
+    ) {
+        let event = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: guard.transfer_id().to_string(),
+                kind: kind.to_wire() as i32,
+                peer: peer.to_string(),
+                module: module.to_string(),
+                path: path.to_string(),
+                start_unix_ms: guard.start_unix_ms(),
+            })),
+        };
+        let _ = self.events_tx.send(event);
+    }
 }
 
 #[tonic::async_trait]
@@ -126,6 +179,36 @@ impl Blit for BlitService {
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
+    type SubscribeStream =
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        // Subscribe to the broadcast first, BEFORE the response
+        // is returned. This guarantees that any event emitted
+        // between this call and the client's first .next() poll
+        // lands in the broadcast queue rather than being dropped.
+        let rx = self.events_tx.subscribe();
+        // Translate broadcast Receiver into a tonic-compatible
+        // stream. `BroadcastStream` yields
+        // `Result<T, BroadcastStreamRecvError::Lagged(n)>`:
+        // - Item Ok(event)              → forward as Ok(event).
+        // - Item Err(Lagged(_))         → emit Status::aborted
+        //   so the client's stream sees a final error frame
+        //   indicating "you fell behind, re-subscribe + GetState
+        //   to recover."
+        let stream = BroadcastStream::new(rx).map(|item| match item {
+            Ok(event) => Ok(event),
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                Err(Status::aborted(format!(
+                    "subscriber lagged {n} events; re-subscribe and refresh via GetState"
+                )))
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
+    }
 
     async fn push(
         &self,
@@ -149,9 +232,18 @@ impl Blit for BlitService {
         // those arrive in the first stream frame; the handler
         // calls `job.set_endpoint(...)` once the header is
         // parsed (b-2-set-endpoint).
-        let job =
-            self.active_jobs
-                .register(ActiveJobKind::Push, peer, String::new(), String::new());
+        let job = self.active_jobs.register(
+            ActiveJobKind::Push,
+            peer.clone(),
+            String::new(),
+            String::new(),
+        );
+        // Subscribe event — fired with the empty module/path the
+        // row currently carries. Subscribers reconcile to the
+        // populated endpoint by reading GetState.active[] after
+        // the first stream frame; a separate "endpoint resolved"
+        // event family member is a future C slice.
+        self.emit_transfer_started(&job, ActiveJobKind::Push, &peer, "", "");
         // §3.1 / D5: capture start time so `--metrics` can emit a
         // per-RPC duration line at completion.
         let started = std::time::Instant::now();
@@ -214,10 +306,14 @@ impl Blit for BlitService {
         // error, panic, client cancellation).
         let job = self.active_jobs.register(
             ActiveJobKind::Pull,
-            peer,
+            peer.clone(),
             req.module.clone(),
             req.path.clone(),
         );
+        // Subscribe event — pull has module/path synchronously
+        // available, so subscribers get the populated row from
+        // the first event.
+        self.emit_transfer_started(&job, ActiveJobKind::Pull, &peer, &req.module, &req.path);
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
@@ -255,9 +351,16 @@ impl Blit for BlitService {
         // Same shape as `push` above: module + path arrive in
         // the first stream frame; handler calls
         // `job.set_endpoint(...)` after parsing the spec.
-        let job =
-            self.active_jobs
-                .register(ActiveJobKind::PullSync, peer, String::new(), String::new());
+        let job = self.active_jobs.register(
+            ActiveJobKind::PullSync,
+            peer.clone(),
+            String::new(),
+            String::new(),
+        );
+        // Subscribe event with empty module/path — same caveat
+        // as the push site above. Subscribers reconcile via
+        // GetState.active[].
+        self.emit_transfer_started(&job, ActiveJobKind::PullSync, &peer, "", "");
         let started = std::time::Instant::now();
 
         tokio::spawn(async move {
@@ -304,9 +407,18 @@ impl Blit for BlitService {
         // the first stream frame parses.
         let job = self.active_jobs.register(
             ActiveJobKind::DelegatedPull,
-            peer,
+            peer.clone(),
             req.dst_module.clone(),
             req.dst_destination_path.clone(),
+        );
+        // Subscribe event — module/path are populated for
+        // delegated_pull at dispatch time (unlike push/pull_sync).
+        self.emit_transfer_started(
+            &job,
+            ActiveJobKind::DelegatedPull,
+            &peer,
+            &req.dst_module,
+            &req.dst_destination_path,
         );
         // Captured before `req` moves into the handler call.
         // Drives the conditional select arm below: when
@@ -1102,6 +1214,120 @@ mod tests {
             .await
             .expect_err("empty id must InvalidArgument");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn subscribe_delivers_transfer_started_event_to_subscriber() {
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        // Subscribe BEFORE firing the event. This is the
+        // ordering the production code guarantees too — the
+        // RPC handler subscribes synchronously, then the
+        // stream is returned to the caller.
+        let resp = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe returns Ok");
+        let mut stream = resp.into_inner();
+
+        // Fire a TransferStarted by registering a job on the
+        // service's table — same path the real dispatch site
+        // takes.
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "10.0.0.5:443".to_string(),
+            "mod-a".to_string(),
+            "sub/dir".to_string(),
+        );
+        svc.emit_transfer_started(
+            &guard,
+            ActiveJobKind::DelegatedPull,
+            "10.0.0.5:443",
+            "mod-a",
+            "sub/dir",
+        );
+        let id = guard.transfer_id().to_string();
+
+        // First (and only) frame should be a TransferStarted.
+        let frame = stream
+            .next()
+            .await
+            .expect("stream yields a frame")
+            .expect("frame is Ok");
+        let payload = frame.payload.expect("frame has payload");
+        match payload {
+            daemon_event::Payload::TransferStarted(ev) => {
+                assert_eq!(ev.transfer_id, id);
+                assert_eq!(ev.kind, WireKind::DelegatedPull as i32);
+                assert_eq!(ev.peer, "10.0.0.5:443");
+                assert_eq!(ev.module, "mod-a");
+                assert_eq!(ev.path, "sub/dir");
+                assert!(ev.start_unix_ms > 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_delivers_to_multiple_subscribers() {
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let mut stream_a = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe a")
+            .into_inner();
+        let mut stream_b = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe b")
+            .into_inner();
+
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        svc.emit_transfer_started(&guard, ActiveJobKind::Pull, "p", "m", "/");
+
+        let event_a = stream_a
+            .next()
+            .await
+            .expect("a yields")
+            .expect("a frame ok");
+        let event_b = stream_b
+            .next()
+            .await
+            .expect("b yields")
+            .expect("b frame ok");
+        let id_a = match event_a.payload.unwrap() {
+            daemon_event::Payload::TransferStarted(e) => e.transfer_id,
+        };
+        let id_b = match event_b.payload.unwrap() {
+            daemon_event::Payload::TransferStarted(e) => e.transfer_id,
+        };
+        assert_eq!(id_a, id_b, "both subscribers see the same transfer_id");
+    }
+
+    #[tokio::test]
+    async fn subscribe_drops_event_silently_when_no_subscribers() {
+        // No subscribers attached → broadcast::send returns
+        // SendError, which `emit_transfer_started` ignores.
+        // The test just asserts the call doesn't panic.
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::Push,
+            "p".to_string(),
+            String::new(),
+            String::new(),
+        );
+        svc.emit_transfer_started(&guard, ActiveJobKind::Push, "p", "", "");
+        // Drop the guard cleanly to keep the table snapshot
+        // assertion below precise.
+        drop(guard);
+        assert!(svc.active_jobs.snapshot().is_empty());
     }
 
     #[tokio::test]
