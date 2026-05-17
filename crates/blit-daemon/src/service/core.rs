@@ -389,13 +389,28 @@ impl Blit for BlitService {
         let (tx, rx) = mpsc::channel::<Result<DaemonEvent, Status>>(SUBSCRIBE_MPSC_CAPACITY);
         tokio::spawn(async move {
             loop {
-                match broadcast_rx.recv().await {
+                // c-5a round 3: race broadcast recv against
+                // `tx.closed()` so the forwarder exits as soon
+                // as the client drops the stream — not only
+                // when a matching event happens to arrive.
+                // Without this race a filtered watcher that
+                // disconnects during a quiet period (no
+                // further matching events) leaks a task + a
+                // live broadcast Receiver indefinitely, since
+                // unrelated events are filtered with `continue`
+                // and never touch `tx`.
+                let recv = tokio::select! {
+                    biased;
+                    () = tx.closed() => break,
+                    recv = broadcast_rx.recv() => recv,
+                };
+                match recv {
                     Ok(event) => {
                         if !event_matches_filter(&event, &transfer_id_filter) {
                             continue;
                         }
                         if tx.send(Ok(event)).await.is_err() {
-                            // Client dropped the stream.
+                            // Client dropped between filter and send.
                             break;
                         }
                     }
@@ -1986,6 +2001,72 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn filtered_subscriber_forwarder_exits_on_client_disconnect() {
+        // c-5a round-3 regression: when a filtered subscriber
+        // drops its stream during a quiet period (no further
+        // matching events ever fire), the forwarder MUST
+        // notice and exit — otherwise it leaks a task and a
+        // live broadcast Receiver indefinitely.
+        //
+        // The signal we measure is `events_tx.receiver_count()`:
+        // each forwarder owns one broadcast Receiver, so the
+        // count drops by exactly 1 when the forwarder exits.
+
+        let svc = empty_service();
+        let g_a = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+
+        let baseline = svc.events_tx.receiver_count();
+        let stream = svc
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: g_a.transfer_id().to_string(),
+            }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+        // Subscribe spawned a forwarder which now holds a
+        // broadcast::Receiver. Yield so the spawned task has
+        // a chance to subscribe before we measure.
+        tokio::task::yield_now().await;
+        let with_subscriber = svc.events_tx.receiver_count();
+        assert_eq!(
+            with_subscriber,
+            baseline + 1,
+            "subscribe should add exactly one broadcast Receiver"
+        );
+
+        // Client drops the stream. The forwarder is sitting
+        // on `broadcast_rx.recv().await`; with the `tx.closed()`
+        // race wired up it should observe the channel close
+        // and exit, dropping its Receiver and decrementing the
+        // count back to baseline.
+        drop(stream);
+
+        // Poll the receiver count for up to 1s. The forwarder
+        // typically exits on the very next runtime tick; the
+        // loop tolerates jitter under CI load.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            if svc.events_tx.receiver_count() == baseline {
+                return;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "forwarder did not exit within 1s after client disconnect; \
+             receiver_count {} != baseline {}",
+            svc.events_tx.receiver_count(),
+            baseline
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn filtered_subscriber_survives_overflow_of_other_transfer_events() {
         // c-5a round-2 regression: a subscriber with a
         // transfer_id_filter MUST not be aborted with Lagged
@@ -2016,6 +2097,8 @@ mod tests {
             "/".to_string(),
         );
         let id_a = g_a.transfer_id().to_string();
+        let id_b = g_b.transfer_id().to_string();
+        let start_b = g_b.start_unix_ms();
 
         let mut stream = svc
             .subscribe(Request::new(SubscribeRequest {
@@ -2026,27 +2109,35 @@ mod tests {
             .expect("subscribe ok")
             .into_inner();
 
-        // Fire > SUBSCRIBE_BROADCAST_CAPACITY events for id_b,
-        // yielding periodically so the forwarder gets airtime
-        // (mirrors the production case where event emits
-        // interleave with other async work). The forwarder
-        // filters each id_b event without touching the mpsc,
-        // so its broadcast cursor stays caught up.
+        // Spawn the id_b emitter on its own task so the
+        // runtime schedules it alongside the forwarder. Emit
+        // > SUBSCRIBE_BROADCAST_CAPACITY events; the forwarder
+        // drains each (filter rejects → no mpsc traffic) and
+        // its broadcast cursor stays caught up. A tight sync
+        // emit loop in the test task itself would starve the
+        // forwarder regardless of design (the runtime can't
+        // preempt sync code); production naturally interleaves
+        // because emit sites live on different async tasks
+        // (RPC handlers, the progress ticker).
         let overflow_count = SUBSCRIBE_BROADCAST_CAPACITY + 50;
-        for i in 0..overflow_count {
-            svc.emit_transfer_started(&g_b, ActiveJobKind::DelegatedPull, "b", "m", "/");
-            // Yield every 32 emits — this is well below the
-            // 256-slot broadcast capacity, so even on a slow
-            // CI box the forwarder catches up before the ring
-            // wraps. In production this is implicit (event
-            // emits live on different async tasks).
-            if i % 32 == 0 {
+        let events_tx = svc.events_tx.clone();
+        let emit_task = tokio::spawn(async move {
+            for _ in 0..overflow_count {
+                let event = DaemonEvent {
+                    payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                        transfer_id: id_b.clone(),
+                        kind: ActiveJobKind::DelegatedPull.to_wire() as i32,
+                        peer: "b".to_string(),
+                        module: "m".to_string(),
+                        path: "/".to_string(),
+                        start_unix_ms: start_b,
+                    })),
+                };
+                let _ = events_tx.send(event);
                 tokio::task::yield_now().await;
             }
-        }
-        // Final yield to drain any remaining buffered events
-        // before we fire id_a.
-        tokio::task::yield_now().await;
+        });
+        emit_task.await.expect("emit task ok");
 
         // Fire one event for id_a. It must reach the
         // subscriber's stream, not be lost to Lagged.
