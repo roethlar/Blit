@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                    | Severity | Title                                       | Status | Branch     | Commit    |
+|-----------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-4-transfer-progress | Feature  | Periodic TransferProgress events            | [~]    | `phase5/c` | `69224e0` |
 
 ## Open findings
 
