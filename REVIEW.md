@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                    | Severity | Title                                       | Status | Branch     | Commit    |
-|-----------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-4-transfer-progress | Medium   | Progress events can follow terminal events | [~]    | `phase5/c` | `5b88f3a` |
+_none_
 
 ## Open findings
 
@@ -78,3 +76,5 @@ Phase 5 C sub-slices on branch `phase5/c`:
 - `df8249d` SubscribeRequest reserved-tag order aligned with `TUI_DESIGN.md` (`c-2-subscribe-skeleton` round 2)
 - `5be5f10` TransferComplete + TransferError terminal events (`c-3-transfer-finished-events`)
 - `7d4fd28` Terminal events broadcast after ActiveJobs/GetState drain (`c-3-transfer-finished-events` round 2)
+- `69224e0` Periodic TransferProgress events (`c-4-transfer-progress`)
+- `5b88f3a` Progress events serialized before terminal events (`c-4-transfer-progress` round 2)
