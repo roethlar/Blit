@@ -220,7 +220,7 @@ impl TransferSink for FsTransferSink {
         // through tokio). Local-source payloads (File / TarShard) stay
         // on a blocking thread so the zero-copy cascade and tar
         // extraction can use std::fs.
-        match payload {
+        let outcome = match payload {
             PreparedPayload::FileBlock {
                 relative_path,
                 offset,
@@ -233,7 +233,7 @@ impl TransferSink for FsTransferSink {
                     offset,
                     bytes,
                 )
-                .await
+                .await?
             }
             PreparedPayload::FileBlockComplete {
                 relative_path,
@@ -253,7 +253,7 @@ impl TransferSink for FsTransferSink {
                 if outcome.files_written > 0 {
                     self.track(&relative_path);
                 }
-                Ok(outcome)
+                outcome
             }
             PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
                 // Capture paths for tracking before payload moves into
@@ -293,9 +293,24 @@ impl TransferSink for FsTransferSink {
                         self.track(&path);
                     }
                 }
-                Ok(outcome)
+                outcome
             }
+        };
+        // c-1b round 2: tar shards and resume blocks land via
+        // write_payload, not write_file_stream, so the chunk-
+        // granular `receive_stream_double_buffered` hook never
+        // fires for them. Report `outcome.bytes_written` here so
+        // `GetState.active[].bytes_completed` reflects bytes
+        // landed on disk for ALL payload shapes, not just
+        // streamed files. Dry-run write paths return
+        // `bytes_written: 0` (see `write_file_payload` and
+        // `write_tar_shard_payload`'s dry-run early returns), so
+        // adding 0 is a no-op for previews — same semantics as
+        // `write_file_stream`'s dry-run branch.
+        if let Some(bp) = &self.byte_progress {
+            bp.report(outcome.bytes_written);
         }
+        Ok(outcome)
     }
 
     /// Stream file bytes from the wire to the destination filesystem
@@ -1928,6 +1943,129 @@ mod tests {
         assert!(
             !outside.join("victim.txt").exists(),
             "tar shard must not write outside dst"
+        );
+    }
+
+    /// c-1b round 2 regression: tar shards land via `write_payload`,
+    /// not `write_file_stream`, so the chunk-granular byte hook
+    /// inside `receive_stream_double_buffered` never fires for them.
+    /// `write_payload` now reports `outcome.bytes_written` against
+    /// the sink's byte counter for non-streamed records.
+    #[tokio::test]
+    async fn write_payload_reports_tar_shard_bytes_against_byte_progress() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let content_a = b"alpha shard content";
+        let content_b = b"beta shard content!";
+        let mut header_a = tar::Header::new_gnu();
+        header_a.set_size(content_a.len() as u64);
+        header_a.set_mode(0o644);
+        header_a.set_cksum();
+        builder
+            .append_data(&mut header_a, "a.txt", &content_a[..])
+            .unwrap();
+        let mut header_b = tar::Header::new_gnu();
+        header_b.set_size(content_b.len() as u64);
+        header_b.set_mode(0o644);
+        header_b.set_cksum();
+        builder
+            .append_data(&mut header_b, "b.txt", &content_b[..])
+            .unwrap();
+        let tar_data = builder.into_inner().unwrap();
+        let headers = vec![
+            make_file_header("a.txt", content_a.len() as u64),
+            make_file_header("b.txt", content_b.len() as u64),
+        ];
+
+        let byte_progress = ByteProgressSink::new();
+        let probe_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Use `from_counter` so we can read the atomic directly
+        // for the assertion. Cloning the sink would also work but
+        // requires re-exposing a load() — `from_counter` is the
+        // cleaner observer pattern.
+        let sink_progress = ByteProgressSink::from_counter(std::sync::Arc::clone(&probe_counter));
+        let _ = byte_progress; // keep `new()` covered too
+
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        )
+        .with_byte_progress(sink_progress);
+
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard {
+                headers,
+                data: tar_data,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.files_written, 2);
+        let expected = (content_a.len() + content_b.len()) as u64;
+        assert_eq!(outcome.bytes_written, expected);
+        assert_eq!(
+            probe_counter.load(std::sync::atomic::Ordering::Relaxed),
+            expected,
+            "tar shard byte progress must equal outcome.bytes_written"
+        );
+    }
+
+    /// c-1b round 2 regression: resume `FileBlock` payloads
+    /// also land via `write_payload`. Their `bytes_written`
+    /// reflects the bytes seeked-and-written; the byte counter
+    /// must see them too.
+    #[tokio::test]
+    async fn write_payload_reports_file_block_bytes_against_byte_progress() {
+        let tmp = tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        // FileBlock writes seek into an existing destination file.
+        // Pre-create the target with a placeholder of the right size.
+        std::fs::write(dst.join("resume.bin"), vec![0u8; 64]).unwrap();
+
+        let probe_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let sink_progress = ByteProgressSink::from_counter(std::sync::Arc::clone(&probe_counter));
+
+        let sink = FsTransferSink::new(
+            tmp.path().to_path_buf(),
+            dst.clone(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        )
+        .with_byte_progress(sink_progress);
+
+        let block_bytes = vec![0xABu8; 32];
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlock {
+                relative_path: "resume.bin".to_string(),
+                offset: 16,
+                bytes: block_bytes.clone(),
+            })
+            .await
+            .expect("block write succeeds against pre-created file");
+
+        // FileBlock's outcome.bytes_written reflects bytes
+        // landed on disk for this block.
+        assert_eq!(outcome.bytes_written, block_bytes.len() as u64);
+        assert_eq!(
+            probe_counter.load(std::sync::atomic::Ordering::Relaxed),
+            block_bytes.len() as u64,
+            "FileBlock byte progress must equal outcome.bytes_written"
         );
     }
 }
