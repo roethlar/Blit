@@ -29,8 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
-use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 /// Capacity of the daemon's `Subscribe` event broadcast channel.
@@ -40,6 +39,18 @@ use tonic::{Request, Response, Status, Streaming};
 /// events. Slow consumers that lag more than this many events behind
 /// receive a `tonic::Status::aborted` and re-subscribe.
 const SUBSCRIBE_BROADCAST_CAPACITY: usize = 256;
+
+/// Capacity of the per-subscriber `mpsc` buffer behind the
+/// c-5a Subscribe forwarder. Sized so a momentary client stall
+/// (one or two tick intervals' worth of matching events) doesn't
+/// back up into the forwarder. Smaller than
+/// `SUBSCRIBE_BROADCAST_CAPACITY` because the filter is already
+/// applied — the buffer holds only events the client wanted.
+/// A client whose mpsc fills causes the forwarder to block on
+/// `send().await`, which eventually triggers a broadcast Lagged
+/// when global event rate exceeds the broadcast ring capacity —
+/// the correct "this client really is too slow" signal.
+const SUBSCRIBE_MPSC_CAPACITY: usize = 64;
 
 /// Cadence of the c-4 progress ticker. Default 100ms (10 Hz) —
 /// matches the TUI_DESIGN.md §6.2 step-3 estimate. The cost is one
@@ -349,36 +360,63 @@ impl Blit for BlitService {
         // is returned. This guarantees that any event emitted
         // between this call and the client's first .next() poll
         // lands in the broadcast queue rather than being dropped.
-        let rx = self.events_tx.subscribe();
-        // c-5a: empty filter means "every transfer-related
-        // event"; non-empty means "only events whose
-        // transfer_id matches this string." Captured into the
-        // stream's `filter_map` closure as an owned String.
+        let mut broadcast_rx = self.events_tx.subscribe();
         let transfer_id_filter = req.transfer_id_filter;
-        // Translate broadcast Receiver into a tonic-compatible
-        // stream. `BroadcastStream` yields
-        // `Result<T, BroadcastStreamRecvError::Lagged(n)>`:
-        // - Item Ok(event)              → forward as Ok(event).
-        // - Item Err(Lagged(_))         → emit Status::aborted
-        //   so the client's stream sees a final error frame
-        //   indicating "you fell behind, re-subscribe + GetState
-        //   to recover."
-        let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
-            Ok(event) => {
-                if event_matches_filter(&event, &transfer_id_filter) {
-                    Some(Ok(event))
-                } else {
-                    // Filtered out; do not yield a frame.
-                    None
+
+        // c-5a round 2: per-subscriber forwarder. The round-1
+        // shape (returning `BroadcastStream::filter_map` directly)
+        // still advanced the subscriber's broadcast cursor
+        // through every event — so a `jobs watch <id>` consumer
+        // could be aborted with Lagged when unrelated transfers
+        // overflowed the global ring, even though the filter
+        // rejected those events anyway.
+        //
+        // Fix: spawn a task that eagerly drains the broadcast
+        // (cursor stays caught up independent of client read
+        // pace), applies the filter, and forwards only matching
+        // events into a bounded per-subscriber `mpsc`. The mpsc
+        // receiver is what tonic streams to the client.
+        //
+        // Lagged semantics now mean "the FORWARDER couldn't
+        // keep up with global event rate" — a daemon-side CPU
+        // problem, not "this client is slow on its filtered
+        // subset." If the client is slow on the matching
+        // subset the mpsc fills first, the forwarder's
+        // `send().await` blocks, and Lagged eventually fires
+        // through the normal broadcast over-capacity path —
+        // which is the correct "this client really is too
+        // slow" signal.
+        let (tx, rx) = mpsc::channel::<Result<DaemonEvent, Status>>(SUBSCRIBE_MPSC_CAPACITY);
+        tokio::spawn(async move {
+            loop {
+                match broadcast_rx.recv().await {
+                    Ok(event) => {
+                        if !event_matches_filter(&event, &transfer_id_filter) {
+                            continue;
+                        }
+                        if tx.send(Ok(event)).await.is_err() {
+                            // Client dropped the stream.
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let _ = tx
+                            .send(Err(Status::aborted(format!(
+                                "subscriber lagged {n} events; re-subscribe and refresh via GetState"
+                            ))))
+                            .await;
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Daemon shutdown — broadcast Sender
+                        // dropped. Stream ends cleanly.
+                        break;
+                    }
                 }
             }
-            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                Some(Err(Status::aborted(format!(
-                    "subscriber lagged {n} events; re-subscribe and refresh via GetState"
-                ))))
-            }
         });
-        Ok(Response::new(Box::pin(stream)))
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     async fn push(
@@ -1945,6 +1983,87 @@ mod tests {
         };
         assert!(event_matches_filter(&p_a, &id_a));
         assert!(!event_matches_filter(&p_a, &id_b));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn filtered_subscriber_survives_overflow_of_other_transfer_events() {
+        // c-5a round-2 regression: a subscriber with a
+        // transfer_id_filter MUST not be aborted with Lagged
+        // when unrelated transfers' events overflow the global
+        // broadcast ring at production-realistic interleaved
+        // rates. The forwarder eagerly drains unrelated events
+        // (filter rejects → no mpsc traffic), so the client's
+        // stream only sees the matching one.
+        //
+        // Requires multi-thread runtime: the forwarder spawned
+        // inside `subscribe` needs to make progress in parallel
+        // with the emit task. Under the default `current_thread`
+        // runtime, a tight sync emit loop would starve the
+        // forwarder regardless of design.
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let g_a = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "a".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let g_b = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "b".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id_a = g_a.transfer_id().to_string();
+
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: id_a.clone(),
+            }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        // Fire > SUBSCRIBE_BROADCAST_CAPACITY events for id_b,
+        // yielding periodically so the forwarder gets airtime
+        // (mirrors the production case where event emits
+        // interleave with other async work). The forwarder
+        // filters each id_b event without touching the mpsc,
+        // so its broadcast cursor stays caught up.
+        let overflow_count = SUBSCRIBE_BROADCAST_CAPACITY + 50;
+        for i in 0..overflow_count {
+            svc.emit_transfer_started(&g_b, ActiveJobKind::DelegatedPull, "b", "m", "/");
+            // Yield every 32 emits — this is well below the
+            // 256-slot broadcast capacity, so even on a slow
+            // CI box the forwarder catches up before the ring
+            // wraps. In production this is implicit (event
+            // emits live on different async tasks).
+            if i % 32 == 0 {
+                tokio::task::yield_now().await;
+            }
+        }
+        // Final yield to drain any remaining buffered events
+        // before we fire id_a.
+        tokio::task::yield_now().await;
+
+        // Fire one event for id_a. It must reach the
+        // subscriber's stream, not be lost to Lagged.
+        svc.emit_transfer_started(&g_a, ActiveJobKind::DelegatedPull, "a", "m", "/");
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("filtered subscriber did not receive event in time")
+            .expect("stream did not end prematurely")
+            .expect(
+                "expected the id_a frame, not Status::aborted — \
+             filtered events for id_b should not cause Lagged",
+            );
+        match frame.payload.unwrap() {
+            daemon_event::Payload::TransferStarted(e) => assert_eq!(e.transfer_id, id_a),
+            other => panic!("expected id_a TransferStarted, got {other:?}"),
+        }
     }
 
     #[tokio::test]
