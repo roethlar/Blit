@@ -201,7 +201,14 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
     // before our receiver existed, no replay (c-5b deferred),
     // and the stream hung forever waiting for a transfer_id
     // that's never going to fire again.
-    let mut stream = jobs::subscribe(&remote, &args.transfer_id).await?;
+    // c-7: ask for replay_recent so any TransferProgress
+    // events that fired between our snapshot and the next
+    // tick land in the stream immediately instead of waiting
+    // up to ~100ms. The replayed TransferStarted that comes
+    // through is harmless — the loop's TransferStarted arm is
+    // a no-op since the initial GetState already rendered the
+    // active line.
+    let mut stream = jobs::subscribe(&remote, &args.transfer_id, true).await?;
 
     // Step 1: GetState snapshot so we handle the already-
     // completed and never-existed cases (and the in-flight

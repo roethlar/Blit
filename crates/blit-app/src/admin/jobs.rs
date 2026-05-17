@@ -110,9 +110,17 @@ pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<Cancel
 /// related events on the daemon; a non-empty value scopes the
 /// stream to that transfer_id (c-5a). `event_mask` is reserved
 /// for future event-category filtering and passed through as 0.
+///
+/// `replay_recent` (c-5b): when true AND `transfer_id_filter`
+/// is non-empty, the daemon replays the row's recent event
+/// ring before forwarding live broadcast events. Lets a
+/// late-joining consumer (e.g. `blit jobs watch`) pick up
+/// the in-flight history without waiting for the next live
+/// progress tick.
 pub async fn subscribe(
     remote: &RemoteEndpoint,
     transfer_id_filter: &str,
+    replay_recent: bool,
 ) -> Result<tonic::Streaming<DaemonEvent>> {
     let uri = remote.control_plane_uri();
     let mut client = BlitClient::connect(uri.clone())
@@ -120,8 +128,8 @@ pub async fn subscribe(
         .with_context(|| format!("connecting to {}", uri))?;
     let response = client
         .subscribe(SubscribeRequest {
-            replay_recent: false,
             event_mask: 0,
+            replay_recent,
             transfer_id_filter: transfer_id_filter.to_string(),
         })
         .await
