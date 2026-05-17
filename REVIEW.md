@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| a1-1-tui-scaffold | Feature  | `blit-tui` crate + ratatui event loop      | [~]    | `phase5/a1` | `63975ef` |
 
 ## Open findings
 
