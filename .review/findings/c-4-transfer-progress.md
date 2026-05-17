@@ -200,6 +200,52 @@ Workspace: 565 passing serially (was 562; +3).
   `tcp_fallback_used` (split across several lower-priority
   slices).
 
+## Round 2 (sha `5b88f3a`)
+
+Reviewer caught a real race: round 1's `snapshot_progress_samples`
+returned a Vec; the ticker then iterated and broadcast outside
+the table lock. A c-3 spawn closure that did
+`Drop(guard) + events_tx.send(terminal)` could interleave
+between the snapshot and the first progress send, leading a
+subscriber to see `TransferProgress` AFTER `TransferComplete`
+for the same `transfer_id`.
+
+Fix: `ActiveJobs::for_each_progress_sample(emit)` invokes the
+emit closure while still holding the table lock. The ticker's
+emit does `broadcast::Sender::send`, which is synchronous (no
+await, no I/O — pushes to an in-memory ring), so the lock
+window stays bounded by the active-row count.
+
+Drop also acquires this lock to remove its row. The two paths
+now serialize:
+
+- **Ticker wins the lock**: progress events for every live row
+  fire while Drop is blocked. When the ticker releases, Drop
+  runs (row removed); the spawn closure's terminal event
+  broadcast follows. Subscriber sees `Progress*, Terminal`.
+- **Drop wins the lock**: row gone before ticker iterates, no
+  progress event fires for that id. Terminal event has been
+  (or will shortly be) broadcast. Subscriber sees `Terminal`
+  only.
+
+Either way, no progress-after-terminal for any transfer id.
+
+Kept `snapshot_progress_samples` as a `#[cfg(test)]`
+convenience that walks `for_each_progress_sample` into a Vec
+— the c-4 ticker doesn't use it.
+
++1 regression test:
+
+- `progress_event_cannot_arrive_after_terminal_for_same_transfer`
+  runs the ticker and a build→drop→broadcast dropper as two
+  `tokio::task::spawn_blocking` tasks. Either interleave must
+  yield a stream where any `TransferProgress` for the id
+  comes before its `TransferComplete`/`TransferError`. Test
+  is robust to either lock ordering since both are valid
+  outcomes; it just asserts the invariant.
+
+Workspace: 566 passing serially (was 565; +1).
+
 ## Reviewer comments
 
 (empty — pending grade)
