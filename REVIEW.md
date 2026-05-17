@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                      | Severity | Title                                       | Status | Branch     | Commit    |
-|-------------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-1b-byte-counter-wiring | Medium   | Tar-shard/resume records bypass byte progress | [~]    | `phase5/c` | `14eeda7` |
+_none_
 
 ## Open findings
 
@@ -73,3 +71,4 @@ Phase 5 M-Jobs sub-slices on branch `phase5/m-jobs`:
 Phase 5 C sub-slices on branch `phase5/c`:
 
 - `234d2c6` Byte counter API in `blit-core` + ActiveJobs row wiring (`c-1a-byte-counter-api`)
+- `14eeda7` Delegated-pull data-plane byte reporting, including tar-shard/block paths (`c-1b-byte-counter-wiring`)
