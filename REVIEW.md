@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                      | Severity | Title                                       | Status | Branch     | Commit    |
-|-------------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-5a-transfer-id-filter | Medium   | Filtered Subscribe forwarders can leak     | [~]    | `phase5/c` | `d901656` |
+_none_
 
 ## Open findings
 
@@ -80,3 +78,6 @@ Phase 5 C sub-slices on branch `phase5/c`:
 - `7d4fd28` Terminal events broadcast after ActiveJobs/GetState drain (`c-3-transfer-finished-events` round 2)
 - `69224e0` Periodic TransferProgress events (`c-4-transfer-progress`)
 - `5b88f3a` Progress events serialized before terminal events (`c-4-transfer-progress` round 2)
+- `6330a7d` SubscribeRequest transfer_id_filter (`c-5a-transfer-id-filter`)
+- `7587b46` Per-subscriber forwarder drains broadcast before filtering (`c-5a-transfer-id-filter` round 2)
+- `d901656` Forwarder exits on client disconnect (`c-5a-transfer-id-filter` round 3)
