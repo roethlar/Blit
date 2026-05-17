@@ -260,6 +260,37 @@ pub fn spawn_progress_ticker(svc: &BlitService) -> tokio::task::JoinHandle<()> {
     })
 }
 
+/// c-5a: decide whether a `DaemonEvent` should be forwarded to a
+/// subscriber whose `SubscribeRequest.transfer_id_filter` is set
+/// to `filter`. Empty filter accepts everything. Non-empty
+/// filter accepts only transfer-scoped events whose `transfer_id`
+/// matches.
+///
+/// Non-transfer-scoped events (future variants: `ModuleListChanged`,
+/// `DaemonHeartbeat`) bypass the filter entirely so a subscriber
+/// tracking a specific transfer still sees daemon-wide state
+/// updates relevant to context — they're cheap and provide
+/// orientation.
+pub(crate) fn event_matches_filter(event: &DaemonEvent, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    // Exhaustive match over current variants. Future
+    // non-transfer-scoped variants (ModuleListChanged,
+    // DaemonHeartbeat) should be added with the explicit
+    // policy "bypass the filter and always forward" so
+    // subscribers tracking one transfer still see daemon-wide
+    // context. Adding any future variant here is a compile-
+    // forced decision — exactly what we want.
+    match event.payload.as_ref() {
+        Some(daemon_event::Payload::TransferStarted(e)) => e.transfer_id == filter,
+        Some(daemon_event::Payload::TransferProgress(e)) => e.transfer_id == filter,
+        Some(daemon_event::Payload::TransferComplete(e)) => e.transfer_id == filter,
+        Some(daemon_event::Payload::TransferError(e)) => e.transfer_id == filter,
+        None => false,
+    }
+}
+
 /// Build the terminal event for a transfer that's draining. Called
 /// from each RPC's spawn closure after `record_outcome` and before
 /// `drop(job)`, with the same `(ok, error_message)` pair that the
@@ -311,13 +342,19 @@ impl Blit for BlitService {
 
     async fn subscribe(
         &self,
-        _request: Request<SubscribeRequest>,
+        request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let req = request.into_inner();
         // Subscribe to the broadcast first, BEFORE the response
         // is returned. This guarantees that any event emitted
         // between this call and the client's first .next() poll
         // lands in the broadcast queue rather than being dropped.
         let rx = self.events_tx.subscribe();
+        // c-5a: empty filter means "every transfer-related
+        // event"; non-empty means "only events whose
+        // transfer_id matches this string." Captured into the
+        // stream's `filter_map` closure as an owned String.
+        let transfer_id_filter = req.transfer_id_filter;
         // Translate broadcast Receiver into a tonic-compatible
         // stream. `BroadcastStream` yields
         // `Result<T, BroadcastStreamRecvError::Lagged(n)>`:
@@ -326,12 +363,19 @@ impl Blit for BlitService {
         //   so the client's stream sees a final error frame
         //   indicating "you fell behind, re-subscribe + GetState
         //   to recover."
-        let stream = BroadcastStream::new(rx).map(|item| match item {
-            Ok(event) => Ok(event),
+        let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+            Ok(event) => {
+                if event_matches_filter(&event, &transfer_id_filter) {
+                    Some(Ok(event))
+                } else {
+                    // Filtered out; do not yield a frame.
+                    None
+                }
+            }
             Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
-                Err(Status::aborted(format!(
+                Some(Err(Status::aborted(format!(
                     "subscriber lagged {n} events; re-subscribe and refresh via GetState"
-                )))
+                ))))
             }
         });
         Ok(Response::new(Box::pin(stream)))
@@ -1392,7 +1436,10 @@ mod tests {
         // RPC handler subscribes synchronously, then the
         // stream is returned to the caller.
         let resp = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe returns Ok");
         let mut stream = resp.into_inner();
@@ -1441,12 +1488,18 @@ mod tests {
 
         let svc = empty_service();
         let mut stream_a = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe a")
             .into_inner();
         let mut stream_b = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe b")
             .into_inner();
@@ -1524,7 +1577,10 @@ mod tests {
 
         let svc = empty_service();
         let mut stream = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe ok")
             .into_inner();
@@ -1604,7 +1660,10 @@ mod tests {
 
         let svc = empty_service();
         let mut stream = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe ok")
             .into_inner();
@@ -1670,7 +1729,10 @@ mod tests {
         // (it would still succeed silently, but a real consumer
         // matches the production code path).
         let _stream = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe ok")
             .into_inner();
@@ -1712,7 +1774,10 @@ mod tests {
 
         let svc = empty_service();
         let mut stream = svc
-            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: String::new(),
+            }))
             .await
             .expect("subscribe ok")
             .into_inner();
@@ -1808,6 +1873,131 @@ mod tests {
         let svc = empty_service();
         let n = tick_progress_once(&svc.active_jobs, &svc.events_tx);
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn event_matches_filter_empty_filter_accepts_everything() {
+        let svc = empty_service();
+        let g = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let ev = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: g.transfer_id().to_string(),
+                kind: WireKind::DelegatedPull as i32,
+                peer: String::new(),
+                module: String::new(),
+                path: String::new(),
+                start_unix_ms: g.start_unix_ms(),
+            })),
+        };
+        assert!(event_matches_filter(&ev, ""));
+    }
+
+    #[tokio::test]
+    async fn event_matches_filter_matches_only_target_transfer() {
+        let svc = empty_service();
+        let g_a = svc.active_jobs.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let g_b = svc.active_jobs.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id_a = g_a.transfer_id().to_string();
+        let id_b = g_b.transfer_id().to_string();
+        let mk_started = |g: &crate::active_jobs::ActiveJobGuard| DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: g.transfer_id().to_string(),
+                kind: WireKind::Pull as i32,
+                peer: String::new(),
+                module: String::new(),
+                path: String::new(),
+                start_unix_ms: g.start_unix_ms(),
+            })),
+        };
+        let ev_a = mk_started(&g_a);
+        let ev_b = mk_started(&g_b);
+
+        assert!(event_matches_filter(&ev_a, &id_a));
+        assert!(!event_matches_filter(&ev_b, &id_a));
+        assert!(event_matches_filter(&ev_b, &id_b));
+        assert!(!event_matches_filter(&ev_a, &id_b));
+
+        // Cross-variant: progress events honor the same filter.
+        let p_a = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
+                transfer_id: id_a.clone(),
+                bytes_completed: 0,
+                bytes_total: 0,
+                files_completed: 0,
+                files_total: 0,
+                throughput_bps: 0,
+            })),
+        };
+        assert!(event_matches_filter(&p_a, &id_a));
+        assert!(!event_matches_filter(&p_a, &id_b));
+    }
+
+    #[tokio::test]
+    async fn subscribe_with_transfer_id_filter_drops_other_transfer_events() {
+        // End-to-end via the real subscribe handler: subscribe
+        // with filter=id_a, fire Started events for two
+        // transfers, assert only id_a's reaches the subscriber.
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let g_a = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let g_b = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id_a = g_a.transfer_id().to_string();
+        let _id_b = g_b.transfer_id().to_string();
+
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                transfer_id_filter: id_a.clone(),
+            }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        // Fire two events; only id_a's should reach the
+        // subscriber's stream.
+        svc.emit_transfer_started(&g_a, ActiveJobKind::DelegatedPull, "p", "m", "/");
+        svc.emit_transfer_started(&g_b, ActiveJobKind::DelegatedPull, "p", "m", "/");
+
+        let frame = stream.next().await.expect("first frame").expect("frame ok");
+        match frame.payload.unwrap() {
+            daemon_event::Payload::TransferStarted(e) => assert_eq!(e.transfer_id, id_a),
+            other => panic!("expected id_a TransferStarted, got {other:?}"),
+        }
+
+        // No second frame within a short window — id_b
+        // filtered out.
+        let next = tokio::time::timeout(std::time::Duration::from_millis(50), stream.next()).await;
+        assert!(
+            next.is_err(),
+            "expected no further frame (id_b should be filtered), got: {:?}",
+            next
+        );
     }
 
     #[tokio::test]
