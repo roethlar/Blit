@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                     | Severity | Title                                       | Status | Branch     | Commit    |
-|------------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-2-subscribe-skeleton | Low      | SubscribeRequest future tags vs design doc  | [~]    | `phase5/c` | `df8249d` |
+_none_
 
 ## Open findings
 
@@ -74,3 +72,5 @@ Phase 5 C sub-slices on branch `phase5/c`:
 
 - `234d2c6` Byte counter API in `blit-core` + ActiveJobs row wiring (`c-1a-byte-counter-api`)
 - `14eeda7` Delegated-pull data-plane byte reporting, including tar-shard/block paths (`c-1b-byte-counter-wiring`)
+- `0ffaac7` Subscribe RPC + DaemonEvent + TransferStarted (`c-2-subscribe-skeleton`)
+- `df8249d` SubscribeRequest reserved-tag order aligned with `TUI_DESIGN.md` (`c-2-subscribe-skeleton` round 2)
