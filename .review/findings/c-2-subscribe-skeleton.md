@@ -243,6 +243,36 @@ Workspace: 559 passing serially (was 556; +3).
    tag is locked so future filtering can use it without a
    wire-shape change.
 
+## Round 2 (sha `df8249d`)
+
+Reviewer caught a comment/doc disagreement on the
+`SubscribeRequest` reserved-tag assignment:
+
+- `proto/blit.proto` round 1 comment: `transfer_id_filter = 2,
+  replay_recent = 3`.
+- `docs/plan/TUI_DESIGN.md` §6.2: `replay_recent = 2,
+  transfer_id_filter = 3`.
+
+The `reserved 2, 3;` directive itself was correct (both
+documents agree the tags are reserved); the disagreement was
+only over which future variant gets which number.
+
+Adopting the design-doc order (`replay_recent = 2`,
+`transfer_id_filter = 3`) and updating the proto comment to
+match. Reasoning:
+
+- The design doc is the older / source-of-truth document; the
+  proto comment was meant to reflect it.
+- Convention: lower field numbers tend to go to bool
+  variants over string variants when both would land in the
+  same message.
+
+No wire impact — only one variant is implemented today
+(TransferStarted) and the reserved directive itself was
+already correct. The next C sub-slice that lands
+`replay_recent` and `transfer_id_filter` will now pick the
+right number from both sources.
+
 ## Reviewer comments
 
 (empty — pending grade)
