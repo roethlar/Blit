@@ -836,9 +836,10 @@ message SubscribeRequest {
   // Locking the tag here keeps the wire shape stable.
   uint32 event_mask = 1;
 
-  // Future C sub-slices add:
-  //   string transfer_id_filter = 2;  // per-job replay + filter
-  //   bool   replay_recent = 3;       // emit recent-event ring on connect
+  // Future C sub-slices add (field numbers match
+  // `docs/plan/TUI_DESIGN.md` §6.2 message shape):
+  //   bool   replay_recent      = 2;  // emit recent-event ring on connect
+  //   string transfer_id_filter = 3;  // per-job replay + filter
   // Reserved here so we don't accidentally pick those numbers
   // for some other purpose later.
   reserved 2, 3;
