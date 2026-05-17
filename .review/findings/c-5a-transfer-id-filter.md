@@ -189,6 +189,52 @@ Lagged semantics now correctly distinguish two cases:
 
 Workspace: 570 passing serially (was 569; +1).
 
+## Round 3 (sha `d901656`)
+
+Reviewer caught a real task leak: round 2's forwarder was
+parked on `broadcast_rx.recv().await` and only noticed a
+disconnected client when a matching event happened to fire.
+For completed transfer ids that's "never" — each disconnected
+filtered watcher leaked its spawned task + broadcast Receiver
+indefinitely.
+
+Fix: race the broadcast recv against `tx.closed()` in a
+biased `tokio::select!`:
+
+```rust
+let recv = tokio::select! {
+    biased;
+    () = tx.closed() => break,
+    recv = broadcast_rx.recv() => recv,
+};
+```
+
+`biased` keeps the close check cheap (polled first; usually
+Pending until disconnect). When the client drops the
+returned stream, the mpsc Sender's closed future resolves on
+the next runtime poll and the forwarder exits, dropping its
+broadcast Receiver and the spawned task.
+
++1 regression test:
+
+- `filtered_subscriber_forwarder_exits_on_client_disconnect`
+  measures `events_tx.receiver_count()` before/after the
+  Subscribe call (asserts +1), drops the returned stream
+  during a quiet period (no further matching events), and
+  polls receiver_count back to baseline within 1s. Uses
+  `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`
+  so the forwarder runs on its own worker and observes
+  close promptly.
+
+Also restructured the round-2 overflow regression to drive
+emits from a separate `tokio::spawn`-ed task so the runtime
+balances emitter and forwarder cooperatively. The earlier
+tight sync emit loop starved the forwarder regardless of
+design — production never has that pattern (every emit site
+is in an async function).
+
+Workspace: 571 passing serially (was 570; +1).
+
 ## Reviewer comments
 
 (empty — pending grade)
