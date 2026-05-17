@@ -23,6 +23,7 @@
 //! a single async stream poll can share the same task.
 
 use clap::Parser;
+use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -36,6 +37,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// CLI flags. Today `--remote` is captured but not yet
@@ -55,43 +57,138 @@ struct Args {
 /// latency low without burning CPU on idle.
 const EVENT_POLL_INTERVAL_MS: u64 = 50;
 
+/// Tracks whether raw mode has been entered. Used by the
+/// panic hook to decide whether `restore_terminal` is safe
+/// to call (avoids spurious teardown if the panic fires
+/// before `enter_raw_mode` succeeded). Atomic for the panic
+/// hook's `Send + Sync` requirement.
+static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let _ = args; // consumed in future slices.
 
-    let mut terminal = enter_tui().context("entering TUI")?;
-    // Ensure the terminal is restored even if the inner loop
-    // panics. `scopeguard`-style: wrap the body in a closure
-    // and always call `leave_tui` afterwards.
-    let result = run_event_loop(&mut terminal).await;
-    leave_tui(&mut terminal).context("leaving TUI")?;
+    // Install the panic hook BEFORE touching the terminal so
+    // a panic inside `TuiGuard::new()` (or anywhere
+    // downstream) still restores. The hook chains the original
+    // handler so panic output still appears after restore.
+    install_panic_hook();
+
+    // `TuiGuard::new` is transactional: if any setup step
+    // fails it unwinds the partial state before returning Err.
+    // `Drop` covers every other exit path (normal return,
+    // `?`-propagated error, panic unwinding through main).
+    let mut guard = TuiGuard::new().context("entering TUI")?;
+    let result = run_event_loop(guard.terminal_mut()).await;
+    // `guard` drops here (end of scope). Drop runs
+    // `restore_terminal` regardless of `result`. Returning
+    // `result` after drop preserves the loop's exit status.
+    drop(guard);
     result
 }
 
-/// Set up the crossterm-backed terminal: raw mode, alternate
-/// screen, cursor hidden. Mirror the standard ratatui setup
-/// recipe so future slices don't need to know the magic
-/// incantation.
-fn enter_tui() -> Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode().context("enable_raw_mode")?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("EnterAlternateScreen")?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).context("Terminal::new")?;
-    terminal.clear().context("terminal.clear")?;
-    terminal.hide_cursor().context("hide_cursor")?;
-    Ok(terminal)
+/// RAII wrapper for the crossterm/ratatui terminal lifecycle.
+/// `new()` is transactional — partial setup failures unwind
+/// before the Result is returned. `Drop` restores raw mode,
+/// leaves the alternate screen, and shows the cursor on
+/// every exit path (normal, ?-propagated error, panic
+/// unwinding).
+struct TuiGuard {
+    terminal: Option<Terminal<CrosstermBackend<Stdout>>>,
 }
 
-/// Restore the terminal. Best-effort — we ignore individual
-/// errors here so a partial failure can't mask the
-/// `run_event_loop` error the user actually cares about.
-fn leave_tui(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-    let _ = terminal.show_cursor();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+impl TuiGuard {
+    /// Sets up raw mode → alternate screen → terminal → clear
+    /// → hide cursor in order. Each step on success advances
+    /// a local `progress` marker so failures rewind only the
+    /// steps that actually succeeded.
+    fn new() -> Result<Self> {
+        enable_raw_mode().context("enable_raw_mode")?;
+        // From this point on `TUI_ACTIVE` reflects state we
+        // need to roll back if anything below fails.
+        TUI_ACTIVE.store(true, Ordering::SeqCst);
+
+        // Stage 1: alternate screen.
+        let mut stdout = io::stdout();
+        if let Err(err) = execute!(stdout, EnterAlternateScreen) {
+            // Roll back stage 0.
+            let _ = disable_raw_mode();
+            TUI_ACTIVE.store(false, Ordering::SeqCst);
+            return Err(eyre::eyre!("EnterAlternateScreen: {err}"));
+        }
+
+        // Stage 2: ratatui Terminal handle. From here we have
+        // a real Terminal we can call `clear` / `hide_cursor`
+        // / `show_cursor` on. Failures rewind via the
+        // already-stored TUI_ACTIVE flag through `restore_terminal()`.
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = match Terminal::new(backend) {
+            Ok(t) => t,
+            Err(err) => {
+                restore_terminal();
+                return Err(eyre::eyre!("Terminal::new: {err}"));
+            }
+        };
+
+        // Stage 3+: terminal-API calls. Same rollback shape.
+        if let Err(err) = terminal.clear() {
+            restore_terminal();
+            return Err(eyre::eyre!("terminal.clear: {err}"));
+        }
+        if let Err(err) = terminal.hide_cursor() {
+            restore_terminal();
+            return Err(eyre::eyre!("terminal.hide_cursor: {err}"));
+        }
+
+        Ok(Self {
+            terminal: Some(terminal),
+        })
+    }
+
+    /// Mutable borrow of the contained `Terminal` for the
+    /// event loop's draw cycles. Stays inside the guard so
+    /// Drop owns the lifecycle — the loop can't outlive the
+    /// guard's restoration.
+    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+        self.terminal
+            .as_mut()
+            .expect("TuiGuard::terminal_mut after Drop is impossible")
+    }
+}
+
+impl Drop for TuiGuard {
+    fn drop(&mut self) {
+        // Idempotent — restore_terminal checks TUI_ACTIVE.
+        restore_terminal();
+    }
+}
+
+/// Best-effort terminal restore: show cursor, leave
+/// alternate screen, disable raw mode. Idempotent (no-op if
+/// `TUI_ACTIVE` is false) so the panic hook and Drop can
+/// both call it without worrying about double-teardown.
+fn restore_terminal() {
+    if !TUI_ACTIVE.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, Show);
+    let _ = execute!(stdout, LeaveAlternateScreen);
     let _ = disable_raw_mode();
-    Ok(())
+}
+
+/// Install a panic hook that restores the terminal before
+/// chaining to the previous hook. Without this a panic
+/// during the event loop leaves the terminal in raw mode +
+/// alternate screen + cursor hidden until the user types
+/// `reset` or restarts their shell.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        original(info);
+    }));
 }
 
 /// Main event/draw loop. Renders the placeholder splash and
@@ -188,6 +285,41 @@ mod tests {
         assert!(!should_quit(KeyCode::Enter, KeyModifiers::empty()));
         // Plain 'c' without Ctrl is not a quit shortcut.
         assert!(!should_quit(KeyCode::Char('c'), KeyModifiers::empty()));
+    }
+
+    /// `restore_terminal` must be a no-op when no setup
+    /// state was committed. Without this contract a panic
+    /// during early startup (before `enable_raw_mode`) would
+    /// fire `disable_raw_mode` on a process that hadn't
+    /// enabled it — usually benign, but on some terminals
+    /// adds spurious escape sequences to stderr.
+    #[test]
+    fn restore_terminal_is_noop_when_not_active() {
+        TUI_ACTIVE.store(false, Ordering::SeqCst);
+        restore_terminal();
+        // Just asserting it didn't panic + flag stays false.
+        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
+    }
+
+    /// Idempotency: calling `restore_terminal` twice in a
+    /// row swaps the flag to false on the first call;
+    /// subsequent calls early-return without touching
+    /// crossterm. Validates the "panic hook AND Drop both
+    /// call this" contract.
+    #[test]
+    fn restore_terminal_idempotent_across_repeated_calls() {
+        // Pretend we'd entered raw mode. We can't actually
+        // call `enable_raw_mode` in a test process (no TTY
+        // attached on most CI), so we only exercise the flag
+        // path. The execute! calls inside restore_terminal
+        // are best-effort and ignore errors, so they're
+        // safe to run regardless.
+        TUI_ACTIVE.store(true, Ordering::SeqCst);
+        restore_terminal();
+        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
+        // Second call is a clean no-op.
+        restore_terminal();
+        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
     }
 
     #[test]
