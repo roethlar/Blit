@@ -16,6 +16,7 @@ use crate::copy::{copy_file, resume_copy_file};
 use crate::generated::{ComparisonMode, FileHeader};
 use crate::logger::NoopLogger;
 use crate::remote::transfer::payload::PreparedPayload;
+use crate::remote::transfer::progress::ByteProgressSink;
 use crate::remote::transfer::source::TransferSource;
 
 // Re-export for consumers.
@@ -128,6 +129,15 @@ pub struct FsTransferSink {
     /// keep when purging extraneous local entries. Each successful
     /// `write_payload`/`write_file_stream` pushes its `relative_path`.
     path_tracker: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
+    /// Optional byte-level progress sink. When set,
+    /// `write_file_stream` passes it into
+    /// `receive_stream_double_buffered` so chunk-granularity
+    /// writes report cumulative byte progress against the
+    /// daemon's per-transfer counter (c-1a). Unset on the CLI
+    /// side; the daemon side sets it via
+    /// [`FsTransferSink::with_byte_progress`] from
+    /// `ActiveJobGuard::bytes_counter()`.
+    byte_progress: Option<ByteProgressSink>,
 }
 
 impl FsTransferSink {
@@ -147,6 +157,7 @@ impl FsTransferSink {
             canonical_dst_root,
             config,
             path_tracker: None,
+            byte_progress: None,
         }
     }
 
@@ -156,6 +167,16 @@ impl FsTransferSink {
     /// without re-implementing the record dispatch loop.
     pub fn with_path_tracker(mut self, tracker: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
         self.path_tracker = Some(tracker);
+        self
+    }
+
+    /// Attach a byte-level progress sink. When set,
+    /// `write_file_stream` reports every chunk the data plane
+    /// writes against this sink. Used by the daemon side of
+    /// remote→remote transfers so `GetState.active[].bytes_completed`
+    /// tracks live progress; CLI-side callers omit it.
+    pub fn with_byte_progress(mut self, sink: ByteProgressSink) -> Self {
+        self.byte_progress = Some(sink);
         self
     }
 
@@ -307,9 +328,20 @@ impl TransferSink for FsTransferSink {
         // transfer would create destination directories.
         if self.config.dry_run {
             let mut sink = tokio::io::sink();
-            receive_stream_double_buffered(reader, &mut sink, header.size, RECEIVE_CHUNK_SIZE)
-                .await
-                .with_context(|| format!("draining {} (dry-run)", header.relative_path))?;
+            // Dry-run: drain wire bytes for protocol alignment.
+            // Do NOT report against `byte_progress` — by contract
+            // dry-run is side-effect-free and these bytes never
+            // hit user disk; we don't want a daemon-side bytes_completed
+            // counter to advance for an aborted preview.
+            receive_stream_double_buffered(
+                reader,
+                &mut sink,
+                header.size,
+                RECEIVE_CHUNK_SIZE,
+                None,
+            )
+            .await
+            .with_context(|| format!("draining {} (dry-run)", header.relative_path))?;
             return Ok(SinkOutcome {
                 files_written: 1,
                 bytes_written: 0,
@@ -327,9 +359,15 @@ impl TransferSink for FsTransferSink {
             let mut file = tokio::fs::File::create(&dst)
                 .await
                 .with_context(|| format!("creating {}", dst.display()))?;
-            receive_stream_double_buffered(reader, &mut file, header.size, RECEIVE_CHUNK_SIZE)
-                .await
-                .with_context(|| format!("writing {}", dst.display()))?;
+            receive_stream_double_buffered(
+                reader,
+                &mut file,
+                header.size,
+                RECEIVE_CHUNK_SIZE,
+                self.byte_progress.as_ref(),
+            )
+            .await
+            .with_context(|| format!("writing {}", dst.display()))?;
             // Flush the tokio File's internal buffer state (does NOT
             // fsync — just ensures user-space buffering is drained
             // before we drop the handle and apply mtime). Without
@@ -837,9 +875,19 @@ impl TransferSink for NullSink {
             receive_stream_double_buffered, RECEIVE_CHUNK_SIZE,
         };
         let mut sink = tokio::io::sink();
-        let n = receive_stream_double_buffered(reader, &mut sink, header.size, RECEIVE_CHUNK_SIZE)
-            .await
-            .with_context(|| format!("draining {} (null sink)", header.relative_path))?;
+        // --null benchmark: bytes never land on user disk; do
+        // not advance a daemon-side progress counter for these
+        // drains. Same reasoning as the dry-run path on
+        // FsTransferSink.
+        let n = receive_stream_double_buffered(
+            reader,
+            &mut sink,
+            header.size,
+            RECEIVE_CHUNK_SIZE,
+            None,
+        )
+        .await
+        .with_context(|| format!("draining {} (null sink)", header.relative_path))?;
         Ok(SinkOutcome {
             files_written: 1,
             bytes_written: n,

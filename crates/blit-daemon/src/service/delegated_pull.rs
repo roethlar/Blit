@@ -118,6 +118,7 @@ pub(crate) async fn handle_delegated_pull(
     metrics: Arc<TransferMetrics>,
     tx: mpsc::Sender<Result<DelegatedPullProgress, Status>>,
     transfer_id: String,
+    byte_progress: blit_core::remote::transfer::ByteProgressSink,
 ) -> bool {
     let resolver = StdResolver;
     let result = run_delegated_pull(
@@ -129,6 +130,7 @@ pub(crate) async fn handle_delegated_pull(
         transfer_id,
         &tx,
         &resolver,
+        &byte_progress,
     )
     .await;
 
@@ -156,6 +158,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     transfer_id: String,
     tx: &mpsc::Sender<Result<DelegatedPullProgress, Status>>,
     resolver: &R,
+    byte_progress: &blit_core::remote::transfer::ByteProgressSink,
 ) -> Result<(), DelegatedPullProgress> {
     use blit_core::generated::delegated_pull_error::Phase;
 
@@ -330,6 +333,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             spec,
             /* track_paths = */ false,
             None,
+            Some(byte_progress),
         )
         .await
         .map_err(|err| {
@@ -943,6 +947,7 @@ mod tests {
             metrics,
             tx,
             "t-test".to_string(),
+            blit_core::remote::transfer::ByteProgressSink::new(),
         )
         .await;
         assert!(

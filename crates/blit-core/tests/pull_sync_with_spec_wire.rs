@@ -260,6 +260,7 @@ async fn pull_sync_with_spec_forwards_spec_unchanged_on_wire() {
             spec_in.clone(),
             false,
             None,
+            None,
         )
         .await;
 
@@ -385,6 +386,7 @@ async fn pull_sync_with_spec_classifies_initial_rpc_rejection_as_negotiation() {
             Vec::<FileHeader>::new(),
             hand_built_spec(),
             false,
+            None,
             None,
         )
         .await

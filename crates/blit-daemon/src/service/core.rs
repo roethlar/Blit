@@ -317,6 +317,11 @@ impl Blit for BlitService {
         // client connection state.
         let detach = req.detach;
         let transfer_id_for_started = job.transfer_id().to_string();
+        // c-1b: byte-progress sink fed by the data-plane write
+        // loop inside `pull_sync_with_spec`. Reports land on the
+        // same atomic the table row holds, so GetState sees live
+        // progress while the transfer is in flight.
+        let byte_progress = job.bytes_counter();
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
         let delegation = Arc::clone(&self.delegation);
@@ -397,6 +402,7 @@ impl Blit for BlitService {
                     metrics,
                     handler_tx,
                     transfer_id_for_started,
+                    byte_progress,
                 ) => {
                     Some(handler_ok)
                 }
