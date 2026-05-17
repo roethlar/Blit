@@ -65,6 +65,73 @@ pub(crate) fn cancel_exit_code(outcome: &CancelJobOutcome) -> ExitCode {
     }
 }
 
+/// Snapshot of the active row's metadata, captured by the
+/// initial `GetState` before the streaming loop. Used to merge
+/// the wire `TransferComplete` / `TransferError` event's
+/// (sparse) fields back into the pre-existing
+/// `WatchSnapshot::Finished` JSON schema so JSON-Lines
+/// consumers see a stable terminal shape on both the
+/// snapshot-finished and stream-finished paths.
+struct ActiveSnapshot {
+    kind: i32,
+    peer: String,
+    module: String,
+    path: String,
+    start_unix_ms: u64,
+}
+
+impl ActiveSnapshot {
+    /// Merge with a `TransferComplete` to produce a
+    /// `TransferRecord`-shaped value that matches the JSON
+    /// schema emitted by `print_watch_json(Finished(...))`.
+    fn to_finished_complete(
+        &self,
+        c: &blit_core::generated::TransferComplete,
+    ) -> blit_core::generated::TransferRecord {
+        blit_core::generated::TransferRecord {
+            transfer_id: c.transfer_id.clone(),
+            kind: self.kind,
+            peer: self.peer.clone(),
+            module: self.module.clone(),
+            path: self.path.clone(),
+            start_unix_ms: self.start_unix_ms,
+            duration_ms: c.duration_ms,
+            bytes: c.bytes,
+            files: c.files,
+            ok: true,
+            error_message: String::new(),
+        }
+    }
+
+    /// Merge with a `TransferError` to produce the same shape.
+    /// `duration_ms` derives from `start_unix_ms` since the
+    /// event itself doesn't carry it; `bytes` / `files` stay
+    /// at zero (unknown on the error path).
+    fn to_finished_error(
+        &self,
+        e: &blit_core::generated::TransferError,
+    ) -> blit_core::generated::TransferRecord {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let duration_ms = now_ms.saturating_sub(self.start_unix_ms);
+        blit_core::generated::TransferRecord {
+            transfer_id: e.transfer_id.clone(),
+            kind: self.kind,
+            peer: self.peer.clone(),
+            module: self.module.clone(),
+            path: self.path.clone(),
+            start_unix_ms: self.start_unix_ms,
+            duration_ms,
+            bytes: 0,
+            files: 0,
+            ok: false,
+            error_message: e.message.clone(),
+        }
+    }
+}
+
 /// Stream live progress for a single transfer until it
 /// terminates or the optional timeout fires. Uses the c-2
 /// `Subscribe` RPC scoped by c-5a's `transfer_id_filter` so
@@ -81,18 +148,23 @@ pub(crate) fn cancel_exit_code(outcome: &CancelJobOutcome) -> ExitCode {
 ///                              terminal event arrived)
 ///
 /// Flow:
-/// 1. Snapshot daemon state via GetState. Three branches:
-///    - Already in recent[] → emit terminal line, return.
-///    - In active[]        → emit initial line, open Subscribe.
-///    - NotFound           → emit not-found line, return 2.
-/// 2. With Subscribe open + filtered to `transfer_id`, loop
-///    on stream events:
+/// 1. Open the Subscribe stream FIRST — registers our
+///    per-subscriber forwarder with the daemon so any terminal
+///    event fired after this point lands in the mpsc and is
+///    observable on the loop's first `message().await`.
+/// 2. Query GetState. Three branches:
+///    - Already in recent[] → drop stream, emit terminal,
+///      return appropriate exit code.
+///    - In active[]        → emit initial line, cache active
+///      metadata, fall through to stream loop.
+///    - NotFound           → emit not-found, return 2.
+/// 3. Consume Subscribe stream events for the transfer:
 ///    - TransferProgress → update progress line / JSON.
 ///    - TransferComplete → emit terminal line, return 0.
 ///    - TransferError    → emit failed line, return 1.
 ///    - TransferStarted  → ignored (initial GetState already
 ///      reported state).
-/// 3. Stream errors fall back to a final GetState query so a
+/// 4. Stream errors fall back to a final GetState query so a
 ///    Subscribe Lagged or daemon disconnect doesn't leave the
 ///    operator without a terminal answer.
 ///
@@ -119,12 +191,25 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
         );
     }
 
-    // Step 1: initial GetState snapshot so we handle the
-    // already-completed and never-existed cases without
-    // waiting on Subscribe.
+    // c-6 round 2: subscribe FIRST so terminal events that
+    // fire between the snapshot and our stream registration
+    // land in the per-subscriber mpsc and are observable on
+    // the loop's first `message().await`. The original
+    // ordering (GetState first, Subscribe second) allowed a
+    // race: transfer was Active at snapshot time, then drained
+    // before Subscribe registered, terminal events broadcast
+    // before our receiver existed, no replay (c-5b deferred),
+    // and the stream hung forever waiting for a transfer_id
+    // that's never going to fire again.
+    let mut stream = jobs::subscribe(&remote, &args.transfer_id).await?;
+
+    // Step 1: GetState snapshot so we handle the already-
+    // completed and never-existed cases (and the in-flight
+    // case where we want to render an initial line + cache
+    // metadata for terminal JSON merge).
     let state = jobs::query(&remote, 0).await?;
     let snap = jobs::watch_snapshot(&state, &args.transfer_id);
-    match &snap {
+    let active_snapshot = match &snap {
         WatchSnapshot::Finished(r) => {
             if args.json {
                 print_watch_json(&snap);
@@ -156,12 +241,24 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
             } else {
                 emit_human_active(a, None);
             }
+            // c-6 round 2: cache the active row's metadata so
+            // when a terminal event arrives over the stream we
+            // can synthesize a `WatchSnapshot::Finished`-shaped
+            // JSON object — same schema (kind, peer, module,
+            // path, start_unix_ms, duration_ms, ok,
+            // error_message) that the snapshot-finished path
+            // emits. Subscribers iterating JSON-Lines see one
+            // stable terminal shape regardless of which path
+            // produced it.
+            ActiveSnapshot {
+                kind: a.kind,
+                peer: a.peer.clone(),
+                module: a.module.clone(),
+                path: a.path.clone(),
+                start_unix_ms: a.start_unix_ms,
+            }
         }
-    }
-
-    // Step 2: open Subscribe with transfer_id_filter. The
-    // daemon only forwards events for this transfer (c-5a).
-    let mut stream = jobs::subscribe(&remote, &args.transfer_id).await?;
+    };
 
     loop {
         // tonic's `Streaming::message()` returns
@@ -211,7 +308,14 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                 }
                 Some(daemon_event::Payload::TransferComplete(c)) => {
                     if args.json {
-                        print_watch_complete_json(&c);
+                        // Synthesize a Finished-shaped JSON
+                        // object by merging the event's fields
+                        // with the cached active snapshot —
+                        // schema matches the GetState-finished
+                        // path so JSON-Lines consumers see one
+                        // stable terminal shape.
+                        let merged = active_snapshot.to_finished_complete(&c);
+                        print_watch_json(&WatchSnapshot::Finished(merged));
                     } else {
                         emit_human_complete(&c);
                     }
@@ -219,7 +323,8 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                 }
                 Some(daemon_event::Payload::TransferError(e)) => {
                     if args.json {
-                        print_watch_error_json(&e);
+                        let merged = active_snapshot.to_finished_error(&e);
+                        print_watch_json(&WatchSnapshot::Finished(merged));
                     } else {
                         eprintln!("[failed] transfer '{}' error: {}", e.transfer_id, e.message);
                     }
@@ -384,34 +489,12 @@ fn print_watch_progress_json(p: &blit_core::generated::TransferProgress) {
     }
 }
 
-fn print_watch_complete_json(c: &blit_core::generated::TransferComplete) {
-    use serde_json::json;
-    let body = json!({
-        "state": "finished",
-        "transfer_id": c.transfer_id,
-        "bytes": c.bytes,
-        "files": c.files,
-        "duration_ms": c.duration_ms,
-        "tcp_fallback_used": c.tcp_fallback_used,
-        "ok": true,
-    });
-    if let Ok(line) = serde_json::to_string(&body) {
-        println!("{}", line);
-    }
-}
-
-fn print_watch_error_json(e: &blit_core::generated::TransferError) {
-    use serde_json::json;
-    let body = json!({
-        "state": "finished",
-        "transfer_id": e.transfer_id,
-        "ok": false,
-        "error_message": e.message,
-    });
-    if let Ok(line) = serde_json::to_string(&body) {
-        println!("{}", line);
-    }
-}
+// c-6 round 2: the standalone `print_watch_complete_json` /
+// `print_watch_error_json` emitters were replaced by merging
+// the event into a `WatchSnapshot::Finished` via
+// `ActiveSnapshot::into_finished_*`, then routing through the
+// existing `print_watch_json`. That keeps the terminal JSON
+// schema identical regardless of which path produced it.
 
 fn print_watch_json(snap: &WatchSnapshot) {
     use serde_json::json;
@@ -734,6 +817,71 @@ mod tests {
     /// and good enough to pin the contract.
     fn exit_code_repr(c: ExitCode) -> String {
         format!("{:?}", c)
+    }
+
+    fn sample_active_snapshot() -> ActiveSnapshot {
+        ActiveSnapshot {
+            kind: blit_core::generated::TransferKind::DelegatedPull as i32,
+            peer: "10.0.0.5:443".to_string(),
+            module: "mod-a".to_string(),
+            path: "sub/dir".to_string(),
+            start_unix_ms: 1_700_000_000_000,
+        }
+    }
+
+    /// c-6 round 2 regression: terminal JSON shape on the
+    /// stream-complete path must match the GetState-finished
+    /// path. Pre-fix the stream path emitted only
+    /// (state, transfer_id, bytes, files, duration_ms,
+    /// tcp_fallback_used, ok), missing kind/peer/module/path/
+    /// start_unix_ms that the snapshot path provides. Merging
+    /// with the cached ActiveSnapshot restores parity.
+    #[test]
+    fn active_snapshot_to_finished_complete_carries_all_finished_fields() {
+        let snap = sample_active_snapshot();
+        let complete = blit_core::generated::TransferComplete {
+            transfer_id: "t1-7".to_string(),
+            bytes: 1024,
+            files: 4,
+            duration_ms: 1200,
+            tcp_fallback_used: false,
+        };
+        let merged = snap.to_finished_complete(&complete);
+        assert_eq!(merged.transfer_id, "t1-7");
+        assert_eq!(merged.kind, snap.kind);
+        assert_eq!(merged.peer, snap.peer);
+        assert_eq!(merged.module, snap.module);
+        assert_eq!(merged.path, snap.path);
+        assert_eq!(merged.start_unix_ms, snap.start_unix_ms);
+        assert_eq!(merged.duration_ms, 1200);
+        assert_eq!(merged.bytes, 1024);
+        assert_eq!(merged.files, 4);
+        assert!(merged.ok);
+        assert!(merged.error_message.is_empty());
+    }
+
+    /// Same parity check on the stream-error path.
+    #[test]
+    fn active_snapshot_to_finished_error_carries_all_finished_fields() {
+        let snap = sample_active_snapshot();
+        let err = blit_core::generated::TransferError {
+            transfer_id: "t1-7".to_string(),
+            message: "module not found".to_string(),
+        };
+        let merged = snap.to_finished_error(&err);
+        assert_eq!(merged.transfer_id, "t1-7");
+        assert_eq!(merged.kind, snap.kind);
+        assert_eq!(merged.peer, snap.peer);
+        assert_eq!(merged.module, snap.module);
+        assert_eq!(merged.path, snap.path);
+        assert_eq!(merged.start_unix_ms, snap.start_unix_ms);
+        // duration_ms is computed from now - start; just
+        // sanity-check it's non-negative (saturating sub).
+        let _ = merged.duration_ms;
+        assert_eq!(merged.bytes, 0);
+        assert_eq!(merged.files, 0);
+        assert!(!merged.ok);
+        assert_eq!(merged.error_message, "module not found");
     }
 
     #[test]
