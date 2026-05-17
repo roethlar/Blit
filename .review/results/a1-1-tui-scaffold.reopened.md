@@ -1,24 +1,24 @@
 # a1-1-tui-scaffold reopened
 
-Reviewed sha: `63975ef40e8ed144d3fa5f072edca883e9d34890`
-Reviewed at: 2026-05-17T17:57:42Z
+Reviewed sha: `a88055994a91e7a5a5610081ab089d8164f70cee`
+Reviewed at: 2026-05-17T18:11:28Z
 Reviewer: reviewer
 Verdict: reopened
 
 ## Findings
 
-### 1. Terminal teardown is not guaranteed on setup errors or panics
+### 1. Restore idempotency test emits real terminal control sequences
 
-Severity: Medium
+Severity: Low
 
-Location: `crates/blit-tui/src/main.rs:63`, `crates/blit-tui/src/main.rs:67`, `crates/blit-tui/src/main.rs:76`
+Location: `crates/blit-tui/src/main.rs:308`
 
-The scaffold's load-bearing promise is terminal lifecycle correctness, but the current shape only restores the terminal after `enter_tui()` has fully succeeded and `run_event_loop()` returns normally. If any setup call after `enable_raw_mode()` fails, such as `EnterAlternateScreen`, `Terminal::new`, `terminal.clear`, or `hide_cursor`, `main` returns before `leave_tui()` is available and raw mode can remain enabled. If `run_event_loop()` panics, line 68 is skipped and the terminal can remain in raw mode / alternate screen with the cursor hidden.
+Round 2 fixes the original lifecycle issue, but the new `restore_terminal_idempotent_across_repeated_calls` test sets `TUI_ACTIVE=true` and calls the real `restore_terminal()` without actually entering the TUI. That makes the test emit real crossterm escape sequences (`Show` and `LeaveAlternateScreen`) during `cargo test`; the passing test output included `\x1b[?25h\x1b[?1049l` before the `blit-tui` test names.
 
-This cannot be left as a known gap for a scaffold whose purpose is to establish the TUI lifecycle. Please make setup transactional and add panic-safe restoration before this lands. A small RAII guard plus a panic hook is fine; the important contract is that partial setup failures, normal errors, normal quit, and panics all attempt to restore raw mode, leave alternate screen, and show the cursor.
+Unit tests should not manipulate the developer's terminal or pollute CI logs with terminal control bytes. Please refactor the idempotency check so it exercises the state transition without writing terminal escape sequences, for example by extracting a pure `take_active_for_restore()` helper or injecting a test sink for the terminal commands.
 
 ## Validation
 
 - `cargo fmt --all -- --check` passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` passed.
-- `cargo test --workspace` passed.
+- `cargo test --workspace` passed, but emitted terminal escape bytes from the new `blit-tui` restore test.
