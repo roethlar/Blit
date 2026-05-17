@@ -326,10 +326,16 @@ impl Blit for BlitService {
             // dropped the guard first the record would say
             // "cancelled before outcome recorded."
             job.record_outcome(ok, err_msg.clone());
-            // c-3: emit the terminal Subscribe event while the
-            // guard is still alive (we still need to read its
-            // byte counter + start_unix_ms).
-            let _ = events_tx.send(build_transfer_finished_event(&job, ok, err_msg.as_deref()));
+            // c-3 round 2: build the terminal event from the
+            // still-alive guard (we need its byte counter +
+            // start_unix_ms), drain the daemon's bookkeeping
+            // (active row + metrics gauge + error counter),
+            // and ONLY THEN broadcast. A subscriber that races
+            // GetState immediately after seeing the event will
+            // observe the transfer already drained from
+            // active[] and present in recent[] — the event
+            // signals reconcilable state, not "about to drain."
+            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
             drop(job);
             // §3.1 followup: drop the active-transfer guard BEFORE the
             // completion log so `active=N` reflects state AFTER the
@@ -337,6 +343,7 @@ impl Blit for BlitService {
             // a single-transfer log showed `active=1`, which is
             // misleading for an end-of-RPC summary.
             drop(guard);
+            let _ = events_tx.send(finished_event);
             metrics.log_completion("push", started.elapsed(), ok);
         });
 
@@ -384,9 +391,12 @@ impl Blit for BlitService {
                 let _ = tx.send(Err(status)).await;
             }
             job.record_outcome(ok, err_msg.clone());
-            let _ = events_tx.send(build_transfer_finished_event(&job, ok, err_msg.as_deref()));
+            // c-3 round 2: build event from live guard, drain
+            // daemon bookkeeping, then broadcast.
+            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
             drop(guard);
             drop(job);
+            let _ = events_tx.send(finished_event);
             metrics.log_completion("pull", started.elapsed(), ok);
         });
 
@@ -442,9 +452,13 @@ impl Blit for BlitService {
                 let _ = tx.send(Err(status)).await;
             }
             job.record_outcome(ok, err_msg.clone());
-            let _ = events_tx.send(build_transfer_finished_event(&job, ok, err_msg.as_deref()));
+            // c-3 round 2: same ordering as push/pull — build,
+            // drain, then broadcast so subscribers can race
+            // GetState and see reconcilable state.
+            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
             drop(guard);
             drop(job);
+            let _ = events_tx.send(finished_event);
             metrics.log_completion("pull_sync", started.elapsed(), ok);
         });
 
@@ -607,11 +621,15 @@ impl Blit for BlitService {
                 None => (false, Some("client cancelled".to_string())),
             };
             job.record_outcome(job_ok, job_err.clone());
-            let _ = events_tx.send(build_transfer_finished_event(
-                &job,
-                job_ok,
-                job_err.as_deref(),
-            ));
+            // c-3 round 2: build the terminal event while the
+            // guard is still alive (we need its byte counter
+            // + start_unix_ms), but defer the broadcast until
+            // AFTER the active row is dropped AND the error
+            // counter has been incremented. Without this
+            // ordering a subscriber that races GetState after
+            // seeing the event could still see active[] or
+            // stale counters.
+            let finished_event = build_transfer_finished_event(&job, job_ok, job_err.as_deref());
             drop(job);
             // The handler's RAII guard releases the active gauge as
             // its scope ends with the spawn task above, so by the
@@ -629,6 +647,9 @@ impl Blit for BlitService {
             if matches!(outcome, Some(false)) {
                 metrics_for_log.inc_error();
             }
+            // All bookkeeping (active row, metrics gauge,
+            // error counter) is committed — safe to broadcast.
+            let _ = events_tx.send(finished_event);
             metrics_for_log.log_completion("delegated_pull", started.elapsed(), ok);
         });
 
@@ -1410,6 +1431,71 @@ mod tests {
                 // — small (test runs fast) but not negative.
                 let _ = c.duration_ms;
                 assert!(!c.tcp_fallback_used);
+            }
+            other => panic!("expected TransferComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_event_observable_only_after_active_row_drained() {
+        // c-3 round-2 regression: build → drain → broadcast.
+        // A subscriber that observes the terminal event MUST
+        // be able to immediately query GetState and see the
+        // row already moved out of active[].
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        // Replay the spawn-closure ordering: register → record
+        // outcome → build event → drop guard → broadcast.
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        guard.record_outcome(true, None);
+        let event = build_transfer_finished_event(&guard, true, None);
+        // Snapshot BEFORE drop — row should be present.
+        assert_eq!(svc.active_jobs.snapshot().len(), 1);
+        drop(guard);
+        // Snapshot AFTER drop — row drained.
+        assert!(
+            svc.active_jobs.snapshot().is_empty(),
+            "Drop must drain the active row before broadcast"
+        );
+        // Now broadcast. A subscriber's `next()` cannot
+        // resolve any earlier than this `send()` call, so by
+        // the time the subscriber sees the event the active
+        // row is already gone (recent[] now holds it).
+        let _ = svc.events_tx().send(event);
+
+        let frame = stream
+            .next()
+            .await
+            .expect("stream yields")
+            .expect("frame ok");
+        // At event-receipt time, an immediate GetState query
+        // would race and might see the recent ring populated;
+        // the load-bearing invariant is that active is
+        // already drained.
+        assert!(
+            svc.active_jobs.snapshot().is_empty(),
+            "active[] must be empty when subscriber sees terminal event"
+        );
+        // recent[] must already carry the row.
+        let recent = svc.active_jobs.recent();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].transfer_id, id);
+        match frame.payload.expect("payload present") {
+            daemon_event::Payload::TransferComplete(c) => {
+                assert_eq!(c.transfer_id, id);
             }
             other => panic!("expected TransferComplete, got {other:?}"),
         }
