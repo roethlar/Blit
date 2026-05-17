@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                       | Severity | Title                                       | Status | Branch     | Commit    |
+|--------------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-5a-transfer-id-filter  | Feature  | SubscribeRequest.transfer_id_filter        | [~]    | `phase5/c` | `6330a7d` |
 
 ## Open findings
 
