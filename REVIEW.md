@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                    | Severity | Title                                       | Status | Branch     | Commit    |
-|-----------------------|----------|---------------------------------------------|--------|------------|-----------|
-| c-6-jobs-watch-stream | Medium   | Watch race + terminal JSON shape           | [~]    | `phase5/c` | `f7edcc9` |
+_none_
 
 ## Open findings
 
@@ -83,3 +81,5 @@ Phase 5 C sub-slices on branch `phase5/c`:
 - `6330a7d` SubscribeRequest transfer_id_filter (`c-5a-transfer-id-filter`)
 - `7587b46` Per-subscriber forwarder drains broadcast before filtering (`c-5a-transfer-id-filter` round 2)
 - `d901656` Forwarder exits on client disconnect (`c-5a-transfer-id-filter` round 3)
+- `ea7a8d7` `blit jobs watch` consumes Subscribe stream (`c-6-jobs-watch-stream`)
+- `f7edcc9` Subscribe-first watch race fix + stable terminal JSON (`c-6-jobs-watch-stream` round 2)
