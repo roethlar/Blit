@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch     | Commit    |
+|-------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-7-watch-replay  | Feature  | `blit jobs watch` enables replay_recent    | [~]    | `phase5/c` | `7d3ff3f` |
 
 ## Open findings
 
