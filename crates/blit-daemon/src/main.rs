@@ -6,7 +6,7 @@ mod service;
 
 use crate::metrics::TransferMetrics;
 use crate::runtime::{load_runtime, DaemonArgs, DaemonRuntime};
-use crate::service::{BlitServer, BlitService};
+use crate::service::{spawn_progress_ticker, BlitServer, BlitService};
 use blit_core::mdns::{self, AdvertiseOptions, MdnsAdvertiser};
 use clap::Parser;
 use eyre::Result;
@@ -106,6 +106,10 @@ async fn main() -> Result<()> {
         metrics,
         delegation,
     );
+    // c-4: kick off the periodic `TransferProgress` emitter.
+    // The handle is owned by the runtime for the daemon's
+    // lifetime; on process exit tokio aborts in-flight tasks.
+    let _progress_ticker = spawn_progress_ticker(&service);
 
     println!("blitd v2 listening on {}", addr);
 

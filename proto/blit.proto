@@ -853,13 +853,13 @@ message SubscribeRequest {
 message DaemonEvent {
   oneof payload {
     TransferStarted  transfer_started  = 1;
-    // tag 2 reserved for TransferProgress (next C sub-slice).
+    TransferProgress transfer_progress = 2;
     TransferComplete transfer_complete = 3;
     TransferError    transfer_error    = 4;
     // 5..6 reserved for ModuleListChanged, DaemonHeartbeat
     // (later C sub-slices).
   }
-  reserved 2, 5, 6;
+  reserved 5, 6;
 }
 
 // Fired when the daemon registers a new active transfer in its
@@ -884,6 +884,36 @@ message TransferStarted {
   string path = 5;
   // Unix milliseconds at which the active row was registered.
   uint64 start_unix_ms = 6;
+}
+
+// Periodic chunk-granular progress for an in-flight transfer. The
+// daemon fires one TransferProgress per active row per tick (default
+// 10 Hz, see DEFAULT_PROGRESS_TICK_MS in service/core.rs) so a
+// subscribed TUI can render a live byte-level progress bar without
+// polling GetState.
+//
+// The bytes/files totals are absolute (cumulative since
+// TransferStarted), not deltas — consumers that want per-tick rates
+// subtract the previous observation. `throughput_bps` is the
+// daemon-computed instantaneous rate over the most recent tick
+// interval; a smoothed EWMA is a follow-up slice once we have an
+// operator pain signal to justify the extra state.
+message TransferProgress {
+  string transfer_id = 1;
+  // Cumulative bytes that landed on disk (same source as
+  // GetState.active[].bytes_completed).
+  uint64 bytes_completed = 2;
+  // Total bytes expected, when known. 0 until a future C
+  // sub-slice wires it from the manifest stage.
+  uint64 bytes_total = 3;
+  // Files completed; 0 until the files-counter slice wires it.
+  uint64 files_completed = 4;
+  // Total files expected; 0 until the manifest stage wires it.
+  uint64 files_total = 5;
+  // Instantaneous bytes-per-second over the most recent tick.
+  // Future slice may replace with an EWMA so subscribers see
+  // smoothed values; field name + semantic are forward-stable.
+  uint64 throughput_bps = 6;
 }
 
 // Fired when a transfer drains successfully (`ActiveJobGuard`

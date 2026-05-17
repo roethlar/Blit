@@ -6,7 +6,7 @@ mod pull_sync;
 mod push;
 mod util;
 
-pub use core::{BlitServer, BlitService};
+pub use core::{spawn_progress_ticker, BlitServer, BlitService};
 
 use blit_core::generated::{
     pull_chunk::Payload as PullPayload, DiskUsageEntry, FindEntry, PullChunk, ServerPullMessage,

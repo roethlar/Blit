@@ -21,7 +21,8 @@ use blit_core::generated::{
     FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest,
     ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk,
     PullRequest, PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
-    SubscribeRequest, TransferComplete, TransferError, TransferRecord, TransferStarted,
+    SubscribeRequest, TransferComplete, TransferError, TransferProgress, TransferRecord,
+    TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -39,6 +40,14 @@ use tonic::{Request, Response, Status, Streaming};
 /// events. Slow consumers that lag more than this many events behind
 /// receive a `tonic::Status::aborted` and re-subscribe.
 const SUBSCRIBE_BROADCAST_CAPACITY: usize = 256;
+
+/// Cadence of the c-4 progress ticker. Default 100ms (10 Hz) —
+/// matches the TUI_DESIGN.md §6.2 step-3 estimate. The cost is one
+/// broadcast event per active transfer per tick, so at typical
+/// active-counts of 1-4 transfers we send 10-40 events/sec.
+/// Subscribers that can't keep up get the c-2 Lagged → Status::aborted
+/// path; the broadcast itself never blocks the ticker.
+pub const DEFAULT_PROGRESS_TICK_MS: u64 = 100;
 
 pub struct BlitService {
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
@@ -180,6 +189,66 @@ impl BlitService {
     pub(crate) fn events_tx(&self) -> broadcast::Sender<DaemonEvent> {
         self.events_tx.clone()
     }
+}
+
+/// Drive one tick of the c-4 progress emitter. For each row in the
+/// `active_jobs` table, computes throughput since the previous tick
+/// and broadcasts a `TransferProgress` event with the row's current
+/// byte count.
+///
+/// Factored as a free function so the daemon's tokio interval task
+/// can drive it on a timer AND tests can call it directly without
+/// standing up a runtime + timer.
+///
+/// Returns the number of events emitted (one per active row).
+pub(crate) fn tick_progress_once(
+    active_jobs: &crate::active_jobs::ActiveJobs,
+    events_tx: &broadcast::Sender<DaemonEvent>,
+) -> usize {
+    let samples = active_jobs.snapshot_progress_samples();
+    let n = samples.len();
+    for sample in samples {
+        let event = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
+                transfer_id: sample.transfer_id,
+                bytes_completed: sample.bytes_completed,
+                // bytes_total and files_* land in follow-up
+                // C sub-slices that wire the manifest stage
+                // and the files counter.
+                bytes_total: 0,
+                files_completed: 0,
+                files_total: 0,
+                throughput_bps: sample.throughput_bps,
+            })),
+        };
+        let _ = events_tx.send(event);
+    }
+    n
+}
+
+/// Spawn the long-running progress ticker. Called from the daemon
+/// binary's `main` after the service is constructed; the returned
+/// `JoinHandle` lives as long as the daemon process.
+///
+/// Tests don't spawn this — they call [`tick_progress_once`]
+/// directly so the test ordering is deterministic and doesn't pick
+/// up arbitrary background events.
+#[allow(dead_code)]
+pub fn spawn_progress_ticker(svc: &BlitService) -> tokio::task::JoinHandle<()> {
+    let active_jobs = svc.active_jobs.clone();
+    let events_tx = svc.events_tx.clone();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(DEFAULT_PROGRESS_TICK_MS));
+        // Skip behavior: if the daemon is paused (e.g. by a long
+        // single-threaded operation) we don't want to fire a burst
+        // of catch-up ticks afterwards.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let _ = tick_progress_once(&active_jobs, &events_tx);
+        }
+    })
 }
 
 /// Build the terminal event for a transfer that's draining. Called
@@ -1518,6 +1587,108 @@ mod tests {
             }
             other => panic!("expected TransferError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn tick_progress_emits_transfer_progress_per_active_row() {
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        // Register two active rows and seed some bytes on one so
+        // it has non-zero progress.
+        let g1 = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p1".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        g1.bytes_counter().report(4096);
+        let g2 = svc.active_jobs.register(
+            ActiveJobKind::Pull,
+            "p2".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        // ActiveJobs::register emits no events directly — only the
+        // dispatch site calls emit_transfer_started, which we
+        // skip here. Drain whatever happened to land (e.g.
+        // background events) is unnecessary; the broadcast queue
+        // was empty when we subscribed and we haven't fired any
+        // started events.
+
+        let n = tick_progress_once(&svc.active_jobs, &svc.events_tx);
+        assert_eq!(n, 2, "one progress event per active row");
+
+        // Collect both frames the ticker broadcast.
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let frame = stream
+                .next()
+                .await
+                .expect("ticker frame yields")
+                .expect("frame ok");
+            match frame.payload.expect("payload") {
+                daemon_event::Payload::TransferProgress(p) => {
+                    ids.push((p.transfer_id, p.bytes_completed));
+                }
+                other => panic!("expected TransferProgress, got {other:?}"),
+            }
+        }
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        let id1 = g1.transfer_id().to_string();
+        let id2 = g2.transfer_id().to_string();
+        let mut expected = vec![(id1, 4096u64), (id2, 0u64)];
+        expected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(ids, expected);
+    }
+
+    #[tokio::test]
+    async fn tick_progress_throughput_reflects_delta_between_ticks() {
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        // Subscribe so the broadcast doesn't have zero receivers
+        // (it would still succeed silently, but a real consumer
+        // matches the production code path).
+        let _stream = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        // First tick — establishes the baseline at 0 bytes.
+        let _ = tick_progress_once(&svc.active_jobs, &svc.events_tx);
+
+        // Report bytes, sleep ~50ms so delta_ms is non-zero, then
+        // tick again. The second tick should show a non-zero
+        // throughput corresponding to the bytes reported.
+        guard.bytes_counter().report(50 * 1024);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let samples = svc.active_jobs.snapshot_progress_samples();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].bytes_completed, 50 * 1024);
+        // throughput_bps = 50 KiB / ~50ms ≈ 1 MiB/s. Loose bound
+        // since sleep timing isn't precise; just confirm > 0 and
+        // < a sane ceiling (10x expected).
+        assert!(samples[0].throughput_bps > 0);
+        assert!(samples[0].throughput_bps < 100 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn tick_progress_emits_zero_events_when_no_active_rows() {
+        let svc = empty_service();
+        let n = tick_progress_once(&svc.active_jobs, &svc.events_tx);
+        assert_eq!(n, 0);
     }
 
     #[tokio::test]

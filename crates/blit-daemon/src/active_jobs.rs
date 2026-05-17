@@ -248,6 +248,18 @@ pub struct TransferRecord {
     pub error_message: String,
 }
 
+/// One row's worth of progress data, returned by
+/// [`ActiveJobs::snapshot_progress_samples`] for the c-4
+/// ticker to fold into `TransferProgress` events.
+#[derive(Debug, Clone)]
+pub struct ProgressSample {
+    pub transfer_id: String,
+    pub bytes_completed: u64,
+    /// Instantaneous rate over the tick window — `delta_bytes *
+    /// 1000 / delta_ms`. Zero on the same-ms first tick.
+    pub throughput_bps: u64,
+}
+
 /// In-memory registry, shared between the dispatch boundary and
 /// future `GetState` reads.
 #[derive(Clone)]
@@ -282,6 +294,16 @@ struct TableEntry {
     /// `snapshot()` and by Drop when building the
     /// `TransferRecord`.
     bytes_counter: Arc<AtomicU64>,
+    /// c-4: byte counter value observed by the most recent
+    /// `snapshot_progress_samples` call. Used to compute
+    /// per-tick byte deltas for the `TransferProgress.throughput_bps`
+    /// field. Initialized to 0; updated atomically each tick.
+    last_progress_bytes: AtomicU64,
+    /// c-4: unix-ms timestamp of the most recent
+    /// `snapshot_progress_samples` call against this row.
+    /// Initialized to the row's `start_unix_ms`, so the first
+    /// tick computes throughput over `(now - start)`.
+    last_progress_unix_ms: AtomicU64,
 }
 
 struct Inner {
@@ -363,6 +385,8 @@ impl ActiveJobs {
             job: row,
             cancellation: cancellation.clone(),
             bytes_counter: Arc::clone(&bytes_counter),
+            last_progress_bytes: AtomicU64::new(0),
+            last_progress_unix_ms: AtomicU64::new(start_unix_ms),
         };
         self.inner
             .table
@@ -430,6 +454,46 @@ impl ActiveJobs {
                 job
             })
             .collect()
+    }
+
+    /// Snapshot each active row's current byte counter plus the
+    /// throughput observed since the previous call. Atomically
+    /// updates the per-row tracking fields so the next call sees
+    /// a fresh delta window. Called by the c-4 progress ticker
+    /// once per tick.
+    ///
+    /// `throughput_bps` is the instantaneous rate over the
+    /// elapsed window — `(delta_bytes * 1000) / delta_ms`. A
+    /// smoothed EWMA is a future C sub-slice once an operator
+    /// signal justifies the extra state.
+    pub fn snapshot_progress_samples(&self) -> Vec<ProgressSample> {
+        let now_ms = unix_ms_now();
+        let table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let mut out = Vec::with_capacity(table.len());
+        for entry in table.values() {
+            let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
+            // swap returns the OLD value; cur_bytes/now_ms is the
+            // new baseline for the next tick.
+            let last_bytes = entry.last_progress_bytes.swap(cur_bytes, Ordering::Relaxed);
+            let last_ms = entry.last_progress_unix_ms.swap(now_ms, Ordering::Relaxed);
+            let delta_bytes = cur_bytes.saturating_sub(last_bytes);
+            let delta_ms = now_ms.saturating_sub(last_ms);
+            // delta_ms == 0 can happen on the same-millisecond
+            // first tick (register and tick in the same ms). Skip
+            // the divide; report 0 throughput; next tick will have
+            // a real window.
+            let throughput_bps = if delta_ms == 0 {
+                0
+            } else {
+                ((delta_bytes as u128) * 1000 / (delta_ms as u128)) as u64
+            };
+            out.push(ProgressSample {
+                transfer_id: entry.job.transfer_id.clone(),
+                bytes_completed: cur_bytes,
+                throughput_bps,
+            });
+        }
+        out
     }
 
     /// Snapshot of the recent-runs ring, oldest first. Will
