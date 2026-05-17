@@ -5,6 +5,7 @@ members = [
     "crates/blit-app",
     "crates/blit-cli",
     "crates/blit-daemon",
+    "crates/blit-tui",
 ]
 
 [workspace.package]

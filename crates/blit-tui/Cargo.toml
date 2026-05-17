@@ -1,0 +1,21 @@
+[package]
+name = "blit-tui"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "blit-tui"
+path = "src/main.rs"
+
+[dependencies]
+blit-core = { path = "../blit-core" }
+blit-app = { path = "../blit-app" }
+tokio = { version = "1", features = ["full"] }
+ratatui = "0.30"
+crossterm = "0.29"
+eyre = "0.6"
+clap = { version = "4.6", features = ["derive"] }
+
+[lints]
+workspace = true
