@@ -85,11 +85,13 @@
 //! Round-1 of this slice used `tokio::sync::Mutex` + the
 //! try_lock-then-spawn pattern; the reviewer caught it.
 
+use blit_core::generated::DaemonEvent;
 use blit_core::remote::transfer::ByteProgressSink;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 /// Default depth of the recent-runs ring buffer. Mirrors the
@@ -97,6 +99,18 @@ use tokio_util::sync::CancellationToken;
 /// doc (§6.3) calls for. Carried as a constant here so b-3
 /// can land before the proto types.
 pub const DEFAULT_RECENT_LIMIT: usize = 50;
+
+/// Capacity of each `ActiveJob`'s per-row event ring. Holds the
+/// most recent N events emitted for that transfer so a c-5b
+/// `Subscribe(replay_recent=true, transfer_id_filter=X)` can
+/// replay the in-flight history to a late-joining client.
+///
+/// Sized to comfortably hold one TransferStarted + many
+/// TransferProgress events (10 Hz × a few seconds of history
+/// is plenty for a TUI joining mid-transfer). Terminal events
+/// never land here — they're emitted AFTER row drain (c-3
+/// round 2), at which point the ring is gone with the row.
+pub const JOB_EVENT_RING_CAP: usize = 64;
 
 /// What kind of transfer a row represents. Mirrors the
 /// dispatch sites in `service/core.rs`. When milestone C
@@ -304,6 +318,12 @@ struct TableEntry {
     /// Initialized to the row's `start_unix_ms`, so the first
     /// tick computes throughput over `(now - start)`.
     last_progress_unix_ms: AtomicU64,
+    /// c-5b: per-row event ring. Pushed under the table lock
+    /// by [`ActiveJobs::emit_event`]; cloned under the same
+    /// lock by [`ActiveJobs::subscribe_with_ring`] for replay.
+    /// Bounded to [`JOB_EVENT_RING_CAP`] — oldest entries
+    /// drop on overflow.
+    events_ring: VecDeque<DaemonEvent>,
 }
 
 struct Inner {
@@ -387,6 +407,7 @@ impl ActiveJobs {
             bytes_counter: Arc::clone(&bytes_counter),
             last_progress_bytes: AtomicU64::new(0),
             last_progress_unix_ms: AtomicU64::new(start_unix_ms),
+            events_ring: VecDeque::with_capacity(JOB_EVENT_RING_CAP),
         };
         self.inner
             .table
@@ -456,6 +477,83 @@ impl ActiveJobs {
             .collect()
     }
 
+    /// Push an event onto the per-row event ring (bounded by
+    /// [`JOB_EVENT_RING_CAP`]) AND broadcast it on `events_tx`.
+    /// Both happen under the table lock so c-5b's
+    /// [`subscribe_with_ring`] doesn't see torn state:
+    ///
+    /// - If subscribe acquires the lock FIRST, it snapshots
+    ///   the ring at its current state and registers a
+    ///   broadcast Receiver. Any subsequent `emit_event`
+    ///   adds to the ring (subscriber's snapshot is stale by
+    ///   one entry) AND broadcasts (subscriber's Receiver
+    ///   sees it on its next poll). Subscriber sees the event
+    ///   exactly once via the broadcast.
+    /// - If `emit_event` acquires the lock first, it pushes
+    ///   to the ring and broadcasts. The broadcast send
+    ///   completes while holding the lock so a not-yet-
+    ///   subscribed client misses it via broadcast — but a
+    ///   subsequent `subscribe_with_ring` snapshots the ring
+    ///   (event present) and registers a Receiver (future
+    ///   events only). Subscriber sees the event exactly once
+    ///   via the replay.
+    ///
+    /// No-op if the transfer_id isn't in the table (row
+    /// already drained or never registered) — the broadcast
+    /// still fires either way so live subscribers without a
+    /// specific filter still see it.
+    pub fn emit_event(
+        &self,
+        events_tx: &broadcast::Sender<DaemonEvent>,
+        transfer_id: &str,
+        event: DaemonEvent,
+    ) {
+        let mut table = self.inner.table.lock().expect("active_jobs table poisoned");
+        if let Some(entry) = table.get_mut(transfer_id) {
+            if entry.events_ring.len() >= JOB_EVENT_RING_CAP {
+                entry.events_ring.pop_front();
+            }
+            entry.events_ring.push_back(event.clone());
+        }
+        // Broadcast inside the lock — see ordering rationale
+        // in the doc comment above. send is sync (in-memory
+        // ring push, no I/O); critical section stays bounded.
+        let _ = events_tx.send(event);
+    }
+
+    /// Register a broadcast Receiver AND snapshot the per-row
+    /// event ring for `transfer_id_filter` atomically under
+    /// the table lock. Returns:
+    ///
+    /// - `Receiver<DaemonEvent>` — live broadcast subscription
+    ///   for the c-5a filtered forwarder.
+    /// - `Vec<DaemonEvent>` — events to replay before live
+    ///   forwarding starts. Empty unless `replay && !filter.is_empty()
+    ///   && row exists`.
+    ///
+    /// Together with [`emit_event`]'s under-lock contract,
+    /// guarantees no event is delivered to the subscriber
+    /// twice (replay + broadcast) or zero times (missed
+    /// during the subscribe race window).
+    pub fn subscribe_with_ring(
+        &self,
+        events_tx: &broadcast::Sender<DaemonEvent>,
+        transfer_id_filter: &str,
+        replay: bool,
+    ) -> (broadcast::Receiver<DaemonEvent>, Vec<DaemonEvent>) {
+        let table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let rx = events_tx.subscribe();
+        let events = if replay && !transfer_id_filter.is_empty() {
+            table
+                .get(transfer_id_filter)
+                .map(|entry| entry.events_ring.iter().cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        (rx, events)
+    }
+
     /// For each active row, sample the byte counter + throughput
     /// and invoke `emit` while holding the table lock. The lock
     /// is held across every `emit` call so the c-4 progress
@@ -489,6 +587,7 @@ impl ActiveJobs {
     /// elapsed window — `(delta_bytes * 1000) / delta_ms`. A
     /// smoothed EWMA is a future C sub-slice once an operator
     /// signal justifies the extra state.
+    #[cfg(test)]
     pub fn for_each_progress_sample<F: FnMut(ProgressSample)>(&self, mut emit: F) {
         let now_ms = unix_ms_now();
         let table = self.inner.table.lock().expect("active_jobs table poisoned");
@@ -515,6 +614,53 @@ impl ActiveJobs {
                 throughput_bps,
             });
         }
+    }
+
+    /// c-5b: sibling of [`for_each_progress_sample`] that also
+    /// pushes the built event onto the row's event ring AND
+    /// broadcasts it via `events_tx`. All three (sample
+    /// computation, ring push, broadcast) happen under the
+    /// same table lock — so the ordering against
+    /// [`subscribe_with_ring`] / [`emit_event`] / Drop holds.
+    ///
+    /// Returns the number of events emitted (one per active
+    /// row). Used by the c-4 progress ticker.
+    pub fn tick_progress_emit<F>(
+        &self,
+        events_tx: &broadcast::Sender<DaemonEvent>,
+        mut build_event: F,
+    ) -> usize
+    where
+        F: FnMut(&ProgressSample) -> DaemonEvent,
+    {
+        let now_ms = unix_ms_now();
+        let mut table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let mut count: usize = 0;
+        for entry in table.values_mut() {
+            let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
+            let last_bytes = entry.last_progress_bytes.swap(cur_bytes, Ordering::Relaxed);
+            let last_ms = entry.last_progress_unix_ms.swap(now_ms, Ordering::Relaxed);
+            let delta_bytes = cur_bytes.saturating_sub(last_bytes);
+            let delta_ms = now_ms.saturating_sub(last_ms);
+            let throughput_bps = if delta_ms == 0 {
+                0
+            } else {
+                ((delta_bytes as u128) * 1000 / (delta_ms as u128)) as u64
+            };
+            let sample = ProgressSample {
+                transfer_id: entry.job.transfer_id.clone(),
+                bytes_completed: cur_bytes,
+                throughput_bps,
+            };
+            let event = build_event(&sample);
+            if entry.events_ring.len() >= JOB_EVENT_RING_CAP {
+                entry.events_ring.pop_front();
+            }
+            entry.events_ring.push_back(event.clone());
+            let _ = events_tx.send(event);
+            count += 1;
+        }
+        count
     }
 
     /// Convenience wrapper around [`for_each_progress_sample`]

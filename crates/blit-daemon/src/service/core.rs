@@ -187,7 +187,12 @@ impl BlitService {
                 start_unix_ms: guard.start_unix_ms(),
             })),
         };
-        let _ = self.events_tx.send(event);
+        // c-5b: emit via ActiveJobs so the event lands in the
+        // per-row ring (for future replay) AND on the
+        // broadcast (for live subscribers). Both happen under
+        // the table lock — see emit_event rustdoc.
+        self.active_jobs
+            .emit_event(&self.events_tx, guard.transfer_id(), event);
     }
 
     /// Clone of the broadcast sender, handed to spawn closures
@@ -216,34 +221,28 @@ pub(crate) fn tick_progress_once(
     active_jobs: &crate::active_jobs::ActiveJobs,
     events_tx: &broadcast::Sender<DaemonEvent>,
 ) -> usize {
-    // c-4 round 2: send INSIDE the table lock so a concurrent
-    // `ActiveJobGuard::Drop` (which would otherwise broadcast
-    // the c-3 terminal event right after removing the row)
-    // can't interleave between our snapshot and our send. The
-    // closure runs under `std::sync::Mutex`; the broadcast
-    // send is synchronous so the lock window stays bounded by
-    // the number of active rows. See
-    // `ActiveJobs::for_each_progress_sample` rustdoc for the
-    // full ordering argument.
-    let mut n: usize = 0;
-    active_jobs.for_each_progress_sample(|sample| {
-        let event = DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
-                transfer_id: sample.transfer_id,
-                bytes_completed: sample.bytes_completed,
-                // bytes_total and files_* land in follow-up
-                // C sub-slices that wire the manifest stage
-                // and the files counter.
-                bytes_total: 0,
-                files_completed: 0,
-                files_total: 0,
-                throughput_bps: sample.throughput_bps,
-            })),
-        };
-        let _ = events_tx.send(event);
-        n += 1;
-    });
-    n
+    // c-5b: dispatch through `tick_progress_emit`, which
+    // builds AND broadcasts AND pushes to the per-row event
+    // ring all under the same table lock. The lock window
+    // serializes against c-3 terminal-event Drop (which also
+    // takes the table lock) and against c-5b subscribe
+    // snapshots (which use the same lock), so progress events
+    // can never be observed after a same-id terminal event
+    // and can never be missed/duplicated by replaying
+    // subscribers.
+    active_jobs.tick_progress_emit(events_tx, |sample| DaemonEvent {
+        payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
+            transfer_id: sample.transfer_id.clone(),
+            bytes_completed: sample.bytes_completed,
+            // bytes_total and files_* land in follow-up C sub-
+            // slices that wire the manifest stage and the
+            // files counter.
+            bytes_total: 0,
+            files_completed: 0,
+            files_total: 0,
+            throughput_bps: sample.throughput_bps,
+        })),
+    })
 }
 
 /// Spawn the long-running progress ticker. Called from the daemon
@@ -356,12 +355,18 @@ impl Blit for BlitService {
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
         let req = request.into_inner();
-        // Subscribe to the broadcast first, BEFORE the response
-        // is returned. This guarantees that any event emitted
-        // between this call and the client's first .next() poll
-        // lands in the broadcast queue rather than being dropped.
-        let mut broadcast_rx = self.events_tx.subscribe();
         let transfer_id_filter = req.transfer_id_filter;
+        // c-5b: atomically register a broadcast Receiver AND
+        // snapshot the per-row event ring (if replay_recent &&
+        // filter is non-empty AND the row exists). Both happen
+        // under the table lock so no event can be observed
+        // both via replay and via broadcast — see emit_event /
+        // subscribe_with_ring rustdoc for the full ordering.
+        let (mut broadcast_rx, replay) = self.active_jobs.subscribe_with_ring(
+            &self.events_tx,
+            &transfer_id_filter,
+            req.replay_recent,
+        );
 
         // c-5a round 2: per-subscriber forwarder. The round-1
         // shape (returning `BroadcastStream::filter_map` directly)
@@ -388,6 +393,21 @@ impl Blit for BlitService {
         // slow" signal.
         let (tx, rx) = mpsc::channel::<Result<DaemonEvent, Status>>(SUBSCRIBE_MPSC_CAPACITY);
         tokio::spawn(async move {
+            // c-5b: drain replay events first (empty Vec when
+            // replay_recent=false or filter is empty or row
+            // doesn't exist). The forwarder then transitions
+            // to live broadcast forwarding. Note that replay
+            // events have ALREADY been deduped against the
+            // broadcast Receiver under the table lock — the
+            // ordering contract in `subscribe_with_ring` and
+            // `emit_event` ensures any event in `replay` is
+            // NOT also in `broadcast_rx`.
+            for event in replay {
+                if tx.send(Ok(event)).await.is_err() {
+                    // Client dropped before consuming replay.
+                    return;
+                }
+            }
             loop {
                 // c-5a round 3: race broadcast recv against
                 // `tx.closed()` so the forwarder exits as soon
@@ -1490,6 +1510,7 @@ mod tests {
         // stream is returned to the caller.
         let resp = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -1542,6 +1563,7 @@ mod tests {
         let svc = empty_service();
         let mut stream_a = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -1550,6 +1572,7 @@ mod tests {
             .into_inner();
         let mut stream_b = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -1631,6 +1654,7 @@ mod tests {
         let svc = empty_service();
         let mut stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -1714,6 +1738,7 @@ mod tests {
         let svc = empty_service();
         let mut stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -1783,6 +1808,7 @@ mod tests {
         // matches the production code path).
         let _stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -1828,6 +1854,7 @@ mod tests {
         let svc = empty_service();
         let mut stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: String::new(),
             }))
@@ -2001,6 +2028,101 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_replay_recent_replays_per_row_ring_to_late_joiner() {
+        // c-5b regression: a subscriber that joins AFTER
+        // emit_transfer_started has fired (and any early
+        // TransferProgress events have fired) MUST see them
+        // on connect when SubscribeRequest.replay_recent =
+        // true. Without replay the forwarder would only see
+        // events that arrive after subscribe registration.
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        // Fire the started + a couple of progress events BEFORE
+        // anyone subscribes. They land in the row's event ring.
+        svc.emit_transfer_started(&guard, ActiveJobKind::DelegatedPull, "p", "m", "/");
+        guard.bytes_counter().report(1024);
+        tick_progress_once(&svc.active_jobs, &svc.events_tx);
+        guard.bytes_counter().report(2048);
+        tick_progress_once(&svc.active_jobs, &svc.events_tx);
+
+        // Now subscribe with replay_recent=true. The
+        // forwarder should drain the row's ring (Started +
+        // 2 progress) to us before any live broadcast.
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                replay_recent: true,
+                transfer_id_filter: id.clone(),
+            }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+                .await
+                .expect("replay frame did not arrive in time")
+                .expect("stream did not end prematurely")
+                .expect("frame ok");
+            match frame.payload.expect("payload") {
+                daemon_event::Payload::TransferStarted(_) => seen.push("started"),
+                daemon_event::Payload::TransferProgress(_) => seen.push("progress"),
+                other => panic!("unexpected variant in replay: {other:?}"),
+            }
+        }
+        // Order is the order the events were emitted: Started,
+        // Progress, Progress.
+        assert_eq!(seen, vec!["started", "progress", "progress"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_without_replay_recent_skips_ring() {
+        // Default `replay_recent=false` behavior: the row's
+        // event ring stays put, but the subscriber only sees
+        // events from subscribe time onward.
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        svc.emit_transfer_started(&guard, ActiveJobKind::DelegatedPull, "p", "m", "/");
+
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest {
+                event_mask: 0,
+                replay_recent: false,
+                transfer_id_filter: id.clone(),
+            }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        // No replay → no Started frame. A short timeout
+        // should fire with no frame received.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next()).await;
+        assert!(
+            result.is_err(),
+            "replay_recent=false should NOT replay the ring; got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn filtered_subscriber_forwarder_exits_on_client_disconnect() {
         // c-5a round-3 regression: when a filtered subscriber
         // drops its stream during a quiet period (no further
@@ -2023,6 +2145,7 @@ mod tests {
         let baseline = svc.events_tx.receiver_count();
         let stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: g_a.transfer_id().to_string(),
             }))
@@ -2102,6 +2225,7 @@ mod tests {
 
         let mut stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: id_a.clone(),
             }))
@@ -2182,6 +2306,7 @@ mod tests {
 
         let mut stream = svc
             .subscribe(Request::new(SubscribeRequest {
+                replay_recent: false,
                 event_mask: 0,
                 transfer_id_filter: id_a.clone(),
             }))

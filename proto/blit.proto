@@ -836,9 +836,18 @@ message SubscribeRequest {
   // Locking the tag here keeps the wire shape stable.
   uint32 event_mask = 1;
 
-  // Reserved for replay-on-connect (`replay_recent = 2`) in a
-  // future C sub-slice once the per-job event ring lands.
-  reserved 2;
+  // c-5b: when true AND `transfer_id_filter` is non-empty,
+  // the daemon replays the per-job event ring for the
+  // targeted transfer (up to JOB_EVENT_RING_CAP recent events)
+  // before forwarding live broadcast events. Lets a TUI that
+  // connects mid-transfer pick up the bytes-completed history
+  // without missing the early progress.
+  //
+  // No-op when `transfer_id_filter` is empty (no specific
+  // ring to drain). No-op when set on its own (the row may
+  // not exist yet); same row-not-found behavior as filter
+  // alone.
+  bool replay_recent = 2;
 
   // c-5a: when set, the daemon only forwards events whose
   // `transfer_id` matches this string. Empty means "every

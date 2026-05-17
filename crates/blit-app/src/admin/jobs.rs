@@ -120,6 +120,7 @@ pub async fn subscribe(
         .with_context(|| format!("connecting to {}", uri))?;
     let response = client
         .subscribe(SubscribeRequest {
+            replay_recent: false,
             event_mask: 0,
             transfer_id_filter: transfer_id_filter.to_string(),
         })
