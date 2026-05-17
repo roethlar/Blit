@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                    | Severity | Title                                       | Status | Branch     | Commit    |
+|-----------------------|----------|---------------------------------------------|--------|------------|-----------|
+| c-6-jobs-watch-stream | Feature  | `blit jobs watch` uses Subscribe streaming | [~]    | `phase5/c` | `ea7a8d7` |
 
 ## Open findings
 
