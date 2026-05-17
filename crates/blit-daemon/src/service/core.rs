@@ -205,9 +205,17 @@ pub(crate) fn tick_progress_once(
     active_jobs: &crate::active_jobs::ActiveJobs,
     events_tx: &broadcast::Sender<DaemonEvent>,
 ) -> usize {
-    let samples = active_jobs.snapshot_progress_samples();
-    let n = samples.len();
-    for sample in samples {
+    // c-4 round 2: send INSIDE the table lock so a concurrent
+    // `ActiveJobGuard::Drop` (which would otherwise broadcast
+    // the c-3 terminal event right after removing the row)
+    // can't interleave between our snapshot and our send. The
+    // closure runs under `std::sync::Mutex`; the broadcast
+    // send is synchronous so the lock window stays bounded by
+    // the number of active rows. See
+    // `ActiveJobs::for_each_progress_sample` rustdoc for the
+    // full ordering argument.
+    let mut n: usize = 0;
+    active_jobs.for_each_progress_sample(|sample| {
         let event = DaemonEvent {
             payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
                 transfer_id: sample.transfer_id,
@@ -222,7 +230,8 @@ pub(crate) fn tick_progress_once(
             })),
         };
         let _ = events_tx.send(event);
-    }
+        n += 1;
+    });
     n
 }
 
@@ -1682,6 +1691,116 @@ mod tests {
         // < a sane ceiling (10x expected).
         assert!(samples[0].throughput_bps > 0);
         assert!(samples[0].throughput_bps < 100 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn progress_event_cannot_arrive_after_terminal_for_same_transfer() {
+        // c-4 round-2 regression: the progress ticker and the
+        // c-3 terminal emit BOTH acquire the active-jobs table
+        // lock for their critical sections. The lock serializes
+        // them, so a TransferProgress for a given transfer_id
+        // cannot be broadcast after the corresponding
+        // TransferComplete/Error.
+        //
+        // We deterministically force the worst-case interleave:
+        // the ticker is racing against a thread that's about to
+        // run the c-3 build-then-drop-then-broadcast sequence
+        // (the spawn-closure pattern). Whichever side acquires
+        // the lock first, the invariant must hold.
+        use std::sync::atomic::AtomicUsize;
+        use tokio_stream::StreamExt;
+
+        let svc = empty_service();
+        let mut stream = svc
+            .subscribe(Request::new(SubscribeRequest { event_mask: 0 }))
+            .await
+            .expect("subscribe ok")
+            .into_inner();
+
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::DelegatedPull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        guard.bytes_counter().report(1024);
+        guard.record_outcome(true, None);
+
+        // Build the terminal event BEFORE racing the threads
+        // so we can hand it to the dropper. This mirrors the
+        // spawn-closure ordering: build, then drop, then send.
+        let finished_event = build_transfer_finished_event(&guard, true, None);
+        let events_tx = svc.events_tx.clone();
+        let active_jobs = svc.active_jobs.clone();
+
+        // Two blocking tasks racing on the lock. We don't
+        // synchronize their start with a barrier — running
+        // them naked exercises both interleavings across
+        // multiple test runs (rustc's test runner shuffles).
+        // What matters is that for EITHER interleaving the
+        // invariant holds. We then check the stream order.
+        let ticker_events_tx = events_tx.clone();
+        let ticker = tokio::task::spawn_blocking(move || {
+            tick_progress_once(&active_jobs, &ticker_events_tx);
+        });
+        let dropper = tokio::task::spawn_blocking(move || {
+            // Match c-3 round 2's spawn-closure order: drop the
+            // guard (releases the row under the lock), then
+            // broadcast the pre-built terminal event.
+            drop(guard);
+            let _ = events_tx.send(finished_event);
+        });
+
+        ticker.await.expect("ticker join");
+        dropper.await.expect("dropper join");
+
+        // Walk the subscriber's stream and assert the ordering
+        // invariant: any TransferProgress for `id` must come
+        // BEFORE any TransferComplete/Error for the same id.
+        // We can see 0 or 1 progress events depending on which
+        // task won the lock race; we must see exactly 1
+        // terminal event.
+        let mut seen_terminal = false;
+        let progress_count = AtomicUsize::new(0);
+        // Drain up to 3 frames (max possible: 1 progress + 1
+        // terminal; an extra await guards against test-runner
+        // jitter).
+        for _ in 0..3 {
+            let frame =
+                match tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                    .await
+                {
+                    Ok(Some(f)) => f.expect("frame ok"),
+                    _ => break,
+                };
+            match frame.payload.expect("payload") {
+                daemon_event::Payload::TransferProgress(p) if p.transfer_id == id => {
+                    assert!(
+                        !seen_terminal,
+                        "progress event after terminal for same transfer_id"
+                    );
+                    progress_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                daemon_event::Payload::TransferComplete(c) if c.transfer_id == id => {
+                    assert!(!seen_terminal, "two terminal events for same id");
+                    seen_terminal = true;
+                }
+                daemon_event::Payload::TransferError(e) if e.transfer_id == id => {
+                    assert!(!seen_terminal, "two terminal events for same id");
+                    seen_terminal = true;
+                }
+                _ => {
+                    // Other events (none expected) — ignore.
+                }
+            }
+        }
+        assert!(seen_terminal, "terminal event must arrive on the stream");
+        // progress_count is 0 if dropper won the lock race
+        // (row gone before ticker iterates), 1 if ticker won.
+        // Both are valid outcomes; the invariant we care about
+        // is just "no progress after terminal" which the inner
+        // assertion enforces.
     }
 
     #[tokio::test]

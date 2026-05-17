@@ -456,20 +456,42 @@ impl ActiveJobs {
             .collect()
     }
 
-    /// Snapshot each active row's current byte counter plus the
-    /// throughput observed since the previous call. Atomically
-    /// updates the per-row tracking fields so the next call sees
-    /// a fresh delta window. Called by the c-4 progress ticker
-    /// once per tick.
+    /// For each active row, sample the byte counter + throughput
+    /// and invoke `emit` while holding the table lock. The lock
+    /// is held across every `emit` call so the c-4 progress
+    /// ticker can broadcast events WITHOUT racing the c-3
+    /// terminal-event Drop path.
+    ///
+    /// Ordering invariant: [`ActiveJobGuard::Drop`] also takes
+    /// this lock to remove the row. Holding the lock during
+    /// emit guarantees that either:
+    ///
+    /// 1. The ticker took the lock first → all progress events
+    ///    for currently-live rows fire BEFORE any Drop can
+    ///    remove a row. The spawn closure's terminal event,
+    ///    which is broadcast AFTER Drop (c-3 round 2), therefore
+    ///    comes AFTER the corresponding progress events for the
+    ///    same transfer_id.
+    /// 2. Drop took the lock first → row already removed by the
+    ///    time the ticker iterates → no progress event fires
+    ///    for that transfer_id. The spawn closure's terminal
+    ///    event has been (or will shortly be) broadcast.
+    ///
+    /// Either way, a `TransferProgress` for a given transfer_id
+    /// cannot follow its `TransferComplete` / `TransferError`.
+    ///
+    /// `emit` must be cheap and non-blocking — it's called
+    /// under a `std::sync::Mutex`. The `broadcast::Sender::send`
+    /// the c-4 ticker uses is synchronous (pushes to a ring
+    /// buffer, never awaits), so this is safe.
     ///
     /// `throughput_bps` is the instantaneous rate over the
     /// elapsed window — `(delta_bytes * 1000) / delta_ms`. A
     /// smoothed EWMA is a future C sub-slice once an operator
     /// signal justifies the extra state.
-    pub fn snapshot_progress_samples(&self) -> Vec<ProgressSample> {
+    pub fn for_each_progress_sample<F: FnMut(ProgressSample)>(&self, mut emit: F) {
         let now_ms = unix_ms_now();
         let table = self.inner.table.lock().expect("active_jobs table poisoned");
-        let mut out = Vec::with_capacity(table.len());
         for entry in table.values() {
             let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
             // swap returns the OLD value; cur_bytes/now_ms is the
@@ -487,12 +509,26 @@ impl ActiveJobs {
             } else {
                 ((delta_bytes as u128) * 1000 / (delta_ms as u128)) as u64
             };
-            out.push(ProgressSample {
+            emit(ProgressSample {
                 transfer_id: entry.job.transfer_id.clone(),
                 bytes_completed: cur_bytes,
                 throughput_bps,
             });
         }
+    }
+
+    /// Convenience wrapper around [`for_each_progress_sample`]
+    /// that collects the samples into a Vec. Used by tests that
+    /// only want to inspect the sample shape without exercising
+    /// the broadcast emit. Callers that broadcast from the
+    /// returned Vec DO NOT preserve the terminal-event ordering
+    /// invariant — the lock is released before any send fires.
+    /// The c-4 ticker uses `for_each_progress_sample` directly
+    /// for that reason.
+    #[cfg(test)]
+    pub fn snapshot_progress_samples(&self) -> Vec<ProgressSample> {
+        let mut out = Vec::new();
+        self.for_each_progress_sample(|s| out.push(s));
         out
     }
 
