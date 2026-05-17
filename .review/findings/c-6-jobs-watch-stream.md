@@ -178,6 +178,78 @@ Workspace: 571 passing serially (unchanged from c-5a round 3).
 - **`bytes_total` / files counters** wired from manifest stage
   (lower priority; the CLI rendering tolerates zero).
 
+## Round 2 (sha `f7edcc9`)
+
+Reviewer caught two real medium issues:
+
+### 1. GetState → Subscribe race could miss terminal events
+
+Round-1 ordering opened the Subscribe stream AFTER the
+initial GetState snapshot. If the transfer was Active at
+snapshot time but terminated in the window before the
+Subscribe receiver registered, the daemon's terminal
+TransferComplete/Error broadcast before our receiver existed.
+Without replay (c-5b deferred) the stream then waited forever
+for an id that would never fire again — and with the default
+`--timeout-secs 0` that meant an unbounded hang.
+
+Fix: **subscribe first**. The per-subscriber forwarder
+registers its broadcast Receiver before any post-snapshot
+terminal event can broadcast. Then GetState. If the snapshot
+shows recent[] / NotFound we drop the stream and emit
+immediately. If Active, the stream's already-queued events
+(if any fired between subscribe registration and our first
+poll) drain on the first `message().await`. The race window
+collapses to zero.
+
+### 2. Terminal JSON schema drifted between paths
+
+Snapshot-finished used the existing `WatchSnapshot::Finished`
+schema (kind, peer, module, path, start_unix_ms, duration_ms,
+ok, error_message). Stream-finished emitted only the sparse
+event-payload fields (bytes, files, duration_ms,
+tcp_fallback_used, ok / transfer_id, message). JSON-Lines
+consumers watching for the old `finished` shape saw a
+different terminal object depending on which path produced it.
+
+Fix: cache the active row's metadata at snapshot time:
+
+```rust
+struct ActiveSnapshot {
+    kind: i32, peer: String, module: String,
+    path: String, start_unix_ms: u64,
+}
+```
+
+At terminal-event time, merge the event into a
+`TransferRecord`-shaped value via
+`ActiveSnapshot::to_finished_complete(&event)` /
+`to_finished_error(&event)` and route through the existing
+`print_watch_json(Finished(merged))`. JSON-Lines consumers
+now see one stable terminal shape regardless of which path
+produced it.
+
+### Tests
+
++2 unit tests in `jobs::tests`:
+
+- `active_snapshot_into_finished_complete_carries_all_finished_fields`
+  — asserts the merged TransferRecord carries kind / peer /
+  module / path / start_unix_ms from the cached snapshot AND
+  bytes / files / duration_ms / ok from the event.
+- `active_snapshot_into_finished_error_carries_all_finished_fields`
+  — same parity check for the error path; `duration_ms`
+  computed from `now - start_unix_ms`, `bytes/files` zero.
+
+The race fix itself is observable as code ordering in
+`run_jobs_watch`; an integration test that drives a real
+tonic server and exercises the timing window is deferred to
+a later end-to-end suite. The merge correctness — which is
+the load-bearing semantic for the schema-stability fix — is
+now unit-tested.
+
+Workspace: 573 passing serially (was 571; +2).
+
 ## Reviewer comments
 
 (empty — pending grade)
