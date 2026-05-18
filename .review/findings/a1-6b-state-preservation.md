@@ -258,6 +258,90 @@ multi-channel draining would need a TestBackend + a
 substantial fixture-task harness. Out of scope for this
 round; tracked implicitly under E (Polish).
 
+## Round 3 (sha filled by sentinel)
+
+Reviewer flagged the F2 setup overlap race:
+
+### F2 refresh could spawn overlapping setup tasks
+
+With a slow remote, the initial `spawn_f2_setup_task` from
+startup might still be in flight when the operator
+switches to F2 and presses `r`. Round 2's refresh handler
+unconditionally spawned a second setup if
+`transfers_event_rx.is_none()`. Two tasks then raced for
+the same `f2_setup_rx` mpsc:
+
+- Setup A succeeds, installs `event_rx`. Setup B fails
+  later → overwrites status to `Degraded` even though the
+  stream from A is healthy.
+- Both succeed → the later reply drops the active
+  receiver, switching the TUI to a fresh stream silently.
+
+### Fix: generation + in-flight guard
+
+Two new `AppState` fields:
+
+```rust
+transfers_setup_gen: u64,         // bumped on each spawn
+transfers_setup_pending: bool,    // true while waiting
+```
+
+`spawn_f2_setup_task` now takes the current generation and
+embeds it in the reply. The reply envelope becomes:
+
+```rust
+struct F2SetupReply {
+    gen: u64,
+    payload: F2SetupPayload,  // Ready { event_rx, snapshot_result } | Failed(String)
+}
+```
+
+Apply arm:
+
+1. If `reply.gen != app.transfers_setup_gen`, drop silently
+   (stale generation).
+2. Otherwise clear `transfers_setup_pending` and apply the
+   payload.
+
+Refresh handler in `handle_pane_action`:
+
+```rust
+if should_spawn_f2_setup(transfers_event_rx.is_some(),
+                         app.transfers_setup_pending) {
+    // bump gen, set pending, spawn
+} else if transfers_event_rx.is_some() {
+    refresh_via_get_state(...).await;
+}
+// else: setup pending — no-op
+```
+
+Extracted pure helper `should_spawn_f2_setup(event_rx_present,
+setup_pending) -> bool` so the contract is easy to assert.
+
+### Files changed (round 3)
+
+- `crates/blit-tui/src/main.rs`:
+  - `AppState`: `transfers_setup_gen`, `transfers_setup_pending`.
+  - `F2SetupReply` → struct with `gen` + `payload`;
+    new `F2SetupPayload` enum.
+  - `spawn_f2_setup_task` takes `gen: u64`.
+  - Initial setup spawn site (in `run_router`) bumps gen +
+    sets pending.
+  - `handle_pane_action` F2 refresh uses `should_spawn_f2_setup`
+    guard.
+  - Reply arm drops stale generations, clears pending on
+    apply.
+  - New pure helper `should_spawn_f2_setup`.
+
+### Tests
+
++1 unit test:
+- `should_spawn_f2_setup_only_when_no_stream_and_no_pending`
+  pins all four combinations of (stream present, setup
+  pending).
+
+95 blit-tui unit tests (was 94). Workspace passes serially.
+
 ## Reviewer comments
 
 (empty — pending grade)

@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| a1-6b-state-preservation | Medium | F2 setup generation + pending guard (R3) | `[~]` | `phase5/a1` | `8719925` |
 
 ## Open findings
 
