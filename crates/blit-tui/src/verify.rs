@@ -102,37 +102,59 @@ impl VerifyState {
     }
 
     /// Append a character to the focused field. No-op when
-    /// focus is None.
+    /// focus is None. Edits invalidate any prior result
+    /// AND drop any in-flight run via `invalidate_run`
+    /// (d-2 round-2 fix: the operator may type while a
+    /// `compare_trees` call is still blocking; the reply
+    /// must NOT land against the now-edited paths).
     pub fn insert_char(&mut self, c: char) {
-        match self.focus {
-            VerifyFocus::Source => self.source.push(c),
-            VerifyFocus::Destination => self.destination.push(c),
-            VerifyFocus::None => {}
-        }
-        // Editing invalidates any prior run result.
-        if matches!(
-            self.status,
-            VerifyStatus::Done { .. } | VerifyStatus::Error { .. }
-        ) {
-            self.status = VerifyStatus::Idle;
+        let mutated = match self.focus {
+            VerifyFocus::Source => {
+                self.source.push(c);
+                true
+            }
+            VerifyFocus::Destination => {
+                self.destination.push(c);
+                true
+            }
+            VerifyFocus::None => false,
+        };
+        if mutated {
+            self.invalidate_run();
         }
     }
 
-    /// Delete the last char from the focused field. No-op
-    /// when focus is None or the field is empty.
+    /// Delete the last char from the focused field. Same
+    /// invalidation contract as `insert_char`.
     pub fn backspace(&mut self) {
-        match self.focus {
-            VerifyFocus::Source => {
-                self.source.pop();
-            }
-            VerifyFocus::Destination => {
-                self.destination.pop();
-            }
-            VerifyFocus::None => {}
+        let mutated = match self.focus {
+            VerifyFocus::Source => self.source.pop().is_some(),
+            VerifyFocus::Destination => self.destination.pop().is_some(),
+            VerifyFocus::None => false,
+        };
+        if mutated {
+            self.invalidate_run();
         }
+    }
+
+    /// Drop any in-flight run result. Bumps the generation
+    /// so a still-pending compare_trees task's reply gets
+    /// dropped on arrival, AND collapses Done/Error to
+    /// Idle so the displayed counts can't outlive the
+    /// fields they were computed against.
+    fn invalidate_run(&mut self) {
+        // Bumping the request_id is what actually makes a
+        // future `apply_result` / `apply_error` for the
+        // old run return false. Generation matches the
+        // pattern used by `begin_run`.
+        self.request_id += 1;
+        // Collapse user-visible status. Running → Idle
+        // tells the renderer to stop showing
+        // "running compare_trees..." for a run whose
+        // result will now be ignored.
         if matches!(
             self.status,
-            VerifyStatus::Done { .. } | VerifyStatus::Error { .. }
+            VerifyStatus::Done { .. } | VerifyStatus::Error { .. } | VerifyStatus::Running
         ) {
             self.status = VerifyStatus::Idle;
         }
@@ -283,6 +305,61 @@ mod tests {
         state.source.clear();
         state.source.push_str("   ");
         assert!(!state.can_run());
+    }
+
+    /// d-2 round-2 regression: typing into the form while
+    /// a `compare_trees` call is still running MUST drop
+    /// the in-flight reply on arrival. Without this guard
+    /// the operator types `/tmp/a` + `/tmp/b` + Enter, then
+    /// immediately keeps typing — the blocking task's old
+    /// reply lands and labels the new paths with the old
+    /// comparison.
+    #[test]
+    fn edit_during_running_drops_in_flight_reply() {
+        let mut state = VerifyState::new();
+        state.cycle_focus(); // Source
+        state.insert_char('a');
+        state.cycle_focus(); // Destination
+        state.insert_char('b');
+        let gen = state.begin_run();
+        assert!(matches!(state.status(), VerifyStatus::Running));
+
+        // Operator keeps typing while the run is in flight.
+        state.insert_char('c');
+        // Status collapses back to Idle: we're no longer
+        // really running the gen the worker is computing.
+        assert!(matches!(state.status(), VerifyStatus::Idle));
+
+        // The in-flight reply lands — apply_result must
+        // refuse to write it, because the generation
+        // moved on.
+        let applied = state.apply_result(gen, empty_check_result());
+        assert!(!applied);
+        assert!(matches!(state.status(), VerifyStatus::Idle));
+
+        // Same for an Err reply from the same generation.
+        let applied_err = state.apply_error(gen, "boom".to_string());
+        assert!(!applied_err);
+    }
+
+    /// Backspace during Running has the same guard as
+    /// `insert_char`.
+    #[test]
+    fn backspace_during_running_drops_in_flight_reply() {
+        let mut state = VerifyState::new();
+        state.cycle_focus(); // Source
+        state.insert_char('a');
+        state.cycle_focus(); // Destination
+        state.insert_char('b');
+        let gen = state.begin_run();
+        // Cycle through None back to Source so the next
+        // backspace mutates a non-empty field.
+        state.cycle_focus(); // None
+        state.cycle_focus(); // Source
+        state.backspace();
+        assert!(matches!(state.status(), VerifyStatus::Idle));
+        let applied = state.apply_result(gen, empty_check_result());
+        assert!(!applied);
     }
 
     #[test]
