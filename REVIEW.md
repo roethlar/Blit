@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-4-f4-local-transfers | High | Round 2: mirror confirm + dest resolve + perf_history | [~] | `phase5/a1` | `470630e` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -102,3 +102,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `62eef1e` F4 Verify pane with generation-safe in-flight edits (`d-2-f4-verify` round 2)
 - `d26ca9c` F4 diagnostics dump mirrors CLI JSON shape (`d-3-f4-diagnostics` round 2)
 - `aba7394` `?` help overlay global from Verify edit mode (`e-1-help-overlay` round 2)
+- `470630e` F4 local copy/mirror triggers with mirror confirmation (`d-4-f4-local-transfers` round 2)
