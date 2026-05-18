@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ |  |  |  |  |  |
+| d-25-f2-tib-tier | Feature | TiB/s + TiB tiers on F2 formatters align with F4 | `[~]` | `phase5/a1` | `7bc5e57` |
 
 ## Open findings
 
