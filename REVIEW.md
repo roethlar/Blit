@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-22-f2-cancel-selected | Low | Round 2: sync F2 layout doc | [~] | `phase5/a1` | `852fe10` |
 
 ## Open findings
 
@@ -23,7 +23,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
-| d-22-f2-cancel-selected | Low | F2 layout doc omits cancel footer state | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
