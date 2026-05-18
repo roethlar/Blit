@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-1-f4-profile-lifecycle | Medium | Mutation errors survive over re-fetch (R2) | `[~]` | `phase5/a1` | `0607c70` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -24,7 +24,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
-| d-1-f4-profile-lifecycle | Medium | F4 lifecycle mutation errors must remain visible | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
@@ -99,3 +98,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `d33fedc` F4 Profile pane with read-only perf history + predictor (`a1-5-f4-profile`)
 - `72d67ed` F-key screen router with router-owned input task (`a1-6-screen-router` round 2)
 - `8719925` AppState unified loop with generation-guarded F2 setup (`a1-6b-state-preservation` round 3)
+- `0607c70` F4 profile lifecycle actions preserve mutation-error banners (`d-1-f4-profile-lifecycle` round 2)
