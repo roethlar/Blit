@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-1-tui-scaffold | Low      | Restore-helper tests use local AtomicBool   | [~]    | `phase5/a1` | `2237521` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -87,3 +87,7 @@ Phase 5 C sub-slices on branch `phase5/c`:
 - `ea7a8d7` `blit jobs watch` consumes Subscribe stream (`c-6-jobs-watch-stream`)
 - `f7edcc9` Subscribe-first watch race fix + stable terminal JSON (`c-6-jobs-watch-stream` round 2)
 - `7d3ff3f` `blit jobs watch` enables `replay_recent` (`c-7-watch-replay`)
+
+Phase 5 A.1 sub-slices on branch `phase5/a1`:
+
+- `2237521` `blit-tui` crate scaffold + terminal lifecycle (`a1-1-tui-scaffold`)
