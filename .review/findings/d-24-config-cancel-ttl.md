@@ -196,4 +196,121 @@ Updated three documentation surfaces in the same slice
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-24-config-cancel-ttl.reopened.md`)
+
+One Low-severity finding:
+
+- **Configured cancel TTL is bounded by the unrelated
+  live-tick cadence.** The renderer reads the clamped
+  TTL each frame, but the loop's only automatic redraw
+  timer is `live_tick.interval_ms`. So if the operator
+  sets `cancel_status_ttl_ms = 250` but
+  `live_tick.interval_ms = 5000`, a Done/Error fragment
+  stays visible for ~5s instead of clearing near 250ms.
+  Reviewer asked for the event-loop sleep to use
+  `min(live_tick_interval, remaining_cancel_ttl)` when
+  F2 is visible, plus a regression test.
+
+### Round 2 fix
+
+Two new pure helpers in `main.rs`:
+
+```rust
+fn cancel_status_remaining_ttl(
+    status: &F2CancelStatus,
+    now: Instant,
+    ttl: Duration,
+) -> Option<Duration> {
+    /* Returns Some(remaining) only while a Done/Error
+       fragment is still visible; None for Idle/Sending
+       or already-expired Done/Error. */
+}
+
+fn compute_tick_budget(
+    needs_live_tick: bool,
+    live_tick_interval: Duration,
+    cancel_remaining: Option<Duration>,
+) -> Option<Duration> {
+    /* min(live_tick_interval, remaining) when both apply;
+       just the cancel deadline when no live-tick;
+       just the live tick when no cancel pending;
+       None when neither — sleep indefinitely. */
+}
+```
+
+Loop wiring (after the existing `needs_live_tick` /
+`live_tick_interval` computation):
+
+```rust
+let cancel_ttl = Duration::from_millis(
+    tui_config.transfer.cancel_status_ttl_ms_clamped(),
+);
+let cancel_remaining = if matches!(app.current_screen, Screen::F2) {
+    cancel_status_remaining_ttl(&app.cancel_status, Instant::now(), cancel_ttl)
+} else {
+    None
+};
+let tick_budget = compute_tick_budget(
+    needs_live_tick, live_tick_interval, cancel_remaining,
+);
+let live_tick = async {
+    if let Some(dur) = tick_budget {
+        tokio::time::sleep(dur).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+};
+```
+
+The cancel-remaining gate is `Screen::F2` only — on
+F1/F3/F4 the fragment isn't rendered, so there's no
+visible deadline to hit. When the operator switches
+back to F2 after TTL, the renderer-side `>= ttl` check
+in `cancel_status_to_display` already returns Hidden.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`:
+  - New `cancel_status_remaining_ttl` helper.
+  - New `compute_tick_budget` helper.
+  - Loop computes `cancel_remaining` per iteration and
+    feeds it into `compute_tick_budget`.
+  - 11 new tests in `main::tests` (see below).
+
+### Round 2 tests
+
++11 tests (257 → 268):
+
+- `cancel_status_remaining_ttl_idle_returns_none`
+- `cancel_status_remaining_ttl_sending_returns_none`
+- `cancel_status_remaining_ttl_done_within_returns_positive`
+- `cancel_status_remaining_ttl_error_within_returns_positive`
+- `cancel_status_remaining_ttl_past_returns_none`
+- `cancel_status_remaining_ttl_at_boundary_returns_none`
+- `short_cancel_ttl_overrides_long_live_tick` — the
+  reviewer's requested regression: live=5000, cancel=250
+  → budget=250.
+- `long_cancel_ttl_keeps_live_tick_unchanged` — symmetric
+  case: live=500, cancel=60_000 → budget=500.
+- `tick_budget_no_live_tick_no_cancel_returns_none` —
+  idle path: no wakeup scheduled.
+- `tick_budget_cancel_only_wakes_for_deadline` — edge
+  case where freshness gate is false but a cancel is
+  pending; the loop must still wake.
+- `tick_budget_live_tick_only_returns_interval` — the
+  happy path when no cancel fragment is active.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+Same lesson as d-23: a "config-tunable knob" is a
+contract. If the operator sets X, the user-visible
+behavior must reflect X, not the looser of (X, some
+other knob). The 5s default coincidentally matched the
+old hardcoded value, which is why default-config tests
+all passed — short-TTL operators were silently
+ignored. The d-24 R2 regression test now pins the
+contract directly: short cancel TTL must NOT be
+delayed by long live_tick.

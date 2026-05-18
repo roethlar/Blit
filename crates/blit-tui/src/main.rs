@@ -578,12 +578,27 @@ async fn run_router(
         // e-5: cadence is now operator-tunable via
         // `[live_tick] interval_ms` in tui.toml (default
         // 500ms; clamped to [50, 5000]).
+        // d-24 R2: when F2 is visible and a Done/Error
+        // cancel fragment is pending auto-hide, the sleep
+        // budget collapses to min(live_tick_interval,
+        // remaining_cancel_ttl). Otherwise a long
+        // `live_tick.interval_ms` would silently delay a
+        // short `cancel_status_ttl_ms`.
         let needs_live_tick = needs_live_tick(&app);
         let live_tick_interval =
             std::time::Duration::from_millis(tui_config.live_tick.interval_ms_clamped());
+        let cancel_ttl =
+            std::time::Duration::from_millis(tui_config.transfer.cancel_status_ttl_ms_clamped());
+        let cancel_remaining = if matches!(app.current_screen, Screen::F2) {
+            cancel_status_remaining_ttl(&app.cancel_status, Instant::now(), cancel_ttl)
+        } else {
+            None
+        };
+        let tick_budget =
+            compute_tick_budget(needs_live_tick, live_tick_interval, cancel_remaining);
         let live_tick = async {
-            if needs_live_tick {
-                tokio::time::sleep(live_tick_interval).await;
+            if let Some(dur) = tick_budget {
+                tokio::time::sleep(dur).await;
             } else {
                 std::future::pending::<()>().await;
             }
@@ -1661,6 +1676,62 @@ fn cancel_status_to_display(
                 message: message.clone(),
             }
         }
+    }
+}
+
+/// d-24 round 2: how much wall-clock time remains before the
+/// d-23 auto-hide kicks in on a Done/Error cancel fragment.
+///
+/// Returns `Some(remaining)` only while the fragment is still
+/// visible. `None` for:
+/// - `Idle` / `Sending` — no deadline (Sending waits for the
+///   RPC reply, not a timer).
+/// - Already-expired Done/Error — the renderer already returns
+///   `Hidden`, so no further wakeup is needed.
+///
+/// The event loop reads this to ensure a short
+/// `cancel_status_ttl_ms` isn't silently bounded by a longer
+/// `live_tick.interval_ms` (round-1 R2 reopen). The fix is
+/// `min(live_tick_interval, remaining)` while F2 is visible.
+fn cancel_status_remaining_ttl(
+    status: &F2CancelStatus,
+    now: Instant,
+    ttl: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let finished_at = match status {
+        F2CancelStatus::Done { finished_at, .. } => *finished_at,
+        F2CancelStatus::Error { finished_at, .. } => *finished_at,
+        _ => return None,
+    };
+    let elapsed = now.saturating_duration_since(finished_at);
+    if elapsed >= ttl {
+        None
+    } else {
+        Some(ttl - elapsed)
+    }
+}
+
+/// d-24 round 2: pick the actual sleep budget for the loop's
+/// optional `live_tick` future.
+///
+/// - When the live tick is needed AND a cancel fragment is
+///   pending, sleep the shorter of the two (cancel deadline
+///   wins for short TTLs).
+/// - When only the live tick is needed, use its interval.
+/// - When only a cancel fragment is pending (no other
+///   freshness-driven ticks), wake just for the deadline.
+/// - When neither applies, return `None` — the loop sleeps
+///   indefinitely waiting on real events.
+fn compute_tick_budget(
+    needs_live_tick: bool,
+    live_tick_interval: std::time::Duration,
+    cancel_remaining: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (needs_live_tick, cancel_remaining) {
+        (true, Some(rem)) => Some(live_tick_interval.min(rem)),
+        (true, None) => Some(live_tick_interval),
+        (false, Some(rem)) => Some(rem),
+        (false, None) => None,
     }
 }
 
@@ -3037,6 +3108,153 @@ mod tests {
             }
             other => panic!("expected Cancelled within custom TTL, got {other:?}"),
         }
+    }
+
+    // d-24 round 2: the loop's sleep budget must respect
+    // the cancel-TTL deadline when F2 is visible, so a
+    // short cancel TTL isn't silently bounded by a long
+    // live_tick interval.
+
+    #[test]
+    fn cancel_status_remaining_ttl_idle_returns_none() {
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_millis(5_000);
+        assert!(cancel_status_remaining_ttl(&F2CancelStatus::Idle, now, ttl).is_none());
+    }
+
+    #[test]
+    fn cancel_status_remaining_ttl_sending_returns_none() {
+        let now = Instant::now();
+        let ttl = std::time::Duration::from_millis(5_000);
+        let status = F2CancelStatus::Sending {
+            transfer_id: "t-1".to_string(),
+            request_id: 1,
+        };
+        // Sending waits on the RPC reply, not a timer —
+        // the loop has no cancel-driven deadline.
+        assert!(cancel_status_remaining_ttl(&status, now, ttl).is_none());
+    }
+
+    #[test]
+    fn cancel_status_remaining_ttl_done_within_returns_positive() {
+        let finished_at = Instant::now();
+        let ttl = std::time::Duration::from_millis(1_000);
+        let now = finished_at + std::time::Duration::from_millis(250);
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at,
+        };
+        // Elapsed 250ms of a 1000ms TTL → 750ms remain.
+        let remaining = cancel_status_remaining_ttl(&status, now, ttl);
+        assert_eq!(remaining, Some(std::time::Duration::from_millis(750)));
+    }
+
+    #[test]
+    fn cancel_status_remaining_ttl_error_within_returns_positive() {
+        let finished_at = Instant::now();
+        let ttl = std::time::Duration::from_millis(2_000);
+        let now = finished_at + std::time::Duration::from_millis(1_500);
+        let status = F2CancelStatus::Error {
+            transfer_id: "t-1".to_string(),
+            message: "boom".to_string(),
+            finished_at,
+        };
+        let remaining = cancel_status_remaining_ttl(&status, now, ttl);
+        assert_eq!(remaining, Some(std::time::Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn cancel_status_remaining_ttl_past_returns_none() {
+        // Already past TTL — the renderer returns Hidden,
+        // so the loop has nothing left to wake for.
+        let finished_at = Instant::now();
+        let ttl = std::time::Duration::from_millis(500);
+        let now = finished_at + std::time::Duration::from_millis(501);
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at,
+        };
+        assert!(cancel_status_remaining_ttl(&status, now, ttl).is_none());
+    }
+
+    #[test]
+    fn cancel_status_remaining_ttl_at_boundary_returns_none() {
+        // Boundary matches the d-23 `>=` convention used
+        // by `cancel_status_to_display` — exact-tick lands
+        // on Hidden, so the loop has no remaining wakeup.
+        let finished_at = Instant::now();
+        let ttl = std::time::Duration::from_millis(500);
+        let now = finished_at + ttl;
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at,
+        };
+        assert!(cancel_status_remaining_ttl(&status, now, ttl).is_none());
+    }
+
+    /// d-24 R2 REGRESSION: this is the scenario the
+    /// reviewer flagged. Operator sets a 250ms cancel TTL
+    /// but a 5000ms live-tick. Pre-fix, the loop slept
+    /// 5000ms after the cancel reply and the fragment
+    /// stayed on screen ~20x longer than configured.
+    /// Post-fix, the tick budget collapses to the
+    /// shorter of the two.
+    #[test]
+    fn short_cancel_ttl_overrides_long_live_tick() {
+        let budget = compute_tick_budget(
+            true,
+            std::time::Duration::from_millis(5_000),
+            Some(std::time::Duration::from_millis(250)),
+        );
+        assert_eq!(budget, Some(std::time::Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn long_cancel_ttl_keeps_live_tick_unchanged() {
+        // 60s cancel TTL + 500ms live tick → live tick
+        // wins (freshness footer cadence drives the loop).
+        let budget = compute_tick_budget(
+            true,
+            std::time::Duration::from_millis(500),
+            Some(std::time::Duration::from_millis(60_000)),
+        );
+        assert_eq!(budget, Some(std::time::Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn tick_budget_no_live_tick_no_cancel_returns_none() {
+        // Pure-idle: no freshness ticks, no cancel
+        // fragment → the loop sleeps indefinitely.
+        let budget = compute_tick_budget(false, std::time::Duration::from_millis(500), None);
+        assert!(budget.is_none());
+    }
+
+    #[test]
+    fn tick_budget_cancel_only_wakes_for_deadline() {
+        // Edge case: needs_live_tick is false (e.g. the
+        // freshness gate didn't fire) but a cancel
+        // fragment is still pending. The loop must still
+        // wake for the deadline — otherwise a stale
+        // fragment would persist until the next real
+        // event.
+        let budget = compute_tick_budget(
+            false,
+            std::time::Duration::from_millis(500),
+            Some(std::time::Duration::from_millis(120)),
+        );
+        assert_eq!(budget, Some(std::time::Duration::from_millis(120)));
+    }
+
+    #[test]
+    fn tick_budget_live_tick_only_returns_interval() {
+        let budget = compute_tick_budget(true, std::time::Duration::from_millis(500), None);
+        assert_eq!(budget, Some(std::time::Duration::from_millis(500)));
     }
 
     /// `take_active_for_restore` is the pure state-transition
