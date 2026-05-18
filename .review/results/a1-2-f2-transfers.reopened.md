@@ -1,33 +1,23 @@
 # a1-2-f2-transfers reopened
 
-Reviewed sha: `71840a0347f6ed57532ad4ddcd8a47dc0677e949`
-Reviewed at: 2026-05-18T03:39:17Z
+Reviewed sha: `da7646edd601b2ae88bda1ecdf04e3927f1b38c0`
+Reviewed at: 2026-05-18T03:56:43Z
 Reviewer: reviewer
 Verdict: reopened
 
 ## Findings
 
-### 1. Subscribe events detach in-flight keystroke polls
+### 1. Startup can miss transfers between GetState and Subscribe
 
 Severity: Medium
 
-Location: `crates/blit-tui/src/main.rs:265`
+Location: `crates/blit-tui/src/main.rs:241`
 
-Each render-loop iteration creates a fresh `tokio::task::spawn_blocking` keystroke poll, then races that `JoinHandle` against `rx.recv()` in `tokio::select!`. When a Subscribe event wins, the losing `JoinHandle` is dropped. Dropping a Tokio `JoinHandle` does not stop the spawned blocking task, so the old crossterm poll continues detached for up to the 50 ms timeout and can still call `event::read()`.
+Round 2 fixes the detached-input-task issue and the idle `Connecting` status, but the live state still has a startup race: `run_event_loop` awaits the initial `jobs::query(&endpoint, 0)` before creating the Subscribe receiver with `spawn_subscribe_forwarder(...)`. Any transfer that starts after the snapshot is taken but before the Subscribe stream is registered is not present in the initial `active[]`/`recent[]` state and its `TransferStarted` event is missed.
 
-Under active progress traffic this can leave multiple detached blocking tasks polling/reading terminal input concurrently. A detached task can consume `q` or `r` and discard it, so quit/refresh becomes lossy exactly while transfers are active. It can also accumulate unnecessary blocking tasks when many progress events arrive before the poll timeout.
+That gap breaks the F2 pane in common cases. If the transfer remains active after the stream connects, later `TransferProgress` events are discarded because `TransfersState::apply_event` returns false for unknown ids. If it completes, the `TransferComplete` event can only produce a recent row with default/blank kind, peer, module, and path because the active row was never known.
 
-Please make terminal input a single owner. A dedicated input task that loops over `event::poll/read` and sends key presses through an mpsc would fit this design; the main loop can then `select!` between `key_rx.recv()` and Subscribe events without dropping unfinished crossterm reads. Keeping one pending join handle across loop iterations would also need to account for the fact that `spawn_blocking` work is not cancellable once started.
-
-### 2. Idle successful Subscribe streams stay stuck on Connecting
-
-Severity: Low
-
-Location: `crates/blit-tui/src/main.rs:239`
-
-After a remote parses successfully, the loop spawns the Subscribe forwarder but only changes `ConnectionStatus::Connecting` to `Live` after receiving a daemon event. An idle daemon can establish the Subscribe stream successfully and then emit no events indefinitely, leaving the footer on `connecting...` even though the live stream is already open.
-
-Please surface successful stream establishment separately from transfer events, for example by having the forwarder send a `Connected`/`Live` control message immediately after `jobs::subscribe(...)` succeeds. That keeps "no events yet" distinct from "still connecting".
+Please make the snapshot/stream handshake race-safe before verifying this as a live transfers pane. A reasonable shape is to open Subscribe first, buffer events while taking the snapshot, then merge them into the snapshot with idempotent recent-row handling. The important contract is that a transfer starting during TUI startup must either appear as active or end up as a complete recent row with correct metadata, not disappear or render as a blank terminal event.
 
 ## Validation
 
