@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-1-f4-profile-lifecycle | Feature | F4 c/d/e keys for perf-history lifecycle | `[~]` | `phase5/a1` | `c380e0d` |
+_none_
 
 ## Open findings
 
@@ -24,6 +22,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
+| d-1-f4-profile-lifecycle | Medium | F4 lifecycle mutation errors must remain visible | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
