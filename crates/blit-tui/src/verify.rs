@@ -91,14 +91,23 @@ impl Default for VerifyState {
 
 impl VerifyState {
     pub fn new() -> Self {
+        Self::with_defaults(false, false)
+    }
+
+    /// e-3: construct with explicit mode defaults from
+    /// the on-disk `tui.toml`. Callers that don't have a
+    /// config (tests, throwaway use) still get
+    /// `VerifyState::new()` which defaults to the
+    /// rsync-style "size+mtime · two-way" mode.
+    pub fn with_defaults(use_checksum: bool, one_way: bool) -> Self {
         Self {
             source: String::new(),
             destination: String::new(),
             focus: VerifyFocus::None,
             status: VerifyStatus::Idle,
             request_id: 0,
-            use_checksum: false,
-            one_way: false,
+            use_checksum,
+            one_way,
         }
     }
 
@@ -600,6 +609,25 @@ mod tests {
     }
 
     // d-8: started_at preserved across begin_run → apply_result.
+
+    // e-3: VerifyState honors tui.toml defaults.
+
+    #[test]
+    fn with_defaults_seeds_mode_flags_from_config() {
+        let state = VerifyState::with_defaults(true, true);
+        assert!(state.use_checksum());
+        assert!(state.one_way());
+    }
+
+    #[test]
+    fn new_uses_rsync_compatible_defaults() {
+        let state = VerifyState::new();
+        // Matches `blit check` defaults — operator who
+        // hasn't customized tui.toml gets the same shape
+        // as the CLI.
+        assert!(!state.use_checksum());
+        assert!(!state.one_way());
+    }
 
     // d-18: Ctrl-U clears the focused field.
 

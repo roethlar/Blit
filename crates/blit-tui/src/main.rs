@@ -23,6 +23,7 @@
 //! both inputs.
 
 mod browse;
+mod config;
 mod daemons;
 mod diagnostics;
 mod help;
@@ -243,6 +244,13 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
     spawn_input_task(key_tx);
 
+    // e-3: optional `<config_dir>/tui.toml`. Missing file
+    // is the default install; parse errors warn on stderr
+    // (visible after the TUI exits) and fall back to
+    // defaults. The TUI never refuses to start on a
+    // misconfigured tui.toml.
+    let tui_config = config::load(|msg| eprintln!("[blit-tui] {msg}"));
+
     // a1-6b: parse remote up-front so every pane sees the
     // same endpoint (or None) without re-parsing. Round 2:
     // keep the parse error string so F2/F3 banners can
@@ -315,7 +323,10 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         browse_fetch_tx: browse_fetch_tx.clone(),
         profile: profile::ProfileState::new(),
         profile_reply_tx: profile_reply_tx.clone(),
-        verify: verify::VerifyState::new(),
+        verify: verify::VerifyState::with_defaults(
+            tui_config.verify.default_use_checksum,
+            tui_config.verify.default_one_way,
+        ),
         diagnostics: diagnostics::DiagnosticsState::new(),
         diagnostics_reply_tx: diagnostics_reply_tx.clone(),
         help: help::HelpOverlay::default(),
