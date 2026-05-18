@@ -30,8 +30,14 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use std::time::Instant;
 
-pub fn render(frame: &mut Frame, state: &BrowseState, remote_label: &str, now: Instant) {
-    let area = frame.area();
+/// Render the F3 pane into a caller-supplied area (router-aware).
+pub fn render_into(
+    frame: &mut Frame,
+    area: Rect,
+    state: &BrowseState,
+    remote_label: &str,
+    now: Instant,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

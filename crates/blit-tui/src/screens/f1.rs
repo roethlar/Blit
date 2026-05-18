@@ -33,9 +33,10 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use std::time::Instant;
 
-/// Top-level F1 render entry. Same shape as f2::render.
-pub fn render(frame: &mut Frame, state: &DaemonsState, now: Instant) {
-    let area = frame.area();
+/// Render the F1 pane into a caller-supplied area. The
+/// router (a1-6) calls this with `body_area` from
+/// `screens::split_for_tabs` so the tab strip lives above.
+pub fn render_into(frame: &mut Frame, area: Rect, state: &DaemonsState, now: Instant) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -668,7 +669,12 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(80, 12);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let now = Instant::now();
-        terminal.draw(|frame| render(frame, &state, now)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_into(frame, area, &state, now);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let mut rendered = String::new();
         for y in 0..buffer.area.height {

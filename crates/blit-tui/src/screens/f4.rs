@@ -32,8 +32,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use std::time::Instant;
 
-pub fn render(frame: &mut Frame, state: &ProfileState, now: Instant) {
-    let area = frame.area();
+/// Render the F4 pane into a caller-supplied area (router-aware).
+pub fn render_into(frame: &mut Frame, area: Rect, state: &ProfileState, now: Instant) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

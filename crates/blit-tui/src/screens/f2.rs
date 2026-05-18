@@ -45,13 +45,15 @@ pub enum ConnectionStatus {
 /// Render the F2 screen into `frame`. The renderer is a free
 /// function so unit tests can call it against synthetic
 /// state + a `TestBackend`-backed Terminal.
-pub fn render(
+/// Render the F2 pane into a caller-supplied area. Used
+/// by the router (a1-6) to leave room for the tab strip.
+pub fn render_into(
     frame: &mut Frame,
+    area: Rect,
     state: &TransfersState,
     remote_label: &str,
     status: &ConnectionStatus,
 ) {
-    let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

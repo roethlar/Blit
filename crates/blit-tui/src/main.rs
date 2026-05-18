@@ -67,10 +67,13 @@ struct Args {
     #[arg(long)]
     remote: Option<String>,
 
-    /// Which pane to render. Defaults to F2 to preserve
-    /// the existing operator-facing behavior; F1 is opt-in
-    /// until a1-6 lands the routing UI.
-    #[arg(long, value_enum, default_value_t = ScreenArg::F2)]
+    /// Initial pane to open. With a1-6 routing in place,
+    /// the operator can switch panes via F1..F4 keys at
+    /// any time — this flag just picks the starting pane.
+    /// Defaults to F1 (Daemons) since that's the natural
+    /// entry point: scan the LAN, pick a daemon, then
+    /// drill into F2/F3/F4 from there.
+    #[arg(long, value_enum, default_value_t = ScreenArg::F1)]
     screen: ScreenArg,
 }
 
@@ -80,6 +83,47 @@ enum ScreenArg {
     F2,
     F3,
     F4,
+}
+
+/// In-app pane identifier. Distinct from `ScreenArg`
+/// because (a) the CLI value-enum maps to lowercase
+/// `f1`/`f2`/etc. for clap, while we want PascalCase
+/// values in code, and (b) `ScreenArg` may grow CLI-only
+/// variants in the future (e.g. a Help screen) that don't
+/// have an F-key.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Screen {
+    F1,
+    F2,
+    F3,
+    F4,
+}
+
+impl From<ScreenArg> for Screen {
+    fn from(arg: ScreenArg) -> Self {
+        match arg {
+            ScreenArg::F1 => Screen::F1,
+            ScreenArg::F2 => Screen::F2,
+            ScreenArg::F3 => Screen::F3,
+            ScreenArg::F4 => Screen::F4,
+        }
+    }
+}
+
+/// Return value of a per-pane event loop. `Quit` exits the
+/// TUI; `Navigate(target)` bubbles back to the router so a
+/// fresh loop for `target` can run.
+///
+/// State preservation across `Navigate` transitions is NOT
+/// implemented in a1-6 — each transition re-runs the
+/// destination pane's setup (mDNS rescan, Subscribe
+/// reopen, profile re-read). A follow-up slice
+/// (`a1-6b-state-preservation`) will hoist per-pane state
+/// into a shared `AppState` so switching back and forth
+/// preserves work.
+pub enum LoopOutcome {
+    Quit,
+    Navigate(Screen),
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -99,14 +143,33 @@ async fn main() -> Result<()> {
 
     install_panic_hook();
     let mut guard = TuiGuard::new().context("entering TUI")?;
-    let result = match args.screen {
-        ScreenArg::F1 => run_f1_event_loop(guard.terminal_mut()).await,
-        ScreenArg::F2 => run_f2_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
-        ScreenArg::F3 => run_f3_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
-        ScreenArg::F4 => run_f4_event_loop(guard.terminal_mut()).await,
-    };
+    let result = run_router(guard.terminal_mut(), &args).await;
     drop(guard);
     result
+}
+
+/// a1-6 router. Loops running the active pane's event
+/// loop until it returns `Quit`. `Navigate(target)` swaps
+/// the active pane and re-enters. The `--screen` CLI arg
+/// supplies the initial pane.
+///
+/// State preservation across navigations is not
+/// implemented in this slice — see the
+/// `a1-6b-state-preservation` follow-up.
+async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Args) -> Result<()> {
+    let mut next: Screen = args.screen.into();
+    loop {
+        let outcome = match next {
+            Screen::F1 => run_f1_event_loop(terminal).await?,
+            Screen::F2 => run_f2_event_loop(terminal, args.remote.as_deref()).await?,
+            Screen::F3 => run_f3_event_loop(terminal, args.remote.as_deref()).await?,
+            Screen::F4 => run_f4_event_loop(terminal).await?,
+        };
+        match outcome {
+            LoopOutcome::Quit => return Ok(()),
+            LoopOutcome::Navigate(target) => next = target,
+        }
+    }
 }
 
 /// Cadence for the background mDNS discovery loop. mDNS
@@ -250,7 +313,7 @@ fn install_panic_hook() {
 async fn run_f2_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     remote_arg: Option<&str>,
-) -> Result<()> {
+) -> Result<LoopOutcome> {
     let mut state = TransfersState::new();
     let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
     let mut status = if remote_arg.is_some() {
@@ -329,7 +392,9 @@ async fn run_f2_event_loop(
     loop {
         terminal
             .draw(|frame| {
-                screens::f2::render(frame, &state, &remote_label, &status);
+                let (tab_area, body_area) = screens::split_for_tabs(frame.area());
+                screens::render_tab_strip(frame, tab_area, Screen::F2);
+                screens::f2::render_into(frame, body_area, &state, &remote_label, &status);
             })
             .context("terminal.draw")?;
 
@@ -341,11 +406,11 @@ async fn run_f2_event_loop(
                         // Input task dropped its sender —
                         // unexpected (it loops until tx fails),
                         // treat as a clean exit.
-                        return Ok(());
+                        return Ok(LoopOutcome::Quit);
                     };
                     if let Some(action) = key_action(&key) {
                         match action {
-                            UserAction::Quit => return Ok(()),
+                            UserAction::Quit => return Ok(LoopOutcome::Quit),
                             UserAction::Refresh => {
                                 if let Some(endpoint) = parsed_remote.as_ref() {
                                     refresh_via_get_state(endpoint, &mut state, &mut status).await;
@@ -356,6 +421,9 @@ async fn run_f2_event_loop(
                             | UserAction::SelectPrev
                             | UserAction::Descend
                             | UserAction::Ascend => {}
+                            UserAction::Navigate(target) => {
+                                return Ok(LoopOutcome::Navigate(target));
+                            }
                         }
                     }
                 }
@@ -402,11 +470,11 @@ async fn run_f2_event_loop(
             // No live stream — only the keystroke path is
             // active.
             let Some(key) = key_rx.recv().await else {
-                return Ok(());
+                return Ok(LoopOutcome::Quit);
             };
             if let Some(action) = key_action(&key) {
                 match action {
-                    UserAction::Quit => return Ok(()),
+                    UserAction::Quit => return Ok(LoopOutcome::Quit),
                     UserAction::Refresh => {
                         if let Some(endpoint) = parsed_remote.as_ref() {
                             refresh_via_get_state(endpoint, &mut state, &mut status).await;
@@ -417,6 +485,9 @@ async fn run_f2_event_loop(
                     | UserAction::SelectPrev
                     | UserAction::Descend
                     | UserAction::Ascend => {}
+                    UserAction::Navigate(target) => {
+                        return Ok(LoopOutcome::Navigate(target));
+                    }
                 }
             }
         }
@@ -430,7 +501,9 @@ async fn run_f2_event_loop(
 /// network mDNS-advertises. The operator picks one and the
 /// future browse / trigger panes wire that selection
 /// through (later A.1 sub-slices + a1-6 routing).
-async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+async fn run_f1_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<LoopOutcome> {
     let mut state = DaemonsState::new();
 
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
@@ -465,16 +538,18 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
         let now = Instant::now();
         terminal
             .draw(|frame| {
-                screens::f1::render(frame, &state, now);
+                let (tab_area, body_area) = screens::split_for_tabs(frame.area());
+                screens::render_tab_strip(frame, tab_area, Screen::F1);
+                screens::f1::render_into(frame, body_area, &state, now);
             })
             .context("terminal.draw")?;
 
         tokio::select! {
             key = key_rx.recv() => {
-                let Some(key) = key else { return Ok(()); };
+                let Some(key) = key else { return Ok(LoopOutcome::Quit); };
                 if let Some(action) = key_action(&key) {
                     match action {
-                        UserAction::Quit => return Ok(()),
+                        UserAction::Quit => return Ok(LoopOutcome::Quit),
                         UserAction::Refresh => {
                             // Non-blocking nudge to the discovery
                             // task. If the channel is full a scan
@@ -503,6 +578,9 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                         // will repurpose Enter to switch panes;
                         // for now both Descend/Ascend are no-ops.
                         UserAction::Descend | UserAction::Ascend => {}
+                        UserAction::Navigate(target) => {
+                            return Ok(LoopOutcome::Navigate(target));
+                        }
                     }
                 }
             }
@@ -645,7 +723,7 @@ const F1_DETAIL_BUFFER: usize = 8;
 async fn run_f3_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     remote_arg: Option<&str>,
-) -> Result<()> {
+) -> Result<LoopOutcome> {
     let mut state = BrowseState::new();
     let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
 
@@ -699,16 +777,18 @@ async fn run_f3_event_loop(
         let label = remote_label.clone();
         terminal
             .draw(|frame| {
-                screens::f3::render(frame, &state, &label, now);
+                let (tab_area, body_area) = screens::split_for_tabs(frame.area());
+                screens::render_tab_strip(frame, tab_area, Screen::F3);
+                screens::f3::render_into(frame, body_area, &state, &label, now);
             })
             .context("terminal.draw")?;
 
         tokio::select! {
             key = key_rx.recv() => {
-                let Some(key) = key else { return Ok(()); };
+                let Some(key) = key else { return Ok(LoopOutcome::Quit); };
                 if let Some(action) = key_action(&key) {
                     match action {
-                        UserAction::Quit => return Ok(()),
+                        UserAction::Quit => return Ok(LoopOutcome::Quit),
                         UserAction::Refresh => {
                             handle_f3_refresh(
                                 &mut state,
@@ -726,6 +806,9 @@ async fn run_f3_event_loop(
                         }
                         UserAction::Ascend => {
                             state.ascend();
+                        }
+                        UserAction::Navigate(target) => {
+                            return Ok(LoopOutcome::Navigate(target));
                         }
                     }
                 }
@@ -860,7 +943,9 @@ enum BrowseFetchPayload {
 /// predictor state file (both local files; no RPC). The
 /// `profile::query` call is synchronous, so we run it on a
 /// `spawn_blocking` task to avoid stalling the runtime.
-async fn run_f4_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+async fn run_f4_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<LoopOutcome> {
     use crate::profile::ProfileState;
     let mut state = ProfileState::new();
 
@@ -879,16 +964,18 @@ async fn run_f4_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
         let now = Instant::now();
         terminal
             .draw(|frame| {
-                screens::f4::render(frame, &state, now);
+                let (tab_area, body_area) = screens::split_for_tabs(frame.area());
+                screens::render_tab_strip(frame, tab_area, Screen::F4);
+                screens::f4::render_into(frame, body_area, &state, now);
             })
             .context("terminal.draw")?;
 
         tokio::select! {
             key = key_rx.recv() => {
-                let Some(key) = key else { return Ok(()); };
+                let Some(key) = key else { return Ok(LoopOutcome::Quit); };
                 if let Some(action) = key_action(&key) {
                     match action {
-                        UserAction::Quit => return Ok(()),
+                        UserAction::Quit => return Ok(LoopOutcome::Quit),
                         UserAction::Refresh => {
                             let id = state.begin_fetch();
                             spawn_profile_fetch(id, reply_tx.clone());
@@ -899,6 +986,9 @@ async fn run_f4_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                         | UserAction::SelectPrev
                         | UserAction::Descend
                         | UserAction::Ascend => {}
+                        UserAction::Navigate(target) => {
+                            return Ok(LoopOutcome::Navigate(target));
+                        }
                     }
                 }
             }
@@ -1044,7 +1134,9 @@ fn spawn_input_task(tx: mpsc::Sender<KeyEvent>) {
 /// Action surfaced by `key_action` back to the loop.
 /// `Quit` and `Refresh` are shared across screens; the
 /// other variants are pane-specific (F2 ignores all
-/// navigation today).
+/// navigation today). `Navigate` bubbles up to the
+/// router so the top-level can switch which pane is
+/// active.
 enum UserAction {
     Quit,
     Refresh,
@@ -1055,6 +1147,9 @@ enum UserAction {
     /// F3: pop back one level (←). Mapped only on the
     /// dedicated key; q/Esc remain Quit.
     Ascend,
+    /// Switch to a different pane. Bubbles back to the
+    /// router via `LoopOutcome::Navigate`.
+    Navigate(Screen),
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1073,6 +1168,17 @@ struct KeyEvent {
 fn key_action(key: &KeyEvent) -> Option<UserAction> {
     if should_quit(key.code, key.modifiers) {
         return Some(UserAction::Quit);
+    }
+    // F1-F4 navigate to the named pane. Available from
+    // every pane — that's the whole point of the router.
+    if let KeyCode::F(n) = key.code {
+        match n {
+            1 => return Some(UserAction::Navigate(Screen::F1)),
+            2 => return Some(UserAction::Navigate(Screen::F2)),
+            3 => return Some(UserAction::Navigate(Screen::F3)),
+            4 => return Some(UserAction::Navigate(Screen::F4)),
+            _ => {}
+        }
     }
     match key.code {
         KeyCode::Char('r') => Some(UserAction::Refresh),
@@ -1282,6 +1388,33 @@ mod tests {
             key_action(&k(KeyCode::Char('r'))),
             Some(UserAction::Refresh)
         ));
+    }
+
+    /// a1-6: F-keys F1..F4 map to Navigate(...) for the
+    /// corresponding pane. Verified across all four keys.
+    #[test]
+    fn key_action_maps_f_keys_to_navigate() {
+        let f = |n| key_action(&k(KeyCode::F(n)));
+        assert!(matches!(f(1), Some(UserAction::Navigate(Screen::F1))));
+        assert!(matches!(f(2), Some(UserAction::Navigate(Screen::F2))));
+        assert!(matches!(f(3), Some(UserAction::Navigate(Screen::F3))));
+        assert!(matches!(f(4), Some(UserAction::Navigate(Screen::F4))));
+        // Out-of-range F-keys are not mapped (F5+ unused
+        // today; the design reserves them for future help /
+        // settings / etc.).
+        assert!(f(5).is_none());
+        assert!(f(12).is_none());
+    }
+
+    /// a1-6: ScreenArg → Screen mapping covers all four
+    /// variants. Pins the CLI-to-router translation so a
+    /// future ScreenArg variant can't silently default.
+    #[test]
+    fn screen_arg_to_screen_mapping_is_total() {
+        assert_eq!(Screen::from(ScreenArg::F1), Screen::F1);
+        assert_eq!(Screen::from(ScreenArg::F2), Screen::F2);
+        assert_eq!(Screen::from(ScreenArg::F3), Screen::F3);
+        assert_eq!(Screen::from(ScreenArg::F4), Screen::F4);
     }
 
     /// a1-4: F3 navigation keys. Enter / → / 'l' descend
