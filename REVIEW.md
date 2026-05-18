@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-9-live-tick     | Feature  | 500ms wakeup ticks F4 elapsed counter       | [~]    | `phase5/a1` | `d406e3d` |
 
 ## Open findings
 
