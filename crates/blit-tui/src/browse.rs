@@ -14,11 +14,15 @@
 //!
 //! Navigation:
 //!
-//! - `enter` (or →): descend into the cursor's directory.
-//!   No-op on a file entry today (transfer / detail panes
-//!   are future slices).
-//! - `esc` (or ←): pop the path. At module root, pops back
+//! - `enter` (or `→` / `l`): descend into the cursor's
+//!   directory. No-op on a file entry today (transfer /
+//!   detail panes are future slices).
+//! - `←` (or `h`): pop the path. At module root, pops back
 //!   to the module list. At the module list, no-op.
+//!
+//! `q` and `Esc` are reserved for Quit and are NOT
+//! interpreted as ascend — the operator's muscle memory for
+//! quitting wins over the file-manager Esc convention.
 
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;

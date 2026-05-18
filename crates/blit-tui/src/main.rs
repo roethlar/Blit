@@ -706,18 +706,11 @@ async fn run_f3_event_loop(
                     match action {
                         UserAction::Quit => return Ok(()),
                         UserAction::Refresh => {
-                            // Drop last_fetched_view so the next
-                            // iteration's kick fires.
-                            last_fetched_view = None;
-                            // Bump generation so any in-flight
-                            // reply is dropped on arrival.
-                            state.begin_fetch();
-                            // begin_fetch sets Pending; the kick
-                            // path uses Idle/Error as triggers,
-                            // so reset to Idle here to re-fire.
-                            // (Refresh is the only path that
-                            // bumps generation without descending.)
-                            state.note_fetch_error("refreshing".to_string());
+                            handle_f3_refresh(
+                                &mut state,
+                                endpoint.is_some(),
+                                &mut last_fetched_view,
+                            );
                         }
                         UserAction::SelectNext => state.select_next(),
                         UserAction::SelectPrev => state.select_prev(),
@@ -740,6 +733,33 @@ async fn run_f3_event_loop(
             }
         }
     }
+}
+
+/// Pure helper for F3's `r` keystroke. When `has_endpoint`
+/// is false the refresh is a no-op — there's no daemon to
+/// query and the existing status banner is already showing
+/// the actionable error (missing or malformed `--remote`).
+/// Overwriting that with `"refreshing"` would hide the
+/// operator's actual problem AND leave the UI stuck on
+/// "refreshing" because the kick path can never fire
+/// without an endpoint.
+///
+/// When `has_endpoint` is true, bumps the request id (to
+/// discard any in-flight reply), resets `last_fetched_view`
+/// (so the next loop iteration's kick fires), and sets the
+/// status to `Error("refreshing")` which the kick path
+/// treats as a refresh trigger.
+fn handle_f3_refresh(
+    state: &mut BrowseState,
+    has_endpoint: bool,
+    last_fetched_view: &mut Option<browse::BrowseView>,
+) {
+    if !has_endpoint {
+        return;
+    }
+    *last_fetched_view = None;
+    state.begin_fetch();
+    state.note_fetch_error("refreshing".to_string());
 }
 
 fn views_differ(prior: Option<&browse::BrowseView>, current: &browse::BrowseView) -> bool {
@@ -1393,6 +1413,56 @@ mod tests {
             other => panic!("expected preserved Loaded, got {other:?}"),
         }
         assert!(detail_rx.try_recv().is_err());
+    }
+
+    /// a1-4 round-2 regression: refresh while F3 has no
+    /// usable endpoint (missing or malformed `--remote`)
+    /// MUST be a no-op — the actionable error banner must
+    /// survive. Round-1 unconditionally wiped the banner
+    /// with "refreshing" and stranded the operator.
+    #[test]
+    fn handle_f3_refresh_without_endpoint_preserves_error() {
+        let mut state = BrowseState::new();
+        state.note_fetch_error("--remote <host> is required for F3 Browse".to_string());
+        let mut last_fetched: Option<browse::BrowseView> = None;
+
+        handle_f3_refresh(&mut state, false, &mut last_fetched);
+
+        match state.status() {
+            browse::BrowseFetchStatus::Error { message } => {
+                assert!(message.contains("--remote"));
+                assert!(!message.contains("refreshing"));
+            }
+            other => panic!("expected preserved Error banner, got {other:?}"),
+        }
+        // last_fetched_view unchanged.
+        assert!(last_fetched.is_none());
+    }
+
+    /// Companion: with an endpoint, refresh does the
+    /// expected dance (bumps generation, resets
+    /// last_fetched_view, flips to Error("refreshing") so
+    /// the kick path re-fires next iteration).
+    #[test]
+    fn handle_f3_refresh_with_endpoint_arms_next_kick() {
+        let mut state = BrowseState::new();
+        // Simulate the "after a successful list_modules"
+        // state.
+        state.apply_modules(Vec::new(), Instant::now());
+        let mut last_fetched: Option<browse::BrowseView> = Some(browse::BrowseView::Modules);
+
+        handle_f3_refresh(&mut state, true, &mut last_fetched);
+
+        // Generation bumped (status is Error("refreshing")
+        // now, but the request_id under the hood was bumped
+        // by begin_fetch).
+        match state.status() {
+            browse::BrowseFetchStatus::Error { message } => {
+                assert_eq!(message, "refreshing");
+            }
+            other => panic!("expected Error(refreshing), got {other:?}"),
+        }
+        assert!(last_fetched.is_none());
     }
 
     /// a1-4: views_differ is the trigger predicate for
