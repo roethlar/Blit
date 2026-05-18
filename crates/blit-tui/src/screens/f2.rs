@@ -108,7 +108,9 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, no
         Constraint::Length(14),
         Constraint::Length(20),
         Constraint::Min(20),
-        Constraint::Length(12),
+        // d-15: bytes column carries "bytes · NN%" so we
+        // need 18 chars for worst-case "1023.99 MiB · 100%".
+        Constraint::Length(18),
         Constraint::Length(12),
         Constraint::Length(10),
     ];
@@ -213,7 +215,7 @@ fn active_row_to_table_row(row: &ActiveRow, now_unix_ms: u64) -> Row<'static> {
         Cell::from(kind_label(row.kind).to_string()),
         Cell::from(row.peer.clone()),
         Cell::from(module_path(&row.module, &row.path)),
-        Cell::from(format_bytes(row.bytes_completed)),
+        Cell::from(format_bytes_progress(row.bytes_completed, row.bytes_total)),
         Cell::from(if row.throughput_bps == 0 {
             "-".to_string()
         } else {
@@ -300,6 +302,38 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
+/// d-15: bytes-completed display for F2's active rows.
+/// When `bytes_total > 0` (the daemon knows how much is
+/// in flight) we append a percentage so the operator can
+/// see fraction-complete at a glance:
+///
+///     500 KiB · 10%
+///     1.20 GiB · 75%
+///     0 B · 0%
+///
+/// When `bytes_total == 0` the daemon hasn't measured the
+/// total yet (e.g. a remote pull whose ls hasn't returned),
+/// so we just show the raw byte count to avoid lying about
+/// a meaningless 0%.
+///
+/// `completed > total` (daemon counter drift) clamps the
+/// percent to 100 — the percent is operator-facing UX, not
+/// authoritative arithmetic.
+fn format_bytes_progress(completed: u64, total: u64) -> String {
+    let bytes_str = format_bytes(completed);
+    if total == 0 {
+        return bytes_str;
+    }
+    let percent = if completed >= total {
+        100
+    } else {
+        // No overflow: completed < total ≤ u64::MAX, so
+        // completed * 100 fits in u128.
+        ((completed as u128 * 100) / total as u128) as u64
+    };
+    format!("{bytes_str} · {percent}%")
+}
+
 fn format_ms(n: u64) -> String {
     if n >= 1000 {
         format!("{:.1}s", n as f64 / 1000.0)
@@ -355,6 +389,39 @@ mod tests {
         assert_eq!(format_age_from_unix_ms(1_120_000, 1_000_000), "2m");
         // 1h → 3_600_000ms past start
         assert_eq!(format_age_from_unix_ms(4_600_000, 1_000_000), "1h");
+    }
+
+    // d-15: bytes-progress display.
+
+    #[test]
+    fn format_bytes_progress_omits_percent_when_total_unknown() {
+        // bytes_total=0 means the daemon hasn't measured
+        // the plan yet — show just the raw bytes.
+        assert_eq!(format_bytes_progress(512, 0), "512 B");
+        assert_eq!(format_bytes_progress(0, 0), "0 B");
+    }
+
+    #[test]
+    fn format_bytes_progress_appends_percent_when_total_known() {
+        assert_eq!(format_bytes_progress(0, 1000), "0 B · 0%");
+        assert_eq!(format_bytes_progress(500, 1000), "500 B · 50%");
+        assert_eq!(format_bytes_progress(1000, 1000), "1000 B · 100%");
+    }
+
+    #[test]
+    fn format_bytes_progress_clamps_overflow_to_100() {
+        // Daemon counter drift: completed > total.
+        // Showing "120%" would confuse the operator more
+        // than it'd inform.
+        assert_eq!(format_bytes_progress(120, 100), "120 B · 100%");
+    }
+
+    #[test]
+    fn format_bytes_progress_picks_correct_byte_unit() {
+        assert_eq!(
+            format_bytes_progress(1024 * 1024, 4 * 1024 * 1024),
+            "1.00 MiB · 25%"
+        );
     }
 
     #[test]
