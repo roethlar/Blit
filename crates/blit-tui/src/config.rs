@@ -30,6 +30,7 @@ pub const CONFIG_FILENAME: &str = "tui.toml";
 #[serde(default, deny_unknown_fields)]
 pub struct TuiConfig {
     pub verify: VerifyDefaults,
+    pub tab_strip: TabStripDefaults,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -42,6 +43,24 @@ pub struct VerifyDefaults {
     /// Default value of `VerifyState::one_way`. `false`
     /// matches `blit check`'s two-way default.
     pub default_one_way: bool,
+}
+
+/// e-4: tab-strip rendering preferences.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TabStripDefaults {
+    /// Render the right-side "N daemons · N active · N
+    /// recent · ? help" counts. `true` (default) matches
+    /// d-15. `false` collapses the tab strip to just the
+    /// F1..F4 labels — useful on narrow terminals or for
+    /// operators who find the counts distracting.
+    pub show_counts: bool,
+}
+
+impl Default for TabStripDefaults {
+    fn default() -> Self {
+        Self { show_counts: true }
+    }
 }
 
 /// Read + parse `<config_dir>/tui.toml`. Any failure

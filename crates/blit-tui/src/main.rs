@@ -427,7 +427,13 @@ async fn run_router(
                     active_transfers: app.transfers.active_count() + app.transfer.count_active(),
                     recent_transfers: app.transfers.recent_count() + app.transfer.count_recent(),
                 };
-                screens::render_tab_strip(frame, tab_area, app.current_screen, counts);
+                screens::render_tab_strip(
+                    frame,
+                    tab_area,
+                    app.current_screen,
+                    counts,
+                    tui_config.tab_strip.show_counts,
+                );
                 match app.current_screen {
                     Screen::F1 => screens::f1::render_into(frame, body_area, &app.daemons, now),
                     Screen::F2 => screens::f2::render_into(

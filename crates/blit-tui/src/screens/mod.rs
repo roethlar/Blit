@@ -63,16 +63,34 @@ pub struct TabStripCounts {
 ///    always painted; on a terminal narrower than the
 ///    short-tab width, ratatui's Paragraph truncates the
 ///    span as a last resort.
-pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen, counts: TabStripCounts) {
+pub fn render_tab_strip(
+    frame: &mut Frame,
+    area: Rect,
+    active: Screen,
+    counts: TabStripCounts,
+    show_counts: bool,
+) {
     let full_tab_spans = build_tab_spans(active, false);
     let short_tab_spans = build_tab_spans(active, true);
     let full_tab_width = total_span_width(&full_tab_spans);
     let short_tab_width = total_span_width(&short_tab_spans);
 
+    // e-4: when `show_counts` is false (operator opted
+    // out via `[tab_strip] show_counts = false`), the
+    // right-edge column collapses to zero width and the
+    // tabs always get full labels if they fit. Layout
+    // logic stays identical; we just feed it zero widths
+    // for the counts so it never gets selected.
     let full_counts = format_counts_full(counts);
     let short_counts = format_counts_short(counts);
-    let full_counts_width = full_counts.chars().count() as u16;
-    let short_counts_width = short_counts.chars().count() as u16;
+    let (full_counts_width, short_counts_width) = if show_counts {
+        (
+            full_counts.chars().count() as u16,
+            short_counts.chars().count() as u16,
+        )
+    } else {
+        (0, 0)
+    };
 
     let (tab_spans, tab_width, counts_str) =
         if area.width >= full_tab_width.saturating_add(full_counts_width) {
@@ -92,7 +110,7 @@ pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen, counts: T
 
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), chunks[0]);
 
-    if !counts_str.is_empty() {
+    if show_counts && !counts_str.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 counts_str,
@@ -224,5 +242,75 @@ mod tests {
             short_width <= 30,
             "short-tab spans must fit within 30 cols; got {short_width}"
         );
+    }
+
+    // e-4: tab-strip render honors the `show_counts`
+    // flag from tui.toml.
+
+    #[test]
+    fn render_tab_strip_with_counts_shown_renders_counts() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // 120 wide so the responsive layout picks the
+        // full counts format ("3 daemons · ..."), not the
+        // short fallback ("3d · 1a · 47r").
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_tab_strip(
+                    frame,
+                    frame.area(),
+                    Screen::F1,
+                    TabStripCounts {
+                        daemons: 3,
+                        active_transfers: 1,
+                        recent_transfers: 47,
+                    },
+                    true,
+                );
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for x in 0..buf.area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(text.contains("3 daemons"));
+        assert!(text.contains("? help"));
+    }
+
+    #[test]
+    fn render_tab_strip_with_counts_hidden_omits_counts() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_tab_strip(
+                    frame,
+                    frame.area(),
+                    Screen::F1,
+                    TabStripCounts {
+                        daemons: 3,
+                        active_transfers: 1,
+                        recent_transfers: 47,
+                    },
+                    false,
+                );
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for x in 0..buf.area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        // No counts strings present.
+        assert!(!text.contains("daemons"));
+        assert!(!text.contains("? help"));
+        assert!(!text.contains("47"));
+        // Tabs still render in full (no counts column
+        // eating into the width budget).
+        assert!(text.contains("Daemons"));
+        assert!(text.contains("Profile"));
     }
 }
