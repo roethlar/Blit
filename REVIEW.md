@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| a1-6-screen-router | Medium  | Router owns input task across navigation (R2) | `[~]` | `phase5/a1` | `72d67ed` |
 
 ## Open findings
 

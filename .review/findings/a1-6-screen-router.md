@@ -147,6 +147,62 @@ serially.
   — including the unified status bar, `?` help overlay,
   mouse-on-tab navigation.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer flagged a Medium correctness issue:
+
+### Two terminal input readers can race during a navigation transition
+
+Each per-pane event loop in round 1 spawned its own
+`spawn_input_task`, which uses `event::poll(50ms)` +
+`event::read()`. When the operator pressed an F-key:
+
+1. The active pane returned `LoopOutcome::Navigate(target)`.
+2. The router immediately re-entered the destination pane's
+   loop.
+3. The destination pane spawned a *second* input task.
+4. The first pane's old task could still be inside its
+   50ms poll, with the channel-closed check only firing on
+   the next iteration.
+
+For at least that ~50ms window, two crossterm readers were
+alive. A fast follow-up keystroke could land on the old
+reader (whose mpsc Sender then fails on send, dropping the
+key), or be split across the two streams. Same class of
+bug a1-2 round 1 caught with per-iteration `spawn_blocking`.
+
+### Fix: router owns the input task for the whole TUI lifetime
+
+`run_router` now spawns `spawn_input_task` once at startup
+and threads `&mut mpsc::Receiver<KeyEvent>` through each
+pane's loop. Pane loops borrow the receiver via the
+`key_rx: &mut mpsc::Receiver<KeyEvent>` parameter and call
+`key_rx.recv()` against it directly. No pane creates a new
+crossterm reader; navigation just changes which loop is
+calling `recv` on the same channel.
+
+### Files changed (round 2)
+
+- `crates/blit-tui/src/main.rs`:
+  - `run_router` spawns the input task and owns `key_rx`.
+  - Each `run_fN_event_loop` gains a
+    `key_rx: &mut mpsc::Receiver<KeyEvent>` parameter.
+  - Removed the per-pane
+    `let (key_tx, key_rx) = mpsc::channel(); spawn_input_task(key_tx);`
+    blocks; the existing internal references to `key_rx`
+    now point at the borrowed router-owned receiver.
+
+### Tests
+
+No new tests — the existing F-key routing tests
+(`key_action_maps_f_keys_to_navigate`, etc.) still pass.
+The fix is a control-flow change; the behavioural contract
+(F-key keystrokes reach the destination pane in order) is
+covered by the pre-existing behaviour-via-mpsc tests.
+
+94 blit-tui unit tests (unchanged). Workspace passes
+serially.
+
 ## Reviewer comments
 
 (empty — pending grade)
