@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-21-f2-active-cursor | Feature | Row cursor on F2 active table          | [~]    | `phase5/a1` | `bb957c3` |
 
 ## Open findings
 
