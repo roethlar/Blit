@@ -138,6 +138,7 @@ fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Constraint::Length(20),
         Constraint::Min(20),
         Constraint::Length(10),
+        Constraint::Length(10),
         Constraint::Length(12),
     ];
     let header = Row::new(vec![
@@ -147,6 +148,7 @@ fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Cell::from("module/path"),
         Cell::from("bytes"),
         Cell::from("duration"),
+        Cell::from("throughput"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let table = Table::new(rows, widths)
@@ -273,8 +275,40 @@ fn recent_row_to_table_row(row: &RecentRow) -> Row<'static> {
         } else {
             format!("FAIL: {}", row.error_message)
         }),
+        Cell::from(format_recent_throughput(row)),
     ])
     .style(status_style)
+}
+
+/// d-20: average throughput for a completed F2 recent
+/// row. Hidden ("-") when the rate would be misleading
+/// (failed transfer, zero bytes, sub-millisecond
+/// duration). Same shape as d-10's `format_rate` on F4
+/// transfer Done — the operator gets a consistent
+/// "X MiB/s" reading on both surfaces.
+fn format_recent_throughput(row: &RecentRow) -> String {
+    if !row.ok {
+        return "-".to_string();
+    }
+    if row.bytes == 0 || row.duration_ms == 0 {
+        return "-".to_string();
+    }
+    let bytes_per_sec = ((row.bytes as u128).saturating_mul(1000) / row.duration_ms as u128) as f64;
+    if bytes_per_sec < 1.0 {
+        return "-".to_string();
+    }
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    if bytes_per_sec >= GIB {
+        format!("{:.1} GiB/s", bytes_per_sec / GIB)
+    } else if bytes_per_sec >= MIB {
+        format!("{:.1} MiB/s", bytes_per_sec / MIB)
+    } else if bytes_per_sec >= KIB {
+        format!("{:.1} KiB/s", bytes_per_sec / KIB)
+    } else {
+        format!("{} B/s", bytes_per_sec.round() as u64)
+    }
 }
 
 fn kind_label(kind: i32) -> &'static str {
@@ -360,6 +394,61 @@ mod tests {
         assert_eq!(format_ms(0), "0ms");
         assert_eq!(format_ms(999), "999ms");
         assert_eq!(format_ms(1500), "1.5s");
+    }
+
+    // d-20: F2 recent-row throughput column.
+
+    fn recent_row(bytes: u64, duration_ms: u64, ok: bool) -> RecentRow {
+        RecentRow {
+            transfer_id: "t".to_string(),
+            kind: 0,
+            peer: String::new(),
+            module: String::new(),
+            path: String::new(),
+            duration_ms,
+            bytes,
+            ok,
+            error_message: String::new(),
+        }
+    }
+
+    #[test]
+    fn recent_throughput_dash_for_failed_transfer() {
+        let r = recent_row(1024 * 1024, 1000, false);
+        assert_eq!(format_recent_throughput(&r), "-");
+    }
+
+    #[test]
+    fn recent_throughput_dash_for_zero_bytes() {
+        let r = recent_row(0, 1000, true);
+        assert_eq!(format_recent_throughput(&r), "-");
+    }
+
+    #[test]
+    fn recent_throughput_dash_for_zero_duration() {
+        let r = recent_row(1024 * 1024, 0, true);
+        assert_eq!(format_recent_throughput(&r), "-");
+    }
+
+    #[test]
+    fn recent_throughput_kibibytes() {
+        // 1 KiB in 1s = 1.0 KiB/s.
+        let r = recent_row(1024, 1000, true);
+        assert_eq!(format_recent_throughput(&r), "1.0 KiB/s");
+    }
+
+    #[test]
+    fn recent_throughput_mebibytes() {
+        // 100 MiB in 10s = 10 MiB/s.
+        let r = recent_row(100 * 1024 * 1024, 10_000, true);
+        assert_eq!(format_recent_throughput(&r), "10.0 MiB/s");
+    }
+
+    #[test]
+    fn recent_throughput_bytes_tier_for_slow_transfers() {
+        // 512 bytes in 1s = 512 B/s — below KiB cutoff.
+        let r = recent_row(512, 1000, true);
+        assert_eq!(format_recent_throughput(&r), "512 B/s");
     }
 
     #[test]
