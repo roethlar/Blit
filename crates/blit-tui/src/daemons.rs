@@ -155,6 +155,14 @@ pub struct DaemonsState {
     /// outside `rows` so a rescan doesn't blow away
     /// previously-fetched detail data.
     details: HashMap<String, DaemonDetail>,
+    /// Per-row monotonically increasing request id. Each
+    /// kick of a GetState fetch bumps this and embeds the
+    /// new value in the spawn's reply envelope. The reply
+    /// arm only applies the result if the id still matches
+    /// — so an older fetch returning after a newer one (or
+    /// after the cursor moved away and back) is dropped on
+    /// the floor instead of clobbering the fresh data.
+    request_ids: HashMap<String, u64>,
 }
 
 impl Default for DaemonsState {
@@ -174,6 +182,7 @@ impl DaemonsState {
             selected: 0,
             status: DiscoveryStatus::Scanning,
             details: HashMap::new(),
+            request_ids: HashMap::new(),
         }
     }
 
@@ -201,15 +210,64 @@ impl DaemonsState {
     }
 
     /// Insert or replace the cached detail for a daemon.
-    /// Called by the F1 event loop after a `GetState` fetch
-    /// resolves (or fails). Operator can keep a stale entry
-    /// visible alongside an in-flight refresh by passing
-    /// `Pending` while the previous `Loaded` stays in place;
-    /// callers that want that decoupling can leave the old
-    /// value and write Pending only when the previous value
-    /// was already Error.
+    /// Bypasses request-id matching — use this when the
+    /// caller is the synchronous originator of a state
+    /// change (e.g. the kick path setting `Pending`,
+    /// invalidations, tests). The async reply arm should
+    /// use [`Self::apply_detail_update`] instead so a stale
+    /// in-flight fetch can't clobber a newer one.
     pub fn set_detail(&mut self, instance_name: String, detail: DaemonDetail) {
         self.details.insert(instance_name, detail);
+    }
+
+    /// Bump the per-row request id, store `Pending`, and
+    /// return the new id. Called by the event loop's
+    /// `maybe_kick_detail_fetch` to mark the start of a
+    /// fresh fetch — the spawned task embeds the returned
+    /// id in its reply, and the apply arm only writes the
+    /// result if the row's id still matches.
+    pub fn begin_fetch(&mut self, instance_name: &str) -> u64 {
+        let next = self.request_ids.get(instance_name).copied().unwrap_or(0) + 1;
+        self.request_ids.insert(instance_name.to_string(), next);
+        self.details
+            .insert(instance_name.to_string(), DaemonDetail::Pending);
+        next
+    }
+
+    /// Apply a result from a previously-spawned fetch.
+    /// Returns `true` if the result was current (and got
+    /// written into the cache); `false` if it was stale and
+    /// dropped. Stale results occur when:
+    ///
+    /// - The operator pressed `r` and a second fetch was
+    ///   kicked for the same row before the first returned.
+    /// - The operator moved off the row and back, kicking
+    ///   another fetch before the first returned.
+    /// - Any other path that increments the row's request id
+    ///   between begin_fetch and the reply.
+    pub fn apply_detail_update(
+        &mut self,
+        instance_name: &str,
+        request_id: u64,
+        detail: DaemonDetail,
+    ) -> bool {
+        let latest = self.request_ids.get(instance_name).copied().unwrap_or(0);
+        if request_id != latest {
+            return false;
+        }
+        self.details.insert(instance_name.to_string(), detail);
+        true
+    }
+
+    /// Drop the cached detail (and bump the row's request
+    /// id) so the next kick fires fresh. Called by the `r`
+    /// keystroke. Bumping the id ensures any in-flight
+    /// reply from before the invalidation is dropped by
+    /// [`Self::apply_detail_update`] when it arrives.
+    pub fn invalidate_detail(&mut self, instance_name: &str) {
+        self.details.remove(instance_name);
+        let next = self.request_ids.get(instance_name).copied().unwrap_or(0) + 1;
+        self.request_ids.insert(instance_name.to_string(), next);
     }
 
     /// Build the [`RemoteEndpoint`] to fetch this row's
@@ -580,6 +638,93 @@ mod tests {
             Some(DaemonDetail::Error { message }) => assert_eq!(message, "later failure"),
             other => panic!("expected later Error, got {other:?}"),
         }
+    }
+
+    /// `begin_fetch` increments the row's request_id and
+    /// stores Pending. Subsequent calls bump the id.
+    #[test]
+    fn begin_fetch_increments_request_id_per_row() {
+        let mut state = DaemonsState::new();
+        let id1 = state.begin_fetch("mycroft");
+        assert_eq!(id1, 1);
+        assert!(matches!(
+            state.detail_for("mycroft"),
+            Some(DaemonDetail::Pending)
+        ));
+        let id2 = state.begin_fetch("mycroft");
+        assert_eq!(id2, 2);
+        // Independent per row.
+        let other = state.begin_fetch("skippy");
+        assert_eq!(other, 1);
+    }
+
+    /// `apply_detail_update` applies a result tagged with
+    /// the current request_id and returns true.
+    #[test]
+    fn apply_detail_update_writes_current_generation() {
+        let mut state = DaemonsState::new();
+        let id = state.begin_fetch("mycroft");
+        let applied = state.apply_detail_update(
+            "mycroft",
+            id,
+            DaemonDetail::Error {
+                message: "boom".to_string(),
+            },
+        );
+        assert!(applied);
+        match state.detail_for("mycroft") {
+            Some(DaemonDetail::Error { message }) => assert_eq!(message, "boom"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// `apply_detail_update` drops a result tagged with a
+    /// stale (older) request_id and returns false. The
+    /// existing Pending/Loaded state is preserved.
+    #[test]
+    fn apply_detail_update_drops_stale_generation() {
+        let mut state = DaemonsState::new();
+        let id1 = state.begin_fetch("mycroft");
+        // Caller kicks again before the first reply arrives.
+        let _id2 = state.begin_fetch("mycroft");
+        // Stale reply from fetch #1 arrives:
+        let applied = state.apply_detail_update(
+            "mycroft",
+            id1,
+            DaemonDetail::Error {
+                message: "from stale fetch #1".to_string(),
+            },
+        );
+        assert!(!applied);
+        // Detail should still be Pending (set by fetch #2),
+        // not the stale Error.
+        assert!(matches!(
+            state.detail_for("mycroft"),
+            Some(DaemonDetail::Pending)
+        ));
+    }
+
+    /// `invalidate_detail` removes the cache entry and
+    /// bumps the request_id so an in-flight reply from
+    /// before the invalidation is dropped.
+    #[test]
+    fn invalidate_detail_drops_in_flight_reply() {
+        let mut state = DaemonsState::new();
+        let id = state.begin_fetch("mycroft");
+        state.invalidate_detail("mycroft");
+        // No cached entry.
+        assert!(state.detail_for("mycroft").is_none());
+        // Reply from the now-invalidated fetch arrives:
+        let applied = state.apply_detail_update(
+            "mycroft",
+            id,
+            DaemonDetail::Loaded {
+                state: Box::new(DaemonState::default()),
+                fetched_at: Instant::now(),
+            },
+        );
+        assert!(!applied);
+        assert!(state.detail_for("mycroft").is_none());
     }
 
     #[test]

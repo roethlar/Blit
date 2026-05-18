@@ -465,9 +465,19 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                             // is already pending — silently drop,
                             // the queued tick will satisfy us.
                             let _ = refresh_tx.try_send(());
-                            // Also re-fetch the selected row's
-                            // detail. Drop `last_fetched` so the
-                            // next iteration's kick fires.
+                            // Invalidate the selected row's
+                            // cached detail so the next kick
+                            // fires fresh. invalidate_detail
+                            // also bumps the row's request_id
+                            // so any in-flight reply from
+                            // before the invalidation is
+                            // dropped on arrival.
+                            if let Some(name) = state
+                                .selected_row()
+                                .map(|r| r.instance_name.clone())
+                            {
+                                state.invalidate_detail(&name);
+                            }
                             last_fetched = None;
                         }
                         UserAction::SelectNext => state.select_next(),
@@ -492,7 +502,7 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                 }
             }
             update = detail_rx.recv() => {
-                if let Some(DetailUpdate { instance_name, result }) = update {
+                if let Some(DetailUpdate { instance_name, request_id, result }) = update {
                     let detail = match result {
                         Ok(daemon_state) => DaemonDetail::Loaded {
                             state: Box::new(daemon_state),
@@ -500,7 +510,13 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                         },
                         Err(message) => DaemonDetail::Error { message },
                     };
-                    state.set_detail(instance_name, detail);
+                    // apply_detail_update returns false if
+                    // the row's request_id has moved on since
+                    // we spawned this fetch — in that case
+                    // the stale result is dropped on the
+                    // floor (a newer fetch is in flight or
+                    // already returned).
+                    state.apply_detail_update(&instance_name, request_id, detail);
                 }
                 // If the channel closed (None) we just
                 // continue — the loop survives.
@@ -509,10 +525,17 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
     }
 }
 
-/// If the selected row differs from `last_fetched`, mark the
-/// new row as Pending and spawn a `GetState` fetcher for it.
-/// Idempotent in the sense that two consecutive calls
-/// without a selection change are a no-op.
+/// If the selected row's name differs from `last_fetched`,
+/// decide whether to spawn a fresh `GetState` fetch.
+///
+/// Cache contract (a1-3b round 2): an existing cached
+/// detail entry — `Loaded`, `Pending`, OR `Error` — is
+/// treated as "already covered for this row." Cursoring
+/// off and back onto a row whose detail was previously
+/// loaded must NOT replace the loaded data with `Pending`
+/// or spawn another RPC. The `r` keystroke is the only
+/// non-discovery path that invalidates a cached entry
+/// (via [`DaemonsState::invalidate_detail`]).
 fn maybe_kick_detail_fetch(
     state: &mut DaemonsState,
     last_fetched: &mut Option<String>,
@@ -523,6 +546,14 @@ fn maybe_kick_detail_fetch(
     };
     let name = row.instance_name.clone();
     if last_fetched.as_deref() == Some(name.as_str()) {
+        return;
+    }
+    // Already have a cached entry for this row — just track
+    // the visit, don't refetch. Keeps `Loaded` data on
+    // screen when the operator returns to a previously
+    // viewed row; avoids redundant RPCs.
+    if state.detail_for(&name).is_some() {
+        *last_fetched = Some(name);
         return;
     }
     let Some(endpoint) = DaemonsState::endpoint_for_row(row) else {
@@ -537,21 +568,22 @@ fn maybe_kick_detail_fetch(
         *last_fetched = Some(name);
         return;
     };
-    state.set_detail(name.clone(), DaemonDetail::Pending);
-    spawn_detail_fetch(endpoint, name.clone(), detail_tx.clone());
+    // begin_fetch bumps the row's request_id, sets Pending,
+    // and hands us the id to embed in the spawn so a stale
+    // reply from a prior generation can be discarded.
+    let request_id = state.begin_fetch(&name);
+    spawn_detail_fetch(endpoint, name.clone(), request_id, detail_tx.clone());
     *last_fetched = Some(name);
 }
 
-/// One-shot GetState fetcher. Each kick spawns one of these;
-/// the result is tagged with the row's `instance_name` so
-/// stale responses (selection changed mid-fetch) can be
-/// distinguished from current ones — though in practice we
-/// apply every result we get since `set_detail` is keyed by
-/// name, and the renderer always reads the current
-/// selection.
+/// One-shot GetState fetcher. The reply carries the
+/// row name AND the request id from `begin_fetch`, so the
+/// apply arm can drop a stale generation's result without
+/// clobbering whatever a newer fetch already wrote.
 fn spawn_detail_fetch(
     endpoint: RemoteEndpoint,
     instance_name: String,
+    request_id: u64,
     tx: mpsc::Sender<DetailUpdate>,
 ) {
     tokio::spawn(async move {
@@ -561,6 +593,7 @@ fn spawn_detail_fetch(
         let _ = tx
             .send(DetailUpdate {
                 instance_name,
+                request_id,
                 result,
             })
             .await;
@@ -570,6 +603,7 @@ fn spawn_detail_fetch(
 /// Reply envelope for the detail fetcher.
 struct DetailUpdate {
     instance_name: String,
+    request_id: u64,
     result: Result<DaemonState, String>,
 }
 
@@ -1012,5 +1046,131 @@ mod tests {
         let mut status = ConnectionStatus::Connecting;
         drain_startup_events(&mut rx, &mut state, &mut status);
         assert!(matches!(status, ConnectionStatus::Live));
+    }
+
+    /// a1-3b round-2 regression: cursor flick onto a row,
+    /// off, then back — must NOT re-spawn a fetch or
+    /// overwrite the previously loaded detail with Pending.
+    /// The cache contract (per the reviewer) is "an
+    /// existing entry covers the row until the operator
+    /// hits `r`."
+    ///
+    /// Driven directly through `maybe_kick_detail_fetch` —
+    /// no real spawn happens because the detail_tx is just
+    /// observed for emptiness afterwards.
+    #[tokio::test]
+    async fn maybe_kick_detail_fetch_preserves_loaded_on_revisit() {
+        use crate::daemons::EndpointKind;
+        use blit_core::generated::DaemonState as WireState;
+
+        let mut state = DaemonsState::new();
+        // Manually inject a remote row "alpha".
+        let alpha = crate::daemons::DaemonRow {
+            kind: EndpointKind::Remote,
+            instance_name: "alpha".to_string(),
+            addresses: vec![std::net::Ipv4Addr::new(10, 0, 0, 1)],
+            port: 9031,
+            module_count: None,
+            delegation_enabled: None,
+            version: None,
+            modules: Vec::new(),
+        };
+        // Build a row vec by going through the public API:
+        // discover one daemon, then patch its row to alpha.
+        // Simpler: directly stuff via replace_from_discovery
+        // with a synthetic service.
+        use blit_core::mdns::MdnsDiscoveredService;
+        use std::collections::HashMap;
+        state.replace_from_discovery(
+            &[MdnsDiscoveredService {
+                fullname: "alpha._blit._tcp.local.".to_string(),
+                instance_name: "alpha".to_string(),
+                hostname: "alpha.local.".to_string(),
+                port: 9031,
+                addresses: vec![std::net::Ipv4Addr::new(10, 0, 0, 1)],
+                properties: HashMap::new(),
+            }],
+            std::time::Instant::now(),
+        );
+        let _ = alpha; // shut unused-binding analysis up.
+
+        // Move cursor onto alpha (Local @ 0, alpha @ 1).
+        state.select_next();
+        assert_eq!(state.selected_row().unwrap().instance_name, "alpha");
+
+        // Pre-load a detail for alpha (simulating a prior fetch returning).
+        let prior_state = WireState {
+            version: "9.9.9".to_string(),
+            ..WireState::default()
+        };
+        state.set_detail(
+            "alpha".to_string(),
+            DaemonDetail::Loaded {
+                state: Box::new(prior_state),
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let (detail_tx, mut detail_rx) = mpsc::channel::<DetailUpdate>(8);
+        let mut last_fetched: Option<String> = None;
+
+        // Cursor onto alpha → kick checks for cached entry,
+        // finds Loaded, just bumps last_fetched.
+        maybe_kick_detail_fetch(&mut state, &mut last_fetched, &detail_tx);
+        assert_eq!(last_fetched.as_deref(), Some("alpha"));
+        assert!(matches!(
+            state.detail_for("alpha"),
+            Some(DaemonDetail::Loaded { .. })
+        ));
+        // No spawn → no message on detail_tx.
+        assert!(detail_rx.try_recv().is_err());
+
+        // Cursor off (back to Local) and back onto alpha.
+        state.select_prev();
+        last_fetched = Some("local (this machine)".to_string());
+        state.select_next();
+        maybe_kick_detail_fetch(&mut state, &mut last_fetched, &detail_tx);
+        assert_eq!(last_fetched.as_deref(), Some("alpha"));
+        // STILL Loaded — not Pending, not overwritten.
+        match state.detail_for("alpha") {
+            Some(DaemonDetail::Loaded { state, .. }) => {
+                assert_eq!(state.version, "9.9.9");
+            }
+            other => panic!("expected preserved Loaded, got {other:?}"),
+        }
+        assert!(detail_rx.try_recv().is_err());
+    }
+
+    /// Companion: when no cached detail exists, the kick
+    /// DOES set Pending and (would) spawn — for the test
+    /// we just verify Pending lands and the request_id was
+    /// bumped (via begin_fetch's contract).
+    #[tokio::test]
+    async fn maybe_kick_detail_fetch_spawns_when_cache_empty() {
+        use blit_core::mdns::MdnsDiscoveredService;
+        use std::collections::HashMap;
+
+        let mut state = DaemonsState::new();
+        state.replace_from_discovery(
+            &[MdnsDiscoveredService {
+                fullname: "alpha._blit._tcp.local.".to_string(),
+                instance_name: "alpha".to_string(),
+                hostname: "alpha.local.".to_string(),
+                port: 9031,
+                addresses: vec![std::net::Ipv4Addr::new(10, 0, 0, 1)],
+                properties: HashMap::new(),
+            }],
+            std::time::Instant::now(),
+        );
+        state.select_next();
+
+        let (detail_tx, _detail_rx) = mpsc::channel::<DetailUpdate>(8);
+        let mut last_fetched: Option<String> = None;
+        maybe_kick_detail_fetch(&mut state, &mut last_fetched, &detail_tx);
+        assert_eq!(last_fetched.as_deref(), Some("alpha"));
+        assert!(matches!(
+            state.detail_for("alpha"),
+            Some(DaemonDetail::Pending)
+        ));
     }
 }
