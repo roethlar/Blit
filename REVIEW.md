@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-11-freshness-tick | Feature | F1/F3/F4 freshness footers tick live      | [~]    | `phase5/a1` | `eaf5881` |
 
 ## Open findings
 
