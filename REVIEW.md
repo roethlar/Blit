@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-1-help-overlay  | Feature  | `?` opens a global help overlay             | `[~]`  | `phase5/a1` | `1de78c6` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -24,6 +24,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
+| e-1-help-overlay | Medium | Help overlay must be global from Verify edit mode | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
