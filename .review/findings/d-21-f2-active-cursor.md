@@ -143,4 +143,66 @@ In `state::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-21-f2-active-cursor.reopened.md`)
+
+One Medium-severity finding, addressed in round 2:
+
+- **Index-anchored cursor silently retargets after row
+  removal.** The round-1 cursor was `Option<usize>` —
+  an index into `active_rows()`. When the selected row
+  Completed / Errored:
+  - **Middle-row case**: the index stayed the same, so
+    the cursor moved to whatever transfer occupied that
+    slot after the removal — a different transfer with
+    no operator consent. Particularly dangerous for the
+    planned `K` cancel slice, which would have killed
+    the wrong transfer.
+  - **Solo-row case**: index stayed `Some(0)` while the
+    list was empty. A later new transfer popped into
+    index 0 — and the cursor "came back" pointing at
+    it, again without consent.
+
+  Round 2 fix: cursor is now `Option<String>` (the
+  `transfer_id`). `selected_active_index()` derives the
+  display index by `position()` over the sorted view.
+  When the id is no longer present, `position()`
+  returns `None` and the cursor naturally falls off.
+  An unrelated new transfer with a different id doesn't
+  accidentally re-anchor.
+
+  Bonus side-effect: `select_next_active` /
+  `select_prev_active` now treat a stale-id cursor as
+  "no cursor" — pressing j after a removal re-anchors
+  at index 0, instead of walking forward from a stale
+  index.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/state.rs`:
+  - Field rename: `selected_active: Option<usize>` →
+    `selected_active_id: Option<String>`.
+  - `selected_active_index()` derives via `position()`.
+  - `select_next_active` / `select_prev_active` resolve
+    via id and snapshot the new row's id.
+
+### Round 2 tests
+
++2 regression tests (240 → 242):
+
+In `state::tests`:
+- `middle_row_complete_does_not_retarget_cursor` — 3
+  rows, cursor on the middle one, complete the middle.
+  Cursor falls off (returns None) instead of jumping
+  to the next-index transfer.
+- `solo_row_complete_then_new_start_keeps_cursor_off`
+  — solo row selected, completes (list empty), then a
+  new unrelated transfer starts. Cursor stays off-list;
+  operator must press j/k to anchor on the new row.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+The id-anchored model is also what the future `K`
+cancel slice needs — it can read `selected_active_id`
+directly without re-resolving an index against a list
+that might have shifted between selection and action.

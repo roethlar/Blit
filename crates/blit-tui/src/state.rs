@@ -107,13 +107,15 @@ pub struct TransfersState {
     /// tick gate uses it to decide whether the F2 footer
     /// needs refreshing.
     last_event_at: Option<Instant>,
-    /// d-21: cursor index into the SORTED `active_rows()`
-    /// view. `None` until the operator first navigates,
-    /// then clamped to the active count. Used by the
-    /// renderer to highlight the selected row and by a
-    /// future cancel-selected-transfer slice to know
-    /// which transfer_id to target.
-    selected_active: Option<usize>,
+    /// d-21 R2: cursor anchored on a transfer_id rather
+    /// than a display index. An index-based cursor would
+    /// silently retarget after row removal — same index,
+    /// different transfer underneath. The id-based cursor
+    /// "falls off" naturally when the underlying transfer
+    /// terminates (id no longer present in `active`) and
+    /// doesn't come back when an unrelated transfer
+    /// starts later.
+    selected_active_id: Option<String>,
 }
 
 impl TransfersState {
@@ -294,48 +296,49 @@ impl TransfersState {
         self.active.len()
     }
 
-    /// d-21: index into the sorted `active_rows()` view
-    /// that the operator's cursor is on. `None` until
-    /// they first navigate. The renderer interprets
-    /// `Some(idx)` where `idx >= active_count()` as
-    /// "no selection" — the cursor falls off the end
-    /// when transfers terminate.
+    /// d-21 R2: derive the display index from the
+    /// id-anchored cursor. Returns `None` when the
+    /// selected transfer is no longer present (terminated
+    /// or never seen) — the operator has to press j/k to
+    /// re-anchor.
     pub fn selected_active_index(&self) -> Option<usize> {
-        match self.selected_active {
-            Some(idx) if idx < self.active.len() => Some(idx),
-            _ => None,
-        }
+        let id = self.selected_active_id.as_ref()?;
+        self.active_rows().iter().position(|r| r.transfer_id == *id)
     }
 
-    /// d-21: advance the cursor. Clamps to the last
-    /// active row; first call from `None` selects index 0
-    /// (the newest row, since `active_rows()` sorts
-    /// newest-first).
+    /// d-21 R2: advance the cursor. If the previously
+    /// selected id is no longer present (transfer
+    /// terminated), the next press re-anchors at index 0
+    /// rather than walking forward from a stale index.
+    /// First call from no-cursor lands on index 0.
     pub fn select_next_active(&mut self) {
-        let count = self.active.len();
-        if count == 0 {
-            self.selected_active = None;
+        let rows = self.active_rows();
+        if rows.is_empty() {
+            self.selected_active_id = None;
             return;
         }
-        self.selected_active = Some(match self.selected_active {
+        let next_idx = match self.selected_active_index() {
             None => 0,
-            Some(idx) => (idx + 1).min(count - 1),
-        });
+            Some(idx) => (idx + 1).min(rows.len() - 1),
+        };
+        self.selected_active_id = Some(rows[next_idx].transfer_id.clone());
     }
 
-    /// d-21: walk the cursor up. First call from `None`
-    /// selects index 0 just like `select_next_active`;
-    /// subsequent calls saturate at 0.
+    /// d-21 R2: walk the cursor up. Same re-anchor
+    /// semantics as `select_next_active` — a stale id
+    /// resets to index 0 instead of "saturate at 0 from
+    /// nowhere."
     pub fn select_prev_active(&mut self) {
-        let count = self.active.len();
-        if count == 0 {
-            self.selected_active = None;
+        let rows = self.active_rows();
+        if rows.is_empty() {
+            self.selected_active_id = None;
             return;
         }
-        self.selected_active = Some(match self.selected_active {
+        let prev_idx = match self.selected_active_index() {
             None => 0,
             Some(idx) => idx.saturating_sub(1),
-        });
+        };
+        self.selected_active_id = Some(rows[prev_idx].transfer_id.clone());
     }
 
     pub fn recent_count(&self) -> usize {
@@ -468,6 +471,125 @@ mod tests {
         let mut state = TransfersState::new();
         state.select_next_active();
         assert!(state.selected_active_index().is_none());
+    }
+
+    // d-21 R2: id-anchored cursor doesn't silently
+    // retarget when the selected row is removed.
+
+    /// Reopen scenario A: 3 active rows, cursor on the
+    /// middle one. The middle row Completes. The cursor
+    /// must "fall off" (selected_active_index → None)
+    /// rather than shift to the row that *was* third —
+    /// pre-fix the index stayed at 1 and silently pointed
+    /// at a different transfer.
+    #[test]
+    fn middle_row_complete_does_not_retarget_cursor() {
+        let mut state = TransfersState::new();
+        // Distinct start_unix_ms so sort order is stable.
+        let mut now = Instant::now();
+        for (id, start) in [("t-1", 100), ("t-2", 200), ("t-3", 300)] {
+            let ev = DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: id.to_string(),
+                    kind: TransferKind::DelegatedPull as i32,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: start,
+                })),
+            };
+            state.apply_event(ev, now);
+            now += std::time::Duration::from_millis(1);
+        }
+        // Sort order is newest-first by start_unix_ms:
+        // t-3 (300), t-2 (200), t-1 (100). Walk to index 1
+        // = t-2 (the middle row).
+        state.select_next_active();
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(1));
+        // Complete t-2.
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferComplete(
+                    blit_core::generated::TransferComplete {
+                        transfer_id: "t-2".to_string(),
+                        duration_ms: 100,
+                        bytes: 0,
+                        files: 0,
+                        tcp_fallback_used: false,
+                    },
+                )),
+            },
+            now,
+        );
+        // Cursor falls off — operator must press j/k to
+        // re-anchor on either remaining row.
+        assert!(
+            state.selected_active_index().is_none(),
+            "middle row completion must not retarget the cursor at the next transfer"
+        );
+    }
+
+    /// Reopen scenario B: single active row, cursor on
+    /// it. Row completes (list empty). A new unrelated
+    /// transfer starts later. The cursor must still be
+    /// off-list — pre-fix the index stayed Some(0) and
+    /// the new row got an unintended selection.
+    #[test]
+    fn solo_row_complete_then_new_start_keeps_cursor_off() {
+        let mut state = TransfersState::new();
+        let now = Instant::now();
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: "t-1".to_string(),
+                    kind: TransferKind::DelegatedPull as i32,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: 1,
+                })),
+            },
+            now,
+        );
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(0));
+        // Complete the solo row → list empty.
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferComplete(
+                    blit_core::generated::TransferComplete {
+                        transfer_id: "t-1".to_string(),
+                        duration_ms: 100,
+                        bytes: 0,
+                        files: 0,
+                        tcp_fallback_used: false,
+                    },
+                )),
+            },
+            now,
+        );
+        assert!(state.selected_active_index().is_none());
+        // Unrelated new transfer starts.
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: "t-2".to_string(),
+                    kind: TransferKind::DelegatedPull as i32,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: 2,
+                })),
+            },
+            now,
+        );
+        // Cursor MUST still be off-list — the operator
+        // never selected t-2.
+        assert!(
+            state.selected_active_index().is_none(),
+            "new unrelated transfer must not auto-select; operator must press j/k"
+        );
     }
 
     /// Cursor "falls off" when the underlying row is
