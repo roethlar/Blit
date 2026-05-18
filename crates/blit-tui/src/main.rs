@@ -500,6 +500,23 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                 {
                     continue;
                 }
+                // d-12: Esc cancels a pending mirror/move
+                // confirm prompt. Has to happen before
+                // key_action runs because `should_quit`
+                // maps bare Esc to Quit, which would otherwise
+                // tear down the TUI on what the operator
+                // intended as a "no, don't do that" gesture.
+                // Ctrl-Esc / Alt-Esc still fall through to
+                // the regular dispatcher.
+                if key.code == KeyCode::Esc
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && app.transfer.is_confirming()
+                {
+                    app.transfer.cancel_confirm();
+                    continue;
+                }
                 // If handle_verify_keystroke returned false
                 // (F-keys, Ctrl-c) or we're not in editing
                 // mode, fall through to the action
@@ -2724,6 +2741,28 @@ mod tests {
             "`?` must NOT insert into the focused field, got: {:?}",
             app.verify.source
         );
+    }
+
+    /// d-12: cancel_confirm dismisses both ConfirmingMirror
+    /// and ConfirmingMove back to Idle. The router's Esc
+    /// intercept calls cancel_confirm directly, so this
+    /// test pins the state-transition contract that the
+    /// intercept relies on.
+    #[test]
+    fn cancel_confirm_dismisses_either_confirm_kind() {
+        let mut state = transfer::TransferState::new();
+
+        // Mirror confirm → cancel → Idle.
+        state.begin_confirm_mirror();
+        assert!(state.is_confirming_mirror());
+        assert!(state.cancel_confirm());
+        assert!(matches!(state.status(), transfer::TransferStatus::Idle));
+
+        // Move confirm → cancel → Idle.
+        state.begin_confirm_move();
+        assert!(state.is_confirming_move());
+        assert!(state.cancel_confirm());
+        assert!(matches!(state.status(), transfer::TransferStatus::Idle));
     }
 
     /// d-9: `needs_live_tick` is true ONLY while a Verify

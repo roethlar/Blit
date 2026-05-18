@@ -229,11 +229,11 @@ fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState, now:
             Style::default().fg(Color::DarkGray),
         )),
         TransferStatus::ConfirmingMirror => Line::from(Span::styled(
-            "mirror will DELETE extraneous files at destination · [y/N] to confirm",
+            "mirror will DELETE extraneous files at destination · [y / N or Esc]",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         TransferStatus::ConfirmingMove => Line::from(Span::styled(
-            "move will DELETE the SOURCE after copy · [y/N] to confirm",
+            "move will DELETE the SOURCE after copy · [y / N or Esc]",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         TransferStatus::Running { kind, started_at } => Line::from(Span::styled(
