@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-3-config-scaffold | Feature | tui.toml loader + Verify defaults | [~] | `phase5/a1` | `985b047` |
 
 ## Open findings
 
