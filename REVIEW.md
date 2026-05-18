@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-6b-state-preservation | Medium | F2 setup generation + pending guard (R3) | `[~]` | `phase5/a1` | `8719925` |
+_none_
 
 ## Open findings
 
@@ -23,7 +21,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
-| a1-6b-state-preservation | Medium | Hoist per-pane state into shared AppState so F-key navigation doesn't restart fetches | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
@@ -98,3 +95,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `2abc71b` F3 Browse pane with modules + directory tree (`a1-4-f3-browse` round 2)
 - `d33fedc` F4 Profile pane with read-only perf history + predictor (`a1-5-f4-profile`)
 - `72d67ed` F-key screen router with router-owned input task (`a1-6-screen-router` round 2)
+- `8719925` AppState unified loop with generation-guarded F2 setup (`a1-6b-state-preservation` round 3)
