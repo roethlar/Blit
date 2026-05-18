@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-5-f4-local-move | Feature  | F4 `V` move trigger (copy + source-purge)   | [~]    | `phase5/a1` | `dc03872` |
 
 ## Open findings
 
