@@ -57,9 +57,14 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         kv("F4", "Profile / Verify / Diagnostics / Transfer"),
         kv("?", "toggle this help overlay"),
         kv("q / Esc", "quit (Ctrl-c emergency)"),
+        // d-16 R2: `r` works on every pane — rescan
+        // discovery on F1, re-open Subscribe / GetState
+        // on F2, re-fetch browse on F3, re-read profile
+        // on F4. Belongs in the global section, not
+        // under any pane-specific block.
+        kv("r", "refresh / rescan (active pane)"),
         Line::from(""),
         section_header("F1 · F3 navigation"),
-        kv("r", "refresh / rescan"),
         kv("↑ ↓ / j k", "cursor (F1, F3)"),
         kv("Enter / → / l", "descend (F3)"),
         kv("← / h", "ascend (F3)"),
@@ -165,11 +170,15 @@ mod tests {
     }
 
     /// d-16: regression test — the help overlay's keymap
-    /// must surface every public keystroke. We render the
-    /// modal into a TestBackend buffer and grep the cell
-    /// contents for the keys we added since e-1. If a
-    /// future slice adds a binding without updating help,
-    /// this catches it.
+    /// must surface every public keystroke. Renders the
+    /// modal into a TestBackend and asserts each key
+    /// appears in the right section.
+    ///
+    /// d-16 R2: tightened to check section attribution,
+    /// not just bare substring presence — `r` was listed
+    /// under "F1 · F3 navigation" while still active on
+    /// F2/F4 in the original landing, and the old loose
+    /// grep didn't catch it.
     #[test]
     fn help_modal_documents_all_public_keys() {
         use ratatui::{backend::TestBackend, Terminal};
@@ -189,28 +198,88 @@ mod tests {
             }
             text.push('\n');
         }
+        // First-pass: every key surfaces somewhere.
         for needle in [
             "F1",
             "F2",
             "F3",
-            "F4", // panes
+            "F4",
             "Tab",
-            "Enter", // form / nav
+            "Enter",
             "C",
             "M",
-            "V", // transfer triggers
+            "V",
             "H",
-            "O",           // verify mode toggles
-            "y / N / Esc", // confirm prompt keys
-            "c / d / e",   // profile lifecycle
-            "s",           // diagnostics snapshot
-            "?",           // help itself
+            "O",
+            "y / N / Esc",
+            "c / d / e",
+            "s",
+            "?",
+            "r", // refresh (global as of d-16 R2)
         ] {
             assert!(
                 text.contains(needle),
                 "help overlay missing key reference {needle:?}; rendered text:\n{text}",
             );
         }
+        // Section attribution: each key must appear in
+        // the right section. We slice the rendered text
+        // between section headers and grep each slice.
+        let global_section = section_contents(&text, "Navigation (global)");
+        assert!(
+            global_section.contains("r"),
+            "`r` is a global refresh key; must live in Navigation (global) — got section:\n{global_section}",
+        );
+        let f4_profile = section_contents(&text, "F4 · Profile lifecycle");
+        assert!(
+            f4_profile.contains("c / d / e"),
+            "F4 profile lifecycle section must list `c / d / e`; got:\n{f4_profile}",
+        );
+        assert!(
+            f4_profile.contains('s'),
+            "F4 profile lifecycle section must list `s` (snapshot); got:\n{f4_profile}",
+        );
+        let f4_verify = section_contents(&text, "F4 · Verify form");
+        for needle in ["Tab", "Enter", "H", "O"] {
+            assert!(
+                f4_verify.contains(needle),
+                "F4 Verify section missing {needle:?}; got:\n{f4_verify}",
+            );
+        }
+        let f4_transfer = section_contents(&text, "F4 · Local transfer");
+        for needle in ["C", "M", "V", "y / N / Esc"] {
+            assert!(
+                f4_transfer.contains(needle),
+                "F4 transfer section missing {needle:?}; got:\n{f4_transfer}",
+            );
+        }
+    }
+
+    /// Slice the rendered modal text into the lines
+    /// belonging to `header`'s section — between this
+    /// header and the next one in display order. Used by
+    /// the keymap test to assert section attribution.
+    fn section_contents<'a>(text: &'a str, header: &str) -> &'a str {
+        // Display order of section headers. Each entry is
+        // (this_header, next_header). The final entry's
+        // next_header is empty, meaning "to end of text".
+        let next_header: &str = match header {
+            "Navigation (global)" => "F1 · F3 navigation",
+            "F1 · F3 navigation" => "F4 · Profile lifecycle",
+            "F4 · Profile lifecycle" => "F4 · Verify form",
+            "F4 · Verify form" => "F4 · Local transfer",
+            "F4 · Local transfer" => "",
+            other => panic!("unknown section header in help test: {other:?}"),
+        };
+        let start = text.find(header).unwrap_or_else(|| {
+            panic!("section header {header:?} not found in rendered help; got:\n{text}")
+        });
+        let rest = &text[start..];
+        if next_header.is_empty() {
+            return rest;
+        }
+        let end = rest.find(next_header).unwrap_or(rest.len());
+        &rest[..end]
     }
 
     #[test]

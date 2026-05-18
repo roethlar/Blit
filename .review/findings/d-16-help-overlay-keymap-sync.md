@@ -110,4 +110,38 @@ In `help::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-16-help-overlay-keymap-sync.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **`r` was listed only under "F1 · F3 navigation"** but
+  it's actually a per-pane refresh key that works on
+  every pane: F1 rescans discovery, F2 re-opens
+  Subscribe / GetState, F3 re-fetches browse, F4
+  re-reads profile. The round-1 regrouping put it in
+  the wrong place. The original loose substring test
+  passed because `r` appeared somewhere, but it would
+  have caught the attribution mistake with a slightly
+  stronger assertion.
+
+  Round 2 fix:
+  1. Move `r` to the global section with label
+     "refresh / rescan (active pane)" so the operator
+     reading help on any pane sees it.
+  2. Tighten the regression test to assert section
+     attribution. New `section_contents` helper slices
+     the rendered text by section header and the
+     test now asserts each key lives in its expected
+     section, not just somewhere in the modal.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/help.rs`:
+  - `r` moved from "F1 · F3 navigation" to "Navigation
+    (global)" with rewritten label.
+  - `help_modal_documents_all_public_keys` test now
+    uses a `section_contents` helper to assert per-key
+    section attribution.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
