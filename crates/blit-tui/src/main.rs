@@ -22,11 +22,14 @@
 //! Subscribe stream message so a single task handles
 //! both inputs.
 
+mod daemons;
 mod screens;
 mod state;
 
 use blit_app::admin::jobs;
+use blit_app::scan;
 use blit_core::generated::DaemonEvent;
+use blit_core::mdns::MdnsDiscoveredService;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use clap::Parser;
 use crossterm::cursor::Show;
@@ -35,6 +38,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use daemons::DaemonsState;
 use eyre::{Context, Result};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -43,19 +47,31 @@ use state::TransfersState;
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
-/// CLI flags. Today `--remote` is captured but not yet
-/// consumed — the F1 Daemons pane will use it as the default
-/// daemon to connect to. Keeping the parser scaffold here so
-/// the next slice doesn't have to re-litigate flag shape.
+/// CLI flags. `--remote` is consumed by the F2 Transfers
+/// pane (a1-2). `--screen` selects which pane the TUI
+/// opens; a1-6 will replace this with in-app F-key routing.
 #[derive(Parser, Debug)]
 #[command(name = "blit-tui", about = "Operator TUI for Blit", version)]
 struct Args {
-    /// Default daemon to connect to (host or host:port). Used
-    /// by future F1/F2 panes; ignored for now.
+    /// Default daemon to connect to (host or host:port).
+    /// Consumed by F2; ignored by F1 (mDNS-only).
     #[arg(long)]
     remote: Option<String>,
+
+    /// Which pane to render. Defaults to F2 to preserve
+    /// the existing operator-facing behavior; F1 is opt-in
+    /// until a1-6 lands the routing UI.
+    #[arg(long, value_enum, default_value_t = ScreenArg::F2)]
+    screen: ScreenArg,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum ScreenArg {
+    F1,
+    F2,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -75,10 +91,25 @@ async fn main() -> Result<()> {
 
     install_panic_hook();
     let mut guard = TuiGuard::new().context("entering TUI")?;
-    let result = run_event_loop(guard.terminal_mut(), args.remote.as_deref()).await;
+    let result = match args.screen {
+        ScreenArg::F1 => run_f1_event_loop(guard.terminal_mut()).await,
+        ScreenArg::F2 => run_f2_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
+    };
     drop(guard);
     result
 }
+
+/// Cadence for the background mDNS discovery loop. mDNS
+/// answers settle inside ~1.5s on a quiet LAN, so 5s
+/// between rescans is comfortably above the noise floor
+/// while keeping the daemon list "fresh enough" for an
+/// operator scanning the F1 pane.
+const F1_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Per-scan timeout for the mDNS query. Each tick spends
+/// up to this long collecting responses; smaller than the
+/// interval to leave headroom for the next scan.
+const F1_DISCOVERY_SCAN_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Sized to absorb a burst of progress events without
 /// backing up the Subscribe forwarder. At the daemon's
@@ -201,12 +232,12 @@ fn install_panic_hook() {
     }));
 }
 
-/// Main event/draw loop. With a `--remote`, runs the F2
-/// Transfers pane against a live daemon (initial GetState
+/// Main event/draw loop for the F2 Transfers pane. With a
+/// `--remote`, runs against a live daemon (initial GetState
 /// snapshot + Subscribe stream). Without `--remote`, renders
 /// F2 in a "no remote configured" state so the layout is
 /// visible.
-async fn run_event_loop(
+async fn run_f2_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     remote_arg: Option<&str>,
 ) -> Result<()> {
@@ -310,6 +341,8 @@ async fn run_event_loop(
                                     refresh_via_get_state(endpoint, &mut state, &mut status).await;
                                 }
                             }
+                            // F2 has no cursor — ignore.
+                            UserAction::SelectNext | UserAction::SelectPrev => {}
                         }
                     }
                 }
@@ -366,10 +399,132 @@ async fn run_event_loop(
                             refresh_via_get_state(endpoint, &mut state, &mut status).await;
                         }
                     }
+                    // F2 has no cursor — ignore.
+                    UserAction::SelectNext | UserAction::SelectPrev => {}
                 }
             }
         }
     }
+}
+
+/// F1 Daemons event loop. Drives the mDNS discovery task
+/// and renders [`DaemonsState`] on every loop tick.
+///
+/// No `--remote` parsing here — F1 lists every daemon the
+/// network mDNS-advertises. The operator picks one and the
+/// future browse / trigger panes wire that selection
+/// through (later A.1 sub-slices + a1-6 routing).
+async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    let mut state = DaemonsState::new();
+
+    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
+    spawn_input_task(key_tx);
+
+    let (disco_tx, mut disco_rx) = mpsc::channel::<DiscoveryUpdate>(4);
+    let (refresh_tx, refresh_rx) = mpsc::channel::<()>(1);
+    spawn_discovery_task(
+        F1_DISCOVERY_INTERVAL,
+        F1_DISCOVERY_SCAN_TIMEOUT,
+        refresh_rx,
+        disco_tx,
+    );
+
+    loop {
+        let now = Instant::now();
+        terminal
+            .draw(|frame| {
+                screens::f1::render(frame, &state, now);
+            })
+            .context("terminal.draw")?;
+
+        tokio::select! {
+            key = key_rx.recv() => {
+                let Some(key) = key else { return Ok(()); };
+                if let Some(action) = key_action(&key) {
+                    match action {
+                        UserAction::Quit => return Ok(()),
+                        UserAction::Refresh => {
+                            // Non-blocking nudge to the discovery
+                            // task. If the channel is full a scan
+                            // is already pending — silently drop,
+                            // the queued tick will satisfy us.
+                            let _ = refresh_tx.try_send(());
+                        }
+                        UserAction::SelectNext => state.select_next(),
+                        UserAction::SelectPrev => state.select_prev(),
+                    }
+                }
+            }
+            update = disco_rx.recv() => {
+                match update {
+                    Some(DiscoveryUpdate::Result(services)) => {
+                        state.replace_from_discovery(&services, Instant::now());
+                    }
+                    Some(DiscoveryUpdate::Error(msg)) => {
+                        state.note_discovery_error(msg);
+                    }
+                    None => {
+                        // Discovery task exited unexpectedly.
+                        state.note_discovery_error(
+                            "discovery task exited".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Messages from the discovery task back to the F1 loop.
+enum DiscoveryUpdate {
+    Result(Vec<MdnsDiscoveredService>),
+    Error(String),
+}
+
+/// Spawn the F1 discovery task. Loops on a tokio interval,
+/// running one-shot mDNS discovery each tick, forwarding
+/// results (or errors) via `tx`. Accepts manual-refresh
+/// pokes via `refresh_rx` — those simply break out of the
+/// `interval.tick()` wait and re-scan immediately.
+fn spawn_discovery_task(
+    interval: Duration,
+    scan_timeout: Duration,
+    mut refresh_rx: mpsc::Receiver<()>,
+    tx: mpsc::Sender<DiscoveryUpdate>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        // The first tick fires immediately, which is what we
+        // want — operator gets a result on screen-open.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                signal = refresh_rx.recv() => {
+                    if signal.is_none() {
+                        // Caller dropped the refresh sender —
+                        // F1 loop is exiting; we should too.
+                        return;
+                    }
+                    // Reset the ticker so the next automatic
+                    // scan is `interval` away from this manual
+                    // one (avoids two back-to-back scans).
+                    ticker.reset();
+                }
+            }
+            match scan::discover(scan_timeout).await {
+                Ok(services) => {
+                    if tx.send(DiscoveryUpdate::Result(services)).await.is_err() {
+                        // Receiver closed — F1 loop exited.
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(DiscoveryUpdate::Error(format!("{err:#}"))).await;
+                }
+            }
+        }
+    });
 }
 
 /// Single-owner crossterm input task. One spawn_blocking
@@ -416,10 +571,15 @@ fn spawn_input_task(tx: mpsc::Sender<KeyEvent>) {
     });
 }
 
-/// Action surfaced by [`handle_keystroke`] back to the loop.
+/// Action surfaced by `key_action` back to the loop.
+/// `Quit` and `Refresh` are shared across screens; `SelectNext` /
+/// `SelectPrev` are consumed only by F1 (a no-op on F2 today —
+/// F2 doesn't have a cursor yet).
 enum UserAction {
     Quit,
     Refresh,
+    SelectNext,
+    SelectPrev,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -439,10 +599,12 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
     if should_quit(key.code, key.modifiers) {
         return Some(UserAction::Quit);
     }
-    if matches!(key.code, KeyCode::Char('r')) {
-        return Some(UserAction::Refresh);
+    match key.code {
+        KeyCode::Char('r') => Some(UserAction::Refresh),
+        KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
+        KeyCode::Up | KeyCode::Char('k') => Some(UserAction::SelectPrev),
+        _ => None,
     }
-    None
 }
 
 /// Drain whatever events buffered in `rx` during the
@@ -645,10 +807,36 @@ mod tests {
         ));
     }
 
+    /// a1-3: F1 needs cursor navigation keys. Both arrows and
+    /// vim-style hjkl bindings are accepted (operators who
+    /// haven't broken the habit get both). 'j' / 'k' are
+    /// case-sensitive — uppercase remains unmapped.
+    #[test]
+    fn key_action_maps_arrow_and_vim_navigation() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Down)),
+            Some(UserAction::SelectNext)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Up)),
+            Some(UserAction::SelectPrev)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('j'))),
+            Some(UserAction::SelectNext)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('k'))),
+            Some(UserAction::SelectPrev)
+        ));
+    }
+
     #[test]
     fn key_action_returns_none_for_unmapped_keys() {
         assert!(key_action(&k(KeyCode::Char('a'))).is_none());
         assert!(key_action(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
+        assert!(key_action(&k(KeyCode::Char('J'))).is_none()); // case-sensitive
+        assert!(key_action(&k(KeyCode::Char('K'))).is_none()); // case-sensitive
         assert!(key_action(&k(KeyCode::Enter)).is_none());
     }
 
