@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-2-f2-transfers | Medium   | Subscribe-first + buffered-event drain     | [~]    | `phase5/a1` | `455ba2e` |
 
 ## Open findings
 

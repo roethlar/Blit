@@ -234,6 +234,53 @@ hit mpsc backpressure.
 
 16 unit tests in `blit-tui` total. Workspace passing.
 
+## Round 3 (sha `455ba2e`)
+
+Reviewer caught the third startup race: round 2's
+ordering ran `GetState` BEFORE registering the Subscribe
+Receiver. A transfer that started after the snapshot but
+before the stream registered was invisible — Progress
+events would discard against an unknown id, and a Complete
+would land in `recent[]` with blank kind/peer/module/path.
+
+Fix mirrors c-6 round 2 on the CLI side: **subscribe
+first**.
+
+1. `run_event_loop` opens Subscribe (spawns the forwarder)
+   BEFORE awaiting `jobs::query`. Events broadcast during
+   the GetState RPC's flight buffer in the mpsc.
+2. After applying the snapshot, `drain_startup_events`
+   `try_recv`s buffered events and applies each onto state.
+3. Falls into the normal select loop.
+
+For the merge to be safe:
+
+- `TransfersState::apply_event(TransferStarted)` now uses
+  `entry().or_insert_with(...)` instead of `insert(...)`.
+  Started events for ids already in the snapshot are no-ops
+  (preserves snapshot bytes/throughput). Returns `true`
+  only when the row was newly inserted.
+- The daemon's broadcast is FIFO per receiver, so a
+  transfer that Started+Completed entirely within the
+  startup window has its Started buffered first. Replay
+  inserts the row with metadata, then Complete moves it
+  to recent. The "blank metadata" failure mode is closed.
+
++2 regression tests:
+
+- `apply_event_started_does_not_clobber_snapshot_progress`
+  — snapshot has bytes=500_000; buffered Started arrives;
+  bytes preserved.
+- `buffered_started_then_complete_preserves_metadata` —
+  transfer started+completed in the race window arrives
+  in recent with full metadata (kind/peer/module/path).
+
+`apply_event_started_inserts_idempotently` updated to
+match the new return semantics (true on first insert,
+false on duplicate).
+
+Workspace: 591 passing serially.
+
 ## Reviewer comments
 
 (empty — pending grade)
