@@ -338,9 +338,11 @@ async fn run_router(
         browse_fetch_tx: browse_fetch_tx.clone(),
         profile: profile::ProfileState::new(),
         profile_reply_tx: profile_reply_tx.clone(),
-        verify: verify::VerifyState::with_defaults(
+        verify: verify::VerifyState::with_defaults_and_paths(
             tui_config.verify.default_use_checksum,
             tui_config.verify.default_one_way,
+            tui_config.verify.default_source.clone(),
+            tui_config.verify.default_destination.clone(),
         ),
         diagnostics: diagnostics::DiagnosticsState::new(),
         diagnostics_reply_tx: diagnostics_reply_tx.clone(),

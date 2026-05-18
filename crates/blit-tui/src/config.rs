@@ -50,6 +50,16 @@ pub struct VerifyDefaults {
     /// Default value of `VerifyState::one_way`. `false`
     /// matches `blit check`'s two-way default.
     pub default_one_way: bool,
+    /// e-6: prefill the Verify form's Source field at
+    /// TUI launch. Empty string (default) leaves the
+    /// field empty — operator types as before. Useful
+    /// when the operator runs the same compare repeatedly
+    /// (e.g. nightly backup verification against a
+    /// known target).
+    pub default_source: String,
+    /// e-6: prefill the Verify form's Destination field
+    /// at TUI launch. Same shape as `default_source`.
+    pub default_destination: String,
 }
 
 /// e-4: tab-strip rendering preferences.
@@ -195,6 +205,36 @@ mod tests {
         let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
         assert!(cfg.verify.default_use_checksum);
         assert!(cfg.verify.default_one_way);
+    }
+
+    /// e-6: path-prefill fields parse + default to empty.
+    #[test]
+    fn verify_path_prefill_round_trip() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(
+            &path,
+            "[verify]\n\
+             default_source = \"/backups/src\"\n\
+             default_destination = \"/backups/dst\"\n",
+        )
+        .expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.verify.default_source, "/backups/src");
+        assert_eq!(cfg.verify.default_destination, "/backups/dst");
+        // Other verify fields untouched.
+        assert!(!cfg.verify.default_use_checksum);
+        assert!(!cfg.verify.default_one_way);
+    }
+
+    #[test]
+    fn verify_path_prefill_defaults_to_empty() {
+        // Verify section absent entirely — path fields
+        // must default to empty so the operator's typing
+        // workflow is unchanged.
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.verify.default_source, "");
+        assert_eq!(cfg.verify.default_destination, "");
     }
 
     #[test]

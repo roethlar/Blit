@@ -98,11 +98,25 @@ impl VerifyState {
     /// the on-disk `tui.toml`. Callers that don't have a
     /// config (tests, throwaway use) still get
     /// `VerifyState::new()` which defaults to the
-    /// rsync-style "size+mtime · two-way" mode.
+    /// rsync-style "size+mtime · two-way" mode with
+    /// empty form fields.
     pub fn with_defaults(use_checksum: bool, one_way: bool) -> Self {
+        Self::with_defaults_and_paths(use_checksum, one_way, String::new(), String::new())
+    }
+
+    /// e-6: full ctor — mode toggles + path prefill from
+    /// `tui.toml`'s `[verify]` section. Path strings
+    /// default to empty (the operator types both fields)
+    /// when unspecified.
+    pub fn with_defaults_and_paths(
+        use_checksum: bool,
+        one_way: bool,
+        source: String,
+        destination: String,
+    ) -> Self {
         Self {
-            source: String::new(),
-            destination: String::new(),
+            source,
+            destination,
             focus: VerifyFocus::None,
             status: VerifyStatus::Idle,
             request_id: 0,
@@ -617,6 +631,29 @@ mod tests {
         let state = VerifyState::with_defaults(true, true);
         assert!(state.use_checksum());
         assert!(state.one_way());
+    }
+
+    #[test]
+    fn with_defaults_and_paths_prefills_fields() {
+        let state = VerifyState::with_defaults_and_paths(
+            false,
+            false,
+            "/tmp/from-cfg".to_string(),
+            "/tmp/to-cfg".to_string(),
+        );
+        assert_eq!(state.source, "/tmp/from-cfg");
+        assert_eq!(state.destination, "/tmp/to-cfg");
+        // Edit/run state still pristine.
+        assert!(matches!(state.status(), VerifyStatus::Idle));
+        assert_eq!(state.focus(), VerifyFocus::None);
+    }
+
+    #[test]
+    fn with_defaults_and_paths_empty_strings_equal_no_prefill() {
+        let state =
+            VerifyState::with_defaults_and_paths(false, false, String::new(), String::new());
+        assert_eq!(state.source, "");
+        assert_eq!(state.destination, "");
     }
 
     #[test]
