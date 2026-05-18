@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-19-digit-tab-shortcuts | Feature | 1-4 as F1-F4 aliases                | [~]    | `phase5/a1` | `aac0b22` |
+_none_
 
 ## Open findings
 
@@ -118,6 +116,7 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `d471f1e` `?` help overlay documents active-pane refresh (`d-16-help-overlay-keymap-sync` round 2)
 - `873757b` F4 Verify Done preview lines (`d-17-verify-result-preview`)
 - `a4416c8` Ctrl-U clears focused Verify field (`d-18-verify-form-clear`)
+- `aac0b22` Digit aliases for F1-F4 pane navigation (`d-19-digit-tab-shortcuts`)
 - `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
 - `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
