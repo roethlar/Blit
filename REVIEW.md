@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-7-config-theme | Low | Round 2: contrasting active-tab fg | [~] | `phase5/a1` | `12ee960` |
+_none_
 
 ## Open findings
 
@@ -122,3 +120,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
 - `72b742b` Verify path prefill config + schema doc sync (`e-6-verify-prefill` round 2)
+- `12ee960` Configurable tab-strip accent with contrasting active-tab foreground (`e-7-config-theme` round 2)
