@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-14-f2-active-row-age | Feature | Per-row "age" column on F2 active table | [~] | `phase5/a1` | `f1217b7` |
 
 ## Open findings
 
