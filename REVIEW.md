@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| e-7-config-theme | Feature | [theme] accent_color for tab strip          | [~]    | `phase5/a1` | `2b910dc` |
 
 ## Open findings
 
