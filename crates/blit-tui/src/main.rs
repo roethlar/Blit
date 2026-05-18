@@ -157,13 +157,26 @@ async fn main() -> Result<()> {
 /// implemented in this slice — see the
 /// `a1-6b-state-preservation` follow-up.
 async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Args) -> Result<()> {
+    // a1-6 round 2: the input task is owned by the router
+    // for the whole TUI lifetime. Pane loops borrow the
+    // receiver instead of spawning their own task. Without
+    // this, two crossterm `event::poll` readers could be
+    // alive during a navigation window — the old pane's
+    // blocking task could still be inside the 50ms poll
+    // when the next pane spawns its own reader, leading to
+    // dropped or misrouted keystrokes (the same class of
+    // bug a1-2 round 1 hit with per-iteration
+    // spawn_blocking).
+    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
+    spawn_input_task(key_tx);
+
     let mut next: Screen = args.screen.into();
     loop {
         let outcome = match next {
-            Screen::F1 => run_f1_event_loop(terminal).await?,
-            Screen::F2 => run_f2_event_loop(terminal, args.remote.as_deref()).await?,
-            Screen::F3 => run_f3_event_loop(terminal, args.remote.as_deref()).await?,
-            Screen::F4 => run_f4_event_loop(terminal).await?,
+            Screen::F1 => run_f1_event_loop(terminal, &mut key_rx).await?,
+            Screen::F2 => run_f2_event_loop(terminal, &mut key_rx, args.remote.as_deref()).await?,
+            Screen::F3 => run_f3_event_loop(terminal, &mut key_rx, args.remote.as_deref()).await?,
+            Screen::F4 => run_f4_event_loop(terminal, &mut key_rx).await?,
         };
         match outcome {
             LoopOutcome::Quit => return Ok(()),
@@ -312,6 +325,7 @@ fn install_panic_hook() {
 /// visible.
 async fn run_f2_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key_rx: &mut mpsc::Receiver<KeyEvent>,
     remote_arg: Option<&str>,
 ) -> Result<LoopOutcome> {
     let mut state = TransfersState::new();
@@ -322,15 +336,10 @@ async fn run_f2_event_loop(
         ConnectionStatus::NoRemote
     };
 
-    // a1-2 round 2: single-owner input task. crossterm
-    // event::poll/read are sync and not cancellable, so racing
-    // a fresh spawn_blocking on each loop iteration leaked
-    // detached blocking tasks that could each consume a key
-    // press. Now ONE blocking task loops on event::poll and
-    // forwards every key press through an mpsc; the main
-    // loop selects on it without touching crossterm directly.
-    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
-    spawn_input_task(key_tx);
+    // a1-6 round 2: the input task is owned by the router
+    // for the whole TUI lifetime. `key_rx` is borrowed
+    // here so a navigation transition doesn't briefly
+    // double up two crossterm event readers.
 
     // Optional Subscribe channel. None when no `--remote`.
     let mut event_rx: Option<mpsc::Receiver<EventOrError>> = None;
@@ -503,11 +512,12 @@ async fn run_f2_event_loop(
 /// through (later A.1 sub-slices + a1-6 routing).
 async fn run_f1_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key_rx: &mut mpsc::Receiver<KeyEvent>,
 ) -> Result<LoopOutcome> {
     let mut state = DaemonsState::new();
 
-    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
-    spawn_input_task(key_tx);
+    // a1-6 round 2: key_rx is owned by the router and
+    // borrowed here.
 
     let (disco_tx, mut disco_rx) = mpsc::channel::<DiscoveryUpdate>(4);
     let (refresh_tx, refresh_rx) = mpsc::channel::<()>(1);
@@ -722,13 +732,13 @@ const F1_DETAIL_BUFFER: usize = 8;
 /// only `q` to quit.
 async fn run_f3_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key_rx: &mut mpsc::Receiver<KeyEvent>,
     remote_arg: Option<&str>,
 ) -> Result<LoopOutcome> {
     let mut state = BrowseState::new();
     let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
 
-    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
-    spawn_input_task(key_tx);
+    // a1-6 round 2: key_rx is owned by the router.
 
     // Parse the remote up-front so a malformed value lands
     // in the stats banner instead of bouncing back to a hard
@@ -945,12 +955,12 @@ enum BrowseFetchPayload {
 /// `spawn_blocking` task to avoid stalling the runtime.
 async fn run_f4_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    key_rx: &mut mpsc::Receiver<KeyEvent>,
 ) -> Result<LoopOutcome> {
     use crate::profile::ProfileState;
     let mut state = ProfileState::new();
 
-    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
-    spawn_input_task(key_tx);
+    // a1-6 round 2: key_rx is owned by the router.
 
     let (reply_tx, mut reply_rx) = mpsc::channel::<ProfileReply>(4);
 
