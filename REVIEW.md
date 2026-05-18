@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-2-f2-transfers | Medium   | F2 startup Subscribe/GetState merge (R4)    | `[~]`  | `phase5/a1` | `024e406` |
 
 ## Open findings
 

@@ -281,6 +281,106 @@ false on duplicate).
 
 Workspace: 591 passing serially.
 
+## Round 4 (sha filled by sentinel)
+
+Reviewer caught two follow-ups on round 3's subscribe-first
+ordering:
+
+### 1. Subscribe-first was not causally ordered (Medium)
+
+Round 3 issued `tokio::spawn(async move { subscribe(...).await
+... })` and immediately returned. The spawned task still had
+to be scheduled, connect over gRPC, and have the daemon
+register its broadcast receiver — all of which can happen
+*after* the caller resumes and fires `GetState`. A transfer
+started in that gap was still invisible.
+
+Fix: **inline-await** the subscribe RPC.
+
+```rust
+async fn open_subscribe_stream(
+    endpoint: &RemoteEndpoint,
+) -> Result<mpsc::Receiver<EventOrError>, String> {
+    let stream = jobs::subscribe(endpoint, "", false).await?;
+    let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
+    let _ = tx.send(EventOrError::Connected).await;
+    tokio::spawn(forward_subscribe_stream(stream, tx));
+    Ok(rx)
+}
+```
+
+When this function returns `Ok(rx)`, the daemon's broadcast
+sender is registered and any subsequent transfer event is
+in our mpsc. The spawned `forward_subscribe_stream` task is
+just the inner pump — no setup work remains.
+
+`run_event_loop` now calls `open_subscribe_stream(&endpoint).await`
+BEFORE `jobs::query(...)`. Failure of subscribe lands the TUI
+in Degraded state without ever firing GetState (no point
+fetching a snapshot we can't keep live).
+
+### 2. Buffered terminal events duplicate snapshot recent[]
+   rows (Medium)
+
+A transfer that started, completed, and was recorded in the
+daemon's `RecentRing` **before** the GetState RPC returned
+would appear in `snapshot.recent[]`. The same transfer's
+Started + Complete pair also broadcast through the Subscribe
+stream during the startup window and buffered in our mpsc.
+Replaying those buffered events ran:
+
+- Started → `active.entry(id).or_insert_with(...)` — inserted
+  a fresh active row (id not in active).
+- Complete → `move active→recent` — pushed a SECOND recent
+  row with the same `transfer_id`.
+
+Net: the recent table showed two rows for one transfer.
+
+Fix: **terminal-id dedup at the top of `apply_event`**.
+
+```rust
+let event_id = match event.payload.as_ref() {
+    Some(Payload::TransferStarted(s))  => Some(s.transfer_id.as_str()),
+    Some(Payload::TransferProgress(p)) => Some(p.transfer_id.as_str()),
+    Some(Payload::TransferComplete(c)) => Some(c.transfer_id.as_str()),
+    Some(Payload::TransferError(e))    => Some(e.transfer_id.as_str()),
+    None => None,
+};
+if let Some(id) = event_id {
+    if self.recent.iter().any(|r| r.transfer_id == id) {
+        return false;
+    }
+}
+```
+
+Once an id is in `recent[]`, no further event for that id
+can mutate state. Closes the duplicate-row failure mode for
+both the snapshot/stream overlap and any future Complete →
+late Error scenarios.
+
+### Files
+
+- `crates/blit-tui/Cargo.toml`: + tonic = "0.14" (needed
+  because `forward_subscribe_stream`'s signature names
+  `tonic::Streaming<DaemonEvent>`).
+- `crates/blit-tui/src/main.rs`: subscribe ordering refactor
+  + extracted `forward_subscribe_stream` helper.
+- `crates/blit-tui/src/state.rs`: terminal-id dedup at
+  `apply_event` entry.
+
+### Tests
+
++1 regression test in `state::tests`:
+
+- `buffered_events_dedupe_against_snapshot_recent`:
+  populates snapshot.recent[] with id "race-id"; pushes
+  Started + Complete for that id through `apply_event`;
+  asserts active_count=0, recent_count=1, both events
+  return `false`.
+
+19 unit tests in `blit-tui` total (was 18). Workspace
+passing serially: 592 tests.
+
 ## Reviewer comments
 
 (empty — pending grade)
