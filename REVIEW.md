@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| d-20-f2-recent-throughput | Feature | Throughput column on F2 recent table | [~] | `phase5/a1` | `ecbb24f` |
 
 ## Open findings
 
