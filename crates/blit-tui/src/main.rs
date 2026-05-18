@@ -392,7 +392,12 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
-                screens::render_tab_strip(frame, tab_area, app.current_screen);
+                let counts = screens::TabStripCounts {
+                    daemons: app.daemons.rows().len(),
+                    active_transfers: app.transfers.active_count(),
+                    recent_transfers: app.transfers.recent_count(),
+                };
+                screens::render_tab_strip(frame, tab_area, app.current_screen, counts);
                 match app.current_screen {
                     Screen::F1 => screens::f1::render_into(frame, body_area, &app.daemons, now),
                     Screen::F2 => screens::f2::render_into(

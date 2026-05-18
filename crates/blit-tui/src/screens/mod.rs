@@ -30,10 +30,23 @@ pub fn split_for_tabs(frame_area: Rect) -> (Rect, Rect) {
     (chunks[0], chunks[1])
 }
 
+/// At-a-glance counts surfaced on the tab strip's right
+/// edge. Mirrors TUI_DESIGN §5's header line
+/// ("3 daemons │ 1 transfer active"). e-2 fills these
+/// from `AppState`; pass `Default` to render zeroes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TabStripCounts {
+    pub daemons: usize,
+    pub active_transfers: usize,
+    pub recent_transfers: usize,
+}
+
 /// Paint the F1..F4 tab strip into `area`. The active
 /// pane is rendered bold + cyan; inactive panes are dim.
-pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen) {
-    let mut spans: Vec<Span> = Vec::with_capacity(8);
+/// Right-side counts column shows discovered daemons +
+/// active/recent transfer counts + a `? help` reminder.
+pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen, counts: TabStripCounts) {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
     for (idx, (key, label, screen)) in [
         ("F1", "Daemons", Screen::F1),
         ("F2", "Transfers", Screen::F2),
@@ -56,5 +69,48 @@ pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen) {
         }
         spans.push(Span::styled(format!(" {key} {label} "), style));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(28), Constraint::Length(48)])
+        .split(area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format_counts_line(counts),
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(ratatui::layout::Alignment::Right),
+        chunks[1],
+    );
+}
+
+fn format_counts_line(counts: TabStripCounts) -> String {
+    format!(
+        "{} daemons · {} active · {} recent · ? help",
+        counts.daemons, counts.active_transfers, counts.recent_transfers,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_counts_line_includes_all_three_numbers() {
+        let s = format_counts_line(TabStripCounts {
+            daemons: 3,
+            active_transfers: 1,
+            recent_transfers: 47,
+        });
+        assert!(s.contains("3 daemons"));
+        assert!(s.contains("1 active"));
+        assert!(s.contains("47 recent"));
+        assert!(s.contains("? help"));
+    }
+
+    #[test]
+    fn format_counts_line_with_zeroes() {
+        let s = format_counts_line(TabStripCounts::default());
+        assert!(s.contains("0 daemons"));
+    }
 }
