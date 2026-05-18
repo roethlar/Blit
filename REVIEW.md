@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-5-f4-local-move | Feature  | F4 `V` move trigger (copy + source-purge)   | [~]    | `phase5/a1` | `dc03872` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -104,3 +104,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `aba7394` `?` help overlay global from Verify edit mode (`e-1-help-overlay` round 2)
 - `470630e` F4 local copy/mirror triggers with mirror confirmation (`d-4-f4-local-transfers` round 2)
 - `5b51ee0` Responsive tab-strip counts include F4 local transfers (`e-2-tab-strip-counts` round 2)
+- `dc03872` F4 local move trigger with source-delete confirmation (`d-5-f4-local-move`)
