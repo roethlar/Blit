@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-6b-state-preservation | Medium | AppState consolidates pane state + bgs | `[~]` | `phase5/a1` | `2fbcd1a` |
+_none_
 
 ## Open findings
 
