@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-5-config-live-tick-interval | Feature | Operator-tunable live-tick cadence | [~] | `phase5/a1` | `55f1733` |
 
 ## Open findings
 
