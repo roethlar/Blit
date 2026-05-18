@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-6-verify-prefill | Feature | tui.toml prefills Verify Source/Destination | [~] | `phase5/a1` | `bea03ac` |
 
 ## Open findings
 
