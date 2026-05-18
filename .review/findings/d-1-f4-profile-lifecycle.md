@@ -125,6 +125,53 @@ serially.
   fields + check execution + diff render).
 - **d-3-f4-diagnostics**: Diagnostics dump button.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer caught a real bug: round-1's F4 arms called the
+mutating helper THEN unconditionally kicked
+`begin_fetch + spawn_profile_fetch`. If the mutation
+failed, `note_fetch_error` set the banner to
+`Error(message)`, but `begin_fetch` flipped it right back
+to `Pending`. The subsequent successful read landed
+`Loaded` and the operator never saw the failure.
+
+### Fix: helpers return Result; caller only refetches on Ok
+
+`apply_profile_clear` and `apply_profile_set_enabled` now
+return `Result<(), String>` (no longer take a `&mut
+ProfileState`). A new helper `apply_lifecycle_outcome(state,
+result) -> bool` decides what to do with the outcome:
+
+- `Ok(())` → returns `true`, status untouched, caller
+  proceeds to kick a re-fetch.
+- `Err(msg)` → calls `state.note_fetch_error(msg)`, returns
+  `false`, caller SKIPS the re-fetch so the error banner
+  survives.
+
+F4 match arms:
+
+```rust
+UserAction::ProfileClear => {
+    let outcome = apply_profile_clear();
+    if apply_lifecycle_outcome(&mut app.profile, outcome) {
+        let id = app.profile.begin_fetch();
+        spawn_profile_fetch(id, app.profile_reply_tx.clone());
+    }
+}
+```
+
+### Tests
+
++2 unit tests:
+- `apply_lifecycle_outcome_preserves_error_and_skips_fetch`
+  — Err path returns false; status is the Error banner;
+  caller knows not to refetch.
+- `apply_lifecycle_outcome_ok_signals_refetch_without_banner_change`
+  — Ok path returns true; status untouched (caller's
+  `begin_fetch` flips it to Pending).
+
+98 blit-tui unit tests (was 96). Workspace passes serially.
+
 ## Reviewer comments
 
 (empty — pending grade)

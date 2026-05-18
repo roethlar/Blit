@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| d-1-f4-profile-lifecycle | Medium | Mutation errors survive over re-fetch (R2) | `[~]` | `phase5/a1` | `0607c70` |
 
 ## Open findings
 
