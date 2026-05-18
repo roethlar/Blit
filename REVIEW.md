@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-5-config-live-tick-interval | Feature | Operator-tunable live-tick cadence | [~] | `phase5/a1` | `55f1733` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -26,6 +26,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
+| e-5-config-live-tick-interval | Low | Source docs still describe pre-e-5 live tick/config contract | `phase5/a1` |
 
 ## Verified history
 
