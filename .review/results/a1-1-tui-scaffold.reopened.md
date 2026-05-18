@@ -1,24 +1,25 @@
 # a1-1-tui-scaffold reopened
 
-Reviewed sha: `a88055994a91e7a5a5610081ab089d8164f70cee`
-Reviewed at: 2026-05-17T18:11:28Z
+Reviewed sha: `38df2bbadbade26e6ab03be907536f61d1c7c654`
+Reviewed at: 2026-05-18T03:21:37Z
 Reviewer: reviewer
 Verdict: reopened
 
 ## Findings
 
-### 1. Restore idempotency test emits real terminal control sequences
+### 1. State-transition tests race on global TUI_ACTIVE
 
 Severity: Low
 
-Location: `crates/blit-tui/src/main.rs:308`
+Location: `crates/blit-tui/src/main.rs:310`
 
-Round 2 fixes the original lifecycle issue, but the new `restore_terminal_idempotent_across_repeated_calls` test sets `TUI_ACTIVE=true` and calls the real `restore_terminal()` without actually entering the TUI. That makes the test emit real crossterm escape sequences (`Show` and `LeaveAlternateScreen`) during `cargo test`; the passing test output included `\x1b[?25h\x1b[?1049l` before the `blit-tui` test names.
+Round 3 removes the terminal escape output, but the two new `take_active_for_restore_*` tests both mutate the same process-global `TUI_ACTIVE` atomic. Rust's unit test harness runs tests in parallel by default, so these tests can interleave: one test can store `false` between the other test's store and `take_active_for_restore()`, or store `true` before the inactive test's assertion. That makes the new tests order-dependent and potentially flaky.
 
-Unit tests should not manipulate the developer's terminal or pollute CI logs with terminal control bytes. Please refactor the idempotency check so it exercises the state transition without writing terminal escape sequences, for example by extracting a pure `take_active_for_restore()` helper or injecting a test sink for the terminal commands.
+Please make the tests independent or serialize the shared state. Prefer changing the helper to take an `&AtomicBool` so production passes `&TUI_ACTIVE` and tests use local atomics; a test-only mutex around these two tests is also acceptable.
 
 ## Validation
 
 - `cargo fmt --all -- --check` passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` passed.
-- `cargo test --workspace` passed, but emitted terminal escape bytes from the new `blit-tui` restore test.
+- `cargo test -p blit-tui` passed and no longer emitted terminal escape bytes.
+- `cargo test --workspace` passed.
