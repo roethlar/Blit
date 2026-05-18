@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-22-f2-cancel-selected | Low | Round 2: sync F2 layout doc | [~] | `phase5/a1` | `852fe10` |
+| _none_ |  |  |  |  |  |
 
 ## Open findings
 
@@ -121,6 +121,7 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `aac0b22` Digit aliases for F1-F4 pane navigation (`d-19-digit-tab-shortcuts`)
 - `2e11732` F2 recent throughput column + layout doc sync (`d-20-f2-recent-throughput` round 2)
 - `5e8856f` F2 active-row cursor anchored by transfer_id (`d-21-f2-active-cursor` round 2)
+- `852fe10` F2 cancel-selected action + layout doc sync (`d-22-f2-cancel-selected` round 2)
 - `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
 - `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
