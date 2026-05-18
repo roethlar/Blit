@@ -126,6 +126,7 @@ pub fn render_tab_strip(
 /// Build the tab spans. `short=true` uses just " F1 " etc.
 /// (drops the "Daemons"/"Transfers"/... label).
 fn build_tab_spans(active: Screen, short: bool, accent: Color) -> Vec<Span<'static>> {
+    let fg_for_active = contrasting_fg(accent);
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
     for (idx, (key, label, screen)) in [
         ("F1", "Daemons", Screen::F1),
@@ -138,7 +139,7 @@ fn build_tab_spans(active: Screen, short: bool, accent: Color) -> Vec<Span<'stat
     {
         let style = if *screen == active {
             Style::default()
-                .fg(Color::Black)
+                .fg(fg_for_active)
                 .bg(accent)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -159,6 +160,36 @@ fn build_tab_spans(active: Screen, short: bool, accent: Color) -> Vec<Span<'stat
 
 fn total_span_width(spans: &[Span<'_>]) -> u16 {
     spans.iter().map(|s| s.content.chars().count() as u16).sum()
+}
+
+/// e-7 R2: pick a foreground color that contrasts the
+/// active-tab background. Pre-fix the active tab always
+/// used `Color::Black` for the foreground, which became
+/// invisible when the operator picked
+/// `accent_color = "black"` (and was hard to read on
+/// other dim ANSI variants too).
+///
+/// Classification:
+/// - **Dark accents** (need white text): black, red,
+///   green, blue, magenta, darkgray. Standard ANSI dim
+///   colors render dark on most terminal palettes.
+/// - **Light accents** (need black text): yellow, cyan,
+///   gray, white, and all `light_*` variants.
+///
+/// `Color::Reset` and any RGB / indexed variants fall
+/// back to black foreground — the renderer doesn't try
+/// to be clever about user-defined values it doesn't
+/// recognize.
+fn contrasting_fg(bg: Color) -> Color {
+    match bg {
+        Color::Black
+        | Color::Red
+        | Color::Green
+        | Color::Blue
+        | Color::Magenta
+        | Color::DarkGray => Color::White,
+        _ => Color::Black,
+    }
 }
 
 fn format_counts_full(counts: TabStripCounts) -> String {
@@ -232,6 +263,93 @@ mod tests {
             full_width + short_counts_w <= 80,
             "full tabs + short counts must fit in 80 cols ({full_width} + {short_counts_w})",
         );
+    }
+
+    // e-7 R2: contrasting-fg picks white text on dark
+    // accent backgrounds. Pre-fix `accent_color = "black"`
+    // rendered an invisible active tab (black fg on black
+    // bg). Now the active-tab fg flips to white whenever
+    // the accent is one of the dim ANSI variants.
+
+    #[test]
+    fn contrasting_fg_picks_white_on_dark_accents() {
+        for dark in [
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Blue,
+            Color::Magenta,
+            Color::DarkGray,
+        ] {
+            assert_eq!(
+                contrasting_fg(dark),
+                Color::White,
+                "expected white fg on {dark:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn contrasting_fg_picks_black_on_light_accents() {
+        for light in [
+            Color::Yellow,
+            Color::Cyan,
+            Color::Gray,
+            Color::White,
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightYellow,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::LightCyan,
+        ] {
+            assert_eq!(
+                contrasting_fg(light),
+                Color::Black,
+                "expected black fg on {light:?}"
+            );
+        }
+    }
+
+    /// The black-accent regression case the round-1
+    /// review caught: render the tab strip with
+    /// `accent = Color::Black` and assert the active
+    /// tab's cells use a non-black foreground so the
+    /// "F1 Daemons" text remains visible.
+    #[test]
+    fn black_accent_keeps_active_tab_readable() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_tab_strip(
+                    frame,
+                    frame.area(),
+                    Screen::F1,
+                    TabStripCounts::default(),
+                    false,
+                    Color::Black,
+                );
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        // Find a cell on the active F1 tab — it must
+        // have bg=Black (we asked for that) and fg !=
+        // Black (otherwise the text is invisible).
+        let mut found_active_cell = false;
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, 0)];
+            if cell.bg == Color::Black && cell.symbol() != " " {
+                assert_ne!(
+                    cell.fg,
+                    Color::Black,
+                    "active tab cell at x={x} has invisible fg=Black on bg=Black"
+                );
+                found_active_cell = true;
+            }
+        }
+        assert!(found_active_cell, "no active-tab cell found in render");
     }
 
     /// Short tabs alone fit even on a 30-col terminal.

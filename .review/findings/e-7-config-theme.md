@@ -132,4 +132,52 @@ In `config::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/e-7-config-theme.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **`accent_color = "black"` rendered an invisible
+  active tab.** Pre-fix the active-tab style always set
+  `fg(Color::Black)` regardless of bg. With
+  `accent_color = "black"` the operator got
+  black-on-black — text invisible. The same issue
+  surfaced (less severely) on other dim ANSI variants
+  (`red`, `green`, `blue`, `magenta`, `darkgray`)
+  depending on the terminal palette.
+
+  Round 2 fix: new `contrasting_fg(bg) -> Color` helper.
+  Dim ANSI variants get `Color::White`; light /
+  `light_*` variants keep `Color::Black`. The active-tab
+  style now calls `contrasting_fg(accent)` instead of
+  the hardcoded `Color::Black`.
+
+  Classification:
+  - **White fg** (dark accents): black, red, green,
+    blue, magenta, darkgray.
+  - **Black fg** (light accents): yellow, cyan, gray,
+    white, lightred...lightcyan.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/screens/mod.rs`:
+  - `contrasting_fg(Color) -> Color` helper.
+  - `build_tab_spans` calls it to pick the active-tab
+    foreground.
+
+### Round 2 tests
+
++3 unit tests (225 → 228):
+
+In `screens::tests`:
+- `contrasting_fg_picks_white_on_dark_accents` —
+  every dim ANSI variant returns `Color::White`.
+- `contrasting_fg_picks_black_on_light_accents` —
+  every light variant returns `Color::Black`.
+- `black_accent_keeps_active_tab_readable` —
+  renderer-level regression: renders the tab strip
+  with `accent = Color::Black` into a TestBackend,
+  asserts at least one cell with bg=Black has a
+  non-Black fg (i.e. the active-tab text is visible).
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
