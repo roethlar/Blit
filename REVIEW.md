@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-4-f4-local-transfers | Feature | F4 `C` copy / `M` mirror triggers       | `[~]`  | `phase5/a1` | `faec1e3` |
 
 ## Open findings
 
