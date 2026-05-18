@@ -98,4 +98,50 @@ and inline; correctness is pinned by
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-12-esc-cancels-confirm.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **Esc still fails to cancel confirm after Verify focus
+  is re-entered.** The round-1 intercept ran AFTER
+  `handle_verify_keystroke`. If the operator hit `M`
+  (confirm opens), then `Tab` (Verify form gains edit
+  focus, the confirm prompt stays visible), then `Esc`
+  — the Verify keystroke handler consumed the Esc to
+  clear focus and the confirm-cancel branch never ran.
+  Operator was stuck with a destructive prompt and no
+  Esc escape.
+
+  Round 2 reorders the dispatch: the Esc-cancels-confirm
+  intercept now runs BEFORE `handle_verify_keystroke`,
+  so confirm-pending always wins over Verify edit-mode
+  Esc handling. Comment block at the call site spells
+  out the priority explicitly.
+
+  Also factored the gate into a testable helper
+  `esc_cancels_confirm(&KeyEvent, &AppState) -> bool` so
+  the priority matrix can be regression-tested directly
+  (the previous round just had a state-machine test for
+  cancel_confirm that wouldn't have caught this).
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`:
+  - New `esc_cancels_confirm(&KeyEvent, &AppState) -> bool`
+    helper.
+  - Router's Esc intercept now uses the helper AND
+    runs before `handle_verify_keystroke`.
+
+### Round 2 tests
+
++1 unit test (178 → 179):
+
+In `main::tests`:
+- `esc_cancels_confirm_priority_matrix`: pins the gate
+  matrix — confirm pending alone, confirm + Verify
+  edit focus (the regression case), Ctrl-Esc / Alt-Esc
+  (no-trigger), Move confirm (also handled), non-Esc
+  keys (no-trigger).
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test -p blit-tui` all green.

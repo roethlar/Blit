@@ -494,27 +494,26 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                     }
                     continue;
                 }
+                // d-12 R2: Esc cancels a pending mirror/move
+                // confirm prompt. Has to happen BEFORE the
+                // Verify keystroke handler so the operator
+                // can still escape a confirm even after
+                // Tab-ing into the Verify form (which
+                // `handle_verify_keystroke` would otherwise
+                // absorb Esc for clear-focus). Also has to
+                // happen before key_action runs because
+                // `should_quit` maps bare Esc to Quit, which
+                // would tear down the TUI on what the
+                // operator intended as a "no, don't do that"
+                // gesture.
+                if esc_cancels_confirm(&key, &app) {
+                    app.transfer.cancel_confirm();
+                    continue;
+                }
                 if app.current_screen == Screen::F4
                     && app.verify.focus().is_editing()
                     && handle_verify_keystroke(&key, &mut app, &verify_run_tx)
                 {
-                    continue;
-                }
-                // d-12: Esc cancels a pending mirror/move
-                // confirm prompt. Has to happen before
-                // key_action runs because `should_quit`
-                // maps bare Esc to Quit, which would otherwise
-                // tear down the TUI on what the operator
-                // intended as a "no, don't do that" gesture.
-                // Ctrl-Esc / Alt-Esc still fall through to
-                // the regular dispatcher.
-                if key.code == KeyCode::Esc
-                    && !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                    && app.transfer.is_confirming()
-                {
-                    app.transfer.cancel_confirm();
                     continue;
                 }
                 // If handle_verify_keystroke returned false
@@ -1442,6 +1441,24 @@ fn needs_live_tick(app: &AppState) -> bool {
             profile::ProfileFetchStatus::Loaded { .. }
         ),
     }
+}
+
+/// d-12: predicate for the router's Esc-cancels-confirm
+/// intercept. Returns true ONLY for bare Esc (no Ctrl /
+/// Alt modifiers) while a mirror or move confirmation
+/// prompt is open. The router calls this BEFORE
+/// `handle_verify_keystroke` and `key_action` so the
+/// confirm-cancel branch absorbs the keystroke even if
+/// the operator has Tab-ed into the Verify form's edit
+/// mode mid-confirm (d-12 round-2 fix — pre-fix the
+/// Verify keystroke handler ate the Esc and the confirm
+/// stayed visible with no way out).
+fn esc_cancels_confirm(key: &KeyEvent, app: &AppState) -> bool {
+    key.code == KeyCode::Esc
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && app.transfer.is_confirming()
 }
 
 /// `true` when the operator can kick a local transfer:
@@ -2741,6 +2758,84 @@ mod tests {
             "`?` must NOT insert into the focused field, got: {:?}",
             app.verify.source
         );
+    }
+
+    /// d-12 R2: predicate that gates the router's
+    /// Esc-cancels-confirm intercept. Pins the matrix the
+    /// reviewer asked for, in particular the "confirm
+    /// pending + Verify focus editing" combination — the
+    /// gate returns true regardless of focus state so the
+    /// confirm-cancel branch wins over `handle_verify_keystroke`.
+    #[test]
+    fn esc_cancels_confirm_priority_matrix() {
+        let mut app = AppState {
+            current_screen: Screen::F4,
+            parsed_remote: None,
+            remote_label: String::new(),
+            daemons: DaemonsState::new(),
+            daemons_last_fetched: None,
+            detail_tx: mpsc::channel::<DetailUpdate>(1).0,
+            discovery_refresh_tx: mpsc::channel::<()>(1).0,
+            transfers: TransfersState::new(),
+            transfers_status: ConnectionStatus::NoRemote,
+            transfers_setup_gen: 0,
+            transfers_setup_pending: false,
+            browse: BrowseState::new(),
+            browse_last_fetched_view: None,
+            browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            profile: profile::ProfileState::new(),
+            profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
+            verify: verify::VerifyState::new(),
+            diagnostics: diagnostics::DiagnosticsState::new(),
+            diagnostics_reply_tx: mpsc::channel::<DiagnosticsReply>(1).0,
+            help: help::HelpOverlay::default(),
+            transfer: transfer::TransferState::new(),
+            transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+        };
+
+        let esc = k(KeyCode::Esc);
+        // No confirm pending → false even on Esc.
+        assert!(!esc_cancels_confirm(&esc, &app));
+
+        // Confirm pending → true.
+        app.transfer.begin_confirm_mirror();
+        assert!(esc_cancels_confirm(&esc, &app));
+
+        // *** THE REGRESSION ***: even with Verify form
+        // focused into edit mode, Esc must still cancel
+        // the confirm (the intercept runs BEFORE
+        // handle_verify_keystroke). Pre-fix this returned
+        // true correctly here, but the router consulted
+        // handle_verify_keystroke first and ate the Esc.
+        app.verify.cycle_focus();
+        assert!(app.verify.focus().is_editing());
+        assert!(
+            esc_cancels_confirm(&esc, &app),
+            "Esc must cancel confirm even when Verify form has edit focus"
+        );
+
+        // Ctrl-Esc / Alt-Esc still fall through to the
+        // regular dispatcher.
+        let ctrl_esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert!(!esc_cancels_confirm(&ctrl_esc, &app));
+        let alt_esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::ALT,
+        };
+        assert!(!esc_cancels_confirm(&alt_esc, &app));
+
+        // Move confirm also gets cancelled (the gate is
+        // confirm-kind-agnostic via is_confirming()).
+        app.transfer.cancel_confirm();
+        app.transfer.begin_confirm_move();
+        assert!(esc_cancels_confirm(&esc, &app));
+
+        // Non-Esc keys with confirm pending don't trigger.
+        let y = k(KeyCode::Char('y'));
+        assert!(!esc_cancels_confirm(&y, &app));
     }
 
     /// d-12: cancel_confirm dismisses both ConfirmingMirror
