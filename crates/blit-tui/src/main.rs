@@ -231,6 +231,20 @@ async fn main() -> Result<()> {
     let mut config_warnings: Vec<String> = Vec::new();
     let tui_config = config::load(|msg| config_warnings.push(msg));
 
+    // e-7: validate the [theme] accent color. An unknown
+    // name (typo, terminal-specific color not in our
+    // palette) buffers a warning + falls back to the
+    // default. Same buffer-then-flush contract as parse
+    // errors.
+    if tui_config.theme.parse_accent().is_none() {
+        config_warnings.push(format!(
+            "tui.toml [theme] accent_color = {:?} is not a recognized color; \
+             using default {:?}",
+            tui_config.theme.accent_color,
+            config::ThemeDefaults::DEFAULT_ACCENT,
+        ));
+    }
+
     let mut guard = TuiGuard::new().context("entering TUI")?;
     let result = run_router(guard.terminal_mut(), &args, tui_config).await;
     drop(guard);
@@ -265,6 +279,17 @@ async fn run_router(
     // for the whole TUI lifetime.
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
     spawn_input_task(key_tx);
+
+    // e-7: bridge the config's `RawColor` (operator-typed
+    // accent_color string) to a `ratatui::style::Color`.
+    // Unknown values already warned at startup (in main)
+    // — here we silently fall back so the renderer never
+    // panics on a None.
+    let accent_color = tui_config
+        .theme
+        .parse_accent()
+        .map(raw_color_to_ratatui)
+        .unwrap_or(ratatui::style::Color::Cyan);
 
     // a1-6b: parse remote up-front so every pane sees the
     // same endpoint (or None) without re-parsing. Round 2:
@@ -435,6 +460,7 @@ async fn run_router(
                     app.current_screen,
                     counts,
                     tui_config.tab_strip.show_counts,
+                    accent_color,
                 );
                 match app.current_screen {
                     Screen::F1 => screens::f1::render_into(frame, body_area, &app.daemons, now),
@@ -1445,6 +1471,32 @@ struct TransferReply {
     request_id: u64,
     kind: transfer::TransferKind,
     result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
+}
+
+/// e-7: bridge from the config's `RawColor` (which lives
+/// in `config` to avoid leaking ratatui types into the
+/// schema layer) to the ratatui color used by the
+/// renderer.
+fn raw_color_to_ratatui(c: config::RawColor) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match c {
+        config::RawColor::Black => Color::Black,
+        config::RawColor::Red => Color::Red,
+        config::RawColor::Green => Color::Green,
+        config::RawColor::Yellow => Color::Yellow,
+        config::RawColor::Blue => Color::Blue,
+        config::RawColor::Magenta => Color::Magenta,
+        config::RawColor::Cyan => Color::Cyan,
+        config::RawColor::Gray => Color::Gray,
+        config::RawColor::DarkGray => Color::DarkGray,
+        config::RawColor::LightRed => Color::LightRed,
+        config::RawColor::LightGreen => Color::LightGreen,
+        config::RawColor::LightYellow => Color::LightYellow,
+        config::RawColor::LightBlue => Color::LightBlue,
+        config::RawColor::LightMagenta => Color::LightMagenta,
+        config::RawColor::LightCyan => Color::LightCyan,
+        config::RawColor::White => Color::White,
+    }
 }
 
 /// `true` when the event loop should arm the 500ms

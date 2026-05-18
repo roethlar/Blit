@@ -69,9 +69,10 @@ pub fn render_tab_strip(
     active: Screen,
     counts: TabStripCounts,
     show_counts: bool,
+    accent: Color,
 ) {
-    let full_tab_spans = build_tab_spans(active, false);
-    let short_tab_spans = build_tab_spans(active, true);
+    let full_tab_spans = build_tab_spans(active, false, accent);
+    let short_tab_spans = build_tab_spans(active, true, accent);
     let full_tab_width = total_span_width(&full_tab_spans);
     let short_tab_width = total_span_width(&short_tab_spans);
 
@@ -124,7 +125,7 @@ pub fn render_tab_strip(
 
 /// Build the tab spans. `short=true` uses just " F1 " etc.
 /// (drops the "Daemons"/"Transfers"/... label).
-fn build_tab_spans(active: Screen, short: bool) -> Vec<Span<'static>> {
+fn build_tab_spans(active: Screen, short: bool, accent: Color) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
     for (idx, (key, label, screen)) in [
         ("F1", "Daemons", Screen::F1),
@@ -138,7 +139,7 @@ fn build_tab_spans(active: Screen, short: bool) -> Vec<Span<'static>> {
         let style = if *screen == active {
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -215,7 +216,7 @@ mod tests {
     /// at least the short counts.
     #[test]
     fn render_at_80_cols_keeps_full_tabs() {
-        let full = build_tab_spans(Screen::F1, false);
+        let full = build_tab_spans(Screen::F1, false, Color::Cyan);
         let full_width = total_span_width(&full);
         assert!(
             full_width <= 60,
@@ -236,7 +237,7 @@ mod tests {
     /// Short tabs alone fit even on a 30-col terminal.
     #[test]
     fn short_tabs_fit_narrow_terminal() {
-        let short = build_tab_spans(Screen::F1, true);
+        let short = build_tab_spans(Screen::F1, true, Color::Cyan);
         let short_width = total_span_width(&short);
         assert!(
             short_width <= 30,
@@ -267,6 +268,7 @@ mod tests {
                         recent_transfers: 47,
                     },
                     true,
+                    Color::Cyan,
                 );
             })
             .expect("draw");
@@ -296,6 +298,7 @@ mod tests {
                         recent_transfers: 47,
                     },
                     false,
+                    Color::Cyan,
                 );
             })
             .expect("draw");

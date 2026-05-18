@@ -7,7 +7,7 @@
 //! stderr (visible after TUI exit) and use defaults. We
 //! never crash the TUI on a misconfigured `tui.toml`.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5 / e-6):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7):
 //!
 //! ```toml
 //! [verify]
@@ -21,11 +21,14 @@
 //!
 //! [live_tick]
 //! interval_ms = 500             # e-5: render-wakeup cadence (clamped to [50, 5000])
+//!
+//! [theme]
+//! accent_color = "cyan"         # e-7: active-tab background
 //! ```
 //!
-//! Future slices can grow the schema (color themes,
-//! per-pane tick intervals, runtime save-back of edited
-//! Verify paths). Every new field must have
+//! Future slices can grow the schema (per-pane tick
+//! intervals, runtime save-back of edited Verify paths,
+//! more themable surfaces). Every new field must have
 //! `#[serde(default)]` so older configs continue to
 //! parse without surprises.
 
@@ -41,6 +44,7 @@ pub struct TuiConfig {
     pub verify: VerifyDefaults,
     pub tab_strip: TabStripDefaults,
     pub live_tick: LiveTickDefaults,
+    pub theme: ThemeDefaults,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -127,6 +131,85 @@ impl Default for LiveTickDefaults {
         Self {
             interval_ms: Self::DEFAULT_INTERVAL_MS,
         }
+    }
+}
+
+/// e-7: themable colors. Renderer-facing surfaces that
+/// historically hardcoded `Color::Cyan` / `Color::Magenta`
+/// now read from this struct so an operator with red-green
+/// colorblindness or a custom terminal palette can swap
+/// the highlight to something more legible.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThemeDefaults {
+    /// Active-tab background in the tab strip. Default
+    /// `"cyan"` matches the d-15 visual baseline.
+    pub accent_color: String,
+}
+
+impl ThemeDefaults {
+    pub const DEFAULT_ACCENT: &'static str = "cyan";
+
+    /// Parse the accent string into a renderer-ready
+    /// color. Returns the parsed color when the string
+    /// matches a known name, or `None` on unknown values
+    /// so callers can warn + fall back to the default.
+    /// Case-insensitive.
+    pub fn parse_accent(&self) -> Option<RawColor> {
+        accent_color_from_str(&self.accent_color)
+    }
+}
+
+impl Default for ThemeDefaults {
+    fn default() -> Self {
+        Self {
+            accent_color: Self::DEFAULT_ACCENT.to_string(),
+        }
+    }
+}
+
+/// e-7: the subset of ratatui colors we expose for the
+/// accent setting. Names match the standard ANSI palette
+/// terminal users recognize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawColor {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+    DarkGray,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
+    White,
+}
+
+fn accent_color_from_str(name: &str) -> Option<RawColor> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "black" => Some(RawColor::Black),
+        "red" => Some(RawColor::Red),
+        "green" => Some(RawColor::Green),
+        "yellow" => Some(RawColor::Yellow),
+        "blue" => Some(RawColor::Blue),
+        "magenta" => Some(RawColor::Magenta),
+        "cyan" => Some(RawColor::Cyan),
+        "gray" | "grey" => Some(RawColor::Gray),
+        "darkgray" | "darkgrey" | "dark_gray" | "dark_grey" => Some(RawColor::DarkGray),
+        "lightred" | "light_red" => Some(RawColor::LightRed),
+        "lightgreen" | "light_green" => Some(RawColor::LightGreen),
+        "lightyellow" | "light_yellow" => Some(RawColor::LightYellow),
+        "lightblue" | "light_blue" => Some(RawColor::LightBlue),
+        "lightmagenta" | "light_magenta" => Some(RawColor::LightMagenta),
+        "lightcyan" | "light_cyan" => Some(RawColor::LightCyan),
+        "white" => Some(RawColor::White),
+        _ => None,
     }
 }
 
@@ -336,6 +419,66 @@ mod tests {
                 "in-range value passes through"
             );
         }
+    }
+
+    // e-7: [theme] accent color.
+
+    #[test]
+    fn theme_default_is_cyan() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.theme.accent_color, "cyan");
+        assert_eq!(cfg.theme.parse_accent(), Some(RawColor::Cyan));
+    }
+
+    #[test]
+    fn theme_parses_each_supported_color() {
+        for (name, expected) in [
+            ("black", RawColor::Black),
+            ("red", RawColor::Red),
+            ("green", RawColor::Green),
+            ("yellow", RawColor::Yellow),
+            ("blue", RawColor::Blue),
+            ("magenta", RawColor::Magenta),
+            ("cyan", RawColor::Cyan),
+            ("gray", RawColor::Gray),
+            ("grey", RawColor::Gray),
+            ("darkgray", RawColor::DarkGray),
+            ("dark_gray", RawColor::DarkGray),
+            ("lightblue", RawColor::LightBlue),
+            ("light_blue", RawColor::LightBlue),
+            ("white", RawColor::White),
+        ] {
+            let theme = ThemeDefaults {
+                accent_color: name.to_string(),
+            };
+            assert_eq!(theme.parse_accent(), Some(expected), "color name {name:?}");
+        }
+    }
+
+    #[test]
+    fn theme_parse_is_case_insensitive() {
+        let theme = ThemeDefaults {
+            accent_color: "CyAn".to_string(),
+        };
+        assert_eq!(theme.parse_accent(), Some(RawColor::Cyan));
+    }
+
+    #[test]
+    fn theme_parse_unknown_color_returns_none() {
+        let theme = ThemeDefaults {
+            accent_color: "fuchsia".to_string(),
+        };
+        assert!(theme.parse_accent().is_none());
+    }
+
+    #[test]
+    fn theme_round_trips_through_toml() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[theme]\naccent_color = \"magenta\"\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.theme.accent_color, "magenta");
+        assert_eq!(cfg.theme.parse_accent(), Some(RawColor::Magenta));
     }
 
     #[test]
