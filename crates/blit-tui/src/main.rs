@@ -149,6 +149,18 @@ struct AppState {
     // F2
     transfers: TransfersState,
     transfers_status: ConnectionStatus,
+    /// Generation counter for F2 setup tasks. Bumped each
+    /// time `spawn_f2_setup_task` is called; the reply
+    /// envelope carries the same value, and the apply arm
+    /// drops the reply if the generation has moved on.
+    /// Same pattern as `DaemonsState::request_ids` for F1
+    /// detail fetches.
+    transfers_setup_gen: u64,
+    /// True from the moment we spawn an F2 setup task until
+    /// its reply lands. Refresh keystrokes consult this so
+    /// pressing `r` while a setup is in flight doesn't
+    /// spawn a duplicate.
+    transfers_setup_pending: bool,
 
     // F3
     browse: BrowseState,
@@ -261,6 +273,8 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         } else {
             ConnectionStatus::NoRemote
         },
+        transfers_setup_gen: 0,
+        transfers_setup_pending: false,
         browse: BrowseState::new(),
         browse_last_fetched_view: None,
         browse_fetch_tx: browse_fetch_tx.clone(),
@@ -288,7 +302,9 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
     // event_rx + snapshot into `app`.
     let (f2_setup_tx, mut f2_setup_rx) = mpsc::channel::<F2SetupReply>(1);
     if let Some(endpoint) = app.parsed_remote.clone() {
-        spawn_f2_setup_task(endpoint, f2_setup_tx.clone());
+        app.transfers_setup_gen += 1;
+        app.transfers_setup_pending = true;
+        spawn_f2_setup_task(endpoint, app.transfers_setup_gen, f2_setup_tx.clone());
     }
 
     // F4 initial profile fetch — kicked once so the operator
@@ -448,26 +464,36 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
             // F2 setup task completion.
             setup = f2_setup_rx.recv() => {
                 if let Some(reply) = setup {
-                    match reply {
-                        F2SetupReply::Ready { event_rx, snapshot_result } => {
-                            let mut rx = event_rx;
-                            match snapshot_result {
-                                Ok(snapshot) => app.transfers.replace_from_snapshot(snapshot),
-                                Err(err) => {
-                                    app.transfers_status = ConnectionStatus::Degraded(
-                                        format!("initial GetState failed: {err}"),
-                                    );
+                    // Round-3 generation gate: drop the
+                    // reply if a newer setup was spawned
+                    // before this one returned. The pending
+                    // flag is cleared either way so a
+                    // future `r` can spawn afresh.
+                    if reply.gen != app.transfers_setup_gen {
+                        // Stale generation — drop silently.
+                    } else {
+                        app.transfers_setup_pending = false;
+                        match reply.payload {
+                            F2SetupPayload::Ready { event_rx, snapshot_result } => {
+                                let mut rx = event_rx;
+                                match snapshot_result {
+                                    Ok(snapshot) => app.transfers.replace_from_snapshot(snapshot),
+                                    Err(err) => {
+                                        app.transfers_status = ConnectionStatus::Degraded(
+                                            format!("initial GetState failed: {err}"),
+                                        );
+                                    }
                                 }
+                                drain_startup_events(
+                                    &mut rx,
+                                    &mut app.transfers,
+                                    &mut app.transfers_status,
+                                );
+                                transfers_event_rx = Some(rx);
                             }
-                            drain_startup_events(
-                                &mut rx,
-                                &mut app.transfers,
-                                &mut app.transfers_status,
-                            );
-                            transfers_event_rx = Some(rx);
-                        }
-                        F2SetupReply::Failed(err) => {
-                            app.transfers_status = ConnectionStatus::Degraded(err);
+                            F2SetupPayload::Failed(err) => {
+                                app.transfers_status = ConnectionStatus::Degraded(err);
+                            }
                         }
                     }
                 }
@@ -518,16 +544,29 @@ async fn handle_pane_action(
         },
         Screen::F2 => {
             if let UserAction::Refresh = action {
-                if transfers_event_rx.is_none() {
-                    // No live stream — try to (re)open it.
+                if should_spawn_f2_setup(transfers_event_rx.is_some(), app.transfers_setup_pending)
+                {
+                    // No live stream and no setup in flight
+                    // — try to (re)open. Round-3 guard
+                    // closes the duplicate-setup race.
                     if let Some(endpoint) = app.parsed_remote.clone() {
                         app.transfers_status = ConnectionStatus::Connecting;
-                        spawn_f2_setup_task(endpoint, f2_setup_tx.clone());
+                        app.transfers_setup_gen += 1;
+                        app.transfers_setup_pending = true;
+                        spawn_f2_setup_task(endpoint, app.transfers_setup_gen, f2_setup_tx.clone());
                     }
-                } else if let Some(endpoint) = app.parsed_remote.as_ref() {
-                    refresh_via_get_state(endpoint, &mut app.transfers, &mut app.transfers_status)
+                } else if transfers_event_rx.is_some() {
+                    if let Some(endpoint) = app.parsed_remote.as_ref() {
+                        refresh_via_get_state(
+                            endpoint,
+                            &mut app.transfers,
+                            &mut app.transfers_status,
+                        )
                         .await;
+                    }
                 }
+                // else: setup is pending; refresh is a no-op
+                // until the in-flight task lands.
             }
         }
         Screen::F3 => match action {
@@ -557,8 +596,25 @@ async fn handle_pane_action(
     }
 }
 
-/// Reply envelope from the F2 setup task.
-enum F2SetupReply {
+/// Pure helper: decide whether the F2 refresh keystroke
+/// should spawn a fresh setup task. Returns `true` only
+/// when we lack a live Subscribe receiver AND no setup is
+/// already in flight. This is the round-3 fix for the F2
+/// overlap race: pressing `r` while the initial setup is
+/// still running must NOT spawn a duplicate.
+fn should_spawn_f2_setup(event_rx_present: bool, setup_pending: bool) -> bool {
+    !event_rx_present && !setup_pending
+}
+
+/// Reply envelope from the F2 setup task. Carries a
+/// generation so the loop can drop stale results when a
+/// second setup was kicked before the first returned.
+struct F2SetupReply {
+    gen: u64,
+    payload: F2SetupPayload,
+}
+
+enum F2SetupPayload {
     Ready {
         event_rx: mpsc::Receiver<EventOrError>,
         snapshot_result: Result<DaemonState, String>,
@@ -568,15 +624,22 @@ enum F2SetupReply {
 
 /// Background task for F2 setup. Opens the Subscribe
 /// stream and fires the initial `GetState`. Either result
-/// becomes a single `F2SetupReply` message into `tx`.
-/// Running this off the router's await means a slow /
-/// unreachable remote does NOT block the TUI's first draw.
-fn spawn_f2_setup_task(endpoint: RemoteEndpoint, tx: mpsc::Sender<F2SetupReply>) {
+/// becomes a single `F2SetupReply` message into `tx`,
+/// tagged with the generation the caller bumped before
+/// spawning. Running this off the router's await means a
+/// slow / unreachable remote does NOT block the TUI's
+/// first draw.
+fn spawn_f2_setup_task(endpoint: RemoteEndpoint, gen: u64, tx: mpsc::Sender<F2SetupReply>) {
     tokio::spawn(async move {
         let event_rx = match open_subscribe_stream(&endpoint).await {
             Ok(rx) => rx,
             Err(err) => {
-                let _ = tx.send(F2SetupReply::Failed(err)).await;
+                let _ = tx
+                    .send(F2SetupReply {
+                        gen,
+                        payload: F2SetupPayload::Failed(err),
+                    })
+                    .await;
                 return;
             }
         };
@@ -584,9 +647,12 @@ fn spawn_f2_setup_task(endpoint: RemoteEndpoint, tx: mpsc::Sender<F2SetupReply>)
             .await
             .map_err(|err| format!("{err:#}"));
         let _ = tx
-            .send(F2SetupReply::Ready {
-                event_rx,
-                snapshot_result,
+            .send(F2SetupReply {
+                gen,
+                payload: F2SetupPayload::Ready {
+                    event_rx,
+                    snapshot_result,
+                },
             })
             .await;
     });
@@ -1562,6 +1628,25 @@ mod tests {
             other => panic!("expected preserved Loaded, got {other:?}"),
         }
         assert!(detail_rx.try_recv().is_err());
+    }
+
+    /// a1-6b round 3: F2 refresh keystroke must not
+    /// spawn a duplicate setup task. The contract is "only
+    /// spawn when there's no live stream AND no setup
+    /// already in flight."
+    #[test]
+    fn should_spawn_f2_setup_only_when_no_stream_and_no_pending() {
+        // Initial state — no stream, no pending — spawn.
+        assert!(should_spawn_f2_setup(false, false));
+        // Setup already in flight — don't spawn duplicate.
+        assert!(!should_spawn_f2_setup(false, true));
+        // Live stream — refresh path goes through
+        // refresh_via_get_state, not setup spawn.
+        assert!(!should_spawn_f2_setup(true, false));
+        // Both flags set: still don't spawn (defensive —
+        // shouldn't happen in practice, but a stale pending
+        // flag shouldn't override a live stream).
+        assert!(!should_spawn_f2_setup(true, true));
     }
 
     /// a1-4 round-2 regression: refresh while F3 has no
