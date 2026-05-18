@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-4-config-tab-strip-counts | Feature | Opt-out for tab-strip counts via tui.toml | [~] | `phase5/a1` | `94a30c2` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -119,3 +119,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `873757b` F4 Verify Done preview lines (`d-17-verify-result-preview`)
 - `a4416c8` Ctrl-U clears focused Verify field (`d-18-verify-form-clear`)
 - `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
+- `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
