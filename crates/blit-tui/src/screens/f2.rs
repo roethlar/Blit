@@ -56,6 +56,17 @@ pub fn render_into(
     status: &ConnectionStatus,
     now: Instant,
 ) {
+    // d-14: the active-table "age" column compares
+    // `start_unix_ms` (wall-clock at transfer start, sent
+    // by the daemon) against the operator's wall-clock
+    // now — Instant is monotonic so it can't be used here.
+    // We capture the wall-clock once per frame so each
+    // row's age computes against the same anchor.
+    let now_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -67,7 +78,7 @@ pub fn render_into(
         .split(area);
 
     render_header(frame, chunks[0], remote_label, state);
-    render_active_table(frame, chunks[1], state);
+    render_active_table(frame, chunks[1], state, now_unix_ms);
     render_recent_table(frame, chunks[2], state);
     render_footer(frame, chunks[3], status, state.last_event_at(), now);
 }
@@ -86,11 +97,11 @@ fn render_header(frame: &mut Frame, area: Rect, remote_label: &str, state: &Tran
     frame.render_widget(para, area);
 }
 
-fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
+fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, now_unix_ms: u64) {
     let rows: Vec<Row> = state
         .active_rows()
         .into_iter()
-        .map(active_row_to_table_row)
+        .map(|r| active_row_to_table_row(r, now_unix_ms))
         .collect();
     let widths = [
         Constraint::Length(20),
@@ -99,6 +110,7 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Constraint::Min(20),
         Constraint::Length(12),
         Constraint::Length(12),
+        Constraint::Length(10),
     ];
     let header = Row::new(vec![
         Cell::from("transfer_id"),
@@ -107,6 +119,7 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Cell::from("module/path"),
         Cell::from("bytes"),
         Cell::from("throughput"),
+        Cell::from("age"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
     let table = Table::new(rows, widths)
@@ -194,7 +207,7 @@ fn format_since(now: Instant, then: Instant) -> String {
     }
 }
 
-fn active_row_to_table_row(row: &ActiveRow) -> Row<'static> {
+fn active_row_to_table_row(row: &ActiveRow, now_unix_ms: u64) -> Row<'static> {
     Row::new(vec![
         Cell::from(row.transfer_id.clone()),
         Cell::from(kind_label(row.kind).to_string()),
@@ -206,7 +219,39 @@ fn active_row_to_table_row(row: &ActiveRow) -> Row<'static> {
         } else {
             format!("{}/s", format_bytes(row.throughput_bps))
         }),
+        Cell::from(format_age_from_unix_ms(now_unix_ms, row.start_unix_ms)),
     ])
+}
+
+/// d-14: format the age of an active transfer for the
+/// "age" column in F2's active table. `start_unix_ms` is
+/// the wall-clock millisecond timestamp the daemon
+/// stamped at transfer start (`ActiveTransfer::start_unix_ms`).
+/// `now_unix_ms` is the operator's wall-clock now,
+/// captured once per frame.
+///
+/// Returns "-" if `now < start` (clock skew between TUI
+/// and daemon hosts) or if either value is zero. The
+/// daemon stamps the field on every active row, so the
+/// zero case shouldn't happen in practice — but the
+/// renderer must not panic on garbage input from the
+/// wire.
+fn format_age_from_unix_ms(now_unix_ms: u64, start_unix_ms: u64) -> String {
+    if now_unix_ms == 0 || start_unix_ms == 0 || now_unix_ms < start_unix_ms {
+        return "-".to_string();
+    }
+    let age_ms = now_unix_ms - start_unix_ms;
+    if age_ms < 1000 {
+        return format!("{age_ms}ms");
+    }
+    let secs = age_ms / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
 }
 
 fn recent_row_to_table_row(row: &RecentRow) -> Row<'static> {
@@ -289,5 +334,42 @@ mod tests {
         assert_eq!(module_path("", "p"), "p");
         assert_eq!(module_path("mod", ""), "mod");
         assert_eq!(module_path("mod", "sub/dir"), "mod/sub/dir");
+    }
+
+    // d-14: F2 active-row age column.
+
+    #[test]
+    fn format_age_milliseconds() {
+        assert_eq!(format_age_from_unix_ms(1_000_500, 1_000_000), "500ms");
+    }
+
+    #[test]
+    fn format_age_seconds() {
+        assert_eq!(format_age_from_unix_ms(1_005_000, 1_000_000), "5s");
+        assert_eq!(format_age_from_unix_ms(1_060_000, 1_000_000), "1m");
+    }
+
+    #[test]
+    fn format_age_minutes_and_hours() {
+        // 2m → 120000ms past start
+        assert_eq!(format_age_from_unix_ms(1_120_000, 1_000_000), "2m");
+        // 1h → 3_600_000ms past start
+        assert_eq!(format_age_from_unix_ms(4_600_000, 1_000_000), "1h");
+    }
+
+    #[test]
+    fn format_age_returns_dash_for_garbage_inputs() {
+        // Zero now → can't compute against an absolute
+        // wall-clock anchor (renderer captures zero only
+        // if SystemTime::now() fails, which is itself
+        // already a panic-avoidance fallback).
+        assert_eq!(format_age_from_unix_ms(0, 1_000_000), "-");
+        // Zero start → daemon would only send this on a
+        // garbage wire payload.
+        assert_eq!(format_age_from_unix_ms(1_000_000, 0), "-");
+        // Clock skew: TUI host clock is BEHIND the
+        // daemon's. Showing a negative-age placeholder is
+        // safer than wrapping around an unsigned subtract.
+        assert_eq!(format_age_from_unix_ms(1_000_000, 1_000_500), "-");
     }
 }
