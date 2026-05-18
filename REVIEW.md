@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-5-f4-profile   | Feature  | F4 Profile pane (read-only perf history)    | `[~]`  | `phase5/a1` | `d33fedc` |
 
 ## Open findings
 
