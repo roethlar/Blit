@@ -22,15 +22,19 @@
 //! Subscribe stream message so a single task handles
 //! both inputs.
 
+mod browse;
 mod daemons;
 mod screens;
 mod state;
 
-use blit_app::admin::jobs;
+use blit_app::admin::list_modules::Module;
+use blit_app::admin::ls::DirEntry;
+use blit_app::admin::{jobs, list_modules, ls};
 use blit_app::scan;
 use blit_core::generated::{DaemonEvent, DaemonState};
 use blit_core::mdns::MdnsDiscoveredService;
 use blit_core::remote::endpoint::RemoteEndpoint;
+use browse::BrowseState;
 use clap::Parser;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -72,6 +76,7 @@ struct Args {
 enum ScreenArg {
     F1,
     F2,
+    F3,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -94,6 +99,7 @@ async fn main() -> Result<()> {
     let result = match args.screen {
         ScreenArg::F1 => run_f1_event_loop(guard.terminal_mut()).await,
         ScreenArg::F2 => run_f2_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
+        ScreenArg::F3 => run_f3_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
     };
     drop(guard);
     result
@@ -342,7 +348,10 @@ async fn run_f2_event_loop(
                                 }
                             }
                             // F2 has no cursor — ignore.
-                            UserAction::SelectNext | UserAction::SelectPrev => {}
+                            UserAction::SelectNext
+                            | UserAction::SelectPrev
+                            | UserAction::Descend
+                            | UserAction::Ascend => {}
                         }
                     }
                 }
@@ -400,7 +409,10 @@ async fn run_f2_event_loop(
                         }
                     }
                     // F2 has no cursor — ignore.
-                    UserAction::SelectNext | UserAction::SelectPrev => {}
+                    UserAction::SelectNext
+                    | UserAction::SelectPrev
+                    | UserAction::Descend
+                    | UserAction::Ascend => {}
                 }
             }
         }
@@ -482,6 +494,11 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                         }
                         UserAction::SelectNext => state.select_next(),
                         UserAction::SelectPrev => state.select_prev(),
+                        // F1 doesn't have tree navigation
+                        // semantics today. Future a1-6 routing
+                        // will repurpose Enter to switch panes;
+                        // for now both Descend/Ascend are no-ops.
+                        UserAction::Descend | UserAction::Ascend => {}
                     }
                 }
             }
@@ -613,6 +630,208 @@ struct DetailUpdate {
 /// cursor through rows.
 const F1_DETAIL_BUFFER: usize = 8;
 
+/// F3 Browse event loop. Lists modules at top level; cursor +
+/// Enter descends into a module's root and then into its
+/// directories via the `List` RPC.
+///
+/// `--remote` is required (operator-mode browsing requires a
+/// daemon target). On missing or invalid endpoint the loop
+/// renders the F3 frame with an error stats line and accepts
+/// only `q` to quit.
+async fn run_f3_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    remote_arg: Option<&str>,
+) -> Result<()> {
+    let mut state = BrowseState::new();
+    let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
+
+    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
+    spawn_input_task(key_tx);
+
+    // Parse the remote up-front so a malformed value lands
+    // in the stats banner instead of bouncing back to a hard
+    // crash. Missing flag is fatal for browsing (we have
+    // nothing to list) — keep the loop alive so the operator
+    // can read the message and quit.
+    let endpoint = match remote_arg {
+        Some(raw) => match RemoteEndpoint::parse(raw) {
+            Ok(ep) => Some(ep),
+            Err(err) => {
+                state.note_fetch_error(format!("parse '{raw}': {err}"));
+                None
+            }
+        },
+        None => {
+            state.note_fetch_error("--remote <host> is required for F3 Browse".to_string());
+            None
+        }
+    };
+
+    let (fetch_tx, mut fetch_rx) = mpsc::channel::<BrowseFetchReply>(8);
+    // Tracks what fetch we last kicked: whichever view the
+    // request was issued for. Comparing this against the
+    // current `state.view()` lets us skip duplicate kicks
+    // (operator pressing arrows without descending).
+    let mut last_fetched_view: Option<browse::BrowseView> = None;
+
+    loop {
+        // Decide whether to kick a fetch. Only kicks when:
+        // - We have an endpoint.
+        // - The current view differs from the last-kicked.
+        if endpoint.is_some()
+            && views_differ(last_fetched_view.as_ref(), state.view())
+            && matches!(
+                state.status(),
+                browse::BrowseFetchStatus::Idle | browse::BrowseFetchStatus::Error { .. }
+            )
+        {
+            if let Some(ep) = endpoint.as_ref() {
+                kick_browse_fetch(&mut state, ep, &fetch_tx);
+                last_fetched_view = Some(state.view().clone());
+            }
+        }
+
+        let now = Instant::now();
+        let label = remote_label.clone();
+        terminal
+            .draw(|frame| {
+                screens::f3::render(frame, &state, &label, now);
+            })
+            .context("terminal.draw")?;
+
+        tokio::select! {
+            key = key_rx.recv() => {
+                let Some(key) = key else { return Ok(()); };
+                if let Some(action) = key_action(&key) {
+                    match action {
+                        UserAction::Quit => return Ok(()),
+                        UserAction::Refresh => {
+                            // Drop last_fetched_view so the next
+                            // iteration's kick fires.
+                            last_fetched_view = None;
+                            // Bump generation so any in-flight
+                            // reply is dropped on arrival.
+                            state.begin_fetch();
+                            // begin_fetch sets Pending; the kick
+                            // path uses Idle/Error as triggers,
+                            // so reset to Idle here to re-fire.
+                            // (Refresh is the only path that
+                            // bumps generation without descending.)
+                            state.note_fetch_error("refreshing".to_string());
+                        }
+                        UserAction::SelectNext => state.select_next(),
+                        UserAction::SelectPrev => state.select_prev(),
+                        UserAction::Descend => {
+                            // descend mutates state.view; the
+                            // next loop iteration's check
+                            // detects the new view and kicks.
+                            state.descend();
+                        }
+                        UserAction::Ascend => {
+                            state.ascend();
+                        }
+                    }
+                }
+            }
+            reply = fetch_rx.recv() => {
+                if let Some(reply) = reply {
+                    apply_browse_reply(&mut state, reply);
+                }
+            }
+        }
+    }
+}
+
+fn views_differ(prior: Option<&browse::BrowseView>, current: &browse::BrowseView) -> bool {
+    match (prior, current) {
+        (None, _) => true,
+        (Some(browse::BrowseView::Modules), browse::BrowseView::Modules) => false,
+        (
+            Some(browse::BrowseView::Module { name: a, path: ap }),
+            browse::BrowseView::Module { name: b, path: bp },
+        ) => a != b || ap != bp,
+        _ => true,
+    }
+}
+
+/// Kick a fetch for the current view. Bumps the per-view
+/// request id and spawns either a `list_modules` or
+/// `list` RPC task depending on the view shape.
+fn kick_browse_fetch(
+    state: &mut BrowseState,
+    endpoint: &RemoteEndpoint,
+    fetch_tx: &mpsc::Sender<BrowseFetchReply>,
+) {
+    let request_id = state.begin_fetch();
+    let endpoint = endpoint.clone();
+    let view = state.view().clone();
+    let tx = fetch_tx.clone();
+    tokio::spawn(async move {
+        let payload = match &view {
+            browse::BrowseView::Modules => match list_modules::query(&endpoint).await {
+                Ok(modules) => BrowseFetchPayload::Modules(modules),
+                Err(err) => BrowseFetchPayload::Error(format!("{err:#}")),
+            },
+            browse::BrowseView::Module { name, path } => {
+                let path_str = path.join("/");
+                match ls::list_remote(&endpoint, name.clone(), path_str).await {
+                    Ok(entries) => BrowseFetchPayload::Listing {
+                        module: name.clone(),
+                        path: path.clone(),
+                        entries,
+                    },
+                    Err(err) => BrowseFetchPayload::Error(format!("{err:#}")),
+                }
+            }
+        };
+        let _ = tx
+            .send(BrowseFetchReply {
+                request_id,
+                payload,
+            })
+            .await;
+    });
+}
+
+fn apply_browse_reply(state: &mut BrowseState, reply: BrowseFetchReply) {
+    if !state.is_current_request(reply.request_id) {
+        // Stale generation — drop. A newer fetch is in
+        // flight (or already returned).
+        return;
+    }
+    let now = Instant::now();
+    match reply.payload {
+        BrowseFetchPayload::Modules(modules) => {
+            state.apply_modules(modules, now);
+        }
+        BrowseFetchPayload::Listing {
+            module,
+            path,
+            entries,
+        } => {
+            state.apply_listing(&module, &path, entries, now);
+        }
+        BrowseFetchPayload::Error(message) => {
+            state.note_fetch_error(message);
+        }
+    }
+}
+
+struct BrowseFetchReply {
+    request_id: u64,
+    payload: BrowseFetchPayload,
+}
+
+enum BrowseFetchPayload {
+    Modules(Vec<Module>),
+    Listing {
+        module: String,
+        path: Vec<String>,
+        entries: Vec<DirEntry>,
+    },
+    Error(String),
+}
+
 /// Messages from the discovery task back to the F1 loop.
 enum DiscoveryUpdate {
     Result(Vec<MdnsDiscoveredService>),
@@ -710,14 +929,19 @@ fn spawn_input_task(tx: mpsc::Sender<KeyEvent>) {
 }
 
 /// Action surfaced by `key_action` back to the loop.
-/// `Quit` and `Refresh` are shared across screens; `SelectNext` /
-/// `SelectPrev` are consumed only by F1 (a no-op on F2 today —
-/// F2 doesn't have a cursor yet).
+/// `Quit` and `Refresh` are shared across screens; the
+/// other variants are pane-specific (F2 ignores all
+/// navigation today).
 enum UserAction {
     Quit,
     Refresh,
     SelectNext,
     SelectPrev,
+    /// F3: descend into the cursor row (enter / →).
+    Descend,
+    /// F3: pop back one level (←). Mapped only on the
+    /// dedicated key; q/Esc remain Quit.
+    Ascend,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -741,6 +965,8 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         KeyCode::Char('r') => Some(UserAction::Refresh),
         KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') => Some(UserAction::SelectPrev),
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UserAction::Descend),
+        KeyCode::Left | KeyCode::Char('h') => Some(UserAction::Ascend),
         _ => None,
     }
 }
@@ -945,6 +1171,33 @@ mod tests {
         ));
     }
 
+    /// a1-4: F3 navigation keys. Enter / → / 'l' descend
+    /// into the cursor row; ← / 'h' ascend. Verifies the
+    /// full set lands in the right variant.
+    #[test]
+    fn key_action_maps_f3_navigation() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Enter)),
+            Some(UserAction::Descend)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Right)),
+            Some(UserAction::Descend)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('l'))),
+            Some(UserAction::Descend)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Left)),
+            Some(UserAction::Ascend)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('h'))),
+            Some(UserAction::Ascend)
+        ));
+    }
+
     /// a1-3: F1 needs cursor navigation keys. Both arrows and
     /// vim-style hjkl bindings are accepted (operators who
     /// haven't broken the habit get both). 'j' / 'k' are
@@ -975,7 +1228,8 @@ mod tests {
         assert!(key_action(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
         assert!(key_action(&k(KeyCode::Char('J'))).is_none()); // case-sensitive
         assert!(key_action(&k(KeyCode::Char('K'))).is_none()); // case-sensitive
-        assert!(key_action(&k(KeyCode::Enter)).is_none());
+                                                               // Enter is now mapped (a1-4: F3 Descend) — it
+                                                               // *isn't* in this "unmapped" list anymore.
     }
 
     /// `take_active_for_restore` is the pure state-transition
@@ -1139,6 +1393,37 @@ mod tests {
             other => panic!("expected preserved Loaded, got {other:?}"),
         }
         assert!(detail_rx.try_recv().is_err());
+    }
+
+    /// a1-4: views_differ is the trigger predicate for
+    /// the F3 fetcher. None / different views → true;
+    /// equal views → false.
+    #[test]
+    fn views_differ_module_path_compare() {
+        use crate::browse::BrowseView;
+
+        let modules = BrowseView::Modules;
+        let home_root = BrowseView::Module {
+            name: "home".to_string(),
+            path: Vec::new(),
+        };
+        let home_photos = BrowseView::Module {
+            name: "home".to_string(),
+            path: vec!["photos".to_string()],
+        };
+
+        // None → any non-None is "different."
+        assert!(views_differ(None, &modules));
+        assert!(views_differ(None, &home_root));
+
+        // Same view → false.
+        assert!(!views_differ(Some(&modules), &modules));
+        assert!(!views_differ(Some(&home_root), &home_root));
+        assert!(!views_differ(Some(&home_photos), &home_photos));
+
+        // Different views.
+        assert!(views_differ(Some(&modules), &home_root));
+        assert!(views_differ(Some(&home_root), &home_photos));
     }
 
     /// Companion: when no cached detail exists, the kick
