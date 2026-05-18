@@ -221,6 +221,56 @@ In `main::tests`:
 - **a1-6-screen-router**: F-keys to navigate between panes,
   replacing the `--screen` flag.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer caught two issues:
+
+### 1. Refresh wiped the only actionable endpoint error (Medium)
+
+Round 1's `Refresh` arm unconditionally bumped the
+generation and set `Error("refreshing")`, even when
+`endpoint` was `None` (missing or malformed `--remote`).
+The kick-loop's gating then skipped firing (no endpoint),
+so the UI was stranded on "refreshing" instead of the
+actionable original banner ("--remote is required for F3
+Browse" / "parse '<raw>': ...").
+
+Fix: extract the refresh logic into a pure
+`handle_f3_refresh(state, has_endpoint, last_fetched_view)`
+helper. When `has_endpoint == false` it's a no-op. Otherwise
+it does the round-1 dance (drop last_fetched_view, bump
+generation, set Error("refreshing") so the next loop tick
+kicks).
+
++2 regression tests in `main::tests`:
+- `handle_f3_refresh_without_endpoint_preserves_error` —
+  pre-set Error("--remote is required..."); call refresh
+  with has_endpoint=false; assert the banner survives and
+  `last_fetched_view` is untouched.
+- `handle_f3_refresh_with_endpoint_arms_next_kick` — with
+  has_endpoint=true, assert the banner flips to
+  Error("refreshing") and last_fetched_view resets to None.
+
+### 2. Module docs claimed `esc` ascends (Low)
+
+The new `browse.rs` module-level doc said "esc (or ←): pop
+the path." `key_action` checks `should_quit` first and
+maps `Esc` to `Quit`; the footer reads `q/Esc quit` and
+`← / h` for ascending.
+
+Fix: update the doc comment to match the implemented
+keymap, including a note that `q` / `Esc` are reserved for
+Quit (operator's muscle memory for quitting wins over the
+file-manager Esc convention).
+
+### Files changed (round 2)
+
+- `crates/blit-tui/src/browse.rs`: doc comment corrected.
+- `crates/blit-tui/src/main.rs`: `handle_f3_refresh`
+  helper extracted; `Refresh` arm calls it; +2 unit tests.
+
+82 blit-tui unit tests (was 80). Workspace passes serially.
+
 ## Reviewer comments
 
 (empty — pending grade)

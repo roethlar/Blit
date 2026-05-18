@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-4-f3-browse    | Medium   | F3 refresh preserves endpoint error (R2)    | `[~]`  | `phase5/a1` | `2abc71b` |
 
 ## Open findings
 
