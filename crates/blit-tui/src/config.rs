@@ -31,6 +31,7 @@ pub const CONFIG_FILENAME: &str = "tui.toml";
 pub struct TuiConfig {
     pub verify: VerifyDefaults,
     pub tab_strip: TabStripDefaults,
+    pub live_tick: LiveTickDefaults,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -60,6 +61,53 @@ pub struct TabStripDefaults {
 impl Default for TabStripDefaults {
     fn default() -> Self {
         Self { show_counts: true }
+    }
+}
+
+/// e-5: live-tick wakeup cadence. Higher values reduce
+/// redraw cost on slow / high-latency terminals at the
+/// expense of choppier elapsed counters.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LiveTickDefaults {
+    /// Milliseconds between wakeups while a Running
+    /// transfer, Running verify, or pane with a freshness
+    /// footer is on screen. Clamped to
+    /// `[MIN_TICK_MS, MAX_TICK_MS]` after load — anything
+    /// outside is silently snapped to the bound rather
+    /// than refused.
+    pub interval_ms: u64,
+}
+
+impl LiveTickDefaults {
+    /// Default 500ms — matches d-9's hardcoded value, so
+    /// upgrading without writing a `tui.toml` keeps the
+    /// existing cadence.
+    pub const DEFAULT_INTERVAL_MS: u64 = 500;
+    /// Floor — 50ms is already 20Hz, fast enough that
+    /// human eyes can't tell the difference and the
+    /// terminal would burn CPU on cells that aren't
+    /// changing.
+    pub const MIN_INTERVAL_MS: u64 = 50;
+    /// Ceiling — 5s. Beyond that the "live" tick stops
+    /// looking live (a 12.3s timer that updates once
+    /// every 5s looks frozen most of the time).
+    pub const MAX_INTERVAL_MS: u64 = 5000;
+
+    /// Clamped accessor. The loader applies this once,
+    /// so the runtime always sees a sane value even when
+    /// the TOML file specifies 0 or u64::MAX.
+    pub fn interval_ms_clamped(&self) -> u64 {
+        self.interval_ms
+            .clamp(Self::MIN_INTERVAL_MS, Self::MAX_INTERVAL_MS)
+    }
+}
+
+impl Default for LiveTickDefaults {
+    fn default() -> Self {
+        Self {
+            interval_ms: Self::DEFAULT_INTERVAL_MS,
+        }
     }
 }
 
@@ -188,6 +236,57 @@ mod tests {
         // Buffer is owned by the caller — caller can
         // flush after restoring the terminal.
         assert!(!cfg.verify.default_use_checksum);
+    }
+
+    // e-5: live-tick interval clamp + parse.
+
+    #[test]
+    fn live_tick_default_is_500ms() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.live_tick.interval_ms, 500);
+        assert_eq!(cfg.live_tick.interval_ms_clamped(), 500);
+    }
+
+    #[test]
+    fn live_tick_parses_from_toml() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[live_tick]\ninterval_ms = 1200\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.live_tick.interval_ms, 1200);
+        assert_eq!(cfg.live_tick.interval_ms_clamped(), 1200);
+    }
+
+    #[test]
+    fn live_tick_clamp_floor() {
+        let cfg = LiveTickDefaults { interval_ms: 0 };
+        assert_eq!(cfg.interval_ms_clamped(), LiveTickDefaults::MIN_INTERVAL_MS);
+        let cfg = LiveTickDefaults { interval_ms: 1 };
+        assert_eq!(cfg.interval_ms_clamped(), LiveTickDefaults::MIN_INTERVAL_MS);
+    }
+
+    #[test]
+    fn live_tick_clamp_ceiling() {
+        let cfg = LiveTickDefaults {
+            interval_ms: u64::MAX,
+        };
+        assert_eq!(cfg.interval_ms_clamped(), LiveTickDefaults::MAX_INTERVAL_MS);
+        let cfg = LiveTickDefaults {
+            interval_ms: 10_000,
+        };
+        assert_eq!(cfg.interval_ms_clamped(), LiveTickDefaults::MAX_INTERVAL_MS);
+    }
+
+    #[test]
+    fn live_tick_passes_through_when_in_range() {
+        for ms in [50, 250, 500, 1000, 3000, 5000] {
+            let cfg = LiveTickDefaults { interval_ms: ms };
+            assert_eq!(
+                cfg.interval_ms_clamped(),
+                ms,
+                "in-range value passes through"
+            );
+        }
     }
 
     #[test]

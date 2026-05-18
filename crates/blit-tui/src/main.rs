@@ -470,16 +470,21 @@ async fn run_router(
             })
             .context("terminal.draw")?;
 
-        // d-9: a conditional 500ms ticker keeps the F4
-        // elapsed counters live while a Verify run or
-        // local transfer is in flight. When idle, the
-        // tick future is `pending()` so the loop sleeps
+        // d-9: a conditional ticker keeps the F4 elapsed
+        // counters live while a Verify run or local
+        // transfer is in flight. When idle, the tick
+        // future is `pending()` so the loop sleeps
         // indefinitely waiting on real events — no idle
         // CPU burn, no terminal flicker.
+        // e-5: cadence is now operator-tunable via
+        // `[live_tick] interval_ms` in tui.toml (default
+        // 500ms; clamped to [50, 5000]).
         let needs_live_tick = needs_live_tick(&app);
+        let live_tick_interval =
+            std::time::Duration::from_millis(tui_config.live_tick.interval_ms_clamped());
         let live_tick = async {
             if needs_live_tick {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(live_tick_interval).await;
             } else {
                 std::future::pending::<()>().await;
             }
