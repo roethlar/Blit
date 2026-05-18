@@ -46,6 +46,33 @@ pub enum ConnectionStatus {
     Degraded(String),
 }
 
+/// d-22: F2 cancel-selected fragment passed to the
+/// footer renderer. Renderer-agnostic snapshot of the
+/// `F2CancelStatus` enum from `main.rs` — we don't want
+/// the screens layer reaching into main.rs's types, so
+/// this enum carries just the rendered fields.
+#[derive(Debug, Clone)]
+pub enum F2CancelDisplay {
+    Hidden,
+    Sending {
+        transfer_id: String,
+    },
+    Cancelled {
+        transfer_id: String,
+    },
+    NotFound {
+        transfer_id: String,
+    },
+    Unsupported {
+        transfer_id: String,
+        message: String,
+    },
+    Failed {
+        transfer_id: String,
+        message: String,
+    },
+}
+
 /// Render the F2 screen into `frame`. The renderer is a free
 /// function so unit tests can call it against synthetic
 /// state + a `TestBackend`-backed Terminal.
@@ -57,6 +84,7 @@ pub fn render_into(
     state: &TransfersState,
     remote_label: &str,
     status: &ConnectionStatus,
+    cancel: &F2CancelDisplay,
     now: Instant,
 ) {
     // d-14: the active-table "age" column compares
@@ -83,7 +111,7 @@ pub fn render_into(
     render_header(frame, chunks[0], remote_label, state);
     render_active_table(frame, chunks[1], state, now_unix_ms);
     render_recent_table(frame, chunks[2], state);
-    render_footer(frame, chunks[3], status, state.last_event_at(), now);
+    render_footer(frame, chunks[3], status, state.last_event_at(), cancel, now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, remote_label: &str, state: &TransfersState) {
@@ -178,6 +206,7 @@ fn render_footer(
     area: Rect,
     status: &ConnectionStatus,
     last_event_at: Option<Instant>,
+    cancel: &F2CancelDisplay,
     now: Instant,
 ) {
     let status_span = match status {
@@ -205,12 +234,59 @@ fn render_footer(
             Style::default().fg(Color::DarkGray),
         ));
     }
+    // d-22: cancel-selected fragment. Hidden when Idle.
+    match cancel {
+        F2CancelDisplay::Hidden => {}
+        F2CancelDisplay::Sending { transfer_id } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancelling {transfer_id}..."),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        F2CancelDisplay::Cancelled { transfer_id } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancelled {transfer_id}"),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        F2CancelDisplay::NotFound { transfer_id } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancel: id {transfer_id} not found"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        F2CancelDisplay::Unsupported {
+            transfer_id,
+            message,
+        } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancel unsupported for {transfer_id}: {message}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+        F2CancelDisplay::Failed {
+            transfer_id,
+            message,
+        } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancel {transfer_id} failed: {message}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    }
     spans.extend(vec![
         Span::raw("  ·  "),
         Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  ·  "),
         Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" refresh"),
+        Span::raw(" refresh  ·  "),
+        Span::styled("K", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" cancel selected"),
     ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

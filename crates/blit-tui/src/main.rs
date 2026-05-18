@@ -201,6 +201,54 @@ struct AppState {
     transfer: transfer::TransferState,
     /// Sender into the F4 transfer reply mpsc.
     transfer_reply_tx: mpsc::Sender<TransferReply>,
+    /// d-22: lifecycle of an F2 `K` cancel-selected
+    /// request. `Idle` until the operator presses K with
+    /// an anchored cursor; `Sending` while the CancelJob
+    /// RPC is in flight; `Done`/`Error` once it lands.
+    /// Status renders into the F2 footer.
+    cancel_status: F2CancelStatus,
+    cancel_reply_tx: mpsc::Sender<CancelReply>,
+    cancel_request_seq: u64,
+}
+
+/// d-22: F2 cancel-selected lifecycle. Lives on AppState
+/// so the F2 footer can render whichever variant is
+/// current. Same generation-guard pattern as the F4
+/// transfer machinery — `Sending`'s `transfer_id` plus a
+/// monotonic `request_id` let the reply arm drop a stale
+/// reply if the operator fires a second cancel before
+/// the first lands.
+#[derive(Debug, Clone)]
+enum F2CancelStatus {
+    Idle,
+    Sending {
+        transfer_id: String,
+        request_id: u64,
+    },
+    Done {
+        // The transfer_id is carried by `outcome` (every
+        // CancelJobOutcome variant has its own
+        // `transfer_id` field), so we don't double up
+        // here.
+        outcome: blit_app::admin::jobs::CancelJobOutcome,
+    },
+    Error {
+        transfer_id: String,
+        message: String,
+    },
+}
+
+impl F2CancelStatus {
+    fn is_sending(&self) -> bool {
+        matches!(self, F2CancelStatus::Sending { .. })
+    }
+}
+
+/// Reply envelope from the spawned CancelJob task.
+struct CancelReply {
+    request_id: u64,
+    transfer_id: String,
+    result: Result<blit_app::admin::jobs::CancelJobOutcome, String>,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -340,6 +388,10 @@ async fn run_router(
     // F4 local-transfer reply channel.
     let (transfer_reply_tx, mut transfer_reply_rx) = mpsc::channel::<TransferReply>(2);
 
+    // d-22: F2 cancel-selected reply channel. Same shape
+    // as the F4 transfer reply machinery.
+    let (cancel_reply_tx, mut cancel_reply_rx) = mpsc::channel::<CancelReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -374,6 +426,9 @@ async fn run_router(
         help: help::HelpOverlay::default(),
         transfer: transfer::TransferState::new(),
         transfer_reply_tx: transfer_reply_tx.clone(),
+        cancel_status: F2CancelStatus::Idle,
+        cancel_reply_tx: cancel_reply_tx.clone(),
+        cancel_request_seq: 0,
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -470,6 +525,7 @@ async fn run_router(
                         &app.transfers,
                         &app.remote_label,
                         &app.transfers_status,
+                        &cancel_status_to_display(&app.cancel_status),
                         now,
                     ),
                     Screen::F3 => screens::f3::render_into(
@@ -776,6 +832,35 @@ async fn run_router(
                     }
                 }
             }
+            // d-22: F2 cancel-selected replies.
+            reply = cancel_reply_rx.recv() => {
+                if let Some(CancelReply { request_id, transfer_id, result }) = reply {
+                    // Generation guard: a second cancel
+                    // fired while the first was in flight
+                    // would have bumped `cancel_request_seq`.
+                    // The stale reply still arrives — drop
+                    // it so the operator sees the latest
+                    // attempt's outcome, not the previous.
+                    let current_request_id = match &app.cancel_status {
+                        F2CancelStatus::Sending { request_id: rid, .. } => Some(*rid),
+                        _ => None,
+                    };
+                    if current_request_id != Some(request_id) {
+                        // Stale — drop.
+                    } else {
+                        app.cancel_status = match result {
+                            Ok(outcome) => {
+                                let _ = transfer_id; // carried by outcome
+                                F2CancelStatus::Done { outcome }
+                            }
+                            Err(message) => F2CancelStatus::Error {
+                                transfer_id,
+                                message,
+                            },
+                        };
+                    }
+                }
+            }
         }
     }
 }
@@ -834,6 +919,27 @@ async fn handle_pane_action(
             // subsequent presses walk through.
             UserAction::SelectNext => app.transfers.select_next_active(),
             UserAction::SelectPrev => app.transfers.select_prev_active(),
+            // d-22: cancel the cursor-selected transfer.
+            // Gated on a confirmed live selection AND a
+            // remote being configured AND no cancel
+            // already in flight (Sending). Without all
+            // three the keystroke is silently ignored.
+            UserAction::CancelSelectedTransfer => {
+                if app.cancel_status.is_sending() {
+                    // Already sending one — don't pile up.
+                } else if let (Some(id), Some(endpoint)) = (
+                    app.transfers.selected_active_id().map(|s| s.to_string()),
+                    app.parsed_remote.clone(),
+                ) {
+                    app.cancel_request_seq += 1;
+                    let rid = app.cancel_request_seq;
+                    app.cancel_status = F2CancelStatus::Sending {
+                        transfer_id: id.clone(),
+                        request_id: rid,
+                    };
+                    spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
+                }
+            }
             _ => {}
         },
         Screen::F3 => match action {
@@ -1477,6 +1583,68 @@ struct TransferReply {
     request_id: u64,
     kind: transfer::TransferKind,
     result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
+}
+
+/// d-22: convert the internal `F2CancelStatus` to the
+/// renderer-facing `F2CancelDisplay` (which lives in
+/// `screens/f2.rs` to avoid the screens layer reaching
+/// into main.rs's types).
+fn cancel_status_to_display(status: &F2CancelStatus) -> screens::f2::F2CancelDisplay {
+    use blit_app::admin::jobs::CancelJobOutcome;
+    use screens::f2::F2CancelDisplay;
+    match status {
+        F2CancelStatus::Idle => F2CancelDisplay::Hidden,
+        F2CancelStatus::Sending { transfer_id, .. } => F2CancelDisplay::Sending {
+            transfer_id: transfer_id.clone(),
+        },
+        F2CancelStatus::Done { outcome } => match outcome {
+            CancelJobOutcome::Cancelled { transfer_id: id } => F2CancelDisplay::Cancelled {
+                transfer_id: id.clone(),
+            },
+            CancelJobOutcome::NotFound { transfer_id: id } => F2CancelDisplay::NotFound {
+                transfer_id: id.clone(),
+            },
+            CancelJobOutcome::Unsupported {
+                transfer_id: id,
+                message,
+            } => F2CancelDisplay::Unsupported {
+                transfer_id: id.clone(),
+                message: message.clone(),
+            },
+        },
+        F2CancelStatus::Error {
+            transfer_id,
+            message,
+        } => F2CancelDisplay::Failed {
+            transfer_id: transfer_id.clone(),
+            message: message.clone(),
+        },
+    }
+}
+
+/// d-22: spawn a CancelJob RPC against `endpoint` for
+/// `transfer_id`. Reply lands on `tx` as a [`CancelReply`].
+/// The async machinery exists in `blit_app::admin::jobs::cancel`;
+/// this is a thin wrapper that flattens the Result into the
+/// reply envelope.
+fn spawn_cancel_transfer(
+    request_id: u64,
+    endpoint: blit_core::remote::RemoteEndpoint,
+    transfer_id: String,
+    tx: mpsc::Sender<CancelReply>,
+) {
+    tokio::spawn(async move {
+        let result = blit_app::admin::jobs::cancel(&endpoint, &transfer_id)
+            .await
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx
+            .send(CancelReply {
+                request_id,
+                transfer_id,
+                result,
+            })
+            .await;
+    });
 }
 
 /// e-7: bridge from the config's `RawColor` (which lives
@@ -2148,6 +2316,11 @@ enum UserAction {
     /// `blit check --one-way`: skips the dst walk). Same
     /// invalidation contract as ToggleVerifyChecksum.
     ToggleVerifyOneWay,
+    /// d-22: F2 only. `K` cancels the cursor-selected
+    /// active transfer via the daemon's CancelJob RPC.
+    /// No-op if the cursor isn't anchored on a live row
+    /// (operator presses j/k first to select).
+    CancelSelectedTransfer,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -2237,6 +2410,10 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // free for potential vim-style "visual mode" /
         // multi-select on a future F3 polish slice.
         KeyCode::Char('V') => Some(UserAction::TransferMove),
+        // d-22: `K` (kill) cancels the F2-selected
+        // active transfer. F1/F3/F4 ignore in their
+        // dispatch arms.
+        KeyCode::Char('K') => Some(UserAction::CancelSelectedTransfer),
         // `H` toggles Verify mode (size+mtime ↔ checksum).
         // Capital chosen because lowercase `h` is the
         // Ascend / left-arrow alias used by F3 navigation.
@@ -2662,9 +2839,24 @@ mod tests {
         assert!(key_action(&k(KeyCode::Char('a'))).is_none());
         assert!(key_action(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
         assert!(key_action(&k(KeyCode::Char('J'))).is_none()); // case-sensitive
-        assert!(key_action(&k(KeyCode::Char('K'))).is_none()); // case-sensitive
+                                                               // `K` was unmapped before d-22; it now maps
+                                                               // to CancelSelectedTransfer for the F2 cancel
+                                                               // flow. Other capitals (C/M/V/H/O/Y/N) are
+                                                               // also mapped now via earlier slices.
                                                                // Enter is now mapped (a1-4: F3 Descend) — it
                                                                // *isn't* in this "unmapped" list anymore.
+    }
+
+    /// d-22: `K` maps to CancelSelectedTransfer. F2's
+    /// dispatcher honors it only when the cursor is
+    /// anchored on a live row and there's a remote +
+    /// no cancel in flight; other panes silently ignore.
+    #[test]
+    fn key_action_maps_cancel_selected_transfer() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('K'))),
+            Some(UserAction::CancelSelectedTransfer)
+        ));
     }
 
     /// `take_active_for_restore` is the pure state-transition
@@ -2908,6 +3100,9 @@ mod tests {
             help: help::HelpOverlay::default(),
             transfer: transfer::TransferState::new(),
             transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+            cancel_status: F2CancelStatus::Idle,
+            cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
+            cancel_request_seq: 0,
         };
         app.verify.cycle_focus(); // Source
         let (verify_run_tx, _verify_run_rx) = mpsc::channel::<VerifyReply>(1);
@@ -2955,6 +3150,9 @@ mod tests {
             help: help::HelpOverlay::default(),
             transfer: transfer::TransferState::new(),
             transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+            cancel_status: F2CancelStatus::Idle,
+            cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
+            cancel_request_seq: 0,
         };
 
         let esc = k(KeyCode::Esc);
@@ -3055,6 +3253,9 @@ mod tests {
             help: help::HelpOverlay::default(),
             transfer: transfer::TransferState::new(),
             transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+            cancel_status: F2CancelStatus::Idle,
+            cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
+            cancel_request_seq: 0,
         };
 
         // All-idle → no tick.
@@ -3114,6 +3315,9 @@ mod tests {
             help: help::HelpOverlay::default(),
             transfer: transfer::TransferState::new(),
             transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+            cancel_status: F2CancelStatus::Idle,
+            cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
+            cancel_request_seq: 0,
         };
 
         // F1, pre-discovery (Scanning) → no tick.

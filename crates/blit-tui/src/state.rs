@@ -306,6 +306,22 @@ impl TransfersState {
         self.active_rows().iter().position(|r| r.transfer_id == *id)
     }
 
+    /// d-22: the transfer_id at the cursor — the target
+    /// for `K` (cancel-selected). `None` when the cursor
+    /// isn't anchored (no navigation yet) OR when the
+    /// anchored id has terminated (cursor fell off).
+    /// Callers MUST check `Some` before firing CancelJob;
+    /// the d-21 R2 fall-off contract means we never lie
+    /// about which transfer is selected.
+    pub fn selected_active_id(&self) -> Option<&str> {
+        let id = self.selected_active_id.as_ref()?;
+        if self.active.contains_key(id) {
+            Some(id.as_str())
+        } else {
+            None
+        }
+    }
+
     /// d-21 R2: advance the cursor. If the previously
     /// selected id is no longer present (transfer
     /// terminated), the next press re-anchors at index 0

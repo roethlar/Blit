@@ -44,7 +44,7 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
     // area is smaller than the box, use the full area —
     // ratatui's diff renderer truncates rather than
     // crashing on overflow.
-    let modal = centered(area, 70, 32);
+    let modal = centered(area, 70, 34);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -64,10 +64,11 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         // under any pane-specific block.
         kv("r", "refresh / rescan (active pane)"),
         Line::from(""),
-        section_header("F1 · F3 navigation"),
-        kv("↑ ↓ / j k", "cursor (F1, F3)"),
+        section_header("F1 · F2 · F3 navigation"),
+        kv("↑ ↓ / j k", "cursor (F1, F2 active, F3)"),
         kv("Enter / → / l", "descend (F3)"),
         kv("← / h", "ascend (F3)"),
+        kv("K", "cancel selected transfer (F2)"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
         kv("c / d / e", "clear / disable / enable history"),
@@ -163,7 +164,7 @@ mod tests {
     #[test]
     fn centered_clamps_to_area_when_smaller() {
         let area = Rect::new(0, 0, 40, 10);
-        let modal = centered(area, 70, 32);
+        let modal = centered(area, 70, 34);
         // Width / height are capped to the area's dims.
         assert!(modal.width <= 40);
         assert!(modal.height <= 10);
