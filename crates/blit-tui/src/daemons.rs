@@ -190,6 +190,16 @@ impl DaemonsState {
         &self.rows
     }
 
+    /// Count of remote daemons surfaced by mDNS discovery,
+    /// excluding the synthetic Local row. The tab strip
+    /// uses this so "0 daemons" really means "discovery
+    /// has not surfaced any remote endpoints" instead of
+    /// the misleading "1 daemons" produced by counting the
+    /// always-present Local row (e-2 round 2 fix).
+    pub fn discovered_count(&self) -> usize {
+        self.rows.iter().filter(|r| !r.is_local()).count()
+    }
+
     pub fn selected_index(&self) -> usize {
         self.selected
     }
@@ -400,6 +410,25 @@ mod tests {
         assert_eq!(local.kind, EndpointKind::Local);
         assert!(local.is_local());
         assert_eq!(local.instance_name, LOCAL_INSTANCE_NAME);
+    }
+
+    /// e-2 round 2: `discovered_count()` excludes the
+    /// synthetic Local row so the tab strip can show
+    /// "0 daemons" before mDNS surfaces anything.
+    #[test]
+    fn discovered_count_excludes_local_row() {
+        let mut state = DaemonsState::new();
+        assert_eq!(
+            state.discovered_count(),
+            0,
+            "pre-discovery: only Local row exists",
+        );
+        state.replace_from_discovery(&[svc("alpha", &[]), svc("bravo", &[])], Instant::now());
+        assert_eq!(
+            state.discovered_count(),
+            2,
+            "discovered: 2 remotes, Local doesn't count",
+        );
     }
 
     #[test]

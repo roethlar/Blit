@@ -95,6 +95,27 @@ impl TransferState {
         matches!(self.status, TransferStatus::Running { .. })
     }
 
+    /// `1` while the F4 local transfer is in flight,
+    /// `0` otherwise. Folded into the tab-strip "active"
+    /// count so the operator sees F4-initiated transfers
+    /// alongside daemon-stream transfers (e-2 round 2).
+    pub fn count_active(&self) -> usize {
+        usize::from(self.is_running())
+    }
+
+    /// `1` once the F4 local transfer has reached a
+    /// terminal state (Done or Error), `0` otherwise. The
+    /// F4 surface only retains one slot, so the count
+    /// flips back to 0 the next time `M` / `C` kicks a
+    /// fresh run (which transitions to `Running` /
+    /// `ConfirmingMirror`).
+    pub fn count_recent(&self) -> usize {
+        usize::from(matches!(
+            self.status,
+            TransferStatus::Done { .. } | TransferStatus::Error { .. }
+        ))
+    }
+
     /// `true` while a mirror confirmation prompt is open.
     /// Used by the F4 dispatcher to route `y`/`n` to the
     /// confirm/cancel arms instead of the no-op default.
@@ -332,5 +353,42 @@ mod tests {
         assert!(!state.is_busy());
         state.begin(TransferKind::Copy);
         assert!(state.is_busy());
+    }
+
+    // e-2 round 2: tab-strip counts include F4 local transfers.
+
+    #[test]
+    fn count_active_is_one_while_running_zero_otherwise() {
+        let mut state = TransferState::new();
+        assert_eq!(state.count_active(), 0, "Idle → 0 active");
+        state.begin_confirm_mirror();
+        assert_eq!(state.count_active(), 0, "ConfirmingMirror → 0 active");
+        state.cancel_confirm();
+        state.begin(TransferKind::Copy);
+        assert_eq!(state.count_active(), 1, "Running → 1 active");
+    }
+
+    #[test]
+    fn count_recent_is_one_after_terminal_state() {
+        let mut state = TransferState::new();
+        assert_eq!(state.count_recent(), 0, "Idle → 0 recent");
+        let id = state.begin(TransferKind::Copy);
+        assert_eq!(state.count_recent(), 0, "Running → 0 recent");
+        state.apply_done(id, TransferKind::Copy, empty_summary());
+        assert_eq!(state.count_recent(), 1, "Done → 1 recent");
+        // A new attempt erases the previous "recent" by
+        // transitioning back to Running. The counter
+        // models "currently visible terminal state in F4,"
+        // not a history ring.
+        state.begin(TransferKind::Mirror);
+        assert_eq!(state.count_recent(), 0, "back to Running → 0 recent");
+    }
+
+    #[test]
+    fn count_recent_counts_errors() {
+        let mut state = TransferState::new();
+        let id = state.begin(TransferKind::Copy);
+        state.apply_error(id, TransferKind::Copy, "boom".to_string());
+        assert_eq!(state.count_recent(), 1, "Error → 1 recent");
     }
 }

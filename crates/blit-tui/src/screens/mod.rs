@@ -9,7 +9,7 @@ pub mod f3;
 pub mod f4;
 
 use crate::Screen;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -41,11 +41,72 @@ pub struct TabStripCounts {
     pub recent_transfers: usize,
 }
 
-/// Paint the F1..F4 tab strip into `area`. The active
-/// pane is rendered bold + cyan; inactive panes are dim.
-/// Right-side counts column shows discovered daemons +
-/// active/recent transfer counts + a `? help` reminder.
+/// Paint the F1..F4 tab strip into `area`.
+///
+/// e-2 round 2 makes the layout responsive: tab labels
+/// always come first (full or short variant) so the
+/// primary navigation surface never gets clipped, and the
+/// right-side counts shrink / disappear as area width
+/// drops.
+///
+/// Width regimes (cumulative — falls through to the next
+/// smaller as `area.width` shrinks):
+///
+/// 1. `area.width ≥ tab_full + counts_full`: full tab
+///    labels (" F1 Daemons ", ...) + full counts (e.g.
+///    "3 daemons · 1 active · 47 recent · ? help").
+/// 2. `area.width ≥ tab_full + counts_short`: full tabs
+///    + short counts ("3d · 1a · 47r").
+/// 3. `area.width ≥ tab_short + counts_short`: short
+///    tabs (" F1 ", ...) + short counts.
+/// 4. Otherwise: short tabs only, no counts. The tabs are
+///    always painted; on a terminal narrower than the
+///    short-tab width, ratatui's Paragraph truncates the
+///    span as a last resort.
 pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen, counts: TabStripCounts) {
+    let full_tab_spans = build_tab_spans(active, false);
+    let short_tab_spans = build_tab_spans(active, true);
+    let full_tab_width = total_span_width(&full_tab_spans);
+    let short_tab_width = total_span_width(&short_tab_spans);
+
+    let full_counts = format_counts_full(counts);
+    let short_counts = format_counts_short(counts);
+    let full_counts_width = full_counts.chars().count() as u16;
+    let short_counts_width = short_counts.chars().count() as u16;
+
+    let (tab_spans, tab_width, counts_str) =
+        if area.width >= full_tab_width.saturating_add(full_counts_width) {
+            (full_tab_spans, full_tab_width, full_counts)
+        } else if area.width >= full_tab_width.saturating_add(short_counts_width) {
+            (full_tab_spans, full_tab_width, short_counts)
+        } else if area.width >= short_tab_width.saturating_add(short_counts_width) {
+            (short_tab_spans, short_tab_width, short_counts)
+        } else {
+            (short_tab_spans, short_tab_width, String::new())
+        };
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(tab_width), Constraint::Min(0)])
+        .split(area);
+
+    frame.render_widget(Paragraph::new(Line::from(tab_spans)), chunks[0]);
+
+    if !counts_str.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                counts_str,
+                Style::default().fg(Color::DarkGray),
+            )))
+            .alignment(Alignment::Right),
+            chunks[1],
+        );
+    }
+}
+
+/// Build the tab spans. `short=true` uses just " F1 " etc.
+/// (drops the "Daemons"/"Transfers"/... label).
+fn build_tab_spans(active: Screen, short: bool) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
     for (idx, (key, label, screen)) in [
         ("F1", "Daemons", Screen::F1),
@@ -67,26 +128,30 @@ pub fn render_tab_strip(frame: &mut Frame, area: Rect, active: Screen, counts: T
         if idx > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(format!(" {key} {label} "), style));
+        let text = if short {
+            format!(" {key} ")
+        } else {
+            format!(" {key} {label} ")
+        };
+        spans.push(Span::styled(text, style));
     }
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(28), Constraint::Length(48)])
-        .split(area);
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format_counts_line(counts),
-            Style::default().fg(Color::DarkGray),
-        )))
-        .alignment(ratatui::layout::Alignment::Right),
-        chunks[1],
-    );
+    spans
 }
 
-fn format_counts_line(counts: TabStripCounts) -> String {
+fn total_span_width(spans: &[Span<'_>]) -> u16 {
+    spans.iter().map(|s| s.content.chars().count() as u16).sum()
+}
+
+fn format_counts_full(counts: TabStripCounts) -> String {
     format!(
         "{} daemons · {} active · {} recent · ? help",
+        counts.daemons, counts.active_transfers, counts.recent_transfers,
+    )
+}
+
+fn format_counts_short(counts: TabStripCounts) -> String {
+    format!(
+        "{}d · {}a · {}r",
         counts.daemons, counts.active_transfers, counts.recent_transfers,
     )
 }
@@ -96,8 +161,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_counts_line_includes_all_three_numbers() {
-        let s = format_counts_line(TabStripCounts {
+    fn format_counts_full_includes_all_three_numbers() {
+        let s = format_counts_full(TabStripCounts {
             daemons: 3,
             active_transfers: 1,
             recent_transfers: 47,
@@ -109,8 +174,55 @@ mod tests {
     }
 
     #[test]
-    fn format_counts_line_with_zeroes() {
-        let s = format_counts_line(TabStripCounts::default());
+    fn format_counts_full_with_zeroes() {
+        let s = format_counts_full(TabStripCounts::default());
         assert!(s.contains("0 daemons"));
+    }
+
+    #[test]
+    fn format_counts_short_keeps_numbers_drops_help_hint() {
+        let s = format_counts_short(TabStripCounts {
+            daemons: 3,
+            active_transfers: 1,
+            recent_transfers: 47,
+        });
+        assert!(s.contains("3d"));
+        assert!(s.contains("1a"));
+        assert!(s.contains("47r"));
+        assert!(!s.contains("?"), "short form drops the ? help hint");
+    }
+
+    /// e-2 R2 finding 3: full tab labels render even at
+    /// 80 cols. With width=80 we should fit full tabs +
+    /// at least the short counts.
+    #[test]
+    fn render_at_80_cols_keeps_full_tabs() {
+        let full = build_tab_spans(Screen::F1, false);
+        let full_width = total_span_width(&full);
+        assert!(
+            full_width <= 60,
+            "full-tab spans must fit within 60 cols so 80-col terminals \
+             have room for counts; got {full_width}"
+        );
+        // 80 - full_width ≥ short_counts.len() (14ish) so
+        // the responsive regime picks "full tabs + short
+        // counts" not "short tabs + nothing".
+        let short_counts = format_counts_short(TabStripCounts::default());
+        let short_counts_w = short_counts.chars().count() as u16;
+        assert!(
+            full_width + short_counts_w <= 80,
+            "full tabs + short counts must fit in 80 cols ({full_width} + {short_counts_w})",
+        );
+    }
+
+    /// Short tabs alone fit even on a 30-col terminal.
+    #[test]
+    fn short_tabs_fit_narrow_terminal() {
+        let short = build_tab_spans(Screen::F1, true);
+        let short_width = total_span_width(&short);
+        assert!(
+            short_width <= 30,
+            "short-tab spans must fit within 30 cols; got {short_width}"
+        );
     }
 }

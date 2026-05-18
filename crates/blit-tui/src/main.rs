@@ -392,10 +392,14 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
+                // e-2 R2: daemons = discovered remotes
+                // (excludes the synthetic Local row), and
+                // active/recent fold the F4 local transfer
+                // state into the daemon-stream counts.
                 let counts = screens::TabStripCounts {
-                    daemons: app.daemons.rows().len(),
-                    active_transfers: app.transfers.active_count(),
-                    recent_transfers: app.transfers.recent_count(),
+                    daemons: app.daemons.discovered_count(),
+                    active_transfers: app.transfers.active_count() + app.transfer.count_active(),
+                    recent_transfers: app.transfers.recent_count() + app.transfer.count_recent(),
                 };
                 screens::render_tab_strip(frame, tab_area, app.current_screen, counts);
                 match app.current_screen {
