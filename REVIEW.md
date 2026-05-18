@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-13-f2-freshness-footer | Feature | F2 footer surfaces last-event age | [~] | `phase5/a1` | `8787b5f` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -112,3 +112,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `b625ca1` F4 transfer Done throughput (`d-10-transfer-throughput`)
 - `fa18813` F1/F3/F4 freshness live tick (`d-11-freshness-tick` round 2)
 - `ec8695f` F4 Esc cancels mirror/move confirm (`d-12-esc-cancels-confirm` round 2)
+- `8787b5f` F2 footer last-event age (`d-13-f2-freshness-footer`)
