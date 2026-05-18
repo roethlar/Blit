@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-2-f2-transfers | Medium   | F2 startup Subscribe/GetState merge (R4)    | `[~]`  | `phase5/a1` | `024e406` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -23,7 +23,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
-| a1-2-f2-transfers | Medium | F2 startup Subscribe/GetState merge still races | `phase5/a1` |
+| a1-2-f2-transfers | Low | F2 Connected status masks initial GetState failure | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
