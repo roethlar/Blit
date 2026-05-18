@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-17-verify-result-preview | Feature | Show first diff/missing/error on Verify Done | [~] | `phase5/a1` | `873757b` |
 
 ## Open findings
 
