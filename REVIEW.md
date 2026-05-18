@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-2-tab-strip-counts | Feature | At-a-glance daemons/active/recent counts on tab strip | [~] | `phase5/a1` | `859a062` |
 
 ## Open findings
 
