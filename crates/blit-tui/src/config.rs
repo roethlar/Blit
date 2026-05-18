@@ -7,12 +7,14 @@
 //! stderr (visible after TUI exit) and use defaults. We
 //! never crash the TUI on a misconfigured `tui.toml`.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6):
 //!
 //! ```toml
 //! [verify]
 //! default_use_checksum = false  # `H` toggle's startup value
 //! default_one_way = false       # `O` toggle's startup value
+//! default_source = ""           # e-6: launch-time Source prefill
+//! default_destination = ""      # e-6: launch-time Destination prefill
 //!
 //! [tab_strip]
 //! show_counts = true            # e-4: right-edge counts column
@@ -22,9 +24,10 @@
 //! ```
 //!
 //! Future slices can grow the schema (color themes,
-//! persisted form prefill, per-pane tick intervals).
-//! Every new field must have `#[serde(default)]` so
-//! older configs continue to parse without surprises.
+//! per-pane tick intervals, runtime save-back of edited
+//! Verify paths). Every new field must have
+//! `#[serde(default)]` so older configs continue to
+//! parse without surprises.
 
 use serde::Deserialize;
 use std::path::Path;

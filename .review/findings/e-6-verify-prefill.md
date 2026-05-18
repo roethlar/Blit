@@ -129,4 +129,36 @@ In `config::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/e-6-verify-prefill.reopened.md`)
+
+One Low-severity finding, addressed in round 2 — the
+same doc-staleness shape as e-5 R2:
+
+- **`config.rs` module-level schema doc omitted the new
+  Verify prefill keys.** The "Current schema (grown
+  through e-3 / e-4 / e-5)" block presented only the
+  pre-e-6 `[verify]` shape (`default_use_checksum` /
+  `default_one_way`), even though `default_source` and
+  `default_destination` were now live below in
+  `VerifyDefaults`. The future-slice note also still
+  named "persisted form prefill" as future work, which
+  contradicted what e-6 just shipped.
+
+  Round 2 fixes both:
+  - Schema block adds `default_source = ""` /
+    `default_destination = ""` with e-6 attribution.
+  - "Grown through..." line includes e-6.
+  - Future-slice note rephrased: launch-time prefill is
+    done; the still-pending polish is *runtime save-back*
+    (operator types into the form, hits a hotkey,
+    `tui.toml` gets updated).
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/config.rs`:
+  - Module-doc schema block + future-slice list both
+    updated to reflect the e-6 reality.
+
+No behavior change, no test count delta (still 220).
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
