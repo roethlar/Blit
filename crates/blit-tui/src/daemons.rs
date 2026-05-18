@@ -212,6 +212,38 @@ impl DaemonsState {
         &self.status
     }
 
+    /// `true` when F1's render path currently shows at
+    /// least one time-dependent value — `format_since`
+    /// against `now` — that the d-9/d-11 live-tick gate
+    /// needs to keep refreshing.
+    ///
+    /// Two surfaces qualify:
+    ///
+    /// 1. The footer "live · last scan Xs ago" when
+    ///    `DiscoveryStatus::Live`.
+    /// 2. The detail block "as of Xs ago" when the
+    ///    selected row has a cached `DaemonDetail::Loaded`.
+    ///
+    /// d-11 round-2 fix: we used to only gate on (1), so
+    /// a degraded mDNS scan would freeze the (still
+    /// visible) detail timestamp. The render path keeps
+    /// drawing the cached detail through Scanning /
+    /// Degraded states; the gate must too.
+    pub fn has_live_timestamp(&self) -> bool {
+        if matches!(self.status, DiscoveryStatus::Live { .. }) {
+            return true;
+        }
+        if let Some(row) = self.selected_row() {
+            if matches!(
+                self.details.get(&row.instance_name),
+                Some(DaemonDetail::Loaded { .. })
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Lookup the cached `GetState` detail for a daemon by
     /// `instance_name`. `None` when the renderer has never
     /// requested a fetch for that row.
@@ -428,6 +460,56 @@ mod tests {
             state.discovered_count(),
             2,
             "discovered: 2 remotes, Local doesn't count",
+        );
+    }
+
+    /// d-11 round 2: `has_live_timestamp` returns true
+    /// when EITHER the discovery footer is Live OR the
+    /// selected row has a cached `Loaded` detail. The
+    /// reopen scenario: discovery degrades, but a
+    /// previously-fetched detail line is still on screen
+    /// and still ticks against `now`.
+    #[test]
+    fn has_live_timestamp_covers_degraded_with_loaded_detail() {
+        let mut state = DaemonsState::new();
+        // Pre-discovery Scanning, no cached details — no
+        // live timestamps to refresh.
+        assert!(!state.has_live_timestamp());
+
+        // Live status → tick (the footer's "last scan
+        // Xs ago" line is on screen).
+        state.replace_from_discovery(&[svc("alpha", &[])], Instant::now());
+        assert!(state.has_live_timestamp(), "Live footer ticks");
+
+        // Cursor on `alpha`; cache a Loaded detail.
+        state.select_next();
+        assert_eq!(state.selected_row().unwrap().instance_name, "alpha");
+        state.set_detail(
+            "alpha".to_string(),
+            DaemonDetail::Loaded {
+                state: Box::new(DaemonState::default()),
+                fetched_at: Instant::now(),
+            },
+        );
+
+        // Discovery degrades — the footer flips to
+        // "degraded: ...", but the detail "as of Xs ago"
+        // line keeps drawing. Pre-fix this returned false
+        // and the detail timestamp froze on screen.
+        state.note_discovery_error("network down".to_string());
+        assert!(
+            state.has_live_timestamp(),
+            "Degraded + Loaded detail must still tick"
+        );
+
+        // Move cursor off the alpha row (back to Local,
+        // which has no cached detail). Now nothing
+        // time-dependent is on screen.
+        state.select_prev();
+        assert!(state.selected_row().unwrap().is_local());
+        assert!(
+            !state.has_live_timestamp(),
+            "Degraded + cursor on row without Loaded detail → no tick"
         );
     }
 

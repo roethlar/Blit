@@ -100,4 +100,45 @@ In `main::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-11-freshness-tick.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **F1 loaded detail timestamps still freeze after
+  discovery degrades.** The round-1 gate only checked
+  `DiscoveryStatus::Live`. But F1 keeps drawing the
+  detail "as of Xs ago" line through Scanning /
+  Degraded — `note_discovery_error` preserves the cached
+  `DaemonDetail::Loaded` rows. So after a network blip
+  the footer correctly flips to "degraded: ..." while
+  the visible detail line silently stops ticking.
+
+  Round 2 introduces a new `DaemonsState` predicate
+  `has_live_timestamp()` that covers either condition:
+  Live footer OR a Loaded detail cached for the
+  currently-selected row. `needs_live_tick` calls it
+  for F1 instead of the narrower `matches!` against
+  `DiscoveryStatus::Live`.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/daemons.rs`:
+  - New `has_live_timestamp(&self) -> bool` method.
+- `crates/blit-tui/src/main.rs`:
+  - `needs_live_tick` F1 arm now calls
+    `app.daemons.has_live_timestamp()`.
+  - Doc comment expanded to spell out the round-2
+    degraded-detail case.
+
+### Round 2 tests
+
++1 test (176 → 177):
+
+In `daemons::tests`:
+- `has_live_timestamp_covers_degraded_with_loaded_detail`:
+  walks Scanning (false) → Live (true) → cache a Loaded
+  detail and degrade discovery (still true) → move
+  cursor off to a row without cached detail (false).
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test -p blit-tui` all green.

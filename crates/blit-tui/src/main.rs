@@ -1396,8 +1396,11 @@ struct TransferReply {
 /// and F4.
 ///
 /// Pane-specific conditions:
-/// - F1: `DiscoveryStatus::Live` shows "last scan Xs ago".
-///   Scanning / Degraded states have no time component.
+/// - F1: `DaemonsState::has_live_timestamp()` covers
+///   either the `Live` footer or a cached `Loaded`
+///   detail block on the selected row. Round 2 fix: the
+///   detail line keeps showing "as of Xs ago" even when
+///   discovery drops to Degraded, so the gate must too.
 /// - F2: no `now` use → no tick.
 /// - F3: `BrowseFetchStatus::Loaded` shows "loaded · Xs ago".
 /// - F4: `ProfileFetchStatus::Loaded` ticks the footer
@@ -1411,7 +1414,7 @@ fn needs_live_tick(app: &AppState) -> bool {
         return true;
     }
     match app.current_screen {
-        Screen::F1 => matches!(app.daemons.status(), daemons::DiscoveryStatus::Live { .. }),
+        Screen::F1 => app.daemons.has_live_timestamp(),
         Screen::F2 => false,
         Screen::F3 => matches!(
             app.browse.status(),
