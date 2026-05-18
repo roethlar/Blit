@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-16-help-overlay-keymap-sync | Feature | Sync `?` help with all F4 keys | [~] | `phase5/a1` | `8b81260` |
 
 ## Open findings
 
