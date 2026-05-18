@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-9-live-tick     | Feature  | 500ms wakeup ticks F4 elapsed counter       | [~]    | `phase5/a1` | `d406e3d` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -25,6 +25,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
+| d-9-live-tick | Low | Stale rustdoc on live tick helper | `phase5/a1` |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
 ## Verified history
