@@ -25,7 +25,7 @@
 //! │ status · q quit · r refresh · ↑↓ select          │
 //! └──────────────────────────────────────────────────┘
 
-use crate::daemons::{DaemonRow, DaemonsState, DiscoveryStatus};
+use crate::daemons::{DaemonDetail, DaemonRow, DaemonsState, DiscoveryStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -48,7 +48,7 @@ pub fn render(frame: &mut Frame, state: &DaemonsState, now: Instant) {
 
     render_header(frame, chunks[0], state);
     render_table(frame, chunks[1], state);
-    render_detail(frame, chunks[2], state);
+    render_detail(frame, chunks[2], state, now);
     render_footer(frame, chunks[3], state.status(), now);
 }
 
@@ -100,10 +100,13 @@ fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_detail(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+fn render_detail(frame: &mut Frame, area: Rect, state: &DaemonsState, now: Instant) {
     let block = Block::default().borders(Borders::ALL).title(" Selected ");
     let lines: Vec<Line> = match state.selected_row() {
-        Some(row) => detail_lines(row),
+        Some(row) => {
+            let detail = state.detail_for(&row.instance_name);
+            detail_lines(row, detail, now)
+        }
         None => vec![Line::from(Span::styled(
             "(no daemon selected — waiting for discovery)",
             Style::default().fg(Color::DarkGray),
@@ -168,10 +171,16 @@ fn daemon_to_row(row: &DaemonRow) -> Row<'static> {
     }
 }
 
-fn detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
+fn detail_lines(
+    row: &DaemonRow,
+    detail: Option<&DaemonDetail>,
+    now: Instant,
+) -> Vec<Line<'static>> {
     if row.is_local() {
-        return local_detail_lines(row);
+        return local_detail_lines(row, detail, now);
     }
+    // Remote header line stays mDNS-driven (it's the row's
+    // identity); GetState data populates the body lines.
     let header = format!(
         "{} · {}:{} · {}",
         row.instance_name,
@@ -179,7 +188,101 @@ fn detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
         row.port,
         row.version.clone().unwrap_or_else(|| "?".to_string()),
     );
-    let modules_line = if row.modules.is_empty() && row.module_count.is_none() {
+    let mut lines = vec![Line::from(Span::styled(
+        header,
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.extend(detail_body_for_remote(row, detail, now));
+    lines
+}
+
+/// Body lines for a remote row's detail block, populated
+/// from `GetState`. Falls back to the mDNS-only modules /
+/// delegation lines when the fetch hasn't returned yet.
+fn detail_body_for_remote(
+    row: &DaemonRow,
+    detail: Option<&DaemonDetail>,
+    now: Instant,
+) -> Vec<Line<'static>> {
+    match detail {
+        Some(DaemonDetail::Loaded { state, fetched_at }) => {
+            let counters_line = format!(
+                "active: {} · recent: {} · push: {} · pull: {} · errors: {}",
+                state.active.len(),
+                state.recent.len(),
+                state
+                    .counters
+                    .as_ref()
+                    .map(|c| c.push_operations_total)
+                    .unwrap_or(0),
+                state
+                    .counters
+                    .as_ref()
+                    .map(|c| c.pull_operations_total)
+                    .unwrap_or(0),
+                state
+                    .counters
+                    .as_ref()
+                    .map(|c| c.transfer_errors_total)
+                    .unwrap_or(0),
+            );
+            let modules_line = if state.modules.is_empty() && row.modules.is_empty() {
+                "modules: (none)".to_string()
+            } else if state.modules.is_empty() {
+                // Some daemons might return empty modules in
+                // GetState (e.g., perms) — fall back to the
+                // mDNS-advertised names.
+                format!("modules: {} (from mDNS)", row.modules.join(", "))
+            } else {
+                let names: Vec<String> = state.modules.iter().map(|m| m.name.clone()).collect();
+                format!("modules: {}", names.join(", "))
+            };
+            let uptime_line = format!(
+                "uptime: {} · as of {}",
+                format_uptime(state.uptime_seconds),
+                format_since(now, *fetched_at),
+            );
+            vec![
+                Line::from(counters_line),
+                Line::from(modules_line),
+                Line::from(uptime_line),
+            ]
+        }
+        Some(DaemonDetail::Pending) => vec![
+            Line::from(Span::styled(
+                "fetching GetState...",
+                Style::default().fg(Color::Yellow),
+            )),
+            // Keep the mDNS-only lines visible while the
+            // fetch is in flight — the operator still gets
+            // useful info on a slow daemon.
+            Line::from(mdns_modules_line(row)),
+            Line::from(mdns_delegation_line(row)),
+        ],
+        Some(DaemonDetail::Error { message }) => vec![
+            Line::from(Span::styled(
+                format!("GetState failed: {message}"),
+                Style::default().fg(Color::Red),
+            )),
+            Line::from(mdns_modules_line(row)),
+            Line::from(mdns_delegation_line(row)),
+        ],
+        None => vec![
+            // Before any fetch has been attempted, show the
+            // mDNS-only body (matches the a1-3 round-1
+            // contract, just without the live counters).
+            Line::from(mdns_modules_line(row)),
+            Line::from(mdns_delegation_line(row)),
+            Line::from(Span::styled(
+                "GetState not fetched yet",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+    }
+}
+
+fn mdns_modules_line(row: &DaemonRow) -> String {
+    if row.modules.is_empty() && row.module_count.is_none() {
         "modules: (daemon does not advertise)".to_string()
     } else if row.modules.is_empty() {
         format!(
@@ -190,46 +293,120 @@ fn detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
         )
     } else {
         format!("modules: {}", row.modules.join(", "))
-    };
-    let delegation_line = format!(
+    }
+}
+
+fn mdns_delegation_line(row: &DaemonRow) -> String {
+    format!(
         "delegation: {}",
         match row.delegation_enabled {
             Some(true) => "enabled",
             Some(false) => "disabled",
             None => "unknown (pre-§3.2 daemon)",
         }
-    );
-    vec![
-        Line::from(Span::styled(
-            header,
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(modules_line),
-        Line::from(delegation_line),
-    ]
+    )
 }
 
-/// Detail block for the synthetic Local row. Distinct copy
-/// from `detail_lines` because the Local endpoint doesn't
-/// have an advertised address/port/version (it's "this
-/// machine," not a daemon advertising itself over mDNS).
+/// Detail block for the synthetic Local row. The mDNS row
+/// doesn't carry useful identity (no advertised address /
+/// version), so the rendering is GetState-or-bust:
 ///
-/// A follow-up slice (`a1-3b-f1-getstate-detail`) will
-/// upgrade this block with `GetState`-driven counters when
-/// a daemon is running on the loopback interface.
-fn local_detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
-    let header = format!("{} · this machine (no mDNS advertise)", row.instance_name);
-    vec![
-        Line::from(Span::styled(
-            header,
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from("modules: (pending GetState integration — a1-3b)"),
-        Line::from(Span::styled(
-            "Local endpoint — F2/F3 routing slices will treat this symmetrically with remote daemons.",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ]
+/// - `Loaded`: show "live · vX · uptime · counters"
+/// - `Pending`: "fetching GetState from loopback..."
+/// - `Error` / `None`: "no local daemon detected (start
+///   `blit-daemon` on this host to enable transfers)".
+fn local_detail_lines(
+    row: &DaemonRow,
+    detail: Option<&DaemonDetail>,
+    now: Instant,
+) -> Vec<Line<'static>> {
+    let header = format!("{} · this machine", row.instance_name);
+    let body = match detail {
+        Some(DaemonDetail::Loaded { state, fetched_at }) => {
+            let live = format!(
+                "local daemon detected · v{} · uptime {}",
+                state.version,
+                format_uptime(state.uptime_seconds),
+            );
+            let counters = format!(
+                "active: {} · recent: {} · push: {} · pull: {} · errors: {}",
+                state.active.len(),
+                state.recent.len(),
+                state
+                    .counters
+                    .as_ref()
+                    .map(|c| c.push_operations_total)
+                    .unwrap_or(0),
+                state
+                    .counters
+                    .as_ref()
+                    .map(|c| c.pull_operations_total)
+                    .unwrap_or(0),
+                state
+                    .counters
+                    .as_ref()
+                    .map(|c| c.transfer_errors_total)
+                    .unwrap_or(0),
+            );
+            vec![
+                Line::from(Span::styled(live, Style::default().fg(Color::Green))),
+                Line::from(counters),
+                Line::from(format!("as of {}", format_since(now, *fetched_at))),
+            ]
+        }
+        Some(DaemonDetail::Pending) => vec![
+            Line::from(Span::styled(
+                "fetching GetState from 127.0.0.1:9031...",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(""),
+            Line::from(""),
+        ],
+        Some(DaemonDetail::Error { message }) => vec![
+            Line::from(Span::styled(
+                "no local daemon detected",
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(format!("(127.0.0.1:9031 — {message})")),
+            Line::from(Span::styled(
+                "start `blit-daemon` on this host to enable Local-endpoint transfers.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        None => vec![
+            Line::from(Span::styled(
+                "GetState not yet attempted",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(""),
+        ],
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        header,
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    lines.extend(body);
+    lines
+}
+
+/// Format an uptime in seconds as e.g. "3d 4h 12m" or
+/// "1m 32s" — readable at glance, doesn't try to be
+/// millisecond-exact.
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    let mins = (secs % 3600) / 60;
+    let s = secs % 60;
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {s}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// Renders the first address as `a.b.c.d`, or `n.n.n.n+N`
@@ -353,6 +530,14 @@ mod tests {
         );
     }
 
+    fn now_for_tests() -> Instant {
+        Instant::now()
+    }
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
     #[test]
     fn detail_lines_label_unknown_delegation_for_pre_3_2_daemon() {
         let mut r = row("legacy");
@@ -360,31 +545,24 @@ mod tests {
         r.module_count = None;
         r.modules.clear();
         r.version = None;
-        let lines = detail_lines(&r);
-        // Three lines: header, modules, delegation.
-        assert_eq!(lines.len(), 3);
-        // Joining all spans of each line to a string for the
-        // assertion. Span styling doesn't matter here.
-        let line_text: Vec<String> = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
+        let lines = detail_lines(&r, None, now_for_tests());
+        // 4 lines now: header, modules, delegation,
+        // GetState-not-fetched-yet hint.
+        assert_eq!(lines.len(), 4);
+        let line_text: Vec<String> = lines.iter().map(line_text).collect();
         assert!(line_text[0].contains("legacy"));
         assert!(line_text[0].contains("?"));
         assert!(line_text[1].contains("does not advertise"));
         assert!(line_text[2].contains("pre-§3.2"));
+        assert!(line_text[3].contains("GetState"));
     }
 
     #[test]
     fn detail_lines_shows_advertised_module_names() {
         let r = row("mycroft");
-        let lines = detail_lines(&r);
-        let modules_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let lines = detail_lines(&r, None, now_for_tests());
+        // mDNS-only path: header, modules, delegation, hint.
+        let modules_line = line_text(&lines[1]);
         assert!(modules_line.contains("home"));
         assert!(modules_line.contains("media"));
     }
@@ -394,8 +572,8 @@ mod tests {
         let mut r = row("dense");
         r.modules.clear();
         r.module_count = Some(40);
-        let lines = detail_lines(&r);
-        let modules_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let lines = detail_lines(&r, None, now_for_tests());
+        let modules_line = line_text(&lines[1]);
         assert!(modules_line.contains("40"));
         assert!(modules_line.contains("not advertised"));
     }
@@ -408,13 +586,13 @@ mod tests {
     #[test]
     fn detail_lines_for_local_row_uses_local_specific_copy() {
         let r = local_row();
-        let lines = detail_lines(&r);
-        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let lines = detail_lines(&r, None, now_for_tests());
+        let header = line_text(&lines[0]);
         assert!(header.contains("this machine"));
-        let modules: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(modules.contains("a1-3b"));
-        let footer: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(footer.contains("Local endpoint"));
+        // First body line surfaces the "GetState not yet
+        // attempted" hint (a1-3b shape).
+        let body = line_text(&lines[1]);
+        assert!(body.contains("GetState"));
     }
 
     /// Local row in the table uses placeholders for the
@@ -503,5 +681,125 @@ mod tests {
             rendered.contains(&target),
             "expected selected row '{target}' to be visible in viewport, got:\n{rendered}"
         );
+    }
+
+    /// a1-3b: Remote row with a `Loaded` GetState shows
+    /// live counters in the detail block.
+    #[test]
+    fn detail_lines_for_remote_loaded_shows_counters() {
+        use blit_core::generated::{Counters, DaemonState};
+        let r = row("mycroft");
+        let state = DaemonState {
+            version: "0.2.0".to_string(),
+            uptime_seconds: 90_000, // 1d 1h
+            counters: Some(Counters {
+                push_operations_total: 12,
+                pull_operations_total: 4,
+                purge_operations_total: 1,
+                active_transfers: 1,
+                transfer_errors_total: 0,
+            }),
+            ..DaemonState::default()
+        };
+        let detail = DaemonDetail::Loaded {
+            state: Box::new(state),
+            fetched_at: Instant::now(),
+        };
+        let lines = detail_lines(&r, Some(&detail), Instant::now());
+        // Header + counters + modules + uptime.
+        assert_eq!(lines.len(), 4);
+        let counters = line_text(&lines[1]);
+        assert!(counters.contains("push: 12"));
+        assert!(counters.contains("pull: 4"));
+        assert!(counters.contains("errors: 0"));
+        let uptime = line_text(&lines[3]);
+        assert!(uptime.contains("uptime"));
+        assert!(uptime.contains("1d"));
+    }
+
+    /// a1-3b: Pending state shows a "fetching..." spinner
+    /// line and keeps the mDNS-only body lines visible
+    /// (operator isn't dropped into a blank pane while a
+    /// fetch is in flight).
+    #[test]
+    fn detail_lines_for_remote_pending_shows_spinner_and_mdns_fallback() {
+        let r = row("mycroft");
+        let detail = DaemonDetail::Pending;
+        let lines = detail_lines(&r, Some(&detail), Instant::now());
+        assert_eq!(lines.len(), 4);
+        let spinner = line_text(&lines[1]);
+        assert!(spinner.contains("fetching"));
+        let modules = line_text(&lines[2]);
+        assert!(modules.contains("home")); // mDNS fallback
+    }
+
+    /// a1-3b: Error state surfaces the failure message in
+    /// red and keeps the mDNS fallback body lines.
+    #[test]
+    fn detail_lines_for_remote_error_shows_message_and_fallback() {
+        let r = row("mycroft");
+        let detail = DaemonDetail::Error {
+            message: "connect refused".to_string(),
+        };
+        let lines = detail_lines(&r, Some(&detail), Instant::now());
+        let err = line_text(&lines[1]);
+        assert!(err.contains("GetState failed"));
+        assert!(err.contains("connect refused"));
+    }
+
+    /// a1-3b: Local row with Loaded shows the "local daemon
+    /// detected" header + counters.
+    #[test]
+    fn detail_lines_for_local_loaded_shows_live() {
+        use blit_core::generated::{Counters, DaemonState};
+        let r = local_row();
+        let state = DaemonState {
+            version: "0.2.0".to_string(),
+            uptime_seconds: 60,
+            counters: Some(Counters {
+                push_operations_total: 0,
+                pull_operations_total: 1,
+                purge_operations_total: 0,
+                active_transfers: 0,
+                transfer_errors_total: 0,
+            }),
+            ..DaemonState::default()
+        };
+        let detail = DaemonDetail::Loaded {
+            state: Box::new(state),
+            fetched_at: Instant::now(),
+        };
+        let lines = detail_lines(&r, Some(&detail), Instant::now());
+        let live = line_text(&lines[1]);
+        assert!(live.contains("local daemon detected"));
+        assert!(live.contains("0.2.0"));
+        let counters = line_text(&lines[2]);
+        assert!(counters.contains("pull: 1"));
+    }
+
+    /// a1-3b: Local row with Error shows the "no local
+    /// daemon detected" message with a hint to start
+    /// blit-daemon.
+    #[test]
+    fn detail_lines_for_local_error_shows_no_daemon_hint() {
+        let r = local_row();
+        let detail = DaemonDetail::Error {
+            message: "connection refused".to_string(),
+        };
+        let lines = detail_lines(&r, Some(&detail), Instant::now());
+        let hint = line_text(&lines[1]);
+        assert!(hint.contains("no local daemon"));
+        let footer = line_text(&lines[3]);
+        assert!(footer.contains("blit-daemon"));
+    }
+
+    /// `format_uptime` covers each unit threshold.
+    #[test]
+    fn format_uptime_picks_correct_unit() {
+        assert_eq!(format_uptime(0), "0s");
+        assert_eq!(format_uptime(42), "42s");
+        assert_eq!(format_uptime(60), "1m 0s");
+        assert_eq!(format_uptime(3700), "1h 1m");
+        assert_eq!(format_uptime(90_061), "1d 1h 1m");
     }
 }

@@ -10,7 +10,10 @@
 //! Render-side helpers live in `screens/f1.rs`. State-shape
 //! decisions belong here.
 
+use blit_core::generated::DaemonState;
 use blit_core::mdns::MdnsDiscoveredService;
+use blit_core::remote::endpoint::RemoteEndpoint;
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Endpoint kind discriminator. F1 treats the local host as
@@ -115,11 +118,32 @@ pub enum DiscoveryStatus {
     Degraded { message: String },
 }
 
+/// Per-daemon `GetState` snapshot, keyed by `instance_name`
+/// in [`DaemonsState::details`]. Drives the detail block's
+/// rendering — mDNS gives us the row's identity, `GetState`
+/// gives us the live counters / uptime / version.
+#[derive(Debug, Clone)]
+pub enum DaemonDetail {
+    /// `GetState` fetch is in flight for this row.
+    Pending,
+    /// Last fetch returned `Ok`. `fetched_at` lets the
+    /// renderer show "as of Xs ago" if we want.
+    Loaded {
+        state: Box<DaemonState>,
+        fetched_at: Instant,
+    },
+    /// Last fetch failed. Carry the message so the operator
+    /// can diagnose (e.g. "no local daemon detected" for
+    /// Local row when nothing's listening on the loopback).
+    Error { message: String },
+}
+
 /// Pane state for F1. Holds the most recent discovery
-/// result and the cursor position. Replacement is
-/// whole-snapshot — there's no incremental update because
-/// mDNS doesn't give us per-service events of the shape
-/// we'd want (departures aren't reliably signalled).
+/// result, the cursor position, and a per-row `GetState`
+/// cache. Replacement of `rows` is whole-snapshot — there's
+/// no incremental update because mDNS doesn't give us
+/// per-service events of the shape we'd want (departures
+/// aren't reliably signalled).
 #[derive(Debug, Clone)]
 pub struct DaemonsState {
     rows: Vec<DaemonRow>,
@@ -127,6 +151,10 @@ pub struct DaemonsState {
     /// replacement. Stays `0` when `rows` is empty.
     selected: usize,
     status: DiscoveryStatus,
+    /// `GetState` snapshots keyed by `instance_name`. Lives
+    /// outside `rows` so a rescan doesn't blow away
+    /// previously-fetched detail data.
+    details: HashMap<String, DaemonDetail>,
 }
 
 impl Default for DaemonsState {
@@ -145,6 +173,7 @@ impl DaemonsState {
             rows: vec![DaemonRow::local()],
             selected: 0,
             status: DiscoveryStatus::Scanning,
+            details: HashMap::new(),
         }
     }
 
@@ -162,6 +191,45 @@ impl DaemonsState {
 
     pub fn status(&self) -> &DiscoveryStatus {
         &self.status
+    }
+
+    /// Lookup the cached `GetState` detail for a daemon by
+    /// `instance_name`. `None` when the renderer has never
+    /// requested a fetch for that row.
+    pub fn detail_for(&self, instance_name: &str) -> Option<&DaemonDetail> {
+        self.details.get(instance_name)
+    }
+
+    /// Insert or replace the cached detail for a daemon.
+    /// Called by the F1 event loop after a `GetState` fetch
+    /// resolves (or fails). Operator can keep a stale entry
+    /// visible alongside an in-flight refresh by passing
+    /// `Pending` while the previous `Loaded` stays in place;
+    /// callers that want that decoupling can leave the old
+    /// value and write Pending only when the previous value
+    /// was already Error.
+    pub fn set_detail(&mut self, instance_name: String, detail: DaemonDetail) {
+        self.details.insert(instance_name, detail);
+    }
+
+    /// Build the [`RemoteEndpoint`] to fetch this row's
+    /// `GetState` from. Returns `None` for a remote row that
+    /// didn't advertise any address (defensive — discovery
+    /// shouldn't surface such rows in practice).
+    ///
+    /// Local rows resolve to `127.0.0.1:9031` — the operator
+    /// can opt into a different loopback port via future
+    /// config but the default port matches the daemon's
+    /// canonical bind.
+    pub fn endpoint_for_row(row: &DaemonRow) -> Option<RemoteEndpoint> {
+        if row.is_local() {
+            // Default daemon port; if no local daemon is
+            // running the GetState fetch will fail and the
+            // detail block surfaces "no local daemon".
+            return RemoteEndpoint::parse("127.0.0.1:9031").ok();
+        }
+        let addr = row.addresses.first()?;
+        RemoteEndpoint::parse(&format!("{}:{}", addr, row.port)).ok()
     }
 
     /// Replace the row set with a fresh discovery result.
@@ -455,5 +523,79 @@ mod tests {
         let row = DaemonRow::from_service(&s);
         assert_eq!(row.kind, EndpointKind::Remote);
         assert!(!row.is_local());
+    }
+
+    #[test]
+    fn endpoint_for_row_returns_loopback_for_local() {
+        let local = DaemonRow::local();
+        let endpoint = DaemonsState::endpoint_for_row(&local).unwrap();
+        assert_eq!(endpoint.host, "127.0.0.1");
+        assert_eq!(endpoint.port, 9031);
+    }
+
+    #[test]
+    fn endpoint_for_row_uses_first_advertised_address() {
+        let s = svc("mycroft", &[]);
+        let row = DaemonRow::from_service(&s);
+        let endpoint = DaemonsState::endpoint_for_row(&row).unwrap();
+        assert_eq!(endpoint.host, "192.168.1.10");
+        assert_eq!(endpoint.port, 9031);
+    }
+
+    #[test]
+    fn endpoint_for_row_returns_none_when_remote_has_no_address() {
+        let mut row = DaemonRow::from_service(&svc("addressless", &[]));
+        row.addresses.clear();
+        assert!(DaemonsState::endpoint_for_row(&row).is_none());
+    }
+
+    #[test]
+    fn detail_for_returns_set_value() {
+        let mut state = DaemonsState::new();
+        state.set_detail(
+            "mycroft".to_string(),
+            DaemonDetail::Error {
+                message: "boom".to_string(),
+            },
+        );
+        match state.detail_for("mycroft") {
+            Some(DaemonDetail::Error { message }) => assert_eq!(message, "boom"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // Lookup for a name we never set returns None.
+        assert!(state.detail_for("unknown").is_none());
+    }
+
+    #[test]
+    fn set_detail_replaces_prior_value_for_same_name() {
+        let mut state = DaemonsState::new();
+        state.set_detail("mycroft".to_string(), DaemonDetail::Pending);
+        state.set_detail(
+            "mycroft".to_string(),
+            DaemonDetail::Error {
+                message: "later failure".to_string(),
+            },
+        );
+        match state.detail_for("mycroft") {
+            Some(DaemonDetail::Error { message }) => assert_eq!(message, "later failure"),
+            other => panic!("expected later Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn details_survive_discovery_rescan() {
+        // Once we've cached a detail, a rescan of mDNS
+        // (which replaces `rows`) must NOT blow away the
+        // cached entries — flicking the cursor onto a row
+        // that we just fetched shouldn't trigger an extra
+        // round trip.
+        let mut state = DaemonsState::new();
+        state.replace_from_discovery(&[svc("alpha", &[])], Instant::now());
+        state.set_detail("alpha".to_string(), DaemonDetail::Pending);
+        state.replace_from_discovery(&[svc("alpha", &[]), svc("bravo", &[])], Instant::now());
+        assert!(matches!(
+            state.detail_for("alpha"),
+            Some(DaemonDetail::Pending)
+        ));
     }
 }

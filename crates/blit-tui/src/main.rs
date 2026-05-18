@@ -28,7 +28,7 @@ mod state;
 
 use blit_app::admin::jobs;
 use blit_app::scan;
-use blit_core::generated::DaemonEvent;
+use blit_core::generated::{DaemonEvent, DaemonState};
 use blit_core::mdns::MdnsDiscoveredService;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use clap::Parser;
@@ -38,7 +38,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use daemons::DaemonsState;
+use daemons::{DaemonDetail, DaemonsState};
 use eyre::{Context, Result};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -429,7 +429,23 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
         disco_tx,
     );
 
+    // a1-3b: per-row GetState detail fetcher. Each task
+    // tags its result with the `instance_name` it was
+    // fetching so a stale response (selection changed while
+    // in flight) can be silently dropped by the apply step
+    // below.
+    let (detail_tx, mut detail_rx) = mpsc::channel::<DetailUpdate>(F1_DETAIL_BUFFER);
+    // Last `instance_name` we kicked a fetch for. Used to
+    // dedup; the kick helper compares this against the
+    // currently selected row.
+    let mut last_fetched: Option<String> = None;
+
     loop {
+        // Kick a detail fetch whenever the selection moved
+        // since the last kick. Cheap: this is a pointer
+        // compare against the cached Option<String>.
+        maybe_kick_detail_fetch(&mut state, &mut last_fetched, &detail_tx);
+
         let now = Instant::now();
         terminal
             .draw(|frame| {
@@ -449,6 +465,10 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                             // is already pending — silently drop,
                             // the queued tick will satisfy us.
                             let _ = refresh_tx.try_send(());
+                            // Also re-fetch the selected row's
+                            // detail. Drop `last_fetched` so the
+                            // next iteration's kick fires.
+                            last_fetched = None;
                         }
                         UserAction::SelectNext => state.select_next(),
                         UserAction::SelectPrev => state.select_prev(),
@@ -471,9 +491,93 @@ async fn run_f1_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) ->
                     }
                 }
             }
+            update = detail_rx.recv() => {
+                if let Some(DetailUpdate { instance_name, result }) = update {
+                    let detail = match result {
+                        Ok(daemon_state) => DaemonDetail::Loaded {
+                            state: Box::new(daemon_state),
+                            fetched_at: Instant::now(),
+                        },
+                        Err(message) => DaemonDetail::Error { message },
+                    };
+                    state.set_detail(instance_name, detail);
+                }
+                // If the channel closed (None) we just
+                // continue — the loop survives.
+            }
         }
     }
 }
+
+/// If the selected row differs from `last_fetched`, mark the
+/// new row as Pending and spawn a `GetState` fetcher for it.
+/// Idempotent in the sense that two consecutive calls
+/// without a selection change are a no-op.
+fn maybe_kick_detail_fetch(
+    state: &mut DaemonsState,
+    last_fetched: &mut Option<String>,
+    detail_tx: &mpsc::Sender<DetailUpdate>,
+) {
+    let Some(row) = state.selected_row() else {
+        return;
+    };
+    let name = row.instance_name.clone();
+    if last_fetched.as_deref() == Some(name.as_str()) {
+        return;
+    }
+    let Some(endpoint) = DaemonsState::endpoint_for_row(row) else {
+        // No usable endpoint (remote row with no advertised
+        // address). Mark as Error so the operator sees why.
+        state.set_detail(
+            name.clone(),
+            DaemonDetail::Error {
+                message: "no advertised address".to_string(),
+            },
+        );
+        *last_fetched = Some(name);
+        return;
+    };
+    state.set_detail(name.clone(), DaemonDetail::Pending);
+    spawn_detail_fetch(endpoint, name.clone(), detail_tx.clone());
+    *last_fetched = Some(name);
+}
+
+/// One-shot GetState fetcher. Each kick spawns one of these;
+/// the result is tagged with the row's `instance_name` so
+/// stale responses (selection changed mid-fetch) can be
+/// distinguished from current ones — though in practice we
+/// apply every result we get since `set_detail` is keyed by
+/// name, and the renderer always reads the current
+/// selection.
+fn spawn_detail_fetch(
+    endpoint: RemoteEndpoint,
+    instance_name: String,
+    tx: mpsc::Sender<DetailUpdate>,
+) {
+    tokio::spawn(async move {
+        let result = jobs::query(&endpoint, 0)
+            .await
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx
+            .send(DetailUpdate {
+                instance_name,
+                result,
+            })
+            .await;
+    });
+}
+
+/// Reply envelope for the detail fetcher.
+struct DetailUpdate {
+    instance_name: String,
+    result: Result<DaemonState, String>,
+}
+
+/// Bounded channel depth for detail-fetch replies. 8 is
+/// generous — at most one fetch per selection change, and
+/// the loop consumes them faster than the operator can
+/// cursor through rows.
+const F1_DETAIL_BUFFER: usize = 8;
 
 /// Messages from the discovery task back to the F1 loop.
 enum DiscoveryUpdate {
