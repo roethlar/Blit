@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-3-f1-daemons   | Medium   | F1 Local row + viewport + clamp (R2)        | `[~]`  | `phase5/a1` | `1fcee97` |
 
 ## Open findings
 
@@ -24,6 +24,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | a1-3-f1-daemons | Medium | F1 missing local/GetState contract and table viewport | `phase5/a1` |
+| a1-3b-f1-getstate-detail | Medium | F1 detail block populated by `GetState` (follow-up of a1-3) | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |

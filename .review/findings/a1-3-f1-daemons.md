@@ -228,6 +228,128 @@ In `main.rs::tests`:
 - **a1-6-screen-router**: F-keys to navigate between panes,
   replacing the `--screen` flag.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer raised three findings:
+
+### 1. Local endpoint missing + GetState detail not wired (Medium)
+
+The A.1 plan (TUI_DESIGN.md:938 + §10 owner-signoff) calls
+for two F1 commitments:
+
+1. `Local` appears as a first-class row so the operator
+   can interact with the host machine even with no LAN
+   daemons.
+2. The detail block surfaces `GetState`-derived counters
+   (uptime / active / version) per selected daemon.
+
+Round 1 shipped neither. Round 2 splits the commitment:
+
+- **Land in this round**: synthetic Local row (1).
+- **Defer to a follow-up sentinel**: GetState-driven detail
+  block (2) → new open finding `a1-3b-f1-getstate-detail`,
+  added to `REVIEW.md`.
+
+**Local row**: `daemons.rs` gains an `EndpointKind { Local,
+Remote }` discriminator + `LOCAL_INSTANCE_NAME` constant.
+`DaemonRow::local()` constructs the synthetic row;
+`DaemonsState::new()` pre-populates it so the operator
+sees Local before mDNS even returns. `replace_from_discovery`
+re-injects Local at index 0 on every rescan — discovered
+remotes follow sorted by name.
+
+`screens/f1.rs` special-cases Local: the table cell shows
+`(this machine)` in the address column and `—` in the
+remaining columns to keep the layout stable. The detail
+block emits a Local-specific header + a "(pending GetState
+integration — a1-3b)" placeholder + a hint that downstream
+F2/F3 slices treat it symmetrically with remote daemons.
+
+The findings doc and `REVIEW.md` Open findings now list
+the `a1-3b-f1-getstate-detail` follow-up explicitly.
+
+### 2. Selected row moved out of the visible table (Low)
+
+Round 1's `render_table` painted every row with an inline
+style and no viewport offset. Past the first page of
+daemons, the highlighted row scrolled off and only the
+detail block reflected the off-screen selection.
+
+Fix: switch to ratatui's `TableState` + stateful render.
+`Table::row_highlight_style(...)` paints the cyan
+highlight; `TableState::with_selected(Some(idx))` carries
+the selected index AND maintains an offset for
+auto-scrolling. The widget guarantees the highlighted row
+stays in the viewport.
+
+Verified by a new TestBackend test
+(`selected_row_stays_visible_when_list_exceeds_viewport`):
+20 discovered daemons + Local in a 12-line terminal,
+cursor at index 15 — assert the daemon's name is in the
+rendered buffer.
+
+### 3. Selection clamp didn't match the documented behavior (Low)
+
+Round 1's reducer used `unwrap_or(0)` when the prior
+selected name disappeared, jumping back to row 0 even when
+the prior index was still valid. With a 5s mDNS rescan
+cadence and unreliable departure events, this triggered
+frequently.
+
+Fix: when the prior name is gone, fall back to
+`min(prior_index, rows.len()-1)` so the cursor stays near
+where the operator left it.
+
++2 regression tests in `daemons::tests`:
+- `replace_from_discovery_keeps_index_near_prior_when_name_lost`:
+  4 daemons → cursor on `charlie` (index 3) → rescan
+  removes charlie → cursor on `delta` (index 3), not row 0.
+- `replace_from_discovery_clamps_to_last_row_when_tail_disappears`:
+  cursor on last row → rescan removes it → cursor on new
+  last row.
+
+### Files changed (round 2)
+
+- `crates/blit-tui/src/daemons.rs`: `EndpointKind`,
+  `LOCAL_INSTANCE_NAME`, `DaemonRow::local()` +
+  `is_local()`, `DaemonsState::new()` seeds Local row,
+  `replace_from_discovery` re-injects Local + new
+  index-near-prior clamp.
+- `crates/blit-tui/src/screens/f1.rs`: `daemon_to_row`
+  + `detail_lines` special-case Local; `render_table`
+  switches to `TableState` stateful widget; +3 tests
+  (Local detail copy, Local placeholder cells, viewport
+  visibility).
+- `.review/findings/a1-3b-f1-getstate-detail.md` (new
+  follow-up finding doc).
+- `REVIEW.md`: adds `a1-3b-f1-getstate-detail` to Open
+  findings.
+
+### Tests
+
+7 new unit tests (5 daemons + 3 screens):
+
+In `daemons::tests`:
+- `new_state_has_local_row`
+- `replace_from_discovery_keeps_local_at_index_zero`
+- `replace_from_discovery_preserves_local_selection_across_rescan`
+- `replace_from_discovery_keeps_index_near_prior_when_name_lost`
+- `replace_from_discovery_clamps_to_last_row_when_tail_disappears`
+- `from_service_tags_row_as_remote`
+
+In `screens::f1::tests`:
+- `detail_lines_for_local_row_uses_local_specific_copy`
+- `daemon_to_row_for_local_uses_placeholders`
+- `selected_row_stays_visible_when_list_exceeds_viewport`
+
+Updated tests to account for the always-present Local
+row in row-count assertions (`replace_from_discovery_sorts_by_instance_name`
+becomes `…_keeps_local_at_index_zero`, etc.). The
+behaviour is preserved; the indices and counts shifted by
+one to include Local.
+
+44 blit-tui unit tests (was 37). Workspace passes serially.
+
 ## Reviewer comments
 
 (empty — pending grade)
