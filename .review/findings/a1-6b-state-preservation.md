@@ -165,6 +165,99 @@ serially.
    lives in `main.rs`. A future polish slice could move
    the struct + setup helpers into a dedicated `app.rs`.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer flagged three issues on round 1:
+
+### 1. Hidden F2 setup blocked the first draw (Medium)
+
+`run_router` awaited `open_subscribe_stream` + initial
+`GetState` inline before entering the event loop. With
+default `--screen f1`, a slow or unreachable remote
+nevertheless stalled the first draw for up to the
+combined RTT of those two operations.
+
+**Fix:** background-spawn the F2 setup. New
+`spawn_f2_setup_task(endpoint, tx)` does both RPCs in a
+detached `tokio::spawn` and posts an `F2SetupReply` (either
+`Ready { event_rx, snapshot_result }` or `Failed(msg)`)
+through a bounded mpsc(1). The unified loop has a select!
+arm for `f2_setup_rx.recv()` that wires the returned
+event_rx + snapshot into the shared state. F1 renders
+immediately on TUI start regardless of remote latency.
+
+### 2. Hidden panes' channels could back up (Medium)
+
+Round 1 kept the four per-pane loops; only the active
+pane's loop ran the select! that drained its receivers.
+That meant F1's bounded(4) discovery channel and F2's
+bounded(256) Subscribe channel could fill while the
+operator browsed other panes, eventually back-pressuring
+the producer tasks.
+
+**Fix:** consolidate into a single `tokio::select!` in
+`run_router`. The unified loop drains every channel
+(disco_rx, detail_rx, transfers_event_rx, browse_fetch_rx,
+profile_reply_rx, f2_setup_rx, key_rx) on every iteration
+regardless of `app.current_screen`. Key dispatch happens
+via a new `handle_pane_action(action, &mut app, ...)`
+async helper that routes per-action based on the active
+pane.
+
+The four `run_fN_pane_loop` functions are deleted; their
+state-mutation logic moved into `handle_pane_action`'s
+per-screen match arms or into the unified select!'s
+data-channel arms.
+
+For the optional Subscribe receiver, the select! uses an
+`if transfers_event_rx.is_some()` guard plus an inner
+`async {…}` block that yields `pending()` when the
+receiver is None — keeps the arm inactive until F2 setup
+completes.
+
+### 3. Remote parse errors collapsed to "invalid endpoint" (Low)
+
+Round 1's `RemoteEndpoint::parse(raw).ok()` discarded the
+actual error message. F2 and F3 banners then synthesized
+a generic "parse '<raw>': invalid endpoint" string,
+losing the backslash-guidance / module-path-missing hints
+that the parser produces.
+
+**Fix:** keep the parse `Result`. Round 2 builds a tuple
+`(Option<RemoteEndpoint>, Option<String>)` where the
+second element is the actual parse error message. Both
+F2's `transfers_status` and F3's banner consume this
+string directly.
+
+### Files changed (round 2)
+
+- `crates/blit-tui/src/main.rs`:
+  - Removed the four `run_fN_pane_loop` functions and
+    `LoopOutcome` enum.
+  - New `run_router` body: unified select! with one arm
+    per channel + key dispatch through
+    `handle_pane_action`.
+  - `AppState` gains `current_screen` field.
+  - `spawn_f2_setup_task` + `F2SetupReply` enum.
+  - `handle_pane_action(action, app, transfers_event_rx,
+    f2_setup_tx)` — async; routes per active pane.
+  - Parse-error string preserved through
+    `parse_error_message: Option<String>`.
+
+### Tests
+
+Existing 94 blit-tui unit tests all pass — the helper
+functions tested (`maybe_kick_detail_fetch`,
+`handle_f3_refresh`, `views_differ`,
+`drain_startup_events`, `apply_browse_reply`, etc.) keep
+their shapes; the consolidation is purely call-site
+restructuring around them.
+
+Adding new end-to-end tests for the unified loop's
+multi-channel draining would need a TestBackend + a
+substantial fixture-task harness. Out of scope for this
+round; tracked implicitly under E (Polish).
+
 ## Reviewer comments
 
 (empty — pending grade)
