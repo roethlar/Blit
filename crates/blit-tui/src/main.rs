@@ -164,12 +164,23 @@ impl Drop for TuiGuard {
     }
 }
 
+/// Pure state transition: swap `TUI_ACTIVE` to false and
+/// return whether this call was the one that observed it
+/// `true`. Extracted so tests can validate the idempotency
+/// contract without touching crossterm or emitting real
+/// terminal control sequences.
+fn take_active_for_restore() -> bool {
+    TUI_ACTIVE.swap(false, Ordering::SeqCst)
+}
+
 /// Best-effort terminal restore: show cursor, leave
-/// alternate screen, disable raw mode. Idempotent (no-op if
-/// `TUI_ACTIVE` is false) so the panic hook and Drop can
-/// both call it without worrying about double-teardown.
+/// alternate screen, disable raw mode. Idempotent —
+/// the first caller observes `TUI_ACTIVE = true` via
+/// `take_active_for_restore`; subsequent callers see it
+/// `false` and early-return. The panic hook and Drop can
+/// both call this without double-teardown.
 fn restore_terminal() {
-    if !TUI_ACTIVE.swap(false, Ordering::SeqCst) {
+    if !take_active_for_restore() {
         return;
     }
     let mut stdout = io::stdout();
@@ -287,38 +298,31 @@ mod tests {
         assert!(!should_quit(KeyCode::Char('c'), KeyModifiers::empty()));
     }
 
-    /// `restore_terminal` must be a no-op when no setup
-    /// state was committed. Without this contract a panic
-    /// during early startup (before `enable_raw_mode`) would
-    /// fire `disable_raw_mode` on a process that hadn't
-    /// enabled it — usually benign, but on some terminals
-    /// adds spurious escape sequences to stderr.
+    /// `take_active_for_restore` is the pure state-transition
+    /// helper that `restore_terminal` uses to decide whether
+    /// to fire any crossterm calls. Testing it directly
+    /// validates the idempotency contract WITHOUT writing
+    /// real terminal escape sequences to stderr — the issue
+    /// the round-2 review flagged.
+    ///
+    /// Inactive → false (and stays false).
     #[test]
-    fn restore_terminal_is_noop_when_not_active() {
+    fn take_active_for_restore_inactive_returns_false() {
         TUI_ACTIVE.store(false, Ordering::SeqCst);
-        restore_terminal();
-        // Just asserting it didn't panic + flag stays false.
+        assert!(!take_active_for_restore());
         assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
     }
 
-    /// Idempotency: calling `restore_terminal` twice in a
-    /// row swaps the flag to false on the first call;
-    /// subsequent calls early-return without touching
-    /// crossterm. Validates the "panic hook AND Drop both
-    /// call this" contract.
+    /// Active → true on first call, false on subsequent
+    /// calls. Validates the "panic hook AND Drop both call
+    /// this" contract: only the winner does the teardown.
     #[test]
-    fn restore_terminal_idempotent_across_repeated_calls() {
-        // Pretend we'd entered raw mode. We can't actually
-        // call `enable_raw_mode` in a test process (no TTY
-        // attached on most CI), so we only exercise the flag
-        // path. The execute! calls inside restore_terminal
-        // are best-effort and ignore errors, so they're
-        // safe to run regardless.
+    fn take_active_for_restore_active_then_inactive() {
         TUI_ACTIVE.store(true, Ordering::SeqCst);
-        restore_terminal();
+        assert!(take_active_for_restore());
         assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
-        // Second call is a clean no-op.
-        restore_terminal();
+        // Second caller sees inactive — no double teardown.
+        assert!(!take_active_for_restore());
         assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
     }
 
