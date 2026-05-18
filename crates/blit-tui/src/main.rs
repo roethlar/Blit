@@ -317,11 +317,14 @@ async fn run_event_loop(
                 event = rx.recv() => {
                     match event {
                         Some(EventOrError::Connected) => {
-                            // Stream open. Doesn't reset
-                            // earlier Degraded snapshots —
-                            // that path is reached only via a
-                            // successful (re)open.
-                            status = ConnectionStatus::Live;
+                            // Stream open. Same rule as the
+                            // startup drain: only transition
+                            // Connecting → Live; preserve any
+                            // existing Degraded that came from
+                            // a failed initial snapshot.
+                            if matches!(status, ConnectionStatus::Connecting) {
+                                status = ConnectionStatus::Live;
+                            }
                         }
                         Some(EventOrError::Event(daemon_event)) => {
                             state.apply_event(daemon_event);
@@ -462,13 +465,23 @@ fn drain_startup_events(
     loop {
         match rx.try_recv() {
             Ok(EventOrError::Connected) => {
-                *status = ConnectionStatus::Live;
+                // Connected is a stream-health signal, not a
+                // snapshot-health signal. Only let it
+                // transition Connecting → Live. If the
+                // caller already set Degraded (e.g. the
+                // initial GetState failed) we must not
+                // overwrite that — the live stream may be
+                // healthy but the active/recent state is
+                // incomplete and the user needs to know.
+                if matches!(status, ConnectionStatus::Connecting) {
+                    *status = ConnectionStatus::Live;
+                }
             }
             Ok(EventOrError::Event(event)) => {
                 state.apply_event(event);
-                // Connected may not have arrived yet (slot
-                // 0 of the buffer was an event); first
-                // observed event also flips Live.
+                // Same rule as Connected: first event is a
+                // stream-health signal. Don't paper over an
+                // existing Degraded snapshot status.
                 if matches!(status, ConnectionStatus::Connecting) {
                     *status = ConnectionStatus::Live;
                 }
@@ -668,5 +681,44 @@ mod tests {
         // Second caller sees inactive — no double teardown.
         assert!(!take_active_for_restore(&flag));
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    /// a1-2 round-5 regression: when the initial `GetState`
+    /// fails but Subscribe is healthy, the buffered
+    /// `Connected` message must NOT overwrite the
+    /// `Degraded(...)` status set by the snapshot failure.
+    /// Connected is a stream-health signal — it cannot tell
+    /// the user the active/recent rows are complete.
+    #[tokio::test]
+    async fn drain_startup_events_connected_preserves_degraded() {
+        let (tx, mut rx) = mpsc::channel::<EventOrError>(4);
+        // Forwarder always pushes Connected first.
+        tx.send(EventOrError::Connected).await.unwrap();
+        drop(tx);
+
+        let mut state = TransfersState::new();
+        let mut status = ConnectionStatus::Degraded("initial GetState failed: timeout".to_string());
+        drain_startup_events(&mut rx, &mut state, &mut status);
+        match status {
+            ConnectionStatus::Degraded(msg) => {
+                assert!(msg.contains("initial GetState failed"));
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
+    /// Companion case: when the prior status is `Connecting`
+    /// (normal happy path — snapshot succeeded, drain runs
+    /// next), Connected SHOULD flip to Live.
+    #[tokio::test]
+    async fn drain_startup_events_connected_flips_connecting_to_live() {
+        let (tx, mut rx) = mpsc::channel::<EventOrError>(4);
+        tx.send(EventOrError::Connected).await.unwrap();
+        drop(tx);
+
+        let mut state = TransfersState::new();
+        let mut status = ConnectionStatus::Connecting;
+        drain_startup_events(&mut rx, &mut state, &mut status);
+        assert!(matches!(status, ConnectionStatus::Live));
     }
 }
