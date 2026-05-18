@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-8-f4-elapsed-time | Feature | F4 Verify/Transfer Done banners show duration | [~] | `phase5/a1` | `9b01340` |
 
 ## Open findings
 
