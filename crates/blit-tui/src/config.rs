@@ -7,18 +7,24 @@
 //! stderr (visible after TUI exit) and use defaults. We
 //! never crash the TUI on a misconfigured `tui.toml`.
 //!
-//! Initial schema (intentionally tiny):
+//! Current schema (grown through e-3 / e-4 / e-5):
 //!
 //! ```toml
 //! [verify]
-//! default_use_checksum = true
-//! default_one_way = false
+//! default_use_checksum = false  # `H` toggle's startup value
+//! default_one_way = false       # `O` toggle's startup value
+//!
+//! [tab_strip]
+//! show_counts = true            # e-4: right-edge counts column
+//!
+//! [live_tick]
+//! interval_ms = 500             # e-5: render-wakeup cadence (clamped to [50, 5000])
 //! ```
 //!
 //! Future slices can grow the schema (color themes,
-//! refresh intervals, persisted form fields). Every new
-//! field must have `#[serde(default)]` so older configs
-//! continue to parse without surprises.
+//! persisted form prefill, per-pane tick intervals).
+//! Every new field must have `#[serde(default)]` so
+//! older configs continue to parse without surprises.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -73,9 +79,9 @@ pub struct LiveTickDefaults {
     /// Milliseconds between wakeups while a Running
     /// transfer, Running verify, or pane with a freshness
     /// footer is on screen. Clamped to
-    /// `[MIN_TICK_MS, MAX_TICK_MS]` after load — anything
-    /// outside is silently snapped to the bound rather
-    /// than refused.
+    /// `[MIN_INTERVAL_MS, MAX_INTERVAL_MS]` after load —
+    /// anything outside is silently snapped to the bound
+    /// rather than refused.
     pub interval_ms: u64,
 }
 

@@ -124,4 +124,47 @@ In `config::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/e-5-config-live-tick-interval.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **Source docs still describe the pre-e-5 contract.**
+  The runtime change shipped correctly, but three
+  comments contradicted the code:
+
+  1. `main.rs` select-arm comment said "500ms live-tick
+     wakeup" but the cadence is now config-driven.
+  2. `config.rs` `LiveTickDefaults::interval_ms` rustdoc
+     named `[MIN_TICK_MS, MAX_TICK_MS]` — the actual
+     constants this slice introduced are
+     `MIN_INTERVAL_MS` / `MAX_INTERVAL_MS`.
+  3. `config.rs` module doc still presented the schema as
+     verify-only despite `[tab_strip]` (e-4) and
+     `[live_tick]` (e-5) being live.
+
+  These would mislead the next agent into editing
+  against the wrong baseline.
+
+  Round 2 fixes all three:
+  - select-arm comment now says "d-9 / e-5: cadence is
+    `tui_config.live_tick.interval_ms_clamped()`
+    (default 500ms; bounded to [50, 5000])".
+  - rustdoc names the correct `MIN_INTERVAL_MS` /
+    `MAX_INTERVAL_MS` constants.
+  - module doc shows the current 3-section schema
+    (`[verify]`, `[tab_strip]`, `[live_tick]`) with the
+    e-N attribution for each section.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/config.rs`:
+  - Module doc rewritten to reflect the current
+    schema.
+  - `interval_ms` rustdoc names the correct constants.
+- `crates/blit-tui/src/main.rs`:
+  - select-arm comment updated to describe the
+    config-driven cadence.
+
+No behavior change, no test count delta (still 216).
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.

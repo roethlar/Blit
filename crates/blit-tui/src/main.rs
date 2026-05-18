@@ -496,11 +496,14 @@ async fn run_router(
         // receiver yet (F2 setup still in flight, or no
         // remote configured).
         tokio::select! {
-            // d-9: 500ms live-tick wakeup for F4 elapsed
-            // counters. Body is empty — the next loop
-            // iteration's terminal.draw call computes a
-            // fresh `now` and re-renders with the updated
-            // duration string.
+            // d-9 / e-5: live-tick wakeup for F4 elapsed
+            // counters + freshness footers. Cadence is
+            // `tui_config.live_tick.interval_ms_clamped()`
+            // (default 500ms; bounded to [50, 5000]).
+            // Body is empty — the next loop iteration's
+            // terminal.draw call computes a fresh `now`
+            // and re-renders with the updated duration
+            // string.
             _ = &mut live_tick => {}
 
             // Keystrokes — dispatched to the active pane.
