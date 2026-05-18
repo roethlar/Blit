@@ -3,10 +3,14 @@
 //! to see how they differ — same code path as `blit check`.
 //!
 //! d-2-f4-verify scope: text-input form, run-on-Enter, result
-//! rendering as match / diff / missing counts. Mode toggle
-//! (size+mtime vs checksum) and remote endpoints are
-//! deferred (matches the CLI's `blit check` semantics —
-//! local paths only, per TUI_DESIGN §5.4).
+//! rendering as match / diff / missing counts.
+//!
+//! d-6 adds the mode toggle: `H` flips between size+mtime
+//! (the default — fast, what rsync does without `--checksum`)
+//! and checksum mode (slower, but catches content edits that
+//! preserve mtime). Remote endpoints stay deferred (matches
+//! the CLI's `blit check` semantics — local paths only, per
+//! TUI_DESIGN §5.4).
 
 use blit_app::check::CheckResult;
 use std::time::Instant;
@@ -58,6 +62,13 @@ pub struct VerifyState {
     /// the run task tags its reply with the gen and the
     /// apply arm drops mismatches.
     request_id: u64,
+    /// d-6: `false` (default) means size+mtime compare —
+    /// fast, matches rsync's default. `true` flips to
+    /// per-file checksum, which catches content edits
+    /// that preserve mtime (timestamps copied from a
+    /// snapshot, manual `touch` after edit, etc.). Toggled
+    /// by `H` from F4.
+    use_checksum: bool,
 }
 
 impl Default for VerifyState {
@@ -74,7 +85,25 @@ impl VerifyState {
             focus: VerifyFocus::None,
             status: VerifyStatus::Idle,
             request_id: 0,
+            use_checksum: false,
         }
+    }
+
+    /// `true` if the next compare_trees run will use
+    /// per-file checksum, `false` for size+mtime.
+    pub fn use_checksum(&self) -> bool {
+        self.use_checksum
+    }
+
+    /// Flip the checksum mode and invalidate any in-flight
+    /// or completed run. The mode change is meaningful
+    /// only at the next `compare_trees` call, so a Done
+    /// banner from the OLD mode would be misleading after
+    /// the flip — collapse to Idle and bump the generation
+    /// (same shape as `invalidate_run` for edits).
+    pub fn toggle_checksum(&mut self) {
+        self.use_checksum = !self.use_checksum;
+        self.invalidate_run();
     }
 
     pub fn focus(&self) -> VerifyFocus {
@@ -386,5 +415,61 @@ mod tests {
         state.cycle_focus();
         state.clear_focus();
         assert_eq!(state.focus(), VerifyFocus::None);
+    }
+
+    // d-6: checksum mode toggle.
+
+    #[test]
+    fn new_state_uses_size_mtime_compare() {
+        let state = VerifyState::new();
+        assert!(
+            !state.use_checksum(),
+            "default mode matches rsync default (no --checksum)"
+        );
+    }
+
+    #[test]
+    fn toggle_checksum_flips_the_flag() {
+        let mut state = VerifyState::new();
+        state.toggle_checksum();
+        assert!(state.use_checksum(), "first toggle → checksum mode");
+        state.toggle_checksum();
+        assert!(!state.use_checksum(), "second toggle → back to size+mtime");
+    }
+
+    /// Flipping mode must invalidate any prior result.
+    /// A Done from the OLD mode would mislead the operator
+    /// after the flip, because the displayed counts no
+    /// longer correspond to the mode shown in the header.
+    #[test]
+    fn toggle_checksum_invalidates_done_result() {
+        let mut state = VerifyState::new();
+        state.source = "/tmp/a".to_string();
+        state.destination = "/tmp/b".to_string();
+        let gen = state.begin_run();
+        state.apply_result(gen, empty_check_result());
+        assert!(matches!(state.status(), VerifyStatus::Done { .. }));
+        state.toggle_checksum();
+        assert!(matches!(state.status(), VerifyStatus::Idle));
+    }
+
+    /// Flipping mode while a compare_trees run is in
+    /// flight must drop the eventual reply — its counts
+    /// belong to the prior mode.
+    #[test]
+    fn toggle_checksum_drops_in_flight_reply() {
+        let mut state = VerifyState::new();
+        state.source = "/tmp/a".to_string();
+        state.destination = "/tmp/b".to_string();
+        let gen = state.begin_run();
+        state.toggle_checksum();
+        let applied = state.apply_result(gen, empty_check_result());
+        assert!(
+            !applied,
+            "reply tagged with the pre-toggle gen must be dropped"
+        );
+        // Status collapsed back to Idle, not stuck on
+        // Running with a result that'll never arrive.
+        assert!(matches!(state.status(), VerifyStatus::Idle));
     }
 }

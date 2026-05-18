@@ -205,10 +205,18 @@ fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState) {
         &verify.destination,
         focus == VerifyFocus::Destination,
     );
-    let mode_hint = Line::from(Span::styled(
-        "Mode: size+mtime (checksum toggle deferred)",
-        Style::default().fg(Color::DarkGray),
-    ));
+    let (mode_label, mode_style) = if verify.use_checksum() {
+        (
+            "Mode: checksum (per-file content compare · H to toggle)",
+            Style::default().fg(Color::Magenta),
+        )
+    } else {
+        (
+            "Mode: size+mtime (fast, rsync default · H to toggle)",
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    let mode_hint = Line::from(Span::styled(mode_label, mode_style));
     let status_line = match verify.status() {
         VerifyStatus::Idle => Line::from(Span::styled(
             "tab: enter editing · enter: run · esc: leave editing",

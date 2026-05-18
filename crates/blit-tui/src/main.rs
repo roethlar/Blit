@@ -871,6 +871,9 @@ async fn handle_pane_action(
             UserAction::TransferCancel if app.transfer.is_confirming() => {
                 app.transfer.cancel_confirm();
             }
+            UserAction::ToggleVerifyChecksum => {
+                app.verify.toggle_checksum();
+            }
             _ => {}
         },
     }
@@ -1698,6 +1701,7 @@ fn handle_verify_keystroke(
                     gen,
                     app.verify.source.clone(),
                     app.verify.destination.clone(),
+                    app.verify.use_checksum(),
                     verify_run_tx.clone(),
                 );
             }
@@ -1734,14 +1738,16 @@ fn handle_verify_keystroke(
 /// Spawn a `compare_trees` run on a blocking task. Both
 /// inputs are local path strings; the task parses them to
 /// `PathBuf` and runs the comparison with a default
-/// `FileFilter`. `use_checksum=false` and `one_way=false`
-/// match the design's default Verify mode (size+mtime,
-/// two-way comparison). The checksum-mode toggle is a
-/// future polish.
+/// `FileFilter`. `use_checksum` follows the
+/// `VerifyState`'s mode toggle (d-6) — `false` is the
+/// default size+mtime compare matching rsync; `true` is
+/// per-file content checksum. `one_way=false` keeps the
+/// two-way comparison (matches `blit check` default).
 fn spawn_verify_run(
     request_id: u64,
     source: String,
     destination: String,
+    use_checksum: bool,
     tx: mpsc::Sender<VerifyReply>,
 ) {
     tokio::spawn(async move {
@@ -1751,7 +1757,7 @@ fn spawn_verify_run(
             blit_app::check::compare_trees(
                 &src,
                 &dst,
-                false,
+                use_checksum,
                 false,
                 blit_core::fs_enum::FileFilter::default(),
             )
@@ -1915,6 +1921,11 @@ enum UserAction {
     TransferMirrorConfirm,
     /// F4: `n` cancels a pending mirror-or-move prompt.
     TransferCancel,
+    /// F4: `H` toggles the Verify form between size+mtime
+    /// (default, rsync-style) and per-file checksum.
+    /// Invalidates any prior result so the displayed
+    /// counts always match the current mode.
+    ToggleVerifyChecksum,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1981,6 +1992,10 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // free for potential vim-style "visual mode" /
         // multi-select on a future F3 polish slice.
         KeyCode::Char('V') => Some(UserAction::TransferMove),
+        // `H` toggles Verify mode (size+mtime ↔ checksum).
+        // Capital chosen because lowercase `h` is the
+        // Ascend / left-arrow alias used by F3 navigation.
+        KeyCode::Char('H') => Some(UserAction::ToggleVerifyChecksum),
         // `y` / `n` confirm or cancel a pending mirror
         // prompt. The F4 dispatcher only acts on these
         // while `transfer.is_confirming_mirror()` is true —
@@ -2651,6 +2666,21 @@ mod tests {
             Some(UserAction::TransferMove)
         ));
         assert!(key_action(&k(KeyCode::Char('v'))).is_none());
+    }
+
+    /// d-6: `H` maps to the Verify-mode toggle. Lowercase
+    /// `h` stays bound to Ascend (F3 navigation), so only
+    /// uppercase claims the toggle.
+    #[test]
+    fn key_action_maps_verify_checksum_toggle() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('H'))),
+            Some(UserAction::ToggleVerifyChecksum)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('h'))),
+            Some(UserAction::Ascend)
+        ));
     }
 
     /// d-5: V triggers the move confirm flow — a copy
