@@ -1388,9 +1388,6 @@ struct TransferReply {
     result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
 }
 
-/// `true` when the operator can kick a local transfer:
-/// both Verify fields are non-empty AND no transfer is
-/// running or awaiting a destructive-confirm prompt.
 /// d-9: `true` when the event loop should arm the
 /// 500ms live-tick wakeup. Reads true while a Verify
 /// run or a local transfer is in flight, so the F4
@@ -1402,6 +1399,9 @@ fn needs_live_tick(app: &AppState) -> bool {
     app.transfer.is_running() || app.verify.is_running()
 }
 
+/// `true` when the operator can kick a local transfer:
+/// both Verify fields are non-empty AND no transfer is
+/// running or awaiting a destructive-confirm prompt.
 fn can_start_transfer(app: &AppState) -> bool {
     !app.verify.source.trim().is_empty()
         && !app.verify.destination.trim().is_empty()

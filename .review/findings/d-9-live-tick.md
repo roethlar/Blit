@@ -131,4 +131,33 @@ and is exercised by the main test above.)
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-9-live-tick.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **Stale rustdoc on `needs_live_tick`.** The round-1
+  edit inserted the new "d-9: arm the 500ms wakeup..."
+  paragraph ABOVE the existing `can_start_transfer`
+  paragraph instead of replacing it. As a result both
+  paragraphs ended up attached to `needs_live_tick`,
+  with the leading one ("true when the operator can
+  kick a local transfer") contradicting the function's
+  actual contract (true while a transfer IS active),
+  and `can_start_transfer` itself ended up
+  undocumented.
+
+  Round 2 swaps the two paragraphs back: the
+  `can_start_transfer` rustdoc moves back above its
+  declaration, leaving only the d-9 paragraph on
+  `needs_live_tick`. No behavior change, no test
+  change — pure doc hygiene.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`: re-home the
+  `can_start_transfer` rustdoc, leave the d-9 paragraph
+  on `needs_live_tick`.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test -p blit-tui` (169
+tests) all green. No test count change.
