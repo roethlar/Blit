@@ -107,6 +107,13 @@ pub struct TransfersState {
     /// tick gate uses it to decide whether the F2 footer
     /// needs refreshing.
     last_event_at: Option<Instant>,
+    /// d-21: cursor index into the SORTED `active_rows()`
+    /// view. `None` until the operator first navigates,
+    /// then clamped to the active count. Used by the
+    /// renderer to highlight the selected row and by a
+    /// future cancel-selected-transfer slice to know
+    /// which transfer_id to target.
+    selected_active: Option<usize>,
 }
 
 impl TransfersState {
@@ -287,6 +294,50 @@ impl TransfersState {
         self.active.len()
     }
 
+    /// d-21: index into the sorted `active_rows()` view
+    /// that the operator's cursor is on. `None` until
+    /// they first navigate. The renderer interprets
+    /// `Some(idx)` where `idx >= active_count()` as
+    /// "no selection" — the cursor falls off the end
+    /// when transfers terminate.
+    pub fn selected_active_index(&self) -> Option<usize> {
+        match self.selected_active {
+            Some(idx) if idx < self.active.len() => Some(idx),
+            _ => None,
+        }
+    }
+
+    /// d-21: advance the cursor. Clamps to the last
+    /// active row; first call from `None` selects index 0
+    /// (the newest row, since `active_rows()` sorts
+    /// newest-first).
+    pub fn select_next_active(&mut self) {
+        let count = self.active.len();
+        if count == 0 {
+            self.selected_active = None;
+            return;
+        }
+        self.selected_active = Some(match self.selected_active {
+            None => 0,
+            Some(idx) => (idx + 1).min(count - 1),
+        });
+    }
+
+    /// d-21: walk the cursor up. First call from `None`
+    /// selects index 0 just like `select_next_active`;
+    /// subsequent calls saturate at 0.
+    pub fn select_prev_active(&mut self) {
+        let count = self.active.len();
+        if count == 0 {
+            self.selected_active = None;
+            return;
+        }
+        self.selected_active = Some(match self.selected_active {
+            None => 0,
+            Some(idx) => idx.saturating_sub(1),
+        });
+    }
+
     pub fn recent_count(&self) -> usize {
         self.recent.len()
     }
@@ -350,6 +401,102 @@ mod tests {
         let stamp = Instant::now();
         state.replace_from_snapshot(DaemonState::default(), stamp);
         assert_eq!(state.last_event_at(), Some(stamp));
+    }
+
+    // d-21: F2 active-row cursor selection.
+
+    fn started_event(id: &str) -> DaemonEvent {
+        DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: id.to_string(),
+                kind: TransferKind::DelegatedPull as i32,
+                peer: String::new(),
+                module: String::new(),
+                path: String::new(),
+                start_unix_ms: 0,
+            })),
+        }
+    }
+
+    #[test]
+    fn selected_active_index_is_none_until_first_navigation() {
+        let state = TransfersState::new();
+        assert!(state.selected_active_index().is_none());
+    }
+
+    #[test]
+    fn select_next_active_lands_on_index_zero_first_time() {
+        let mut state = TransfersState::new();
+        state.apply_event(started_event("t-1"), Instant::now());
+        state.apply_event(started_event("t-2"), Instant::now());
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(0));
+    }
+
+    #[test]
+    fn select_next_active_walks_through_rows() {
+        let mut state = TransfersState::new();
+        state.apply_event(started_event("t-1"), Instant::now());
+        state.apply_event(started_event("t-2"), Instant::now());
+        state.apply_event(started_event("t-3"), Instant::now());
+        state.select_next_active();
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(1));
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(2));
+        // Clamps at end.
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(2));
+    }
+
+    #[test]
+    fn select_prev_active_saturates_at_zero() {
+        let mut state = TransfersState::new();
+        state.apply_event(started_event("t-1"), Instant::now());
+        state.apply_event(started_event("t-2"), Instant::now());
+        state.select_next_active();
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(1));
+        state.select_prev_active();
+        assert_eq!(state.selected_active_index(), Some(0));
+        state.select_prev_active();
+        assert_eq!(state.selected_active_index(), Some(0));
+    }
+
+    #[test]
+    fn select_next_active_no_op_on_empty_list() {
+        let mut state = TransfersState::new();
+        state.select_next_active();
+        assert!(state.selected_active_index().is_none());
+    }
+
+    /// Cursor "falls off" when the underlying row is
+    /// removed (Complete/Error). `selected_active_index`
+    /// returns None so the caller knows the cursor isn't
+    /// pointing at a real row anymore. Operator can press
+    /// up/down to re-anchor.
+    #[test]
+    fn selected_active_index_falls_off_when_row_terminates() {
+        let mut state = TransfersState::new();
+        state.apply_event(started_event("t-1"), Instant::now());
+        state.select_next_active();
+        assert_eq!(state.selected_active_index(), Some(0));
+        // Complete the only row → list empty → cursor off-list.
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferComplete(
+                    blit_core::generated::TransferComplete {
+                        transfer_id: "t-1".to_string(),
+                        duration_ms: 100,
+                        bytes: 0,
+                        files: 0,
+                        tcp_fallback_used: false,
+                    },
+                )),
+            },
+            Instant::now(),
+        );
+        assert!(state.selected_active_index().is_none());
     }
 
     #[test]

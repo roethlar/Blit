@@ -803,8 +803,8 @@ async fn handle_pane_action(
             UserAction::SelectPrev => app.daemons.select_prev(),
             _ => {}
         },
-        Screen::F2 => {
-            if let UserAction::Refresh = action {
+        Screen::F2 => match action {
+            UserAction::Refresh => {
                 if should_spawn_f2_setup(transfers_event_rx.is_some(), app.transfers_setup_pending)
                 {
                     // No live stream and no setup in flight
@@ -829,7 +829,13 @@ async fn handle_pane_action(
                 // else: setup is pending; refresh is a no-op
                 // until the in-flight task lands.
             }
-        }
+            // d-21: cursor selection in the active table.
+            // First press selects the newest row (index 0);
+            // subsequent presses walk through.
+            UserAction::SelectNext => app.transfers.select_next_active(),
+            UserAction::SelectPrev => app.transfers.select_prev_active(),
+            _ => {}
+        },
         Screen::F3 => match action {
             UserAction::Refresh => {
                 handle_f3_refresh(

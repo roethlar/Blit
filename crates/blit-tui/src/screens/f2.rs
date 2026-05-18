@@ -28,7 +28,7 @@ use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use std::time::Instant;
 
@@ -129,8 +129,21 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, no
     .style(Style::default().add_modifier(Modifier::BOLD));
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Active "));
-    frame.render_widget(table, area);
+        .block(Block::default().borders(Borders::ALL).title(" Active "))
+        // d-21: highlight the row at the cursor index.
+        // Black-on-cyan matches the tab-strip active-tab
+        // visual (e-7 made that themable; the Active row
+        // highlight stays Cyan for now — operator-visible
+        // accent is the tab strip, the row highlight is
+        // an internal selection marker).
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut table_state = TableState::default().with_selected(state.selected_active_index());
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
