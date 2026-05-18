@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| d-20-f2-recent-throughput | Low | Round 2: sync F2 module-doc layout | [~] | `phase5/a1` | `2e11732` |
 
 ## Open findings
 
@@ -24,7 +26,6 @@ _none_
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
-| d-20-f2-recent-throughput | Low | F2 layout docs omit throughput columns       | `phase5/a1` |
 
 ## Verified history
 
