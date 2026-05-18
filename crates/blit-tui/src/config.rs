@@ -7,7 +7,7 @@
 //! stderr (visible after TUI exit) and use defaults. We
 //! never crash the TUI on a misconfigured `tui.toml`.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24):
 //!
 //! ```toml
 //! [verify]
@@ -24,6 +24,9 @@
 //!
 //! [theme]
 //! accent_color = "cyan"         # e-7: active-tab background
+//!
+//! [transfer]
+//! cancel_status_ttl_ms = 5000   # d-24: F2 cancel-fragment TTL (clamped to [250, 60000])
 //! ```
 //!
 //! Future slices can grow the schema (per-pane tick
@@ -45,6 +48,7 @@ pub struct TuiConfig {
     pub tab_strip: TabStripDefaults,
     pub live_tick: LiveTickDefaults,
     pub theme: ThemeDefaults,
+    pub transfer: TransferDefaults,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -164,6 +168,50 @@ impl Default for ThemeDefaults {
     fn default() -> Self {
         Self {
             accent_color: Self::DEFAULT_ACCENT.to_string(),
+        }
+    }
+}
+
+/// d-24: transfer-related preferences. Currently just
+/// the d-23 cancel-status TTL.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransferDefaults {
+    /// Milliseconds the F2 cancel-status fragment stays
+    /// on screen after a CancelJob reply lands. Sending
+    /// has no TTL — only Done / Error variants expire.
+    /// Clamped to `[MIN_CANCEL_TTL_MS, MAX_CANCEL_TTL_MS]`
+    /// — 0 (always-hidden) or 600000 (10 minutes) are
+    /// silently snapped to the bounds rather than refused.
+    pub cancel_status_ttl_ms: u64,
+}
+
+impl TransferDefaults {
+    /// d-23 baseline: 5 seconds. Long enough to read
+    /// "cancelled abc-123", short enough not to clutter.
+    pub const DEFAULT_CANCEL_TTL_MS: u64 = 5_000;
+    /// Floor — at 250ms the operator barely sees the
+    /// fragment before it disappears. Lower values
+    /// effectively mean "don't show me cancel outcomes."
+    pub const MIN_CANCEL_TTL_MS: u64 = 250;
+    /// Ceiling — 60 seconds. Beyond that the footer feels
+    /// permanently cluttered. Operators who want
+    /// truly-permanent retention can re-run the cancel.
+    pub const MAX_CANCEL_TTL_MS: u64 = 60_000;
+
+    /// Clamped accessor; the renderer reads this once per
+    /// frame so out-of-range config values are silently
+    /// normalized.
+    pub fn cancel_status_ttl_ms_clamped(&self) -> u64 {
+        self.cancel_status_ttl_ms
+            .clamp(Self::MIN_CANCEL_TTL_MS, Self::MAX_CANCEL_TTL_MS)
+    }
+}
+
+impl Default for TransferDefaults {
+    fn default() -> Self {
+        Self {
+            cancel_status_ttl_ms: Self::DEFAULT_CANCEL_TTL_MS,
         }
     }
 }
@@ -493,5 +541,108 @@ mod tests {
         let _cfg = load_from_path(&path, |msg| warned = Some(msg));
         let warning = warned.expect("typo'd field must warn");
         assert!(warning.contains("defalut_use_checksum") || warning.contains("unknown"));
+    }
+
+    // d-24: [transfer] cancel_status_ttl_ms clamp + parse.
+
+    #[test]
+    fn transfer_default_cancel_ttl_is_5000ms() {
+        let cfg = TuiConfig::default();
+        assert_eq!(
+            cfg.transfer.cancel_status_ttl_ms,
+            TransferDefaults::DEFAULT_CANCEL_TTL_MS
+        );
+        assert_eq!(
+            cfg.transfer.cancel_status_ttl_ms_clamped(),
+            TransferDefaults::DEFAULT_CANCEL_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_cancel_ttl_parses_from_toml() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\ncancel_status_ttl_ms = 2500\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.transfer.cancel_status_ttl_ms, 2500);
+        assert_eq!(cfg.transfer.cancel_status_ttl_ms_clamped(), 2500);
+    }
+
+    #[test]
+    fn transfer_cancel_ttl_clamp_floor() {
+        let cfg = TransferDefaults {
+            cancel_status_ttl_ms: 0,
+        };
+        assert_eq!(
+            cfg.cancel_status_ttl_ms_clamped(),
+            TransferDefaults::MIN_CANCEL_TTL_MS
+        );
+        let cfg = TransferDefaults {
+            cancel_status_ttl_ms: 100,
+        };
+        assert_eq!(
+            cfg.cancel_status_ttl_ms_clamped(),
+            TransferDefaults::MIN_CANCEL_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_cancel_ttl_clamp_ceiling() {
+        let cfg = TransferDefaults {
+            cancel_status_ttl_ms: u64::MAX,
+        };
+        assert_eq!(
+            cfg.cancel_status_ttl_ms_clamped(),
+            TransferDefaults::MAX_CANCEL_TTL_MS
+        );
+        let cfg = TransferDefaults {
+            cancel_status_ttl_ms: 120_000,
+        };
+        assert_eq!(
+            cfg.cancel_status_ttl_ms_clamped(),
+            TransferDefaults::MAX_CANCEL_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_cancel_ttl_passes_through_when_in_range() {
+        for ms in [250, 1_000, 5_000, 10_000, 30_000, 60_000] {
+            let cfg = TransferDefaults {
+                cancel_status_ttl_ms: ms,
+            };
+            assert_eq!(
+                cfg.cancel_status_ttl_ms_clamped(),
+                ms,
+                "in-range value passes through"
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_cancel_ttl_round_trips_through_toml() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\ncancel_status_ttl_ms = 750\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.transfer.cancel_status_ttl_ms, 750);
+        assert_eq!(cfg.transfer.cancel_status_ttl_ms_clamped(), 750);
+    }
+
+    #[test]
+    fn transfer_unknown_field_warns() {
+        // deny_unknown_fields on [transfer] catches typos
+        // so the operator's intended TTL override doesn't
+        // silently fall back to the default.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(
+            &path,
+            "[transfer]\ncancel_status_ttl = 1000\n", // missing _ms suffix
+        )
+        .expect("write");
+        let mut warned = None;
+        let _cfg = load_from_path(&path, |msg| warned = Some(msg));
+        let warning = warned.expect("unknown [transfer] field must warn");
+        assert!(warning.contains("cancel_status_ttl") || warning.contains("unknown"));
     }
 }

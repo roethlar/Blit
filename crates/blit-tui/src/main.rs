@@ -232,10 +232,12 @@ enum F2CancelStatus {
         // here.
         outcome: blit_app::admin::jobs::CancelJobOutcome,
         /// d-23: terminal-state timestamp. The footer
-        /// converter hides the fragment after
-        /// `CANCEL_STATUS_TTL` has elapsed so the operator
-        /// gets a few seconds to read the outcome and
-        /// then the footer self-cleans.
+        /// converter hides the fragment after the
+        /// configured cancel-status TTL (d-24:
+        /// `tui.toml [transfer] cancel_status_ttl_ms`,
+        /// default 5s) has elapsed so the operator gets
+        /// a few seconds to read the outcome and then
+        /// the footer self-cleans.
         finished_at: Instant,
     },
     Error {
@@ -244,12 +246,6 @@ enum F2CancelStatus {
         finished_at: Instant,
     },
 }
-
-/// d-23: how long a Done / Error cancel fragment stays
-/// on screen before the footer converter reverts it to
-/// Hidden. Long enough for the operator to read,
-/// short enough not to clutter the footer indefinitely.
-const CANCEL_STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl F2CancelStatus {
     fn is_sending(&self) -> bool {
@@ -538,7 +534,13 @@ async fn run_router(
                         &app.transfers,
                         &app.remote_label,
                         &app.transfers_status,
-                        &cancel_status_to_display(&app.cancel_status, now),
+                        &cancel_status_to_display(
+                            &app.cancel_status,
+                            now,
+                            std::time::Duration::from_millis(
+                                tui_config.transfer.cancel_status_ttl_ms_clamped(),
+                            ),
+                        ),
                         now,
                     ),
                     Screen::F3 => screens::f3::render_into(
@@ -1607,7 +1609,11 @@ struct TransferReply {
 /// renderer-facing `F2CancelDisplay` (which lives in
 /// `screens/f2.rs` to avoid the screens layer reaching
 /// into main.rs's types).
-fn cancel_status_to_display(status: &F2CancelStatus, now: Instant) -> screens::f2::F2CancelDisplay {
+fn cancel_status_to_display(
+    status: &F2CancelStatus,
+    now: Instant,
+    ttl: std::time::Duration,
+) -> screens::f2::F2CancelDisplay {
     use blit_app::admin::jobs::CancelJobOutcome;
     use screens::f2::F2CancelDisplay;
     match status {
@@ -1623,7 +1629,7 @@ fn cancel_status_to_display(status: &F2CancelStatus, now: Instant) -> screens::f
             // TTL. The state itself stays — we don't mutate
             // it from the renderer — but the operator sees
             // the footer self-clean.
-            if now.saturating_duration_since(*finished_at) >= CANCEL_STATUS_TTL {
+            if now.saturating_duration_since(*finished_at) >= ttl {
                 return F2CancelDisplay::Hidden;
             }
             match outcome {
@@ -1647,7 +1653,7 @@ fn cancel_status_to_display(status: &F2CancelStatus, now: Instant) -> screens::f
             message,
             finished_at,
         } => {
-            if now.saturating_duration_since(*finished_at) >= CANCEL_STATUS_TTL {
+            if now.saturating_duration_since(*finished_at) >= ttl {
                 return F2CancelDisplay::Hidden;
             }
             F2CancelDisplay::Failed {
@@ -2895,11 +2901,21 @@ mod tests {
         ));
     }
 
-    // d-23: cancel-status TTL auto-clear.
+    // d-23: cancel-status TTL auto-clear. d-24 made the
+    // TTL config-tunable; the tests use the default value
+    // (5s) via `TransferDefaults::DEFAULT_CANCEL_TTL_MS`.
+
+    /// Default TTL used by the d-23 cancel-fragment tests.
+    /// Mirrors the production default before any operator
+    /// override; d-24 moved the literal out of main.rs and
+    /// into `config::TransferDefaults`.
+    const TEST_CANCEL_TTL: std::time::Duration =
+        std::time::Duration::from_millis(config::TransferDefaults::DEFAULT_CANCEL_TTL_MS);
 
     #[test]
     fn cancel_status_idle_renders_hidden() {
-        let display = cancel_status_to_display(&F2CancelStatus::Idle, Instant::now());
+        let display =
+            cancel_status_to_display(&F2CancelStatus::Idle, Instant::now(), TEST_CANCEL_TTL);
         assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
     }
 
@@ -2912,7 +2928,7 @@ mod tests {
         // Sending has no TTL — it stays on screen until
         // the RPC reply lands (which transitions to
         // Done/Error).
-        let display = cancel_status_to_display(&status, Instant::now());
+        let display = cancel_status_to_display(&status, Instant::now(), TEST_CANCEL_TTL);
         match display {
             screens::f2::F2CancelDisplay::Sending { transfer_id } => {
                 assert_eq!(transfer_id, "t-1");
@@ -2931,7 +2947,7 @@ mod tests {
             finished_at: now,
         };
         // Same Instant → within TTL.
-        let display = cancel_status_to_display(&status, now);
+        let display = cancel_status_to_display(&status, now, TEST_CANCEL_TTL);
         match display {
             screens::f2::F2CancelDisplay::Cancelled { transfer_id } => {
                 assert_eq!(transfer_id, "t-1");
@@ -2943,14 +2959,14 @@ mod tests {
     #[test]
     fn cancel_status_done_past_ttl_renders_hidden() {
         let finished_at = Instant::now();
-        let later = finished_at + CANCEL_STATUS_TTL + std::time::Duration::from_millis(1);
+        let later = finished_at + TEST_CANCEL_TTL + std::time::Duration::from_millis(1);
         let status = F2CancelStatus::Done {
             outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
         };
-        let display = cancel_status_to_display(&status, later);
+        let display = cancel_status_to_display(&status, later, TEST_CANCEL_TTL);
         assert!(
             matches!(display, screens::f2::F2CancelDisplay::Hidden),
             "past-TTL Done must hide the fragment"
@@ -2960,13 +2976,13 @@ mod tests {
     #[test]
     fn cancel_status_error_past_ttl_renders_hidden() {
         let finished_at = Instant::now();
-        let later = finished_at + CANCEL_STATUS_TTL + std::time::Duration::from_millis(1);
+        let later = finished_at + TEST_CANCEL_TTL + std::time::Duration::from_millis(1);
         let status = F2CancelStatus::Error {
             transfer_id: "t-1".to_string(),
             message: "boom".to_string(),
             finished_at,
         };
-        let display = cancel_status_to_display(&status, later);
+        let display = cancel_status_to_display(&status, later, TEST_CANCEL_TTL);
         assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
     }
 
@@ -2977,15 +2993,50 @@ mod tests {
         // clutter) when the operator's clock lands on
         // the exact boundary.
         let finished_at = Instant::now();
-        let at_boundary = finished_at + CANCEL_STATUS_TTL;
+        let at_boundary = finished_at + TEST_CANCEL_TTL;
         let status = F2CancelStatus::Done {
             outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
                 transfer_id: "t-1".to_string(),
             },
             finished_at,
         };
-        let display = cancel_status_to_display(&status, at_boundary);
+        let display = cancel_status_to_display(&status, at_boundary, TEST_CANCEL_TTL);
         assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
+    }
+
+    /// d-24: an operator-overridden TTL governs the
+    /// fragment lifetime, not the default. Verifies the
+    /// production code path picks up the clamped value
+    /// from `cancel_status_ttl_ms_clamped()` rather than
+    /// the old hardcoded 5s.
+    #[test]
+    fn cancel_status_respects_caller_supplied_ttl() {
+        let finished_at = Instant::now();
+        let custom_ttl = std::time::Duration::from_millis(1_000);
+        let just_past = finished_at + custom_ttl + std::time::Duration::from_millis(1);
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at,
+        };
+        // Past the custom TTL → hidden, even though the
+        // default 5s TTL would still be showing.
+        let display = cancel_status_to_display(&status, just_past, custom_ttl);
+        assert!(
+            matches!(display, screens::f2::F2CancelDisplay::Hidden),
+            "1s custom TTL must hide a 1.001s-old Done fragment"
+        );
+        // And same finished_at + a smaller `now` delta is
+        // still showing under the same custom TTL.
+        let within = finished_at + std::time::Duration::from_millis(500);
+        let display = cancel_status_to_display(&status, within, custom_ttl);
+        match display {
+            screens::f2::F2CancelDisplay::Cancelled { transfer_id } => {
+                assert_eq!(transfer_id, "t-1");
+            }
+            other => panic!("expected Cancelled within custom TTL, got {other:?}"),
+        }
     }
 
     /// `take_active_for_restore` is the pure state-transition

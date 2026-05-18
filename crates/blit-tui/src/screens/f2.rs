@@ -8,7 +8,7 @@
 //! stream; this module just paints.
 //!
 //! Layout (heights are constraints; columns reflect the
-//! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 polish):
+//! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 / d-24 polish):
 //!
 //! ```text
 //! ┌── header (1 line) ──────────────────────────────────────────────┐
@@ -36,9 +36,15 @@
 //! - `cancel <id> failed: <msg>` (red, Error · transport)
 //!
 //! d-23: terminal variants (Done / Error) auto-hide
-//! after `CANCEL_STATUS_TTL` (5s) so the footer
-//! self-cleans. Sending stays visible until the reply
-//! lands.
+//! after a TTL so the footer self-cleans. Sending stays
+//! visible until the reply lands.
+//!
+//! d-24: the TTL is operator-tunable via tui.toml's
+//! `[transfer] cancel_status_ttl_ms` (default 5000 ms,
+//! clamped to [250, 60000]). The renderer reads the
+//! clamped value through `cancel_status_ttl_ms_clamped()`
+//! and passes it into `cancel_status_to_display` each
+//! frame — no per-frame parse cost, just a u64 clamp.
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
