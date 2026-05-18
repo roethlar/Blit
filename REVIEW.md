@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-2-tab-strip-counts | Feature | At-a-glance daemons/active/recent counts on tab strip | [~] | `phase5/a1` | `859a062` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -24,6 +24,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
+| e-2-tab-strip-counts | High | Tab-strip counts must include local transfers and preserve tabs | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
