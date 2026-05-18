@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-12-esc-cancels-confirm | Low | Round 2: intercept beats Verify edit-focus | [~] | `phase5/a1` | `ec8695f` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -111,3 +111,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `f011cb3` F4 live elapsed ticker (`d-9-live-tick` round 2)
 - `b625ca1` F4 transfer Done throughput (`d-10-transfer-throughput`)
 - `fa18813` F1/F3/F4 freshness live tick (`d-11-freshness-tick` round 2)
+- `ec8695f` F4 Esc cancels mirror/move confirm (`d-12-esc-cancels-confirm` round 2)
