@@ -210,6 +210,106 @@ Existing `detail_lines_*` tests updated for the new
    variant of `detail_lines` independently; a full-pane
    golden test could land alongside future polish.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer caught two correctness gaps:
+
+### 1. Cache not used to avoid re-fetching (Medium)
+
+Round-1 `maybe_kick_detail_fetch` always overwrote the
+cached `Loaded` entry with `Pending` whenever the selected
+name differed from `last_fetched`. Cursor flick away and
+back triggered a redundant RPC AND visibly flickered the
+detail block from loaded data back to "fetching..."
+
+Fix: consult `state.detail_for(&name)` before deciding to
+spawn. If *any* cached entry exists (`Loaded`, `Pending`,
+OR `Error`), the kick just updates `last_fetched` and
+returns — no RPC, no Pending overwrite.
+
+The `r` keystroke remains the explicit invalidation: it
+calls `DaemonsState::invalidate_detail(name)`, which drops
+the cache entry AND bumps the row's request_id so an
+in-flight reply from before `r` won't write back.
+
+Regression test (`maybe_kick_detail_fetch_preserves_loaded_on_revisit`):
+1. Manually inject a `Loaded { version: "9.9.9" }` detail
+   for daemon "alpha".
+2. Run kick → cursor moves to alpha.
+3. Cursor off, then back to alpha.
+4. Run kick again.
+5. Assert detail is still `Loaded { version: "9.9.9" }`
+   AND that no `DetailUpdate` landed on the detail_tx
+   channel.
+
+Companion test (`maybe_kick_detail_fetch_spawns_when_cache_empty`)
+pins the inverse: empty cache → kick sets Pending.
+
+### 2. Older same-row replies could overwrite newer ones (Medium)
+
+A press of `r` (or any path that re-fires a fetch for the
+same row) starts a second RPC. If the first RPC's reply
+arrives after the second's, the stale data overwrites the
+fresh data.
+
+Fix: per-row generation counter in `DaemonsState`.
+
+- New field `request_ids: HashMap<String, u64>`.
+- `begin_fetch(name) -> u64`: bumps the row's id, stores
+  Pending, returns the new id. Replaces the old `set_detail(_,
+  Pending)` call site in the kick.
+- `apply_detail_update(name, request_id, detail) -> bool`:
+  only writes the detail if `request_id` matches the row's
+  current id. Returns true on apply, false on drop (used
+  by tests; the main loop ignores the return).
+- `invalidate_detail(name)`: removes the cache entry AND
+  bumps the request_id (so an in-flight reply from before
+  the invalidation is silently dropped).
+
+`spawn_detail_fetch` now takes the request_id and embeds
+it in the `DetailUpdate` reply. The select! apply arm calls
+`state.apply_detail_update(name, request_id, detail)`.
+
+Regression tests:
+- `begin_fetch_increments_request_id_per_row`: two bumps on
+  the same row → ids 1, 2; bumping a different row starts
+  at 1.
+- `apply_detail_update_writes_current_generation`:
+  begin_fetch → reply with matching id → applied.
+- `apply_detail_update_drops_stale_generation`: begin_fetch
+  twice for the same row; reply with the older id is
+  dropped; Pending (from the second begin_fetch) stays.
+- `invalidate_detail_drops_in_flight_reply`: begin_fetch →
+  invalidate → reply with the now-stale id is dropped;
+  cache stays empty.
+
+### Files changed (round 2)
+
+- `crates/blit-tui/src/daemons.rs`: `request_ids` field,
+  `begin_fetch`, `apply_detail_update`, `invalidate_detail`
+  methods; existing `set_detail` kept as a synchronous
+  bypass (tests + invalidation Pending writes).
+- `crates/blit-tui/src/main.rs`: `maybe_kick_detail_fetch`
+  consults `detail_for` before spawning; `r` keystroke
+  calls `invalidate_detail`; `DetailUpdate` carries
+  `request_id`; reply arm calls `apply_detail_update`.
+
+### Tests
+
++6 unit tests:
+
+In `daemons::tests`:
+- `begin_fetch_increments_request_id_per_row`
+- `apply_detail_update_writes_current_generation`
+- `apply_detail_update_drops_stale_generation`
+- `invalidate_detail_drops_in_flight_reply`
+
+In `main::tests`:
+- `maybe_kick_detail_fetch_preserves_loaded_on_revisit`
+- `maybe_kick_detail_fetch_spawns_when_cache_empty`
+
+62 blit-tui unit tests (was 56). Workspace passes serially.
+
 ## Reviewer comments
 
 (empty — pending grade)

@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-3b-f1-getstate-detail | Medium | F1 detail cache + generational fetch (R2) | `[~]` | `phase5/a1` | `3ac1cb2` |
 
 ## Open findings
 
