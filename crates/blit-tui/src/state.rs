@@ -127,7 +127,35 @@ impl TransfersState {
     /// the event mutated state (useful for triggering a
     /// redraw); false when the event was for an unknown id
     /// or a no-op variant.
+    ///
+    /// Terminal-id dedup: once a transfer_id lands in the
+    /// recent ring, subsequent events for that id are
+    /// ignored. Closes the a1-2 round-3 startup race where
+    /// the snapshot's `recent[]` already contained a
+    /// transfer that ALSO had buffered Started+Complete in
+    /// the Subscribe stream — without dedup the buffered
+    /// Started would re-insert it as active and the
+    /// buffered Complete would push a duplicate recent row.
     pub fn apply_event(&mut self, event: DaemonEvent) -> bool {
+        // Look up the event's transfer_id and short-circuit
+        // if the id is already terminal. We check this
+        // BEFORE the variant match because every
+        // transfer-scoped variant carries `transfer_id`.
+        let event_id = match event.payload.as_ref() {
+            Some(daemon_event::Payload::TransferStarted(s)) => Some(s.transfer_id.as_str()),
+            Some(daemon_event::Payload::TransferProgress(p)) => Some(p.transfer_id.as_str()),
+            Some(daemon_event::Payload::TransferComplete(c)) => Some(c.transfer_id.as_str()),
+            Some(daemon_event::Payload::TransferError(e)) => Some(e.transfer_id.as_str()),
+            None => None,
+        };
+        if let Some(id) = event_id {
+            if self.recent.iter().any(|r| r.transfer_id == id) {
+                // Id is terminal — ignore further events
+                // for it. Returning false signals no state
+                // change (caller can avoid a redraw).
+                return false;
+            }
+        }
         match event.payload {
             Some(daemon_event::Payload::TransferStarted(s)) => {
                 // Subscribe filter is empty (we watch every
@@ -441,6 +469,55 @@ mod tests {
         // Snapshot's bytes_completed preserved.
         let row = &state.active_rows()[0];
         assert_eq!(row.bytes_completed, 500_000);
+    }
+
+    /// a1-2 round-4 regression: the buffered Started +
+    /// Complete pair for a transfer that's ALREADY in the
+    /// snapshot's `recent[]` (because it completed before
+    /// the GetState response arrived) MUST NOT produce a
+    /// duplicate recent row. Terminal-id dedup at the start
+    /// of `apply_event` short-circuits subsequent events
+    /// once an id is in recent.
+    #[test]
+    fn buffered_events_dedupe_against_snapshot_recent() {
+        let mut state = TransfersState::new();
+        // Snapshot already has the transfer in recent[].
+        state.replace_from_snapshot(DaemonState {
+            recent: vec![make_record("race-id", true)],
+            ..DaemonState::default()
+        });
+        assert_eq!(state.recent_count(), 1);
+
+        // Buffered Started — should be ignored.
+        let started_mutated = state.apply_event(DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: "race-id".to_string(),
+                kind: TransferKind::Pull as i32,
+                peer: "p".to_string(),
+                module: "m".to_string(),
+                path: "/".to_string(),
+                start_unix_ms: 1,
+            })),
+        });
+        assert!(!started_mutated);
+        assert_eq!(state.active_count(), 0);
+        assert_eq!(state.recent_count(), 1);
+
+        // Buffered Complete — should also be ignored.
+        let complete_mutated = state.apply_event(DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferComplete(
+                blit_core::generated::TransferComplete {
+                    transfer_id: "race-id".to_string(),
+                    bytes: 0,
+                    files: 0,
+                    duration_ms: 0,
+                    tcp_fallback_used: false,
+                },
+            )),
+        });
+        assert!(!complete_mutated);
+        // Still exactly one recent row.
+        assert_eq!(state.recent_count(), 1);
     }
 
     /// a1-2 round-3 regression: a transfer that starts AND

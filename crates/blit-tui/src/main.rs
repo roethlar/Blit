@@ -235,40 +235,48 @@ async fn run_event_loop(
     if let Some(remote_str) = remote_arg {
         match RemoteEndpoint::parse(remote_str) {
             Ok(endpoint) => {
-                // a1-2 round 3: open Subscribe BEFORE the
-                // initial GetState so any transfer that
-                // Started during the snapshot window lands
-                // in our mpsc and can be replayed onto the
-                // snapshot state. The previous ordering
-                // (snapshot first, subscribe second) left a
-                // gap where a transfer started after the
-                // snapshot but before our Receiver
-                // registered would be invisible: subsequent
-                // Progress events would discard against an
-                // unknown id, and a Complete would land in
-                // recent with blank metadata.
-                let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
-                spawn_subscribe_forwarder(endpoint.clone(), tx);
-                // Initial GetState. Events broadcast during
-                // this RPC's flight are buffering in `rx`.
-                match jobs::query(&endpoint, 0).await {
-                    Ok(snapshot) => state.replace_from_snapshot(snapshot),
-                    Err(err) => {
-                        status =
-                            ConnectionStatus::Degraded(format!("initial GetState failed: {err}"));
+                // a1-2 round 4: subscribe-first ordering is
+                // now causally enforced. `open_subscribe_stream`
+                // awaits the subscribe RPC and only returns
+                // OK after the daemon's broadcast receiver is
+                // registered. Any transfer that Started after
+                // this point but before the snapshot lands
+                // buffers in `rx` and replays onto state
+                // below.
+                match open_subscribe_stream(&endpoint).await {
+                    Ok(rx) => {
+                        // Initial GetState. Events broadcast
+                        // during this RPC's flight buffer in
+                        // `rx`.
+                        match jobs::query(&endpoint, 0).await {
+                            Ok(snapshot) => state.replace_from_snapshot(snapshot),
+                            Err(err) => {
+                                status = ConnectionStatus::Degraded(format!(
+                                    "initial GetState failed: {err}"
+                                ));
+                            }
+                        }
+                        event_rx = Some(rx);
+                        parsed_remote = Some(endpoint);
+                        // Drain buffered events onto the
+                        // snapshot. TransferStarted is
+                        // non-clobbering for ids already in
+                        // active[]; `apply_event` also
+                        // ignores any payload for an id
+                        // already in recent[] so a transfer
+                        // that completed in the race window
+                        // and is captured in BOTH the
+                        // snapshot.recent and the stream's
+                        // buffered Started+Complete doesn't
+                        // duplicate.
+                        if let Some(rx) = event_rx.as_mut() {
+                            drain_startup_events(rx, &mut state, &mut status);
+                        }
                     }
-                }
-                event_rx = Some(rx);
-                parsed_remote = Some(endpoint);
-                // Drain any buffered events onto the
-                // snapshot state. TransferStarted is
-                // non-clobbering (preserves snapshot bytes /
-                // throughput when the same id is in both
-                // sources); Progress / Complete / Error
-                // apply in stream order. After this drain
-                // the loop falls into the normal select.
-                if let Some(rx) = event_rx.as_mut() {
-                    drain_startup_events(rx, &mut state, &mut status);
+                    Err(err) => {
+                        status = ConnectionStatus::Degraded(err);
+                        parsed_remote = Some(endpoint);
+                    }
                 }
             }
             Err(err) => {
@@ -499,63 +507,73 @@ async fn refresh_via_get_state(
 /// Control / data messages from the Subscribe forwarder.
 /// `Connected` is sent once after the subscribe RPC returns
 /// successfully so the TUI can flip out of "Connecting"
-/// without waiting for the first event (an idle daemon can
-/// be silent indefinitely — a1-2 round 1 left the footer
-/// stuck on "connecting..." in that case).
+/// without waiting for the first event.
 enum EventOrError {
     Connected,
     Event(DaemonEvent),
     Error(String),
 }
 
-/// Background task that opens the Subscribe stream and
-/// forwards events into the loop's mpsc. The task exits when:
-/// - The TUI drops its receiver (we observe via `send().await`
-///   returning Err).
-/// - The Subscribe stream returns an error or end-of-stream.
-fn spawn_subscribe_forwarder(endpoint: RemoteEndpoint, tx: mpsc::Sender<EventOrError>) {
-    tokio::spawn(async move {
-        // Empty filter, no replay — F2 watches every
-        // transfer the daemon emits.
-        let mut stream = match jobs::subscribe(&endpoint, "", false).await {
-            Ok(s) => s,
-            Err(err) => {
+/// Open the Subscribe stream synchronously (awaited inline)
+/// and spawn the forwarder task. Returns the mpsc Receiver
+/// only AFTER the subscribe RPC has succeeded — i.e. the
+/// daemon-side broadcast Receiver is already registered.
+///
+/// a1-2 round 4 fix: the previous shape called
+/// `tokio::spawn(async move { subscribe(...).await ... })`
+/// and returned immediately. The spawned task still had to
+/// connect before the daemon would register its receiver.
+/// During that gap a `GetState` could complete and a
+/// transfer could start without ever being buffered.
+///
+/// By awaiting the subscribe RPC inline here, the caller
+/// can be confident that when this function returns OK, the
+/// daemon's broadcast is sending into the forwarder's
+/// receiver.
+async fn open_subscribe_stream(
+    endpoint: &RemoteEndpoint,
+) -> Result<mpsc::Receiver<EventOrError>, String> {
+    let stream = jobs::subscribe(endpoint, "", false)
+        .await
+        .map_err(|err| format!("subscribe: {err}"))?;
+    let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
+    // Send Connected immediately — subscribe() has returned
+    // OK so the daemon broadcast receiver is registered.
+    let _ = tx.send(EventOrError::Connected).await;
+    tokio::spawn(forward_subscribe_stream(stream, tx));
+    Ok(rx)
+}
+
+/// Inner loop of the Subscribe forwarder task. Reads
+/// `stream.message()` and forwards events into `tx` until
+/// the stream ends, errors, or `tx` reports a closed
+/// receiver. Factored out of `open_subscribe_stream` so the
+/// spawn site is a single function call.
+async fn forward_subscribe_stream(
+    mut stream: tonic::Streaming<DaemonEvent>,
+    tx: mpsc::Sender<EventOrError>,
+) {
+    loop {
+        match stream.message().await {
+            Ok(Some(event)) => {
+                if tx.send(EventOrError::Event(event)).await.is_err() {
+                    return;
+                }
+            }
+            Ok(None) => {
                 let _ = tx
-                    .send(EventOrError::Error(format!("subscribe: {err}")))
+                    .send(EventOrError::Error("stream ended".to_string()))
                     .await;
                 return;
             }
-        };
-        // Signal successful connect immediately. Idle daemons
-        // may emit no events for a long time; without this
-        // the footer was stuck on "connecting..."
-        // indefinitely after a healthy connect.
-        if tx.send(EventOrError::Connected).await.is_err() {
-            return;
-        }
-        loop {
-            match stream.message().await {
-                Ok(Some(event)) => {
-                    if tx.send(EventOrError::Event(event)).await.is_err() {
-                        // TUI dropped — exit.
-                        return;
-                    }
-                }
-                Ok(None) => {
-                    let _ = tx
-                        .send(EventOrError::Error("stream ended".to_string()))
-                        .await;
-                    return;
-                }
-                Err(status) => {
-                    let _ = tx
-                        .send(EventOrError::Error(format!("stream: {}", status.message())))
-                        .await;
-                    return;
-                }
+            Err(status) => {
+                let _ = tx
+                    .send(EventOrError::Error(format!("stream: {}", status.message())))
+                    .await;
+                return;
             }
         }
-    });
+    }
 }
 
 /// Quit predicate. `q` / `Esc` are the muscle-memory

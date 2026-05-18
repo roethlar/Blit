@@ -12,6 +12,7 @@ path = "src/main.rs"
 blit-core = { path = "../blit-core" }
 blit-app = { path = "../blit-app" }
 tokio = { version = "1", features = ["full"] }
+tonic = "0.14"
 ratatui = "0.30"
 crossterm = "0.29"
 eyre = "0.6"
