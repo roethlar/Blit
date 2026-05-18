@@ -236,6 +236,34 @@ The four paths the reviewer flagged are now covered:
 Workspace: 580 passing serially (was 578; +2 new in
 blit-tui).
 
+## Round 3 (sha `38df2bb`)
+
+Reviewer caught that the round-2 idempotency tests called
+`restore_terminal()` directly. That fires real `Show` +
+`LeaveAlternateScreen` crossterm escape bytes to stderr —
+visible in `cargo test` output and polluting CI logs.
+
+Fix: extract a pure state-transition helper:
+
+```rust
+fn take_active_for_restore() -> bool {
+    TUI_ACTIVE.swap(false, Ordering::SeqCst)
+}
+```
+
+`restore_terminal()` calls it; if true, fires the
+crossterm sequences. Tests call `take_active_for_restore`
+directly — no terminal I/O during `cargo test`.
+
+Renamed the two tests to reflect the function they
+exercise:
+
+- `take_active_for_restore_inactive_returns_false`
+- `take_active_for_restore_active_then_inactive`
+
+Same idempotency contract, no escape sequences in test
+output.
+
 ## Reviewer comments
 
 (empty — pending grade)
