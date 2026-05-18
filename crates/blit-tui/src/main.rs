@@ -1388,15 +1388,40 @@ struct TransferReply {
     result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
 }
 
-/// d-9: `true` when the event loop should arm the
-/// 500ms live-tick wakeup. Reads true while a Verify
-/// run or a local transfer is in flight, so the F4
-/// elapsed counters tick visibly. Returns false on every
-/// other state, including `ConfirmingMirror` /
-/// `ConfirmingMove` — those prompts don't change over
-/// time, so there's nothing to refresh.
+/// `true` when the event loop should arm the 500ms
+/// live-tick wakeup. The render path uses `now: Instant`
+/// in several places that visibly tick — d-9 added the
+/// initial F4 transfer/verify gate; d-11 extends to the
+/// per-pane "fetched Xs ago" freshness footers on F1, F3,
+/// and F4.
+///
+/// Pane-specific conditions:
+/// - F1: `DiscoveryStatus::Live` shows "last scan Xs ago".
+///   Scanning / Degraded states have no time component.
+/// - F2: no `now` use → no tick.
+/// - F3: `BrowseFetchStatus::Loaded` shows "loaded · Xs ago".
+/// - F4: `ProfileFetchStatus::Loaded` ticks the footer
+///   (even when no transfer/verify run is active).
+///
+/// Confirm prompts and pure-Idle states deliberately
+/// don't tick — there's nothing visible that depends on
+/// the current time.
 fn needs_live_tick(app: &AppState) -> bool {
-    app.transfer.is_running() || app.verify.is_running()
+    if app.transfer.is_running() || app.verify.is_running() {
+        return true;
+    }
+    match app.current_screen {
+        Screen::F1 => matches!(app.daemons.status(), daemons::DiscoveryStatus::Live { .. }),
+        Screen::F2 => false,
+        Screen::F3 => matches!(
+            app.browse.status(),
+            browse::BrowseFetchStatus::Loaded { .. }
+        ),
+        Screen::F4 => matches!(
+            app.profile.status(),
+            profile::ProfileFetchStatus::Loaded { .. }
+        ),
+    }
 }
 
 /// `true` when the operator can kick a local transfer:
@@ -2754,6 +2779,85 @@ mod tests {
         app.verify.destination = "/tmp/b".to_string();
         let _ = app.verify.begin_run();
         assert!(needs_live_tick(&app));
+    }
+
+    /// d-11: extend the live-tick gate to per-pane
+    /// freshness footers. F1's "live · last scan Xs ago"
+    /// (when DiscoveryStatus is Live), F3's "loaded · Xs
+    /// ago" (when BrowseFetchStatus is Loaded), and F4's
+    /// "loaded · Xs ago" (when ProfileFetchStatus is
+    /// Loaded) all tick — F2 doesn't use `now` so it
+    /// stays gated off.
+    #[test]
+    fn needs_live_tick_covers_per_pane_freshness_footers() {
+        let mut app = AppState {
+            current_screen: Screen::F1,
+            parsed_remote: None,
+            remote_label: String::new(),
+            daemons: DaemonsState::new(),
+            daemons_last_fetched: None,
+            detail_tx: mpsc::channel::<DetailUpdate>(1).0,
+            discovery_refresh_tx: mpsc::channel::<()>(1).0,
+            transfers: TransfersState::new(),
+            transfers_status: ConnectionStatus::NoRemote,
+            transfers_setup_gen: 0,
+            transfers_setup_pending: false,
+            browse: BrowseState::new(),
+            browse_last_fetched_view: None,
+            browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            profile: profile::ProfileState::new(),
+            profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
+            verify: verify::VerifyState::new(),
+            diagnostics: diagnostics::DiagnosticsState::new(),
+            diagnostics_reply_tx: mpsc::channel::<DiagnosticsReply>(1).0,
+            help: help::HelpOverlay::default(),
+            transfer: transfer::TransferState::new(),
+            transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+        };
+
+        // F1, pre-discovery (Scanning) → no tick.
+        assert!(!needs_live_tick(&app), "F1 Scanning has no time component");
+
+        // F1 with Live status → tick.
+        app.daemons
+            .replace_from_discovery(&[], std::time::Instant::now());
+        assert!(needs_live_tick(&app), "F1 Live ticks the last-scan footer");
+
+        // Switch to F2 — no `now` use, no tick even with
+        // a live remote.
+        app.current_screen = Screen::F2;
+        assert!(!needs_live_tick(&app), "F2 never ticks");
+
+        // F3 with browse status Idle → no tick.
+        app.current_screen = Screen::F3;
+        assert!(!needs_live_tick(&app));
+        // F3 after a successful fetch (Loaded) → tick.
+        app.browse.apply_modules(vec![], std::time::Instant::now());
+        assert!(
+            needs_live_tick(&app),
+            "F3 Loaded ticks the loaded-since footer"
+        );
+
+        // F4 with profile status Idle → no tick (no
+        // running transfer either).
+        app.current_screen = Screen::F4;
+        assert!(!needs_live_tick(&app));
+        // F4 after a successful profile fetch → tick.
+        let id = app.profile.begin_fetch();
+        app.profile.apply_report(
+            blit_app::profile::ProfileReport {
+                enabled: true,
+                records: vec![],
+                predictor_path: None,
+                predictor: None,
+            },
+            std::time::Instant::now(),
+        );
+        let _ = id;
+        assert!(
+            needs_live_tick(&app),
+            "F4 Loaded ticks the profile-as-of footer"
+        );
     }
 
     /// d-4: capital C / M trigger local copy / mirror.
