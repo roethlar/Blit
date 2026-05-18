@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-3-f4-diagnostics | Medium  | Diagnostics dump JSON matches CLI shape (R2) | `[~]` | `phase5/a1` | `d26ca9c` |
 
 ## Open findings
 

@@ -148,6 +148,62 @@ serially.
 - Result list of past dumps + open-in-editor — future
   polish.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer caught that round-1's JSON shape didn't match
+the CLI's `blit diagnostics dump --json` output:
+
+- Missing `invocation` field.
+- Missing `rsync_resolution { source_is_contents,
+  destination_is_container, pre_resolve_destination,
+  resolved_destination, resolution_changed }` block.
+- `destination` and `same_device` were computed against
+  the un-resolved destination, so container targets (e.g.
+  `cp src /dst/`) would report the wrong effective path.
+
+### Fix
+
+`run_diagnostics_dump` now mirrors the CLI's
+`run_diagnostics_dump` (`crates/blit-cli/src/diagnostics.rs:160`):
+
+1. Parses source + raw destination.
+2. Calls `blit_app::transfers::resolution::resolve_destination`
+   to compute the effective destination.
+3. Calls `source_is_contents` + `dest_is_container` for
+   the resolution-flag block.
+4. Calls `endpoint_snapshot` for source AND
+   resolved-destination (not pre-resolved).
+5. Calls `same_device` against the resolved destination.
+6. Emits the full top-level shape including `invocation`
+   and `rsync_resolution`.
+
+The pure JSON-building work is extracted into a
+`build_diagnostics_snapshot` helper so the regression
+tests can compare shape without touching disk.
+`run_diagnostics_dump` becomes a thin "build snapshot +
+write to disk" wrapper.
+
+### Tests
+
++2 regression tests:
+
+- `tui_dump_shape_matches_cli_contract`: asserts the
+  top-level JSON has the same keys as the CLI's output
+  (`blit_version`, `invocation`, `source`, `destination`,
+  `rsync_resolution`, `same_device`) and that
+  `rsync_resolution` has all five fields the CLI emits.
+- `tui_dump_resolves_destination_for_container_targets`:
+  builds a real temp src directory + temp container
+  destination (trailing-slash), then asserts
+  `source_is_contents=false`, `destination_is_container=true`,
+  `pre_resolve_destination != resolved_destination`, and
+  `resolution_changed=true`. This is the bug-bait case
+  the reviewer called out — the TUI must NOT report the
+  un-resolved destination.
+
+116 blit-tui unit tests (was 114). Workspace passes
+serially.
+
 ## Reviewer comments
 
 (empty — pending grade)
