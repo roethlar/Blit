@@ -13,12 +13,13 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-16-help-overlay-keymap-sync | Feature | Sync `?` help with all F4 keys | [~] | `phase5/a1` | `8b81260` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
+| d-16-help-overlay-keymap-sync | Low | Help overlay omits F4 refresh after regrouping | `phase5/a1` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
