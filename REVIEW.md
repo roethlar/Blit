@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-22-f2-cancel-selected | Feature | K cancels selected F2 transfer | [~] | `phase5/a1` | `84e7f44` |
 
 ## Open findings
 
