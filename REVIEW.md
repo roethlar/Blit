@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-18-verify-form-clear | Feature | Ctrl-U clears focused Verify field | [~] | `phase5/a1` | `a4416c8` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -117,3 +117,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `31541a7` F2 active-row percent complete (`d-15-f2-active-row-progress`)
 - `d471f1e` `?` help overlay documents active-pane refresh (`d-16-help-overlay-keymap-sync` round 2)
 - `873757b` F4 Verify Done preview lines (`d-17-verify-result-preview`)
+- `a4416c8` Ctrl-U clears focused Verify field (`d-18-verify-form-clear`)
