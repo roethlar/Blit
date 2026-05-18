@@ -113,4 +113,39 @@ In `screens::f2::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-20-f2-recent-throughput.reopened.md`)
+
+One Low-severity finding, addressed in round 2 — the
+same module-doc-staleness pattern as e-5 R2 and e-6 R2:
+
+- **F2 module-doc ASCII layout still showed pre-d-20
+  columns.** Active table was sketched as
+  "bytes bps" (the original d-15-era shape) and Recent
+  as "duration ok" (the d-14-era shape). Both have
+  drifted significantly: Active is now
+  "bytes·NN% throughput age" (d-14 + d-15 +
+  reordering), and Recent is "bytes duration throughput"
+  (d-20). A future agent reading the doc as the F2
+  contract would head to the wrong baseline.
+
+  Round 2 updates the ASCII sketch:
+  - Active row reflects d-14 / d-15 columns.
+  - Recent row reflects d-20.
+  - Footer line gains the d-13 "last event Xs ago"
+    fragment so the operator-facing layout matches what
+    the code emits.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/screens/f2.rs`:
+  - Module-doc ASCII sketch updated to reflect the
+    current column shape on both tables + the footer.
+
+No behavior change, no test count delta (still 234).
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+**Lesson restated** (e-5 R2, e-6 R2, d-20 R2 all hit
+this): module-level doc sketches drift fast as columns
+get added. From now on, update the doc sketch in the
+SAME slice as the column change.

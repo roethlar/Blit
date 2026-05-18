@@ -7,19 +7,22 @@
 //! event loop in `main.rs` owns the state and the Subscribe
 //! stream; this module just paints.
 //!
-//! Layout (heights are constraints):
+//! Layout (heights are constraints; columns reflect the
+//! d-14 / d-15 / d-20 polish):
 //!
-//! ┌── header (1 line) ─────────────────────────┐
-//! │ blit-tui · F2 Transfers · <remote>         │
-//! ├── active table (Min 5) ────────────────────┤
-//! │ id  kind  peer  module/path  bytes  bps    │
-//! │ ...                                        │
-//! ├── recent table (Min 5) ────────────────────┤
-//! │ id  kind  peer  module/path  duration  ok  │
-//! │ ...                                        │
-//! ├── footer (1 line) ─────────────────────────┤
-//! │ status · q/Esc quit · r refresh            │
-//! └────────────────────────────────────────────┘
+//! ```text
+//! ┌── header (1 line) ──────────────────────────────────────────────┐
+//! │ blit-tui · F2 Transfers · <remote> · N active · N recent        │
+//! ├── active table (Min 5) ─────────────────────────────────────────┤
+//! │ id  kind  peer  module/path  bytes·NN%  throughput  age         │
+//! │ ...                                                             │
+//! ├── recent table (Min 5) ─────────────────────────────────────────┤
+//! │ id  kind  peer  module/path  bytes  duration  throughput        │
+//! │ ...                                                             │
+//! ├── footer (1 line) ──────────────────────────────────────────────┤
+//! │ status · [last event Xs ago] · q/Esc quit · r refresh           │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
