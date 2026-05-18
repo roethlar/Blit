@@ -94,6 +94,94 @@ mod elapsed_tests {
     }
 }
 
+/// d-10: format an effective transfer rate as a compact
+/// human-readable string. Returns `None` when the rate
+/// is meaningless (zero bytes, sub-millisecond duration,
+/// or rate below 1 B/s after rounding) so the caller can
+/// suppress the trailing rate fragment instead of showing
+/// a misleading "0 B/s" for a 1-file copy that completed
+/// instantly.
+///
+/// Units climb in factors of 1024 (binary): B/s, KiB/s,
+/// MiB/s, GiB/s, TiB/s. The Done banner sits next to the
+/// byte total which already uses raw bytes; using the
+/// binary scale keeps the two consistent.
+fn format_rate(bytes: u64, duration: Duration) -> Option<String> {
+    if bytes == 0 {
+        return None;
+    }
+    let ms = duration.as_millis();
+    if ms == 0 {
+        return None;
+    }
+    let bytes_per_sec = ((bytes as u128).saturating_mul(1000) / ms) as f64;
+    if bytes_per_sec < 1.0 {
+        return None;
+    }
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    const TIB: f64 = GIB * 1024.0;
+    let label = if bytes_per_sec >= TIB {
+        format!("{:.1} TiB/s", bytes_per_sec / TIB)
+    } else if bytes_per_sec >= GIB {
+        format!("{:.1} GiB/s", bytes_per_sec / GIB)
+    } else if bytes_per_sec >= MIB {
+        format!("{:.1} MiB/s", bytes_per_sec / MIB)
+    } else if bytes_per_sec >= KIB {
+        format!("{:.1} KiB/s", bytes_per_sec / KIB)
+    } else {
+        format!("{} B/s", bytes_per_sec.round() as u64)
+    };
+    Some(label)
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    #[test]
+    fn format_rate_returns_none_for_zero_bytes() {
+        assert!(format_rate(0, Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn format_rate_returns_none_for_zero_duration() {
+        // A copy that "completed instantly" by Instant
+        // resolution has no meaningful rate.
+        assert!(format_rate(1024, Duration::from_millis(0)).is_none());
+    }
+
+    #[test]
+    fn format_rate_bytes_per_second() {
+        // 512 bytes in 1s = 512 B/s — below KiB cutoff.
+        let s = format_rate(512, Duration::from_secs(1)).expect("rate");
+        assert_eq!(s, "512 B/s");
+    }
+
+    #[test]
+    fn format_rate_kibibytes_per_second() {
+        // 1 KiB in 1s = 1.0 KiB/s.
+        let s = format_rate(1024, Duration::from_secs(1)).expect("rate");
+        assert_eq!(s, "1.0 KiB/s");
+    }
+
+    #[test]
+    fn format_rate_mebibytes_per_second() {
+        // 100 MiB in 10s = 10 MiB/s.
+        let s = format_rate(100 * 1024 * 1024, Duration::from_secs(10)).expect("rate");
+        assert_eq!(s, "10.0 MiB/s");
+    }
+
+    #[test]
+    fn format_rate_gibibytes_per_second() {
+        // 2 GiB in 1s = 2 GiB/s. (Hypothetical for unit
+        // testing; F4 doesn't normally see these speeds.)
+        let s = format_rate(2 * 1024 * 1024 * 1024, Duration::from_secs(1)).expect("rate");
+        assert_eq!(s, "2.0 GiB/s");
+    }
+}
+
 /// Render the F4 pane into a caller-supplied area (router-aware).
 ///
 /// d-2 adds the Verify block underneath the predictor
@@ -161,17 +249,25 @@ fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState, now:
             summary,
             started_at,
             finished_at,
-        } => Line::from(Span::styled(
-            format!(
+        } => {
+            let elapsed = finished_at.saturating_duration_since(*started_at);
+            let mut line = format!(
                 "{} done · {} planned · {} copied · {} bytes · {}",
                 kind.label(),
                 summary.planned_files,
                 summary.copied_files,
                 summary.total_bytes,
-                format_elapsed(finished_at.saturating_duration_since(*started_at)),
-            ),
-            Style::default().fg(Color::Green),
-        )),
+                format_elapsed(elapsed),
+            );
+            // d-10: append effective throughput when it's
+            // meaningful (suppressed for 0-byte / instant
+            // copies — see `format_rate`).
+            if let Some(rate) = format_rate(summary.total_bytes, elapsed) {
+                line.push_str(" · ");
+                line.push_str(&rate);
+            }
+            Line::from(Span::styled(line, Style::default().fg(Color::Green)))
+        }
         TransferStatus::Error { kind, message } => Line::from(Span::styled(
             format!("{} failed: {message}", kind.label()),
             Style::default().fg(Color::Red),
