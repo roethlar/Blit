@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| d-1-f4-profile-lifecycle | Feature | F4 c/d/e keys for perf-history lifecycle | `[~]` | `phase5/a1` | `c380e0d` |
 
 ## Open findings
 
