@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-2-f2-transfers | Feature  | F2 Transfers pane with live Subscribe      | [~]    | `phase5/a1` | `71840a0` |
 
 ## Open findings
 
