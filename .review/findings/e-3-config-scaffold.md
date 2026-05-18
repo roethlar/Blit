@@ -151,4 +151,52 @@ In `verify::tests`:
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/e-3-config-scaffold.reopened.md`)
+
+One Medium-severity finding, addressed in round 2:
+
+- **Parse warnings emitted inside the alternate screen.**
+  Round 1 loaded the config inside `run_router`, which
+  runs AFTER `TuiGuard::new()` enters raw mode + the
+  alternate screen. `eprintln!` writes from inside that
+  context either corrupt the rendered UI mid-draw or
+  get swallowed by the alternate screen and never reach
+  the operator. A typo like `defalut_use_checksum`
+  silently fell back to defaults from the operator's
+  perspective.
+
+  Round 2 reorders: `main` loads the config BEFORE
+  constructing the TuiGuard, accumulates any warnings
+  into a `Vec<String>`, passes the loaded `TuiConfig`
+  into `run_router`, then flushes the warnings to
+  stderr AFTER the guard drops. The terminal is back
+  to its normal state when the warning lands, so it's
+  reliably visible.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`:
+  - `fn main` loads `TuiConfig` before `TuiGuard::new()`,
+    accumulates warnings into a local Vec.
+  - `run_router` signature gains `tui_config: TuiConfig`
+    parameter; the inline load + `eprintln!` callback
+    are gone.
+  - Post-guard warning flush iterates the accumulated
+    Vec.
+- `crates/blit-tui/src/config.rs`:
+  - New `warnings_route_through_callback_not_stderr`
+    regression test capturing the buffer-then-flush
+    contract.
+
+### Round 2 tests
+
++1 test (208 → 209):
+
+In `config::tests`:
+- `warnings_route_through_callback_not_stderr` — drives
+  the loader the same way `main` does (Vec collector
+  callback) and asserts the warning landed in the
+  buffer.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.

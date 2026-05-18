@@ -219,9 +219,27 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     install_panic_hook();
+
+    // e-3 R2: load `tui.toml` BEFORE entering the
+    // alternate screen, otherwise parse warnings written
+    // via eprintln corrupt the rendered UI (or get
+    // swallowed by the alternate screen and never reach
+    // the operator). The loader's `on_warn` callback
+    // pushes any warning into a Vec; we flush it AFTER
+    // the TuiGuard drops so the message lands cleanly on
+    // the post-exit terminal.
+    let mut config_warnings: Vec<String> = Vec::new();
+    let tui_config = config::load(|msg| config_warnings.push(msg));
+
     let mut guard = TuiGuard::new().context("entering TUI")?;
-    let result = run_router(guard.terminal_mut(), &args).await;
+    let result = run_router(guard.terminal_mut(), &args, tui_config).await;
     drop(guard);
+
+    // Drain accumulated warnings now that the terminal
+    // is back to its normal state.
+    for warning in config_warnings {
+        eprintln!("[blit-tui] {warning}");
+    }
     result
 }
 
@@ -238,18 +256,15 @@ async fn main() -> Result<()> {
 /// completion arrives through `f2_setup_rx`. The TUI's first
 /// draw therefore runs immediately, regardless of how slow
 /// or unreachable the remote is.
-async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Args) -> Result<()> {
+async fn run_router(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    args: &Args,
+    tui_config: config::TuiConfig,
+) -> Result<()> {
     // a1-6 round 2: the input task is owned by the router
     // for the whole TUI lifetime.
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
     spawn_input_task(key_tx);
-
-    // e-3: optional `<config_dir>/tui.toml`. Missing file
-    // is the default install; parse errors warn on stderr
-    // (visible after the TUI exits) and fall back to
-    // defaults. The TUI never refuses to start on a
-    // misconfigured tui.toml.
-    let tui_config = config::load(|msg| eprintln!("[blit-tui] {msg}"));
 
     // a1-6b: parse remote up-front so every pane sees the
     // same endpoint (or None) without re-parsing. Round 2:

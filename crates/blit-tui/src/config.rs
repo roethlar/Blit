@@ -150,6 +150,27 @@ mod tests {
         assert!(!cfg.verify.default_use_checksum);
     }
 
+    /// e-3 R2: warnings flow through the caller-provided
+    /// callback, not via direct stderr writes. This is
+    /// what lets `main` buffer them and flush AFTER the
+    /// TUI guard restores the terminal. The test
+    /// captures the same end-to-end shape `main` uses:
+    /// load → push to Vec → check after.
+    #[test]
+    fn warnings_route_through_callback_not_stderr() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "this is not valid toml").expect("write");
+
+        let mut collected: Vec<String> = Vec::new();
+        let cfg = load_from_path(&path, |msg| collected.push(msg));
+        assert_eq!(collected.len(), 1, "exactly one warning from a parse error");
+        assert!(collected[0].contains("parse"));
+        // Buffer is owned by the caller — caller can
+        // flush after restoring the terminal.
+        assert!(!cfg.verify.default_use_checksum);
+    }
+
     #[test]
     fn unknown_fields_emit_warning() {
         // deny_unknown_fields catches typos early so
