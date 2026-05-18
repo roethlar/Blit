@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-3-config-scaffold | Medium | Round 2: load config before alternate screen | [~] | `phase5/a1` | `c89d278` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -118,3 +118,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `d471f1e` `?` help overlay documents active-pane refresh (`d-16-help-overlay-keymap-sync` round 2)
 - `873757b` F4 Verify Done preview lines (`d-17-verify-result-preview`)
 - `a4416c8` Ctrl-U clears focused Verify field (`d-18-verify-form-clear`)
+- `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
