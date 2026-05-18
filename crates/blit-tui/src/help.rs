@@ -76,6 +76,7 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         section_header("F4 · Verify form"),
         kv("Tab", "enter / cycle Source → Destination"),
         kv("Enter", "run compare_trees"),
+        kv("Ctrl-U", "clear focused field"),
         kv("H", "toggle hash mode (size+mtime ↔ checksum)"),
         kv("O", "toggle direction (two-way ↔ one-way)"),
         Line::from(""),

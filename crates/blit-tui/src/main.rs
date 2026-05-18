@@ -1770,6 +1770,15 @@ fn handle_verify_keystroke(
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
+    // d-18: Ctrl-U clears the focused field (terminal
+    // "kill-line" convention). Same invalidation contract
+    // as character edits — handled inside
+    // `clear_focused_field`.
+    if key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.verify.clear_focused_field();
+        app.transfer.cancel_confirm();
+        return true;
+    }
     // F-keys → navigate; let dispatcher handle.
     if let KeyCode::F(_) = key.code {
         return false;

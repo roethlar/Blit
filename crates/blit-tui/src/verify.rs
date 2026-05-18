@@ -152,6 +152,34 @@ impl VerifyState {
         matches!(self.status, VerifyStatus::Running { .. })
     }
 
+    /// d-18: wipe the currently focused field's text in
+    /// one keystroke (terminal "kill-line" convention,
+    /// bound to Ctrl-U in the F4 dispatcher). Same
+    /// invalidation contract as character edits — a
+    /// pending or completed run for the prior text gets
+    /// dropped. No-op when focus is None (Ctrl-U falls
+    /// through to the regular dispatcher then). Returns
+    /// `true` if a field was actually mutated.
+    pub fn clear_focused_field(&mut self) -> bool {
+        let mutated = match self.focus {
+            VerifyFocus::Source => {
+                let had_content = !self.source.is_empty();
+                self.source.clear();
+                had_content
+            }
+            VerifyFocus::Destination => {
+                let had_content = !self.destination.is_empty();
+                self.destination.clear();
+                had_content
+            }
+            VerifyFocus::None => false,
+        };
+        if mutated {
+            self.invalidate_run();
+        }
+        mutated
+    }
+
     /// Cycle the focus: None → Source → Destination → None.
     /// Called by `Tab` on F4.
     pub fn cycle_focus(&mut self) {
@@ -572,6 +600,69 @@ mod tests {
     }
 
     // d-8: started_at preserved across begin_run → apply_result.
+
+    // d-18: Ctrl-U clears the focused field.
+
+    #[test]
+    fn clear_focused_field_clears_source_when_source_focused() {
+        let mut state = VerifyState::new();
+        state.cycle_focus(); // → Source
+        state.insert_char('a');
+        state.insert_char('b');
+        assert_eq!(state.source, "ab");
+        let mutated = state.clear_focused_field();
+        assert!(mutated);
+        assert_eq!(state.source, "");
+        // Destination untouched.
+        assert_eq!(state.destination, "");
+    }
+
+    #[test]
+    fn clear_focused_field_clears_destination_when_destination_focused() {
+        let mut state = VerifyState::new();
+        state.cycle_focus(); // Source
+        state.insert_char('x');
+        state.cycle_focus(); // Destination
+        state.insert_char('y');
+        let mutated = state.clear_focused_field();
+        assert!(mutated);
+        assert_eq!(state.destination, "");
+        // Source preserved — clear is per-field.
+        assert_eq!(state.source, "x");
+    }
+
+    #[test]
+    fn clear_focused_field_noop_when_no_focus() {
+        let mut state = VerifyState::new();
+        assert_eq!(state.focus(), VerifyFocus::None);
+        let mutated = state.clear_focused_field();
+        assert!(!mutated);
+    }
+
+    #[test]
+    fn clear_focused_field_returns_false_for_already_empty_field() {
+        let mut state = VerifyState::new();
+        state.cycle_focus(); // Source — empty
+        let mutated = state.clear_focused_field();
+        assert!(
+            !mutated,
+            "clearing an empty field is a no-op (don't bump request_id needlessly)"
+        );
+    }
+
+    #[test]
+    fn clear_focused_field_invalidates_pending_run() {
+        let mut state = VerifyState::new();
+        state.source = "src".to_string();
+        state.destination = "dst".to_string();
+        let id = state.begin_run();
+        state.cycle_focus(); // Source
+        let mutated = state.clear_focused_field();
+        assert!(mutated);
+        // Stale Run reply must drop on arrival.
+        let applied = state.apply_result(id, empty_check_result());
+        assert!(!applied, "stale reply must drop after field clear");
+    }
 
     #[test]
     fn apply_result_preserves_started_at_from_running() {
