@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-17-verify-result-preview | Feature | Show first diff/missing/error on Verify Done | [~] | `phase5/a1` | `873757b` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -116,3 +116,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `f1217b7` F2 active-row age column (`d-14-f2-active-row-age`)
 - `31541a7` F2 active-row percent complete (`d-15-f2-active-row-progress`)
 - `d471f1e` `?` help overlay documents active-pane refresh (`d-16-help-overlay-keymap-sync` round 2)
+- `873757b` F4 Verify Done preview lines (`d-17-verify-result-preview`)
