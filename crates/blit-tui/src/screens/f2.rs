@@ -8,7 +8,8 @@
 //! stream; this module just paints.
 //!
 //! Layout (heights are constraints; columns reflect the
-//! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 / d-24 polish):
+//! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 / d-24 / d-25
+//! polish):
 //!
 //! ```text
 //! ┌── header (1 line) ──────────────────────────────────────────────┐
@@ -400,6 +401,11 @@ fn recent_row_to_table_row(row: &RecentRow) -> Row<'static> {
 /// duration). Same shape as d-10's `format_rate` on F4
 /// transfer Done — the operator gets a consistent
 /// "X MiB/s" reading on both surfaces.
+///
+/// d-25: tier list now matches F4 — B/s, KiB/s, MiB/s,
+/// GiB/s, TiB/s. Pre-d-25 the F2 ceiling was GiB/s, so
+/// a 2 TiB/s transfer rendered as "2048.0 GiB/s" while
+/// F4 rendered the same number as "2.0 TiB/s".
 fn format_recent_throughput(row: &RecentRow) -> String {
     if !row.ok {
         return "-".to_string();
@@ -414,7 +420,10 @@ fn format_recent_throughput(row: &RecentRow) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;
-    if bytes_per_sec >= GIB {
+    const TIB: f64 = GIB * 1024.0;
+    if bytes_per_sec >= TIB {
+        format!("{:.1} TiB/s", bytes_per_sec / TIB)
+    } else if bytes_per_sec >= GIB {
         format!("{:.1} GiB/s", bytes_per_sec / GIB)
     } else if bytes_per_sec >= MIB {
         format!("{:.1} MiB/s", bytes_per_sec / MIB)
@@ -438,8 +447,17 @@ fn module_path(module: &str, path: &str) -> String {
     }
 }
 
+/// d-25: aligned with F4's `format_bytes` — tier list is
+/// B, KiB, MiB, GiB, TiB. This formatter feeds three F2
+/// surfaces: recent-row byte total, active-row
+/// bytes-progress column (via `format_bytes_progress`),
+/// and active-row throughput column (via the
+/// `{}/s` wrapper on `row.throughput_bps`). All three
+/// inherit the TiB tier in one shot.
 fn format_bytes(n: u64) -> String {
-    if n >= 1 << 30 {
+    if n >= 1 << 40 {
+        format!("{:.2} TiB", n as f64 / (1u64 << 40) as f64)
+    } else if n >= 1 << 30 {
         format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
     } else if n >= 1 << 20 {
         format!("{:.2} MiB", n as f64 / (1u64 << 20) as f64)
@@ -501,6 +519,20 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.00 KiB");
         assert_eq!(format_bytes(1024 * 1024), "1.00 MiB");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.00 GiB");
+        // d-25: TiB tier matches F4.
+        assert_eq!(format_bytes(1u64 << 40), "1.00 TiB");
+        assert_eq!(format_bytes(2u64 << 40), "2.00 TiB");
+    }
+
+    /// d-25: pre-d-25, anything ≥ 1 TiB rendered as
+    /// "1024.00+ GiB" on F2 while F4 used a TiB tier.
+    /// Asserts the cross-surface alignment.
+    #[test]
+    fn format_bytes_tib_boundary_promotes_unit() {
+        // Exactly 1 TiB — first byte that gets the TiB
+        // tier; 1 byte less must stay in GiB.
+        assert_eq!(format_bytes((1u64 << 40) - 1), "1024.00 GiB");
+        assert_eq!(format_bytes(1u64 << 40), "1.00 TiB");
     }
 
     #[test]
@@ -563,6 +595,31 @@ mod tests {
         // 512 bytes in 1s = 512 B/s — below KiB cutoff.
         let r = recent_row(512, 1000, true);
         assert_eq!(format_recent_throughput(&r), "512 B/s");
+    }
+
+    /// d-25: TiB/s tier — pre-d-25 F2's ceiling was
+    /// GiB/s while F4 already had TiB/s. Same number now
+    /// renders the same way on both panes.
+    #[test]
+    fn recent_throughput_tebibytes() {
+        // 2 TiB in 1s = 2 TiB/s. Hypothetical for unit
+        // coverage; mirrors F4's same-shape test.
+        let r = recent_row(2u64 << 40, 1000, true);
+        assert_eq!(format_recent_throughput(&r), "2.0 TiB/s");
+    }
+
+    /// d-25: just under 1 TiB/s stays on the GiB/s tier;
+    /// at 1 TiB/s exactly we cross.
+    #[test]
+    fn recent_throughput_tib_boundary_promotes_unit() {
+        // Exactly 1 TiB/s
+        let r = recent_row(1u64 << 40, 1000, true);
+        assert_eq!(format_recent_throughput(&r), "1.0 TiB/s");
+        // 1024 GiB/s = 1 TiB/s sits on the boundary —
+        // already covered by the previous case. Test the
+        // last "GiB/s tier" case: 1023 GiB/s.
+        let r = recent_row(1023u64 << 30, 1000, true);
+        assert_eq!(format_recent_throughput(&r), "1023.0 GiB/s");
     }
 
     #[test]
