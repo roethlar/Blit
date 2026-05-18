@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-3-f4-diagnostics | Medium  | Diagnostics dump JSON matches CLI shape (R2) | `[~]` | `phase5/a1` | `d26ca9c` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -24,7 +24,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
-| d-3-f4-diagnostics | Medium | TUI diagnostics dump must match CLI JSON contract | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
@@ -101,3 +100,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `8719925` AppState unified loop with generation-guarded F2 setup (`a1-6b-state-preservation` round 3)
 - `0607c70` F4 profile lifecycle actions preserve mutation-error banners (`d-1-f4-profile-lifecycle` round 2)
 - `62eef1e` F4 Verify pane with generation-safe in-flight edits (`d-2-f4-verify` round 2)
+- `d26ca9c` F4 diagnostics dump mirrors CLI JSON shape (`d-3-f4-diagnostics` round 2)
