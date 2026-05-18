@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-25-f2-tib-tier | Feature | TiB/s + TiB tiers on F2 formatters align with F4 | `[~]` | `phase5/a1` | `7bc5e57` |
+| _none_ |  |  |  |  |  |
 
 ## Open findings
 
@@ -124,6 +124,7 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `852fe10` F2 cancel-selected action + layout doc sync (`d-22-f2-cancel-selected` round 2)
 - `94f556a` F2 cancel-status fragment auto-hide TTL (`d-23-cancel-status-auto-clear`)
 - `db779dc` Configurable F2 cancel TTL drives sleep budget (`d-24-config-cancel-ttl` round 2)
+- `7bc5e57` F2 TiB/TiB/s formatter tiers aligned with F4 (`d-25-f2-tib-tier`)
 - `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
 - `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
