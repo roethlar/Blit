@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-6-verify-prefill | Feature | tui.toml prefills Verify Source/Destination | [~] | `phase5/a1` | `bea03ac` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -26,6 +26,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
+| e-6-verify-prefill | Low | `config.rs` current schema doc omits Verify prefill keys | `phase5/a1` |
 
 ## Verified history
 
