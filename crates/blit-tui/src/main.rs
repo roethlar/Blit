@@ -410,6 +410,7 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                         &app.transfers,
                         &app.remote_label,
                         &app.transfers_status,
+                        now,
                     ),
                     Screen::F3 => screens::f3::render_into(
                         frame,
@@ -607,7 +608,7 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                         }
                     }
                     Some(EventOrError::Event(daemon_event)) => {
-                        app.transfers.apply_event(daemon_event);
+                        app.transfers.apply_event(daemon_event, Instant::now());
                         if matches!(app.transfers_status, ConnectionStatus::Connecting) {
                             app.transfers_status = ConnectionStatus::Live;
                         }
@@ -640,7 +641,7 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                             F2SetupPayload::Ready { event_rx, snapshot_result } => {
                                 let mut rx = event_rx;
                                 match snapshot_result {
-                                    Ok(snapshot) => app.transfers.replace_from_snapshot(snapshot),
+                                    Ok(snapshot) => app.transfers.replace_from_snapshot(snapshot, Instant::now()),
                                     Err(err) => {
                                         app.transfers_status = ConnectionStatus::Degraded(
                                             format!("initial GetState failed: {err}"),
@@ -1417,7 +1418,10 @@ struct TransferReply {
 ///   detail block on the selected row. Round 2 fix: the
 ///   detail line keeps showing "as of Xs ago" even when
 ///   discovery drops to Degraded, so the gate must too.
-/// - F2: no `now` use → no tick.
+/// - F2: `TransfersState::last_event_at()` is `Some` once
+///   any Subscribe event or GetState snapshot has landed
+///   (d-13). Pre-d-13 F2 didn't render anything against
+///   `now` so this was false.
 /// - F3: `BrowseFetchStatus::Loaded` shows "loaded · Xs ago".
 /// - F4: `ProfileFetchStatus::Loaded` ticks the footer
 ///   (even when no transfer/verify run is active).
@@ -1431,7 +1435,7 @@ fn needs_live_tick(app: &AppState) -> bool {
     }
     match app.current_screen {
         Screen::F1 => app.daemons.has_live_timestamp(),
-        Screen::F2 => false,
+        Screen::F2 => app.transfers.last_event_at().is_some(),
         Screen::F3 => matches!(
             app.browse.status(),
             browse::BrowseFetchStatus::Loaded { .. }
@@ -2156,7 +2160,7 @@ fn drain_startup_events(
                 }
             }
             Ok(EventOrError::Event(event)) => {
-                state.apply_event(event);
+                state.apply_event(event, Instant::now());
                 // Same rule as Connected: first event is a
                 // stream-health signal. Don't paper over an
                 // existing Degraded snapshot status.
@@ -2186,7 +2190,7 @@ async fn refresh_via_get_state(
 ) {
     match jobs::query(endpoint, 0).await {
         Ok(snapshot) => {
-            state.replace_from_snapshot(snapshot);
+            state.replace_from_snapshot(snapshot, Instant::now());
             *status = ConnectionStatus::Live;
         }
         Err(err) => {
@@ -2963,7 +2967,23 @@ mod tests {
         // Switch to F2 — no `now` use, no tick even with
         // a live remote.
         app.current_screen = Screen::F2;
-        assert!(!needs_live_tick(&app), "F2 never ticks");
+        // d-13: F2 doesn't tick until it has seen at
+        // least one event. `last_event_at` is None on a
+        // fresh TransfersState.
+        assert!(
+            !needs_live_tick(&app),
+            "F2 doesn't tick until last_event_at is Some"
+        );
+        // After a GetState snapshot lands, F2's footer
+        // shows "last event Xs ago" → tick.
+        app.transfers.replace_from_snapshot(
+            blit_core::generated::DaemonState::default(),
+            std::time::Instant::now(),
+        );
+        assert!(
+            needs_live_tick(&app),
+            "F2 with last_event_at Some ticks the footer"
+        );
 
         // F3 with browse status Idle → no tick.
         app.current_screen = Screen::F3;

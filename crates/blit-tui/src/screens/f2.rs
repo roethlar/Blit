@@ -27,6 +27,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
+use std::time::Instant;
 
 /// Connection-status banner rendered in the footer.
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ pub fn render_into(
     state: &TransfersState,
     remote_label: &str,
     status: &ConnectionStatus,
+    now: Instant,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -67,7 +69,7 @@ pub fn render_into(
     render_header(frame, chunks[0], remote_label, state);
     render_active_table(frame, chunks[1], state);
     render_recent_table(frame, chunks[2], state);
-    render_footer(frame, chunks[3], status);
+    render_footer(frame, chunks[3], status, state.last_event_at(), now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, remote_label: &str, state: &TransfersState) {
@@ -138,7 +140,13 @@ fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
     frame.render_widget(table, area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, status: &ConnectionStatus) {
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    status: &ConnectionStatus,
+    last_event_at: Option<Instant>,
+    now: Instant,
+) {
     let status_span = match status {
         ConnectionStatus::NoRemote => Span::styled(
             "no --remote — read-only splash",
@@ -152,15 +160,38 @@ fn render_footer(frame: &mut Frame, area: Rect, status: &ConnectionStatus) {
             Span::styled(format!("degraded: {msg}"), Style::default().fg(Color::Red))
         }
     };
-    let line = Line::from(vec![
-        status_span,
+    let mut spans = vec![status_span];
+    // d-13: surface "last event Xs ago" when the
+    // Subscribe stream / GetState snapshot has produced
+    // anything. Hidden while NoRemote (nothing to fetch)
+    // and pre-first-event (`last_event_at` is None).
+    if let Some(at) = last_event_at {
+        spans.push(Span::raw("  ·  "));
+        spans.push(Span::styled(
+            format!("last event {}", format_since(now, at)),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.extend(vec![
         Span::raw("  ·  "),
         Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  ·  "),
         Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" refresh"),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn format_since(now: Instant, then: Instant) -> String {
+    let elapsed = now.saturating_duration_since(then);
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
 }
 
 fn active_row_to_table_row(row: &ActiveRow) -> Row<'static> {

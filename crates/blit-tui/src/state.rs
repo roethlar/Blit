@@ -12,6 +12,7 @@ use blit_core::generated::{
 };
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 /// Maximum number of finished transfers retained client-
 /// side. Matches the daemon's default recent ring depth
@@ -99,6 +100,13 @@ pub struct TransfersState {
     /// [`TUI_RECENT_CAP`] — oldest entries drop on
     /// overflow.
     recent: VecDeque<RecentRow>,
+    /// d-13: monotonic timestamp of the last event that
+    /// mutated this view — Subscribe stream event OR
+    /// GetState snapshot reconcile. F2's footer renders
+    /// "last event Xs ago" against this, and the live
+    /// tick gate uses it to decide whether the F2 footer
+    /// needs refreshing.
+    last_event_at: Option<Instant>,
 }
 
 impl TransfersState {
@@ -106,11 +114,23 @@ impl TransfersState {
         Self::default()
     }
 
+    /// Timestamp of the most recent mutating event /
+    /// snapshot. `None` until first wire activity.
+    pub fn last_event_at(&self) -> Option<Instant> {
+        self.last_event_at
+    }
+
     /// Replace `active[]` and `recent[]` from a fresh
     /// `GetState` snapshot. Called on initial connect and
     /// whenever the stream errors and falls back to a
     /// reconcile pass.
-    pub fn replace_from_snapshot(&mut self, state: DaemonState) {
+    ///
+    /// d-13: records `fetched_at` as `last_event_at` so
+    /// F2's footer can show "last event Xs ago" against
+    /// the snapshot too (a stale stream that's been
+    /// reconciling on a timer should tick from the most
+    /// recent reconcile, not from the prior live event).
+    pub fn replace_from_snapshot(&mut self, state: DaemonState, fetched_at: Instant) {
         self.active.clear();
         for a in state.active {
             self.active.insert(a.transfer_id.clone(), a.into());
@@ -121,6 +141,7 @@ impl TransfersState {
         for r in state.recent.into_iter().rev() {
             self.push_recent(r.into());
         }
+        self.last_event_at = Some(fetched_at);
     }
 
     /// Apply one Subscribe stream event. Returns true when
@@ -136,7 +157,15 @@ impl TransfersState {
     /// the Subscribe stream — without dedup the buffered
     /// Started would re-insert it as active and the
     /// buffered Complete would push a duplicate recent row.
-    pub fn apply_event(&mut self, event: DaemonEvent) -> bool {
+    pub fn apply_event(&mut self, event: DaemonEvent, now: Instant) -> bool {
+        let mutated = self.apply_event_inner(event);
+        if mutated {
+            self.last_event_at = Some(now);
+        }
+        mutated
+    }
+
+    fn apply_event_inner(&mut self, event: DaemonEvent) -> bool {
         // Look up the event's transfer_id and short-circuit
         // if the id is already terminal. We check this
         // BEFORE the variant match because every
@@ -307,6 +336,67 @@ mod tests {
         }
     }
 
+    // d-13: last_event_at timestamps mutate-on-apply.
+
+    #[test]
+    fn last_event_at_none_until_first_mutation() {
+        let state = TransfersState::new();
+        assert_eq!(state.last_event_at(), None);
+    }
+
+    #[test]
+    fn replace_from_snapshot_stamps_last_event_at() {
+        let mut state = TransfersState::new();
+        let stamp = Instant::now();
+        state.replace_from_snapshot(DaemonState::default(), stamp);
+        assert_eq!(state.last_event_at(), Some(stamp));
+    }
+
+    #[test]
+    fn apply_event_stamps_only_on_mutation() {
+        let mut state = TransfersState::new();
+        // Started for a new id: mutates, stamps.
+        let started_stamp = Instant::now();
+        let mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: "t-1".to_string(),
+                    kind: TransferKind::DelegatedPull as i32,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: 0,
+                })),
+            },
+            started_stamp,
+        );
+        assert!(mutated);
+        assert_eq!(state.last_event_at(), Some(started_stamp));
+
+        // Progress for unknown id: no-op, last_event_at
+        // must NOT advance to the no-op stamp.
+        let noop_stamp = started_stamp + std::time::Duration::from_secs(1);
+        let mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
+                    transfer_id: "unknown".to_string(),
+                    bytes_completed: 0,
+                    bytes_total: 0,
+                    throughput_bps: 0,
+                    files_completed: 0,
+                    files_total: 0,
+                })),
+            },
+            noop_stamp,
+        );
+        assert!(!mutated);
+        assert_eq!(
+            state.last_event_at(),
+            Some(started_stamp),
+            "no-op events must not refresh last_event_at",
+        );
+    }
+
     #[test]
     fn replace_from_snapshot_populates_active_and_recent() {
         let mut state = TransfersState::new();
@@ -319,7 +409,7 @@ mod tests {
             counters: None,
             delegation_enabled: false,
         };
-        state.replace_from_snapshot(snapshot);
+        state.replace_from_snapshot(snapshot, Instant::now());
         assert_eq!(state.active_count(), 2);
         assert_eq!(state.recent_count(), 2);
     }
@@ -327,20 +417,26 @@ mod tests {
     #[test]
     fn apply_event_progress_updates_row_in_place() {
         let mut state = TransfersState::new();
-        state.replace_from_snapshot(DaemonState {
-            active: vec![make_active("t-1", 0)],
-            ..DaemonState::default()
-        });
-        let mutated = state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
-                transfer_id: "t-1".to_string(),
-                bytes_completed: 4096,
-                bytes_total: 0,
-                files_completed: 0,
-                files_total: 0,
-                throughput_bps: 1_000_000,
-            })),
-        });
+        state.replace_from_snapshot(
+            DaemonState {
+                active: vec![make_active("t-1", 0)],
+                ..DaemonState::default()
+            },
+            Instant::now(),
+        );
+        let mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
+                    transfer_id: "t-1".to_string(),
+                    bytes_completed: 4096,
+                    bytes_total: 0,
+                    files_completed: 0,
+                    files_total: 0,
+                    throughput_bps: 1_000_000,
+                })),
+            },
+            Instant::now(),
+        );
         assert!(mutated);
         let row = state.active_rows()[0];
         assert_eq!(row.bytes_completed, 4096);
@@ -350,16 +446,19 @@ mod tests {
     #[test]
     fn apply_event_progress_for_unknown_id_returns_false() {
         let mut state = TransfersState::new();
-        let mutated = state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
-                transfer_id: "unknown".to_string(),
-                bytes_completed: 0,
-                bytes_total: 0,
-                files_completed: 0,
-                files_total: 0,
-                throughput_bps: 0,
-            })),
-        });
+        let mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferProgress(TransferProgress {
+                    transfer_id: "unknown".to_string(),
+                    bytes_completed: 0,
+                    bytes_total: 0,
+                    files_completed: 0,
+                    files_total: 0,
+                    throughput_bps: 0,
+                })),
+            },
+            Instant::now(),
+        );
         assert!(!mutated);
         assert_eq!(state.active_count(), 0);
     }
@@ -367,19 +466,25 @@ mod tests {
     #[test]
     fn apply_event_complete_moves_row_to_recent() {
         let mut state = TransfersState::new();
-        state.replace_from_snapshot(DaemonState {
-            active: vec![make_active("t-1", 0)],
-            ..DaemonState::default()
-        });
-        let mutated = state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
-                transfer_id: "t-1".to_string(),
-                bytes: 1_000_000,
-                files: 0,
-                duration_ms: 5_000,
-                tcp_fallback_used: false,
-            })),
-        });
+        state.replace_from_snapshot(
+            DaemonState {
+                active: vec![make_active("t-1", 0)],
+                ..DaemonState::default()
+            },
+            Instant::now(),
+        );
+        let mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
+                    transfer_id: "t-1".to_string(),
+                    bytes: 1_000_000,
+                    files: 0,
+                    duration_ms: 5_000,
+                    tcp_fallback_used: false,
+                })),
+            },
+            Instant::now(),
+        );
         assert!(mutated);
         assert_eq!(state.active_count(), 0);
         assert_eq!(state.recent_count(), 1);
@@ -392,16 +497,22 @@ mod tests {
     #[test]
     fn apply_event_error_moves_row_to_recent_with_message() {
         let mut state = TransfersState::new();
-        state.replace_from_snapshot(DaemonState {
-            active: vec![make_active("t-1", 0)],
-            ..DaemonState::default()
-        });
-        state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferError(TransferError {
-                transfer_id: "t-1".to_string(),
-                message: "module not found".to_string(),
-            })),
-        });
+        state.replace_from_snapshot(
+            DaemonState {
+                active: vec![make_active("t-1", 0)],
+                ..DaemonState::default()
+            },
+            Instant::now(),
+        );
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferError(TransferError {
+                    transfer_id: "t-1".to_string(),
+                    message: "module not found".to_string(),
+                })),
+            },
+            Instant::now(),
+        );
         let r = state.recent_rows().next().unwrap();
         assert!(!r.ok);
         assert_eq!(r.error_message, "module not found");
@@ -421,11 +532,11 @@ mod tests {
             })),
         };
         // First apply: row inserted, returns true.
-        assert!(state.apply_event(ev.clone()));
+        assert!(state.apply_event(ev.clone(), Instant::now()));
         assert_eq!(state.active_count(), 1);
         // Second apply for the same id: returns false
         // (state didn't change). Counter stays at 1.
-        assert!(!state.apply_event(ev));
+        assert!(!state.apply_event(ev, Instant::now()));
         assert_eq!(state.active_count(), 1);
     }
 
@@ -440,19 +551,22 @@ mod tests {
     fn apply_event_started_does_not_clobber_snapshot_progress() {
         let mut state = TransfersState::new();
         // Snapshot has the transfer with 500 KB of progress.
-        state.replace_from_snapshot(DaemonState {
-            active: vec![ActiveTransfer {
-                transfer_id: "t-1".to_string(),
-                kind: TransferKind::DelegatedPull as i32,
-                peer: "peer-A".to_string(),
-                module: "mod-X".to_string(),
-                path: "sub/file".to_string(),
-                start_unix_ms: 1,
-                bytes_completed: 500_000,
-                bytes_total: 0,
-            }],
-            ..DaemonState::default()
-        });
+        state.replace_from_snapshot(
+            DaemonState {
+                active: vec![ActiveTransfer {
+                    transfer_id: "t-1".to_string(),
+                    kind: TransferKind::DelegatedPull as i32,
+                    peer: "peer-A".to_string(),
+                    module: "mod-X".to_string(),
+                    path: "sub/file".to_string(),
+                    start_unix_ms: 1,
+                    bytes_completed: 500_000,
+                    bytes_total: 0,
+                }],
+                ..DaemonState::default()
+            },
+            Instant::now(),
+        );
         // Buffered Started event arrives — same id, but the
         // Started shape only carries metadata, no progress.
         let started = DaemonEvent {
@@ -465,7 +579,7 @@ mod tests {
                 start_unix_ms: 1,
             })),
         };
-        assert!(!state.apply_event(started));
+        assert!(!state.apply_event(started, Instant::now()));
         // Snapshot's bytes_completed preserved.
         let row = &state.active_rows()[0];
         assert_eq!(row.bytes_completed, 500_000);
@@ -482,39 +596,48 @@ mod tests {
     fn buffered_events_dedupe_against_snapshot_recent() {
         let mut state = TransfersState::new();
         // Snapshot already has the transfer in recent[].
-        state.replace_from_snapshot(DaemonState {
-            recent: vec![make_record("race-id", true)],
-            ..DaemonState::default()
-        });
+        state.replace_from_snapshot(
+            DaemonState {
+                recent: vec![make_record("race-id", true)],
+                ..DaemonState::default()
+            },
+            Instant::now(),
+        );
         assert_eq!(state.recent_count(), 1);
 
         // Buffered Started — should be ignored.
-        let started_mutated = state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
-                transfer_id: "race-id".to_string(),
-                kind: TransferKind::Pull as i32,
-                peer: "p".to_string(),
-                module: "m".to_string(),
-                path: "/".to_string(),
-                start_unix_ms: 1,
-            })),
-        });
+        let started_mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: "race-id".to_string(),
+                    kind: TransferKind::Pull as i32,
+                    peer: "p".to_string(),
+                    module: "m".to_string(),
+                    path: "/".to_string(),
+                    start_unix_ms: 1,
+                })),
+            },
+            Instant::now(),
+        );
         assert!(!started_mutated);
         assert_eq!(state.active_count(), 0);
         assert_eq!(state.recent_count(), 1);
 
         // Buffered Complete — should also be ignored.
-        let complete_mutated = state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferComplete(
-                blit_core::generated::TransferComplete {
-                    transfer_id: "race-id".to_string(),
-                    bytes: 0,
-                    files: 0,
-                    duration_ms: 0,
-                    tcp_fallback_used: false,
-                },
-            )),
-        });
+        let complete_mutated = state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferComplete(
+                    blit_core::generated::TransferComplete {
+                        transfer_id: "race-id".to_string(),
+                        bytes: 0,
+                        files: 0,
+                        duration_ms: 0,
+                        tcp_fallback_used: false,
+                    },
+                )),
+            },
+            Instant::now(),
+        );
         assert!(!complete_mutated);
         // Still exactly one recent row.
         assert_eq!(state.recent_count(), 1);
@@ -531,31 +654,37 @@ mod tests {
         let mut state = TransfersState::new();
         // Empty initial snapshot (the transfer wasn't yet
         // visible when GetState fired).
-        state.replace_from_snapshot(DaemonState::default());
+        state.replace_from_snapshot(DaemonState::default(), Instant::now());
 
         // Apply buffered Started first.
-        state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
-                transfer_id: "race-id".to_string(),
-                kind: TransferKind::DelegatedPull as i32,
-                peer: "race-peer".to_string(),
-                module: "race-mod".to_string(),
-                path: "race/path".to_string(),
-                start_unix_ms: 1,
-            })),
-        });
-        // Then buffered Complete.
-        state.apply_event(DaemonEvent {
-            payload: Some(daemon_event::Payload::TransferComplete(
-                blit_core::generated::TransferComplete {
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
                     transfer_id: "race-id".to_string(),
-                    bytes: 999,
-                    files: 0,
-                    duration_ms: 50,
-                    tcp_fallback_used: false,
-                },
-            )),
-        });
+                    kind: TransferKind::DelegatedPull as i32,
+                    peer: "race-peer".to_string(),
+                    module: "race-mod".to_string(),
+                    path: "race/path".to_string(),
+                    start_unix_ms: 1,
+                })),
+            },
+            Instant::now(),
+        );
+        // Then buffered Complete.
+        state.apply_event(
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferComplete(
+                    blit_core::generated::TransferComplete {
+                        transfer_id: "race-id".to_string(),
+                        bytes: 999,
+                        files: 0,
+                        duration_ms: 50,
+                        tcp_fallback_used: false,
+                    },
+                )),
+            },
+            Instant::now(),
+        );
 
         assert_eq!(state.active_count(), 0);
         let r = state.recent_rows().next().unwrap();
@@ -573,15 +702,18 @@ mod tests {
     fn recent_ring_drops_oldest_on_overflow() {
         let mut state = TransfersState::new();
         for i in 0..(TUI_RECENT_CAP + 5) {
-            state.apply_event(DaemonEvent {
-                payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
-                    transfer_id: format!("t-{i}"),
-                    bytes: 0,
-                    files: 0,
-                    duration_ms: 0,
-                    tcp_fallback_used: false,
-                })),
-            });
+            state.apply_event(
+                DaemonEvent {
+                    payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
+                        transfer_id: format!("t-{i}"),
+                        bytes: 0,
+                        files: 0,
+                        duration_ms: 0,
+                        tcp_fallback_used: false,
+                    })),
+                },
+                Instant::now(),
+            );
         }
         assert_eq!(state.recent_count(), TUI_RECENT_CAP);
         // Newest-first: the most recent id should be on top.
