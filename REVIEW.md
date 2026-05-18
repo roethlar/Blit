@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-2-f4-verify     | Feature  | F4 Verify pane with source/dest form        | `[~]`  | `phase5/a1` | `ab105fb` |
 
 ## Open findings
 
