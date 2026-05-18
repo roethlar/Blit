@@ -128,7 +128,13 @@ fn render_footer(frame: &mut Frame, area: Rect, status: &ProfileFetchStatus, now
         Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  ·  "),
         Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" refresh"),
+        Span::raw(" refresh  ·  "),
+        Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" clear  ·  "),
+        Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" disable  ·  "),
+        Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" enable"),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }

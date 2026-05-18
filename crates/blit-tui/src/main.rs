@@ -587,11 +587,52 @@ async fn handle_pane_action(
             }
             _ => {}
         },
-        Screen::F4 => {
-            if matches!(action, UserAction::Refresh) {
+        Screen::F4 => match action {
+            UserAction::Refresh => {
                 let id = app.profile.begin_fetch();
                 spawn_profile_fetch(id, app.profile_reply_tx.clone());
             }
+            UserAction::ProfileClear => {
+                apply_profile_clear(&mut app.profile);
+                // Re-fetch so the report shows the cleared
+                // state (zero records, predictor pristine).
+                let id = app.profile.begin_fetch();
+                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+            }
+            UserAction::ProfileDisable => {
+                apply_profile_set_enabled(&mut app.profile, false);
+                let id = app.profile.begin_fetch();
+                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+            }
+            UserAction::ProfileEnable => {
+                apply_profile_set_enabled(&mut app.profile, true);
+                let id = app.profile.begin_fetch();
+                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+            }
+            _ => {}
+        },
+    }
+}
+
+/// Wipe the local perf-history file. Touches disk via
+/// `blit_core::perf_history::clear_history`; errors are
+/// surfaced through `ProfileState::note_fetch_error` so
+/// the operator sees them in the F4 footer.
+fn apply_profile_clear(profile_state: &mut profile::ProfileState) {
+    match blit_core::perf_history::clear_history() {
+        Ok(_) => {}
+        Err(err) => profile_state.note_fetch_error(format!("clear failed: {err:#}")),
+    }
+}
+
+/// Toggle the perf-history-enabled flag. Same error
+/// surfacing as `apply_profile_clear`.
+fn apply_profile_set_enabled(profile_state: &mut profile::ProfileState, enabled: bool) {
+    match blit_core::perf_history::set_perf_history_enabled(enabled) {
+        Ok(_) => {}
+        Err(err) => {
+            let verb = if enabled { "enable" } else { "disable" };
+            profile_state.note_fetch_error(format!("{verb} failed: {err:#}"));
         }
     }
 }
@@ -1139,6 +1180,13 @@ enum UserAction {
     /// router so the top-level can switch which pane is
     /// active.
     Navigate(Screen),
+    /// F4: `c` clears the perf-history file.
+    ProfileClear,
+    /// F4: `d` disables history recording (new transfers
+    /// stop adding records).
+    ProfileDisable,
+    /// F4: `e` re-enables history recording.
+    ProfileEnable,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1175,6 +1223,14 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         KeyCode::Up | KeyCode::Char('k') => Some(UserAction::SelectPrev),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UserAction::Descend),
         KeyCode::Left | KeyCode::Char('h') => Some(UserAction::Ascend),
+        // F4 profile lifecycle keys. The Ctrl-c quit
+        // shortcut is intercepted by `should_quit` above
+        // — only bare lowercase `c` reaches this arm.
+        // Panes other than F4 ignore these variants in
+        // `handle_pane_action`.
+        KeyCode::Char('c') => Some(UserAction::ProfileClear),
+        KeyCode::Char('d') => Some(UserAction::ProfileDisable),
+        KeyCode::Char('e') => Some(UserAction::ProfileEnable),
         _ => None,
     }
 }
@@ -1628,6 +1684,38 @@ mod tests {
             other => panic!("expected preserved Loaded, got {other:?}"),
         }
         assert!(detail_rx.try_recv().is_err());
+    }
+
+    /// d-1 (F4 profile lifecycle keys): `c` / `d` / `e`
+    /// land on the right UserAction variants. Uppercase
+    /// variants stay unmapped — these are case-sensitive
+    /// per the design.
+    #[test]
+    fn key_action_maps_profile_lifecycle_keys() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('c'))),
+            Some(UserAction::ProfileClear)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('d'))),
+            Some(UserAction::ProfileDisable)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('e'))),
+            Some(UserAction::ProfileEnable)
+        ));
+        // Uppercase counterparts are unmapped.
+        assert!(key_action(&k(KeyCode::Char('C'))).is_none());
+        assert!(key_action(&k(KeyCode::Char('D'))).is_none());
+        assert!(key_action(&k(KeyCode::Char('E'))).is_none());
+        // Ctrl-c remains Quit (not ProfileClear).
+        assert!(matches!(
+            key_action(&KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            Some(UserAction::Quit)
+        ));
     }
 
     /// a1-6b round 3: F2 refresh keystroke must not
