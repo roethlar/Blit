@@ -139,6 +139,45 @@ serially.
   refresh rates + color scheme.
 - **e-4 mouse on tabs** — clickable F1..F4 tab strip.
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer caught that `?` wasn't actually global: when the
+F4 Verify form had focus, `handle_verify_keystroke`
+intercepted every `Char(_)` as text input, so `?`
+inserted the literal character instead of opening the
+overlay. That's exactly the screen state where the
+operator is most likely to want the keymap reference.
+
+### Fix
+
+`handle_verify_keystroke` now explicitly returns `false`
+for `Char('?')` (without Ctrl/Alt modifiers) so the
+dispatcher's `ToggleHelp` arm runs. Same exemption shape
+as the existing F-key / Ctrl-c carve-outs.
+
+```rust
+if key.code == KeyCode::Char('?')
+    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+{
+    return false;
+}
+```
+
+(The known-gap "no keybinding for typing `?` literally"
+is now load-bearing instead of incidental — operator who
+needs `?` in a filename must drop focus first. Documented
+in the finding doc.)
+
+### Tests
+
++1 regression test (`handle_verify_keystroke_returns_false_for_question_mark`):
+construct an AppState with Verify focused on Source,
+send `Char('?')`, assert the handler returned `false`
+AND the field is still empty (i.e. `?` wasn't inserted).
+
+124 blit-tui unit tests (was 121). Workspace passes
+serially.
+
 ## Reviewer comments
 
 (empty — pending grade)

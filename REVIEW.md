@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-1-help-overlay  | Medium   | `?` global from Verify edit mode (R2)       | `[~]`  | `phase5/a1` | `aba7394` |
 
 ## Open findings
 
