@@ -11,7 +11,9 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-_none_
+| ID                | Severity | Title                                       | Status | Branch      | Commit    |
+|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| e-7-config-theme | Low | Round 2: contrasting active-tab fg | [~] | `phase5/a1` | `12ee960` |
 
 ## Open findings
 
@@ -24,7 +26,6 @@ _none_
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
-| e-7-config-theme | Low | Active-tab foreground invisible for black accent          | `phase5/a1` |
 
 ## Verified history
 
