@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-1-help-overlay  | Feature  | `?` opens a global help overlay             | `[~]`  | `phase5/a1` | `1de78c6` |
 
 ## Open findings
 
