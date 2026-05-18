@@ -24,6 +24,7 @@
 //! ```
 
 use crate::profile::{ProfileFetchStatus, ProfileState};
+use crate::verify::{VerifyFocus, VerifyState, VerifyStatus};
 use blit_app::profile::{PredictorReport, ProfileReport, ProfileSummary};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -33,13 +34,25 @@ use ratatui::Frame;
 use std::time::Instant;
 
 /// Render the F4 pane into a caller-supplied area (router-aware).
-pub fn render_into(frame: &mut Frame, area: Rect, state: &ProfileState, now: Instant) {
+///
+/// d-2 adds the Verify block underneath the predictor
+/// section. When the operator hits `Tab` the focus walks
+/// into the Source / Destination fields; chars + Backspace
+/// edit, Enter triggers the run.
+pub fn render_into(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ProfileState,
+    verify: &VerifyState,
+    now: Instant,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(4),
             Constraint::Min(5),
+            Constraint::Length(6),
             Constraint::Length(1),
         ])
         .split(area);
@@ -47,7 +60,8 @@ pub fn render_into(frame: &mut Frame, area: Rect, state: &ProfileState, now: Ins
     render_header(frame, chunks[0], state);
     render_records_summary(frame, chunks[1], state);
     render_predictor(frame, chunks[2], state);
-    render_footer(frame, chunks[3], state.status(), now);
+    render_verify(frame, chunks[3], verify);
+    render_footer(frame, chunks[4], state.status(), verify, now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &ProfileState) {
@@ -106,7 +120,90 @@ fn render_predictor(frame: &mut Frame, area: Rect, state: &ProfileState) {
     frame.render_widget(para, area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, status: &ProfileFetchStatus, now: Instant) {
+fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Verify (local paths only) ");
+    let focus = verify.focus();
+    let source_line = field_line("Source: ", &verify.source, focus == VerifyFocus::Source);
+    let dest_line = field_line(
+        "Destin: ",
+        &verify.destination,
+        focus == VerifyFocus::Destination,
+    );
+    let mode_hint = Line::from(Span::styled(
+        "Mode: size+mtime (checksum toggle deferred)",
+        Style::default().fg(Color::DarkGray),
+    ));
+    let status_line = match verify.status() {
+        VerifyStatus::Idle => Line::from(Span::styled(
+            "tab: enter editing · enter: run · esc: leave editing",
+            Style::default().fg(Color::DarkGray),
+        )),
+        VerifyStatus::Running => Line::from(Span::styled(
+            "running compare_trees...",
+            Style::default().fg(Color::Yellow),
+        )),
+        VerifyStatus::Done { result, .. } => Line::from(Span::styled(
+            format!(
+                "matches: {} · differ: {} · missing-on-src: {} · missing-on-dst: {} · errors: {}",
+                result.matching,
+                result.differing.len(),
+                result.missing_on_src.len(),
+                result.missing_on_dest.len(),
+                result.errors.len(),
+            ),
+            Style::default().fg(Color::Green),
+        )),
+        VerifyStatus::Error { message } => Line::from(Span::styled(
+            format!("error: {message}"),
+            Style::default().fg(Color::Red),
+        )),
+    };
+    let lines = vec![source_line, dest_line, mode_hint, status_line];
+    let para = Paragraph::new(lines).block(block);
+    frame.render_widget(para, area);
+}
+
+fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
+    let label_span = Span::styled(
+        label.to_string(),
+        Style::default().add_modifier(Modifier::BOLD),
+    );
+    let value_text = if focused {
+        // Render with an explicit cursor caret so the
+        // operator sees where typing lands. Using a
+        // closing pipe avoids cursor-on-empty-line
+        // ambiguity that would happen with a bare block
+        // cursor.
+        format!("{value}▏")
+    } else {
+        if value.is_empty() {
+            "(empty)".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+    let value_style = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if value.is_empty() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![label_span, Span::styled(value_text, value_style)])
+}
+
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    status: &ProfileFetchStatus,
+    verify: &VerifyState,
+    now: Instant,
+) {
     let status_span = match status {
         ProfileFetchStatus::Idle => {
             Span::styled("idle · press r", Style::default().fg(Color::DarkGray))
@@ -122,20 +219,41 @@ fn render_footer(frame: &mut Frame, area: Rect, status: &ProfileFetchStatus, now
             Span::styled(format!("error: {message}"), Style::default().fg(Color::Red))
         }
     };
-    let line = Line::from(vec![
-        status_span,
-        Span::raw("  ·  "),
-        Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" quit  ·  "),
-        Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" refresh  ·  "),
-        Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" clear  ·  "),
-        Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" disable  ·  "),
-        Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" enable"),
-    ]);
+    // When the Verify form has focus, the footer hint
+    // line swaps to editing keys (Tab/Enter/Esc) since
+    // c/d/e/r are then being typed as text into the
+    // fields rather than acting as profile-lifecycle
+    // shortcuts.
+    let spans: Vec<Span<'static>> = if verify.focus().is_editing() {
+        vec![
+            status_span,
+            Span::raw("  ·  editing form  ·  "),
+            Span::styled("tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" next field  ·  "),
+            Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" run  ·  "),
+            Span::styled("esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" leave"),
+        ]
+    } else {
+        vec![
+            status_span,
+            Span::raw("  ·  "),
+            Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" quit  ·  "),
+            Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" refresh  ·  "),
+            Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" clear  ·  "),
+            Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" disable  ·  "),
+            Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" enable  ·  "),
+            Span::styled("tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" verify"),
+        ]
+    };
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 

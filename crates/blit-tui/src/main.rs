@@ -27,6 +27,7 @@ mod daemons;
 mod profile;
 mod screens;
 mod state;
+mod verify;
 
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
@@ -174,6 +175,9 @@ struct AppState {
     /// Sender into the F4 profile fetcher mpsc. Cloned by
     /// `spawn_profile_fetch` into each spawned task.
     profile_reply_tx: mpsc::Sender<ProfileReply>,
+    /// F4 Verify form. Holds source/destination text, the
+    /// current focus, and the most recent run's result.
+    verify: verify::VerifyState,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -257,6 +261,9 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
     // F4 profile fetcher reply channel.
     let (profile_reply_tx, mut profile_reply_rx) = mpsc::channel::<ProfileReply>(4);
 
+    // F4 Verify run reply channel.
+    let (verify_run_tx, mut verify_run_rx) = mpsc::channel::<VerifyReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -280,6 +287,7 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         browse_fetch_tx: browse_fetch_tx.clone(),
         profile: profile::ProfileState::new(),
         profile_reply_tx: profile_reply_tx.clone(),
+        verify: verify::VerifyState::new(),
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -368,7 +376,9 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                         &app.remote_label,
                         now,
                     ),
-                    Screen::F4 => screens::f4::render_into(frame, body_area, &app.profile, now),
+                    Screen::F4 => {
+                        screens::f4::render_into(frame, body_area, &app.profile, &app.verify, now)
+                    }
                 }
             })
             .context("terminal.draw")?;
@@ -381,22 +391,61 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
             // Keystrokes — dispatched to the active pane.
             key = key_rx.recv() => {
                 let Some(key) = key else { return Ok(()); };
+                // d-2 round 1: when F4's Verify form has
+                // focus, char keys must go through as
+                // text input, not as profile-lifecycle
+                // actions (`c`/`d`/`e`). Esc clears focus
+                // instead of quitting; F-keys still
+                // navigate (intercepted in
+                // handle_verify_keystroke when not
+                // editable).
+                if app.current_screen == Screen::F4
+                    && app.verify.focus().is_editing()
+                    && handle_verify_keystroke(&key, &mut app, &verify_run_tx)
+                {
+                    continue;
+                }
+                // If handle_verify_keystroke returned false
+                // (F-keys, Ctrl-c) or we're not in editing
+                // mode, fall through to the action
+                // dispatcher.
                 if let Some(action) = key_action(&key) {
                     match action {
                         UserAction::Quit => return Ok(()),
                         UserAction::Navigate(target) => {
                             app.current_screen = target;
+                            // Leaving F4 drops the editing
+                            // focus so the next visit
+                            // starts in action-key mode.
+                            if target != Screen::F4 {
+                                app.verify.clear_focus();
+                            }
                         }
                         action => {
-                            handle_pane_action(
-                                action,
-                                &mut app,
-                                &mut transfers_event_rx,
-                                &f2_setup_tx,
-                            )
-                            .await;
+                            // F4-specific: Tab toggles the
+                            // Verify focus. Otherwise route
+                            // to the normal pane action.
+                            if app.current_screen == Screen::F4
+                                && matches!(key.code, KeyCode::Tab)
+                            {
+                                app.verify.cycle_focus();
+                            } else {
+                                handle_pane_action(
+                                    action,
+                                    &mut app,
+                                    &mut transfers_event_rx,
+                                    &f2_setup_tx,
+                                )
+                                .await;
+                            }
                         }
                     }
+                } else if app.current_screen == Screen::F4
+                    && matches!(key.code, KeyCode::Tab)
+                {
+                    // Tab from action-mode enters
+                    // editing mode.
+                    app.verify.cycle_focus();
                 }
             }
             // F1 mDNS discovery feed — drained continuously.
@@ -512,6 +561,17 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                             Ok(report) => app.profile.apply_report(report, Instant::now()),
                             Err(message) => app.profile.note_fetch_error(message),
                         }
+                    }
+                }
+            }
+            // F4 Verify run replies. Generation gating is
+            // inside `apply_result`/`apply_error` —
+            // stale replies are silently dropped.
+            reply = verify_run_rx.recv() => {
+                if let Some(VerifyReply { request_id, result }) = reply {
+                    match result {
+                        Ok(r) => { app.verify.apply_result(request_id, r); }
+                        Err(msg) => { app.verify.apply_error(request_id, msg); }
                     }
                 }
             }
@@ -1087,6 +1147,114 @@ fn spawn_profile_fetch(request_id: u64, tx: mpsc::Sender<ProfileReply>) {
 struct ProfileReply {
     request_id: u64,
     result: Result<blit_app::profile::ProfileReport, String>,
+}
+
+/// Reply envelope from the F4 Verify run task. Generation
+/// is tagged so a stale reply (operator edited the form
+/// between kicks) gets dropped on arrival.
+struct VerifyReply {
+    request_id: u64,
+    result: Result<blit_app::check::CheckResult, String>,
+}
+
+/// Handle a keystroke when F4's Verify form has focus.
+/// Returns `true` if the keystroke was consumed; `false`
+/// when the dispatcher should fall through to the normal
+/// action handler (F-keys for navigation, Ctrl-c for
+/// emergency quit).
+fn handle_verify_keystroke(
+    key: &KeyEvent,
+    app: &mut AppState,
+    verify_run_tx: &mpsc::Sender<VerifyReply>,
+) -> bool {
+    // Ctrl-c → emergency quit; let dispatcher handle.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    // F-keys → navigate; let dispatcher handle.
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            // Esc drops focus without quitting the TUI.
+            app.verify.clear_focus();
+            true
+        }
+        KeyCode::Tab => {
+            app.verify.cycle_focus();
+            true
+        }
+        KeyCode::Enter => {
+            if app.verify.can_run() {
+                let gen = app.verify.begin_run();
+                spawn_verify_run(
+                    gen,
+                    app.verify.source.clone(),
+                    app.verify.destination.clone(),
+                    verify_run_tx.clone(),
+                );
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            app.verify.backspace();
+            true
+        }
+        KeyCode::Char(c) => {
+            // Skip modifier combos (Alt-x etc.) so they
+            // don't sneak in as garbled text.
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return false;
+            }
+            app.verify.insert_char(c);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Spawn a `compare_trees` run on a blocking task. Both
+/// inputs are local path strings; the task parses them to
+/// `PathBuf` and runs the comparison with a default
+/// `FileFilter`. `use_checksum=false` and `one_way=false`
+/// match the design's default Verify mode (size+mtime,
+/// two-way comparison). The checksum-mode toggle is a
+/// future polish.
+fn spawn_verify_run(
+    request_id: u64,
+    source: String,
+    destination: String,
+    tx: mpsc::Sender<VerifyReply>,
+) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let src = std::path::PathBuf::from(&source);
+            let dst = std::path::PathBuf::from(&destination);
+            blit_app::check::compare_trees(
+                &src,
+                &dst,
+                false,
+                false,
+                blit_core::fs_enum::FileFilter::default(),
+            )
+        })
+        .await;
+        let envelope = match result {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(err)) => Err(format!("{err:#}")),
+            Err(join_err) => Err(format!("verify task panicked: {join_err}")),
+        };
+        let _ = tx
+            .send(VerifyReply {
+                request_id,
+                result: envelope,
+            })
+            .await;
+    });
 }
 
 /// Messages from the discovery task back to the F1 loop.
