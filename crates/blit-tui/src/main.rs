@@ -1235,27 +1235,23 @@ fn spawn_diagnostics_dump(
     });
 }
 
-/// Synchronous core of the diagnostics dump. Parses the
-/// two paths, calls `endpoint_snapshot` for each, writes
-/// the combined JSON to `~/.config/blit/diagnostics-...`
-/// and returns the file path. Errors are bubbled as
-/// human-readable strings.
+/// Synchronous core of the diagnostics dump. Mirrors the
+/// CLI's `run_diagnostics_dump` shape (see
+/// `crates/blit-cli/src/diagnostics.rs`) so a TUI-generated
+/// file is interchangeable with the CLI's `blit diagnostics
+/// dump --json` output. Specifically:
+///
+/// - `destination` and `same_device` are computed against
+///   the RESOLVED destination (post-`resolve_destination`),
+///   so a source directory copied into a container reports
+///   the effective target.
+/// - `rsync_resolution` block carries the four flags the
+///   CLI emits + a `resolution_changed` boolean.
+/// - `invocation` lists the TUI process's argv so bug
+///   reports can correlate the dump with how `blit-tui`
+///   was launched.
 fn run_diagnostics_dump(source: &str, destination: &str) -> Result<std::path::PathBuf, String> {
-    use blit_app::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
-    use blit_app::endpoints::parse_transfer_endpoint;
-
-    let src_endpoint =
-        parse_transfer_endpoint(source).map_err(|e| format!("parse source: {e:#}"))?;
-    let dst_endpoint =
-        parse_transfer_endpoint(destination).map_err(|e| format!("parse destination: {e:#}"))?;
-    let snapshot = serde_json::json!({
-        "blit_version": env!("CARGO_PKG_VERSION"),
-        "source": endpoint_snapshot(source, &src_endpoint),
-        "destination": endpoint_snapshot(destination, &dst_endpoint),
-        "source_display": endpoint_display(&src_endpoint),
-        "destination_display": endpoint_display(&dst_endpoint),
-        "same_device": same_device(&src_endpoint, &dst_endpoint),
-    });
+    let snapshot = build_diagnostics_snapshot(source, destination)?;
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1267,6 +1263,50 @@ fn run_diagnostics_dump(source: &str, destination: &str) -> Result<std::path::Pa
     let pretty = serde_json::to_string_pretty(&snapshot).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(&path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(path)
+}
+
+/// Build the diagnostics JSON snapshot. Exposed as a pure
+/// helper so tests can compare the TUI's JSON shape
+/// against the CLI's without writing to disk.
+fn build_diagnostics_snapshot(
+    source: &str,
+    destination: &str,
+) -> Result<serde_json::Value, String> {
+    use blit_app::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
+    use blit_app::endpoints::parse_transfer_endpoint;
+    use blit_app::transfers::resolution::{
+        dest_is_container, resolve_destination, source_is_contents,
+    };
+
+    let src_endpoint =
+        parse_transfer_endpoint(source).map_err(|e| format!("parse source: {e:#}"))?;
+    let raw_dst =
+        parse_transfer_endpoint(destination).map_err(|e| format!("parse destination: {e:#}"))?;
+    let pre_resolve_dst = raw_dst.clone();
+    let resolved_dst = resolve_destination(source, destination, &src_endpoint, raw_dst);
+
+    let source_contents_mode = source_is_contents(source);
+    let dest_is_container_flag = dest_is_container(destination, &pre_resolve_dst);
+
+    let pre_resolve_json = endpoint_display(&pre_resolve_dst);
+    let resolved_display = endpoint_display(&resolved_dst);
+
+    Ok(serde_json::json!({
+        "blit_version": env!("CARGO_PKG_VERSION"),
+        "invocation": std::env::args().collect::<Vec<_>>(),
+        "source": endpoint_snapshot(source, &src_endpoint),
+        // Destination & same_device are evaluated against
+        // the RESOLVED endpoint (matches CLI behavior).
+        "destination": endpoint_snapshot(destination, &resolved_dst),
+        "rsync_resolution": {
+            "source_is_contents": source_contents_mode,
+            "destination_is_container": dest_is_container_flag,
+            "pre_resolve_destination": pre_resolve_json,
+            "resolved_destination": resolved_display,
+            "resolution_changed": pre_resolve_json != resolved_display,
+        },
+        "same_device": same_device(&src_endpoint, &resolved_dst),
+    }))
 }
 
 /// Handle a keystroke when F4's Verify form has focus.
@@ -1703,6 +1743,98 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// d-3 round-2 regression: the TUI diagnostics dump
+    /// JSON must carry the same top-level shape as the
+    /// CLI's `blit diagnostics dump --json` (modulo the
+    /// timestamp, which is determined by the writer).
+    /// Specifically, the snapshot must include the
+    /// `rsync_resolution` block and compute
+    /// `destination` / `same_device` against the RESOLVED
+    /// destination.
+    #[test]
+    fn tui_dump_shape_matches_cli_contract() {
+        // Use /tmp paths so resolve_destination has
+        // something to chew on. With a non-trailing-slash
+        // source and a non-existent dest path,
+        // resolve_destination is a passthrough.
+        let snapshot = build_diagnostics_snapshot("/tmp/a", "/tmp/b").expect("build snapshot");
+        let obj = snapshot.as_object().expect("top-level is object");
+        // Top-level keys that match the CLI's run_diagnostics_dump.
+        assert!(obj.contains_key("blit_version"));
+        assert!(obj.contains_key("invocation"));
+        assert!(obj.contains_key("source"));
+        assert!(obj.contains_key("destination"));
+        assert!(obj.contains_key("rsync_resolution"));
+        assert!(obj.contains_key("same_device"));
+        // The rsync_resolution sub-object must have all
+        // five fields the CLI emits.
+        let resolution = obj
+            .get("rsync_resolution")
+            .and_then(|v| v.as_object())
+            .expect("rsync_resolution is object");
+        assert!(resolution.contains_key("source_is_contents"));
+        assert!(resolution.contains_key("destination_is_container"));
+        assert!(resolution.contains_key("pre_resolve_destination"));
+        assert!(resolution.contains_key("resolved_destination"));
+        assert!(resolution.contains_key("resolution_changed"));
+    }
+
+    /// d-3 round-2: when the source is a directory and
+    /// the destination is a container (trailing slash),
+    /// the resolved destination differs from the
+    /// pre-resolved destination and the
+    /// `resolution_changed` flag flips to true. This is
+    /// the bug-bait case the reviewer called out — the
+    /// TUI must NOT report the un-resolved destination.
+    #[test]
+    fn tui_dump_resolves_destination_for_container_targets() {
+        // Make a temp src directory the resolver sees.
+        let tmp = std::env::temp_dir().join(format!("blit-d-3-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("mkdir tmp");
+        let src = tmp.join("payload");
+        std::fs::create_dir_all(&src).expect("mkdir payload");
+        let dst = tmp.join("container");
+        std::fs::create_dir_all(&dst).expect("mkdir container");
+
+        // Container destination = trailing-slash.
+        let src_str = src.display().to_string();
+        let dst_str = format!("{}/", dst.display());
+        let snapshot = build_diagnostics_snapshot(&src_str, &dst_str).expect("build snapshot");
+
+        let resolution = snapshot
+            .get("rsync_resolution")
+            .and_then(|v| v.as_object())
+            .expect("rsync_resolution");
+        // The source is NOT a /-suffixed contents-mode
+        // path, so this is "nest under dst" semantics.
+        // resolve_destination should append the basename.
+        assert_eq!(
+            resolution.get("source_is_contents"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            resolution.get("destination_is_container"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        // pre_resolve != resolved means we'd nest.
+        let pre = resolution
+            .get("pre_resolve_destination")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let post = resolution
+            .get("resolved_destination")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_ne!(pre, post, "expected resolve_destination to change the path");
+        assert_eq!(
+            resolution.get("resolution_changed"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        // Clean up.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn should_quit_recognises_q_esc_ctrl_c() {
