@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ |  |  |  |  |  |
+| d-23-cancel-status-auto-clear | Feature | 5s TTL on F2 cancel-status fragment | [~] | `phase5/a1` | `94f556a` |
 
 ## Open findings
 
