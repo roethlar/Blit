@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-7-f4-verify-one-way-toggle | Feature | F4 Verify `O` toggles two-way / one-way | [~] | `phase5/a1` | `428cd22` |
 
 ## Open findings
 
