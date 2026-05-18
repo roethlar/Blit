@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-2-f2-transfers | Low      | F2 Connected preserves Degraded (R5)        | `[~]`  | `phase5/a1` | `1176331` |
 
 ## Open findings
 

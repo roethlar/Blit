@@ -381,6 +381,61 @@ late Error scenarios.
 19 unit tests in `blit-tui` total (was 18). Workspace
 passing serially: 592 tests.
 
+## Round 5 (sha filled by sentinel)
+
+Reviewer flagged a status regression introduced in round 4:
+
+### Connected masked an initial GetState failure (Low)
+
+Path: subscribe succeeds (Connected pre-sent into the
+buffer), initial `GetState` fails → `status =
+Degraded("initial GetState failed: ...")`. Then
+`drain_startup_events` runs, sees the buffered
+`EventOrError::Connected`, and unconditionally flips
+`status = Live`. The footer reads "live" even though the
+active/recent snapshot is missing — F2 silently shows a
+partial state.
+
+Root cause: Connected is a *stream-health* signal, not a
+*snapshot-health* signal. Round 4 conflated the two.
+
+Fix: only let `Connected` transition `Connecting → Live`;
+preserve any existing `Degraded(...)`.
+
+```rust
+Ok(EventOrError::Connected) => {
+    if matches!(status, ConnectionStatus::Connecting) {
+        *status = ConnectionStatus::Live;
+    }
+}
+```
+
+The same rule applies to the first event in the drain (and
+in the main select loop's Connected/first-event arms — those
+were already gated for the first-event case, the Connected
+arm now matches).
+
+### Files
+
+- `crates/blit-tui/src/main.rs`: gate Connected on
+  `matches!(status, Connecting)` in two places — the
+  startup drain and the main select loop's Connected arm
+  (kept consistent so the comment matches the code).
+
+### Tests
+
++2 regression tests in `tests`:
+
+- `drain_startup_events_connected_preserves_degraded`:
+  pre-set `Degraded("initial GetState failed: timeout")`,
+  buffer one `Connected`, assert status stays `Degraded`
+  with the same message.
+- `drain_startup_events_connected_flips_connecting_to_live`:
+  pre-set `Connecting`, buffer one `Connected`, assert
+  status flips to `Live`.
+
+21 blit-tui unit tests (was 19); workspace passing serially.
+
 ## Reviewer comments
 
 (empty — pending grade)
