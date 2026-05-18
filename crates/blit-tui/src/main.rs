@@ -218,6 +218,16 @@ async fn run_event_loop(
         ConnectionStatus::NoRemote
     };
 
+    // a1-2 round 2: single-owner input task. crossterm
+    // event::poll/read are sync and not cancellable, so racing
+    // a fresh spawn_blocking on each loop iteration leaked
+    // detached blocking tasks that could each consume a key
+    // press. Now ONE blocking task loops on event::poll and
+    // forwards every key press through an mpsc; the main
+    // loop selects on it without touching crossterm directly.
+    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
+    spawn_input_task(key_tx);
+
     // Optional Subscribe channel. None when no `--remote`.
     let mut event_rx: Option<mpsc::Receiver<EventOrError>> = None;
     let mut parsed_remote: Option<RemoteEndpoint> = None;
@@ -239,9 +249,11 @@ async fn run_event_loop(
                 spawn_subscribe_forwarder(endpoint.clone(), tx);
                 event_rx = Some(rx);
                 parsed_remote = Some(endpoint);
-                // Stream task spawned; first stream messages
-                // arrive shortly. Status flips to Live on the
-                // first successful event below.
+                // Stream task spawned. Status flips to Live
+                // when the forwarder sends Connected (the
+                // subscribe RPC succeeded) — not later when
+                // the first event arrives, which can be
+                // arbitrarily delayed on an idle daemon.
             }
             Err(err) => {
                 status = ConnectionStatus::Degraded(format!("parse '{remote_str}': {err}"));
@@ -256,31 +268,17 @@ async fn run_event_loop(
             })
             .context("terminal.draw")?;
 
-        // Race a keystroke poll against the Subscribe stream
-        // (if any). The keystroke poll is wrapped in
-        // spawn_blocking because crossterm's poll/read are
-        // sync; the await yields the runtime to the stream
-        // arm. Refresh cadence is the spawn_blocking duration
-        // when no other events arrive.
-        let keystroke = tokio::task::spawn_blocking(|| -> Result<Option<KeyEvent>> {
-            if event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS)).context("event::poll")? {
-                if let Event::Key(key) = event::read().context("event::read")? {
-                    if key.kind == KeyEventKind::Press {
-                        return Ok(Some(KeyEvent {
-                            code: key.code,
-                            modifiers: key.modifiers,
-                        }));
-                    }
-                }
-            }
-            Ok(None)
-        });
-
         if let Some(rx) = event_rx.as_mut() {
             tokio::select! {
                 // Keystroke path.
-                k = keystroke => {
-                    if let Some(action) = handle_keystroke(k)? {
+                key = key_rx.recv() => {
+                    let Some(key) = key else {
+                        // Input task dropped its sender —
+                        // unexpected (it loops until tx fails),
+                        // treat as a clean exit.
+                        return Ok(());
+                    };
+                    if let Some(action) = key_action(&key) {
                         match action {
                             UserAction::Quit => return Ok(()),
                             UserAction::Refresh => {
@@ -294,10 +292,19 @@ async fn run_event_loop(
                 // Subscribe stream path.
                 event = rx.recv() => {
                     match event {
+                        Some(EventOrError::Connected) => {
+                            // Stream open. Doesn't reset
+                            // earlier Degraded snapshots —
+                            // that path is reached only via a
+                            // successful (re)open.
+                            status = ConnectionStatus::Live;
+                        }
                         Some(EventOrError::Event(daemon_event)) => {
                             state.apply_event(daemon_event);
-                            // First event we successfully
-                            // received → confirm Live status.
+                            // First event also confirms Live
+                            // (defensive: if Connected was
+                            // dropped due to mpsc backpressure
+                            // we still flip out of Connecting).
                             if matches!(status, ConnectionStatus::Connecting) {
                                 status = ConnectionStatus::Live;
                             }
@@ -321,7 +328,10 @@ async fn run_event_loop(
         } else {
             // No live stream — only the keystroke path is
             // active.
-            if let Some(action) = handle_keystroke(keystroke.await)? {
+            let Some(key) = key_rx.recv().await else {
+                return Ok(());
+            };
+            if let Some(action) = key_action(&key) {
                 match action {
                     UserAction::Quit => return Ok(()),
                     UserAction::Refresh => {
@@ -333,6 +343,50 @@ async fn run_event_loop(
             }
         }
     }
+}
+
+/// Single-owner crossterm input task. One spawn_blocking
+/// task loops over `event::poll`/`event::read` and forwards
+/// every key press through `tx`. Exits when the receiver
+/// drops (TUI quitting) — observed via `blocking_send`
+/// returning Err.
+///
+/// Solves the a1-2 round-1 leak: each loop iteration there
+/// spawned a fresh spawn_blocking that could detach and
+/// independently consume a keystroke when the select arm
+/// preferred the Subscribe stream. With a single owner,
+/// keystrokes always reach the main loop in order.
+fn spawn_input_task(tx: mpsc::Sender<KeyEvent>) {
+    tokio::task::spawn_blocking(move || loop {
+        match event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS)) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    let local = KeyEvent {
+                        code: key.code,
+                        modifiers: key.modifiers,
+                    };
+                    if tx.blocking_send(local).is_err() {
+                        // Receiver dropped — TUI exiting.
+                        return;
+                    }
+                }
+                Ok(_) => {
+                    // Non-key event (resize, mouse, …) —
+                    // ignored for now.
+                }
+                Err(_) => return,
+            },
+            Ok(false) => {
+                // poll timeout; check whether the receiver
+                // is still alive so we don't loop forever
+                // after a TUI quit during quiet input.
+                if tx.is_closed() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    });
 }
 
 /// Action surfaced by [`handle_keystroke`] back to the loop.
@@ -350,24 +404,18 @@ struct KeyEvent {
     modifiers: KeyModifiers,
 }
 
-/// Resolve a `spawn_blocking` keystroke result into an
-/// optional `UserAction`. Returns `None` when the poll
-/// timed out without a key press OR the key wasn't a
-/// recognized action.
-fn handle_keystroke(
-    join: std::result::Result<Result<Option<KeyEvent>>, tokio::task::JoinError>,
-) -> Result<Option<UserAction>> {
-    let inner = join.context("keystroke task panicked")??;
-    let Some(key) = inner else {
-        return Ok(None);
-    };
+/// Classify a key press as a recognized user action, or
+/// `None` if the key is one we ignore. Pure function so
+/// tests can pin the keymap without spinning up an input
+/// task.
+fn key_action(key: &KeyEvent) -> Option<UserAction> {
     if should_quit(key.code, key.modifiers) {
-        return Ok(Some(UserAction::Quit));
+        return Some(UserAction::Quit);
     }
     if matches!(key.code, KeyCode::Char('r')) {
-        return Ok(Some(UserAction::Refresh));
+        return Some(UserAction::Refresh);
     }
-    Ok(None)
+    None
 }
 
 /// Re-issue a `GetState` query and replace local state.
@@ -389,10 +437,14 @@ async fn refresh_via_get_state(
     }
 }
 
-/// Either a daemon event or a stream-error message. The
-/// forwarder task sends both over the same mpsc so the event
-/// loop can handle them in one arm.
+/// Control / data messages from the Subscribe forwarder.
+/// `Connected` is sent once after the subscribe RPC returns
+/// successfully so the TUI can flip out of "Connecting"
+/// without waiting for the first event (an idle daemon can
+/// be silent indefinitely — a1-2 round 1 left the footer
+/// stuck on "connecting..." in that case).
 enum EventOrError {
+    Connected,
     Event(DaemonEvent),
     Error(String),
 }
@@ -415,6 +467,13 @@ fn spawn_subscribe_forwarder(endpoint: RemoteEndpoint, tx: mpsc::Sender<EventOrE
                 return;
             }
         };
+        // Signal successful connect immediately. Idle daemons
+        // may emit no events for a long time; without this
+        // the footer was stuck on "connecting..."
+        // indefinitely after a healthy connect.
+        if tx.send(EventOrError::Connected).await.is_err() {
+            return;
+        }
         loop {
             match stream.message().await {
                 Ok(Some(event)) => {
@@ -464,6 +523,43 @@ mod tests {
         assert!(!should_quit(KeyCode::Enter, KeyModifiers::empty()));
         // Plain 'c' without Ctrl is not a quit shortcut.
         assert!(!should_quit(KeyCode::Char('c'), KeyModifiers::empty()));
+    }
+
+    fn k(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    #[test]
+    fn key_action_maps_quit_and_refresh() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('q'))),
+            Some(UserAction::Quit)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Esc)),
+            Some(UserAction::Quit)
+        ));
+        assert!(matches!(
+            key_action(&KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+            }),
+            Some(UserAction::Quit)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('r'))),
+            Some(UserAction::Refresh)
+        ));
+    }
+
+    #[test]
+    fn key_action_returns_none_for_unmapped_keys() {
+        assert!(key_action(&k(KeyCode::Char('a'))).is_none());
+        assert!(key_action(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
+        assert!(key_action(&k(KeyCode::Enter)).is_none());
     }
 
     /// `take_active_for_restore` is the pure state-transition
