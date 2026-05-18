@@ -130,27 +130,31 @@ impl TransfersState {
     pub fn apply_event(&mut self, event: DaemonEvent) -> bool {
         match event.payload {
             Some(daemon_event::Payload::TransferStarted(s)) => {
-                // The Subscribe filter is empty (we watch
-                // everything), so we receive every transfer's
-                // Started event — including ones already in
-                // the initial GetState snapshot. Insert is
-                // idempotent: same id replaces the row in
-                // place.
-                self.active.insert(
-                    s.transfer_id.clone(),
-                    ActiveRow {
-                        transfer_id: s.transfer_id,
-                        kind: s.kind,
-                        peer: s.peer,
-                        module: s.module,
-                        path: s.path,
-                        start_unix_ms: s.start_unix_ms,
-                        bytes_completed: 0,
-                        bytes_total: 0,
-                        throughput_bps: 0,
-                    },
-                );
-                true
+                // Subscribe filter is empty (we watch every
+                // transfer), so the initial buffered drain
+                // can deliver Started events for transfers
+                // already in the snapshot. Non-clobbering
+                // insert (or_insert_with) preserves the
+                // snapshot's bytes_completed / throughput
+                // when both sources agree on a transfer.
+                //
+                // Returns true when the entry was newly
+                // inserted (state actually changed); false
+                // when the row was already present (no-op).
+                let id = s.transfer_id.clone();
+                let inserted = !self.active.contains_key(&id);
+                self.active.entry(id).or_insert_with(|| ActiveRow {
+                    transfer_id: s.transfer_id,
+                    kind: s.kind,
+                    peer: s.peer,
+                    module: s.module,
+                    path: s.path,
+                    start_unix_ms: s.start_unix_ms,
+                    bytes_completed: 0,
+                    bytes_total: 0,
+                    throughput_bps: 0,
+                });
+                inserted
             }
             Some(daemon_event::Payload::TransferProgress(p)) => {
                 if let Some(row) = self.active.get_mut(&p.transfer_id) {
@@ -388,11 +392,104 @@ mod tests {
                 start_unix_ms: 1,
             })),
         };
+        // First apply: row inserted, returns true.
         assert!(state.apply_event(ev.clone()));
         assert_eq!(state.active_count(), 1);
-        // Same id again — should NOT add a duplicate.
-        assert!(state.apply_event(ev));
+        // Second apply for the same id: returns false
+        // (state didn't change). Counter stays at 1.
+        assert!(!state.apply_event(ev));
         assert_eq!(state.active_count(), 1);
+    }
+
+    /// a1-2 round-3 regression: startup race between
+    /// `subscribe()` (registers receiver early) and
+    /// `GetState` (snapshot taken later). Buffered
+    /// `TransferStarted` events for transfers already in the
+    /// snapshot MUST NOT clobber the snapshot's bytes /
+    /// throughput. Idempotent insert via `or_insert_with`
+    /// preserves the existing row.
+    #[test]
+    fn apply_event_started_does_not_clobber_snapshot_progress() {
+        let mut state = TransfersState::new();
+        // Snapshot has the transfer with 500 KB of progress.
+        state.replace_from_snapshot(DaemonState {
+            active: vec![ActiveTransfer {
+                transfer_id: "t-1".to_string(),
+                kind: TransferKind::DelegatedPull as i32,
+                peer: "peer-A".to_string(),
+                module: "mod-X".to_string(),
+                path: "sub/file".to_string(),
+                start_unix_ms: 1,
+                bytes_completed: 500_000,
+                bytes_total: 0,
+            }],
+            ..DaemonState::default()
+        });
+        // Buffered Started event arrives — same id, but the
+        // Started shape only carries metadata, no progress.
+        let started = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: "t-1".to_string(),
+                kind: TransferKind::DelegatedPull as i32,
+                peer: "peer-A".to_string(),
+                module: "mod-X".to_string(),
+                path: "sub/file".to_string(),
+                start_unix_ms: 1,
+            })),
+        };
+        assert!(!state.apply_event(started));
+        // Snapshot's bytes_completed preserved.
+        let row = &state.active_rows()[0];
+        assert_eq!(row.bytes_completed, 500_000);
+    }
+
+    /// a1-2 round-3 regression: a transfer that starts AND
+    /// completes within the startup race window must arrive
+    /// in the recent ring with full metadata. The buffered
+    /// Started inserts the row; the buffered Complete moves
+    /// it to recent with the Started's kind / peer /
+    /// module / path intact.
+    #[test]
+    fn buffered_started_then_complete_preserves_metadata() {
+        let mut state = TransfersState::new();
+        // Empty initial snapshot (the transfer wasn't yet
+        // visible when GetState fired).
+        state.replace_from_snapshot(DaemonState::default());
+
+        // Apply buffered Started first.
+        state.apply_event(DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: "race-id".to_string(),
+                kind: TransferKind::DelegatedPull as i32,
+                peer: "race-peer".to_string(),
+                module: "race-mod".to_string(),
+                path: "race/path".to_string(),
+                start_unix_ms: 1,
+            })),
+        });
+        // Then buffered Complete.
+        state.apply_event(DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferComplete(
+                blit_core::generated::TransferComplete {
+                    transfer_id: "race-id".to_string(),
+                    bytes: 999,
+                    files: 0,
+                    duration_ms: 50,
+                    tcp_fallback_used: false,
+                },
+            )),
+        });
+
+        assert_eq!(state.active_count(), 0);
+        let r = state.recent_rows().next().unwrap();
+        assert_eq!(r.transfer_id, "race-id");
+        // Metadata copied from the Started, not blank.
+        assert_eq!(r.peer, "race-peer");
+        assert_eq!(r.module, "race-mod");
+        assert_eq!(r.path, "race/path");
+        assert_eq!(r.kind, TransferKind::DelegatedPull as i32);
+        assert_eq!(r.bytes, 999);
+        assert!(r.ok);
     }
 
     #[test]

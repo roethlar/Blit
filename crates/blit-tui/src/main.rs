@@ -235,9 +235,22 @@ async fn run_event_loop(
     if let Some(remote_str) = remote_arg {
         match RemoteEndpoint::parse(remote_str) {
             Ok(endpoint) => {
-                // Initial GetState snapshot. Synchronous over
-                // gRPC — adds a few hundred ms before the first
-                // draw, which is acceptable for startup.
+                // a1-2 round 3: open Subscribe BEFORE the
+                // initial GetState so any transfer that
+                // Started during the snapshot window lands
+                // in our mpsc and can be replayed onto the
+                // snapshot state. The previous ordering
+                // (snapshot first, subscribe second) left a
+                // gap where a transfer started after the
+                // snapshot but before our Receiver
+                // registered would be invisible: subsequent
+                // Progress events would discard against an
+                // unknown id, and a Complete would land in
+                // recent with blank metadata.
+                let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
+                spawn_subscribe_forwarder(endpoint.clone(), tx);
+                // Initial GetState. Events broadcast during
+                // this RPC's flight are buffering in `rx`.
                 match jobs::query(&endpoint, 0).await {
                     Ok(snapshot) => state.replace_from_snapshot(snapshot),
                     Err(err) => {
@@ -245,15 +258,18 @@ async fn run_event_loop(
                             ConnectionStatus::Degraded(format!("initial GetState failed: {err}"));
                     }
                 }
-                let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
-                spawn_subscribe_forwarder(endpoint.clone(), tx);
                 event_rx = Some(rx);
                 parsed_remote = Some(endpoint);
-                // Stream task spawned. Status flips to Live
-                // when the forwarder sends Connected (the
-                // subscribe RPC succeeded) — not later when
-                // the first event arrives, which can be
-                // arbitrarily delayed on an idle daemon.
+                // Drain any buffered events onto the
+                // snapshot state. TransferStarted is
+                // non-clobbering (preserves snapshot bytes /
+                // throughput when the same id is in both
+                // sources); Progress / Complete / Error
+                // apply in stream order. After this drain
+                // the loop falls into the normal select.
+                if let Some(rx) = event_rx.as_mut() {
+                    drain_startup_events(rx, &mut state, &mut status);
+                }
             }
             Err(err) => {
                 status = ConnectionStatus::Degraded(format!("parse '{remote_str}': {err}"));
@@ -416,6 +432,49 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         return Some(UserAction::Refresh);
     }
     None
+}
+
+/// Drain whatever events buffered in `rx` during the
+/// subscribe→snapshot startup window and apply them onto
+/// `state`. Returns once `try_recv` reports the channel
+/// empty (or disconnected — surfaced via Degraded status).
+///
+/// Closes the a1-2 round-3 race: subscribe registered the
+/// broadcast Receiver early, so a transfer that Started
+/// after subscribe but before the snapshot was applied
+/// lands in this buffer. Replaying onto the snapshot makes
+/// the state consistent before the main select loop takes
+/// over.
+fn drain_startup_events(
+    rx: &mut mpsc::Receiver<EventOrError>,
+    state: &mut TransfersState,
+    status: &mut ConnectionStatus,
+) {
+    use tokio::sync::mpsc::error::TryRecvError;
+    loop {
+        match rx.try_recv() {
+            Ok(EventOrError::Connected) => {
+                *status = ConnectionStatus::Live;
+            }
+            Ok(EventOrError::Event(event)) => {
+                state.apply_event(event);
+                // Connected may not have arrived yet (slot
+                // 0 of the buffer was an event); first
+                // observed event also flips Live.
+                if matches!(status, ConnectionStatus::Connecting) {
+                    *status = ConnectionStatus::Live;
+                }
+            }
+            Ok(EventOrError::Error(msg)) => {
+                *status = ConnectionStatus::Degraded(msg);
+                // Continue draining — we don't expect more
+                // events after Error in practice (forwarder
+                // exits) but a benign extra Connected
+                // before Error shouldn't trip us up.
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
+        }
+    }
 }
 
 /// Re-issue a `GetState` query and replace local state.
