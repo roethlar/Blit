@@ -144,6 +144,14 @@ impl VerifyState {
         &self.status
     }
 
+    /// `true` while a `compare_trees` call is in flight.
+    /// Symmetric to `TransferState::is_running` — used by
+    /// the d-9 live-tick gate so the event loop only burns
+    /// a wakeup timer while something is actually running.
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, VerifyStatus::Running { .. })
+    }
+
     /// Cycle the focus: None → Source → Destination → None.
     /// Called by `Tab` on F4.
     pub fn cycle_focus(&mut self) {

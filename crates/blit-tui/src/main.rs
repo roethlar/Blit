@@ -437,11 +437,34 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
             })
             .context("terminal.draw")?;
 
+        // d-9: a conditional 500ms ticker keeps the F4
+        // elapsed counters live while a Verify run or
+        // local transfer is in flight. When idle, the
+        // tick future is `pending()` so the loop sleeps
+        // indefinitely waiting on real events — no idle
+        // CPU burn, no terminal flicker.
+        let needs_live_tick = needs_live_tick(&app);
+        let live_tick = async {
+            if needs_live_tick {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(live_tick);
+
         // Build the optional Subscribe future. `select!`'s
         // `if` guard prevents polling when we have no
         // receiver yet (F2 setup still in flight, or no
         // remote configured).
         tokio::select! {
+            // d-9: 500ms live-tick wakeup for F4 elapsed
+            // counters. Body is empty — the next loop
+            // iteration's terminal.draw call computes a
+            // fresh `now` and re-renders with the updated
+            // duration string.
+            _ = &mut live_tick => {}
+
             // Keystrokes — dispatched to the active pane.
             key = key_rx.recv() => {
                 let Some(key) = key else { return Ok(()); };
@@ -1368,6 +1391,17 @@ struct TransferReply {
 /// `true` when the operator can kick a local transfer:
 /// both Verify fields are non-empty AND no transfer is
 /// running or awaiting a destructive-confirm prompt.
+/// d-9: `true` when the event loop should arm the
+/// 500ms live-tick wakeup. Reads true while a Verify
+/// run or a local transfer is in flight, so the F4
+/// elapsed counters tick visibly. Returns false on every
+/// other state, including `ConfirmingMirror` /
+/// `ConfirmingMove` — those prompts don't change over
+/// time, so there's nothing to refresh.
+fn needs_live_tick(app: &AppState) -> bool {
+    app.transfer.is_running() || app.verify.is_running()
+}
+
 fn can_start_transfer(app: &AppState) -> bool {
     !app.verify.source.trim().is_empty()
         && !app.verify.destination.trim().is_empty()
@@ -2662,6 +2696,64 @@ mod tests {
             "`?` must NOT insert into the focused field, got: {:?}",
             app.verify.source
         );
+    }
+
+    /// d-9: `needs_live_tick` is true ONLY while a Verify
+    /// run or a local transfer is in flight — that's when
+    /// the F4 elapsed counter needs a 500ms wakeup to
+    /// re-render. Idle, confirm-pending, Done, and Error
+    /// states all return false so the loop sleeps on real
+    /// events.
+    #[test]
+    fn needs_live_tick_only_during_active_runs() {
+        let mut app = AppState {
+            current_screen: Screen::F4,
+            parsed_remote: None,
+            remote_label: String::new(),
+            daemons: DaemonsState::new(),
+            daemons_last_fetched: None,
+            detail_tx: mpsc::channel::<DetailUpdate>(1).0,
+            discovery_refresh_tx: mpsc::channel::<()>(1).0,
+            transfers: TransfersState::new(),
+            transfers_status: ConnectionStatus::NoRemote,
+            transfers_setup_gen: 0,
+            transfers_setup_pending: false,
+            browse: BrowseState::new(),
+            browse_last_fetched_view: None,
+            browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            profile: profile::ProfileState::new(),
+            profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
+            verify: verify::VerifyState::new(),
+            diagnostics: diagnostics::DiagnosticsState::new(),
+            diagnostics_reply_tx: mpsc::channel::<DiagnosticsReply>(1).0,
+            help: help::HelpOverlay::default(),
+            transfer: transfer::TransferState::new(),
+            transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+        };
+
+        // All-idle → no tick.
+        assert!(!needs_live_tick(&app));
+
+        // Mirror confirmation pending → no tick (the
+        // banner is static, nothing to refresh).
+        app.transfer.begin_confirm_mirror();
+        assert!(!needs_live_tick(&app));
+        app.transfer.cancel_confirm();
+
+        // Transfer Running → tick.
+        let _id = app.transfer.begin(transfer::TransferKind::Copy);
+        assert!(needs_live_tick(&app));
+
+        // Drop back to Idle, then start a Verify run.
+        let id = _id;
+        app.transfer
+            .apply_done(id, transfer::TransferKind::Copy, Default::default());
+        assert!(!needs_live_tick(&app));
+
+        app.verify.source = "/tmp/a".to_string();
+        app.verify.destination = "/tmp/b".to_string();
+        let _ = app.verify.begin_run();
+        assert!(needs_live_tick(&app));
     }
 
     /// d-4: capital C / M trigger local copy / mirror.
