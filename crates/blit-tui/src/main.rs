@@ -164,13 +164,13 @@ impl Drop for TuiGuard {
     }
 }
 
-/// Pure state transition: swap `TUI_ACTIVE` to false and
-/// return whether this call was the one that observed it
-/// `true`. Extracted so tests can validate the idempotency
-/// contract without touching crossterm or emitting real
-/// terminal control sequences.
-fn take_active_for_restore() -> bool {
-    TUI_ACTIVE.swap(false, Ordering::SeqCst)
+/// Pure state transition: swap the provided flag to false
+/// and return whether this call was the one that observed
+/// it `true`. Parameterised on the flag so unit tests can
+/// pass local `AtomicBool` instances and run in parallel
+/// without racing on the process-global `TUI_ACTIVE`.
+fn take_active_for_restore(flag: &AtomicBool) -> bool {
+    flag.swap(false, Ordering::SeqCst)
 }
 
 /// Best-effort terminal restore: show cursor, leave
@@ -180,7 +180,7 @@ fn take_active_for_restore() -> bool {
 /// `false` and early-return. The panic hook and Drop can
 /// both call this without double-teardown.
 fn restore_terminal() {
-    if !take_active_for_restore() {
+    if !take_active_for_restore(&TUI_ACTIVE) {
         return;
     }
     let mut stdout = io::stdout();
@@ -302,15 +302,18 @@ mod tests {
     /// helper that `restore_terminal` uses to decide whether
     /// to fire any crossterm calls. Testing it directly
     /// validates the idempotency contract WITHOUT writing
-    /// real terminal escape sequences to stderr — the issue
-    /// the round-2 review flagged.
+    /// real terminal escape sequences to stderr.
+    ///
+    /// Tests use local `AtomicBool` instances (round 3
+    /// review) so parallel test execution doesn't race on
+    /// the process-global `TUI_ACTIVE`.
     ///
     /// Inactive → false (and stays false).
     #[test]
     fn take_active_for_restore_inactive_returns_false() {
-        TUI_ACTIVE.store(false, Ordering::SeqCst);
-        assert!(!take_active_for_restore());
-        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
+        let flag = AtomicBool::new(false);
+        assert!(!take_active_for_restore(&flag));
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     /// Active → true on first call, false on subsequent
@@ -318,12 +321,12 @@ mod tests {
     /// this" contract: only the winner does the teardown.
     #[test]
     fn take_active_for_restore_active_then_inactive() {
-        TUI_ACTIVE.store(true, Ordering::SeqCst);
-        assert!(take_active_for_restore());
-        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
+        let flag = AtomicBool::new(true);
+        assert!(take_active_for_restore(&flag));
+        assert!(!flag.load(Ordering::SeqCst));
         // Second caller sees inactive — no double teardown.
-        assert!(!take_active_for_restore());
-        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
+        assert!(!take_active_for_restore(&flag));
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     #[test]
