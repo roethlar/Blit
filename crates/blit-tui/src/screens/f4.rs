@@ -202,8 +202,14 @@ pub fn render_into(
         .constraints([
             Constraint::Length(1),
             Constraint::Length(4),
-            Constraint::Min(5),
-            Constraint::Length(6),
+            // d-17 trades 3 lines from the predictor block
+            // for verify's preview block (first differing
+            // path / first missing path / first error).
+            // Min(2) still keeps the predictor visible —
+            // even a single-line predictor message
+            // ("not loaded") fits.
+            Constraint::Min(2),
+            Constraint::Length(9),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -426,9 +432,59 @@ fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState, now: Insta
             Style::default().fg(Color::Red),
         )),
     };
-    let lines = vec![source_line, dest_line, mode_hint, status_line];
+    let mut lines = vec![source_line, dest_line, mode_hint, status_line];
+    // d-17: on Done, show the first entry from each
+    // non-empty category (differ / missing-on-dst /
+    // missing-on-src / errors). Operator sees the
+    // headline count AND the first concrete offender,
+    // so debugging a mismatch doesn't always require a
+    // diagnostics snapshot.
+    if let VerifyStatus::Done { result, .. } = verify.status() {
+        for line in verify_preview_lines(result, 3) {
+            lines.push(line);
+        }
+    }
     let para = Paragraph::new(lines).block(block);
     frame.render_widget(para, area);
+}
+
+/// d-17: produce up to `max` "first entry" preview lines
+/// from a `CheckResult`. Order: differing → missing-on-dst
+/// → missing-on-src → errors, so the most actionable
+/// category (an existing file that differs) comes first.
+/// Empty categories are skipped — a clean compare with
+/// only matches returns an empty Vec.
+fn verify_preview_lines(result: &blit_app::check::CheckResult, max: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let warn = Style::default().fg(Color::Yellow);
+    let err = Style::default().fg(Color::Red);
+    if !result.differing.is_empty() && lines.len() < max {
+        let d = &result.differing[0];
+        lines.push(Line::from(Span::styled(
+            format!("  differ[0]: {} — {}", d.path, d.reason),
+            warn,
+        )));
+    }
+    if !result.missing_on_dest.is_empty() && lines.len() < max {
+        lines.push(Line::from(Span::styled(
+            format!("  missing-on-dst[0]: {}", result.missing_on_dest[0]),
+            warn,
+        )));
+    }
+    if !result.missing_on_src.is_empty() && lines.len() < max {
+        lines.push(Line::from(Span::styled(
+            format!("  missing-on-src[0]: {}", result.missing_on_src[0]),
+            warn,
+        )));
+    }
+    if !result.errors.is_empty() && lines.len() < max {
+        let (path, msg) = &result.errors[0];
+        lines.push(Line::from(Span::styled(
+            format!("  errors[0]: {} — {}", path, msg),
+            err,
+        )));
+    }
+    lines
 }
 
 fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
@@ -775,5 +831,72 @@ mod tests {
         let lines = summary_lines(&report);
         let recording_line = line_text(&lines[2]);
         assert!(recording_line.contains("disabled"));
+    }
+
+    // d-17: verify-result preview lines.
+
+    fn empty_check_result() -> blit_app::check::CheckResult {
+        blit_app::check::CheckResult::default()
+    }
+
+    #[test]
+    fn verify_preview_empty_result_returns_no_lines() {
+        // A clean compare (all matching, no diffs) needs
+        // no preview block — the headline status line
+        // already says "matches: N · differ: 0 · ...".
+        let lines = verify_preview_lines(&empty_check_result(), 3);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn verify_preview_shows_first_differ_first() {
+        let mut result = empty_check_result();
+        result.differing.push(blit_app::check::DiffEntry {
+            path: "src/a.txt".to_string(),
+            reason: "size 1024 vs 2048".to_string(),
+            src_size: 1024,
+            dst_size: 2048,
+        });
+        result.missing_on_dest.push("src/b.txt".to_string());
+        let lines = verify_preview_lines(&result, 3);
+        assert_eq!(lines.len(), 2);
+        let first = line_text(&lines[0]);
+        assert!(first.contains("differ[0]"));
+        assert!(first.contains("src/a.txt"));
+        assert!(first.contains("size 1024 vs 2048"));
+        let second = line_text(&lines[1]);
+        assert!(second.contains("missing-on-dst[0]"));
+        assert!(second.contains("src/b.txt"));
+    }
+
+    #[test]
+    fn verify_preview_caps_at_max_even_with_all_categories() {
+        let mut result = empty_check_result();
+        result.differing.push(blit_app::check::DiffEntry {
+            path: "a".to_string(),
+            reason: "r".to_string(),
+            src_size: 0,
+            dst_size: 0,
+        });
+        result.missing_on_dest.push("b".to_string());
+        result.missing_on_src.push("c".to_string());
+        result.errors.push(("d".to_string(), "msg".to_string()));
+        // 4 non-empty categories but max=2.
+        let lines = verify_preview_lines(&result, 2);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn verify_preview_shows_errors_in_red() {
+        let mut result = empty_check_result();
+        result
+            .errors
+            .push(("src/oops".to_string(), "permission denied".to_string()));
+        let lines = verify_preview_lines(&result, 3);
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(text.contains("errors[0]"));
+        assert!(text.contains("src/oops"));
+        assert!(text.contains("permission denied"));
     }
 }
