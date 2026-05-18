@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-6b-state-preservation | Medium | Unified loop, backgrounded F2 setup, preserved parse errors (R2) | `[~]` | `phase5/a1` | `5cf2fe6` |
+_none_
 
 ## Open findings
 

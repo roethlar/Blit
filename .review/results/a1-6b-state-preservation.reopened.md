@@ -1,49 +1,30 @@
 # a1-6b-state-preservation reopened
 
-Reviewed sha: `2fbcd1a13747c17ea420490edde5d30f1661588a`
+Reviewed sha: `5cf2fe6499f669ff4f4112e4bc0fe97bdc985b39`
 
 Verdict: reopened
 
-## Findings
+## Finding
 
-### 1. Medium — Hidden F2 setup can block the TUI before the first F1 render
+### 1. Medium — F2 refresh can spawn overlapping setup tasks with stale replies
 
-`run_router` now does the F2 Subscribe setup and initial `GetState` inline before entering the screen loop:
+Round 2 correctly moves F2 setup off the first draw and into `spawn_f2_setup_task`, but there is no "setup in flight" guard or generation check:
 
-- `crates/blit-tui/src/main.rs:287`
-- `crates/blit-tui/src/main.rs:288`
-- `crates/blit-tui/src/main.rs:290`
+- initial setup spawn: `crates/blit-tui/src/main.rs:290`
+- F2 refresh spawn while `transfers_event_rx.is_none()`: `crates/blit-tui/src/main.rs:521`
+- unqualified setup reply application: `crates/blit-tui/src/main.rs:449`
 
-Because `--screen` now defaults to F1, a normal invocation like `blit-tui --remote host:9031` should be able to draw the Daemons pane immediately while F2/F3 consume the remote later. Instead, if the remote is valid syntax but slow or unreachable, `open_subscribe_stream(endpoint).await` / `jobs::query(endpoint, 0).await` can hold the entire TUI before any frame is rendered. That also changes the earlier contract documented around F1: F1 is mDNS-only and ignores `--remote`.
+At startup with a valid but slow remote, `app.transfers_status` is `Connecting` and `transfers_event_rx` is still `None`. If the operator switches to F2 and presses `r`, `handle_pane_action` starts a second `spawn_f2_setup_task` even though the first setup is still pending. Both tasks send the same unversioned `F2SetupReply` into `f2_setup_rx`, and the unified loop applies whichever replies arrive in arrival order.
 
-The F2 setup needs to be lazy or actually backgrounded. It should not block the router's initial draw for screens that do not need F2 state.
+This can corrupt visible status and stream ownership. Example: setup A succeeds and installs a live `event_rx`; setup B, started by the refresh key, fails later and sets `app.transfers_status = Degraded(err)` even though the stream from A is live. Since normal Subscribe events only promote `Connecting -> Live`, that stale failure can leave F2 showing degraded until another manual refresh. If both succeed, the later reply replaces the active Subscribe receiver with a second stream and drops the first.
 
-### 2. Medium — Background feeds are still drained only by the active pane
+The setup path needs either a boolean/generation in `AppState` or a request id in `F2SetupReply`, so `r` does not start duplicate setup while one is pending and stale setup results cannot overwrite newer state.
 
-The finding doc says the refactor replaces the four pane loops with a single loop that selects over all background channels plus keystrokes. The implementation still enters one pane loop at a time:
+## Closed From Round 1
 
-- router dispatch: `crates/blit-tui/src/main.rs:320`
-- F1 drains discovery/detail only inside `run_f1_pane_loop`: `crates/blit-tui/src/main.rs:650`
-- F2 drains Subscribe only inside `run_f2_pane_loop`: `crates/blit-tui/src/main.rs:507`
-- F3 drains browse fetch replies only inside `run_f3_pane_loop`: `crates/blit-tui/src/main.rs:839`
-- F4 drains profile replies only inside `run_f4_pane_loop`: `crates/blit-tui/src/main.rs:1004`
-
-That means hidden-pane producers can back up. F1 discovery has a bounded channel of 4; if the operator spends more than a few scan intervals on another pane, the discovery task can block on send. When the operator returns, `replace_from_discovery(&services, Instant::now())` stamps an old scan as freshly seen. F2's Subscribe mpsc is bounded at 256; a long-running transfer while the operator is on F1/F3/F4 can fill it, causing the TUI forwarder to stop reading the gRPC stream until F2 is revisited.
-
-This is not just an implementation-shape nit: the state being preserved can be stale, and the "background tasks stay alive across navigation" guarantee is incomplete unless their outputs are continuously drained. The fix should be a real app-level event loop, or equivalent background fan-in, that processes all active feeds regardless of the visible pane.
-
-### 3. Low — Remote parse errors are reduced to `invalid endpoint`
-
-The router now parses with `.ok()`:
-
-- `crates/blit-tui/src/main.rs:220`
-
-and later reports generic messages:
-
-- F3: `crates/blit-tui/src/main.rs:278`
-- F2: `crates/blit-tui/src/main.rs:308`
-
-Before this refactor, F2/F3 surfaced the actual `RemoteEndpoint::parse` error, including helpful messages like backslash guidance or missing module-path syntax. Store the parse `Result` or parse error string so both panes keep the specific diagnostic.
+- Hidden F2 setup no longer blocks the first draw.
+- Background feeds are drained by the unified loop regardless of active pane.
+- Remote parse errors preserve the parser's detailed message.
 
 ## Gates
 
