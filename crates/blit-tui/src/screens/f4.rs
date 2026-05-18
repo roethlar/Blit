@@ -33,7 +33,66 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// d-8: format an elapsed Duration as a compact
+/// human-readable string. Sub-second → "Nms", 1-60s →
+/// "N.Ns", 1-60m → "Nm Ns", longer → "Nh Nm". The Done
+/// banners surface this so the operator can see "copy
+/// took 12.3s" or "compare took 432ms" without a
+/// stopwatch.
+fn format_elapsed(d: Duration) -> String {
+    let total_ms = d.as_millis();
+    if total_ms < 1000 {
+        return format!("{}ms", total_ms);
+    }
+    let total_secs = d.as_secs();
+    if total_secs < 60 {
+        // tenths of a second precision for under a minute
+        let tenths = (d.as_millis() % 1000) / 100;
+        return format!("{}.{}s", total_secs, tenths);
+    }
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    if mins < 60 {
+        return format!("{}m {}s", mins, secs);
+    }
+    let hours = mins / 60;
+    let mins = mins % 60;
+    format!("{}h {}m", hours, mins)
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::*;
+
+    #[test]
+    fn format_elapsed_milliseconds() {
+        assert_eq!(format_elapsed(Duration::from_millis(0)), "0ms");
+        assert_eq!(format_elapsed(Duration::from_millis(432)), "432ms");
+        assert_eq!(format_elapsed(Duration::from_millis(999)), "999ms");
+    }
+
+    #[test]
+    fn format_elapsed_seconds_with_tenths() {
+        assert_eq!(format_elapsed(Duration::from_millis(1000)), "1.0s");
+        assert_eq!(format_elapsed(Duration::from_millis(12340)), "12.3s");
+        assert_eq!(format_elapsed(Duration::from_millis(59900)), "59.9s");
+    }
+
+    #[test]
+    fn format_elapsed_minutes_seconds() {
+        assert_eq!(format_elapsed(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(format_elapsed(Duration::from_secs(125)), "2m 5s");
+        assert_eq!(format_elapsed(Duration::from_secs(59 * 60 + 59)), "59m 59s");
+    }
+
+    #[test]
+    fn format_elapsed_hours_minutes() {
+        assert_eq!(format_elapsed(Duration::from_secs(3600)), "1h 0m");
+        assert_eq!(format_elapsed(Duration::from_secs(3600 + 1800)), "1h 30m");
+    }
+}
 
 /// Render the F4 pane into a caller-supplied area (router-aware).
 ///
@@ -66,13 +125,13 @@ pub fn render_into(
     render_header(frame, chunks[0], state);
     render_records_summary(frame, chunks[1], state);
     render_predictor(frame, chunks[2], state);
-    render_verify(frame, chunks[3], verify);
+    render_verify(frame, chunks[3], verify, now);
     render_diagnostics(frame, chunks[4], diagnostics);
-    render_transfer(frame, chunks[5], transfer);
+    render_transfer(frame, chunks[5], transfer, now);
     render_footer(frame, chunks[6], state.status(), verify, now);
 }
 
-fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState) {
+fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState, now: Instant) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Local transfer (C copy · M mirror · V move) ");
@@ -89,17 +148,27 @@ fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState) {
             "move will DELETE the SOURCE after copy · [y/N] to confirm",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
-        TransferStatus::Running { kind } => Line::from(Span::styled(
-            format!("{} running...", kind.label()),
+        TransferStatus::Running { kind, started_at } => Line::from(Span::styled(
+            format!(
+                "{} running... ({})",
+                kind.label(),
+                format_elapsed(now.saturating_duration_since(*started_at))
+            ),
             Style::default().fg(Color::Yellow),
         )),
-        TransferStatus::Done { kind, summary, .. } => Line::from(Span::styled(
+        TransferStatus::Done {
+            kind,
+            summary,
+            started_at,
+            finished_at,
+        } => Line::from(Span::styled(
             format!(
-                "{} done · {} planned · {} copied · {} bytes",
+                "{} done · {} planned · {} copied · {} bytes · {}",
                 kind.label(),
                 summary.planned_files,
                 summary.copied_files,
-                summary.total_bytes
+                summary.total_bytes,
+                format_elapsed(finished_at.saturating_duration_since(*started_at)),
             ),
             Style::default().fg(Color::Green),
         )),
@@ -194,7 +263,7 @@ fn render_predictor(frame: &mut Frame, area: Rect, state: &ProfileState) {
     frame.render_widget(para, area);
 }
 
-fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState) {
+fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState, now: Instant) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Verify (local paths only) ");
@@ -233,18 +302,26 @@ fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState) {
             "tab: enter editing · enter: run · esc: leave editing",
             Style::default().fg(Color::DarkGray),
         )),
-        VerifyStatus::Running => Line::from(Span::styled(
-            "running compare_trees...",
+        VerifyStatus::Running { started_at } => Line::from(Span::styled(
+            format!(
+                "running compare_trees... ({})",
+                format_elapsed(now.saturating_duration_since(*started_at))
+            ),
             Style::default().fg(Color::Yellow),
         )),
-        VerifyStatus::Done { result, .. } => Line::from(Span::styled(
+        VerifyStatus::Done {
+            result,
+            started_at,
+            finished_at,
+        } => Line::from(Span::styled(
             format!(
-                "matches: {} · differ: {} · missing-on-src: {} · missing-on-dst: {} · errors: {}",
+                "matches: {} · differ: {} · missing-on-src: {} · missing-on-dst: {} · errors: {} · {}",
                 result.matching,
                 result.differing.len(),
                 result.missing_on_src.len(),
                 result.missing_on_dest.len(),
                 result.errors.len(),
+                format_elapsed(finished_at.saturating_duration_since(*started_at)),
             ),
             Style::default().fg(Color::Green),
         )),

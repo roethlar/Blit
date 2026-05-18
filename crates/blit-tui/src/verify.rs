@@ -40,11 +40,15 @@ pub enum VerifyStatus {
     /// No run yet (or the form was just edited).
     Idle,
     /// `compare_trees` is running on a blocking task.
-    Running,
+    Running {
+        /// d-8: captured at `begin_run()`. Done preserves
+        /// it so the result banner can show duration.
+        started_at: Instant,
+    },
     /// Last run succeeded; `result` carries the counts.
     Done {
         result: CheckResult,
-        #[allow(dead_code)]
+        started_at: Instant,
         finished_at: Instant,
     },
     /// Last run failed.
@@ -209,7 +213,7 @@ impl VerifyState {
         // result will now be ignored.
         if matches!(
             self.status,
-            VerifyStatus::Done { .. } | VerifyStatus::Error { .. } | VerifyStatus::Running
+            VerifyStatus::Done { .. } | VerifyStatus::Error { .. } | VerifyStatus::Running { .. }
         ) {
             self.status = VerifyStatus::Idle;
         }
@@ -220,7 +224,9 @@ impl VerifyState {
     /// spawned task can tag its reply.
     pub fn begin_run(&mut self) -> u64 {
         self.request_id += 1;
-        self.status = VerifyStatus::Running;
+        self.status = VerifyStatus::Running {
+            started_at: Instant::now(),
+        };
         self.request_id
     }
 
@@ -230,8 +236,17 @@ impl VerifyState {
         if request_id != self.request_id {
             return false;
         }
+        // d-8: preserve `started_at` from the in-flight
+        // Running variant so the Done banner can show
+        // total duration. Defensive fallback as in
+        // `transfer::apply_done` for the same reason.
+        let started_at = match self.status {
+            VerifyStatus::Running { started_at } => started_at,
+            _ => Instant::now(),
+        };
         self.status = VerifyStatus::Done {
             result,
+            started_at,
             finished_at: Instant::now(),
         };
         true
@@ -252,7 +267,7 @@ impl VerifyState {
     pub fn can_run(&self) -> bool {
         !self.source.trim().is_empty()
             && !self.destination.trim().is_empty()
-            && !matches!(self.status, VerifyStatus::Running)
+            && !matches!(self.status, VerifyStatus::Running { .. })
     }
 }
 
@@ -377,7 +392,7 @@ mod tests {
         state.cycle_focus(); // Destination
         state.insert_char('b');
         let gen = state.begin_run();
-        assert!(matches!(state.status(), VerifyStatus::Running));
+        assert!(matches!(state.status(), VerifyStatus::Running { .. }));
 
         // Operator keeps typing while the run is in flight.
         state.insert_char('c');
@@ -431,7 +446,7 @@ mod tests {
         let applied = state.apply_result(gen1, empty_check_result());
         assert!(!applied);
         // State still Running (from gen2).
-        assert!(matches!(state.status(), VerifyStatus::Running));
+        assert!(matches!(state.status(), VerifyStatus::Running { .. }));
     }
 
     #[test]
@@ -546,5 +561,32 @@ mod tests {
         state.toggle_one_way();
         assert!(state.use_checksum(), "checksum unchanged");
         assert!(state.one_way());
+    }
+
+    // d-8: started_at preserved across begin_run → apply_result.
+
+    #[test]
+    fn apply_result_preserves_started_at_from_running() {
+        let mut state = VerifyState::new();
+        state.source = "/tmp/a".to_string();
+        state.destination = "/tmp/b".to_string();
+        let id = state.begin_run();
+        let started = match state.status() {
+            VerifyStatus::Running { started_at } => *started_at,
+            other => panic!("expected Running after begin_run, got {other:?}"),
+        };
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(state.apply_result(id, empty_check_result()));
+        match state.status() {
+            VerifyStatus::Done {
+                started_at,
+                finished_at,
+                ..
+            } => {
+                assert_eq!(*started_at, started);
+                assert!(finished_at >= started_at);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }

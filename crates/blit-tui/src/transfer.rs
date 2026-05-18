@@ -62,11 +62,16 @@ pub enum TransferStatus {
     ConfirmingMove,
     Running {
         kind: TransferKind,
+        /// d-8: captured at `begin()`. Render uses it to
+        /// surface a live "running... (12s)" elapsed
+        /// counter on each frame, then again on Done to
+        /// show total duration.
+        started_at: Instant,
     },
     Done {
         kind: TransferKind,
         summary: Box<LocalMirrorSummary>,
-        #[allow(dead_code)]
+        started_at: Instant,
         finished_at: Instant,
     },
     Error {
@@ -160,7 +165,10 @@ impl TransferState {
 
     pub fn begin(&mut self, kind: TransferKind) -> u64 {
         self.request_id += 1;
-        self.status = TransferStatus::Running { kind };
+        self.status = TransferStatus::Running {
+            kind,
+            started_at: Instant::now(),
+        };
         self.request_id
     }
 
@@ -213,9 +221,21 @@ impl TransferState {
         if request_id != self.request_id {
             return false;
         }
+        // d-8: thread `started_at` from the in-flight
+        // Running state into the Done variant so the
+        // render can compute total duration. Defensive
+        // fallback to `Instant::now()` if state isn't
+        // Running — shouldn't happen given the gen guard
+        // above, but apply_done shouldn't panic on a state
+        // that's already terminal.
+        let started_at = match self.status {
+            TransferStatus::Running { started_at, .. } => started_at,
+            _ => Instant::now(),
+        };
         self.status = TransferStatus::Done {
             kind,
             summary: Box::new(summary),
+            started_at,
             finished_at: Instant::now(),
         };
         true
@@ -252,7 +272,7 @@ mod tests {
         assert_eq!(id, 1);
         assert!(state.is_running());
         match state.status() {
-            TransferStatus::Running { kind } => assert_eq!(*kind, TransferKind::Copy),
+            TransferStatus::Running { kind, .. } => assert_eq!(*kind, TransferKind::Copy),
             other => panic!("expected Running, got {other:?}"),
         }
     }
@@ -279,7 +299,7 @@ mod tests {
         assert!(!applied);
         // Still Running with the second begin's kind.
         match state.status() {
-            TransferStatus::Running { kind } => assert_eq!(*kind, TransferKind::Mirror),
+            TransferStatus::Running { kind, .. } => assert_eq!(*kind, TransferKind::Mirror),
             other => panic!("expected Running, got {other:?}"),
         }
     }
@@ -423,5 +443,41 @@ mod tests {
         let id = state.begin(TransferKind::Copy);
         state.apply_error(id, TransferKind::Copy, "boom".to_string());
         assert_eq!(state.count_recent(), 1, "Error → 1 recent");
+    }
+
+    // d-8: started_at preserved across begin → apply_done.
+
+    #[test]
+    fn apply_done_preserves_started_at_from_running() {
+        let mut state = TransferState::new();
+        let id = state.begin(TransferKind::Copy);
+        let started = match state.status() {
+            TransferStatus::Running { started_at, .. } => *started_at,
+            other => panic!("expected Running after begin, got {other:?}"),
+        };
+        // Insert a small gap so finished_at > started_at
+        // reliably (Instant resolution is fine-grained
+        // enough that this is more documentation than
+        // load-bearing).
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let applied = state.apply_done(id, TransferKind::Copy, empty_summary());
+        assert!(applied);
+        match state.status() {
+            TransferStatus::Done {
+                started_at,
+                finished_at,
+                ..
+            } => {
+                assert_eq!(
+                    *started_at, started,
+                    "Done.started_at must equal the Running.started_at"
+                );
+                assert!(
+                    finished_at >= started_at,
+                    "finished_at must be ≥ started_at"
+                );
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 }
