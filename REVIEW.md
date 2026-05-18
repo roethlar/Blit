@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-5-f4-profile   | Feature  | F4 Profile pane (read-only perf history)    | `[~]`  | `phase5/a1` | `d33fedc` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -95,3 +95,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `1fcee97` F1 Daemons pane with Local row, viewport-aware table, and rescan clamp (`a1-3-f1-daemons`)
 - `3ac1cb2` F1 detail block populated by `GetState` (`a1-3b-f1-getstate-detail` round 2)
 - `2abc71b` F3 Browse pane with modules + directory tree (`a1-4-f3-browse` round 2)
+- `d33fedc` F4 Profile pane with read-only perf history + predictor (`a1-5-f4-profile`)
