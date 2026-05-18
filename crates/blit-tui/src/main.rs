@@ -126,6 +126,58 @@ pub enum LoopOutcome {
     Navigate(Screen),
 }
 
+/// Cross-pane state aggregator (a1-6b). Holds every pane's
+/// state, the per-pane bookkeeping bits (cursor-tracking
+/// names, view paths, statuses), and the senders for
+/// background-task replies. Receivers + the senders the
+/// background tasks themselves use stay in the router's
+/// local scope and get borrowed into each pane loop.
+///
+/// State preservation: `AppState` lives for the whole TUI
+/// session, so navigating away from a pane and back keeps
+/// the existing data — F1's discovered rows + cursor, F2's
+/// active/recent tables, F3's tree position, F4's loaded
+/// profile.
+///
+/// Background-task preservation: the discovery task,
+/// Subscribe stream, and per-pane reply channels are
+/// spawned once by `run_router` and stay alive across
+/// navigations. Pane loops just borrow the receivers.
+struct AppState {
+    /// Shared remote endpoint (parsed once at startup).
+    parsed_remote: Option<RemoteEndpoint>,
+    /// Display label for the remote (raw user input or
+    /// "(no remote)").
+    remote_label: String,
+
+    // F1
+    daemons: DaemonsState,
+    daemons_last_fetched: Option<String>,
+    /// Sender into the F1 detail fetcher mpsc. Cloned by
+    /// `maybe_kick_detail_fetch` into each spawned task.
+    detail_tx: mpsc::Sender<DetailUpdate>,
+    /// Sender for the F1 discovery refresh-trigger channel
+    /// (bounded(1)). Operator's `r` keystroke nudges this.
+    discovery_refresh_tx: mpsc::Sender<()>,
+
+    // F2
+    transfers: TransfersState,
+    transfers_status: ConnectionStatus,
+
+    // F3
+    browse: BrowseState,
+    browse_last_fetched_view: Option<browse::BrowseView>,
+    /// Sender into the F3 browse fetcher mpsc. Cloned by
+    /// `kick_browse_fetch` into each spawned task.
+    browse_fetch_tx: mpsc::Sender<BrowseFetchReply>,
+
+    // F4
+    profile: profile::ProfileState,
+    /// Sender into the F4 profile fetcher mpsc. Cloned by
+    /// `spawn_profile_fetch` into each spawned task.
+    profile_reply_tx: mpsc::Sender<ProfileReply>,
+}
+
 /// Polling cadence for the event loop. 50ms keeps keystroke
 /// latency low without burning CPU on idle.
 const EVENT_POLL_INTERVAL_MS: u64 = 50;
@@ -158,25 +210,133 @@ async fn main() -> Result<()> {
 /// `a1-6b-state-preservation` follow-up.
 async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Args) -> Result<()> {
     // a1-6 round 2: the input task is owned by the router
-    // for the whole TUI lifetime. Pane loops borrow the
-    // receiver instead of spawning their own task. Without
-    // this, two crossterm `event::poll` readers could be
-    // alive during a navigation window — the old pane's
-    // blocking task could still be inside the 50ms poll
-    // when the next pane spawns its own reader, leading to
-    // dropped or misrouted keystrokes (the same class of
-    // bug a1-2 round 1 hit with per-iteration
-    // spawn_blocking).
+    // for the whole TUI lifetime.
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
     spawn_input_task(key_tx);
+
+    // a1-6b: parse remote up-front so every pane sees the
+    // same endpoint (or None) without re-parsing.
+    let parsed_remote = match args.remote.as_deref() {
+        Some(raw) => RemoteEndpoint::parse(raw).ok(),
+        None => None,
+    };
+    let remote_label = args.remote.as_deref().unwrap_or("(no remote)").to_string();
+
+    // a1-6b: background tasks spawned ONCE here. Receivers
+    // live in this function's scope; pane loops borrow them
+    // by `&mut` reference.
+
+    // F1 mDNS discovery — spawned once, runs for the whole
+    // TUI session. Pane visits to F1 just drain `disco_rx`.
+    let (discovery_refresh_tx, refresh_rx) = mpsc::channel::<()>(1);
+    let (disco_tx, mut disco_rx) = mpsc::channel::<DiscoveryUpdate>(4);
+    spawn_discovery_task(
+        F1_DISCOVERY_INTERVAL,
+        F1_DISCOVERY_SCAN_TIMEOUT,
+        refresh_rx,
+        disco_tx,
+    );
+
+    // F1 detail fetcher reply channel.
+    let (detail_tx, mut detail_rx) = mpsc::channel::<DetailUpdate>(F1_DETAIL_BUFFER);
+
+    // F3 browse fetcher reply channel.
+    let (browse_fetch_tx, mut browse_fetch_rx) = mpsc::channel::<BrowseFetchReply>(8);
+
+    // F4 profile fetcher reply channel.
+    let (profile_reply_tx, mut profile_reply_rx) = mpsc::channel::<ProfileReply>(4);
+
+    let mut app = AppState {
+        parsed_remote: parsed_remote.clone(),
+        remote_label,
+        daemons: DaemonsState::new(),
+        daemons_last_fetched: None,
+        detail_tx: detail_tx.clone(),
+        discovery_refresh_tx,
+        transfers: TransfersState::new(),
+        transfers_status: if parsed_remote.is_some() {
+            ConnectionStatus::Connecting
+        } else {
+            ConnectionStatus::NoRemote
+        },
+        browse: BrowseState::new(),
+        browse_last_fetched_view: None,
+        browse_fetch_tx: browse_fetch_tx.clone(),
+        profile: profile::ProfileState::new(),
+        profile_reply_tx: profile_reply_tx.clone(),
+    };
+
+    // F3 banner for missing/malformed remote (matches the
+    // pre-a1-6b behavior where F3's loop set this on first
+    // entry).
+    match args.remote.as_deref() {
+        None => app
+            .browse
+            .note_fetch_error("--remote <host> is required for F3 Browse".to_string()),
+        Some(raw) if app.parsed_remote.is_none() => {
+            app.browse
+                .note_fetch_error(format!("parse '{raw}': invalid endpoint"));
+        }
+        Some(_) => {}
+    }
+
+    // F2 Subscribe stream + initial GetState (a1-2 round 4
+    // subscribe-first ordering). Opened once at startup so
+    // the stream survives F-key navigation.
+    let mut transfers_event_rx: Option<mpsc::Receiver<EventOrError>> = None;
+    if let Some(endpoint) = app.parsed_remote.as_ref() {
+        match open_subscribe_stream(endpoint).await {
+            Ok(rx) => {
+                match jobs::query(endpoint, 0).await {
+                    Ok(snapshot) => app.transfers.replace_from_snapshot(snapshot),
+                    Err(err) => {
+                        app.transfers_status =
+                            ConnectionStatus::Degraded(format!("initial GetState failed: {err}"));
+                    }
+                }
+                let mut rx = rx;
+                drain_startup_events(&mut rx, &mut app.transfers, &mut app.transfers_status);
+                transfers_event_rx = Some(rx);
+            }
+            Err(err) => {
+                app.transfers_status = ConnectionStatus::Degraded(err);
+            }
+        }
+    } else if args.remote.is_some() {
+        // --remote was set but failed to parse.
+        app.transfers_status = ConnectionStatus::Degraded(format!(
+            "parse '{}': invalid endpoint",
+            args.remote.as_deref().unwrap_or("")
+        ));
+    }
+
+    // F4 initial profile fetch — kicked once so the operator
+    // sees data the first time they hit F4.
+    let initial_profile_id = app.profile.begin_fetch();
+    spawn_profile_fetch(initial_profile_id, profile_reply_tx.clone());
 
     let mut next: Screen = args.screen.into();
     loop {
         let outcome = match next {
-            Screen::F1 => run_f1_event_loop(terminal, &mut key_rx).await?,
-            Screen::F2 => run_f2_event_loop(terminal, &mut key_rx, args.remote.as_deref()).await?,
-            Screen::F3 => run_f3_event_loop(terminal, &mut key_rx, args.remote.as_deref()).await?,
-            Screen::F4 => run_f4_event_loop(terminal, &mut key_rx).await?,
+            Screen::F1 => {
+                run_f1_pane_loop(
+                    terminal,
+                    &mut key_rx,
+                    &mut app,
+                    &mut disco_rx,
+                    &mut detail_rx,
+                )
+                .await?
+            }
+            Screen::F2 => {
+                run_f2_pane_loop(terminal, &mut key_rx, &mut app, &mut transfers_event_rx).await?
+            }
+            Screen::F3 => {
+                run_f3_pane_loop(terminal, &mut key_rx, &mut app, &mut browse_fetch_rx).await?
+            }
+            Screen::F4 => {
+                run_f4_pane_loop(terminal, &mut key_rx, &mut app, &mut profile_reply_rx).await?
+            }
         };
         match outcome {
             LoopOutcome::Quit => return Ok(()),
@@ -323,109 +483,46 @@ fn install_panic_hook() {
 /// snapshot + Subscribe stream). Without `--remote`, renders
 /// F2 in a "no remote configured" state so the layout is
 /// visible.
-async fn run_f2_event_loop(
+async fn run_f2_pane_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key_rx: &mut mpsc::Receiver<KeyEvent>,
-    remote_arg: Option<&str>,
+    app: &mut AppState,
+    event_rx: &mut Option<mpsc::Receiver<EventOrError>>,
 ) -> Result<LoopOutcome> {
-    let mut state = TransfersState::new();
-    let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
-    let mut status = if remote_arg.is_some() {
-        ConnectionStatus::Connecting
-    } else {
-        ConnectionStatus::NoRemote
-    };
-
-    // a1-6 round 2: the input task is owned by the router
-    // for the whole TUI lifetime. `key_rx` is borrowed
-    // here so a navigation transition doesn't briefly
-    // double up two crossterm event readers.
-
-    // Optional Subscribe channel. None when no `--remote`.
-    let mut event_rx: Option<mpsc::Receiver<EventOrError>> = None;
-    let mut parsed_remote: Option<RemoteEndpoint> = None;
-
-    if let Some(remote_str) = remote_arg {
-        match RemoteEndpoint::parse(remote_str) {
-            Ok(endpoint) => {
-                // a1-2 round 4: subscribe-first ordering is
-                // now causally enforced. `open_subscribe_stream`
-                // awaits the subscribe RPC and only returns
-                // OK after the daemon's broadcast receiver is
-                // registered. Any transfer that Started after
-                // this point but before the snapshot lands
-                // buffers in `rx` and replays onto state
-                // below.
-                match open_subscribe_stream(&endpoint).await {
-                    Ok(rx) => {
-                        // Initial GetState. Events broadcast
-                        // during this RPC's flight buffer in
-                        // `rx`.
-                        match jobs::query(&endpoint, 0).await {
-                            Ok(snapshot) => state.replace_from_snapshot(snapshot),
-                            Err(err) => {
-                                status = ConnectionStatus::Degraded(format!(
-                                    "initial GetState failed: {err}"
-                                ));
-                            }
-                        }
-                        event_rx = Some(rx);
-                        parsed_remote = Some(endpoint);
-                        // Drain buffered events onto the
-                        // snapshot. TransferStarted is
-                        // non-clobbering for ids already in
-                        // active[]; `apply_event` also
-                        // ignores any payload for an id
-                        // already in recent[] so a transfer
-                        // that completed in the race window
-                        // and is captured in BOTH the
-                        // snapshot.recent and the stream's
-                        // buffered Started+Complete doesn't
-                        // duplicate.
-                        if let Some(rx) = event_rx.as_mut() {
-                            drain_startup_events(rx, &mut state, &mut status);
-                        }
-                    }
-                    Err(err) => {
-                        status = ConnectionStatus::Degraded(err);
-                        parsed_remote = Some(endpoint);
-                    }
-                }
-            }
-            Err(err) => {
-                status = ConnectionStatus::Degraded(format!("parse '{remote_str}': {err}"));
-            }
-        }
-    }
-
     loop {
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
                 screens::render_tab_strip(frame, tab_area, Screen::F2);
-                screens::f2::render_into(frame, body_area, &state, &remote_label, &status);
+                screens::f2::render_into(
+                    frame,
+                    body_area,
+                    &app.transfers,
+                    &app.remote_label,
+                    &app.transfers_status,
+                );
             })
             .context("terminal.draw")?;
 
         if let Some(rx) = event_rx.as_mut() {
             tokio::select! {
-                // Keystroke path.
                 key = key_rx.recv() => {
                     let Some(key) = key else {
-                        // Input task dropped its sender —
-                        // unexpected (it loops until tx fails),
-                        // treat as a clean exit.
                         return Ok(LoopOutcome::Quit);
                     };
                     if let Some(action) = key_action(&key) {
                         match action {
                             UserAction::Quit => return Ok(LoopOutcome::Quit),
                             UserAction::Refresh => {
-                                if let Some(endpoint) = parsed_remote.as_ref() {
-                                    refresh_via_get_state(endpoint, &mut state, &mut status).await;
+                                if let Some(endpoint) = app.parsed_remote.as_ref() {
+                                    refresh_via_get_state(
+                                        endpoint,
+                                        &mut app.transfers,
+                                        &mut app.transfers_status,
+                                    )
+                                    .await;
                                 }
                             }
-                            // F2 has no cursor — ignore.
                             UserAction::SelectNext
                             | UserAction::SelectPrev
                             | UserAction::Descend
@@ -436,48 +533,33 @@ async fn run_f2_event_loop(
                         }
                     }
                 }
-                // Subscribe stream path.
                 event = rx.recv() => {
                     match event {
                         Some(EventOrError::Connected) => {
-                            // Stream open. Same rule as the
-                            // startup drain: only transition
-                            // Connecting → Live; preserve any
-                            // existing Degraded that came from
-                            // a failed initial snapshot.
-                            if matches!(status, ConnectionStatus::Connecting) {
-                                status = ConnectionStatus::Live;
+                            if matches!(app.transfers_status, ConnectionStatus::Connecting) {
+                                app.transfers_status = ConnectionStatus::Live;
                             }
                         }
                         Some(EventOrError::Event(daemon_event)) => {
-                            state.apply_event(daemon_event);
-                            // First event also confirms Live
-                            // (defensive: if Connected was
-                            // dropped due to mpsc backpressure
-                            // we still flip out of Connecting).
-                            if matches!(status, ConnectionStatus::Connecting) {
-                                status = ConnectionStatus::Live;
+                            app.transfers.apply_event(daemon_event);
+                            if matches!(app.transfers_status, ConnectionStatus::Connecting) {
+                                app.transfers_status = ConnectionStatus::Live;
                             }
                         }
                         Some(EventOrError::Error(msg)) => {
-                            status = ConnectionStatus::Degraded(msg);
-                            event_rx = None;
+                            app.transfers_status = ConnectionStatus::Degraded(msg);
+                            *event_rx = None;
                         }
                         None => {
-                            // Forwarder dropped its sender —
-                            // stream task exited. Surface the
-                            // degraded status and stop reading.
-                            status = ConnectionStatus::Degraded(
+                            app.transfers_status = ConnectionStatus::Degraded(
                                 "subscribe stream closed".to_string(),
                             );
-                            event_rx = None;
+                            *event_rx = None;
                         }
                     }
                 }
             }
         } else {
-            // No live stream — only the keystroke path is
-            // active.
             let Some(key) = key_rx.recv().await else {
                 return Ok(LoopOutcome::Quit);
             };
@@ -485,11 +567,15 @@ async fn run_f2_event_loop(
                 match action {
                     UserAction::Quit => return Ok(LoopOutcome::Quit),
                     UserAction::Refresh => {
-                        if let Some(endpoint) = parsed_remote.as_ref() {
-                            refresh_via_get_state(endpoint, &mut state, &mut status).await;
+                        if let Some(endpoint) = app.parsed_remote.as_ref() {
+                            refresh_via_get_state(
+                                endpoint,
+                                &mut app.transfers,
+                                &mut app.transfers_status,
+                            )
+                            .await;
                         }
                     }
-                    // F2 has no cursor — ignore.
                     UserAction::SelectNext
                     | UserAction::SelectPrev
                     | UserAction::Descend
@@ -510,47 +596,28 @@ async fn run_f2_event_loop(
 /// network mDNS-advertises. The operator picks one and the
 /// future browse / trigger panes wire that selection
 /// through (later A.1 sub-slices + a1-6 routing).
-async fn run_f1_event_loop(
+async fn run_f1_pane_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key_rx: &mut mpsc::Receiver<KeyEvent>,
+    app: &mut AppState,
+    disco_rx: &mut mpsc::Receiver<DiscoveryUpdate>,
+    detail_rx: &mut mpsc::Receiver<DetailUpdate>,
 ) -> Result<LoopOutcome> {
-    let mut state = DaemonsState::new();
-
-    // a1-6 round 2: key_rx is owned by the router and
-    // borrowed here.
-
-    let (disco_tx, mut disco_rx) = mpsc::channel::<DiscoveryUpdate>(4);
-    let (refresh_tx, refresh_rx) = mpsc::channel::<()>(1);
-    spawn_discovery_task(
-        F1_DISCOVERY_INTERVAL,
-        F1_DISCOVERY_SCAN_TIMEOUT,
-        refresh_rx,
-        disco_tx,
-    );
-
-    // a1-3b: per-row GetState detail fetcher. Each task
-    // tags its result with the `instance_name` it was
-    // fetching so a stale response (selection changed while
-    // in flight) can be silently dropped by the apply step
-    // below.
-    let (detail_tx, mut detail_rx) = mpsc::channel::<DetailUpdate>(F1_DETAIL_BUFFER);
-    // Last `instance_name` we kicked a fetch for. Used to
-    // dedup; the kick helper compares this against the
-    // currently selected row.
-    let mut last_fetched: Option<String> = None;
-
     loop {
         // Kick a detail fetch whenever the selection moved
-        // since the last kick. Cheap: this is a pointer
-        // compare against the cached Option<String>.
-        maybe_kick_detail_fetch(&mut state, &mut last_fetched, &detail_tx);
+        // since the last kick.
+        maybe_kick_detail_fetch(
+            &mut app.daemons,
+            &mut app.daemons_last_fetched,
+            &app.detail_tx,
+        );
 
         let now = Instant::now();
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
                 screens::render_tab_strip(frame, tab_area, Screen::F1);
-                screens::f1::render_into(frame, body_area, &state, now);
+                screens::f1::render_into(frame, body_area, &app.daemons, now);
             })
             .context("terminal.draw")?;
 
@@ -561,32 +628,18 @@ async fn run_f1_event_loop(
                     match action {
                         UserAction::Quit => return Ok(LoopOutcome::Quit),
                         UserAction::Refresh => {
-                            // Non-blocking nudge to the discovery
-                            // task. If the channel is full a scan
-                            // is already pending — silently drop,
-                            // the queued tick will satisfy us.
-                            let _ = refresh_tx.try_send(());
-                            // Invalidate the selected row's
-                            // cached detail so the next kick
-                            // fires fresh. invalidate_detail
-                            // also bumps the row's request_id
-                            // so any in-flight reply from
-                            // before the invalidation is
-                            // dropped on arrival.
-                            if let Some(name) = state
+                            let _ = app.discovery_refresh_tx.try_send(());
+                            if let Some(name) = app
+                                .daemons
                                 .selected_row()
                                 .map(|r| r.instance_name.clone())
                             {
-                                state.invalidate_detail(&name);
+                                app.daemons.invalidate_detail(&name);
                             }
-                            last_fetched = None;
+                            app.daemons_last_fetched = None;
                         }
-                        UserAction::SelectNext => state.select_next(),
-                        UserAction::SelectPrev => state.select_prev(),
-                        // F1 doesn't have tree navigation
-                        // semantics today. Future a1-6 routing
-                        // will repurpose Enter to switch panes;
-                        // for now both Descend/Ascend are no-ops.
+                        UserAction::SelectNext => app.daemons.select_next(),
+                        UserAction::SelectPrev => app.daemons.select_prev(),
                         UserAction::Descend | UserAction::Ascend => {}
                         UserAction::Navigate(target) => {
                             return Ok(LoopOutcome::Navigate(target));
@@ -597,14 +650,13 @@ async fn run_f1_event_loop(
             update = disco_rx.recv() => {
                 match update {
                     Some(DiscoveryUpdate::Result(services)) => {
-                        state.replace_from_discovery(&services, Instant::now());
+                        app.daemons.replace_from_discovery(&services, Instant::now());
                     }
                     Some(DiscoveryUpdate::Error(msg)) => {
-                        state.note_discovery_error(msg);
+                        app.daemons.note_discovery_error(msg);
                     }
                     None => {
-                        // Discovery task exited unexpectedly.
-                        state.note_discovery_error(
+                        app.daemons.note_discovery_error(
                             "discovery task exited".to_string(),
                         );
                     }
@@ -619,16 +671,8 @@ async fn run_f1_event_loop(
                         },
                         Err(message) => DaemonDetail::Error { message },
                     };
-                    // apply_detail_update returns false if
-                    // the row's request_id has moved on since
-                    // we spawned this fetch — in that case
-                    // the stale result is dropped on the
-                    // floor (a newer fetch is in flight or
-                    // already returned).
-                    state.apply_detail_update(&instance_name, request_id, detail);
+                    app.daemons.apply_detail_update(&instance_name, request_id, detail);
                 }
-                // If the channel closed (None) we just
-                // continue — the loop survives.
             }
         }
     }
@@ -730,66 +774,38 @@ const F1_DETAIL_BUFFER: usize = 8;
 /// daemon target). On missing or invalid endpoint the loop
 /// renders the F3 frame with an error stats line and accepts
 /// only `q` to quit.
-async fn run_f3_event_loop(
+async fn run_f3_pane_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key_rx: &mut mpsc::Receiver<KeyEvent>,
-    remote_arg: Option<&str>,
+    app: &mut AppState,
+    fetch_rx: &mut mpsc::Receiver<BrowseFetchReply>,
 ) -> Result<LoopOutcome> {
-    let mut state = BrowseState::new();
-    let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
-
-    // a1-6 round 2: key_rx is owned by the router.
-
-    // Parse the remote up-front so a malformed value lands
-    // in the stats banner instead of bouncing back to a hard
-    // crash. Missing flag is fatal for browsing (we have
-    // nothing to list) — keep the loop alive so the operator
-    // can read the message and quit.
-    let endpoint = match remote_arg {
-        Some(raw) => match RemoteEndpoint::parse(raw) {
-            Ok(ep) => Some(ep),
-            Err(err) => {
-                state.note_fetch_error(format!("parse '{raw}': {err}"));
-                None
-            }
-        },
-        None => {
-            state.note_fetch_error("--remote <host> is required for F3 Browse".to_string());
-            None
-        }
-    };
-
-    let (fetch_tx, mut fetch_rx) = mpsc::channel::<BrowseFetchReply>(8);
-    // Tracks what fetch we last kicked: whichever view the
-    // request was issued for. Comparing this against the
-    // current `state.view()` lets us skip duplicate kicks
-    // (operator pressing arrows without descending).
-    let mut last_fetched_view: Option<browse::BrowseView> = None;
+    let has_endpoint = app.parsed_remote.is_some();
 
     loop {
-        // Decide whether to kick a fetch. Only kicks when:
-        // - We have an endpoint.
-        // - The current view differs from the last-kicked.
-        if endpoint.is_some()
-            && views_differ(last_fetched_view.as_ref(), state.view())
+        // Decide whether to kick a fetch. Only kicks when
+        // we have an endpoint AND the current view differs
+        // from the last-kicked.
+        if has_endpoint
+            && views_differ(app.browse_last_fetched_view.as_ref(), app.browse.view())
             && matches!(
-                state.status(),
+                app.browse.status(),
                 browse::BrowseFetchStatus::Idle | browse::BrowseFetchStatus::Error { .. }
             )
         {
-            if let Some(ep) = endpoint.as_ref() {
-                kick_browse_fetch(&mut state, ep, &fetch_tx);
-                last_fetched_view = Some(state.view().clone());
+            if let Some(ep) = app.parsed_remote.as_ref() {
+                kick_browse_fetch(&mut app.browse, ep, &app.browse_fetch_tx);
+                app.browse_last_fetched_view = Some(app.browse.view().clone());
             }
         }
 
         let now = Instant::now();
-        let label = remote_label.clone();
+        let label = app.remote_label.clone();
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
                 screens::render_tab_strip(frame, tab_area, Screen::F3);
-                screens::f3::render_into(frame, body_area, &state, &label, now);
+                screens::f3::render_into(frame, body_area, &app.browse, &label, now);
             })
             .context("terminal.draw")?;
 
@@ -801,21 +817,18 @@ async fn run_f3_event_loop(
                         UserAction::Quit => return Ok(LoopOutcome::Quit),
                         UserAction::Refresh => {
                             handle_f3_refresh(
-                                &mut state,
-                                endpoint.is_some(),
-                                &mut last_fetched_view,
+                                &mut app.browse,
+                                has_endpoint,
+                                &mut app.browse_last_fetched_view,
                             );
                         }
-                        UserAction::SelectNext => state.select_next(),
-                        UserAction::SelectPrev => state.select_prev(),
+                        UserAction::SelectNext => app.browse.select_next(),
+                        UserAction::SelectPrev => app.browse.select_prev(),
                         UserAction::Descend => {
-                            // descend mutates state.view; the
-                            // next loop iteration's check
-                            // detects the new view and kicks.
-                            state.descend();
+                            app.browse.descend();
                         }
                         UserAction::Ascend => {
-                            state.ascend();
+                            app.browse.ascend();
                         }
                         UserAction::Navigate(target) => {
                             return Ok(LoopOutcome::Navigate(target));
@@ -825,7 +838,7 @@ async fn run_f3_event_loop(
             }
             reply = fetch_rx.recv() => {
                 if let Some(reply) = reply {
-                    apply_browse_reply(&mut state, reply);
+                    apply_browse_reply(&mut app.browse, reply);
                 }
             }
         }
@@ -953,30 +966,19 @@ enum BrowseFetchPayload {
 /// predictor state file (both local files; no RPC). The
 /// `profile::query` call is synchronous, so we run it on a
 /// `spawn_blocking` task to avoid stalling the runtime.
-async fn run_f4_event_loop(
+async fn run_f4_pane_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     key_rx: &mut mpsc::Receiver<KeyEvent>,
+    app: &mut AppState,
+    reply_rx: &mut mpsc::Receiver<ProfileReply>,
 ) -> Result<LoopOutcome> {
-    use crate::profile::ProfileState;
-    let mut state = ProfileState::new();
-
-    // a1-6 round 2: key_rx is owned by the router.
-
-    let (reply_tx, mut reply_rx) = mpsc::channel::<ProfileReply>(4);
-
-    // Kick the initial read immediately. The operator opens
-    // F4 to see the profile — making them press `r` first
-    // would be busywork.
-    let initial_id = state.begin_fetch();
-    spawn_profile_fetch(initial_id, reply_tx.clone());
-
     loop {
         let now = Instant::now();
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
                 screens::render_tab_strip(frame, tab_area, Screen::F4);
-                screens::f4::render_into(frame, body_area, &state, now);
+                screens::f4::render_into(frame, body_area, &app.profile, now);
             })
             .context("terminal.draw")?;
 
@@ -987,11 +989,9 @@ async fn run_f4_event_loop(
                     match action {
                         UserAction::Quit => return Ok(LoopOutcome::Quit),
                         UserAction::Refresh => {
-                            let id = state.begin_fetch();
-                            spawn_profile_fetch(id, reply_tx.clone());
+                            let id = app.profile.begin_fetch();
+                            spawn_profile_fetch(id, app.profile_reply_tx.clone());
                         }
-                        // F4 has no cursor or tree — ignore
-                        // navigation actions.
                         UserAction::SelectNext
                         | UserAction::SelectPrev
                         | UserAction::Descend
@@ -1004,13 +1004,12 @@ async fn run_f4_event_loop(
             }
             reply = reply_rx.recv() => {
                 if let Some(ProfileReply { request_id, result }) = reply {
-                    if !state.is_current_request(request_id) {
-                        // Stale (a newer fetch was kicked).
+                    if !app.profile.is_current_request(request_id) {
                         continue;
                     }
                     match result {
-                        Ok(report) => state.apply_report(report, Instant::now()),
-                        Err(message) => state.note_fetch_error(message),
+                        Ok(report) => app.profile.apply_report(report, Instant::now()),
+                        Err(message) => app.profile.note_fetch_error(message),
                     }
                 }
             }
