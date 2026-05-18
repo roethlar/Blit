@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-11-freshness-tick | Low    | Round 2: cover degraded discovery + cached detail | [~] | `phase5/a1` | `fa18813` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -110,3 +110,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `9b01340` F4 Verify/Transfer Done durations (`d-8-f4-elapsed-time`)
 - `f011cb3` F4 live elapsed ticker (`d-9-live-tick` round 2)
 - `b625ca1` F4 transfer Done throughput (`d-10-transfer-throughput`)
+- `fa18813` F1/F3/F4 freshness live tick (`d-11-freshness-tick` round 2)
