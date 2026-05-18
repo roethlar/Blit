@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-15-f2-active-row-progress | Feature | % complete on F2 active rows | [~] | `phase5/a1` | `31541a7` |
 
 ## Open findings
 
