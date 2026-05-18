@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-9-live-tick     | Low      | Round 2: re-home stray rustdoc              | [~]    | `phase5/a1` | `f011cb3` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -108,3 +108,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `368dd4b` F4 Verify checksum toggle (`d-6-f4-verify-checksum-toggle`)
 - `428cd22` F4 Verify one-way toggle (`d-7-f4-verify-one-way-toggle`)
 - `9b01340` F4 Verify/Transfer Done durations (`d-8-f4-elapsed-time`)
+- `f011cb3` F4 live elapsed ticker (`d-9-live-tick` round 2)
