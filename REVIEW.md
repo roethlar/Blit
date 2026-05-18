@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-14-f2-active-row-age | Feature | Per-row "age" column on F2 active table | [~] | `phase5/a1` | `f1217b7` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -113,3 +113,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `fa18813` F1/F3/F4 freshness live tick (`d-11-freshness-tick` round 2)
 - `ec8695f` F4 Esc cancels mirror/move confirm (`d-12-esc-cancels-confirm` round 2)
 - `8787b5f` F2 footer last-event age (`d-13-f2-freshness-footer`)
+- `f1217b7` F2 active-row age column (`d-14-f2-active-row-age`)
