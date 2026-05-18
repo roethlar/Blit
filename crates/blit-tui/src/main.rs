@@ -1361,6 +1361,19 @@ fn handle_verify_keystroke(
     if let KeyCode::F(_) = key.code {
         return false;
     }
+    // `?` is a global help shortcut. Even while the
+    // Verify form has focus, the operator should be able
+    // to open the keymap overlay — that's the one
+    // pane state where they're MOST likely to need it.
+    // Return false so the dispatcher's ToggleHelp arm
+    // runs. (e-1 round-2 fix.)
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
     match key.code {
         KeyCode::Esc => {
             // Esc drops focus without quitting the TUI.
@@ -2213,6 +2226,55 @@ mod tests {
             key_action(&k(KeyCode::Char('?'))),
             Some(UserAction::ToggleHelp)
         ));
+    }
+
+    /// e-1 round-2 regression: `?` is GLOBAL, including
+    /// from inside the Verify form's edit mode. The
+    /// verify handler must return false for `Char('?')`
+    /// so the dispatcher's `ToggleHelp` runs instead of
+    /// inserting the character into the focused field.
+    #[test]
+    fn handle_verify_keystroke_returns_false_for_question_mark() {
+        // Build a state with Verify focused on Source.
+        // Then send `?`. Expect handler to NOT consume it
+        // (returns false), and the source field stays empty.
+        let mut app = AppState {
+            current_screen: Screen::F4,
+            parsed_remote: None,
+            remote_label: String::new(),
+            daemons: DaemonsState::new(),
+            daemons_last_fetched: None,
+            // Senders aren't called on the false branch
+            // but the struct demands them.
+            detail_tx: mpsc::channel::<DetailUpdate>(1).0,
+            discovery_refresh_tx: mpsc::channel::<()>(1).0,
+            transfers: TransfersState::new(),
+            transfers_status: ConnectionStatus::NoRemote,
+            transfers_setup_gen: 0,
+            transfers_setup_pending: false,
+            browse: BrowseState::new(),
+            browse_last_fetched_view: None,
+            browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            profile: profile::ProfileState::new(),
+            profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
+            verify: verify::VerifyState::new(),
+            diagnostics: diagnostics::DiagnosticsState::new(),
+            diagnostics_reply_tx: mpsc::channel::<DiagnosticsReply>(1).0,
+            help: help::HelpOverlay::default(),
+        };
+        app.verify.cycle_focus(); // Source
+        let (verify_run_tx, _verify_run_rx) = mpsc::channel::<VerifyReply>(1);
+
+        let consumed = handle_verify_keystroke(&k(KeyCode::Char('?')), &mut app, &verify_run_tx);
+        assert!(
+            !consumed,
+            "`?` must bubble back to the global dispatcher, not be consumed as text"
+        );
+        assert!(
+            app.verify.source.is_empty(),
+            "`?` must NOT insert into the focused field, got: {:?}",
+            app.verify.source
+        );
     }
 
     /// d-1 (F4 profile lifecycle keys): `c` / `d` / `e`
