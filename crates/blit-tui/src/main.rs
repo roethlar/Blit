@@ -25,6 +25,7 @@
 mod browse;
 mod daemons;
 mod diagnostics;
+mod help;
 mod profile;
 mod screens;
 mod state;
@@ -187,6 +188,11 @@ struct AppState {
     /// Cloned by `spawn_diagnostics_dump` into each
     /// spawned task.
     diagnostics_reply_tx: mpsc::Sender<DiagnosticsReply>,
+    /// `?` help overlay. When visible, the overlay paints
+    /// on top of the active pane and absorbs keystrokes
+    /// (except `?`/Esc which close it). Visibility persists
+    /// across F-key navigation.
+    help: help::HelpOverlay,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -302,6 +308,7 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         verify: verify::VerifyState::new(),
         diagnostics: diagnostics::DiagnosticsState::new(),
         diagnostics_reply_tx: diagnostics_reply_tx.clone(),
+        help: help::HelpOverlay::default(),
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -399,6 +406,12 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                         now,
                     ),
                 }
+                if app.help.is_visible() {
+                    // Overlay paints on top of the pane.
+                    // Uses `Clear` internally so widgets
+                    // beneath aren't visible through it.
+                    help::render_overlay(frame, body_area);
+                }
             })
             .context("terminal.draw")?;
 
@@ -418,6 +431,24 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                 // navigate (intercepted in
                 // handle_verify_keystroke when not
                 // editable).
+                // e-1: when the `?` help overlay is open,
+                // it absorbs every keystroke except `?`
+                // (toggle), Esc (close), and Ctrl-c
+                // (emergency quit). F-keys are absorbed
+                // too — the operator can't accidentally
+                // pane-switch while reading the help.
+                if app.help.is_visible() {
+                    if key.code == KeyCode::Char('?') || key.code == KeyCode::Esc {
+                        app.help.close();
+                        continue;
+                    }
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 if app.current_screen == Screen::F4
                     && app.verify.focus().is_editing()
                     && handle_verify_keystroke(&key, &mut app, &verify_run_tx)
@@ -431,6 +462,9 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                 if let Some(action) = key_action(&key) {
                     match action {
                         UserAction::Quit => return Ok(()),
+                        UserAction::ToggleHelp => {
+                            app.help.toggle();
+                        }
                         UserAction::Navigate(target) => {
                             app.current_screen = target;
                             // Leaving F4 drops the editing
@@ -1535,6 +1569,8 @@ enum UserAction {
     /// F4: `s` dumps a diagnostics snapshot to disk for
     /// the current Source/Destination form pair.
     DiagnosticsDump,
+    /// Toggle the `?` help overlay. Works from every pane.
+    ToggleHelp,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1585,6 +1621,10 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // screen — we resolve the conflict by binding
         // dump on the mnemonic `s` (snapshot) key.
         KeyCode::Char('s') => Some(UserAction::DiagnosticsDump),
+        // `?` toggles the global help overlay. The bare
+        // `?` glyph on most layouts requires Shift, which
+        // crossterm hands us as just `Char('?')`.
+        KeyCode::Char('?') => Some(UserAction::ToggleHelp),
         _ => None,
     }
 }
@@ -2164,6 +2204,15 @@ mod tests {
         // Status unchanged by the helper — the caller's
         // begin_fetch flips it to Pending.
         assert!(matches!(state.status(), profile::ProfileFetchStatus::Idle));
+    }
+
+    /// e-1: `?` toggles the global help overlay.
+    #[test]
+    fn key_action_maps_question_mark_to_toggle_help() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('?'))),
+            Some(UserAction::ToggleHelp)
+        ));
     }
 
     /// d-1 (F4 profile lifecycle keys): `c` / `d` / `e`
