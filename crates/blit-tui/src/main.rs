@@ -1,27 +1,33 @@
 //! `blit-tui` — single-pane-of-glass operator TUI.
 //!
 //! Phase 5 milestone A.1 of `docs/plan/TUI_DESIGN.md`.
-//! This slice (`a1-1-tui-scaffold`) lands ONLY the crate
-//! scaffold and a minimal `ratatui` event loop. The four
-//! screens (F1 Daemons / F2 Transfers / F3 Browse / F4
-//! Profile-Verify) land in subsequent A.1 sub-slices.
 //!
-//! Today the binary:
-//! - Enters the alternate screen + raw mode on startup.
-//! - Renders a placeholder splash screen.
-//! - Polls keyboard events on a 50ms tick.
-//! - Exits cleanly on `q`, `Esc`, or `Ctrl-C`.
+//! Slices so far:
+//! - `a1-1-tui-scaffold`: crate + ratatui event loop +
+//!   panic-safe terminal lifecycle.
+//! - `a1-2-f2-transfers` (this slice): F2 Transfers pane.
+//!   When `--remote <host>` is set, the binary fetches an
+//!   initial `GetState` snapshot, opens a `Subscribe`
+//!   stream against the daemon, and renders live active /
+//!   recent rows. With no `--remote` the placeholder
+//!   splash from a1-1 is replaced by an F2 frame in a
+//!   "no remote configured" state so the layout is
+//!   visible without a daemon.
 //!
-//! That's enough surface to exercise the terminal lifecycle
-//! (raw-mode enter/leave, alternate-screen enter/leave,
-//! panic-on-poll teardown) without committing to the screen
-//! layouts. Future slices fill in the content.
+//! F1 (Daemons), F3 (Browse), F4 (Profile/Verify) land in
+//! subsequent A.1 sub-slices.
 //!
-//! Driven by tokio because the F2 Transfers pane (next slice)
-//! will need an async `Subscribe` stream. Using tokio's
-//! current-thread runtime here so a single ratatui draw and
-//! a single async stream poll can share the same task.
+//! Driven by tokio current-thread. The event loop uses
+//! `tokio::select!` between a keystroke poll and a
+//! Subscribe stream message so a single task handles
+//! both inputs.
 
+mod screens;
+mod state;
+
+use blit_app::admin::jobs;
+use blit_core::generated::DaemonEvent;
+use blit_core::remote::endpoint::RemoteEndpoint;
 use clap::Parser;
 use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -31,14 +37,13 @@ use crossterm::terminal::{
 };
 use eyre::{Context, Result};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
+use screens::f2::ConnectionStatus;
+use state::TransfersState;
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 /// CLI flags. Today `--remote` is captured but not yet
 /// consumed — the F1 Daemons pane will use it as the default
@@ -67,26 +72,20 @@ static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let _ = args; // consumed in future slices.
 
-    // Install the panic hook BEFORE touching the terminal so
-    // a panic inside `TuiGuard::new()` (or anywhere
-    // downstream) still restores. The hook chains the original
-    // handler so panic output still appears after restore.
     install_panic_hook();
-
-    // `TuiGuard::new` is transactional: if any setup step
-    // fails it unwinds the partial state before returning Err.
-    // `Drop` covers every other exit path (normal return,
-    // `?`-propagated error, panic unwinding through main).
     let mut guard = TuiGuard::new().context("entering TUI")?;
-    let result = run_event_loop(guard.terminal_mut()).await;
-    // `guard` drops here (end of scope). Drop runs
-    // `restore_terminal` regardless of `result`. Returning
-    // `result` after drop preserves the loop's exit status.
+    let result = run_event_loop(guard.terminal_mut(), args.remote.as_deref()).await;
     drop(guard);
     result
 }
+
+/// Sized to absorb a burst of progress events without
+/// backing up the Subscribe forwarder. At the daemon's
+/// 10 Hz progress cadence × N active rows + headroom for
+/// transient draw pauses, 256 is plenty for one operator's
+/// TUI.
+const TUI_EVENT_BUFFER: usize = 256;
 
 /// RAII wrapper for the crossterm/ratatui terminal lifecycle.
 /// `new()` is transactional — partial setup failures unwind
@@ -202,24 +201,243 @@ fn install_panic_hook() {
     }));
 }
 
-/// Main event/draw loop. Renders the placeholder splash and
-/// polls keyboard events with a short timeout so the future
-/// async-stream branch (Subscribe events) can interleave.
-async fn run_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+/// Main event/draw loop. With a `--remote`, runs the F2
+/// Transfers pane against a live daemon (initial GetState
+/// snapshot + Subscribe stream). Without `--remote`, renders
+/// F2 in a "no remote configured" state so the layout is
+/// visible.
+async fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    remote_arg: Option<&str>,
+) -> Result<()> {
+    let mut state = TransfersState::new();
+    let remote_label = remote_arg.unwrap_or("(no remote)").to_string();
+    let mut status = if remote_arg.is_some() {
+        ConnectionStatus::Connecting
+    } else {
+        ConnectionStatus::NoRemote
+    };
+
+    // Optional Subscribe channel. None when no `--remote`.
+    let mut event_rx: Option<mpsc::Receiver<EventOrError>> = None;
+    let mut parsed_remote: Option<RemoteEndpoint> = None;
+
+    if let Some(remote_str) = remote_arg {
+        match RemoteEndpoint::parse(remote_str) {
+            Ok(endpoint) => {
+                // Initial GetState snapshot. Synchronous over
+                // gRPC — adds a few hundred ms before the first
+                // draw, which is acceptable for startup.
+                match jobs::query(&endpoint, 0).await {
+                    Ok(snapshot) => state.replace_from_snapshot(snapshot),
+                    Err(err) => {
+                        status =
+                            ConnectionStatus::Degraded(format!("initial GetState failed: {err}"));
+                    }
+                }
+                let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
+                spawn_subscribe_forwarder(endpoint.clone(), tx);
+                event_rx = Some(rx);
+                parsed_remote = Some(endpoint);
+                // Stream task spawned; first stream messages
+                // arrive shortly. Status flips to Live on the
+                // first successful event below.
+            }
+            Err(err) => {
+                status = ConnectionStatus::Degraded(format!("parse '{remote_str}': {err}"));
+            }
+        }
+    }
+
     loop {
-        terminal.draw(render_splash).context("terminal.draw")?;
-        // Poll without blocking — the timeout is the loop's
-        // refresh rate. A future slice will use
-        // `tokio::select!` between this poll and a Subscribe
-        // stream.
-        if event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS)).context("event::poll")? {
-            if let Event::Key(key) = event::read().context("event::read")? {
-                if key.kind == KeyEventKind::Press && should_quit(key.code, key.modifiers) {
-                    return Ok(());
+        terminal
+            .draw(|frame| {
+                screens::f2::render(frame, &state, &remote_label, &status);
+            })
+            .context("terminal.draw")?;
+
+        // Race a keystroke poll against the Subscribe stream
+        // (if any). The keystroke poll is wrapped in
+        // spawn_blocking because crossterm's poll/read are
+        // sync; the await yields the runtime to the stream
+        // arm. Refresh cadence is the spawn_blocking duration
+        // when no other events arrive.
+        let keystroke = tokio::task::spawn_blocking(|| -> Result<Option<KeyEvent>> {
+            if event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS)).context("event::poll")? {
+                if let Event::Key(key) = event::read().context("event::read")? {
+                    if key.kind == KeyEventKind::Press {
+                        return Ok(Some(KeyEvent {
+                            code: key.code,
+                            modifiers: key.modifiers,
+                        }));
+                    }
+                }
+            }
+            Ok(None)
+        });
+
+        if let Some(rx) = event_rx.as_mut() {
+            tokio::select! {
+                // Keystroke path.
+                k = keystroke => {
+                    if let Some(action) = handle_keystroke(k)? {
+                        match action {
+                            UserAction::Quit => return Ok(()),
+                            UserAction::Refresh => {
+                                if let Some(endpoint) = parsed_remote.as_ref() {
+                                    refresh_via_get_state(endpoint, &mut state, &mut status).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Subscribe stream path.
+                event = rx.recv() => {
+                    match event {
+                        Some(EventOrError::Event(daemon_event)) => {
+                            state.apply_event(daemon_event);
+                            // First event we successfully
+                            // received → confirm Live status.
+                            if matches!(status, ConnectionStatus::Connecting) {
+                                status = ConnectionStatus::Live;
+                            }
+                        }
+                        Some(EventOrError::Error(msg)) => {
+                            status = ConnectionStatus::Degraded(msg);
+                            event_rx = None;
+                        }
+                        None => {
+                            // Forwarder dropped its sender —
+                            // stream task exited. Surface the
+                            // degraded status and stop reading.
+                            status = ConnectionStatus::Degraded(
+                                "subscribe stream closed".to_string(),
+                            );
+                            event_rx = None;
+                        }
+                    }
+                }
+            }
+        } else {
+            // No live stream — only the keystroke path is
+            // active.
+            if let Some(action) = handle_keystroke(keystroke.await)? {
+                match action {
+                    UserAction::Quit => return Ok(()),
+                    UserAction::Refresh => {
+                        if let Some(endpoint) = parsed_remote.as_ref() {
+                            refresh_via_get_state(endpoint, &mut state, &mut status).await;
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+/// Action surfaced by [`handle_keystroke`] back to the loop.
+enum UserAction {
+    Quit,
+    Refresh,
+}
+
+/// Lightweight key-event copy. Avoids carrying a
+/// `crossterm::event::KeyEvent` across `spawn_blocking`
+/// boundaries (which would otherwise pull in lifetimes we
+/// don't want).
+struct KeyEvent {
+    code: KeyCode,
+    modifiers: KeyModifiers,
+}
+
+/// Resolve a `spawn_blocking` keystroke result into an
+/// optional `UserAction`. Returns `None` when the poll
+/// timed out without a key press OR the key wasn't a
+/// recognized action.
+fn handle_keystroke(
+    join: std::result::Result<Result<Option<KeyEvent>>, tokio::task::JoinError>,
+) -> Result<Option<UserAction>> {
+    let inner = join.context("keystroke task panicked")??;
+    let Some(key) = inner else {
+        return Ok(None);
+    };
+    if should_quit(key.code, key.modifiers) {
+        return Ok(Some(UserAction::Quit));
+    }
+    if matches!(key.code, KeyCode::Char('r')) {
+        return Ok(Some(UserAction::Refresh));
+    }
+    Ok(None)
+}
+
+/// Re-issue a `GetState` query and replace local state.
+/// Triggered by the 'r' keystroke; surfaces failures as
+/// Degraded status instead of aborting the loop.
+async fn refresh_via_get_state(
+    endpoint: &RemoteEndpoint,
+    state: &mut TransfersState,
+    status: &mut ConnectionStatus,
+) {
+    match jobs::query(endpoint, 0).await {
+        Ok(snapshot) => {
+            state.replace_from_snapshot(snapshot);
+            *status = ConnectionStatus::Live;
+        }
+        Err(err) => {
+            *status = ConnectionStatus::Degraded(format!("refresh failed: {err}"));
+        }
+    }
+}
+
+/// Either a daemon event or a stream-error message. The
+/// forwarder task sends both over the same mpsc so the event
+/// loop can handle them in one arm.
+enum EventOrError {
+    Event(DaemonEvent),
+    Error(String),
+}
+
+/// Background task that opens the Subscribe stream and
+/// forwards events into the loop's mpsc. The task exits when:
+/// - The TUI drops its receiver (we observe via `send().await`
+///   returning Err).
+/// - The Subscribe stream returns an error or end-of-stream.
+fn spawn_subscribe_forwarder(endpoint: RemoteEndpoint, tx: mpsc::Sender<EventOrError>) {
+    tokio::spawn(async move {
+        // Empty filter, no replay — F2 watches every
+        // transfer the daemon emits.
+        let mut stream = match jobs::subscribe(&endpoint, "", false).await {
+            Ok(s) => s,
+            Err(err) => {
+                let _ = tx
+                    .send(EventOrError::Error(format!("subscribe: {err}")))
+                    .await;
+                return;
+            }
+        };
+        loop {
+            match stream.message().await {
+                Ok(Some(event)) => {
+                    if tx.send(EventOrError::Event(event)).await.is_err() {
+                        // TUI dropped — exit.
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    let _ = tx
+                        .send(EventOrError::Error("stream ended".to_string()))
+                        .await;
+                    return;
+                }
+                Err(status) => {
+                    let _ = tx
+                        .send(EventOrError::Error(format!("stream: {}", status.message())))
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// Quit predicate. `q` / `Esc` are the muscle-memory
@@ -227,56 +445,6 @@ async fn run_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Re
 fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
     matches!(code, KeyCode::Char('q') | KeyCode::Esc)
         || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
-}
-
-/// Placeholder splash screen. Replaced by the four-screen
-/// layout in subsequent A.1 sub-slices.
-fn render_splash(frame: &mut ratatui::Frame) {
-    let area = frame.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" blit-tui (scaffold) ")
-        .title_alignment(Alignment::Center);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let lines = vec![
-        Line::from(vec![Span::styled(
-            "Phase 5 / A.1 scaffold",
-            Style::default().add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(""),
-        Line::from("Future screens: F1 Daemons · F2 Transfers · F3 Browse · F4 Profile/Verify."),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("Press "),
-            Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(", "),
-            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(", or "),
-            Span::styled("Ctrl-C", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" to exit."),
-        ]),
-    ];
-
-    let centered = center_within(inner, lines.len() as u16);
-    let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
-    frame.render_widget(paragraph, centered);
-}
-
-/// Vertically center `height` lines of content within `area`.
-/// Used by the splash so the placeholder text sits in the
-/// middle of the screen instead of the top-left.
-fn center_within(area: Rect, height: u16) -> Rect {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(height),
-            Constraint::Min(0),
-        ])
-        .split(area);
-    chunks[1]
 }
 
 #[cfg(test)]
@@ -327,17 +495,5 @@ mod tests {
         // Second caller sees inactive — no double teardown.
         assert!(!take_active_for_restore(&flag));
         assert!(!flag.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn center_within_returns_middle_band() {
-        let area = Rect::new(0, 0, 80, 20);
-        let centered = center_within(area, 6);
-        assert_eq!(centered.height, 6);
-        // The centered rect should sit roughly mid-screen:
-        // top margin ≈ (20 - 6) / 2 = 7.
-        assert_eq!(centered.y, 7);
-        assert_eq!(centered.x, area.x);
-        assert_eq!(centered.width, area.width);
     }
 }
