@@ -75,14 +75,18 @@ pub fn render_into(
 fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Local transfer (C copy · M mirror) ");
+        .title(" Local transfer (C copy · M mirror · V move) ");
     let line = match transfer.status() {
         TransferStatus::Idle => Line::from(Span::styled(
-            "press `C` to copy or `M` to mirror Source → Destination",
+            "press `C` to copy · `M` to mirror · `V` to move Source → Destination",
             Style::default().fg(Color::DarkGray),
         )),
         TransferStatus::ConfirmingMirror => Line::from(Span::styled(
             "mirror will DELETE extraneous files at destination · [y/N] to confirm",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        TransferStatus::ConfirmingMove => Line::from(Span::styled(
+            "move will DELETE the SOURCE after copy · [y/N] to confirm",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )),
         TransferStatus::Running { kind } => Line::from(Span::styled(

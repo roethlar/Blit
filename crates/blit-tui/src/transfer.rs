@@ -27,6 +27,11 @@ use std::time::Instant;
 pub enum TransferKind {
     Copy,
     Mirror,
+    /// Copy then delete the source. The destructive step
+    /// is the source-side purge — same data-loss surface
+    /// the CLI's `blit move` guards
+    /// (`crates/blit-cli/src/transfers/mod.rs:445`).
+    Move,
 }
 
 impl TransferKind {
@@ -34,6 +39,7 @@ impl TransferKind {
         match self {
             TransferKind::Copy => "copy",
             TransferKind::Mirror => "mirror",
+            TransferKind::Move => "move",
         }
     }
 }
@@ -48,6 +54,12 @@ pub enum TransferStatus {
     /// `confirm_destructive_operation` prompt
     /// (`crates/blit-cli/src/transfers/mod.rs:181`).
     ConfirmingMirror,
+    /// `V` was pressed but the move hasn't started.
+    /// Waiting for `y` (run) or `n` (cancel). Move is the
+    /// MOST destructive of the three triggers — it deletes
+    /// the source after the copy completes, so the
+    /// confirmation banner is the loudest of the lot.
+    ConfirmingMove,
     Running {
         kind: TransferKind,
     },
@@ -123,12 +135,27 @@ impl TransferState {
         matches!(self.status, TransferStatus::ConfirmingMirror)
     }
 
+    /// `true` while a move confirmation prompt is open.
+    /// Symmetric to [`Self::is_confirming_mirror`] — move
+    /// gets its own variant because the confirm banner
+    /// shows a different warning (source delete vs.
+    /// destination delete).
+    pub fn is_confirming_move(&self) -> bool {
+        matches!(self.status, TransferStatus::ConfirmingMove)
+    }
+
+    /// Either confirm state. Lets `y`/`n` handlers ask one
+    /// question instead of two.
+    pub fn is_confirming(&self) -> bool {
+        self.is_confirming_mirror() || self.is_confirming_move()
+    }
+
     /// `true` when a fresh trigger should be blocked
     /// (running OR awaiting confirmation). `can_start_transfer`
     /// in `main.rs` uses this to refuse a second `M` while
     /// the first confirmation is still on screen.
     pub fn is_busy(&self) -> bool {
-        self.is_running() || self.is_confirming_mirror()
+        self.is_running() || self.is_confirming()
     }
 
     pub fn begin(&mut self, kind: TransferKind) -> u64 {
@@ -145,15 +172,21 @@ impl TransferState {
         self.status = TransferStatus::ConfirmingMirror;
     }
 
-    /// Drop a pending mirror confirmation back to Idle.
-    /// Called when the operator presses `n`/Esc, or when
-    /// they edit the Verify form (which would change the
-    /// effective paths underneath the confirm prompt).
+    /// Open the source-deleting confirmation prompt for a
+    /// move. Same shape as [`Self::begin_confirm_mirror`].
+    pub fn begin_confirm_move(&mut self) {
+        self.status = TransferStatus::ConfirmingMove;
+    }
+
+    /// Drop a pending mirror-or-move confirmation back to
+    /// Idle. Called when the operator presses `n`/Esc, or
+    /// when they edit the Verify form (which would change
+    /// the effective paths underneath the confirm prompt).
     /// Returns `true` if a confirmation was actually
     /// dismissed — lets callers know whether to surface a
     /// "cancelled" message.
     pub fn cancel_confirm(&mut self) -> bool {
-        if matches!(self.status, TransferStatus::ConfirmingMirror) {
+        if self.is_confirming() {
             self.status = TransferStatus::Idle;
             true
         } else {

@@ -817,6 +817,21 @@ async fn handle_pane_action(
                     }
                 }
             }
+            UserAction::TransferMove if can_start_transfer(app) => {
+                // Same gate as mirror — paths must parse
+                // first so the operator doesn't confirm a
+                // delete-source flow against an invalid
+                // source.
+                match prepare_local_transfer(&app.verify.source, &app.verify.destination) {
+                    Ok(_) => {
+                        app.transfer.begin_confirm_move();
+                    }
+                    Err(msg) => {
+                        app.transfer
+                            .note_validation_error(transfer::TransferKind::Move, msg);
+                    }
+                }
+            }
             UserAction::TransferMirrorConfirm if app.transfer.is_confirming_mirror() => {
                 // Re-validate at fire time. The Verify
                 // fields are also invalidated on edit via
@@ -841,7 +856,19 @@ async fn handle_pane_action(
                     }
                 }
             }
-            UserAction::TransferCancel if app.transfer.is_confirming_mirror() => {
+            UserAction::TransferMirrorConfirm if app.transfer.is_confirming_move() => {
+                match prepare_local_transfer(&app.verify.source, &app.verify.destination) {
+                    Ok((src, dst)) => {
+                        let id = app.transfer.begin(transfer::TransferKind::Move);
+                        spawn_local_move(id, src, dst, app.transfer_reply_tx.clone());
+                    }
+                    Err(msg) => {
+                        app.transfer
+                            .note_validation_error(transfer::TransferKind::Move, msg);
+                    }
+                }
+            }
+            UserAction::TransferCancel if app.transfer.is_confirming() => {
                 app.transfer.cancel_confirm();
             }
             _ => {}
@@ -1418,6 +1445,101 @@ fn spawn_local_transfer(
     });
 }
 
+/// Spawn a local move = copy + source-purge. Mirrors the
+/// CLI's `blit move` shape
+/// (`crates/blit-cli/src/transfers/mod.rs:430-503`):
+///
+/// 1. Run `transfers::local::run` with `mirror=false`.
+/// 2. If `summary.unreadable_paths` is non-empty, refuse
+///    to delete the source — files we couldn't read were
+///    skipped during the copy, so removing them from the
+///    source side would lose data. This is the R47-F4
+///    data-loss gate; the TUI must enforce it too.
+/// 3. Otherwise delete the source (`remove_dir_all` for
+///    directories, `remove_file` for files).
+///
+/// Surfaces the `LocalMirrorSummary` on success (so the
+/// Done banner shows the same planned/copied/bytes numbers
+/// as copy/mirror), or a flat error string on either the
+/// copy failure or the post-copy purge failure / safety
+/// refusal.
+fn spawn_local_move(
+    request_id: u64,
+    source: std::path::PathBuf,
+    destination: std::path::PathBuf,
+    tx: mpsc::Sender<TransferReply>,
+) {
+    tokio::spawn(async move {
+        let result = perform_local_move(&source, &destination).await;
+        let _ = tx
+            .send(TransferReply {
+                request_id,
+                kind: transfer::TransferKind::Move,
+                result,
+            })
+            .await;
+    });
+}
+
+/// Async core of [`spawn_local_move`], split out so it can
+/// be exercised by `#[tokio::test]` without going through
+/// the spawn/channel plumbing.
+async fn perform_local_move(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<blit_core::orchestrator::LocalMirrorSummary, String> {
+    let perf_history_enabled = blit_core::perf_history::perf_history_enabled().unwrap_or(true);
+    let options = blit_core::orchestrator::LocalMirrorOptions {
+        mirror: false,
+        perf_history: perf_history_enabled,
+        ..Default::default()
+    };
+    let summary = blit_app::transfers::local::run(source, destination, options)
+        .await
+        .map_err(|err| format!("{err:#}"))?;
+
+    if !summary.unreadable_paths.is_empty() {
+        // R47-F4 (data-loss): refuse purge on incomplete
+        // scan. Quote the first few unreadable paths so
+        // the operator can act on the message.
+        let preview = summary
+            .unreadable_paths
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "refusing to remove source: scan was incomplete ({} unreadable entr{}); \
+             first {} reported: {}. Resolve the scan errors (typically permissions) \
+             and re-run.",
+            summary.unreadable_paths.len(),
+            if summary.unreadable_paths.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            summary.unreadable_paths.len().min(3),
+            preview,
+        ));
+    }
+
+    if source.is_dir() {
+        tokio::fs::remove_dir_all(source)
+            .await
+            .map_err(|e| format!("removing {}: {e}", source.display()))?;
+    } else if source.is_file() {
+        tokio::fs::remove_file(source)
+            .await
+            .map_err(|e| format!("removing {}: {e}", source.display()))?;
+    }
+    // If the source was already gone (e.g. concurrent
+    // delete), treat as success — the post-condition
+    // "source no longer exists" holds.
+
+    Ok(summary)
+}
+
 /// Reply envelope from the F4 Diagnostics dump task.
 /// Same generation pattern as VerifyReply.
 struct DiagnosticsReply {
@@ -1783,10 +1905,15 @@ enum UserAction {
     /// F4: `M` opens the destructive-mirror confirmation
     /// prompt. Actual mirror only fires after `Y`.
     TransferMirror,
-    /// F4: `y` confirms a pending mirror prompt and kicks
-    /// the actual transfer.
+    /// F4: `V` opens the source-deleting move
+    /// confirmation prompt. Actual move only fires after
+    /// `Y`. Move = copy + delete-source, so it's the most
+    /// destructive of the three triggers.
+    TransferMove,
+    /// F4: `y` confirms a pending mirror-or-move prompt
+    /// and kicks the actual transfer.
     TransferMirrorConfirm,
-    /// F4: `n` cancels a pending mirror prompt.
+    /// F4: `n` cancels a pending mirror-or-move prompt.
     TransferCancel,
 }
 
@@ -1849,6 +1976,11 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // wildcard-ignore the variants below.
         KeyCode::Char('C') => Some(UserAction::TransferCopy),
         KeyCode::Char('M') => Some(UserAction::TransferMirror),
+        // Capital `V` triggers the source-deleting move
+        // confirm flow. Lowercase `v` is unmapped — kept
+        // free for potential vim-style "visual mode" /
+        // multi-select on a future F3 polish slice.
+        KeyCode::Char('V') => Some(UserAction::TransferMove),
         // `y` / `n` confirm or cancel a pending mirror
         // prompt. The F4 dispatcher only acts on these
         // while `transfer.is_confirming_mirror()` is true —
@@ -2511,6 +2643,53 @@ mod tests {
             key_action(&k(KeyCode::Char('M'))),
             Some(UserAction::TransferMirror)
         ));
+        // d-5: capital V triggers move. Lowercase v stays
+        // unmapped (reserved for a future visual / multi-
+        // select polish on F3).
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('V'))),
+            Some(UserAction::TransferMove)
+        ));
+        assert!(key_action(&k(KeyCode::Char('v'))).is_none());
+    }
+
+    /// d-5: V triggers the move confirm flow — a copy
+    /// followed by source delete. State must transition
+    /// `Idle → ConfirmingMove`, and `is_busy()` must
+    /// gate further triggers.
+    #[test]
+    fn transfer_state_move_confirm_lifecycle() {
+        let mut state = transfer::TransferState::new();
+        state.begin_confirm_move();
+        assert!(state.is_confirming_move());
+        assert!(state.is_confirming());
+        assert!(state.is_busy());
+        // `is_confirming_mirror` MUST stay false — the
+        // dispatcher routes `y` to mirror-confirm only
+        // when that specific state is set.
+        assert!(!state.is_confirming_mirror());
+        assert!(state.cancel_confirm());
+        assert!(!state.is_busy());
+    }
+
+    /// d-5: end-to-end `perform_local_move`. Writes a
+    /// source file, runs the move, asserts the destination
+    /// has the file and the source is gone.
+    #[tokio::test]
+    async fn perform_local_move_deletes_source_after_copy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src.txt");
+        std::fs::write(&src, b"hello").expect("write src");
+        let dst = tmp.path().join("dst.txt");
+
+        let summary = perform_local_move(&src, &dst).await.expect("move succeeds");
+        assert!(summary.copied_files >= 1, "summary records the copy");
+        assert!(!src.exists(), "source must be removed after move");
+        assert_eq!(
+            std::fs::read(&dst).expect("dst readable"),
+            b"hello",
+            "destination must have the source's bytes"
+        );
     }
 
     /// d-4 R2: `y` / `n` confirm or cancel the mirror
