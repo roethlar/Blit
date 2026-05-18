@@ -8,7 +8,7 @@
 //! stream; this module just paints.
 //!
 //! Layout (heights are constraints; columns reflect the
-//! d-14 / d-15 / d-20 / d-21 / d-22 polish):
+//! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 polish):
 //!
 //! ```text
 //! ┌── header (1 line) ──────────────────────────────────────────────┐
@@ -34,6 +34,11 @@
 //! - `cancel: id <id> not found` (red, Done · NotFound)
 //! - `cancel unsupported for <id>: <msg>` (red, Done · Unsupported)
 //! - `cancel <id> failed: <msg>` (red, Error · transport)
+//!
+//! d-23: terminal variants (Done / Error) auto-hide
+//! after `CANCEL_STATUS_TTL` (5s) so the footer
+//! self-cleans. Sending stays visible until the reply
+//! lands.
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

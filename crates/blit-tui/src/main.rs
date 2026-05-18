@@ -231,12 +231,25 @@ enum F2CancelStatus {
         // `transfer_id` field), so we don't double up
         // here.
         outcome: blit_app::admin::jobs::CancelJobOutcome,
+        /// d-23: terminal-state timestamp. The footer
+        /// converter hides the fragment after
+        /// `CANCEL_STATUS_TTL` has elapsed so the operator
+        /// gets a few seconds to read the outcome and
+        /// then the footer self-cleans.
+        finished_at: Instant,
     },
     Error {
         transfer_id: String,
         message: String,
+        finished_at: Instant,
     },
 }
+
+/// d-23: how long a Done / Error cancel fragment stays
+/// on screen before the footer converter reverts it to
+/// Hidden. Long enough for the operator to read,
+/// short enough not to clutter the footer indefinitely.
+const CANCEL_STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl F2CancelStatus {
     fn is_sending(&self) -> bool {
@@ -525,7 +538,7 @@ async fn run_router(
                         &app.transfers,
                         &app.remote_label,
                         &app.transfers_status,
-                        &cancel_status_to_display(&app.cancel_status),
+                        &cancel_status_to_display(&app.cancel_status, now),
                         now,
                     ),
                     Screen::F3 => screens::f3::render_into(
@@ -848,14 +861,19 @@ async fn run_router(
                     if current_request_id != Some(request_id) {
                         // Stale — drop.
                     } else {
+                        let finished_at = Instant::now();
                         app.cancel_status = match result {
                             Ok(outcome) => {
                                 let _ = transfer_id; // carried by outcome
-                                F2CancelStatus::Done { outcome }
+                                F2CancelStatus::Done {
+                                    outcome,
+                                    finished_at,
+                                }
                             }
                             Err(message) => F2CancelStatus::Error {
                                 transfer_id,
                                 message,
+                                finished_at,
                             },
                         };
                     }
@@ -1589,7 +1607,7 @@ struct TransferReply {
 /// renderer-facing `F2CancelDisplay` (which lives in
 /// `screens/f2.rs` to avoid the screens layer reaching
 /// into main.rs's types).
-fn cancel_status_to_display(status: &F2CancelStatus) -> screens::f2::F2CancelDisplay {
+fn cancel_status_to_display(status: &F2CancelStatus, now: Instant) -> screens::f2::F2CancelDisplay {
     use blit_app::admin::jobs::CancelJobOutcome;
     use screens::f2::F2CancelDisplay;
     match status {
@@ -1597,28 +1615,46 @@ fn cancel_status_to_display(status: &F2CancelStatus) -> screens::f2::F2CancelDis
         F2CancelStatus::Sending { transfer_id, .. } => F2CancelDisplay::Sending {
             transfer_id: transfer_id.clone(),
         },
-        F2CancelStatus::Done { outcome } => match outcome {
-            CancelJobOutcome::Cancelled { transfer_id: id } => F2CancelDisplay::Cancelled {
-                transfer_id: id.clone(),
-            },
-            CancelJobOutcome::NotFound { transfer_id: id } => F2CancelDisplay::NotFound {
-                transfer_id: id.clone(),
-            },
-            CancelJobOutcome::Unsupported {
-                transfer_id: id,
-                message,
-            } => F2CancelDisplay::Unsupported {
-                transfer_id: id.clone(),
-                message: message.clone(),
-            },
-        },
+        F2CancelStatus::Done {
+            outcome,
+            finished_at,
+        } => {
+            // d-23: hide the terminal fragment after the
+            // TTL. The state itself stays — we don't mutate
+            // it from the renderer — but the operator sees
+            // the footer self-clean.
+            if now.saturating_duration_since(*finished_at) >= CANCEL_STATUS_TTL {
+                return F2CancelDisplay::Hidden;
+            }
+            match outcome {
+                CancelJobOutcome::Cancelled { transfer_id: id } => F2CancelDisplay::Cancelled {
+                    transfer_id: id.clone(),
+                },
+                CancelJobOutcome::NotFound { transfer_id: id } => F2CancelDisplay::NotFound {
+                    transfer_id: id.clone(),
+                },
+                CancelJobOutcome::Unsupported {
+                    transfer_id: id,
+                    message,
+                } => F2CancelDisplay::Unsupported {
+                    transfer_id: id.clone(),
+                    message: message.clone(),
+                },
+            }
+        }
         F2CancelStatus::Error {
             transfer_id,
             message,
-        } => F2CancelDisplay::Failed {
-            transfer_id: transfer_id.clone(),
-            message: message.clone(),
-        },
+            finished_at,
+        } => {
+            if now.saturating_duration_since(*finished_at) >= CANCEL_STATUS_TTL {
+                return F2CancelDisplay::Hidden;
+            }
+            F2CancelDisplay::Failed {
+                transfer_id: transfer_id.clone(),
+                message: message.clone(),
+            }
+        }
     }
 }
 
@@ -2857,6 +2893,99 @@ mod tests {
             key_action(&k(KeyCode::Char('K'))),
             Some(UserAction::CancelSelectedTransfer)
         ));
+    }
+
+    // d-23: cancel-status TTL auto-clear.
+
+    #[test]
+    fn cancel_status_idle_renders_hidden() {
+        let display = cancel_status_to_display(&F2CancelStatus::Idle, Instant::now());
+        assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
+    }
+
+    #[test]
+    fn cancel_status_sending_renders_sending_regardless_of_time() {
+        let status = F2CancelStatus::Sending {
+            transfer_id: "t-1".to_string(),
+            request_id: 1,
+        };
+        // Sending has no TTL — it stays on screen until
+        // the RPC reply lands (which transitions to
+        // Done/Error).
+        let display = cancel_status_to_display(&status, Instant::now());
+        match display {
+            screens::f2::F2CancelDisplay::Sending { transfer_id } => {
+                assert_eq!(transfer_id, "t-1");
+            }
+            other => panic!("expected Sending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_status_done_within_ttl_renders_terminal_variant() {
+        let now = Instant::now();
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at: now,
+        };
+        // Same Instant → within TTL.
+        let display = cancel_status_to_display(&status, now);
+        match display {
+            screens::f2::F2CancelDisplay::Cancelled { transfer_id } => {
+                assert_eq!(transfer_id, "t-1");
+            }
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_status_done_past_ttl_renders_hidden() {
+        let finished_at = Instant::now();
+        let later = finished_at + CANCEL_STATUS_TTL + std::time::Duration::from_millis(1);
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at,
+        };
+        let display = cancel_status_to_display(&status, later);
+        assert!(
+            matches!(display, screens::f2::F2CancelDisplay::Hidden),
+            "past-TTL Done must hide the fragment"
+        );
+    }
+
+    #[test]
+    fn cancel_status_error_past_ttl_renders_hidden() {
+        let finished_at = Instant::now();
+        let later = finished_at + CANCEL_STATUS_TTL + std::time::Duration::from_millis(1);
+        let status = F2CancelStatus::Error {
+            transfer_id: "t-1".to_string(),
+            message: "boom".to_string(),
+            finished_at,
+        };
+        let display = cancel_status_to_display(&status, later);
+        assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
+    }
+
+    #[test]
+    fn cancel_status_done_exactly_at_ttl_renders_hidden() {
+        // The `>=` boundary: at exactly TTL elapsed, the
+        // fragment is gone. Picks the safer side (less
+        // clutter) when the operator's clock lands on
+        // the exact boundary.
+        let finished_at = Instant::now();
+        let at_boundary = finished_at + CANCEL_STATUS_TTL;
+        let status = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at,
+        };
+        let display = cancel_status_to_display(&status, at_boundary);
+        assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
     }
 
     /// `take_active_for_restore` is the pure state-transition
