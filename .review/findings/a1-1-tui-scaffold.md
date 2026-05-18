@@ -264,6 +264,19 @@ exercise:
 Same idempotency contract, no escape sequences in test
 output.
 
+## Round 4 (sha `2237521`)
+
+Round 3's tests both mutated the process-global `TUI_ACTIVE`.
+Under Rust's parallel test harness they could interleave —
+one test storing `false` between the other's setup and
+assertion. Reviewer flagged the resulting order-dependence.
+
+Fix: `take_active_for_restore(flag: &AtomicBool)` now takes
+its flag by reference. Production calls
+`take_active_for_restore(&TUI_ACTIVE)`; tests pass local
+`AtomicBool::new(...)` instances. Parallel test execution
+no longer races. Same 5 tests, no flake.
+
 ## Reviewer comments
 
 (empty — pending grade)
