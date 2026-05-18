@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-6-verify-prefill | Low     | Round 2: schema doc covers prefill keys     | [~]    | `phase5/a1` | `72b742b` |
 
 ## Open findings
 
@@ -26,7 +26,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
-| e-6-verify-prefill | Low | `config.rs` current schema doc omits Verify prefill keys | `phase5/a1` |
 
 ## Verified history
 
