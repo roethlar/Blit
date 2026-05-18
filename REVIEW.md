@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-6-f4-verify-checksum-toggle | Feature | F4 Verify `H` toggles size+mtime / checksum | [~] | `phase5/a1` | `368dd4b` |
 
 ## Open findings
 
