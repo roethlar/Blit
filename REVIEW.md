@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-13-f2-freshness-footer | Feature | F2 footer surfaces last-event age | [~] | `phase5/a1` | `8787b5f` |
 
 ## Open findings
 
