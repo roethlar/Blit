@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-8-f4-elapsed-time | Feature | F4 Verify/Transfer Done banners show duration | [~] | `phase5/a1` | `9b01340` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -107,3 +107,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `dc03872` F4 local move trigger with source-delete confirmation (`d-5-f4-local-move`)
 - `368dd4b` F4 Verify checksum toggle (`d-6-f4-verify-checksum-toggle`)
 - `428cd22` F4 Verify one-way toggle (`d-7-f4-verify-one-way-toggle`)
+- `9b01340` F4 Verify/Transfer Done durations (`d-8-f4-elapsed-time`)
