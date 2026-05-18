@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-2-f4-verify     | Medium   | Edits during Running drop in-flight (R2)    | `[~]`  | `phase5/a1` | `62eef1e` |
 
 ## Open findings
 

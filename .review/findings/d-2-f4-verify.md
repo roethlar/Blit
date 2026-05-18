@@ -178,6 +178,43 @@ serially.
 - **Mode toggle for checksum.**
 - **Result drill-down (per-file diff listing).**
 
+## Round 2 (sha filled by sentinel)
+
+Reviewer caught a real race: round 1 allowed text edits
+during `Running`, but the edits only invalidated `Done` /
+`Error` — they didn't bump the generation. The in-flight
+`compare_trees` task's reply could land against the now-
+edited paths and render an old comparison.
+
+### Fix: edits bump generation + collapse Running to Idle
+
+Refactor `insert_char` and `backspace` to call a new
+`invalidate_run` helper whenever they actually mutate a
+field. `invalidate_run`:
+
+1. Bumps `request_id`. Any in-flight reply tagged with the
+   prior generation will be dropped by `apply_result` /
+   `apply_error` on arrival.
+2. Collapses status: `Running` / `Done` / `Error` → `Idle`.
+   The renderer stops showing "running compare_trees..."
+   immediately so the operator doesn't see a status line
+   that won't be honored.
+
+### Tests
+
++2 unit tests in `verify::tests`:
+
+- `edit_during_running_drops_in_flight_reply`: type into
+  the form mid-run, then deliver the old reply — must be
+  refused and status must still be `Idle`. Both
+  `apply_result` and `apply_error` are exercised against
+  the stale generation.
+- `backspace_during_running_drops_in_flight_reply`: same
+  shape but using Backspace instead of typing.
+
+109 blit-tui unit tests (was 107). Workspace passes
+serially.
+
 ## Reviewer comments
 
 (empty — pending grade)
