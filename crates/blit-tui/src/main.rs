@@ -874,6 +874,9 @@ async fn handle_pane_action(
             UserAction::ToggleVerifyChecksum => {
                 app.verify.toggle_checksum();
             }
+            UserAction::ToggleVerifyOneWay => {
+                app.verify.toggle_one_way();
+            }
             _ => {}
         },
     }
@@ -1702,6 +1705,7 @@ fn handle_verify_keystroke(
                     app.verify.source.clone(),
                     app.verify.destination.clone(),
                     app.verify.use_checksum(),
+                    app.verify.one_way(),
                     verify_run_tx.clone(),
                 );
             }
@@ -1741,13 +1745,16 @@ fn handle_verify_keystroke(
 /// `FileFilter`. `use_checksum` follows the
 /// `VerifyState`'s mode toggle (d-6) — `false` is the
 /// default size+mtime compare matching rsync; `true` is
-/// per-file content checksum. `one_way=false` keeps the
-/// two-way comparison (matches `blit check` default).
+/// per-file content checksum. `one_way` follows the d-7
+/// direction toggle — `false` reports both
+/// `missing-on-src` and `missing-on-dst`; `true` skips
+/// the dst-walk and matches `blit check --one-way`.
 fn spawn_verify_run(
     request_id: u64,
     source: String,
     destination: String,
     use_checksum: bool,
+    one_way: bool,
     tx: mpsc::Sender<VerifyReply>,
 ) {
     tokio::spawn(async move {
@@ -1758,7 +1765,7 @@ fn spawn_verify_run(
                 &src,
                 &dst,
                 use_checksum,
-                false,
+                one_way,
                 blit_core::fs_enum::FileFilter::default(),
             )
         })
@@ -1926,6 +1933,12 @@ enum UserAction {
     /// Invalidates any prior result so the displayed
     /// counts always match the current mode.
     ToggleVerifyChecksum,
+    /// F4: `O` toggles the Verify form between two-way
+    /// (default — reports `missing-on-src` and
+    /// `missing-on-dst`) and one-way (matches
+    /// `blit check --one-way`: skips the dst walk). Same
+    /// invalidation contract as ToggleVerifyChecksum.
+    ToggleVerifyOneWay,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1996,6 +2009,12 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // Capital chosen because lowercase `h` is the
         // Ascend / left-arrow alias used by F3 navigation.
         KeyCode::Char('H') => Some(UserAction::ToggleVerifyChecksum),
+        // `O` (One-way) toggles Verify direction. The
+        // mnemonic mirrors `--one-way` on `blit check`.
+        // Lowercase `o` stays unmapped — reserved for
+        // potential "open in editor" / "open module" in
+        // a future polish.
+        KeyCode::Char('O') => Some(UserAction::ToggleVerifyOneWay),
         // `y` / `n` confirm or cancel a pending mirror
         // prompt. The F4 dispatcher only acts on these
         // while `transfer.is_confirming_mirror()` is true —
@@ -2681,6 +2700,18 @@ mod tests {
             key_action(&k(KeyCode::Char('h'))),
             Some(UserAction::Ascend)
         ));
+    }
+
+    /// d-7: `O` maps to the Verify-direction toggle.
+    /// Lowercase `o` stays unmapped (reserved for future
+    /// polish).
+    #[test]
+    fn key_action_maps_verify_one_way_toggle() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('O'))),
+            Some(UserAction::ToggleVerifyOneWay)
+        ));
+        assert!(key_action(&k(KeyCode::Char('o'))).is_none());
     }
 
     /// d-5: V triggers the move confirm flow — a copy

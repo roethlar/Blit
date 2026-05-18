@@ -205,18 +205,29 @@ fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState) {
         &verify.destination,
         focus == VerifyFocus::Destination,
     );
-    let (mode_label, mode_style) = if verify.use_checksum() {
-        (
-            "Mode: checksum (per-file content compare · H to toggle)",
-            Style::default().fg(Color::Magenta),
-        )
+    // Compose a single mode line that surfaces both d-6
+    // (size+mtime vs checksum) and d-7 (two-way vs
+    // one-way) toggles. Magenta whenever EITHER non-default
+    // is on, so the operator's eye catches the deviation.
+    let checksum_label = if verify.use_checksum() {
+        "checksum"
     } else {
-        (
-            "Mode: size+mtime (fast, rsync default · H to toggle)",
-            Style::default().fg(Color::DarkGray),
-        )
+        "size+mtime"
     };
-    let mode_hint = Line::from(Span::styled(mode_label, mode_style));
+    let direction_label = if verify.one_way() {
+        "one-way"
+    } else {
+        "two-way"
+    };
+    let mode_text = format!(
+        "Mode: {checksum_label} · {direction_label} · H toggles hash · O toggles direction"
+    );
+    let mode_style = if verify.use_checksum() || verify.one_way() {
+        Style::default().fg(Color::Magenta)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let mode_hint = Line::from(Span::styled(mode_text, mode_style));
     let status_line = match verify.status() {
         VerifyStatus::Idle => Line::from(Span::styled(
             "tab: enter editing · enter: run · esc: leave editing",

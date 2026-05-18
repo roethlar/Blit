@@ -69,6 +69,14 @@ pub struct VerifyState {
     /// snapshot, manual `touch` after edit, etc.). Toggled
     /// by `H` from F4.
     use_checksum: bool,
+    /// d-7: `false` (default) means two-way compare —
+    /// reports `missing-on-src` AND `missing-on-dst`.
+    /// `true` flips to one-way — skips the dst-walk so the
+    /// operator only sees what's missing on dst (matches
+    /// `blit check --one-way`). Useful for "did the src
+    /// reach dst?" without caring about extras at dst.
+    /// Toggled by `O` from F4.
+    one_way: bool,
 }
 
 impl Default for VerifyState {
@@ -86,6 +94,7 @@ impl VerifyState {
             status: VerifyStatus::Idle,
             request_id: 0,
             use_checksum: false,
+            one_way: false,
         }
     }
 
@@ -93,6 +102,13 @@ impl VerifyState {
     /// per-file checksum, `false` for size+mtime.
     pub fn use_checksum(&self) -> bool {
         self.use_checksum
+    }
+
+    /// `true` if the next compare_trees run will skip
+    /// `missing-on-src` (one-way mode). `false` (default)
+    /// reports both directions.
+    pub fn one_way(&self) -> bool {
+        self.one_way
     }
 
     /// Flip the checksum mode and invalidate any in-flight
@@ -103,6 +119,16 @@ impl VerifyState {
     /// (same shape as `invalidate_run` for edits).
     pub fn toggle_checksum(&mut self) {
         self.use_checksum = !self.use_checksum;
+        self.invalidate_run();
+    }
+
+    /// Flip the one-way / two-way mode. Same invalidation
+    /// contract as [`Self::toggle_checksum`]: a Done
+    /// banner from a two-way run would be misleading after
+    /// flipping to one-way (the missing-on-src count would
+    /// have meant something different).
+    pub fn toggle_one_way(&mut self) {
+        self.one_way = !self.one_way;
         self.invalidate_run();
     }
 
@@ -471,5 +497,54 @@ mod tests {
         // Status collapsed back to Idle, not stuck on
         // Running with a result that'll never arrive.
         assert!(matches!(state.status(), VerifyStatus::Idle));
+    }
+
+    // d-7: one-way toggle.
+
+    #[test]
+    fn new_state_uses_two_way_compare() {
+        let state = VerifyState::new();
+        assert!(
+            !state.one_way(),
+            "default matches `blit check` default (two-way)"
+        );
+    }
+
+    #[test]
+    fn toggle_one_way_flips_the_flag() {
+        let mut state = VerifyState::new();
+        state.toggle_one_way();
+        assert!(state.one_way(), "first toggle → one-way");
+        state.toggle_one_way();
+        assert!(!state.one_way(), "second toggle → back to two-way");
+    }
+
+    /// Same invalidation contract as the checksum toggle —
+    /// a Done banner from a two-way run would mean something
+    /// different after the flip (the missing-on-src count
+    /// would now correspond to "skipped" not "discovered").
+    #[test]
+    fn toggle_one_way_invalidates_done_result() {
+        let mut state = VerifyState::new();
+        state.source = "/tmp/a".to_string();
+        state.destination = "/tmp/b".to_string();
+        let gen = state.begin_run();
+        state.apply_result(gen, empty_check_result());
+        assert!(matches!(state.status(), VerifyStatus::Done { .. }));
+        state.toggle_one_way();
+        assert!(matches!(state.status(), VerifyStatus::Idle));
+    }
+
+    /// The two toggles are independent. Flipping one
+    /// doesn't touch the other.
+    #[test]
+    fn checksum_and_one_way_toggles_are_independent() {
+        let mut state = VerifyState::new();
+        state.toggle_checksum();
+        assert!(state.use_checksum());
+        assert!(!state.one_way(), "one_way unchanged");
+        state.toggle_one_way();
+        assert!(state.use_checksum(), "checksum unchanged");
+        assert!(state.one_way());
     }
 }
