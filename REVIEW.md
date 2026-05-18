@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-2-f2-transfers | Medium   | Single-owner input task + Connected signal | [~]    | `phase5/a1` | `da7646e` |
 
 ## Open findings
 

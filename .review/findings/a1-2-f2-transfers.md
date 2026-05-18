@@ -183,6 +183,57 @@ Workspace: 589 passing serially (was 580; +9).
 - **a1-5-f4-profile**: F4 reads `~/.config/blit/perf_local.jsonl`.
 - **a1-6-screen-router**: F-keys to navigate between panes.
 
+## Round 2 (sha `da7646e`)
+
+Reviewer caught two real medium findings:
+
+### 1. Detached keystroke polls (Medium)
+
+Each loop iteration's `spawn_blocking` keystroke poll
+could detach when the select arm preferred a Subscribe
+event. crossterm `event::poll`/`event::read` are sync and
+not cancellable, so dropped JoinHandles left blocking
+tasks still polling — and a detached task could silently
+consume a q/Esc/r keystroke. Under active progress
+traffic the lossy quit/refresh was a real bug.
+
+Fix: **single-owner input task**. `spawn_input_task` runs
+ONE blocking task that loops on `event::poll`/`event::read`
+and forwards every key press through an mpsc. The main
+loop selects on `key_rx.recv()` and the Subscribe rx — no
+per-iteration spawn_blocking, no detached blocking tasks.
+Input task exits when the mpsc Sender becomes closed (TUI
+quitting) — checked via `tx.is_closed()` on each
+poll-timeout cycle.
+
+### 2. Connecting status stuck on idle daemons (Low)
+
+The status only flipped from Connecting → Live on the
+first event. A successful Subscribe with no transfer
+activity left the footer reading "connecting..." forever.
+
+Fix: forwarder emits `EventOrError::Connected` immediately
+after the subscribe RPC returns. The main loop flips to
+Live on that control message. First-event path keeps the
+Live transition as a defensive fallback in case Connected
+hit mpsc backpressure.
+
+### Code structure
+
+- `handle_keystroke(join_result)` replaced by
+  `key_action(&KeyEvent) -> Option<UserAction>` — pure
+  function, no async/JoinResult plumbing.
+- `EventOrError` enum grew a `Connected` variant.
+
+### Tests
+
++2 in main tests:
+
+- `key_action_maps_quit_and_refresh`
+- `key_action_returns_none_for_unmapped_keys`
+
+16 unit tests in `blit-tui` total. Workspace passing.
+
 ## Reviewer comments
 
 (empty — pending grade)
