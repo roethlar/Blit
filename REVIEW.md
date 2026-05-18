@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-12-esc-cancels-confirm | Feature | Esc cancels mirror/move confirm prompt | [~] | `phase5/a1` | `fe25cb1` |
 
 ## Open findings
 
