@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-2-f2-transfers | Low      | F2 Connected preserves Degraded (R5)        | `[~]`  | `phase5/a1` | `1176331` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -23,7 +23,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
-| a1-2-f2-transfers | Low | F2 Connected status masks initial GetState failure | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
@@ -92,3 +91,4 @@ Phase 5 C sub-slices on branch `phase5/c`:
 Phase 5 A.1 sub-slices on branch `phase5/a1`:
 
 - `2237521` `blit-tui` crate scaffold + terminal lifecycle (`a1-1-tui-scaffold`)
+- `1176331` F2 Transfers pane with live Subscribe stream (`a1-2-f2-transfers`)
