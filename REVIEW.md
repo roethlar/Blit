@@ -13,12 +13,13 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-3-config-scaffold | Feature | tui.toml loader + Verify defaults | [~] | `phase5/a1` | `985b047` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
 | ID         | Severity | Title                                                    | Branch |
 |------------|----------|----------------------------------------------------------|--------|
+| e-3-config-scaffold | Medium | Config parse warnings emitted inside alternate screen | `phase5/a1` |
 | B          | Feature  | `GetState` RPC + `ActiveJobs` table + recent ring        | `phase5/getstate` |
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
