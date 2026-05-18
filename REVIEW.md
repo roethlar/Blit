@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-7-config-theme | Feature | [theme] accent_color for tab strip          | [~]    | `phase5/a1` | `2b910dc` |
+_none_
 
 ## Open findings
 
@@ -26,6 +24,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
+| e-7-config-theme | Low | Active-tab foreground invisible for black accent          | `phase5/a1` |
 
 ## Verified history
 
