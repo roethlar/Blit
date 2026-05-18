@@ -24,12 +24,14 @@
 
 mod browse;
 mod daemons;
+mod profile;
 mod screens;
 mod state;
 
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
 use blit_app::admin::{jobs, list_modules, ls};
+use blit_app::profile as app_profile;
 use blit_app::scan;
 use blit_core::generated::{DaemonEvent, DaemonState};
 use blit_core::mdns::MdnsDiscoveredService;
@@ -77,6 +79,7 @@ enum ScreenArg {
     F1,
     F2,
     F3,
+    F4,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -100,6 +103,7 @@ async fn main() -> Result<()> {
         ScreenArg::F1 => run_f1_event_loop(guard.terminal_mut()).await,
         ScreenArg::F2 => run_f2_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
         ScreenArg::F3 => run_f3_event_loop(guard.terminal_mut(), args.remote.as_deref()).await,
+        ScreenArg::F4 => run_f4_event_loop(guard.terminal_mut()).await,
     };
     drop(guard);
     result
@@ -850,6 +854,95 @@ enum BrowseFetchPayload {
         entries: Vec<DirEntry>,
     },
     Error(String),
+}
+
+/// F4 Profile event loop. Reads `perf_local.jsonl` + the
+/// predictor state file (both local files; no RPC). The
+/// `profile::query` call is synchronous, so we run it on a
+/// `spawn_blocking` task to avoid stalling the runtime.
+async fn run_f4_event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    use crate::profile::ProfileState;
+    let mut state = ProfileState::new();
+
+    let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
+    spawn_input_task(key_tx);
+
+    let (reply_tx, mut reply_rx) = mpsc::channel::<ProfileReply>(4);
+
+    // Kick the initial read immediately. The operator opens
+    // F4 to see the profile — making them press `r` first
+    // would be busywork.
+    let initial_id = state.begin_fetch();
+    spawn_profile_fetch(initial_id, reply_tx.clone());
+
+    loop {
+        let now = Instant::now();
+        terminal
+            .draw(|frame| {
+                screens::f4::render(frame, &state, now);
+            })
+            .context("terminal.draw")?;
+
+        tokio::select! {
+            key = key_rx.recv() => {
+                let Some(key) = key else { return Ok(()); };
+                if let Some(action) = key_action(&key) {
+                    match action {
+                        UserAction::Quit => return Ok(()),
+                        UserAction::Refresh => {
+                            let id = state.begin_fetch();
+                            spawn_profile_fetch(id, reply_tx.clone());
+                        }
+                        // F4 has no cursor or tree — ignore
+                        // navigation actions.
+                        UserAction::SelectNext
+                        | UserAction::SelectPrev
+                        | UserAction::Descend
+                        | UserAction::Ascend => {}
+                    }
+                }
+            }
+            reply = reply_rx.recv() => {
+                if let Some(ProfileReply { request_id, result }) = reply {
+                    if !state.is_current_request(request_id) {
+                        // Stale (a newer fetch was kicked).
+                        continue;
+                    }
+                    match result {
+                        Ok(report) => state.apply_report(report, Instant::now()),
+                        Err(message) => state.note_fetch_error(message),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One-shot profile reader. `profile::query` is sync; wrap
+/// it in `spawn_blocking` so a slow filesystem doesn't
+/// stall the event loop.
+fn spawn_profile_fetch(request_id: u64, tx: mpsc::Sender<ProfileReply>) {
+    tokio::spawn(async move {
+        // `profile::query(0)` matches the CLI's "no limit"
+        // contract: read all records.
+        let result = tokio::task::spawn_blocking(|| app_profile::query(0)).await;
+        let envelope = match result {
+            Ok(Ok(report)) => Ok(report),
+            Ok(Err(err)) => Err(format!("{err:#}")),
+            Err(join_err) => Err(format!("profile read task panicked: {join_err}")),
+        };
+        let _ = tx
+            .send(ProfileReply {
+                request_id,
+                result: envelope,
+            })
+            .await;
+    });
+}
+
+struct ProfileReply {
+    request_id: u64,
+    result: Result<blit_app::profile::ProfileReport, String>,
 }
 
 /// Messages from the discovery task back to the F1 loop.
