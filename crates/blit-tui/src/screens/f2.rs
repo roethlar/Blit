@@ -8,21 +8,32 @@
 //! stream; this module just paints.
 //!
 //! Layout (heights are constraints; columns reflect the
-//! d-14 / d-15 / d-20 polish):
+//! d-14 / d-15 / d-20 / d-21 / d-22 polish):
 //!
 //! ```text
 //! ┌── header (1 line) ──────────────────────────────────────────────┐
 //! │ blit-tui · F2 Transfers · <remote> · N active · N recent        │
 //! ├── active table (Min 5) ─────────────────────────────────────────┤
 //! │ id  kind  peer  module/path  bytes·NN%  throughput  age         │
-//! │ ...                                                             │
+//! │ ← d-21: j/k cursor highlights the selected row                  │
 //! ├── recent table (Min 5) ─────────────────────────────────────────┤
 //! │ id  kind  peer  module/path  bytes  duration  throughput        │
 //! │ ...                                                             │
 //! ├── footer (1 line) ──────────────────────────────────────────────┤
-//! │ status · [last event Xs ago] · q/Esc quit · r refresh           │
+//! │ status · [last event Xs ago] · [d-22 cancel fragment] ·         │
+//! │   q/Esc quit · r refresh · K cancel selected                    │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! d-22's cancel fragment renders one of these between
+//! the last-event timestamp and the key hints, hidden in
+//! the Idle state:
+//!
+//! - `cancelling <id>...` (yellow, Sending)
+//! - `cancelled <id>` (green, Done · Cancelled)
+//! - `cancel: id <id> not found` (red, Done · NotFound)
+//! - `cancel unsupported for <id>: <msg>` (red, Done · Unsupported)
+//! - `cancel <id> failed: <msg>` (red, Error · transport)
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

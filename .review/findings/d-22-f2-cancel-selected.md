@@ -177,4 +177,42 @@ scope for this slice.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-22-f2-cancel-selected.reopened.md`)
+
+One Low-severity finding, addressed in round 2:
+
+- **F2 module-doc layout sketch still showed the
+  pre-d-22 footer.** Same shape as the d-20 R2 doc-sync
+  reopen (and the e-5/e-6 R2 doc-sync reopens before
+  it). I'd committed in d-20 R2 to update doc sketches
+  in the SAME slice as the column change — and d-22
+  added both a d-21 cursor highlight on the Active
+  table AND a new footer fragment, neither of which
+  made it into the doc sketch.
+
+  Round 2 updates the sketch to mention d-21 + d-22,
+  shows the cancel fragment position in the footer
+  sketch, and adds a dedicated block listing the 5
+  cancel-fragment variants (Sending / Cancelled /
+  NotFound / Unsupported / Failed) with their colors
+  and triggers. Future agents reading the F2 module
+  doc as the contract now see what the renderer
+  actually emits.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/screens/f2.rs`:
+  - Module-doc layout sketch updated to reflect d-21
+    cursor + d-22 cancel fragment + `K` footer hint.
+  - New "cancel fragment renders one of …" block
+    enumerates the 5 variants.
+
+No behavior change, no test count delta (still 243).
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+**Same lesson restated** (e-5 R2, e-6 R2, d-20 R2,
+d-22 R2 all hit this): module-doc sketches drift fast
+when rows/columns/footer fragments get added. From
+now on I'll add the doc sketch update to my pre-commit
+checklist alongside test-count update.
