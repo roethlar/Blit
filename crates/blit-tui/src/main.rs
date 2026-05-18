@@ -2172,6 +2172,29 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
             _ => {}
         }
     }
+    // d-19: digit aliases for tab nav. Some terminals
+    // (mosh, certain SSH proxies, screen-multiplexers
+    // running inside CI environments) drop F-keys
+    // entirely, mapping them to escape sequences the
+    // operator's terminal doesn't translate back. Bare
+    // `1`-`4` always survive. When the Verify form has
+    // edit focus, handle_verify_keystroke captures the
+    // digit as text input before this dispatcher runs,
+    // so typing a path with "config/1/data" still works.
+    if let KeyCode::Char(c) = key.code {
+        if !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            match c {
+                '1' => return Some(UserAction::Navigate(Screen::F1)),
+                '2' => return Some(UserAction::Navigate(Screen::F2)),
+                '3' => return Some(UserAction::Navigate(Screen::F3)),
+                '4' => return Some(UserAction::Navigate(Screen::F4)),
+                _ => {}
+            }
+        }
+    }
     match key.code {
         KeyCode::Char('r') => Some(UserAction::Refresh),
         KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
@@ -2530,6 +2553,34 @@ mod tests {
         assert!(matches!(f(1), Some(UserAction::Navigate(Screen::F1))));
         assert!(matches!(f(2), Some(UserAction::Navigate(Screen::F2))));
         assert!(matches!(f(3), Some(UserAction::Navigate(Screen::F3))));
+        // d-19: digit aliases for tab nav. F1-F4 still
+        // map but so do 1-4 — terminals that drop F-keys
+        // (mosh / certain SSH proxies / CI muxers) can
+        // still navigate. Helper closure pins each.
+        let d = |c| key_action(&k(KeyCode::Char(c)));
+        assert!(
+            matches!(d('1'), Some(UserAction::Navigate(Screen::F1))),
+            "`1` must map to F1 navigation",
+        );
+        assert!(matches!(d('2'), Some(UserAction::Navigate(Screen::F2))));
+        assert!(matches!(d('3'), Some(UserAction::Navigate(Screen::F3))));
+        assert!(matches!(d('4'), Some(UserAction::Navigate(Screen::F4))));
+        // Out-of-range digits stay unmapped.
+        assert!(d('5').is_none());
+        assert!(d('0').is_none());
+        // Ctrl-1 / Alt-1 fall through (don't claim
+        // modifier combos the operator might use for
+        // terminal escape sequences).
+        for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            assert!(
+                key_action(&KeyEvent {
+                    code: KeyCode::Char('1'),
+                    modifiers: mods,
+                })
+                .is_none(),
+                "modifier+1 must not navigate (modifiers: {mods:?})",
+            );
+        }
         assert!(matches!(f(4), Some(UserAction::Navigate(Screen::F4))));
         // Out-of-range F-keys are not mapped (F5+ unused
         // today; the design reserves them for future help /

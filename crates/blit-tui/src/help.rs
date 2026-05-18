@@ -51,10 +51,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         .title(" Help · press ? or Esc to close ");
     let lines: Vec<Line<'static>> = vec![
         section_header("Navigation (global)"),
-        kv("F1", "Daemons pane"),
-        kv("F2", "Transfers pane"),
-        kv("F3", "Browse pane"),
-        kv("F4", "Profile / Verify / Diagnostics / Transfer"),
+        kv("F1 / 1", "Daemons pane"),
+        kv("F2 / 2", "Transfers pane"),
+        kv("F3 / 3", "Browse pane"),
+        kv("F4 / 4", "Profile / Verify / Diagnostics / Transfer"),
         kv("?", "toggle this help overlay"),
         kv("q / Esc", "quit (Ctrl-c emergency)"),
         // d-16 R2: `r` works on every pane — rescan
