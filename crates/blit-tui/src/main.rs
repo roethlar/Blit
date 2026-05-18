@@ -29,6 +29,7 @@ mod help;
 mod profile;
 mod screens;
 mod state;
+mod transfer;
 mod verify;
 
 use blit_app::admin::list_modules::Module;
@@ -193,6 +194,12 @@ struct AppState {
     /// (except `?`/Esc which close it). Visibility persists
     /// across F-key navigation.
     help: help::HelpOverlay,
+    /// F4 local-transfer state. Operator triggers a
+    /// copy / mirror via `C` / `M` once the Verify form's
+    /// Source and Destination are filled in.
+    transfer: transfer::TransferState,
+    /// Sender into the F4 transfer reply mpsc.
+    transfer_reply_tx: mpsc::Sender<TransferReply>,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -282,6 +289,9 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
     // F4 Diagnostics dump reply channel.
     let (diagnostics_reply_tx, mut diagnostics_reply_rx) = mpsc::channel::<DiagnosticsReply>(2);
 
+    // F4 local-transfer reply channel.
+    let (transfer_reply_tx, mut transfer_reply_rx) = mpsc::channel::<TransferReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -309,6 +319,8 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         diagnostics: diagnostics::DiagnosticsState::new(),
         diagnostics_reply_tx: diagnostics_reply_tx.clone(),
         help: help::HelpOverlay::default(),
+        transfer: transfer::TransferState::new(),
+        transfer_reply_tx: transfer_reply_tx.clone(),
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -403,6 +415,7 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                         &app.profile,
                         &app.verify,
                         &app.diagnostics,
+                        &app.transfer,
                         now,
                     ),
                 }
@@ -637,6 +650,15 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                     }
                 }
             }
+            // F4 local-transfer replies.
+            reply = transfer_reply_rx.recv() => {
+                if let Some(TransferReply { request_id, kind, result }) = reply {
+                    match result {
+                        Ok(summary) => { app.transfer.apply_done(request_id, kind, summary); }
+                        Err(msg) => { app.transfer.apply_error(request_id, kind, msg); }
+                    }
+                }
+            }
         }
     }
 }
@@ -750,6 +772,26 @@ async fn handle_pane_action(
                     app.verify.source.clone(),
                     app.verify.destination.clone(),
                     app.diagnostics_reply_tx.clone(),
+                );
+            }
+            UserAction::TransferCopy if can_start_transfer(app) => {
+                let id = app.transfer.begin(transfer::TransferKind::Copy);
+                spawn_local_transfer(
+                    id,
+                    transfer::TransferKind::Copy,
+                    app.verify.source.clone(),
+                    app.verify.destination.clone(),
+                    app.transfer_reply_tx.clone(),
+                );
+            }
+            UserAction::TransferMirror if can_start_transfer(app) => {
+                let id = app.transfer.begin(transfer::TransferKind::Mirror);
+                spawn_local_transfer(
+                    id,
+                    transfer::TransferKind::Mirror,
+                    app.verify.source.clone(),
+                    app.verify.destination.clone(),
+                    app.transfer_reply_tx.clone(),
                 );
             }
             _ => {}
@@ -1233,6 +1275,52 @@ struct VerifyReply {
     result: Result<blit_app::check::CheckResult, String>,
 }
 
+/// Reply envelope from a local-transfer task.
+struct TransferReply {
+    request_id: u64,
+    kind: transfer::TransferKind,
+    result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
+}
+
+/// `true` when the operator can kick a local transfer:
+/// both Verify fields are non-empty AND no transfer is
+/// currently running.
+fn can_start_transfer(app: &AppState) -> bool {
+    !app.verify.source.trim().is_empty()
+        && !app.verify.destination.trim().is_empty()
+        && !app.transfer.is_running()
+}
+
+/// Spawn a local copy / mirror via
+/// `blit_app::transfers::local::run`. The result lands on
+/// `tx` as a [`TransferReply`].
+fn spawn_local_transfer(
+    request_id: u64,
+    kind: transfer::TransferKind,
+    source: String,
+    destination: String,
+    tx: mpsc::Sender<TransferReply>,
+) {
+    tokio::spawn(async move {
+        let options = blit_core::orchestrator::LocalMirrorOptions {
+            mirror: matches!(kind, transfer::TransferKind::Mirror),
+            ..Default::default()
+        };
+        let src = std::path::PathBuf::from(&source);
+        let dst = std::path::PathBuf::from(&destination);
+        let result = blit_app::transfers::local::run(&src, &dst, options)
+            .await
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx
+            .send(TransferReply {
+                request_id,
+                kind,
+                result,
+            })
+            .await;
+    });
+}
+
 /// Reply envelope from the F4 Diagnostics dump task.
 /// Same generation pattern as VerifyReply.
 struct DiagnosticsReply {
@@ -1584,6 +1672,11 @@ enum UserAction {
     DiagnosticsDump,
     /// Toggle the `?` help overlay. Works from every pane.
     ToggleHelp,
+    /// F4: `C` triggers a local copy from the Verify
+    /// form's Source → Destination.
+    TransferCopy,
+    /// F4: `M` triggers a local mirror.
+    TransferMirror,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1638,6 +1731,13 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // `?` glyph on most layouts requires Shift, which
         // crossterm hands us as just `Char('?')`.
         KeyCode::Char('?') => Some(UserAction::ToggleHelp),
+        // Capital C/M trigger local transfers from F4's
+        // Verify form (Source → Destination). Capitals
+        // chosen because lowercase c/d/e are taken by
+        // ProfileClear/Disable/Enable on F4. F1/F2/F3
+        // wildcard-ignore the variants below.
+        KeyCode::Char('C') => Some(UserAction::TransferCopy),
+        KeyCode::Char('M') => Some(UserAction::TransferMirror),
         _ => None,
     }
 }
@@ -2261,6 +2361,8 @@ mod tests {
             diagnostics: diagnostics::DiagnosticsState::new(),
             diagnostics_reply_tx: mpsc::channel::<DiagnosticsReply>(1).0,
             help: help::HelpOverlay::default(),
+            transfer: transfer::TransferState::new(),
+            transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
         };
         app.verify.cycle_focus(); // Source
         let (verify_run_tx, _verify_run_rx) = mpsc::channel::<VerifyReply>(1);
@@ -2275,6 +2377,21 @@ mod tests {
             "`?` must NOT insert into the focused field, got: {:?}",
             app.verify.source
         );
+    }
+
+    /// d-4: capital C / M trigger local copy / mirror.
+    /// Lowercase stays mapped to the existing actions
+    /// (`c` → ProfileClear, `m` would be unmapped today).
+    #[test]
+    fn key_action_maps_transfer_triggers() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('C'))),
+            Some(UserAction::TransferCopy)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('M'))),
+            Some(UserAction::TransferMirror)
+        ));
     }
 
     /// d-1 (F4 profile lifecycle keys): `c` / `d` / `e`
@@ -2295,8 +2412,10 @@ mod tests {
             key_action(&k(KeyCode::Char('e'))),
             Some(UserAction::ProfileEnable)
         ));
-        // Uppercase counterparts are unmapped.
-        assert!(key_action(&k(KeyCode::Char('C'))).is_none());
+        // Uppercase D / E remain unmapped (Profile keys
+        // are lowercase-only). Uppercase C is now mapped
+        // to TransferCopy as of d-4, so it's covered in
+        // `key_action_maps_transfer_triggers`.
         assert!(key_action(&k(KeyCode::Char('D'))).is_none());
         assert!(key_action(&k(KeyCode::Char('E'))).is_none());
         // Ctrl-c remains Quit (not ProfileClear).

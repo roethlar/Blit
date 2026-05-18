@@ -25,6 +25,7 @@
 
 use crate::diagnostics::{DiagnosticsState, DiagnosticsStatus};
 use crate::profile::{ProfileFetchStatus, ProfileState};
+use crate::transfer::{TransferState, TransferStatus};
 use crate::verify::{VerifyFocus, VerifyState, VerifyStatus};
 use blit_app::profile::{PredictorReport, ProfileReport, ProfileSummary};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -46,6 +47,7 @@ pub fn render_into(
     state: &ProfileState,
     verify: &VerifyState,
     diagnostics: &DiagnosticsState,
+    transfer: &TransferState,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -56,6 +58,7 @@ pub fn render_into(
             Constraint::Min(5),
             Constraint::Length(6),
             Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(area);
@@ -65,7 +68,40 @@ pub fn render_into(
     render_predictor(frame, chunks[2], state);
     render_verify(frame, chunks[3], verify);
     render_diagnostics(frame, chunks[4], diagnostics);
-    render_footer(frame, chunks[5], state.status(), verify, now);
+    render_transfer(frame, chunks[5], transfer);
+    render_footer(frame, chunks[6], state.status(), verify, now);
+}
+
+fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Local transfer (C copy · M mirror) ");
+    let line = match transfer.status() {
+        TransferStatus::Idle => Line::from(Span::styled(
+            "press `C` to copy or `M` to mirror Source → Destination",
+            Style::default().fg(Color::DarkGray),
+        )),
+        TransferStatus::Running { kind } => Line::from(Span::styled(
+            format!("{} running...", kind.label()),
+            Style::default().fg(Color::Yellow),
+        )),
+        TransferStatus::Done { kind, summary, .. } => Line::from(Span::styled(
+            format!(
+                "{} done · {} planned · {} copied · {} bytes",
+                kind.label(),
+                summary.planned_files,
+                summary.copied_files,
+                summary.total_bytes
+            ),
+            Style::default().fg(Color::Green),
+        )),
+        TransferStatus::Error { kind, message } => Line::from(Span::styled(
+            format!("{} failed: {message}", kind.label()),
+            Style::default().fg(Color::Red),
+        )),
+    };
+    let para = Paragraph::new(vec![line]).block(block);
+    frame.render_widget(para, area);
 }
 
 fn render_diagnostics(frame: &mut Frame, area: Rect, diagnostics: &DiagnosticsState) {
