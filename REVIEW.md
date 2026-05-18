@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ |  |  |  |  |  |
+| d-24-config-cancel-ttl | Feature | F2 cancel-status TTL operator-tunable via tui.toml | `[~]` | `phase5/a1` | `517a3ae` |
 
 ## Open findings
 
