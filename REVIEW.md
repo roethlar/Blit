@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-3-f4-diagnostics | Feature | F4 diagnostics dump (`s` snapshot)          | `[~]`  | `phase5/a1` | `bb93f8c` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -24,6 +24,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
+| d-3-f4-diagnostics | Medium | TUI diagnostics dump must match CLI JSON contract | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
