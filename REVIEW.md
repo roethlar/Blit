@@ -11,9 +11,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 ## Currently pending review
 
-| ID                | Severity | Title                                       | Status | Branch      | Commit    |
-|-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| e-6-verify-prefill | Low     | Round 2: schema doc covers prefill keys     | [~]    | `phase5/a1` | `72b742b` |
+_none_
 
 ## Open findings
 
@@ -121,3 +119,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
 - `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
+- `72b742b` Verify path prefill config + schema doc sync (`e-6-verify-prefill` round 2)
