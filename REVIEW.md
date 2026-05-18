@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-10-transfer-throughput | Feature | bytes/sec rate on transfer Done banner | [~] | `phase5/a1` | `b625ca1` |
 
 ## Open findings
 
