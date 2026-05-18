@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-3-f1-daemons   | Medium   | F1 Local row + viewport + clamp (R2)        | `[~]`  | `phase5/a1` | `1fcee97` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -23,7 +23,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
-| a1-3-f1-daemons | Medium | F1 missing local/GetState contract and table viewport | `phase5/a1` |
 | a1-3b-f1-getstate-detail | Medium | F1 detail block populated by `GetState` (follow-up of a1-3) | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
@@ -94,3 +93,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 
 - `2237521` `blit-tui` crate scaffold + terminal lifecycle (`a1-1-tui-scaffold`)
 - `1176331` F2 Transfers pane with live Subscribe stream (`a1-2-f2-transfers`)
+- `1fcee97` F1 Daemons pane with Local row, viewport-aware table, and rescan clamp (`a1-3-f1-daemons`)
