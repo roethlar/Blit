@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| d-18-verify-form-clear | Feature | Ctrl-U clears focused Verify field | [~] | `phase5/a1` | `a4416c8` |
 
 ## Open findings
 
