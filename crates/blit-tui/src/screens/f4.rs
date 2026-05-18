@@ -23,6 +23,7 @@
 //! └────────────────────────────────────────────────┘
 //! ```
 
+use crate::diagnostics::{DiagnosticsState, DiagnosticsStatus};
 use crate::profile::{ProfileFetchStatus, ProfileState};
 use crate::verify::{VerifyFocus, VerifyState, VerifyStatus};
 use blit_app::profile::{PredictorReport, ProfileReport, ProfileSummary};
@@ -44,6 +45,7 @@ pub fn render_into(
     area: Rect,
     state: &ProfileState,
     verify: &VerifyState,
+    diagnostics: &DiagnosticsState,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -53,6 +55,7 @@ pub fn render_into(
             Constraint::Length(4),
             Constraint::Min(5),
             Constraint::Length(6),
+            Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(area);
@@ -61,7 +64,34 @@ pub fn render_into(
     render_records_summary(frame, chunks[1], state);
     render_predictor(frame, chunks[2], state);
     render_verify(frame, chunks[3], verify);
-    render_footer(frame, chunks[4], state.status(), verify, now);
+    render_diagnostics(frame, chunks[4], diagnostics);
+    render_footer(frame, chunks[5], state.status(), verify, now);
+}
+
+fn render_diagnostics(frame: &mut Frame, area: Rect, diagnostics: &DiagnosticsState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Diagnostics ");
+    let line = match diagnostics.status() {
+        DiagnosticsStatus::Idle => Line::from(Span::styled(
+            "press `s` to dump a snapshot of the Verify Source → Destination pair",
+            Style::default().fg(Color::DarkGray),
+        )),
+        DiagnosticsStatus::Running => Line::from(Span::styled(
+            "writing diagnostics snapshot...",
+            Style::default().fg(Color::Yellow),
+        )),
+        DiagnosticsStatus::Done { path, .. } => Line::from(Span::styled(
+            format!("wrote {}", path.display()),
+            Style::default().fg(Color::Green),
+        )),
+        DiagnosticsStatus::Error { message } => Line::from(Span::styled(
+            format!("error: {message}"),
+            Style::default().fg(Color::Red),
+        )),
+    };
+    let para = Paragraph::new(vec![line]).block(block);
+    frame.render_widget(para, area);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &ProfileState) {
@@ -249,6 +279,8 @@ fn render_footer(
             Span::raw(" disable  ·  "),
             Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" enable  ·  "),
+            Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" snapshot  ·  "),
             Span::styled("tab", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" verify"),
         ]

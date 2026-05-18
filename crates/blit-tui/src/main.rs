@@ -24,6 +24,7 @@
 
 mod browse;
 mod daemons;
+mod diagnostics;
 mod profile;
 mod screens;
 mod state;
@@ -178,6 +179,14 @@ struct AppState {
     /// F4 Verify form. Holds source/destination text, the
     /// current focus, and the most recent run's result.
     verify: verify::VerifyState,
+    /// F4 Diagnostics dump state. Tracks the most recent
+    /// snapshot's status (idle / running / done(path) /
+    /// error). Operator triggers via `s`.
+    diagnostics: diagnostics::DiagnosticsState,
+    /// Sender into the F4 Diagnostics dump task mpsc.
+    /// Cloned by `spawn_diagnostics_dump` into each
+    /// spawned task.
+    diagnostics_reply_tx: mpsc::Sender<DiagnosticsReply>,
 }
 
 /// Polling cadence for the event loop. 50ms keeps keystroke
@@ -264,6 +273,9 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
     // F4 Verify run reply channel.
     let (verify_run_tx, mut verify_run_rx) = mpsc::channel::<VerifyReply>(2);
 
+    // F4 Diagnostics dump reply channel.
+    let (diagnostics_reply_tx, mut diagnostics_reply_rx) = mpsc::channel::<DiagnosticsReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -288,6 +300,8 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
         profile: profile::ProfileState::new(),
         profile_reply_tx: profile_reply_tx.clone(),
         verify: verify::VerifyState::new(),
+        diagnostics: diagnostics::DiagnosticsState::new(),
+        diagnostics_reply_tx: diagnostics_reply_tx.clone(),
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -376,9 +390,14 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                         &app.remote_label,
                         now,
                     ),
-                    Screen::F4 => {
-                        screens::f4::render_into(frame, body_area, &app.profile, &app.verify, now)
-                    }
+                    Screen::F4 => screens::f4::render_into(
+                        frame,
+                        body_area,
+                        &app.profile,
+                        &app.verify,
+                        &app.diagnostics,
+                        now,
+                    ),
                 }
             })
             .context("terminal.draw")?;
@@ -575,6 +594,15 @@ async fn run_router(terminal: &mut Terminal<CrosstermBackend<Stdout>>, args: &Ar
                     }
                 }
             }
+            // F4 Diagnostics dump replies.
+            reply = diagnostics_reply_rx.recv() => {
+                if let Some(DiagnosticsReply { request_id, result }) = reply {
+                    match result {
+                        Ok(path) => { app.diagnostics.apply_done(request_id, path); }
+                        Err(msg) => { app.diagnostics.apply_error(request_id, msg); }
+                    }
+                }
+            }
         }
     }
 }
@@ -675,6 +703,20 @@ async fn handle_pane_action(
                     let id = app.profile.begin_fetch();
                     spawn_profile_fetch(id, app.profile_reply_tx.clone());
                 }
+            }
+            UserAction::DiagnosticsDump
+                if !app.verify.source.trim().is_empty()
+                    && !app.verify.destination.trim().is_empty() =>
+            {
+                // No-op when either field is empty —
+                // there's nothing meaningful to snapshot.
+                let id = app.diagnostics.begin_dump();
+                spawn_diagnostics_dump(
+                    id,
+                    app.verify.source.clone(),
+                    app.verify.destination.clone(),
+                    app.diagnostics_reply_tx.clone(),
+                );
             }
             _ => {}
         },
@@ -1157,6 +1199,76 @@ struct VerifyReply {
     result: Result<blit_app::check::CheckResult, String>,
 }
 
+/// Reply envelope from the F4 Diagnostics dump task.
+/// Same generation pattern as VerifyReply.
+struct DiagnosticsReply {
+    request_id: u64,
+    result: Result<std::path::PathBuf, String>,
+}
+
+/// Spawn a diagnostics-dump task on a blocking worker.
+/// Builds the JSON snapshot via
+/// `blit_app::diagnostics::dump::endpoint_snapshot` for
+/// both source and destination, writes it to
+/// `~/.config/blit/diagnostics-<unix-ms>.json`, and posts
+/// the resulting path through `tx`.
+fn spawn_diagnostics_dump(
+    request_id: u64,
+    source: String,
+    destination: String,
+    tx: mpsc::Sender<DiagnosticsReply>,
+) {
+    tokio::spawn(async move {
+        let result =
+            tokio::task::spawn_blocking(move || run_diagnostics_dump(&source, &destination)).await;
+        let envelope = match result {
+            Ok(Ok(path)) => Ok(path),
+            Ok(Err(msg)) => Err(msg),
+            Err(join_err) => Err(format!("diagnostics task panicked: {join_err}")),
+        };
+        let _ = tx
+            .send(DiagnosticsReply {
+                request_id,
+                result: envelope,
+            })
+            .await;
+    });
+}
+
+/// Synchronous core of the diagnostics dump. Parses the
+/// two paths, calls `endpoint_snapshot` for each, writes
+/// the combined JSON to `~/.config/blit/diagnostics-...`
+/// and returns the file path. Errors are bubbled as
+/// human-readable strings.
+fn run_diagnostics_dump(source: &str, destination: &str) -> Result<std::path::PathBuf, String> {
+    use blit_app::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
+    use blit_app::endpoints::parse_transfer_endpoint;
+
+    let src_endpoint =
+        parse_transfer_endpoint(source).map_err(|e| format!("parse source: {e:#}"))?;
+    let dst_endpoint =
+        parse_transfer_endpoint(destination).map_err(|e| format!("parse destination: {e:#}"))?;
+    let snapshot = serde_json::json!({
+        "blit_version": env!("CARGO_PKG_VERSION"),
+        "source": endpoint_snapshot(source, &src_endpoint),
+        "destination": endpoint_snapshot(destination, &dst_endpoint),
+        "source_display": endpoint_display(&src_endpoint),
+        "destination_display": endpoint_display(&dst_endpoint),
+        "same_device": same_device(&src_endpoint, &dst_endpoint),
+    });
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("clock: {e}"))?
+        .as_millis();
+    let dir = blit_core::perf_history::config_dir().map_err(|e| format!("config dir: {e:#}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create dir: {e}"))?;
+    let path = dir.join(format!("diagnostics-{now_ms}.json"));
+    let pretty = serde_json::to_string_pretty(&snapshot).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Handle a keystroke when F4's Verify form has focus.
 /// Returns `true` if the keystroke was consumed; `false`
 /// when the dispatcher should fall through to the normal
@@ -1380,6 +1492,9 @@ enum UserAction {
     ProfileDisable,
     /// F4: `e` re-enables history recording.
     ProfileEnable,
+    /// F4: `s` dumps a diagnostics snapshot to disk for
+    /// the current Source/Destination form pair.
+    DiagnosticsDump,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1424,6 +1539,12 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         KeyCode::Char('c') => Some(UserAction::ProfileClear),
         KeyCode::Char('d') => Some(UserAction::ProfileDisable),
         KeyCode::Char('e') => Some(UserAction::ProfileEnable),
+        // `s` dumps a diagnostics snapshot. `d` is taken
+        // by ProfileDisable; the TUI_DESIGN listing `[d]
+        // dump` conflicts with `[d] disable` on the same
+        // screen — we resolve the conflict by binding
+        // dump on the mnemonic `s` (snapshot) key.
+        KeyCode::Char('s') => Some(UserAction::DiagnosticsDump),
         _ => None,
     }
 }
