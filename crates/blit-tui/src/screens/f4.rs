@@ -81,6 +81,10 @@ fn render_transfer(frame: &mut Frame, area: Rect, transfer: &TransferState) {
             "press `C` to copy or `M` to mirror Source → Destination",
             Style::default().fg(Color::DarkGray),
         )),
+        TransferStatus::ConfirmingMirror => Line::from(Span::styled(
+            "mirror will DELETE extraneous files at destination · [y/N] to confirm",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
         TransferStatus::Running { kind } => Line::from(Span::styled(
             format!("{} running...", kind.label()),
             Style::default().fg(Color::Yellow),

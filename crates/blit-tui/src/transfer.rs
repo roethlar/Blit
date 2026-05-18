@@ -8,6 +8,14 @@
 //! 3. Esc → leave editing
 //! 4. `C` to copy, `M` to mirror
 //!
+//! d-4 R2: `M` doesn't run the mirror directly. It first
+//! transitions to [`TransferStatus::ConfirmingMirror`] and
+//! waits for `y` (run) or `n` (cancel) — same destructive-
+//! operation guard the CLI applies in
+//! `crates/blit-cli/src/transfers/mod.rs:181`. Mirror can
+//! delete extraneous files at the destination, so a single
+//! keystroke shouldn't be enough.
+//!
 //! The actual transfer runs via
 //! `blit_app::transfers::local::run`, identical to the
 //! CLI's `blit copy` / `blit mirror` code path.
@@ -33,6 +41,13 @@ impl TransferKind {
 #[derive(Debug)]
 pub enum TransferStatus {
     Idle,
+    /// `M` was pressed but the mirror hasn't started.
+    /// Waiting for `y` (run) or `n` (cancel). Mirror can
+    /// delete files at the destination, so requiring an
+    /// explicit confirm matches the CLI's
+    /// `confirm_destructive_operation` prompt
+    /// (`crates/blit-cli/src/transfers/mod.rs:181`).
+    ConfirmingMirror,
     Running {
         kind: TransferKind,
     },
@@ -80,9 +95,58 @@ impl TransferState {
         matches!(self.status, TransferStatus::Running { .. })
     }
 
+    /// `true` while a mirror confirmation prompt is open.
+    /// Used by the F4 dispatcher to route `y`/`n` to the
+    /// confirm/cancel arms instead of the no-op default.
+    pub fn is_confirming_mirror(&self) -> bool {
+        matches!(self.status, TransferStatus::ConfirmingMirror)
+    }
+
+    /// `true` when a fresh trigger should be blocked
+    /// (running OR awaiting confirmation). `can_start_transfer`
+    /// in `main.rs` uses this to refuse a second `M` while
+    /// the first confirmation is still on screen.
+    pub fn is_busy(&self) -> bool {
+        self.is_running() || self.is_confirming_mirror()
+    }
+
     pub fn begin(&mut self, kind: TransferKind) -> u64 {
         self.request_id += 1;
         self.status = TransferStatus::Running { kind };
+        self.request_id
+    }
+
+    /// Open the destructive-operation confirmation prompt
+    /// for a mirror. No request_id bump — the actual run
+    /// happens later via [`Self::begin`] if the operator
+    /// confirms.
+    pub fn begin_confirm_mirror(&mut self) {
+        self.status = TransferStatus::ConfirmingMirror;
+    }
+
+    /// Drop a pending mirror confirmation back to Idle.
+    /// Called when the operator presses `n`/Esc, or when
+    /// they edit the Verify form (which would change the
+    /// effective paths underneath the confirm prompt).
+    /// Returns `true` if a confirmation was actually
+    /// dismissed — lets callers know whether to surface a
+    /// "cancelled" message.
+    pub fn cancel_confirm(&mut self) -> bool {
+        if matches!(self.status, TransferStatus::ConfirmingMirror) {
+            self.status = TransferStatus::Idle;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Synchronously record a validation error (bad source
+    /// path, remote endpoint, etc.) without spinning up a
+    /// background task. Bumps the request_id so any prior
+    /// in-flight reply drops harmlessly.
+    pub fn note_validation_error(&mut self, kind: TransferKind, message: String) -> u64 {
+        self.request_id += 1;
+        self.status = TransferStatus::Error { kind, message };
         self.request_id
     }
 
@@ -185,5 +249,88 @@ mod tests {
     fn transfer_kind_label() {
         assert_eq!(TransferKind::Copy.label(), "copy");
         assert_eq!(TransferKind::Mirror.label(), "mirror");
+    }
+
+    // d-4 R2: mirror confirmation guard.
+
+    #[test]
+    fn begin_confirm_mirror_idles_to_confirming() {
+        let mut state = TransferState::new();
+        state.begin_confirm_mirror();
+        assert!(state.is_confirming_mirror());
+        assert!(state.is_busy());
+        // Not Running — the actual transfer hasn't started yet.
+        assert!(!state.is_running());
+    }
+
+    #[test]
+    fn cancel_confirm_returns_to_idle() {
+        let mut state = TransferState::new();
+        state.begin_confirm_mirror();
+        let dismissed = state.cancel_confirm();
+        assert!(dismissed);
+        assert!(matches!(state.status(), TransferStatus::Idle));
+        assert!(!state.is_busy());
+    }
+
+    #[test]
+    fn cancel_confirm_no_op_outside_confirming() {
+        let mut state = TransferState::new();
+        let dismissed = state.cancel_confirm();
+        assert!(!dismissed);
+        // begin() puts us in Running; cancel must not pull
+        // the rug out from under an actual transfer.
+        state.begin(TransferKind::Copy);
+        let dismissed = state.cancel_confirm();
+        assert!(!dismissed);
+        assert!(state.is_running());
+    }
+
+    #[test]
+    fn confirm_then_begin_transitions_to_running() {
+        let mut state = TransferState::new();
+        state.begin_confirm_mirror();
+        let id = state.begin(TransferKind::Mirror);
+        assert_eq!(id, 1, "first begin bumps gen from 0");
+        assert!(state.is_running());
+    }
+
+    #[test]
+    fn note_validation_error_bumps_gen_and_writes_error() {
+        let mut state = TransferState::new();
+        let id = state.note_validation_error(TransferKind::Mirror, "bad path".to_string());
+        assert_eq!(id, 1);
+        match state.status() {
+            TransferStatus::Error { kind, message } => {
+                assert_eq!(*kind, TransferKind::Mirror);
+                assert_eq!(message, "bad path");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn note_validation_error_drops_stale_running_reply() {
+        let mut state = TransferState::new();
+        let stale_id = state.begin(TransferKind::Copy);
+        // A new attempt fails validation synchronously.
+        state.note_validation_error(TransferKind::Copy, "remote not supported".to_string());
+        // The original async run's reply lands too late.
+        let applied = state.apply_done(stale_id, TransferKind::Copy, empty_summary());
+        assert!(!applied, "stale reply must drop now that gen has advanced");
+        // Error banner stays visible.
+        assert!(matches!(state.status(), TransferStatus::Error { .. }));
+    }
+
+    #[test]
+    fn is_busy_covers_running_and_confirming() {
+        let mut state = TransferState::new();
+        assert!(!state.is_busy());
+        state.begin_confirm_mirror();
+        assert!(state.is_busy());
+        state.cancel_confirm();
+        assert!(!state.is_busy());
+        state.begin(TransferKind::Copy);
+        assert!(state.is_busy());
     }
 }

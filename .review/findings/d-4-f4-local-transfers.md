@@ -175,4 +175,100 @@ serially.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-4-f4-local-transfers.reopened.md`)
+
+Three findings, all addressed in round 2:
+
+1. **High — `M` started a destructive mirror without
+   confirmation.** Fix: `M` now transitions
+   `TransferState` to `ConfirmingMirror`. The block
+   renders a red bold warning ("mirror will DELETE
+   extraneous files at destination · [y/N] to confirm")
+   and the dispatcher only honors `y`/`n` while
+   `is_confirming_mirror()`. Editing the Verify form mid-
+   confirm calls `cancel_confirm()` so the operator can't
+   accidentally confirm a mirror against a different path
+   than they read in the prompt. Matches the CLI's
+   `confirm_destructive_operation` flow
+   (`crates/blit-cli/src/transfers/mod.rs:181`).
+
+2. **High — TUI transfers skipped destination resolution.**
+   Fix: new sync helper `prepare_local_transfer` mirrors
+   `crates/blit-cli/src/transfers/mod.rs:101`:
+   - `parse_transfer_endpoint(source)` /
+     `parse_transfer_endpoint(destination)`.
+   - Reject remote endpoints (F4 is local-only; remote
+     dispatch needs daemon RPC plumbing).
+   - `resolve_destination(raw_source, raw_destination, &src, raw_dst)`
+     applies the rsync trailing-slash + container-dest
+     rules.
+   The resolved `(PathBuf, PathBuf)` is what
+   `spawn_local_transfer` hands to
+   `blit_app::transfers::local::run`. So
+   `source=file.txt, destination=existing_dir/` now copies
+   to `existing_dir/file.txt`, matching `blit copy`.
+
+3. **Medium — `perf_history` was hard-defaulted on.** Fix:
+   `spawn_local_transfer` reads
+   `blit_core::perf_history::perf_history_enabled()` at
+   spawn time and threads it through
+   `LocalMirrorOptions { perf_history, .. }`. The F4
+   `d` / `e` lifecycle keys can flip the setting; a
+   transfer launched immediately after honors the new
+   value (no need to bounce out of the TUI). Falls back to
+   `true` if the read errors — same defensive default the
+   CLI uses (`crates/blit-cli/src/context.rs:11`).
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/transfer.rs`: `TransferStatus::ConfirmingMirror`
+  variant + `is_confirming_mirror`, `is_busy`,
+  `begin_confirm_mirror`, `cancel_confirm`,
+  `note_validation_error` methods. +7 unit tests.
+- `crates/blit-tui/src/main.rs`:
+  - `UserAction::TransferMirrorConfirm` /
+    `UserAction::TransferCancel`.
+  - `key_action` maps `Y`/`y` / `N`/`n`.
+  - `prepare_local_transfer` sync helper (parse +
+    resolve + reject-remote).
+  - F4 dispatch: `TransferCopy` /`TransferMirror` /
+    `TransferMirrorConfirm` / `TransferCancel` arms, all
+    routing through `prepare_local_transfer`.
+  - `spawn_local_transfer` signature changed to take
+    `PathBuf` + reads `perf_history_enabled` per call.
+  - `can_start_transfer` uses `is_busy` (covers
+    ConfirmingMirror).
+  - `handle_verify_keystroke` calls `cancel_confirm()` on
+    insert/backspace so the prompt drops if the operator
+    edits underneath it.
+- `crates/blit-tui/src/screens/f4.rs`: ConfirmingMirror
+  render arm (red bold warning).
+- `crates/blit-tui/Cargo.toml`: `tempfile` dev-dep for
+  the new prepare_local_transfer tests.
+
+### Round 2 tests
+
++12 tests total (129 → 141):
+
+In `transfer::tests`:
+- `begin_confirm_mirror_idles_to_confirming`
+- `cancel_confirm_returns_to_idle`
+- `cancel_confirm_no_op_outside_confirming`
+- `confirm_then_begin_transitions_to_running`
+- `note_validation_error_bumps_gen_and_writes_error`
+- `note_validation_error_drops_stale_running_reply`
+- `is_busy_covers_running_and_confirming`
+
+In `main::tests`:
+- `key_action_maps_transfer_confirm_keys` (Y/y/N/n)
+- `prepare_local_transfer_appends_basename_for_container_dest`
+- `prepare_local_transfer_source_contents_keeps_dest`
+- `prepare_local_transfer_rejects_remote_source`
+- `transfer_state_mirror_confirm_lifecycle`
+
+### Validation
+
+- `cargo fmt --all -- --check` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+- `cargo test -p blit-tui` ✅ 141 tests
+- `cargo test --workspace` ✅

@@ -775,24 +775,65 @@ async fn handle_pane_action(
                 );
             }
             UserAction::TransferCopy if can_start_transfer(app) => {
-                let id = app.transfer.begin(transfer::TransferKind::Copy);
-                spawn_local_transfer(
-                    id,
-                    transfer::TransferKind::Copy,
-                    app.verify.source.clone(),
-                    app.verify.destination.clone(),
-                    app.transfer_reply_tx.clone(),
-                );
+                match prepare_local_transfer(&app.verify.source, &app.verify.destination) {
+                    Ok((src, dst)) => {
+                        let id = app.transfer.begin(transfer::TransferKind::Copy);
+                        spawn_local_transfer(
+                            id,
+                            transfer::TransferKind::Copy,
+                            src,
+                            dst,
+                            app.transfer_reply_tx.clone(),
+                        );
+                    }
+                    Err(msg) => {
+                        app.transfer
+                            .note_validation_error(transfer::TransferKind::Copy, msg);
+                    }
+                }
             }
             UserAction::TransferMirror if can_start_transfer(app) => {
-                let id = app.transfer.begin(transfer::TransferKind::Mirror);
-                spawn_local_transfer(
-                    id,
-                    transfer::TransferKind::Mirror,
-                    app.verify.source.clone(),
-                    app.verify.destination.clone(),
-                    app.transfer_reply_tx.clone(),
-                );
+                // d-4 R2: prompt before destructive mirror.
+                // Validate the paths up-front so a parse
+                // error surfaces before the operator
+                // confirms (avoids "confirmed, then immediately
+                // got a parse error" UX).
+                match prepare_local_transfer(&app.verify.source, &app.verify.destination) {
+                    Ok(_) => {
+                        app.transfer.begin_confirm_mirror();
+                    }
+                    Err(msg) => {
+                        app.transfer
+                            .note_validation_error(transfer::TransferKind::Mirror, msg);
+                    }
+                }
+            }
+            UserAction::TransferMirrorConfirm if app.transfer.is_confirming_mirror() => {
+                // Re-validate at fire time. The Verify
+                // fields are also invalidated on edit via
+                // handle_verify_keystroke, but be defensive
+                // — a stale confirm-pending must never run
+                // a different set of paths than were shown
+                // in the prompt.
+                match prepare_local_transfer(&app.verify.source, &app.verify.destination) {
+                    Ok((src, dst)) => {
+                        let id = app.transfer.begin(transfer::TransferKind::Mirror);
+                        spawn_local_transfer(
+                            id,
+                            transfer::TransferKind::Mirror,
+                            src,
+                            dst,
+                            app.transfer_reply_tx.clone(),
+                        );
+                    }
+                    Err(msg) => {
+                        app.transfer
+                            .note_validation_error(transfer::TransferKind::Mirror, msg);
+                    }
+                }
+            }
+            UserAction::TransferCancel if app.transfer.is_confirming_mirror() => {
+                app.transfer.cancel_confirm();
             }
             _ => {}
         },
@@ -1284,31 +1325,78 @@ struct TransferReply {
 
 /// `true` when the operator can kick a local transfer:
 /// both Verify fields are non-empty AND no transfer is
-/// currently running.
+/// running or awaiting a destructive-confirm prompt.
 fn can_start_transfer(app: &AppState) -> bool {
     !app.verify.source.trim().is_empty()
         && !app.verify.destination.trim().is_empty()
-        && !app.transfer.is_running()
+        && !app.transfer.is_busy()
+}
+
+/// Synchronously validate + resolve the Verify form's raw
+/// strings into a `(src, dst)` pair of local filesystem
+/// paths. Mirrors `crates/blit-cli/src/transfers/mod.rs:101`:
+///
+/// 1. Parse both endpoints (`parse_transfer_endpoint`).
+/// 2. Reject remote endpoints — F4 only kicks local
+///    transfers (the CLI dispatches remote routes through
+///    daemon RPCs; the TUI's Verify form is local-only).
+/// 3. Resolve the destination through
+///    `resolve_destination` so "copy /tmp/src /tmp/dst/"
+///    nests into `/tmp/dst/src`, matching `blit copy`
+///    semantics including the rsync trailing-slash rule.
+///
+/// Returns the resolved `(src, dst)` paths, or an
+/// `Err(message)` formatted for the F4 transfer block.
+fn prepare_local_transfer(
+    raw_source: &str,
+    raw_destination: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
+    use blit_app::transfers::resolution::resolve_destination;
+
+    let src_endpoint =
+        parse_transfer_endpoint(raw_source).map_err(|e| format!("parse source: {e:#}"))?;
+    let raw_dst = parse_transfer_endpoint(raw_destination)
+        .map_err(|e| format!("parse destination: {e:#}"))?;
+    let resolved_dst = resolve_destination(raw_source, raw_destination, &src_endpoint, raw_dst);
+
+    match (src_endpoint, resolved_dst) {
+        (Endpoint::Local(src), Endpoint::Local(dst)) => Ok((src, dst)),
+        (Endpoint::Remote(_), _) | (_, Endpoint::Remote(_)) => {
+            Err("F4 transfers only support local→local paths; \
+             use the CLI for remote endpoints"
+                .to_string())
+        }
+    }
 }
 
 /// Spawn a local copy / mirror via
-/// `blit_app::transfers::local::run`. The result lands on
-/// `tx` as a [`TransferReply`].
+/// `blit_app::transfers::local::run`. The caller has
+/// already validated + resolved both paths through
+/// [`prepare_local_transfer`], so this just forwards them
+/// to the orchestrator and ferries the reply back.
+///
+/// `perf_history` is read from on-disk config at call time
+/// — matches the CLI's `ctx.perf_history_enabled` snapshot
+/// (`crates/blit-cli/src/transfers/local.rs:184`). The F4
+/// `d` / `e` lifecycle keys can flip this setting, and a
+/// transfer launched immediately after must honor the new
+/// value.
 fn spawn_local_transfer(
     request_id: u64,
     kind: transfer::TransferKind,
-    source: String,
-    destination: String,
+    source: std::path::PathBuf,
+    destination: std::path::PathBuf,
     tx: mpsc::Sender<TransferReply>,
 ) {
     tokio::spawn(async move {
+        let perf_history_enabled = blit_core::perf_history::perf_history_enabled().unwrap_or(true);
         let options = blit_core::orchestrator::LocalMirrorOptions {
             mirror: matches!(kind, transfer::TransferKind::Mirror),
+            perf_history: perf_history_enabled,
             ..Default::default()
         };
-        let src = std::path::PathBuf::from(&source);
-        let dst = std::path::PathBuf::from(&destination);
-        let result = blit_app::transfers::local::run(&src, &dst, options)
+        let result = blit_app::transfers::local::run(&source, &destination, options)
             .await
             .map_err(|err| format!("{err:#}"));
         let _ = tx
@@ -1486,6 +1574,13 @@ fn handle_verify_keystroke(
         }
         KeyCode::Backspace => {
             app.verify.backspace();
+            // d-4 R2: editing the Verify form pulls the rug
+            // out from under any pending mirror-confirm
+            // prompt — the path the operator confirmed is
+            // no longer what the form holds. Drop the
+            // confirmation back to Idle so the operator
+            // re-presses `M` on the new paths.
+            app.transfer.cancel_confirm();
             true
         }
         KeyCode::Char(c) => {
@@ -1498,6 +1593,7 @@ fn handle_verify_keystroke(
                 return false;
             }
             app.verify.insert_char(c);
+            app.transfer.cancel_confirm();
             true
         }
         _ => false,
@@ -1675,8 +1771,14 @@ enum UserAction {
     /// F4: `C` triggers a local copy from the Verify
     /// form's Source → Destination.
     TransferCopy,
-    /// F4: `M` triggers a local mirror.
+    /// F4: `M` opens the destructive-mirror confirmation
+    /// prompt. Actual mirror only fires after `Y`.
     TransferMirror,
+    /// F4: `y` confirms a pending mirror prompt and kicks
+    /// the actual transfer.
+    TransferMirrorConfirm,
+    /// F4: `n` cancels a pending mirror prompt.
+    TransferCancel,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -1738,6 +1840,14 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // wildcard-ignore the variants below.
         KeyCode::Char('C') => Some(UserAction::TransferCopy),
         KeyCode::Char('M') => Some(UserAction::TransferMirror),
+        // `y` / `n` confirm or cancel a pending mirror
+        // prompt. The F4 dispatcher only acts on these
+        // while `transfer.is_confirming_mirror()` is true —
+        // otherwise they're no-ops. Both cases are
+        // accepted to match the rsync-style `[y/N]` prompt
+        // the CLI uses (`crates/blit-cli/src/transfers/mod.rs:182`).
+        KeyCode::Char('Y') | KeyCode::Char('y') => Some(UserAction::TransferMirrorConfirm),
+        KeyCode::Char('N') | KeyCode::Char('n') => Some(UserAction::TransferCancel),
         _ => None,
     }
 }
@@ -2392,6 +2502,112 @@ mod tests {
             key_action(&k(KeyCode::Char('M'))),
             Some(UserAction::TransferMirror)
         ));
+    }
+
+    /// d-4 R2: `y` / `n` confirm or cancel the mirror
+    /// destructive-op prompt. Both cases map (rsync-style
+    /// `[y/N]`). The F4 dispatcher only acts on these while
+    /// `transfer.is_confirming_mirror()` is true.
+    #[test]
+    fn key_action_maps_transfer_confirm_keys() {
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
+            assert!(
+                matches!(
+                    key_action(&k(code)),
+                    Some(UserAction::TransferMirrorConfirm)
+                ),
+                "expected TransferMirrorConfirm for {code:?}",
+            );
+        }
+        for code in [KeyCode::Char('n'), KeyCode::Char('N')] {
+            assert!(
+                matches!(key_action(&k(code)), Some(UserAction::TransferCancel)),
+                "expected TransferCancel for {code:?}",
+            );
+        }
+    }
+
+    /// d-4 R2 destination resolution: a file source copied
+    /// into an existing destination directory must resolve
+    /// to `<dest>/<source-basename>`, matching rsync /
+    /// `blit copy` behavior. The CLI does this through
+    /// `resolve_destination` (`crates/blit-cli/src/transfers/mod.rs:105`);
+    /// the TUI must do the same before calling
+    /// `blit_app::transfers::local::run`.
+    #[test]
+    fn prepare_local_transfer_appends_basename_for_container_dest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src_file = tmp.path().join("file.txt");
+        std::fs::write(&src_file, "hello").expect("write src");
+        let dst_dir = tmp.path().join("out");
+        std::fs::create_dir(&dst_dir).expect("mkdir dst");
+
+        let (src, dst) = prepare_local_transfer(
+            src_file.to_str().unwrap(),
+            // Trailing slash signals "destination is a
+            // container" per the rsync trailing-slash rule.
+            &format!("{}/", dst_dir.display()),
+        )
+        .expect("prepare ok");
+
+        assert_eq!(src, src_file);
+        assert_eq!(
+            dst,
+            dst_dir.join("file.txt"),
+            "destination must nest under the container"
+        );
+    }
+
+    /// d-4 R2: rsync's "copy contents" rule. A trailing
+    /// slash on the SOURCE means "copy the contents of",
+    /// so the destination stays as-is (no basename append).
+    #[test]
+    fn prepare_local_transfer_source_contents_keeps_dest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir(&src_dir).expect("mkdir src");
+        let dst_dir = tmp.path().join("dst");
+        std::fs::create_dir(&dst_dir).expect("mkdir dst");
+
+        let src_input = format!("{}/", src_dir.display());
+        let dst_input = format!("{}/", dst_dir.display());
+        let (src, dst) = prepare_local_transfer(&src_input, &dst_input).expect("prepare ok");
+
+        assert_eq!(src, src_dir);
+        assert_eq!(
+            dst, dst_dir,
+            "source-contents → dest stays as the container"
+        );
+    }
+
+    /// d-4 R2: remote endpoints are rejected — the F4
+    /// Verify form is local-only. The CLI dispatches
+    /// remote routes through daemon RPCs; the TUI would
+    /// need additional plumbing.
+    #[test]
+    fn prepare_local_transfer_rejects_remote_source() {
+        let err = prepare_local_transfer("host:/module/path", "/tmp/dst").expect_err("rejected");
+        assert!(
+            err.contains("local"),
+            "error must mention local-only restriction, got: {err}",
+        );
+    }
+
+    /// d-4 R2: confirm-pending guards. M alone doesn't
+    /// fire a mirror; it transitions to ConfirmingMirror
+    /// and the dispatcher reads `is_confirming_mirror()`
+    /// before honoring `y`/`n`.
+    #[test]
+    fn transfer_state_mirror_confirm_lifecycle() {
+        let mut state = transfer::TransferState::new();
+        assert!(!state.is_confirming_mirror());
+        state.begin_confirm_mirror();
+        assert!(state.is_confirming_mirror());
+        assert!(state.is_busy(), "busy gates can_start_transfer");
+        // Cancel resets without firing the transfer.
+        assert!(state.cancel_confirm());
+        assert!(!state.is_busy());
+        assert!(matches!(state.status(), transfer::TransferStatus::Idle));
     }
 
     /// d-1 (F4 profile lifecycle keys): `c` / `d` / `e`
