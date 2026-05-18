@@ -29,7 +29,7 @@ use crate::daemons::{DaemonRow, DaemonsState, DiscoveryStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use std::time::Instant;
 
@@ -65,30 +65,14 @@ fn render_header(frame: &mut Frame, area: Rect, state: &DaemonsState) {
 }
 
 fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
-    let selected = state.selected_index();
-    let rows: Vec<Row> = state
-        .rows()
-        .iter()
-        .enumerate()
-        .map(|(idx, row)| {
-            let style = if idx == selected {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            daemon_to_row(row).style(style)
-        })
-        .collect();
+    let rows: Vec<Row> = state.rows().iter().map(daemon_to_row).collect();
     let widths = [
-        Constraint::Length(16),
+        Constraint::Length(20),
         Constraint::Length(18),
         Constraint::Length(6),
         Constraint::Length(8),
         Constraint::Length(10),
-        Constraint::Length(8),
+        Constraint::Length(10),
     ];
     let header = Row::new(vec![
         Cell::from("name"),
@@ -101,8 +85,19 @@ fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     .style(Style::default().add_modifier(Modifier::BOLD));
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Daemons "));
-    frame.render_widget(table, area);
+        .block(Block::default().borders(Borders::ALL).title(" Daemons "))
+        // Stateful render: TableState carries the selected
+        // index AND maintains an offset for auto-scrolling
+        // so the highlighted row stays in view even when
+        // the daemon count exceeds the viewport height.
+        .row_highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+    let mut table_state = TableState::default().with_selected(Some(state.selected_index()));
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_detail(frame: &mut Frame, area: Rect, state: &DaemonsState) {
@@ -146,17 +141,37 @@ fn render_footer(frame: &mut Frame, area: Rect, status: &DiscoveryStatus, now: I
 }
 
 fn daemon_to_row(row: &DaemonRow) -> Row<'static> {
-    Row::new(vec![
-        Cell::from(row.instance_name.clone()),
-        Cell::from(format_address(row)),
-        Cell::from(row.port.to_string()),
-        Cell::from(row.version.clone().unwrap_or_else(|| "?".to_string())),
-        Cell::from(format_module_count(row)),
-        Cell::from(format_delegation(row.delegation_enabled)),
-    ])
+    if row.is_local() {
+        // Local endpoint columns hold placeholder values
+        // because there's no advertised address/port/version
+        // for "this machine." A follow-up slice
+        // (a1-3b-f1-getstate-detail) will populate the
+        // modules cell from a loopback `GetState` query
+        // when a local daemon is running.
+        Row::new(vec![
+            Cell::from(row.instance_name.clone()),
+            Cell::from("(this machine)"),
+            Cell::from("—"),
+            Cell::from("—"),
+            Cell::from("—"),
+            Cell::from("—"),
+        ])
+    } else {
+        Row::new(vec![
+            Cell::from(row.instance_name.clone()),
+            Cell::from(format_address(row)),
+            Cell::from(row.port.to_string()),
+            Cell::from(row.version.clone().unwrap_or_else(|| "?".to_string())),
+            Cell::from(format_module_count(row)),
+            Cell::from(format_delegation(row.delegation_enabled)),
+        ])
+    }
 }
 
 fn detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
+    if row.is_local() {
+        return local_detail_lines(row);
+    }
     let header = format!(
         "{} · {}:{} · {}",
         row.instance_name,
@@ -191,6 +206,29 @@ fn detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
         )),
         Line::from(modules_line),
         Line::from(delegation_line),
+    ]
+}
+
+/// Detail block for the synthetic Local row. Distinct copy
+/// from `detail_lines` because the Local endpoint doesn't
+/// have an advertised address/port/version (it's "this
+/// machine," not a daemon advertising itself over mDNS).
+///
+/// A follow-up slice (`a1-3b-f1-getstate-detail`) will
+/// upgrade this block with `GetState`-driven counters when
+/// a daemon is running on the loopback interface.
+fn local_detail_lines(row: &DaemonRow) -> Vec<Line<'static>> {
+    let header = format!("{} · this machine (no mDNS advertise)", row.instance_name);
+    vec![
+        Line::from(Span::styled(
+            header,
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("modules: (pending GetState integration — a1-3b)"),
+        Line::from(Span::styled(
+            "Local endpoint — F2/F3 routing slices will treat this symmetrically with remote daemons.",
+            Style::default().fg(Color::DarkGray),
+        )),
     ]
 }
 
@@ -241,6 +279,7 @@ mod tests {
 
     fn row(name: &str) -> DaemonRow {
         DaemonRow {
+            kind: crate::daemons::EndpointKind::Remote,
             instance_name: name.to_string(),
             addresses: vec![Ipv4Addr::new(192, 168, 1, 10)],
             port: 9031,
@@ -248,6 +287,23 @@ mod tests {
             delegation_enabled: Some(true),
             version: Some("0.1.0".to_string()),
             modules: vec!["home".to_string(), "media".to_string()],
+        }
+    }
+
+    fn local_row() -> DaemonRow {
+        // Mirror the daemons::DaemonRow::local() shape for
+        // test consumption. Tests here don't reach into
+        // DaemonRow::local directly because it's private to
+        // the daemons module.
+        DaemonRow {
+            kind: crate::daemons::EndpointKind::Local,
+            instance_name: crate::daemons::LOCAL_INSTANCE_NAME.to_string(),
+            addresses: Vec::new(),
+            port: 0,
+            module_count: None,
+            delegation_enabled: None,
+            version: None,
+            modules: Vec::new(),
         }
     }
 
@@ -342,5 +398,110 @@ mod tests {
         let modules_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(modules_line.contains("40"));
         assert!(modules_line.contains("not advertised"));
+    }
+
+    /// a1-3 round 2: the Local row renders distinctly from a
+    /// remote daemon — placeholder columns, custom detail
+    /// block. This pins the contract that downstream slices
+    /// (F2/F3 routing) can identify the Local endpoint
+    /// visually.
+    #[test]
+    fn detail_lines_for_local_row_uses_local_specific_copy() {
+        let r = local_row();
+        let lines = detail_lines(&r);
+        let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header.contains("this machine"));
+        let modules: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(modules.contains("a1-3b"));
+        let footer: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(footer.contains("Local endpoint"));
+    }
+
+    /// Local row in the table uses placeholders for the
+    /// columns that don't apply ("this machine" address,
+    /// "—" elsewhere) so the column layout doesn't shift.
+    #[test]
+    fn daemon_to_row_for_local_uses_placeholders() {
+        let row = daemon_to_row(&local_row());
+        // Pull each cell's content (column 0..5) by inspecting
+        // ratatui's Row debug repr; since we can't introspect
+        // cell text directly, render to a TestBackend instead.
+        // Wide terminal so the placeholder isn't truncated.
+        // Real F1 layout uses fixed-width columns; this test
+        // is only asserting that the placeholder copy reaches
+        // the rendered buffer for the Local row.
+        let backend = ratatui::backend::TestBackend::new(160, 4);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 160, 3);
+                let widths = [ratatui::layout::Constraint::Length(24); 6];
+                let table = ratatui::widgets::Table::new(vec![row], widths);
+                frame.render_widget(table, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        assert!(
+            rendered.contains("(this machine)"),
+            "expected '(this machine)' in:\n{rendered}"
+        );
+    }
+
+    /// a1-3 round 2: when the daemon list is taller than
+    /// the table viewport, the highlighted row must stay
+    /// visible. TableState auto-scrolls so that even row 15
+    /// of 20 appears in a 6-line viewport.
+    #[test]
+    fn selected_row_stays_visible_when_list_exceeds_viewport() {
+        use crate::daemons::DaemonsState;
+        use blit_core::mdns::MdnsDiscoveredService;
+        use std::collections::HashMap;
+
+        let services: Vec<MdnsDiscoveredService> = (0..20)
+            .map(|i| MdnsDiscoveredService {
+                fullname: format!("daemon{i:02}._blit._tcp.local."),
+                instance_name: format!("daemon{i:02}"),
+                hostname: format!("daemon{i:02}.local."),
+                port: 9031,
+                addresses: vec![Ipv4Addr::new(10, 0, 0, i as u8 + 1)],
+                properties: HashMap::new(),
+            })
+            .collect();
+        let mut state = DaemonsState::new();
+        state.replace_from_discovery(&services, Instant::now());
+        // Move cursor to a row that would be off the first
+        // page (Local + daemon00..daemon14 → index 15 is
+        // daemon14).
+        for _ in 0..15 {
+            state.select_next();
+        }
+        let target = state.selected_row().unwrap().instance_name.clone();
+        assert_eq!(target, "daemon14");
+
+        // Render into a small TestBackend and verify the
+        // selected daemon's name is somewhere in the buffer.
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let now = Instant::now();
+        terminal.draw(|frame| render(frame, &state, now)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+        assert!(
+            rendered.contains(&target),
+            "expected selected row '{target}' to be visible in viewport, got:\n{rendered}"
+        );
     }
 }
