@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| a1-4-f3-browse    | Medium   | F3 refresh preserves endpoint error (R2)    | `[~]`  | `phase5/a1` | `2abc71b` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -23,7 +23,6 @@ See `.review/findings/<id>.md` for per-finding details.
 | M-Jobs     | Feature  | Daemon-owned transfer lifecycle (`CancelJob`, `detach`)  | `phase5/m-jobs` |
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
-| a1-4-f3-browse | Medium | F3 Browse refresh without valid endpoint hides actionable error | `phase5/a1` |
 | D          | Feature  | Verify + diagnostics screens                             |        |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
@@ -95,3 +94,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `1176331` F2 Transfers pane with live Subscribe stream (`a1-2-f2-transfers`)
 - `1fcee97` F1 Daemons pane with Local row, viewport-aware table, and rescan clamp (`a1-3-f1-daemons`)
 - `3ac1cb2` F1 detail block populated by `GetState` (`a1-3b-f1-getstate-detail` round 2)
+- `2abc71b` F3 Browse pane with modules + directory tree (`a1-4-f3-browse` round 2)
