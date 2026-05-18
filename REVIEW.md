@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| a1-3-f1-daemons   | Feature  | F1 Daemons pane via mDNS                    | `[~]`  | `phase5/a1` | `629d410` |
 
 ## Open findings
 

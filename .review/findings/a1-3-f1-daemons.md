@@ -1,0 +1,233 @@
+# a1-3-f1-daemons: F1 Daemons pane via mDNS discovery
+
+**Severity**: Feature (third slice of milestone A.1 — adds F1)
+**Status**: In progress / pending review
+**Branch**: `phase5/a1`
+**Commit**: filled by the sentinel commit
+
+## What
+
+Adds the F1 Daemons screen to `blit-tui`. Operator selects
+it with `blit-tui --screen f1`. The pane:
+
+1. Spawns a background mDNS discovery task that loops every
+   5s and forwards `Vec<MdnsDiscoveredService>` (or a
+   `String` error) into the event loop via mpsc.
+2. Renders a table of discovered daemons with cursor
+   selection + a per-row detail block underneath.
+3. Accepts `↑`/`↓` (and vim-style `k`/`j`) to navigate the
+   cursor and `r` to nudge an immediate rescan.
+
+a1-2's F2 screen stays the default (`--screen f2`). A.1's
+final slice (a1-6) replaces `--screen` with in-app F-key
+routing.
+
+## Why F1 third (not first)
+
+a1-2's reviewer landed F2 first because every wire-surface
+slice (B / M-Jobs / C) was built to feed it. F1 needs only
+the mDNS discovery primitive that already exists in
+`blit_app::scan` — no daemon-side work. Landing it now
+proves the second screen plugs into the existing terminal
+lifecycle without a router refactor, sets the pattern for
+F3 / F4, and gives the operator a list of daemons to point
+F2 at.
+
+## Approach
+
+### State model (`daemons.rs`)
+
+```rust
+pub struct DaemonRow {
+    instance_name: String,
+    addresses: Vec<Ipv4Addr>,
+    port: u16,
+    module_count: Option<u32>,    // None = pre-§3.2 daemon
+    delegation_enabled: Option<bool>,  // ditto
+    version: Option<String>,
+    modules: Vec<String>,
+}
+
+pub struct DaemonsState {
+    rows: Vec<DaemonRow>,
+    selected: usize,
+    status: DiscoveryStatus,
+}
+
+pub enum DiscoveryStatus {
+    Scanning,
+    Live { last_scan_at: Instant },
+    Degraded { message: String },
+}
+```
+
+Reducer surface is small:
+
+- `replace_from_discovery(&[Service], scanned_at)` — replaces
+  rows AND preserves cursor on the same `instance_name` when
+  the daemon survives the rescan. Sorts deterministically by
+  `instance_name` so a re-scan doesn't shuffle the table on
+  the operator.
+- `note_discovery_error(msg)` — sets status to Degraded
+  WITHOUT clearing rows (operator still sees the previous
+  result + an error banner).
+- `select_next` / `select_prev` — bounded cursor movement;
+  no-ops at the ends and on an empty list.
+
+### Rendering (`screens/f1.rs`)
+
+Pure free function `render(frame, &state, now: Instant)`.
+Layout mirrors F2's: header / table / detail block /
+footer. Header counts discovered daemons; footer renders
+status with `last scan Xs ago` when Live.
+
+Detail block per cursor row shows: name + addr:port +
+version line; modules line (advertised names → fallback to
+count → fallback to "(daemon does not advertise)"); and
+delegation line (yes / no / "unknown (pre-§3.2 daemon)").
+
+Address formatting collapses multi-address daemons to
+`first.addr+N` for table width — the detail block could
+expand this in a future slice but no operator pain today.
+
+### Discovery task
+
+```rust
+fn spawn_discovery_task(
+    interval: Duration,
+    scan_timeout: Duration,
+    refresh_rx: mpsc::Receiver<()>,
+    tx: mpsc::Sender<DiscoveryUpdate>,
+)
+```
+
+`tokio::time::interval(5s)` with `MissedTickBehavior::Skip`
+so paused TUIs (suspend / detach) don't fire a flurry on
+resume. Each tick:
+
+1. Wait on `interval.tick()` OR `refresh_rx.recv()` — the
+   `r` keystroke pushes `()` via a bounded(1) channel for
+   non-blocking nudges. When a manual scan fires, `ticker.reset()`
+   pushes the next automatic scan forward so we don't
+   double-fire.
+2. `blit_app::scan::discover(scan_timeout=1.5s)` — wrapped
+   in spawn_blocking by `blit_app::scan`, so the discovery
+   doesn't stall the runtime.
+3. Forward result/err. Receiver close → return (F1 loop
+   exited).
+
+### Event loop (`run_f1_event_loop`)
+
+```rust
+loop {
+    terminal.draw(|f| screens::f1::render(f, &state, Instant::now()));
+    tokio::select! {
+        key = key_rx.recv() => key_action match ...
+        update = disco_rx.recv() => state.replace_from_discovery(...) | note_discovery_error(...)
+    }
+}
+```
+
+Mirrors `run_f2_event_loop`'s shape but without the
+GetState / Subscribe wiring. Keystrokes go through the same
+`spawn_input_task` + `key_action` plumbing from a1-2 — only
+the action handler differs.
+
+### Shared `UserAction` enum
+
+Extended with `SelectNext` / `SelectPrev`. F2 ignores both
+(no cursor today). F1 maps them to `select_next` /
+`select_prev`. `key_action` now recognises arrow keys plus
+vim `j`/`k` for navigation.
+
+## Files changed
+
+- `crates/blit-tui/src/daemons.rs` (new): `DaemonRow`,
+  `DaemonsState`, `DiscoveryStatus` + 8 unit tests.
+- `crates/blit-tui/src/screens/f1.rs` (new): render
+  function + format helpers + 7 unit tests.
+- `crates/blit-tui/src/screens/mod.rs`: `pub mod f1;` added.
+- `crates/blit-tui/src/main.rs`:
+  - `mod daemons;` declaration.
+  - `--screen f1|f2` clap arg; main dispatches on it.
+  - `run_event_loop` renamed to `run_f2_event_loop`;
+    `run_f1_event_loop` added.
+  - `UserAction` gained `SelectNext` / `SelectPrev`;
+    `key_action` recognises arrows + j/k; F2 match arms
+    ignore navigation actions; +1 unit test for the
+    new keymap.
+  - `spawn_discovery_task` + `DiscoveryUpdate` enum.
+  - `F1_DISCOVERY_INTERVAL` (5s) and
+    `F1_DISCOVERY_SCAN_TIMEOUT` (1.5s) constants.
+
+## Tests added
+
+16 new unit tests:
+
+In `daemons::tests`:
+- `replace_from_discovery_sorts_by_instance_name`
+- `replace_from_discovery_preserves_selection_on_rescan`
+- `replace_from_discovery_clamps_selection_when_prior_row_disappears`
+- `select_next_prev_bounded`
+- `from_service_pulls_txt_keys`
+- `from_service_handles_pre_3_2_daemon`
+- `note_discovery_error_preserves_rows_and_sets_status`
+- `empty_discovery_clamps_selected_to_zero`
+
+In `screens::f1::tests`:
+- `format_address_handles_zero_one_many`
+- `format_module_count_distinguishes_zero_from_unknown`
+- `format_delegation_renders_three_states`
+- `format_since_picks_correct_unit`
+- `detail_lines_label_unknown_delegation_for_pre_3_2_daemon`
+- `detail_lines_shows_advertised_module_names`
+- `detail_lines_falls_back_to_module_count_when_names_truncated`
+
+In `main.rs::tests`:
+- `key_action_maps_arrow_and_vim_navigation`
+- Extended `key_action_returns_none_for_unmapped_keys`
+  with `Char('J')` / `Char('K')` to pin case sensitivity.
+
+37 blit-tui unit tests (was 21). Workspace passing serially.
+
+## Known gaps
+
+1. **No router yet.** The operator chooses the screen at
+   process start via `--screen`. F1 ↔ F2 switching lands in
+   a1-6 along with the routing UI for F3 / F4.
+
+2. **Discovery task is not cancelled on F1 exit.** When the
+   event loop returns Ok(()), the discovery task's mpsc
+   Sender is dropped. The task exits on its next send. With
+   a 5s interval that's at most ~6.5s of latency before the
+   task notices. Harmless for normal exit (process is
+   terminating anyway); a future tighter slice could plumb
+   a CancellationToken.
+
+3. **No mDNS departure events.** mdns-sd reports
+   departures sporadically; the design's pragmatic
+   alternative is "what each rescan returns is truth." A
+   daemon that goes away mid-scan disappears on the next
+   tick (~5s). Acceptable today — the F1 detail pane
+   surfaces the last-scan-Xs-ago marker so operators can
+   spot stale rows.
+
+4. **No render test against TestBackend.** Same as a1-2
+   gap. Format helpers + detail_lines are covered; the
+   layout is visual.
+
+5. **Detail block is read-only.** Design specifies
+   `[enter] browse  [t] trigger transfer  [d] diagnostics`
+   hotkeys; those are F3 / future-trigger / F4 entries
+   handled by their own slices.
+
+## Out of scope (next A.1 slices)
+
+- **a1-4-f3-browse**: F3 Browse via List/Find/DiskUsage.
+- **a1-5-f4-profile**: F4 reads `~/.config/blit/perf_local.jsonl`.
+- **a1-6-screen-router**: F-keys to navigate between panes,
+  replacing the `--screen` flag.
+
+## Reviewer comments
+
+(empty — pending grade)
