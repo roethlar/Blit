@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_            |          |                                             |        |             |           |
+| e-4-config-tab-strip-counts | Feature | Opt-out for tab-strip counts via tui.toml | [~] | `phase5/a1` | `94a30c2` |
 
 ## Open findings
 
