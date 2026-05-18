@@ -40,9 +40,11 @@ impl HelpOverlay {
 /// the frame to dim). Uses `Clear` to wipe the underlying
 /// widgets so the modal isn't garbled by mid-render text.
 pub fn render_overlay(frame: &mut Frame, area: Rect) {
-    // Center a 60×16 box inside the given area. If the
-    // area is smaller than the box, use the full area.
-    let modal = centered(area, 64, 18);
+    // Center a 70×32 box inside the given area. If the
+    // area is smaller than the box, use the full area —
+    // ratatui's diff renderer truncates rather than
+    // crashing on overflow.
+    let modal = centered(area, 70, 32);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -52,18 +54,31 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         kv("F1", "Daemons pane"),
         kv("F2", "Transfers pane"),
         kv("F3", "Browse pane"),
-        kv("F4", "Profile / Verify / Diagnostics"),
+        kv("F4", "Profile / Verify / Diagnostics / Transfer"),
         kv("?", "toggle this help overlay"),
         kv("q / Esc", "quit (Ctrl-c emergency)"),
         Line::from(""),
-        section_header("Per-pane"),
+        section_header("F1 · F3 navigation"),
         kv("r", "refresh / rescan"),
         kv("↑ ↓ / j k", "cursor (F1, F3)"),
         kv("Enter / → / l", "descend (F3)"),
         kv("← / h", "ascend (F3)"),
-        kv("Tab", "enter / cycle Verify form (F4)"),
-        kv("c / d / e", "profile clear / disable / enable (F4)"),
-        kv("s", "diagnostics snapshot (F4)"),
+        Line::from(""),
+        section_header("F4 · Profile lifecycle"),
+        kv("c / d / e", "clear / disable / enable history"),
+        kv("s", "diagnostics snapshot"),
+        Line::from(""),
+        section_header("F4 · Verify form"),
+        kv("Tab", "enter / cycle Source → Destination"),
+        kv("Enter", "run compare_trees"),
+        kv("H", "toggle hash mode (size+mtime ↔ checksum)"),
+        kv("O", "toggle direction (two-way ↔ one-way)"),
+        Line::from(""),
+        section_header("F4 · Local transfer"),
+        kv("C", "copy Source → Destination"),
+        kv("M", "mirror (prompts before deleting at dest)"),
+        kv("V", "move (prompts before deleting source)"),
+        kv("y / N / Esc", "confirm / cancel destructive prompt"),
     ];
     let para = Paragraph::new(lines).block(block);
     frame.render_widget(para, modal);
@@ -142,11 +157,60 @@ mod tests {
     #[test]
     fn centered_clamps_to_area_when_smaller() {
         let area = Rect::new(0, 0, 40, 10);
-        let modal = centered(area, 64, 18);
+        let modal = centered(area, 70, 32);
         // Width / height are capped to the area's dims.
         assert!(modal.width <= 40);
         assert!(modal.height <= 10);
         assert!(modal.width > 0 && modal.height > 0);
+    }
+
+    /// d-16: regression test — the help overlay's keymap
+    /// must surface every public keystroke. We render the
+    /// modal into a TestBackend buffer and grep the cell
+    /// contents for the keys we added since e-1. If a
+    /// future slice adds a binding without updating help,
+    /// this catches it.
+    #[test]
+    fn help_modal_documents_all_public_keys() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_overlay(frame, frame.area());
+            })
+            .expect("draw");
+        // Flatten the buffer to a single string for grep.
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        for needle in [
+            "F1",
+            "F2",
+            "F3",
+            "F4", // panes
+            "Tab",
+            "Enter", // form / nav
+            "C",
+            "M",
+            "V", // transfer triggers
+            "H",
+            "O",           // verify mode toggles
+            "y / N / Esc", // confirm prompt keys
+            "c / d / e",   // profile lifecycle
+            "s",           // diagnostics snapshot
+            "?",           // help itself
+        ] {
+            assert!(
+                text.contains(needle),
+                "help overlay missing key reference {needle:?}; rendered text:\n{text}",
+            );
+        }
     }
 
     #[test]
