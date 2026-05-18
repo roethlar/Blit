@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-2-f4-verify     | Feature  | F4 Verify pane with source/dest form        | `[~]`  | `phase5/a1` | `ab105fb` |
+| _none_            |          |                                             |        |             |           |
 
 ## Open findings
 
@@ -24,6 +24,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | C          | Feature  | `Subscribe` RPC + byte-level instrumentation             | `phase5/c` |
 | A.1        | Feature  | TUI implementation                                       |        |
 | D          | Feature  | Verify + diagnostics screens                             |        |
+| d-2-f4-verify | Medium | Verify result must not apply after in-flight path edits | `phase5/a1` |
 | E          | Feature  | Polish (themes, refresh rates, config)                   |        |
 | P0-§2.6    | Feature  | Live remote benchmark capture (hardware-bound)           |        |
 
