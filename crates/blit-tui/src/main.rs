@@ -593,46 +593,71 @@ async fn handle_pane_action(
                 spawn_profile_fetch(id, app.profile_reply_tx.clone());
             }
             UserAction::ProfileClear => {
-                apply_profile_clear(&mut app.profile);
-                // Re-fetch so the report shows the cleared
-                // state (zero records, predictor pristine).
-                let id = app.profile.begin_fetch();
-                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+                // Only re-fetch on success — otherwise
+                // begin_fetch's Pending → Loaded sequence
+                // would wipe the error banner.
+                let outcome = apply_profile_clear();
+                if apply_lifecycle_outcome(&mut app.profile, outcome) {
+                    let id = app.profile.begin_fetch();
+                    spawn_profile_fetch(id, app.profile_reply_tx.clone());
+                }
             }
             UserAction::ProfileDisable => {
-                apply_profile_set_enabled(&mut app.profile, false);
-                let id = app.profile.begin_fetch();
-                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+                let outcome = apply_profile_set_enabled(false);
+                if apply_lifecycle_outcome(&mut app.profile, outcome) {
+                    let id = app.profile.begin_fetch();
+                    spawn_profile_fetch(id, app.profile_reply_tx.clone());
+                }
             }
             UserAction::ProfileEnable => {
-                apply_profile_set_enabled(&mut app.profile, true);
-                let id = app.profile.begin_fetch();
-                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+                let outcome = apply_profile_set_enabled(true);
+                if apply_lifecycle_outcome(&mut app.profile, outcome) {
+                    let id = app.profile.begin_fetch();
+                    spawn_profile_fetch(id, app.profile_reply_tx.clone());
+                }
             }
             _ => {}
         },
     }
 }
 
-/// Wipe the local perf-history file. Touches disk via
-/// `blit_core::perf_history::clear_history`; errors are
-/// surfaced through `ProfileState::note_fetch_error` so
-/// the operator sees them in the F4 footer.
-fn apply_profile_clear(profile_state: &mut profile::ProfileState) {
-    match blit_core::perf_history::clear_history() {
-        Ok(_) => {}
-        Err(err) => profile_state.note_fetch_error(format!("clear failed: {err:#}")),
-    }
+/// Wipe the local perf-history file. Returns `Ok(())` on
+/// success or `Err(message)` on failure. Caller is
+/// expected to surface the error via
+/// [`apply_lifecycle_outcome`] before kicking any
+/// follow-up read.
+fn apply_profile_clear() -> Result<(), String> {
+    blit_core::perf_history::clear_history()
+        .map(|_| ())
+        .map_err(|err| format!("clear failed: {err:#}"))
 }
 
-/// Toggle the perf-history-enabled flag. Same error
-/// surfacing as `apply_profile_clear`.
-fn apply_profile_set_enabled(profile_state: &mut profile::ProfileState, enabled: bool) {
-    match blit_core::perf_history::set_perf_history_enabled(enabled) {
-        Ok(_) => {}
-        Err(err) => {
-            let verb = if enabled { "enable" } else { "disable" };
-            profile_state.note_fetch_error(format!("{verb} failed: {err:#}"));
+/// Toggle the perf-history-enabled flag. Same error shape
+/// as [`apply_profile_clear`].
+fn apply_profile_set_enabled(enabled: bool) -> Result<(), String> {
+    blit_core::perf_history::set_perf_history_enabled(enabled).map_err(|err| {
+        let verb = if enabled { "enable" } else { "disable" };
+        format!("{verb} failed: {err:#}")
+    })
+}
+
+/// Apply the outcome of an F4 lifecycle mutation
+/// (`c`/`d`/`e`). Returns `true` if the caller should
+/// kick a profile re-fetch (the action succeeded). On
+/// failure, writes the message into the profile state's
+/// Error banner and returns `false` — the caller MUST NOT
+/// kick a re-fetch in that case because `begin_fetch` would
+/// immediately flip the status to `Pending`, hiding the
+/// failure from the operator (d-1 round-2 fix).
+fn apply_lifecycle_outcome(
+    profile_state: &mut profile::ProfileState,
+    result: Result<(), String>,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(msg) => {
+            profile_state.note_fetch_error(msg);
+            false
         }
     }
 }
@@ -1684,6 +1709,40 @@ mod tests {
             other => panic!("expected preserved Loaded, got {other:?}"),
         }
         assert!(detail_rx.try_recv().is_err());
+    }
+
+    /// d-1 round-2 regression: a failed lifecycle action
+    /// (clear / disable / enable) must NOT be hidden by a
+    /// follow-up profile re-fetch. `apply_lifecycle_outcome`
+    /// returns false on Err so the caller skips the fetch,
+    /// and the Error banner survives.
+    #[test]
+    fn apply_lifecycle_outcome_preserves_error_and_skips_fetch() {
+        let mut state = profile::ProfileState::new();
+        let should_refetch =
+            apply_lifecycle_outcome(&mut state, Err("clear failed: boom".to_string()));
+        assert!(!should_refetch, "Err path must signal 'no re-fetch'");
+        match state.status() {
+            profile::ProfileFetchStatus::Error { message } => {
+                assert_eq!(message, "clear failed: boom");
+            }
+            other => panic!("expected Error banner, got {other:?}"),
+        }
+    }
+
+    /// Companion: on Ok, returns true (caller refetches)
+    /// and the status is left as-is (caller's begin_fetch
+    /// drives the next transition).
+    #[test]
+    fn apply_lifecycle_outcome_ok_signals_refetch_without_banner_change() {
+        let mut state = profile::ProfileState::new();
+        let before = matches!(state.status(), profile::ProfileFetchStatus::Idle);
+        assert!(before);
+        let should_refetch = apply_lifecycle_outcome(&mut state, Ok(()));
+        assert!(should_refetch, "Ok path must signal 're-fetch'");
+        // Status unchanged by the helper — the caller's
+        // begin_fetch flips it to Pending.
+        assert!(matches!(state.status(), profile::ProfileFetchStatus::Idle));
     }
 
     /// d-1 (F4 profile lifecycle keys): `c` / `d` / `e`
