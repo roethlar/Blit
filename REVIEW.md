@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ |  |  |  |  |  |
+| d-28-f3-no-matches-msg | Feature | Differentiated empty-state on F3 — distinguishes filter-zero-match from no-rows | `[~]` | `phase5/a1` | `0fbaad6` |
 
 ## Open findings
 
