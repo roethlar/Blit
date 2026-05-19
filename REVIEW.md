@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-32-help-scrollbar | Feature | Scrollbar indicator on the help overlay when keymap overflows | `[~]` | `phase5/a1` | `614e58d` |
 
 ## Open findings
 
