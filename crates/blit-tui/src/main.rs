@@ -611,7 +611,7 @@ async fn run_router(
                     // Overlay paints on top of the pane.
                     // Uses `Clear` internally so widgets
                     // beneath aren't visible through it.
-                    help::render_overlay(frame, body_area);
+                    help::render_overlay(frame, body_area, app.help);
                 }
             })
             .context("terminal.draw")?;
@@ -693,6 +693,16 @@ async fn run_router(
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         return Ok(());
+                    }
+                    // d-31: j/k (and arrow / PageUp-Down)
+                    // scroll the keymap while the overlay
+                    // is open. Everything else is absorbed
+                    // so the operator can't pane-switch or
+                    // trigger actions mid-read.
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => app.help.scroll_down(),
+                        KeyCode::Char('k') | KeyCode::Up => app.help.scroll_up(),
+                        _ => {}
                     }
                     continue;
                 }

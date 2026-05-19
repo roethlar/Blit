@@ -16,9 +16,18 @@ use ratatui::Frame;
 /// Help overlay visibility flag. Lives on `AppState` so
 /// it survives across pane navigation (open the help on
 /// F2, switch to F3, the help is still up).
+///
+/// d-31: the keymap has grown past what fits on an
+/// 80×24 terminal (the modal is ~36 rows). `scroll_offset`
+/// lets the operator page through the list with j/k
+/// while the overlay is open.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HelpOverlay {
     visible: bool,
+    /// d-31: top-line offset applied to the keymap
+    /// Paragraph. 0 = top. Clamped by `scroll_down` so
+    /// the operator can't scroll past the last line.
+    scroll_offset: u16,
 }
 
 impl HelpOverlay {
@@ -28,30 +37,52 @@ impl HelpOverlay {
 
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
+        // d-31: re-opening always starts at the top.
+        if !self.visible {
+            self.scroll_offset = 0;
+        }
     }
 
     pub fn close(&mut self) {
         self.visible = false;
+        // d-31: reset scroll so the next open starts at
+        // the top.
+        self.scroll_offset = 0;
     }
+
+    /// d-31: current top-line offset for the renderer.
+    pub fn scroll_offset(self) -> u16 {
+        self.scroll_offset
+    }
+
+    /// d-31: scroll down one line, clamped so at least
+    /// `MIN_VISIBLE_LINES` of content stays on screen
+    /// (otherwise the operator could scroll into an
+    /// all-blank modal).
+    pub fn scroll_down(&mut self) {
+        let max = help_line_count().saturating_sub(Self::MIN_VISIBLE_LINES);
+        if self.scroll_offset < max {
+            self.scroll_offset += 1;
+        }
+    }
+
+    /// d-31: scroll up one line. No-op at the top.
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    /// Floor on how many keymap lines stay visible at the
+    /// maximum scroll offset. Keeps the bottom of the
+    /// list reachable without letting the operator scroll
+    /// the content entirely off-screen.
+    const MIN_VISIBLE_LINES: u16 = 3;
 }
 
-/// Render the overlay over the area provided (typically
-/// the pane's body area; the caller chooses how much of
-/// the frame to dim). Uses `Clear` to wipe the underlying
-/// widgets so the modal isn't garbled by mid-render text.
-pub fn render_overlay(frame: &mut Frame, area: Rect) {
-    // Center a 70×36 box inside the given area. If the
-    // area is smaller than the box, use the full area —
-    // ratatui's diff renderer truncates rather than
-    // crashing on overflow. d-26 bumped 34→35 to fit the
-    // `/` filter row; d-30 bumped 35→36 for `X` batch
-    // cancel.
-    let modal = centered(area, 70, 36);
-    frame.render_widget(Clear, modal);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Help · press ? or Esc to close ");
-    let lines: Vec<Line<'static>> = vec![
+/// The full keymap as renderable lines. Extracted so
+/// both the renderer and `help_line_count` (scroll
+/// clamp) share one source of truth.
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
         section_header("Navigation (global)"),
         kv("F1 / 1", "Daemons pane"),
         kv("F2 / 2", "Transfers pane"),
@@ -65,6 +96,8 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         // on F4. Belongs in the global section, not
         // under any pane-specific block.
         kv("r", "refresh / rescan (active pane)"),
+        // d-31: j/k scroll this overlay when it's open.
+        kv("j / k", "scroll this help (when open)"),
         Line::from(""),
         section_header("F1 · F2 · F3 navigation"),
         kv("↑ ↓ / j k", "cursor (F1, F2 active, F3)"),
@@ -96,8 +129,41 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         kv("M", "mirror (prompts before deleting at dest)"),
         kv("V", "move (prompts before deleting source)"),
         kv("y / N / Esc", "confirm / cancel destructive prompt"),
-    ];
-    let para = Paragraph::new(lines).block(block);
+    ]
+}
+
+/// Total keymap line count. Drives the d-31 scroll clamp
+/// in `HelpOverlay::scroll_down`.
+fn help_line_count() -> u16 {
+    help_lines().len() as u16
+}
+
+/// Render the overlay over the area provided (typically
+/// the pane's body area; the caller chooses how much of
+/// the frame to dim). Uses `Clear` to wipe the underlying
+/// widgets so the modal isn't garbled by mid-render text.
+///
+/// d-31: takes the [`HelpOverlay`] so the renderer can
+/// apply the operator's scroll offset.
+pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
+    // Center a 70×36 box inside the given area. If the
+    // area is smaller than the box, use the full area —
+    // ratatui's diff renderer truncates rather than
+    // crashing on overflow. d-26 bumped 34→35 to fit the
+    // `/` filter row; d-30 bumped 35→36 for `X` batch
+    // cancel. d-31: when the area is shorter than the
+    // modal, the operator scrolls with j/k.
+    let modal = centered(area, 70, 36);
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Help · press ? or Esc to close ");
+    // d-31: apply the vertical scroll offset. Paragraph
+    // clips lines above the offset and below the modal
+    // height — exactly the page-through behavior we want.
+    let para = Paragraph::new(help_lines())
+        .block(block)
+        .scroll((overlay.scroll_offset(), 0));
     frame.render_widget(para, modal);
 }
 
@@ -171,6 +237,77 @@ mod tests {
         assert!(!overlay.is_visible());
     }
 
+    // d-31: help overlay scroll.
+
+    #[test]
+    fn new_overlay_starts_at_top() {
+        let overlay = HelpOverlay::default();
+        assert_eq!(overlay.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_down_advances_offset() {
+        let mut overlay = HelpOverlay::default();
+        overlay.scroll_down();
+        assert_eq!(overlay.scroll_offset(), 1);
+        overlay.scroll_down();
+        assert_eq!(overlay.scroll_offset(), 2);
+    }
+
+    #[test]
+    fn scroll_up_is_saturating_at_top() {
+        let mut overlay = HelpOverlay::default();
+        overlay.scroll_up();
+        assert_eq!(overlay.scroll_offset(), 0, "can't scroll above the top");
+    }
+
+    #[test]
+    fn scroll_down_then_up_returns_to_top() {
+        let mut overlay = HelpOverlay::default();
+        overlay.scroll_down();
+        overlay.scroll_down();
+        overlay.scroll_up();
+        overlay.scroll_up();
+        assert_eq!(overlay.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_down_clamps_so_content_stays_visible() {
+        let mut overlay = HelpOverlay::default();
+        // Scroll way past the end.
+        for _ in 0..1000 {
+            overlay.scroll_down();
+        }
+        let max = help_line_count().saturating_sub(HelpOverlay::MIN_VISIBLE_LINES);
+        assert_eq!(
+            overlay.scroll_offset(),
+            max,
+            "scroll clamps so MIN_VISIBLE_LINES of content stay on screen"
+        );
+        // At least some content is still in view.
+        assert!(overlay.scroll_offset() < help_line_count());
+    }
+
+    #[test]
+    fn close_resets_scroll() {
+        let mut overlay = HelpOverlay::default();
+        overlay.toggle(); // open
+        overlay.scroll_down();
+        overlay.scroll_down();
+        assert!(overlay.scroll_offset() > 0);
+        overlay.close();
+        assert_eq!(overlay.scroll_offset(), 0, "close resets scroll to top");
+    }
+
+    #[test]
+    fn toggle_closed_resets_scroll() {
+        let mut overlay = HelpOverlay::default();
+        overlay.toggle(); // open
+        overlay.scroll_down();
+        overlay.toggle(); // close via toggle
+        assert_eq!(overlay.scroll_offset(), 0);
+    }
+
     #[test]
     fn centered_clamps_to_area_when_smaller() {
         let area = Rect::new(0, 0, 40, 10);
@@ -198,7 +335,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
-                render_overlay(frame, frame.area());
+                // d-31: render at the top (offset 0) so
+                // every section is visible for the grep.
+                render_overlay(frame, frame.area(), HelpOverlay::default());
             })
             .expect("draw");
         // Flatten the buffer to a single string for grep.
