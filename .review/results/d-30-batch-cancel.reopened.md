@@ -1,6 +1,6 @@
 # d-30-batch-cancel reopened
 
-Commit reviewed: `aaa9c42e9663749884c44a9c6df52fdf04d4c4c8`
+Reviewed commit: `aaa9c42e9663749884c44a9c6df52fdf04d4c4c8`
 
 Validation:
 
