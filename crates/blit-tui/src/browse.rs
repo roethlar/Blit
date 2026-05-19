@@ -520,13 +520,31 @@ impl BrowseState {
 /// view) all hash to the same priority — only the name
 /// matters there.
 ///
-/// Public-within-the-crate so tests can probe the
+/// d-27 round 2: the key is `(priority, lowercase_name,
+/// original_name)`. The lowercase form drives the
+/// case-insensitive primary order, and the original
+/// name breaks ties between case variants (`Foo` vs.
+/// `foo` → both have lowercase `"foo"`, but the original
+/// `"Foo"` < `"foo"` by raw bytes so the case-variant
+/// pair lands deterministically). Without the
+/// tiebreaker, stable-sort preserved upstream fetch
+/// order — which for the daemon's `HashMap` is
+/// non-deterministic across reconnects, defeating the
+/// whole point of d-27.
+///
+/// Public-within-the-module so tests can probe the
 /// helper directly. `sort_by_cached_key` builds the
 /// composite key once per row, avoiding the
 /// `to_lowercase()` allocation on every comparator
 /// call.
 fn sort_rows(rows: &mut [BrowseRow]) {
-    rows.sort_by_cached_key(|row| (sort_priority(&row.kind), row.name.to_lowercase()));
+    rows.sort_by_cached_key(|row| {
+        (
+            sort_priority(&row.kind),
+            row.name.to_lowercase(),
+            row.name.clone(),
+        )
+    });
 }
 
 /// Sort-priority companion to [`sort_rows`]. Lower
@@ -1249,5 +1267,59 @@ mod tests {
         assert_eq!(sort_priority(&BrowseRowKind::Module { read_only: true }), 0);
         assert_eq!(sort_priority(&BrowseRowKind::Directory), 1);
         assert_eq!(sort_priority(&BrowseRowKind::File), 2);
+    }
+
+    // d-27 round 2: case-variant tiebreaker.
+
+    /// Reviewer-flagged regression: case-variant names
+    /// (`Foo` / `foo`) share the same lowercase sort key.
+    /// Pre-R2 the stable sort preserved upstream fetch
+    /// order — which for the daemon's `HashMap` is
+    /// non-deterministic. R2 fix: tiebreak on the
+    /// original name (raw bytes), so the pair lands the
+    /// same way regardless of input order.
+    #[test]
+    fn case_variants_sort_deterministically_regardless_of_input_order() {
+        let input_a = vec![module("Foo", false), module("foo", false)];
+        let input_b = vec![module("foo", false), module("Foo", false)];
+        let mut state_a = BrowseState::new();
+        state_a.apply_modules(input_a, Instant::now());
+        let mut state_b = BrowseState::new();
+        state_b.apply_modules(input_b, Instant::now());
+        let names_a: Vec<&str> = state_a.rows().iter().map(|r| r.name.as_str()).collect();
+        let names_b: Vec<&str> = state_b.rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names_a, names_b);
+        // Raw-byte tiebreak: 'F' (0x46) < 'f' (0x66), so
+        // `Foo` precedes `foo` in both inputs.
+        assert_eq!(names_a, vec!["Foo", "foo"]);
+    }
+
+    /// Mixed case-variants + non-variants in the same
+    /// listing must remain deterministic. Sanity check
+    /// the larger interaction.
+    #[test]
+    fn case_variants_mixed_with_other_names_stay_deterministic() {
+        let input_a = vec![
+            module("Foo", false),
+            module("alpha", false),
+            module("foo", false),
+            module("zeta", false),
+        ];
+        let input_b = vec![
+            module("zeta", false),
+            module("foo", false),
+            module("alpha", false),
+            module("Foo", false),
+        ];
+        let mut state_a = BrowseState::new();
+        state_a.apply_modules(input_a, Instant::now());
+        let mut state_b = BrowseState::new();
+        state_b.apply_modules(input_b, Instant::now());
+        let names_a: Vec<&str> = state_a.rows().iter().map(|r| r.name.as_str()).collect();
+        let names_b: Vec<&str> = state_b.rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names_a, names_b);
+        // alpha < {Foo, foo} < zeta by lowercase; Foo
+        // wins the case-variant tiebreak vs. foo.
+        assert_eq!(names_a, vec!["alpha", "Foo", "foo", "zeta"]);
     }
 }

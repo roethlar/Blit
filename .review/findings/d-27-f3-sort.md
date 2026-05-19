@@ -165,4 +165,80 @@ sorted layout.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-27-f3-sort.reopened.md`)
+
+One Low-severity finding:
+
+- **Case-insensitive equal keys are still input-order
+  dependent.** `sort_by_cached_key((priority,
+  lowercase_name))` ties on case-variant names like
+  `Foo` / `foo`. Stable sort preserves upstream
+  insertion order — which for the daemon's `HashMap` is
+  non-deterministic across reconnects. So the
+  case-variant pair could land either way per reconnect,
+  partially defeating the d-27 contract that the
+  `apply_modules_sort_is_deterministic_regardless_of_input_order`
+  test claims to enforce. The test only covered
+  distinct-lowercase keys.
+
+### Round 2 fix
+
+Extended the sort key with the original `name` as a
+third component:
+
+```rust
+fn sort_rows(rows: &mut [BrowseRow]) {
+    rows.sort_by_cached_key(|row| {
+        (
+            sort_priority(&row.kind),
+            row.name.to_lowercase(),
+            row.name.clone(),
+        )
+    });
+}
+```
+
+Primary sort: kind priority (dirs before files).
+Secondary: lowercase name (case-insensitive
+alphabetical). Tertiary tiebreak: raw original name —
+`'F'` (0x46) < `'f'` (0x66) so `Foo` precedes `foo`
+deterministically, independent of upstream order.
+
+`sort_by_cached_key` builds this triple once per row,
+so the extra `clone()` runs `O(n)` times rather than
+`O(n log n)`.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/browse.rs`:
+  - `sort_rows` key gains the third component.
+  - Sort-helper rustdoc explains the tiebreaker
+    motivation + the raw-byte ordering.
+  - 2 new R2 regression tests.
+
+### Round 2 tests
+
++2 tests (308 → 310):
+
+- `case_variants_sort_deterministically_regardless_of_input_order`
+  — the reviewer's exact regression: `[Foo, foo]` and
+  `[foo, Foo]` both produce `[Foo, foo]` post-sort.
+- `case_variants_mixed_with_other_names_stay_deterministic`
+  — sanity check that the case-variant tiebreak still
+  composes correctly with non-variant alphabetical
+  ordering (e.g., `alpha` < `Foo` ≈ `foo` < `zeta`).
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+A "stable" sort is only as deterministic as its keys.
+If your input is non-deterministic AND your sort key
+has collisions, the output is non-deterministic for
+those collisions — even with a stable sort algorithm.
+For HashMap-sourced data, the sort key needs to be a
+total ordering, not just a partial one. The R1 test
+`apply_modules_sort_is_deterministic_regardless_of_input_order`
+hid this because all four names had distinct
+lowercase forms.
