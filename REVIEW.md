@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-30-batch-cancel (round 2) | Feature | Freeze ids at prompt creation — closes the TOCTOU race | `[~]` | `phase5/a1` | `d778f76` |
+| _none_ | | | | | |
 
 ## Open findings
 
@@ -129,6 +129,7 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `d3ba561` F3 stable sort with deterministic case-variant tiebreak (`d-27-f3-sort` round 2)
 - `0fbaad6` F3 no-match filter empty-state message (`d-28-f3-no-matches-msg`)
 - `b7b08a9` Opt-in F2 cancel confirmation prompt (`d-29-confirm-cancel`)
+- `d778f76` F2 batch cancel freezes confirmed transfer ids (`d-30-batch-cancel` round 2)
 - `c89d278` TUI config loader warning ordering + Verify defaults (`e-3-config-scaffold` round 2)
 - `94a30c2` Configurable tab-strip counts (`e-4-config-tab-strip-counts`)
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
