@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-34-f3-pull-endpoint | Feature | F3 transfer slice 2 — pull-source preview derived via RemoteEndpoint | `[~]` | `phase5/a1` | `eb1ee45` |
+| _none_ | | | | | |
 
 ## Open findings
 
@@ -138,3 +138,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `72b742b` Verify path prefill config + schema doc sync (`e-6-verify-prefill` round 2)
 - `12ee960` Configurable tab-strip accent with contrasting active-tab foreground (`e-7-config-theme` round 2)
 - `7baf2a4` F3 pull-source spec preview with bracketed IPv6 authority (`d-33-f3-pull-source` round 2)
+- `eb1ee45` F3 pull-source preview derived via `RemoteEndpoint` (`d-34-f3-pull-endpoint`)
