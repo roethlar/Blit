@@ -7,6 +7,12 @@
 //! stderr (visible after TUI exit) and use defaults. We
 //! never crash the TUI on a misconfigured `tui.toml`.
 //!
+//! d-36: the config is also reloadable at runtime via
+//! `Ctrl+R` (see `main::reload_tui_config`), which swaps
+//! the live config without restarting. A reload parse
+//! error keeps the current config rather than reverting
+//! to defaults.
+//!
 //! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24):
 //!
 //! ```toml

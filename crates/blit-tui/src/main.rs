@@ -215,6 +215,33 @@ struct AppState {
     /// by the TUI process. Renders into the F3 footer.
     f3_pull: f3pull::F3PullState,
     f3_pull_reply_tx: mpsc::Sender<F3PullReply>,
+    /// d-36: transient banner shown after a `Ctrl+R`
+    /// config reload (`config reloaded` on success, the
+    /// parse error on failure). Auto-hides via a
+    /// renderer-side TTL — `None` once expired or never
+    /// reloaded.
+    reload_banner: Option<ReloadBanner>,
+}
+
+/// d-36: outcome of a `Ctrl+R` `tui.toml` reload, shown
+/// briefly in the tab-strip line.
+#[derive(Debug, Clone)]
+struct ReloadBanner {
+    message: String,
+    /// `true` = success (green), `false` = parse error
+    /// (red, current config kept).
+    ok: bool,
+    shown_at: Instant,
+}
+
+impl ReloadBanner {
+    /// How long the banner stays on screen.
+    const TTL: std::time::Duration = std::time::Duration::from_secs(4);
+
+    /// `true` while the banner should still render.
+    fn is_visible(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.shown_at) < Self::TTL
+    }
 }
 
 /// d-22: F2 cancel-selected lifecycle. Lives on AppState
@@ -383,23 +410,14 @@ async fn main() -> Result<()> {
 async fn run_router(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     args: &Args,
-    tui_config: config::TuiConfig,
+    // d-36: `mut` so a `Ctrl+R` reload can swap in a
+    // freshly-parsed config without restarting the TUI.
+    mut tui_config: config::TuiConfig,
 ) -> Result<()> {
     // a1-6 round 2: the input task is owned by the router
     // for the whole TUI lifetime.
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
     spawn_input_task(key_tx);
-
-    // e-7: bridge the config's `RawColor` (operator-typed
-    // accent_color string) to a `ratatui::style::Color`.
-    // Unknown values already warned at startup (in main)
-    // — here we silently fall back so the renderer never
-    // panics on a None.
-    let accent_color = tui_config
-        .theme
-        .parse_accent()
-        .map(raw_color_to_ratatui)
-        .unwrap_or(ratatui::style::Color::Cyan);
 
     // a1-6b: parse remote up-front so every pane sees the
     // same endpoint (or None) without re-parsing. Round 2:
@@ -496,6 +514,7 @@ async fn run_router(
         cancel_request_seq: 0,
         f3_pull: f3pull::F3PullState::new(),
         f3_pull_reply_tx: f3_pull_reply_tx.clone(),
+        reload_banner: None,
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -564,6 +583,37 @@ async fn run_router(
         }
 
         let now = Instant::now();
+        // d-36: drop an expired reload banner so
+        // `needs_live_tick` stops ticking for it.
+        if app
+            .reload_banner
+            .as_ref()
+            .is_some_and(|b| !b.is_visible(now))
+        {
+            app.reload_banner = None;
+        }
+        // d-36: accent + reload banner are recomputed each
+        // frame from the (possibly hot-reloaded) config, so
+        // a `Ctrl+R` theme change takes effect immediately.
+        let accent_color = tui_config
+            .theme
+            .parse_accent()
+            .map(raw_color_to_ratatui)
+            .unwrap_or(ratatui::style::Color::Cyan);
+        let reload_banner = app
+            .reload_banner
+            .as_ref()
+            .filter(|b| b.is_visible(now))
+            .map(|b| {
+                (
+                    b.message.clone(),
+                    if b.ok {
+                        ratatui::style::Color::Green
+                    } else {
+                        ratatui::style::Color::Red
+                    },
+                )
+            });
         terminal
             .draw(|frame| {
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
@@ -583,6 +633,7 @@ async fn run_router(
                     counts,
                     tui_config.tab_strip.show_counts,
                     accent_color,
+                    reload_banner.as_ref().map(|(m, c)| (m.as_str(), *c)),
                 );
                 // d-34: derive the F3 pull-source spec
                 // through the real `RemoteEndpoint` so the
@@ -792,6 +843,15 @@ async fn run_router(
                         UserAction::Quit => return Ok(()),
                         UserAction::ToggleHelp => {
                             app.help.toggle();
+                        }
+                        // d-36: Ctrl+R hot-reloads tui.toml.
+                        // Global (handled here, not in a
+                        // per-pane dispatcher) since it owns
+                        // the run_router-scoped `tui_config`.
+                        UserAction::ReloadConfig => {
+                            let (next, banner) = reload_tui_config(&tui_config, Instant::now());
+                            tui_config = next;
+                            app.reload_banner = Some(banner);
                         }
                         UserAction::Navigate(target) => {
                             app.current_screen = target;
@@ -1935,6 +1995,55 @@ fn cancel_status_to_display(
     }
 }
 
+/// d-36: re-read `tui.toml` for a `Ctrl+R` hot-reload.
+/// Returns the config to use plus the banner to show.
+///
+/// On a parse error, the CURRENT config is kept (the
+/// loader returns defaults on failure, which would
+/// silently wipe the operator's settings) and the banner
+/// carries the error. On success — including a missing
+/// file, which legitimately means "use defaults" — the
+/// freshly-loaded config is adopted.
+fn reload_tui_config(
+    current: &config::TuiConfig,
+    now: Instant,
+) -> (config::TuiConfig, ReloadBanner) {
+    let mut warning: Option<String> = None;
+    let loaded = config::load(|msg| warning = Some(msg));
+    classify_reload(loaded, warning, current, now)
+}
+
+/// Pure core of [`reload_tui_config`] — splits the I/O
+/// (`config::load`) from the keep-vs-adopt decision so
+/// the decision is unit-testable without touching the
+/// process-global config dir (which would race under
+/// parallel tests).
+fn classify_reload(
+    loaded: config::TuiConfig,
+    warning: Option<String>,
+    current: &config::TuiConfig,
+    now: Instant,
+) -> (config::TuiConfig, ReloadBanner) {
+    match warning {
+        Some(message) => (
+            current.clone(),
+            ReloadBanner {
+                message: format!("reload failed: {message} — kept previous"),
+                ok: false,
+                shown_at: now,
+            },
+        ),
+        None => (
+            loaded,
+            ReloadBanner {
+                message: "config reloaded".to_string(),
+                ok: true,
+                shown_at: now,
+            },
+        ),
+    }
+}
+
 /// d-35: bridge the F3 pull state machine to the
 /// renderer-facing `F3PullDisplay` (lives in
 /// `screens/f3.rs` so the screens layer doesn't reach
@@ -2201,6 +2310,11 @@ fn raw_color_to_ratatui(c: config::RawColor) -> ratatui::style::Color {
 /// the current time.
 fn needs_live_tick(app: &AppState) -> bool {
     if app.transfer.is_running() || app.verify.is_running() {
+        return true;
+    }
+    // d-36: tick while a reload banner is showing so it
+    // auto-expires (the loop clears it once past TTL).
+    if app.reload_banner.is_some() {
         return true;
     }
     match app.current_screen {
@@ -2959,6 +3073,12 @@ enum UserAction {
     /// if no remote / nothing selectable / a pull is
     /// already in flight.
     F3PullBegin,
+    /// d-36: `Ctrl+R` re-reads `tui.toml` and swaps the
+    /// live config (theme, tick interval, transfer knobs)
+    /// without restarting the TUI. Global — works from
+    /// every pane. A parse error keeps the current config
+    /// and surfaces the error in the tab-strip banner.
+    ReloadConfig,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -2977,6 +3097,12 @@ struct KeyEvent {
 fn key_action(key: &KeyEvent) -> Option<UserAction> {
     if should_quit(key.code, key.modifiers) {
         return Some(UserAction::Quit);
+    }
+    // d-36: `Ctrl+R` reloads tui.toml. Checked before the
+    // plain `Char('r') => Refresh` arm below so the Ctrl
+    // modifier disambiguates the two.
+    if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(UserAction::ReloadConfig);
     }
     // F1-F4 navigate to the named pane. Available from
     // every pane — that's the whole point of the router.
@@ -3498,6 +3624,94 @@ mod tests {
                                                                // also mapped now via earlier slices.
                                                                // Enter is now mapped (a1-4: F3 Descend) — it
                                                                // *isn't* in this "unmapped" list anymore.
+    }
+
+    // d-36: Ctrl+R config hot-reload.
+
+    /// `Ctrl+R` maps to ReloadConfig; bare `r` stays
+    /// Refresh (the Ctrl modifier disambiguates).
+    #[test]
+    fn key_action_maps_ctrl_r_to_reload_config() {
+        let ctrl_r = KeyEvent {
+            code: KeyCode::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert!(matches!(
+            key_action(&ctrl_r),
+            Some(UserAction::ReloadConfig)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('r'))),
+            Some(UserAction::Refresh)
+        ));
+    }
+
+    /// Reload success (no parse warning): the freshly
+    /// loaded config is adopted and the banner is a green
+    /// "config reloaded".
+    #[test]
+    fn classify_reload_success_adopts_new() {
+        let mut loaded = config::TuiConfig::default();
+        loaded.transfer.confirm_cancel = true;
+        let current = config::TuiConfig::default();
+        let (next, banner) = classify_reload(loaded, None, &current, Instant::now());
+        assert!(next.transfer.confirm_cancel, "reloaded config adopted");
+        assert!(banner.ok);
+        assert_eq!(banner.message, "config reloaded");
+    }
+
+    /// Reload parse error: the CURRENT config is kept (not
+    /// the defaults the loader returns on failure) and the
+    /// banner carries the error.
+    #[test]
+    fn classify_reload_parse_error_keeps_current() {
+        // The loader returns defaults on a parse error...
+        let loaded = config::TuiConfig::default();
+        // ...but `current` has a non-default value we must
+        // NOT lose.
+        let mut current = config::TuiConfig::default();
+        current.transfer.confirm_cancel = true;
+        let (next, banner) = classify_reload(
+            loaded,
+            Some("failed to parse tui.toml: …".to_string()),
+            &current,
+            Instant::now(),
+        );
+        assert!(
+            next.transfer.confirm_cancel,
+            "parse error must keep the current config, not reset to defaults"
+        );
+        assert!(!banner.ok);
+        assert!(banner.message.contains("reload failed"));
+    }
+
+    /// The reload banner auto-hides after its TTL.
+    #[test]
+    fn reload_banner_visibility_expires() {
+        let now = Instant::now();
+        let banner = ReloadBanner {
+            message: "config reloaded".to_string(),
+            ok: true,
+            shown_at: now,
+        };
+        assert!(banner.is_visible(now));
+        assert!(banner.is_visible(now + std::time::Duration::from_secs(3)));
+        assert!(!banner.is_visible(now + std::time::Duration::from_secs(5)));
+    }
+
+    /// d-36: needs_live_tick is true while a reload banner
+    /// is set, so the loop wakes to expire it.
+    #[test]
+    fn needs_live_tick_true_while_reload_banner_set() {
+        let mut app = make_test_app_state(Screen::F1);
+        // F1 with no live timestamp → normally false.
+        assert!(!needs_live_tick(&app));
+        app.reload_banner = Some(ReloadBanner {
+            message: "config reloaded".to_string(),
+            ok: true,
+            shown_at: Instant::now(),
+        });
+        assert!(needs_live_tick(&app));
     }
 
     /// d-22: `K` maps to CancelSelectedTransfer. F2's
@@ -4368,6 +4582,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            reload_banner: None,
         }
     }
 
@@ -4605,6 +4820,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            reload_banner: None,
         };
         app.verify.cycle_focus(); // Source
         let (verify_run_tx, _verify_run_rx) = mpsc::channel::<VerifyReply>(1);
@@ -4657,6 +4873,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            reload_banner: None,
         };
 
         let esc = k(KeyCode::Esc);
@@ -4762,6 +4979,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            reload_banner: None,
         };
 
         // All-idle → no tick.
@@ -4826,6 +5044,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            reload_banner: None,
         };
 
         // F1, pre-discovery (Scanning) → no tick.

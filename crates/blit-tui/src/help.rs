@@ -98,6 +98,8 @@ fn help_lines() -> Vec<Line<'static>> {
         // on F4. Belongs in the global section, not
         // under any pane-specific block.
         kv("r", "refresh / rescan (active pane)"),
+        // d-36: Ctrl+R hot-reloads tui.toml.
+        kv("Ctrl-R", "reload tui.toml (theme / ticks / transfer knobs)"),
         // d-31: j/k scroll this overlay when it's open.
         kv("j / k", "scroll this help (when open)"),
         Line::from(""),
@@ -157,10 +159,11 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // ratatui's diff renderer truncates rather than
     // crashing on overflow. d-26 bumped 34→35 to fit the
     // `/` filter row; d-30 bumped 35→36 for `X` batch
-    // cancel; d-35 bumped 36→37 for `p` pull. d-31: when
-    // the area is shorter than the modal, the operator
-    // scrolls with j/k.
-    let modal = centered(area, 70, 37);
+    // cancel; d-35 bumped 36→37 for `p` pull; d-36 bumped
+    // 37→38 for `Ctrl-R` reload. d-31: when the area is
+    // shorter than the modal, the operator scrolls with
+    // j/k.
+    let modal = centered(area, 70, 38);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -385,7 +388,7 @@ mod tests {
     #[test]
     fn centered_clamps_to_area_when_smaller() {
         let area = Rect::new(0, 0, 40, 10);
-        let modal = centered(area, 70, 37);
+        let modal = centered(area, 70, 38);
         // Width / height are capped to the area's dims.
         assert!(modal.width <= 40);
         assert!(modal.height <= 10);

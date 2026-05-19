@@ -70,6 +70,11 @@ pub fn render_tab_strip(
     counts: TabStripCounts,
     show_counts: bool,
     accent: Color,
+    // d-36: transient `Ctrl+R` reload banner. When
+    // present, it takes the right-edge column in place of
+    // the counts (the counts are stable info; the banner
+    // is a brief, higher-priority notification).
+    reload_banner: Option<(&str, Color)>,
 ) {
     let full_tab_spans = build_tab_spans(active, false, accent);
     let short_tab_spans = build_tab_spans(active, true, accent);
@@ -111,7 +116,18 @@ pub fn render_tab_strip(
 
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), chunks[0]);
 
-    if show_counts && !counts_str.is_empty() {
+    // d-36: the reload banner wins the right-edge column
+    // when present; otherwise the counts render as before.
+    if let Some((message, color)) = reload_banner {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                message.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Right),
+            chunks[1],
+        );
+    } else if show_counts && !counts_str.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 counts_str,
@@ -330,6 +346,7 @@ mod tests {
                     TabStripCounts::default(),
                     false,
                     Color::Black,
+                    None,
                 );
             })
             .expect("draw");
@@ -387,6 +404,7 @@ mod tests {
                     },
                     true,
                     Color::Cyan,
+                    None,
                 );
             })
             .expect("draw");
@@ -417,6 +435,7 @@ mod tests {
                     },
                     false,
                     Color::Cyan,
+                    None,
                 );
             })
             .expect("draw");
