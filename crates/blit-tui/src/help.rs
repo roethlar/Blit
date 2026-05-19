@@ -10,7 +10,9 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::Frame;
 
 /// Help overlay visibility flag. Lives on `AppState` so
@@ -165,6 +167,22 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
         .block(block)
         .scroll((overlay.scroll_offset(), 0));
     frame.render_widget(para, modal);
+
+    // d-32: when the keymap overflows the modal's inner
+    // height, draw a scrollbar on the right border so the
+    // operator can see there's more above/below. Without
+    // the indicator (d-31), the only cue that scrolling
+    // does anything was the self-doc `j / k` row.
+    let inner_height = modal.height.saturating_sub(2); // top + bottom border
+    let total = help_line_count();
+    if total > inner_height {
+        let mut sb_state =
+            ScrollbarState::new(total as usize).position(overlay.scroll_offset() as usize);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"));
+        frame.render_stateful_widget(scrollbar, modal, &mut sb_state);
+    }
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -306,6 +324,57 @@ mod tests {
         overlay.scroll_down();
         overlay.toggle(); // close via toggle
         assert_eq!(overlay.scroll_offset(), 0);
+    }
+
+    /// Helper: render the overlay into a TestBackend of
+    /// the given size and flatten the buffer to a string.
+    fn render_to_string(overlay: HelpOverlay, w: u16, h: u16) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_overlay(frame, frame.area(), overlay);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    /// d-32: when the modal area is shorter than the
+    /// keymap, a scrollbar renders on the right edge. At
+    /// offset 0 with content below, the end marker `▼`
+    /// shows.
+    #[test]
+    fn scrollbar_renders_when_content_overflows() {
+        // 80×12 → modal clamps to 12 rows, inner height
+        // 10 < 34 keymap lines, so the scrollbar shows.
+        let text = render_to_string(HelpOverlay::default(), 80, 12);
+        assert!(
+            text.contains('▼'),
+            "overflowing modal must show a downward scroll marker; got:\n{text}"
+        );
+    }
+
+    /// d-32: when the modal fits the keymap entirely, no
+    /// scrollbar markers render — the indicator only
+    /// appears when it's useful.
+    #[test]
+    fn scrollbar_absent_when_content_fits() {
+        // 80×40 → modal is 36 rows, inner 34 == keymap
+        // length, so nothing overflows.
+        let text = render_to_string(HelpOverlay::default(), 80, 40);
+        assert!(
+            !text.contains('▲') && !text.contains('▼'),
+            "non-overflowing modal must not show scroll markers; got:\n{text}"
+        );
     }
 
     #[test]
