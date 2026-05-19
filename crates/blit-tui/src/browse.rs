@@ -532,6 +532,61 @@ impl BrowseState {
     }
 }
 
+/// d-33: derive the canonical remote pull-source spec for
+/// the F3 cursor — `<host>:/<module>/<rel-path>` — or
+/// `None` when there's nothing pullable (no host, no
+/// selected row, or a stale cursor on a non-matching
+/// filtered row).
+///
+/// This is the first slice of F3 transfer-from-cursor:
+/// it surfaces the resolvable source path as read-only
+/// info in the Stats block. Later slices add the
+/// destination prompt and the actual pull execution,
+/// which will reconstruct a `RemoteEndpoint` from the
+/// operator's `--remote` (for host + port) plus the
+/// module + rel_path this function's logic identifies.
+/// The string here is the human-readable preview.
+///
+/// Cases:
+/// - Modules view, cursor on a `Module` row →
+///   `<host>:/<module>/` (pull the whole module root).
+/// - Module view, cursor on a `Directory` →
+///   `<host>:/<module>/<path>/<dir>/` (trailing slash).
+/// - Module view, cursor on a `File` →
+///   `<host>:/<module>/<path>/<file>` (no trailing slash).
+pub fn pull_source_spec(
+    view: &BrowseView,
+    selected: Option<&BrowseRow>,
+    host: &str,
+) -> Option<String> {
+    if host.is_empty() {
+        return None;
+    }
+    let row = selected?;
+    match view {
+        BrowseView::Modules => match &row.kind {
+            BrowseRowKind::Module { .. } => Some(format!("{host}:/{}/", row.name)),
+            // A non-module row in the Modules view is a
+            // contradiction the model never produces.
+            _ => None,
+        },
+        BrowseView::Module { name, path } => {
+            let mut rel = String::new();
+            for seg in path {
+                rel.push_str(seg);
+                rel.push('/');
+            }
+            match &row.kind {
+                BrowseRowKind::Directory => Some(format!("{host}:/{name}/{rel}{}/", row.name)),
+                BrowseRowKind::File => Some(format!("{host}:/{name}/{rel}{}", row.name)),
+                // A Module row inside a Module view is a
+                // contradiction the model never produces.
+                BrowseRowKind::Module { .. } => None,
+            }
+        }
+    }
+}
+
 /// d-27: stable sort key for browse rows. Directories
 /// sort before files; within each kind, alphabetical
 /// by `name` (case-insensitive). Module rows (top-level
@@ -1392,5 +1447,124 @@ mod tests {
         // alpha < {Foo, foo} < zeta by lowercase; Foo
         // wins the case-variant tiebreak vs. foo.
         assert_eq!(names_a, vec!["alpha", "Foo", "foo", "zeta"]);
+    }
+
+    // d-33: pull-source spec derivation.
+
+    fn module_row(name: &str) -> BrowseRow {
+        BrowseRow {
+            name: name.to_string(),
+            kind: BrowseRowKind::Module { read_only: false },
+            size_bytes: 0,
+            mtime_seconds: 0,
+        }
+    }
+
+    fn dir_row(name: &str) -> BrowseRow {
+        BrowseRow {
+            name: name.to_string(),
+            kind: BrowseRowKind::Directory,
+            size_bytes: 0,
+            mtime_seconds: 0,
+        }
+    }
+
+    fn file_row(name: &str) -> BrowseRow {
+        BrowseRow {
+            name: name.to_string(),
+            kind: BrowseRowKind::File,
+            size_bytes: 10,
+            mtime_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn pull_source_none_without_host() {
+        let row = module_row("photos");
+        assert!(pull_source_spec(&BrowseView::Modules, Some(&row), "").is_none());
+    }
+
+    #[test]
+    fn pull_source_none_without_selection() {
+        assert!(pull_source_spec(&BrowseView::Modules, None, "host").is_none());
+    }
+
+    #[test]
+    fn pull_source_module_root_from_modules_view() {
+        let row = module_row("photos");
+        assert_eq!(
+            pull_source_spec(&BrowseView::Modules, Some(&row), "nas"),
+            Some("nas:/photos/".to_string())
+        );
+    }
+
+    #[test]
+    fn pull_source_directory_at_module_root() {
+        let view = BrowseView::Module {
+            name: "photos".to_string(),
+            path: vec![],
+        };
+        let row = dir_row("2024");
+        assert_eq!(
+            pull_source_spec(&view, Some(&row), "nas"),
+            Some("nas:/photos/2024/".to_string())
+        );
+    }
+
+    #[test]
+    fn pull_source_directory_nested() {
+        let view = BrowseView::Module {
+            name: "photos".to_string(),
+            path: vec!["2024".to_string(), "summer".to_string()],
+        };
+        let row = dir_row("beach");
+        assert_eq!(
+            pull_source_spec(&view, Some(&row), "nas"),
+            Some("nas:/photos/2024/summer/beach/".to_string())
+        );
+    }
+
+    #[test]
+    fn pull_source_file_has_no_trailing_slash() {
+        let view = BrowseView::Module {
+            name: "photos".to_string(),
+            path: vec!["2024".to_string()],
+        };
+        let row = file_row("img001.jpg");
+        assert_eq!(
+            pull_source_spec(&view, Some(&row), "nas"),
+            Some("nas:/photos/2024/img001.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn pull_source_file_at_module_root() {
+        let view = BrowseView::Module {
+            name: "docs".to_string(),
+            path: vec![],
+        };
+        let row = file_row("readme.txt");
+        assert_eq!(
+            pull_source_spec(&view, Some(&row), "host"),
+            Some("host:/docs/readme.txt".to_string())
+        );
+    }
+
+    /// A module row inside a module view, or a non-module
+    /// row in the modules view, are contradictions the
+    /// model never produces — the helper returns None
+    /// rather than emit a malformed spec.
+    #[test]
+    fn pull_source_rejects_contradictory_kind() {
+        // Module row inside a Module view.
+        let view = BrowseView::Module {
+            name: "photos".to_string(),
+            path: vec![],
+        };
+        let row = module_row("nested");
+        assert!(pull_source_spec(&view, Some(&row), "nas").is_none());
+        // Non-module row in the Modules view.
+        let row = dir_row("strays");
+        assert!(pull_source_spec(&BrowseView::Modules, Some(&row), "nas").is_none());
     }
 }

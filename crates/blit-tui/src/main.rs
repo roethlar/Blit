@@ -595,6 +595,9 @@ async fn run_router(
                         body_area,
                         &app.browse,
                         &app.remote_label,
+                        // d-33: host (not the raw label) for
+                        // the canonical pull-source spec.
+                        app.parsed_remote.as_ref().map(|e| e.host.as_str()),
                         now,
                     ),
                     Screen::F4 => screens::f4::render_into(

@@ -6,9 +6,10 @@
 //! emits widgets. Navigation + RPC fetching live in
 //! `main::run_f3_event_loop`.
 //!
-//! Layout (d-26 / d-28 polish — `/` filter fragment in
-//! footer, visible-only rows in the table, differentiated
-//! empty-state message in Stats):
+//! Layout (d-26 / d-28 / d-33 polish — `/` filter
+//! fragment in footer, visible-only rows in the table,
+//! differentiated empty-state message + pull-source
+//! preview in Stats):
 //!
 //! ```text
 //! ┌── header (1 line) ───────────────────────────────┐
@@ -16,16 +17,23 @@
 //! ├── entries table (Min 5) ─────────────────────────┤
 //! │ name  kind  size  mtime                          │
 //! │ ...   (rows filtered by d-26 filter when set)    │
-//! ├── stats block (Length 3) ────────────────────────┤
+//! ├── stats block (Length 5) ────────────────────────┤
 //! │ Selected: photos/ · <kind> · <size>              │
 //! │ View: <breadcrumb> · <V>/<N> entries (when       │
 //! │       filtered) or <N> entries (no filter)       │
+//! │ Pull: <host>:/<module>/<rel-path>   [d-33]       │
 //! │ — or, when nothing is selectable —               │
 //! │ (no entries) / (no rows match filter) [d-28]     │
 //! ├── footer (1 line) ───────────────────────────────┤
 //! │ status · [filter: foo │ filter: foo_] · q quit … │
 //! └──────────────────────────────────────────────────┘
 //! ```
+//!
+//! d-33: the `Pull:` line is the first slice of F3
+//! transfer-from-cursor — it surfaces the canonical
+//! remote source spec for the selected row. The
+//! destination prompt + actual pull execution land in
+//! follow-on slices.
 //!
 //! d-26's filter fragment renders one of:
 //! - hidden (no filter, not editing)
@@ -50,11 +58,17 @@ use ratatui::Frame;
 use std::time::Instant;
 
 /// Render the F3 pane into a caller-supplied area (router-aware).
+///
+/// d-33: `host` is the remote host (from the operator's
+/// `--remote`), used to render the canonical pull-source
+/// spec in the Stats block. `None` when no remote is
+/// configured.
 pub fn render_into(
     frame: &mut Frame,
     area: Rect,
     state: &BrowseState,
     remote_label: &str,
+    host: Option<&str>,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -62,14 +76,16 @@ pub fn render_into(
         .constraints([
             Constraint::Length(1),
             Constraint::Min(5),
-            Constraint::Length(4),
+            // d-33: Stats grew from 4→5 rows for the
+            // "Pull:" preview line.
+            Constraint::Length(5),
             Constraint::Length(1),
         ])
         .split(area);
 
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
-    render_stats(frame, chunks[2], state);
+    render_stats(frame, chunks[2], state, host);
     render_footer(frame, chunks[3], state, now);
 }
 
@@ -136,7 +152,7 @@ fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState) {
+fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, host: Option<&str>) {
     let block = Block::default().borders(Borders::ALL).title(" Stats ");
     // d-26: when a filter is active, show "<V>/<N>
     // entries" so the operator can see how many rows the
@@ -149,19 +165,34 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState) {
         format!("{visible}/{total} entries")
     };
     let lines = match state.selected_row() {
-        Some(row) => vec![
-            Line::from(format!(
-                "Selected: {} · {} · {}",
-                row.name,
-                kind_label(&row.kind),
-                if matches!(row.kind, BrowseRowKind::File) {
-                    format_bytes(row.size_bytes)
-                } else {
-                    "—".to_string()
-                },
-            )),
-            Line::from(format!("View: {} · {}", state.breadcrumb(), count_fragment,)),
-        ],
+        Some(row) => {
+            let mut lines = vec![
+                Line::from(format!(
+                    "Selected: {} · {} · {}",
+                    row.name,
+                    kind_label(&row.kind),
+                    if matches!(row.kind, BrowseRowKind::File) {
+                        format_bytes(row.size_bytes)
+                    } else {
+                        "—".to_string()
+                    },
+                )),
+                Line::from(format!("View: {} · {}", state.breadcrumb(), count_fragment,)),
+            ];
+            // d-33: canonical remote pull-source spec for
+            // the cursor. Foundation for F3
+            // transfer-from-cursor — the destination prompt
+            // + pull execution land in follow-on slices.
+            if let Some(spec) =
+                host.and_then(|h| crate::browse::pull_source_spec(state.view(), Some(row), h))
+            {
+                lines.push(Line::from(vec![
+                    Span::styled("Pull: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(spec),
+                ]));
+            }
+            lines
+        }
         None => vec![Line::from(Span::styled(
             // d-28: differentiated empty-state message —
             // `(no rows match filter)` when a non-empty
