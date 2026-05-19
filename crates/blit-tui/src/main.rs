@@ -573,6 +573,13 @@ async fn run_router(
                     tui_config.tab_strip.show_counts,
                     accent_color,
                 );
+                // d-33 R2: the F3 pull-source preview needs
+                // the canonical display authority (bracketed
+                // IPv6, port-aware) — `host_port_display()`,
+                // not the raw `host` field. Bound here so the
+                // owned String outlives the render call.
+                let f3_authority: Option<String> =
+                    app.parsed_remote.as_ref().map(|e| e.host_port_display());
                 match app.current_screen {
                     Screen::F1 => screens::f1::render_into(frame, body_area, &app.daemons, now),
                     Screen::F2 => screens::f2::render_into(
@@ -595,9 +602,7 @@ async fn run_router(
                         body_area,
                         &app.browse,
                         &app.remote_label,
-                        // d-33: host (not the raw label) for
-                        // the canonical pull-source spec.
-                        app.parsed_remote.as_ref().map(|e| e.host.as_str()),
+                        f3_authority.as_deref(),
                         now,
                     ),
                     Screen::F4 => screens::f4::render_into(

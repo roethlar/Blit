@@ -129,4 +129,70 @@ fit the third line.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-33-f3-pull-source.reopened.md`)
+
+One finding:
+
+- **Raw `host` produces an invalid spec for IPv6
+  remotes.** `main.rs` passed `RemoteEndpoint::host`
+  directly, and `pull_source_spec` formatted it as
+  `{host}:/...`. For `[::1]:/share/`,
+  `RemoteEndpoint::parse` stores `host == "::1"` (brackets
+  stripped), so the preview rendered `::1:/share/...` —
+  un-parseable and copy-hostile. Distinct from the known
+  "port not shown" cosmetic gap: even a default-port
+  IPv6 endpoint needs brackets. The reviewer pointed at
+  the existing `host_port_display()` display authority
+  (bracketed IPv6, port-aware) and asked for an IPv6
+  regression test.
+
+### Round 2 fix
+
+Threaded the **display authority**, not the raw host:
+
+- `main.rs` now binds
+  `let f3_authority = app.parsed_remote.as_ref().map(|e| e.host_port_display());`
+  before the draw match and passes `f3_authority.as_deref()`.
+  (Bound outside the call so the owned `String` outlives
+  the borrow.)
+- `pull_source_spec`'s third parameter renamed
+  `host → authority` with rustdoc pointing at
+  `host_port_display()` as the display-authority source
+  of truth.
+
+This also closes the round-1 "port not shown" cosmetic
+gap for free: `host_port_display()` carries non-default
+ports (`host:9999`).
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`: bind + pass
+  `host_port_display()`.
+- `crates/blit-tui/src/browse.rs`: `authority` param
+  rename + rustdoc; 2 new tests.
+
+### Round 2 tests
+
++2 tests (354 → 356):
+
+- `pull_source_ipv6_authority_round_trips` — the
+  reviewer's regression: a `[::1]` authority yields
+  `[::1]:/share/docs/readme.txt`, and the asserts that
+  `RemoteEndpoint::parse` round-trips it back to
+  `host == "::1"`.
+- `pull_source_non_default_port_authority` — a
+  `host:9999` authority yields `host:9999:/share/logs/`.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+When rendering a parsed value back into its textual
+form, use the type's own display authority — never
+re-assemble from raw fields. `RemoteEndpoint` strips
+IPv6 brackets on parse, so the round-trip requires
+`host_port_display()`, which is the single place that
+knows the bracketing + port rules. The preview is a
+"copy this into a CLI command" affordance, so
+round-trip fidelity is the whole point.

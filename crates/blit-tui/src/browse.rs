@@ -533,10 +533,20 @@ impl BrowseState {
 }
 
 /// d-33: derive the canonical remote pull-source spec for
-/// the F3 cursor — `<host>:/<module>/<rel-path>` — or
-/// `None` when there's nothing pullable (no host, no
+/// the F3 cursor — `<authority>:/<module>/<rel-path>` — or
+/// `None` when there's nothing pullable (no authority, no
 /// selected row, or a stale cursor on a non-matching
 /// filtered row).
+///
+/// `authority` is the endpoint's display authority from
+/// [`blit_core::remote::endpoint::RemoteEndpoint::host_port_display`]
+/// — bracketed for IPv6 literals (`[::1]`) and carrying a
+/// non-default port (`host:9999`). d-33 round 2 fix:
+/// passing the raw `host` field produced `::1:/share/...`
+/// for IPv6 remotes, which doesn't round-trip through
+/// `RemoteEndpoint::parse`. The display authority is the
+/// single source of truth for "how to render this host
+/// back into a copyable spec".
 ///
 /// This is the first slice of F3 transfer-from-cursor:
 /// it surfaces the resolvable source path as read-only
@@ -549,23 +559,23 @@ impl BrowseState {
 ///
 /// Cases:
 /// - Modules view, cursor on a `Module` row →
-///   `<host>:/<module>/` (pull the whole module root).
+///   `<authority>:/<module>/` (pull the module root).
 /// - Module view, cursor on a `Directory` →
-///   `<host>:/<module>/<path>/<dir>/` (trailing slash).
+///   `<authority>:/<module>/<path>/<dir>/` (trailing slash).
 /// - Module view, cursor on a `File` →
-///   `<host>:/<module>/<path>/<file>` (no trailing slash).
+///   `<authority>:/<module>/<path>/<file>` (no trailing slash).
 pub fn pull_source_spec(
     view: &BrowseView,
     selected: Option<&BrowseRow>,
-    host: &str,
+    authority: &str,
 ) -> Option<String> {
-    if host.is_empty() {
+    if authority.is_empty() {
         return None;
     }
     let row = selected?;
     match view {
         BrowseView::Modules => match &row.kind {
-            BrowseRowKind::Module { .. } => Some(format!("{host}:/{}/", row.name)),
+            BrowseRowKind::Module { .. } => Some(format!("{authority}:/{}/", row.name)),
             // A non-module row in the Modules view is a
             // contradiction the model never produces.
             _ => None,
@@ -577,8 +587,8 @@ pub fn pull_source_spec(
                 rel.push('/');
             }
             match &row.kind {
-                BrowseRowKind::Directory => Some(format!("{host}:/{name}/{rel}{}/", row.name)),
-                BrowseRowKind::File => Some(format!("{host}:/{name}/{rel}{}", row.name)),
+                BrowseRowKind::Directory => Some(format!("{authority}:/{name}/{rel}{}/", row.name)),
+                BrowseRowKind::File => Some(format!("{authority}:/{name}/{rel}{}", row.name)),
                 // A Module row inside a Module view is a
                 // contradiction the model never produces.
                 BrowseRowKind::Module { .. } => None,
@@ -1566,5 +1576,45 @@ mod tests {
         // Non-module row in the Modules view.
         let row = dir_row("strays");
         assert!(pull_source_spec(&BrowseView::Modules, Some(&row), "nas").is_none());
+    }
+
+    /// d-33 round 2 regression: an IPv6 authority is
+    /// already bracketed (the caller passes
+    /// `RemoteEndpoint::host_port_display()`, which
+    /// brackets IPv6 literals). The resulting spec must
+    /// round-trip through `RemoteEndpoint::parse`.
+    /// Pre-fix, the raw `host` field `"::1"` produced the
+    /// un-parseable `::1:/share/...`.
+    #[test]
+    fn pull_source_ipv6_authority_round_trips() {
+        use blit_core::remote::endpoint::RemoteEndpoint;
+        let view = BrowseView::Module {
+            name: "share".to_string(),
+            path: vec!["docs".to_string()],
+        };
+        let row = file_row("readme.txt");
+        // The caller hands us the bracketed display
+        // authority, not the raw host.
+        let authority = "[::1]";
+        let spec =
+            pull_source_spec(&view, Some(&row), authority).expect("spec for an IPv6 authority");
+        assert_eq!(spec, "[::1]:/share/docs/readme.txt");
+        // The whole point: it parses back into an endpoint.
+        let parsed = RemoteEndpoint::parse(&spec).expect("IPv6 spec must re-parse");
+        assert_eq!(parsed.host, "::1");
+    }
+
+    /// d-33 round 2: a non-default port survives in the
+    /// authority (also via `host_port_display`).
+    #[test]
+    fn pull_source_non_default_port_authority() {
+        let view = BrowseView::Module {
+            name: "share".to_string(),
+            path: vec![],
+        };
+        let row = dir_row("logs");
+        let spec =
+            pull_source_spec(&view, Some(&row), "host:9999").expect("spec for a non-default port");
+        assert_eq!(spec, "host:9999:/share/logs/");
     }
 }
