@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-29-confirm-cancel | Feature | Opt-in F2 cancel confirmation prompt via [transfer] confirm_cancel | `[~]` | `phase5/a1` | `b7b08a9` |
 
 ## Open findings
 
