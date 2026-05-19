@@ -9,7 +9,7 @@
 //!
 //! Layout (heights are constraints; columns reflect the
 //! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 / d-24 / d-25
-//! / d-29
+//! / d-29 / d-30
 //! polish):
 //!
 //! ```text
@@ -32,6 +32,8 @@
 //! the Idle state:
 //!
 //! - `cancel <id>? y/N` (yellow, Confirming — d-29)
+//! - `cancel N transfers? y/N` (yellow, ConfirmingBatch — d-30)
+//! - `sent N cancel requests` (green, BatchInitiated — d-30; auto-hides on TTL)
 //! - `cancelling <id>...` (yellow, Sending)
 //! - `cancelled <id>` (green, Done · Cancelled)
 //! - `cancel: id <id> not found` (red, Done · NotFound)
@@ -55,6 +57,17 @@
 //! (no TTL — the prompt stays until answered). `y`
 //! promotes Confirming → Sending; `n` or `Esc` reverts
 //! to Idle.
+//!
+//! d-30: `Shift+X` (capital `X`) batch-cancels every
+//! active transfer in one keystroke. `[transfer]
+//! confirm_cancel` gates the same way as single-cancel:
+//! when enabled, `Shift+X` opens a `cancel N transfers?
+//! y/N` prompt (ConfirmingBatch). On `y` or with confirm
+//! disabled, N independent cancel RPCs spawn and the
+//! footer briefly shows `sent N cancel requests`
+//! (BatchInitiated) until the d-23 TTL hides it.
+//! Per-transfer outcomes propagate via the existing
+//! Subscribe stream rather than the per-reply path.
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -91,6 +104,20 @@ pub enum F2CancelDisplay {
     /// operator answers.
     ConfirmingCancel {
         transfer_id: String,
+    },
+    /// d-30: `Shift+X` (batch cancel) pressed while
+    /// `[transfer] confirm_cancel = true` AND there were
+    /// active rows. Footer shows `cancel N transfers? y/N`.
+    ConfirmingBatch {
+        count: usize,
+    },
+    /// d-30: `Shift+X` confirmed (or fired directly when
+    /// confirm_cancel = false). N parallel cancel RPCs
+    /// are in flight; the footer shows
+    /// `sent N cancel requests` until the d-23 TTL hides
+    /// it.
+    BatchInitiated {
+        count: usize,
     },
     Sending {
         transfer_id: String,
@@ -281,6 +308,20 @@ fn render_footer(
             spans.push(Span::styled(
                 format!("cancel {transfer_id}? y/N"),
                 Style::default().fg(Color::Yellow),
+            ));
+        }
+        F2CancelDisplay::ConfirmingBatch { count } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancel {count} transfers? y/N"),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        F2CancelDisplay::BatchInitiated { count } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("sent {count} cancel requests"),
+                Style::default().fg(Color::Green),
             ));
         }
         F2CancelDisplay::Sending { transfer_id } => {

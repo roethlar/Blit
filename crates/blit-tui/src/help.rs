@@ -40,12 +40,13 @@ impl HelpOverlay {
 /// the frame to dim). Uses `Clear` to wipe the underlying
 /// widgets so the modal isn't garbled by mid-render text.
 pub fn render_overlay(frame: &mut Frame, area: Rect) {
-    // Center a 70×35 box inside the given area. If the
+    // Center a 70×36 box inside the given area. If the
     // area is smaller than the box, use the full area —
     // ratatui's diff renderer truncates rather than
     // crashing on overflow. d-26 bumped 34→35 to fit the
-    // new `/` filter row.
-    let modal = centered(area, 70, 35);
+    // `/` filter row; d-30 bumped 35→36 for `X` batch
+    // cancel.
+    let modal = centered(area, 70, 36);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -72,6 +73,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         kv(
             "K",
             "cancel selected transfer (F2) — y/N prompt if [transfer] confirm_cancel",
+        ),
+        kv(
+            "X",
+            "cancel ALL active transfers (F2) — Shift+x; honors confirm_cancel",
         ),
         kv("/", "filter rows (F3) — Esc clears, Enter commits"),
         Line::from(""),
@@ -169,7 +174,7 @@ mod tests {
     #[test]
     fn centered_clamps_to_area_when_smaller() {
         let area = Rect::new(0, 0, 40, 10);
-        let modal = centered(area, 70, 35);
+        let modal = centered(area, 70, 36);
         // Width / height are capped to the area's dims.
         assert!(modal.width <= 40);
         assert!(modal.height <= 10);
@@ -224,6 +229,7 @@ mod tests {
             "?",
             "r", // refresh (global as of d-16 R2)
             "/", // d-26: F3 filter
+            "X", // d-30: F2 batch cancel
         ] {
             assert!(
                 text.contains(needle),

@@ -229,9 +229,27 @@ enum F2CancelStatus {
     Confirming {
         transfer_id: String,
     },
+    /// d-30: operator pressed `Shift+X` (batch cancel)
+    /// while `[transfer] confirm_cancel = true` AND
+    /// at least one active row is present. Waiting for
+    /// `y` (fire all the cancel RPCs) or `n` / `Esc`
+    /// (revert to Idle).
+    ConfirmingBatch {
+        count: usize,
+    },
     Sending {
         transfer_id: String,
         request_id: u64,
+    },
+    /// d-30: N parallel cancel RPCs spawned. The
+    /// individual outcomes don't surface in the cancel
+    /// fragment (operator sees them on the Subscribe
+    /// stream as TransferComplete/Error events). After
+    /// the configured TTL, the fragment auto-hides like
+    /// the single-cancel Done variant.
+    BatchInitiated {
+        count: usize,
+        finished_at: Instant,
     },
     Done {
         // The transfer_id is carried by `outcome` (every
@@ -260,11 +278,14 @@ impl F2CancelStatus {
         matches!(self, F2CancelStatus::Sending { .. })
     }
 
-    /// d-29: `true` while waiting on the operator's
-    /// `y`/`N` answer. Used by the F2 dispatcher and the
-    /// router's Esc-cancels-confirm intercept.
+    /// d-29 / d-30: `true` while waiting on the operator's
+    /// `y`/`N` answer for either a single-cancel confirm
+    /// or a batch-cancel confirm.
     fn is_confirming(&self) -> bool {
-        matches!(self, F2CancelStatus::Confirming { .. })
+        matches!(
+            self,
+            F2CancelStatus::Confirming { .. } | F2CancelStatus::ConfirmingBatch { .. }
+        )
     }
 }
 
@@ -1026,9 +1047,17 @@ async fn handle_pane_action(
             }
             // d-29: `y` confirms a pending cancel — promote
             // Confirming → Sending and fire the RPC.
+            // d-30: `y` also promotes ConfirmingBatch →
+            // BatchInitiated and spawns N RPCs.
             UserAction::TransferMirrorConfirm if app.cancel_status.is_confirming() => {
-                if let Some(endpoint) = app.parsed_remote.clone() {
-                    if let F2CancelStatus::Confirming { transfer_id } = &app.cancel_status {
+                let Some(endpoint) = app.parsed_remote.clone() else {
+                    // No remote — abort the prompt rather
+                    // than silently sit on it.
+                    app.cancel_status = F2CancelStatus::Idle;
+                    return;
+                };
+                match &app.cancel_status {
+                    F2CancelStatus::Confirming { transfer_id } => {
                         let id = transfer_id.clone();
                         app.cancel_request_seq += 1;
                         let rid = app.cancel_request_seq;
@@ -1038,15 +1067,52 @@ async fn handle_pane_action(
                         };
                         spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
                     }
-                } else {
-                    // No remote — abort the prompt rather
-                    // than silently sit on it.
-                    app.cancel_status = F2CancelStatus::Idle;
+                    F2CancelStatus::ConfirmingBatch { count: _ } => {
+                        let count = spawn_batch_cancels(
+                            &app.transfers,
+                            &endpoint,
+                            &mut app.cancel_request_seq,
+                            &app.cancel_reply_tx,
+                        );
+                        app.cancel_status = F2CancelStatus::BatchInitiated {
+                            count,
+                            finished_at: Instant::now(),
+                        };
+                    }
+                    _ => {}
                 }
             }
-            // d-29: `n` aborts a pending cancel prompt.
+            // d-29 / d-30: `n` aborts whichever confirm
+            // prompt is open.
             UserAction::TransferCancel if app.cancel_status.is_confirming() => {
                 app.cancel_status = F2CancelStatus::Idle;
+            }
+            // d-30: `Shift+X` batch-cancels every active
+            // transfer. Same gates as the single-cancel
+            // K path — no remote, no rows, or mid-cycle
+            // → silent no-op.
+            UserAction::CancelAllActiveTransfers => {
+                if app.cancel_status.is_sending() || app.cancel_status.is_confirming() {
+                    // Already mid-cycle — ignore.
+                } else if let Some(endpoint) = app.parsed_remote.clone() {
+                    let count = app.transfers.active_count();
+                    if count == 0 {
+                        // No active transfers — silent no-op.
+                    } else if tui_config.transfer.confirm_cancel {
+                        app.cancel_status = F2CancelStatus::ConfirmingBatch { count };
+                    } else {
+                        let count = spawn_batch_cancels(
+                            &app.transfers,
+                            &endpoint,
+                            &mut app.cancel_request_seq,
+                            &app.cancel_reply_tx,
+                        );
+                        app.cancel_status = F2CancelStatus::BatchInitiated {
+                            count,
+                            finished_at: Instant::now(),
+                        };
+                    }
+                }
             }
             _ => {}
         },
@@ -1712,6 +1778,15 @@ fn cancel_status_to_display(
         F2CancelStatus::Confirming { transfer_id } => F2CancelDisplay::ConfirmingCancel {
             transfer_id: transfer_id.clone(),
         },
+        F2CancelStatus::ConfirmingBatch { count } => {
+            F2CancelDisplay::ConfirmingBatch { count: *count }
+        }
+        F2CancelStatus::BatchInitiated { count, finished_at } => {
+            if now.saturating_duration_since(*finished_at) >= ttl {
+                return F2CancelDisplay::Hidden;
+            }
+            F2CancelDisplay::BatchInitiated { count: *count }
+        }
         F2CancelStatus::Sending { transfer_id, .. } => F2CancelDisplay::Sending {
             transfer_id: transfer_id.clone(),
         },
@@ -1780,6 +1855,11 @@ fn cancel_status_remaining_ttl(
     let finished_at = match status {
         F2CancelStatus::Done { finished_at, .. } => *finished_at,
         F2CancelStatus::Error { finished_at, .. } => *finished_at,
+        // d-30: BatchInitiated has a finished_at like
+        // Done/Error — the loop must wake to hide it on
+        // the same TTL boundary as the single-cancel
+        // variants.
+        F2CancelStatus::BatchInitiated { finished_at, .. } => *finished_at,
         _ => return None,
     };
     let elapsed = now.saturating_duration_since(finished_at);
@@ -1812,6 +1892,42 @@ fn compute_tick_budget(
         (false, Some(rem)) => Some(rem),
         (false, None) => None,
     }
+}
+
+/// d-30: spawn one CancelJob RPC per currently active
+/// transfer. Returns the count of RPCs dispatched
+/// (equivalent to `transfers.active_count()` at call
+/// time — captured to avoid a TOCTOU drift between
+/// "what we told the operator" and "what we actually
+/// spawned").
+///
+/// Each RPC uses the same `cancel_reply_tx` channel as
+/// the single-cancel path; the reply arm in the event
+/// loop discards replies whose request_id doesn't
+/// match the *current* `Sending.request_id`, so batch
+/// replies are dropped harmlessly. Operators see the
+/// per-transfer outcomes via the Subscribe stream's
+/// `TransferComplete` / `TransferError` events, which
+/// is the same channel that displays normal transfer
+/// completions.
+fn spawn_batch_cancels(
+    transfers: &state::TransfersState,
+    endpoint: &blit_core::remote::RemoteEndpoint,
+    cancel_request_seq: &mut u64,
+    tx: &mpsc::Sender<CancelReply>,
+) -> usize {
+    let ids: Vec<String> = transfers
+        .active_rows()
+        .into_iter()
+        .map(|row| row.transfer_id.clone())
+        .collect();
+    let count = ids.len();
+    for id in ids {
+        *cancel_request_seq += 1;
+        let rid = *cancel_request_seq;
+        spawn_cancel_transfer(rid, endpoint.clone(), id, tx.clone());
+    }
+    count
 }
 
 /// d-22: spawn a CancelJob RPC against `endpoint` for
@@ -2577,6 +2693,13 @@ enum UserAction {
     /// through `handle_f3_filter_keystroke` (separate
     /// from the action dispatcher).
     F3FilterBegin,
+    /// d-30: F2 only. `Shift+X` cancels every currently
+    /// active transfer in one keystroke. When
+    /// `[transfer] confirm_cancel = true` the dispatcher
+    /// prompts for `y/N` first; otherwise the cancels
+    /// fire immediately. Outcomes propagate via the
+    /// Subscribe stream rather than the per-reply path.
+    CancelAllActiveTransfers,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -2675,6 +2798,10 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // filter keystroke handler absorbs all input
         // before this dispatcher runs.
         KeyCode::Char('/') => Some(UserAction::F3FilterBegin),
+        // d-30: `X` (Shift+x) on F2 cancels every active
+        // transfer in one keystroke. Other panes ignore.
+        // Mnemonic: cross out everything.
+        KeyCode::Char('X') => Some(UserAction::CancelAllActiveTransfers),
         // `H` toggles Verify mode (size+mtime ↔ checksum).
         // Capital chosen because lowercase `h` is the
         // Ascend / left-arrow alias used by F3 navigation.
@@ -3237,6 +3364,125 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         assert!(!esc_cancels_confirm(&esc, &app));
+    }
+
+    // d-30: batch cancel state machine.
+
+    /// d-30: `X` (Shift+x) maps to CancelAllActiveTransfers.
+    #[test]
+    fn key_action_maps_shift_x_to_cancel_all() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('X'))),
+            Some(UserAction::CancelAllActiveTransfers)
+        ));
+    }
+
+    /// d-30: ConfirmingBatch reports `is_confirming` true
+    /// — Esc routing extends to the batch prompt.
+    #[test]
+    fn f2_cancel_status_confirming_batch_predicates() {
+        let s = F2CancelStatus::ConfirmingBatch { count: 3 };
+        assert!(s.is_confirming());
+        assert!(!s.is_sending());
+    }
+
+    /// d-30: BatchInitiated is a terminal-ish state that
+    /// neither sends nor confirms. Its TTL drives
+    /// auto-hide just like Done/Error.
+    #[test]
+    fn f2_cancel_status_batch_initiated_predicates() {
+        let s = F2CancelStatus::BatchInitiated {
+            count: 4,
+            finished_at: Instant::now(),
+        };
+        assert!(!s.is_confirming());
+        assert!(!s.is_sending());
+    }
+
+    /// d-30: bridge maps ConfirmingBatch → ConfirmingBatch
+    /// display variant with the count preserved.
+    #[test]
+    fn cancel_status_to_display_renders_confirming_batch() {
+        let status = F2CancelStatus::ConfirmingBatch { count: 5 };
+        let display =
+            cancel_status_to_display(&status, Instant::now(), std::time::Duration::from_secs(60));
+        match display {
+            screens::f2::F2CancelDisplay::ConfirmingBatch { count } => {
+                assert_eq!(count, 5);
+            }
+            other => panic!("expected ConfirmingBatch, got {other:?}"),
+        }
+    }
+
+    /// d-30: bridge maps BatchInitiated within TTL →
+    /// BatchInitiated display variant.
+    #[test]
+    fn cancel_status_to_display_renders_batch_initiated_within_ttl() {
+        let now = Instant::now();
+        let status = F2CancelStatus::BatchInitiated {
+            count: 7,
+            finished_at: now,
+        };
+        let display = cancel_status_to_display(&status, now, std::time::Duration::from_secs(5));
+        match display {
+            screens::f2::F2CancelDisplay::BatchInitiated { count } => {
+                assert_eq!(count, 7);
+            }
+            other => panic!("expected BatchInitiated, got {other:?}"),
+        }
+    }
+
+    /// d-30: past TTL the BatchInitiated fragment hides
+    /// just like the single-cancel Done variant.
+    #[test]
+    fn cancel_status_to_display_hides_batch_initiated_past_ttl() {
+        let finished_at = Instant::now();
+        let later = finished_at + std::time::Duration::from_secs(6);
+        let status = F2CancelStatus::BatchInitiated {
+            count: 3,
+            finished_at,
+        };
+        let display = cancel_status_to_display(&status, later, std::time::Duration::from_secs(5));
+        assert!(matches!(display, screens::f2::F2CancelDisplay::Hidden));
+    }
+
+    /// d-30: ConfirmingBatch has no TTL — the prompt
+    /// stays until the operator answers.
+    #[test]
+    fn cancel_status_remaining_ttl_confirming_batch_returns_none() {
+        let status = F2CancelStatus::ConfirmingBatch { count: 4 };
+        let remaining =
+            cancel_status_remaining_ttl(&status, Instant::now(), std::time::Duration::from_secs(5));
+        assert!(remaining.is_none());
+    }
+
+    /// d-30: BatchInitiated drives the loop's sleep
+    /// budget — the loop must wake to hide the fragment.
+    #[test]
+    fn cancel_status_remaining_ttl_batch_initiated_returns_positive() {
+        let finished_at = Instant::now();
+        let now = finished_at + std::time::Duration::from_millis(500);
+        let status = F2CancelStatus::BatchInitiated {
+            count: 2,
+            finished_at,
+        };
+        let remaining =
+            cancel_status_remaining_ttl(&status, now, std::time::Duration::from_secs(5));
+        // 5s TTL − 500ms elapsed = 4500ms remaining.
+        assert_eq!(remaining, Some(std::time::Duration::from_millis(4500)));
+    }
+
+    /// d-30: Esc routing covers ConfirmingBatch the same
+    /// way as Confirming (single-cancel).
+    #[test]
+    fn esc_cancels_confirm_routes_f2_confirming_batch() {
+        let mut app = make_test_app_state(Screen::F2);
+        app.cancel_status = F2CancelStatus::ConfirmingBatch { count: 5 };
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(esc_cancels_confirm(&esc, &app));
     }
 
     // d-23: cancel-status TTL auto-clear. d-24 made the
