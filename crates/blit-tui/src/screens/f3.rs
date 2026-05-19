@@ -29,11 +29,17 @@
 //! └──────────────────────────────────────────────────┘
 //! ```
 //!
-//! d-33: the `Pull:` line is the first slice of F3
-//! transfer-from-cursor — it surfaces the canonical
-//! remote source spec for the selected row. The
-//! destination prompt + actual pull execution land in
-//! follow-on slices.
+//! d-33 / d-34: the `Pull:` line surfaces the canonical
+//! remote source spec for the selected row (derived via
+//! `browse::pull_source_endpoint(...).display()`).
+//!
+//! d-35: `p` opens a destination prompt and runs a
+//! remote→local PullSync owned by the TUI process. The
+//! footer shows one of:
+//! - `pull → <dest>_` (cyan, EnteringDest — typing)
+//! - `pulling → <dest>...` (yellow, Running)
+//! - `pulled N file(s) · X → <dest>` (green, Done)
+//! - `pull failed: <msg>` (red, Error)
 //!
 //! d-26's filter fragment renders one of:
 //! - hidden (no filter, not editing)
@@ -57,6 +63,29 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use std::time::Instant;
 
+/// d-35: renderer-facing snapshot of the F3 pull
+/// lifecycle. Bridged from `f3pull::F3PullStatus` by
+/// `main.rs` so the screens layer doesn't reach into the
+/// pull state machine's internals.
+#[derive(Debug, Clone)]
+pub enum F3PullDisplay {
+    /// No pull fragment (Idle).
+    Hidden,
+    /// Destination prompt open; `dest` is what the
+    /// operator has typed so far.
+    EnteringDest { dest: String },
+    /// PullSync in flight.
+    Running { dest: String },
+    /// Pull finished — files + bytes pulled, dest path.
+    Done {
+        files: usize,
+        bytes: u64,
+        dest: String,
+    },
+    /// Pull failed.
+    Error { message: String },
+}
+
 /// Render the F3 pane into a caller-supplied area (router-aware).
 ///
 /// d-33 / d-34: `pull_spec` is the pre-rendered canonical
@@ -71,6 +100,7 @@ pub fn render_into(
     state: &BrowseState,
     remote_label: &str,
     pull_spec: Option<&str>,
+    pull: &F3PullDisplay,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -88,7 +118,7 @@ pub fn render_into(
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
     render_stats(frame, chunks[2], state, pull_spec);
-    render_footer(frame, chunks[3], state, now);
+    render_footer(frame, chunks[3], state, pull, now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_label: &str) {
@@ -208,7 +238,13 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, pull_spec: O
     frame.render_widget(para, area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, state: &BrowseState, now: Instant) {
+fn render_footer(
+    frame: &mut Frame,
+    area: Rect,
+    state: &BrowseState,
+    pull: &F3PullDisplay,
+    now: Instant,
+) {
     let status_span = match state.status() {
         BrowseFetchStatus::Idle => Span::styled("idle", Style::default().fg(Color::DarkGray)),
         BrowseFetchStatus::Pending => {
@@ -241,20 +277,50 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &BrowseState, now: Instan
         };
         spans.push(Span::styled(fragment, Style::default().fg(color)));
     }
+    // d-35: pull fragment — prompt / progress / outcome.
+    match pull {
+        F3PullDisplay::Hidden => {}
+        F3PullDisplay::EnteringDest { dest } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("pull → {dest}_"),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        F3PullDisplay::Running { dest } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("pulling → {dest}..."),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        F3PullDisplay::Done { files, bytes, dest } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("pulled {files} file(s) · {} → {dest}", format_bytes(*bytes)),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        F3PullDisplay::Error { message } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("pull failed: {message}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    }
     // Tail: shared key hints. `/` joins the keymap since
-    // d-26 made it bindable on F3.
+    // d-26 made it bindable on F3; `p` since d-35.
     spans.extend([
         Span::raw("  ·  "),
         Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  ·  "),
-        Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" refresh  ·  "),
         Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" into  ·  "),
-        Span::styled("←", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" up  ·  "),
         Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" filter"),
+        Span::raw(" filter  ·  "),
+        Span::styled("p", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" pull"),
     ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

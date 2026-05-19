@@ -114,6 +114,10 @@ fn help_lines() -> Vec<Line<'static>> {
             "cancel ALL active transfers (F2) — Shift+x; honors confirm_cancel",
         ),
         kv("/", "filter rows (F3) — Esc clears, Enter commits"),
+        kv(
+            "p",
+            "pull selected → local dir (F3) — Enter runs, Esc cancels",
+        ),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
         kv("c / d / e", "clear / disable / enable history"),
@@ -153,9 +157,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // ratatui's diff renderer truncates rather than
     // crashing on overflow. d-26 bumped 34→35 to fit the
     // `/` filter row; d-30 bumped 35→36 for `X` batch
-    // cancel. d-31: when the area is shorter than the
-    // modal, the operator scrolls with j/k.
-    let modal = centered(area, 70, 36);
+    // cancel; d-35 bumped 36→37 for `p` pull. d-31: when
+    // the area is shorter than the modal, the operator
+    // scrolls with j/k.
+    let modal = centered(area, 70, 37);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -380,7 +385,7 @@ mod tests {
     #[test]
     fn centered_clamps_to_area_when_smaller() {
         let area = Rect::new(0, 0, 40, 10);
-        let modal = centered(area, 70, 36);
+        let modal = centered(area, 70, 37);
         // Width / height are capped to the area's dims.
         assert!(modal.width <= 40);
         assert!(modal.height <= 10);
@@ -438,6 +443,7 @@ mod tests {
             "r", // refresh (global as of d-16 R2)
             "/", // d-26: F3 filter
             "X", // d-30: F2 batch cancel
+            "p", // d-35: F3 pull
         ] {
             assert!(
                 text.contains(needle),

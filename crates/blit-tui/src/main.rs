@@ -26,6 +26,7 @@ mod browse;
 mod config;
 mod daemons;
 mod diagnostics;
+mod f3pull;
 mod help;
 mod profile;
 mod screens;
@@ -209,6 +210,11 @@ struct AppState {
     cancel_status: F2CancelStatus,
     cancel_reply_tx: mpsc::Sender<CancelReply>,
     cancel_request_seq: u64,
+    /// d-35: F3 transfer-from-cursor pull lifecycle —
+    /// destination prompt + remote→local PullSync owned
+    /// by the TUI process. Renders into the F3 footer.
+    f3_pull: f3pull::F3PullState,
+    f3_pull_reply_tx: mpsc::Sender<F3PullReply>,
 }
 
 /// d-22: F2 cancel-selected lifecycle. Lives on AppState
@@ -448,6 +454,9 @@ async fn run_router(
     // as the F4 transfer reply machinery.
     let (cancel_reply_tx, mut cancel_reply_rx) = mpsc::channel::<CancelReply>(2);
 
+    // d-35: F3 pull reply channel.
+    let (f3_pull_reply_tx, mut f3_pull_reply_rx) = mpsc::channel::<F3PullReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -485,6 +494,8 @@ async fn run_router(
         cancel_status: F2CancelStatus::Idle,
         cancel_reply_tx: cancel_reply_tx.clone(),
         cancel_request_seq: 0,
+        f3_pull: f3pull::F3PullState::new(),
+        f3_pull_reply_tx: f3_pull_reply_tx.clone(),
     };
 
     // F3 banner for missing/malformed remote. Surfaces the
@@ -607,6 +618,7 @@ async fn run_router(
                         &app.browse,
                         &app.remote_label,
                         f3_pull_spec.as_deref(),
+                        &f3_pull_to_display(app.f3_pull.status()),
                         now,
                     ),
                     Screen::F4 => screens::f4::render_into(
@@ -758,6 +770,16 @@ async fn run_router(
                 if app.current_screen == Screen::F3
                     && app.browse.is_editing_filter()
                     && handle_f3_filter_keystroke(&key, &mut app)
+                {
+                    continue;
+                }
+                // d-35: F3's `p` pull destination prompt
+                // uses the same input-mode pattern — while
+                // entering the dest, keystrokes route to the
+                // pull state instead of the F3 dispatcher.
+                if app.current_screen == Screen::F3
+                    && app.f3_pull.is_entering_dest()
+                    && handle_f3_pull_keystroke(&key, &mut app)
                 {
                     continue;
                 }
@@ -987,6 +1009,21 @@ async fn run_router(
                     }
                 }
             }
+            // d-35: F3 pull replies. The generation guard
+            // lives in `F3PullState::apply_*` (compares
+            // `request_id` to the current `Running` run).
+            reply = f3_pull_reply_rx.recv() => {
+                if let Some(F3PullReply { request_id, result }) = reply {
+                    match result {
+                        Ok((files, bytes)) => {
+                            app.f3_pull.apply_done(request_id, files, bytes);
+                        }
+                        Err(message) => {
+                            app.f3_pull.apply_error(request_id, message);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1184,6 +1221,21 @@ async fn handle_pane_action(
             }
             UserAction::F3FilterBegin => {
                 app.browse.begin_edit_filter();
+            }
+            // d-35: `p` opens the pull destination prompt.
+            // Gated on: a remote configured, a derivable
+            // pull source under the cursor, and no pull
+            // already entering-dest or running.
+            UserAction::F3PullBegin => {
+                let busy = app.f3_pull.is_entering_dest() || app.f3_pull.is_running();
+                let source = app.parsed_remote.as_ref().and_then(|base| {
+                    browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
+                });
+                if !busy {
+                    if let Some(source) = source {
+                        app.f3_pull.begin(source);
+                    }
+                }
             }
             _ => {}
         },
@@ -1883,6 +1935,84 @@ fn cancel_status_to_display(
     }
 }
 
+/// d-35: bridge the F3 pull state machine to the
+/// renderer-facing `F3PullDisplay` (lives in
+/// `screens/f3.rs` so the screens layer doesn't reach
+/// into the `f3pull` module's internals).
+fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDisplay {
+    use f3pull::F3PullStatus;
+    use screens::f3::F3PullDisplay;
+    match status {
+        F3PullStatus::Idle => F3PullDisplay::Hidden,
+        F3PullStatus::EnteringDest { dest, .. } => {
+            F3PullDisplay::EnteringDest { dest: dest.clone() }
+        }
+        F3PullStatus::Running { dest, .. } => F3PullDisplay::Running { dest: dest.clone() },
+        F3PullStatus::Done {
+            files, bytes, dest, ..
+        } => F3PullDisplay::Done {
+            files: *files,
+            bytes: *bytes,
+            dest: dest.clone(),
+        },
+        F3PullStatus::Error { message, .. } => F3PullDisplay::Error {
+            message: message.clone(),
+        },
+    }
+}
+
+/// d-35: reply envelope from a spawned F3 pull task.
+struct F3PullReply {
+    request_id: u64,
+    /// Ok((files_transferred, bytes_transferred)) or a
+    /// flattened error string.
+    result: Result<(usize, u64), String>,
+}
+
+/// d-35: spawn a remote→local PullSync for an F3
+/// transfer-from-cursor. Mirrors the F4 local-transfer
+/// spawn shape: run the operation on a tokio task, flatten
+/// the outcome into a [`F3PullReply`], and send it back on
+/// `tx` for the event loop to apply (generation-guarded by
+/// `request_id`).
+///
+/// This is the TUI's own pull (the daemon streams bytes to
+/// this process), so it uses default `PullSyncOptions` —
+/// no mirror, no filter, no progress monitor. A non-mirror
+/// pull needs only `run_pull_sync`; the mirror-purge half
+/// (`apply_pull_mirror_purge`) is a no-op when
+/// `mirror_mode = false`, so it's skipped.
+fn spawn_f3_pull(
+    request_id: u64,
+    source: RemoteEndpoint,
+    dest_root: std::path::PathBuf,
+    tx: mpsc::Sender<F3PullReply>,
+) {
+    use blit_app::transfers::remote::{run_pull_sync, PullSyncExecution};
+    use blit_core::remote::pull::PullSyncOptions;
+    tokio::spawn(async move {
+        let remote_label = source.display();
+        let execution = PullSyncExecution {
+            remote: source,
+            dest_root,
+            options: PullSyncOptions::default(),
+            compute_checksums: false,
+            mirror_mode: false,
+            remote_label,
+        };
+        let result = run_pull_sync(execution, None)
+            .await
+            .map(|outcome| {
+                (
+                    outcome.report.files_transferred,
+                    outcome.report.bytes_transferred,
+                )
+            })
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx.send(F3PullReply { request_id, result }).await;
+    });
+}
+
 /// d-24 round 2: how much wall-clock time remains before the
 /// d-23 auto-hide kicks in on a Done/Error cancel fragment.
 ///
@@ -2547,6 +2677,66 @@ fn handle_f3_filter_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
     }
 }
 
+/// d-35: F3 pull destination-prompt keystroke router.
+/// Same shape as `handle_f3_filter_keystroke` — returns
+/// `true` when the key was absorbed into the prompt,
+/// `false` when it should bubble to the dispatcher
+/// (Ctrl-c quit, F-key nav, `?` help). Only runs while
+/// `f3_pull.is_entering_dest()` is true.
+///
+/// On `Enter` with a non-empty dest, fires the pull RPC
+/// (via `begin_run` → `spawn_f3_pull`) and transitions to
+/// `Running`. On `Esc`, aborts the prompt.
+fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.f3_pull.cancel();
+            true
+        }
+        KeyCode::Enter => {
+            if let Some(launch) = app.f3_pull.begin_run() {
+                spawn_f3_pull(
+                    launch.request_id,
+                    launch.source,
+                    launch.dest_root,
+                    app.f3_pull_reply_tx.clone(),
+                );
+            }
+            // Absorb Enter even on an empty dest (begin_run
+            // is a no-op there and the prompt stays open).
+            true
+        }
+        KeyCode::Backspace => {
+            app.f3_pull.pop_char();
+            true
+        }
+        KeyCode::Char(c) => {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return false;
+            }
+            app.f3_pull.push_char(c);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Spawn a `compare_trees` run on a blocking task. Both
 /// inputs are local path strings; the task parses them to
 /// `PathBuf` and runs the comparison with a default
@@ -2764,6 +2954,11 @@ enum UserAction {
     /// fire immediately. Outcomes propagate via the
     /// Subscribe stream rather than the per-reply path.
     CancelAllActiveTransfers,
+    /// d-35: F3 only. `p` opens the pull destination
+    /// prompt for the cursor-selected remote path. No-op
+    /// if no remote / nothing selectable / a pull is
+    /// already in flight.
+    F3PullBegin,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -2862,6 +3057,12 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // filter keystroke handler absorbs all input
         // before this dispatcher runs.
         KeyCode::Char('/') => Some(UserAction::F3FilterBegin),
+        // d-35: `p` (pull) on F3 opens the destination
+        // prompt for the cursor-selected remote path.
+        // Other panes ignore. While the prompt is open the
+        // F3 pull keystroke handler absorbs input before
+        // this dispatcher runs, so `p` is a text char then.
+        KeyCode::Char('p') => Some(UserAction::F3PullBegin),
         // d-30: `X` (Shift+x) on F2 cancels every active
         // transfer in one keystroke. Other panes ignore.
         // Mnemonic: cross out everything.
@@ -4165,6 +4366,8 @@ mod tests {
             cancel_status: F2CancelStatus::Idle,
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
+            f3_pull: f3pull::F3PullState::new(),
+            f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
         }
     }
 
@@ -4272,6 +4475,96 @@ mod tests {
         assert_eq!(app.browse.filter(), "");
     }
 
+    // d-35: F3 pull keystroke routing.
+
+    /// `p` maps to F3PullBegin (only acted on by the F3
+    /// dispatch arm).
+    #[test]
+    fn key_action_maps_p_to_f3_pull_begin() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('p'))),
+            Some(UserAction::F3PullBegin)
+        ));
+    }
+
+    /// Helper: an F3 app with the pull prompt already
+    /// open (source = a parsed endpoint).
+    fn app_with_pull_prompt() -> AppState {
+        let mut app = make_test_app_state(Screen::F3);
+        let source = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
+        app.f3_pull.begin(source);
+        app
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_routes_chars_to_dest() {
+        let mut app = app_with_pull_prompt();
+        for c in "/tmp".chars() {
+            assert!(handle_f3_pull_keystroke(&k(KeyCode::Char(c)), &mut app));
+        }
+        match app.f3_pull.status() {
+            f3pull::F3PullStatus::EnteringDest { dest, .. } => assert_eq!(dest, "/tmp"),
+            other => panic!("expected EnteringDest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_backspace_pops_dest() {
+        let mut app = app_with_pull_prompt();
+        for c in "/tmpx".chars() {
+            handle_f3_pull_keystroke(&k(KeyCode::Char(c)), &mut app);
+        }
+        assert!(handle_f3_pull_keystroke(&k(KeyCode::Backspace), &mut app));
+        match app.f3_pull.status() {
+            f3pull::F3PullStatus::EnteringDest { dest, .. } => assert_eq!(dest, "/tmp"),
+            other => panic!("expected EnteringDest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_esc_cancels() {
+        let mut app = app_with_pull_prompt();
+        handle_f3_pull_keystroke(&k(KeyCode::Char('x')), &mut app);
+        assert!(handle_f3_pull_keystroke(&k(KeyCode::Esc), &mut app));
+        assert!(matches!(app.f3_pull.status(), f3pull::F3PullStatus::Idle));
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_enter_on_empty_dest_keeps_prompt() {
+        let mut app = app_with_pull_prompt();
+        // No dest typed → Enter is absorbed but the prompt
+        // stays open (begin_run is a no-op on empty dest).
+        assert!(handle_f3_pull_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(app.f3_pull.is_entering_dest());
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_returns_false_for_f_keys() {
+        let mut app = app_with_pull_prompt();
+        for n in 1..=4 {
+            assert!(
+                !handle_f3_pull_keystroke(&k(KeyCode::F(n)), &mut app),
+                "F{n} must bubble to the dispatcher for pane nav"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_returns_false_for_question_mark() {
+        let mut app = app_with_pull_prompt();
+        assert!(!handle_f3_pull_keystroke(&k(KeyCode::Char('?')), &mut app));
+    }
+
+    #[test]
+    fn handle_f3_pull_keystroke_returns_false_for_ctrl_c() {
+        let mut app = app_with_pull_prompt();
+        let key = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert!(!handle_f3_pull_keystroke(&key, &mut app));
+    }
+
     /// e-1 round-2 regression: `?` is GLOBAL, including
     /// from inside the Verify form's edit mode. The
     /// verify handler must return false for `Char('?')`
@@ -4310,6 +4603,8 @@ mod tests {
             cancel_status: F2CancelStatus::Idle,
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
+            f3_pull: f3pull::F3PullState::new(),
+            f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
         };
         app.verify.cycle_focus(); // Source
         let (verify_run_tx, _verify_run_rx) = mpsc::channel::<VerifyReply>(1);
@@ -4360,6 +4655,8 @@ mod tests {
             cancel_status: F2CancelStatus::Idle,
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
+            f3_pull: f3pull::F3PullState::new(),
+            f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
         };
 
         let esc = k(KeyCode::Esc);
@@ -4463,6 +4760,8 @@ mod tests {
             cancel_status: F2CancelStatus::Idle,
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
+            f3_pull: f3pull::F3PullState::new(),
+            f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
         };
 
         // All-idle → no tick.
@@ -4525,6 +4824,8 @@ mod tests {
             cancel_status: F2CancelStatus::Idle,
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
+            f3_pull: f3pull::F3PullState::new(),
+            f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
         };
 
         // F1, pre-discovery (Scanning) → no tick.

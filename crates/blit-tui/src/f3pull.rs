@@ -1,0 +1,412 @@
+//! F3 pull state — the TUI-owned lifecycle for a
+//! remote→local pull initiated from the F3 cursor (d-35).
+//!
+//! Unlike the F2 transfers pane (which only *observes*
+//! daemon-tracked jobs via the Subscribe stream), an F3
+//! pull is driven by the TUI process itself: the daemon's
+//! `PullSync` RPC streams bytes into the TUI's local
+//! filesystem. So the lifecycle lives here, mirroring
+//! F4's local-transfer `TransferState` shape rather than
+//! the daemon-job model.
+//!
+//! Flow:
+//!
+//! 1. `p` on a selectable F3 row → [`F3PullState::begin`]
+//!    captures the source [`RemoteEndpoint`] (derived by
+//!    `browse::pull_source_endpoint`) and opens a
+//!    destination-input prompt (`EnteringDest`).
+//! 2. The operator types a local destination path; the
+//!    input router feeds chars / Backspace into
+//!    [`F3PullState::push_char`] / [`F3PullState::pop_char`].
+//! 3. `Esc` → [`F3PullState::cancel`] (back to Idle).
+//!    `Enter` with a non-empty dest →
+//!    [`F3PullState::begin_run`] returns the launch
+//!    params and transitions to `Running`.
+//! 4. The pull task replies; [`F3PullState::apply_done`] /
+//!    [`F3PullState::apply_error`] record the terminal
+//!    state (guarded by `request_id` so a stale reply from
+//!    a superseded run is dropped).
+
+use blit_core::remote::endpoint::RemoteEndpoint;
+use std::path::PathBuf;
+
+/// Lifecycle of an F3 pull.
+#[derive(Debug, Clone)]
+pub enum F3PullStatus {
+    /// No pull in progress.
+    Idle,
+    /// Operator is typing the local destination path.
+    EnteringDest {
+        /// Resolved remote source (host + port + module
+        /// + rel_path) — moved into the launch on commit.
+        source: RemoteEndpoint,
+        /// The destination path the operator is typing.
+        dest: String,
+    },
+    /// PullSync RPC in flight.
+    Running { dest: String, request_id: u64 },
+    /// Pull finished successfully. (The remote source is
+    /// still shown in the Stats block's `Pull:` line, so
+    /// the footer fragment only needs the outcome + dest.)
+    Done {
+        dest: String,
+        files: usize,
+        bytes: u64,
+    },
+    /// Pull failed (validation or transport).
+    Error { message: String },
+}
+
+/// Launch params handed from [`F3PullState::begin_run`] to
+/// the dispatcher's spawn helper.
+pub struct PullLaunch {
+    pub source: RemoteEndpoint,
+    pub dest_root: PathBuf,
+    pub request_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct F3PullState {
+    status: F3PullStatus,
+    /// Monotonic per-run id. Each `begin_run` bumps it and
+    /// stamps the new value into `Running`; the reply arm
+    /// drops replies whose id doesn't match the current
+    /// run (same generation-guard pattern as the F2 cancel
+    /// machine).
+    request_seq: u64,
+}
+
+impl Default for F3PullState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl F3PullState {
+    pub fn new() -> Self {
+        Self {
+            status: F3PullStatus::Idle,
+            request_seq: 0,
+        }
+    }
+
+    pub fn status(&self) -> &F3PullStatus {
+        &self.status
+    }
+
+    /// `true` while the destination prompt is open — the
+    /// input router consults this to route keystrokes to
+    /// the prompt instead of the normal F3 dispatcher.
+    pub fn is_entering_dest(&self) -> bool {
+        matches!(self.status, F3PullStatus::EnteringDest { .. })
+    }
+
+    /// `true` while a pull RPC is in flight. The dispatcher
+    /// blocks a second `p` while running.
+    pub fn is_running(&self) -> bool {
+        matches!(self.status, F3PullStatus::Running { .. })
+    }
+
+    /// Open the destination prompt for `source`. No-op if a
+    /// pull is already entering-dest or running (the
+    /// dispatcher gates on that, but be defensive).
+    pub fn begin(&mut self, source: RemoteEndpoint) {
+        if self.is_entering_dest() || self.is_running() {
+            return;
+        }
+        self.status = F3PullStatus::EnteringDest {
+            source,
+            dest: String::new(),
+        };
+    }
+
+    /// Append a char to the destination path (no-op unless
+    /// entering-dest).
+    pub fn push_char(&mut self, c: char) {
+        if let F3PullStatus::EnteringDest { dest, .. } = &mut self.status {
+            dest.push(c);
+        }
+    }
+
+    /// Drop the last char from the destination path. Returns
+    /// true if a char was popped.
+    pub fn pop_char(&mut self) -> bool {
+        if let F3PullStatus::EnteringDest { dest, .. } = &mut self.status {
+            dest.pop().is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Abort the prompt (Esc) — back to Idle.
+    pub fn cancel(&mut self) {
+        if self.is_entering_dest() {
+            self.status = F3PullStatus::Idle;
+        }
+    }
+
+    /// Commit the prompt (Enter). Returns the launch params
+    /// and transitions to `Running`. Returns `None` (and
+    /// stays in `EnteringDest`) when the dest is empty —
+    /// there's nothing to pull into.
+    pub fn begin_run(&mut self) -> Option<PullLaunch> {
+        // Pull the payload out of EnteringDest without
+        // cloning the endpoint.
+        let (source, dest) = match std::mem::replace(&mut self.status, F3PullStatus::Idle) {
+            F3PullStatus::EnteringDest { source, dest } => (source, dest),
+            // Not entering-dest — restore and bail. (The
+            // `mem::replace` set Idle; for non-EnteringDest
+            // states we want to keep what was there, but
+            // the only caller guards with is_entering_dest
+            // so this branch is unreachable in practice.)
+            other => {
+                self.status = other;
+                return None;
+            }
+        };
+        if dest.trim().is_empty() {
+            // Restore the prompt so the operator can keep
+            // typing.
+            self.status = F3PullStatus::EnteringDest { source, dest };
+            return None;
+        }
+        self.request_seq += 1;
+        let request_id = self.request_seq;
+        let dest_root = PathBuf::from(dest.trim());
+        self.status = F3PullStatus::Running {
+            dest: dest.trim().to_string(),
+            request_id,
+        };
+        Some(PullLaunch {
+            source,
+            dest_root,
+            request_id,
+        })
+    }
+
+    /// Apply a successful pull reply. Dropped if `request_id`
+    /// doesn't match the current `Running` run. Returns true
+    /// if applied.
+    pub fn apply_done(&mut self, request_id: u64, files: usize, bytes: u64) -> bool {
+        match &self.status {
+            F3PullStatus::Running {
+                request_id: rid,
+                dest,
+            } if *rid == request_id => {
+                self.status = F3PullStatus::Done {
+                    dest: dest.clone(),
+                    files,
+                    bytes,
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply a failed pull reply. Same generation guard.
+    pub fn apply_error(&mut self, request_id: u64, message: String) -> bool {
+        match &self.status {
+            F3PullStatus::Running {
+                request_id: rid, ..
+            } if *rid == request_id => {
+                self.status = F3PullStatus::Error { message };
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn endpoint(raw: &str) -> RemoteEndpoint {
+        RemoteEndpoint::parse(raw).expect("endpoint")
+    }
+
+    #[test]
+    fn new_is_idle() {
+        let s = F3PullState::new();
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+        assert!(!s.is_entering_dest());
+        assert!(!s.is_running());
+    }
+
+    #[test]
+    fn begin_opens_dest_prompt_with_empty_dest() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/photos/2024"));
+        assert!(s.is_entering_dest());
+        match s.status() {
+            F3PullStatus::EnteringDest { source, dest } => {
+                assert_eq!(source.display(), "nas:/photos/2024");
+                assert!(dest.is_empty());
+            }
+            other => panic!("expected EnteringDest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_and_pop_edit_dest() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/"));
+        s.push_char('/');
+        s.push_char('t');
+        s.push_char('m');
+        s.push_char('p');
+        assert!(s.pop_char());
+        match s.status() {
+            F3PullStatus::EnteringDest { dest, .. } => assert_eq!(dest, "/tm"),
+            other => panic!("expected EnteringDest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pop_on_empty_dest_returns_false() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/"));
+        assert!(!s.pop_char());
+    }
+
+    #[test]
+    fn cancel_returns_to_idle() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/"));
+        s.push_char('x');
+        s.cancel();
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+    }
+
+    #[test]
+    fn begin_run_with_empty_dest_keeps_prompt() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/"));
+        // No dest typed.
+        assert!(s.begin_run().is_none());
+        assert!(s.is_entering_dest(), "prompt stays open on empty dest");
+    }
+
+    #[test]
+    fn begin_run_with_whitespace_dest_keeps_prompt() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/"));
+        s.push_char(' ');
+        s.push_char(' ');
+        assert!(s.begin_run().is_none());
+        assert!(s.is_entering_dest());
+    }
+
+    #[test]
+    fn begin_run_launches_and_transitions_to_running() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/photos/2024"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        assert_eq!(launch.dest_root, PathBuf::from("/tmp/out"));
+        assert_eq!(launch.request_id, 1);
+        // Source endpoint carried through.
+        assert_eq!(launch.source.display(), "nas:/photos/2024");
+        assert!(s.is_running());
+    }
+
+    #[test]
+    fn begin_run_trims_dest() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/"));
+        for c in "  /tmp/out  ".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        assert_eq!(launch.dest_root, PathBuf::from("/tmp/out"));
+    }
+
+    #[test]
+    fn apply_done_records_terminal_state() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/photos/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        let applied = s.apply_done(launch.request_id, 12, 4096);
+        assert!(applied);
+        match s.status() {
+            F3PullStatus::Done {
+                files, bytes, dest, ..
+            } => {
+                assert_eq!(*files, 12);
+                assert_eq!(*bytes, 4096);
+                assert_eq!(dest, "/tmp/out");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_error_records_message() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/photos/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        assert!(s.apply_error(launch.request_id, "connection refused".to_string()));
+        match s.status() {
+            F3PullStatus::Error { message, .. } => assert_eq!(message, "connection refused"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_reply_is_dropped() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/photos/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        // A reply for a different (older) request id must
+        // not clobber the current Running state.
+        assert!(!s.apply_done(launch.request_id + 99, 1, 1));
+        assert!(s.is_running());
+    }
+
+    #[test]
+    fn request_ids_increment_across_runs() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/x"));
+        for c in "/a".chars() {
+            s.push_char(c);
+        }
+        let first = s.begin_run().expect("first launch");
+        s.apply_done(first.request_id, 0, 0);
+        // Second run.
+        s.begin(endpoint("nas:/m/y"));
+        for c in "/b".chars() {
+            s.push_char(c);
+        }
+        let second = s.begin_run().expect("second launch");
+        assert!(
+            second.request_id > first.request_id,
+            "run ids must be monotonic so stale replies are dropped"
+        );
+    }
+
+    #[test]
+    fn begin_is_noop_while_running() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/x"));
+        for c in "/a".chars() {
+            s.push_char(c);
+        }
+        s.begin_run().expect("launch");
+        assert!(s.is_running());
+        // A second begin while running must not reset.
+        s.begin(endpoint("nas:/m/y"));
+        assert!(s.is_running());
+    }
+}
