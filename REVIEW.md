@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ |  |  |  |  |  |
+| d-26-f3-filter | Feature | F3 substring filter via `/` (Esc cancels, Enter commits) | `[~]` | `phase5/a1` | `47355b4` |
 
 ## Open findings
 
