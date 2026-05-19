@@ -9,6 +9,7 @@
 //!
 //! Layout (heights are constraints; columns reflect the
 //! d-14 / d-15 / d-20 / d-21 / d-22 / d-23 / d-24 / d-25
+//! / d-29
 //! polish):
 //!
 //! ```text
@@ -30,6 +31,7 @@
 //! the last-event timestamp and the key hints, hidden in
 //! the Idle state:
 //!
+//! - `cancel <id>? y/N` (yellow, Confirming — d-29)
 //! - `cancelling <id>...` (yellow, Sending)
 //! - `cancelled <id>` (green, Done · Cancelled)
 //! - `cancel: id <id> not found` (red, Done · NotFound)
@@ -46,6 +48,13 @@
 //! clamped value through `cancel_status_ttl_ms_clamped()`
 //! and passes it into `cancel_status_to_display` each
 //! frame — no per-frame parse cost, just a u64 clamp.
+//!
+//! d-29: opt-in `K` confirmation prompt via
+//! `[transfer] confirm_cancel = true`. When enabled,
+//! pressing `K` transitions cancel_status to `Confirming`
+//! (no TTL — the prompt stays until answered). `y`
+//! promotes Confirming → Sending; `n` or `Esc` reverts
+//! to Idle.
 
 use crate::state::{ActiveRow, RecentRow, TransfersState};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -77,6 +86,12 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone)]
 pub enum F2CancelDisplay {
     Hidden,
+    /// d-29: `K` pressed while `[transfer] confirm_cancel
+    /// = true`. Footer shows `cancel <id>? y/N` until the
+    /// operator answers.
+    ConfirmingCancel {
+        transfer_id: String,
+    },
     Sending {
         transfer_id: String,
     },
@@ -258,8 +273,16 @@ fn render_footer(
         ));
     }
     // d-22: cancel-selected fragment. Hidden when Idle.
+    // d-29: ConfirmingCancel shows `cancel <id>? y/N`.
     match cancel {
         F2CancelDisplay::Hidden => {}
+        F2CancelDisplay::ConfirmingCancel { transfer_id } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("cancel {transfer_id}? y/N"),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
         F2CancelDisplay::Sending { transfer_id } => {
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(

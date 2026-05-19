@@ -221,6 +221,14 @@ struct AppState {
 #[derive(Debug, Clone)]
 enum F2CancelStatus {
     Idle,
+    /// d-29: operator pressed `K` while
+    /// `[transfer] confirm_cancel = true`. Waiting for
+    /// `y` (kick the RPC) or `n` / `Esc` (revert to
+    /// Idle). No TTL — the prompt stays until the
+    /// operator answers.
+    Confirming {
+        transfer_id: String,
+    },
     Sending {
         transfer_id: String,
         request_id: u64,
@@ -250,6 +258,13 @@ enum F2CancelStatus {
 impl F2CancelStatus {
     fn is_sending(&self) -> bool {
         matches!(self, F2CancelStatus::Sending { .. })
+    }
+
+    /// d-29: `true` while waiting on the operator's
+    /// `y`/`N` answer. Used by the F2 dispatcher and the
+    /// router's Esc-cancels-confirm intercept.
+    fn is_confirming(&self) -> bool {
+        matches!(self, F2CancelStatus::Confirming { .. })
     }
 }
 
@@ -662,7 +677,17 @@ async fn run_router(
                 // operator intended as a "no, don't do that"
                 // gesture.
                 if esc_cancels_confirm(&key, &app) {
+                    // Reset whichever state machine had
+                    // the pending confirm. Both calls are
+                    // no-ops when their own state is Idle,
+                    // so it's safe to fire both (in
+                    // practice only one is in Confirming
+                    // at a time, but no harm in being
+                    // defensive).
                     app.transfer.cancel_confirm();
+                    if app.cancel_status.is_confirming() {
+                        app.cancel_status = F2CancelStatus::Idle;
+                    }
                     continue;
                 }
                 if app.current_screen == Screen::F4
@@ -715,6 +740,7 @@ async fn run_router(
                                     &mut app,
                                     &mut transfers_event_rx,
                                     &f2_setup_tx,
+                                    &tui_config,
                                 )
                                 .await;
                             }
@@ -920,6 +946,7 @@ async fn handle_pane_action(
     app: &mut AppState,
     transfers_event_rx: &mut Option<mpsc::Receiver<EventOrError>>,
     f2_setup_tx: &mpsc::Sender<F2SetupReply>,
+    tui_config: &config::TuiConfig,
 ) {
     match app.current_screen {
         Screen::F1 => match action {
@@ -968,23 +995,58 @@ async fn handle_pane_action(
             // d-22: cancel the cursor-selected transfer.
             // Gated on a confirmed live selection AND a
             // remote being configured AND no cancel
-            // already in flight (Sending). Without all
-            // three the keystroke is silently ignored.
+            // already in flight (Sending) AND no confirm
+            // prompt already up. Without all four the
+            // keystroke is silently ignored.
+            //
+            // d-29: when `[transfer] confirm_cancel = true`,
+            // K transitions to Confirming instead of
+            // firing the RPC immediately. `y` then
+            // promotes Confirming → Sending; `n` / `Esc`
+            // revert to Idle.
             UserAction::CancelSelectedTransfer => {
-                if app.cancel_status.is_sending() {
-                    // Already sending one — don't pile up.
+                if app.cancel_status.is_sending() || app.cancel_status.is_confirming() {
+                    // Already mid-cycle — ignore.
                 } else if let (Some(id), Some(endpoint)) = (
                     app.transfers.selected_active_id().map(|s| s.to_string()),
                     app.parsed_remote.clone(),
                 ) {
-                    app.cancel_request_seq += 1;
-                    let rid = app.cancel_request_seq;
-                    app.cancel_status = F2CancelStatus::Sending {
-                        transfer_id: id.clone(),
-                        request_id: rid,
-                    };
-                    spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
+                    if tui_config.transfer.confirm_cancel {
+                        app.cancel_status = F2CancelStatus::Confirming { transfer_id: id };
+                    } else {
+                        app.cancel_request_seq += 1;
+                        let rid = app.cancel_request_seq;
+                        app.cancel_status = F2CancelStatus::Sending {
+                            transfer_id: id.clone(),
+                            request_id: rid,
+                        };
+                        spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
+                    }
                 }
+            }
+            // d-29: `y` confirms a pending cancel — promote
+            // Confirming → Sending and fire the RPC.
+            UserAction::TransferMirrorConfirm if app.cancel_status.is_confirming() => {
+                if let Some(endpoint) = app.parsed_remote.clone() {
+                    if let F2CancelStatus::Confirming { transfer_id } = &app.cancel_status {
+                        let id = transfer_id.clone();
+                        app.cancel_request_seq += 1;
+                        let rid = app.cancel_request_seq;
+                        app.cancel_status = F2CancelStatus::Sending {
+                            transfer_id: id.clone(),
+                            request_id: rid,
+                        };
+                        spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
+                    }
+                } else {
+                    // No remote — abort the prompt rather
+                    // than silently sit on it.
+                    app.cancel_status = F2CancelStatus::Idle;
+                }
+            }
+            // d-29: `n` aborts a pending cancel prompt.
+            UserAction::TransferCancel if app.cancel_status.is_confirming() => {
+                app.cancel_status = F2CancelStatus::Idle;
             }
             _ => {}
         },
@@ -1647,6 +1709,9 @@ fn cancel_status_to_display(
     use screens::f2::F2CancelDisplay;
     match status {
         F2CancelStatus::Idle => F2CancelDisplay::Hidden,
+        F2CancelStatus::Confirming { transfer_id } => F2CancelDisplay::ConfirmingCancel {
+            transfer_id: transfer_id.clone(),
+        },
         F2CancelStatus::Sending { transfer_id, .. } => F2CancelDisplay::Sending {
             transfer_id: transfer_id.clone(),
         },
@@ -1844,20 +1909,23 @@ fn needs_live_tick(app: &AppState) -> bool {
 
 /// d-12: predicate for the router's Esc-cancels-confirm
 /// intercept. Returns true ONLY for bare Esc (no Ctrl /
-/// Alt modifiers) while a mirror or move confirmation
-/// prompt is open. The router calls this BEFORE
-/// `handle_verify_keystroke` and `key_action` so the
-/// confirm-cancel branch absorbs the keystroke even if
-/// the operator has Tab-ed into the Verify form's edit
-/// mode mid-confirm (d-12 round-2 fix — pre-fix the
-/// Verify keystroke handler ate the Esc and the confirm
-/// stayed visible with no way out).
+/// Alt modifiers) while a confirmation prompt is open.
+/// The router calls this BEFORE `handle_verify_keystroke`
+/// and `key_action` so the confirm-cancel branch absorbs
+/// the keystroke even if the operator has Tab-ed into the
+/// Verify form's edit mode mid-confirm (d-12 round-2 fix
+/// — pre-fix the Verify keystroke handler ate the Esc and
+/// the confirm stayed visible with no way out).
+///
+/// d-29: extended to cover F2's cancel-confirm prompt
+/// (`[transfer] confirm_cancel`). Whichever state
+/// machine has a pending confirm, Esc reverts it.
 fn esc_cancels_confirm(key: &KeyEvent, app: &AppState) -> bool {
     key.code == KeyCode::Esc
         && !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        && app.transfer.is_confirming()
+        && (app.transfer.is_confirming() || app.cancel_status.is_confirming())
 }
 
 /// `true` when the operator can kick a local transfer:
@@ -3050,6 +3118,125 @@ mod tests {
             key_action(&k(KeyCode::Char('K'))),
             Some(UserAction::CancelSelectedTransfer)
         ));
+    }
+
+    // d-29: F2 cancel-confirm state machine pure tests.
+    // The dispatch path is hard to drive end-to-end without
+    // a fake daemon; these tests pin the state machine
+    // transitions and the predicates the router consults.
+
+    /// d-29: a Confirming variant reports `is_confirming`
+    /// true and `is_sending` false.
+    #[test]
+    fn f2_cancel_status_confirming_predicates() {
+        let s = F2CancelStatus::Confirming {
+            transfer_id: "t-1".to_string(),
+        };
+        assert!(s.is_confirming());
+        assert!(!s.is_sending());
+    }
+
+    /// d-29: Sending stays `is_sending` only.
+    #[test]
+    fn f2_cancel_status_sending_predicates() {
+        let s = F2CancelStatus::Sending {
+            transfer_id: "t-1".to_string(),
+            request_id: 1,
+        };
+        assert!(s.is_sending());
+        assert!(!s.is_confirming());
+    }
+
+    /// d-29: Idle / Done / Error all report false for
+    /// both predicates.
+    #[test]
+    fn f2_cancel_status_idle_done_error_predicates() {
+        let idle = F2CancelStatus::Idle;
+        assert!(!idle.is_confirming());
+        assert!(!idle.is_sending());
+
+        let done = F2CancelStatus::Done {
+            outcome: blit_app::admin::jobs::CancelJobOutcome::Cancelled {
+                transfer_id: "t-1".to_string(),
+            },
+            finished_at: Instant::now(),
+        };
+        assert!(!done.is_confirming());
+        assert!(!done.is_sending());
+
+        let err = F2CancelStatus::Error {
+            transfer_id: "t-1".to_string(),
+            message: "boom".to_string(),
+            finished_at: Instant::now(),
+        };
+        assert!(!err.is_confirming());
+        assert!(!err.is_sending());
+    }
+
+    /// d-29: the renderer-side bridge maps a Confirming
+    /// state to the new `ConfirmingCancel` display variant.
+    /// No TTL applies — bridge ignores `now`/`ttl`.
+    #[test]
+    fn cancel_status_to_display_renders_confirming() {
+        let status = F2CancelStatus::Confirming {
+            transfer_id: "t-1".to_string(),
+        };
+        let display =
+            cancel_status_to_display(&status, Instant::now(), std::time::Duration::from_secs(60));
+        match display {
+            screens::f2::F2CancelDisplay::ConfirmingCancel { transfer_id } => {
+                assert_eq!(transfer_id, "t-1");
+            }
+            other => panic!("expected ConfirmingCancel, got {other:?}"),
+        }
+    }
+
+    /// d-29: `cancel_status_remaining_ttl` returns None
+    /// for Confirming — the prompt has no deadline; the
+    /// loop has nothing to wake up for.
+    #[test]
+    fn cancel_status_remaining_ttl_confirming_returns_none() {
+        let status = F2CancelStatus::Confirming {
+            transfer_id: "t-1".to_string(),
+        };
+        let remaining = cancel_status_remaining_ttl(
+            &status,
+            Instant::now(),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(remaining.is_none());
+    }
+
+    /// d-29: `esc_cancels_confirm` predicates returns true
+    /// for either F4 (verify-transfer) OR F2 (cancel)
+    /// confirm states.
+    #[test]
+    fn esc_cancels_confirm_routes_f2_cancel_confirm() {
+        let mut app = make_test_app_state(Screen::F2);
+        app.cancel_status = F2CancelStatus::Confirming {
+            transfer_id: "t-1".to_string(),
+        };
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(
+            esc_cancels_confirm(&esc, &app),
+            "Esc must route to the F2 cancel-confirm reset path"
+        );
+    }
+
+    /// d-29: predicate stays false when neither state
+    /// machine is confirming — Esc bubbles to the normal
+    /// dispatcher (which maps it to Quit on F2).
+    #[test]
+    fn esc_cancels_confirm_returns_false_when_neither_confirming() {
+        let app = make_test_app_state(Screen::F2);
+        let esc = KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(!esc_cancels_confirm(&esc, &app));
     }
 
     // d-23: cancel-status TTL auto-clear. d-24 made the

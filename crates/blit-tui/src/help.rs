@@ -69,7 +69,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect) {
         kv("↑ ↓ / j k", "cursor (F1, F2 active, F3)"),
         kv("Enter / → / l", "descend (F3)"),
         kv("← / h", "ascend (F3)"),
-        kv("K", "cancel selected transfer (F2)"),
+        kv(
+            "K",
+            "cancel selected transfer (F2) — y/N prompt if [transfer] confirm_cancel",
+        ),
         kv("/", "filter rows (F3) — Esc clears, Enter commits"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),

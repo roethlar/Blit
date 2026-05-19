@@ -27,6 +27,7 @@
 //!
 //! [transfer]
 //! cancel_status_ttl_ms = 5000   # d-24: F2 cancel-fragment TTL (clamped to [250, 60000])
+//! confirm_cancel = false        # d-29: opt-in `K` confirm prompt (y/N)
 //! ```
 //!
 //! Future slices can grow the schema (per-pane tick
@@ -172,8 +173,9 @@ impl Default for ThemeDefaults {
     }
 }
 
-/// d-24: transfer-related preferences. Currently just
-/// the d-23 cancel-status TTL.
+/// d-24 / d-29: transfer-related preferences. Currently
+/// the d-23 cancel-status TTL and the d-29 opt-in
+/// cancel-confirm prompt.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TransferDefaults {
@@ -184,6 +186,15 @@ pub struct TransferDefaults {
     /// — 0 (always-hidden) or 600000 (10 minutes) are
     /// silently snapped to the bounds rather than refused.
     pub cancel_status_ttl_ms: u64,
+    /// d-29: when `true`, pressing `K` on F2 opens a
+    /// `cancel <id>? y/N` prompt instead of firing the
+    /// CancelJob RPC immediately. `y` confirms, `n` or
+    /// `Esc` aborts. Default `false` keeps the d-22
+    /// behavior of one-keystroke cancel — cancel is
+    /// reversible (the daemon stops sending bytes; data
+    /// already on disk stays) so the prompt is opt-in
+    /// safety for operators who type `K` reflexively.
+    pub confirm_cancel: bool,
 }
 
 impl TransferDefaults {
@@ -212,6 +223,7 @@ impl Default for TransferDefaults {
     fn default() -> Self {
         Self {
             cancel_status_ttl_ms: Self::DEFAULT_CANCEL_TTL_MS,
+            confirm_cancel: false,
         }
     }
 }
@@ -572,6 +584,7 @@ mod tests {
     fn transfer_cancel_ttl_clamp_floor() {
         let cfg = TransferDefaults {
             cancel_status_ttl_ms: 0,
+            ..TransferDefaults::default()
         };
         assert_eq!(
             cfg.cancel_status_ttl_ms_clamped(),
@@ -579,6 +592,7 @@ mod tests {
         );
         let cfg = TransferDefaults {
             cancel_status_ttl_ms: 100,
+            ..TransferDefaults::default()
         };
         assert_eq!(
             cfg.cancel_status_ttl_ms_clamped(),
@@ -590,6 +604,7 @@ mod tests {
     fn transfer_cancel_ttl_clamp_ceiling() {
         let cfg = TransferDefaults {
             cancel_status_ttl_ms: u64::MAX,
+            ..TransferDefaults::default()
         };
         assert_eq!(
             cfg.cancel_status_ttl_ms_clamped(),
@@ -597,6 +612,7 @@ mod tests {
         );
         let cfg = TransferDefaults {
             cancel_status_ttl_ms: 120_000,
+            ..TransferDefaults::default()
         };
         assert_eq!(
             cfg.cancel_status_ttl_ms_clamped(),
@@ -609,6 +625,7 @@ mod tests {
         for ms in [250, 1_000, 5_000, 10_000, 30_000, 60_000] {
             let cfg = TransferDefaults {
                 cancel_status_ttl_ms: ms,
+                ..TransferDefaults::default()
             };
             assert_eq!(
                 cfg.cancel_status_ttl_ms_clamped(),
@@ -644,5 +661,51 @@ mod tests {
         let _cfg = load_from_path(&path, |msg| warned = Some(msg));
         let warning = warned.expect("unknown [transfer] field must warn");
         assert!(warning.contains("cancel_status_ttl") || warning.contains("unknown"));
+    }
+
+    // d-29: [transfer] confirm_cancel opt-in flag.
+
+    #[test]
+    fn transfer_default_confirm_cancel_is_false() {
+        let cfg = TuiConfig::default();
+        assert!(
+            !cfg.transfer.confirm_cancel,
+            "default keeps d-22 one-keystroke cancel behavior"
+        );
+    }
+
+    #[test]
+    fn transfer_confirm_cancel_parses_true() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\nconfirm_cancel = true\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert!(cfg.transfer.confirm_cancel);
+    }
+
+    #[test]
+    fn transfer_confirm_cancel_parses_false_explicitly() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\nconfirm_cancel = false\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert!(!cfg.transfer.confirm_cancel);
+    }
+
+    /// d-29 + d-24 compose: the two `[transfer]` fields
+    /// are independent — TTL override doesn't change the
+    /// confirm_cancel default, and vice versa.
+    #[test]
+    fn transfer_confirm_cancel_and_ttl_compose() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(
+            &path,
+            "[transfer]\nconfirm_cancel = true\ncancel_status_ttl_ms = 1500\n",
+        )
+        .expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert!(cfg.transfer.confirm_cancel);
+        assert_eq!(cfg.transfer.cancel_status_ttl_ms_clamped(), 1500);
     }
 }
