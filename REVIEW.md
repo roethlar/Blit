@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-35-f3-pull-execute (round 2) | Feature | F3 pull dest resolved via resolve_destination (rsync-style nesting) | `[~]` | `phase5/a1` | `beb5d9e` |
+| _none_ | | | | | |
 
 ## Open findings
 
@@ -139,3 +139,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `12ee960` Configurable tab-strip accent with contrasting active-tab foreground (`e-7-config-theme` round 2)
 - `7baf2a4` F3 pull-source spec preview with bracketed IPv6 authority (`d-33-f3-pull-source` round 2)
 - `eb1ee45` F3 pull-source preview derived via `RemoteEndpoint` (`d-34-f3-pull-endpoint`)
+- `beb5d9e` F3 pull destination prompt + execution with resolved local destinations (`d-35-f3-pull-execute` round 2)
