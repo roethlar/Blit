@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-34-f3-pull-endpoint | Feature | F3 transfer slice 2 — pull-source preview derived via RemoteEndpoint | `[~]` | `phase5/a1` | `eb1ee45` |
 
 ## Open findings
 
