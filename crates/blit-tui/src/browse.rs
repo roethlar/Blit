@@ -47,6 +47,8 @@
 
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
+use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// Either the module list or the contents of a directory
@@ -532,69 +534,64 @@ impl BrowseState {
     }
 }
 
-/// d-33: derive the canonical remote pull-source spec for
-/// the F3 cursor — `<authority>:/<module>/<rel-path>` — or
-/// `None` when there's nothing pullable (no authority, no
-/// selected row, or a stale cursor on a non-matching
-/// filtered row).
+/// d-33 / d-34: derive the remote pull-source endpoint for
+/// the F3 cursor by cloning the operator's `base` endpoint
+/// (host + port) and pointing its path at the selected
+/// row's module + rel_path. Returns `None` when there's
+/// nothing pullable (no selected row, or a stale cursor on
+/// a non-matching filtered row, or a view/kind
+/// contradiction the model never produces).
 ///
-/// `authority` is the endpoint's display authority from
-/// [`blit_core::remote::endpoint::RemoteEndpoint::host_port_display`]
-/// — bracketed for IPv6 literals (`[::1]`) and carrying a
-/// non-default port (`host:9999`). d-33 round 2 fix:
-/// passing the raw `host` field produced `::1:/share/...`
-/// for IPv6 remotes, which doesn't round-trip through
-/// `RemoteEndpoint::parse`. The display authority is the
-/// single source of truth for "how to render this host
-/// back into a copyable spec".
+/// d-34: the F3 `Pull:` preview renders
+/// `pull_source_endpoint(...).display()`, so the displayed
+/// spec is exactly what the eventual pull execution will
+/// target — guaranteeing parse-fidelity (bracketed IPv6,
+/// port-aware) by going through `RemoteEndpoint`'s own
+/// display authority rather than a hand-built string
+/// (the d-33-round-1 bug that mangled IPv6 hosts).
 ///
-/// This is the first slice of F3 transfer-from-cursor:
-/// it surfaces the resolvable source path as read-only
-/// info in the Stats block. Later slices add the
-/// destination prompt and the actual pull execution,
-/// which will reconstruct a `RemoteEndpoint` from the
-/// operator's `--remote` (for host + port) plus the
-/// module + rel_path this function's logic identifies.
-/// The string here is the human-readable preview.
-///
-/// Cases:
+/// Source mapping:
 /// - Modules view, cursor on a `Module` row →
-///   `<authority>:/<module>/` (pull the module root).
+///   `Module { module: <name>, rel_path: "" }`
+///   (the whole module root).
 /// - Module view, cursor on a `Directory` →
-///   `<authority>:/<module>/<path>/<dir>/` (trailing slash).
+///   `Module { module, rel_path: <path>/<dir> }`.
 /// - Module view, cursor on a `File` →
-///   `<authority>:/<module>/<path>/<file>` (no trailing slash).
-pub fn pull_source_spec(
+///   `Module { module, rel_path: <path>/<file> }`.
+pub fn pull_source_endpoint(
     view: &BrowseView,
     selected: Option<&BrowseRow>,
-    authority: &str,
-) -> Option<String> {
-    if authority.is_empty() {
-        return None;
-    }
+    base: &RemoteEndpoint,
+) -> Option<RemoteEndpoint> {
     let row = selected?;
-    match view {
+    let (module, rel_path) = match view {
         BrowseView::Modules => match &row.kind {
-            BrowseRowKind::Module { .. } => Some(format!("{authority}:/{}/", row.name)),
+            BrowseRowKind::Module { .. } => (row.name.clone(), PathBuf::new()),
             // A non-module row in the Modules view is a
             // contradiction the model never produces.
-            _ => None,
+            _ => return None,
         },
         BrowseView::Module { name, path } => {
-            let mut rel = String::new();
+            let mut rel = PathBuf::new();
             for seg in path {
-                rel.push_str(seg);
-                rel.push('/');
+                rel.push(seg);
             }
             match &row.kind {
-                BrowseRowKind::Directory => Some(format!("{authority}:/{name}/{rel}{}/", row.name)),
-                BrowseRowKind::File => Some(format!("{authority}:/{name}/{rel}{}", row.name)),
+                BrowseRowKind::Directory | BrowseRowKind::File => {
+                    rel.push(&row.name);
+                    (name.clone(), rel)
+                }
                 // A Module row inside a Module view is a
                 // contradiction the model never produces.
-                BrowseRowKind::Module { .. } => None,
+                BrowseRowKind::Module { .. } => return None,
             }
         }
-    }
+    };
+    Some(RemoteEndpoint {
+        host: base.host.clone(),
+        port: base.port,
+        path: RemotePath::Module { module, rel_path },
+    })
 }
 
 /// d-27: stable sort key for browse rows. Directories
@@ -1488,133 +1485,124 @@ mod tests {
         }
     }
 
+    /// Base endpoint the operator's `--remote` parses to;
+    /// `pull_source_endpoint` clones its host + port and
+    /// overwrites the path. A discovery form keeps the
+    /// test focused on host/port carry-over.
+    fn base(raw: &str) -> RemoteEndpoint {
+        RemoteEndpoint::parse(raw).expect("base endpoint")
+    }
+
+    fn module_rel(ep: &RemoteEndpoint) -> (&str, &std::path::Path) {
+        match &ep.path {
+            RemotePath::Module { module, rel_path } => (module.as_str(), rel_path.as_path()),
+            other => panic!("expected Module path, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn pull_source_none_without_host() {
+    fn pull_source_endpoint_none_without_selection() {
+        assert!(pull_source_endpoint(&BrowseView::Modules, None, &base("nas")).is_none());
+    }
+
+    #[test]
+    fn pull_source_endpoint_module_root_from_modules_view() {
         let row = module_row("photos");
-        assert!(pull_source_spec(&BrowseView::Modules, Some(&row), "").is_none());
+        let ep = pull_source_endpoint(&BrowseView::Modules, Some(&row), &base("nas"))
+            .expect("module-root endpoint");
+        let (module, rel) = module_rel(&ep);
+        assert_eq!(module, "photos");
+        assert_eq!(rel, std::path::Path::new(""));
+        // display() trailing-slashes an empty rel_path.
+        assert_eq!(ep.display(), "nas:/photos/");
     }
 
     #[test]
-    fn pull_source_none_without_selection() {
-        assert!(pull_source_spec(&BrowseView::Modules, None, "host").is_none());
-    }
-
-    #[test]
-    fn pull_source_module_root_from_modules_view() {
-        let row = module_row("photos");
-        assert_eq!(
-            pull_source_spec(&BrowseView::Modules, Some(&row), "nas"),
-            Some("nas:/photos/".to_string())
-        );
-    }
-
-    #[test]
-    fn pull_source_directory_at_module_root() {
+    fn pull_source_endpoint_directory_at_module_root() {
         let view = BrowseView::Module {
             name: "photos".to_string(),
             path: vec![],
         };
         let row = dir_row("2024");
-        assert_eq!(
-            pull_source_spec(&view, Some(&row), "nas"),
-            Some("nas:/photos/2024/".to_string())
-        );
+        let ep = pull_source_endpoint(&view, Some(&row), &base("nas")).expect("dir endpoint");
+        let (module, rel) = module_rel(&ep);
+        assert_eq!(module, "photos");
+        assert_eq!(rel, std::path::Path::new("2024"));
+        assert_eq!(ep.display(), "nas:/photos/2024");
     }
 
     #[test]
-    fn pull_source_directory_nested() {
+    fn pull_source_endpoint_directory_nested() {
         let view = BrowseView::Module {
             name: "photos".to_string(),
             path: vec!["2024".to_string(), "summer".to_string()],
         };
         let row = dir_row("beach");
-        assert_eq!(
-            pull_source_spec(&view, Some(&row), "nas"),
-            Some("nas:/photos/2024/summer/beach/".to_string())
-        );
+        let ep = pull_source_endpoint(&view, Some(&row), &base("nas")).expect("nested dir");
+        let (_module, rel) = module_rel(&ep);
+        assert_eq!(rel, std::path::Path::new("2024/summer/beach"));
+        assert_eq!(ep.display(), "nas:/photos/2024/summer/beach");
     }
 
     #[test]
-    fn pull_source_file_has_no_trailing_slash() {
+    fn pull_source_endpoint_file() {
         let view = BrowseView::Module {
             name: "photos".to_string(),
             path: vec!["2024".to_string()],
         };
         let row = file_row("img001.jpg");
-        assert_eq!(
-            pull_source_spec(&view, Some(&row), "nas"),
-            Some("nas:/photos/2024/img001.jpg".to_string())
-        );
-    }
-
-    #[test]
-    fn pull_source_file_at_module_root() {
-        let view = BrowseView::Module {
-            name: "docs".to_string(),
-            path: vec![],
-        };
-        let row = file_row("readme.txt");
-        assert_eq!(
-            pull_source_spec(&view, Some(&row), "host"),
-            Some("host:/docs/readme.txt".to_string())
-        );
+        let ep = pull_source_endpoint(&view, Some(&row), &base("nas")).expect("file endpoint");
+        let (_module, rel) = module_rel(&ep);
+        assert_eq!(rel, std::path::Path::new("2024/img001.jpg"));
+        assert_eq!(ep.display(), "nas:/photos/2024/img001.jpg");
     }
 
     /// A module row inside a module view, or a non-module
     /// row in the modules view, are contradictions the
-    /// model never produces — the helper returns None
-    /// rather than emit a malformed spec.
+    /// model never produces — the helper returns None.
     #[test]
-    fn pull_source_rejects_contradictory_kind() {
-        // Module row inside a Module view.
+    fn pull_source_endpoint_rejects_contradictory_kind() {
         let view = BrowseView::Module {
             name: "photos".to_string(),
             path: vec![],
         };
         let row = module_row("nested");
-        assert!(pull_source_spec(&view, Some(&row), "nas").is_none());
-        // Non-module row in the Modules view.
+        assert!(pull_source_endpoint(&view, Some(&row), &base("nas")).is_none());
         let row = dir_row("strays");
-        assert!(pull_source_spec(&BrowseView::Modules, Some(&row), "nas").is_none());
+        assert!(pull_source_endpoint(&BrowseView::Modules, Some(&row), &base("nas")).is_none());
     }
 
-    /// d-33 round 2 regression: an IPv6 authority is
-    /// already bracketed (the caller passes
-    /// `RemoteEndpoint::host_port_display()`, which
-    /// brackets IPv6 literals). The resulting spec must
-    /// round-trip through `RemoteEndpoint::parse`.
-    /// Pre-fix, the raw `host` field `"::1"` produced the
-    /// un-parseable `::1:/share/...`.
+    /// d-34: deriving through `RemoteEndpoint` means the
+    /// preview spec round-trips. An IPv6 base produces a
+    /// bracketed `display()` that re-parses — the
+    /// d-33-round-1 raw-host bug can't recur because the
+    /// host is never re-stringified by hand.
     #[test]
-    fn pull_source_ipv6_authority_round_trips() {
-        use blit_core::remote::endpoint::RemoteEndpoint;
+    fn pull_source_endpoint_ipv6_round_trips() {
         let view = BrowseView::Module {
             name: "share".to_string(),
             path: vec!["docs".to_string()],
         };
         let row = file_row("readme.txt");
-        // The caller hands us the bracketed display
-        // authority, not the raw host.
-        let authority = "[::1]";
-        let spec =
-            pull_source_spec(&view, Some(&row), authority).expect("spec for an IPv6 authority");
+        let ep = pull_source_endpoint(&view, Some(&row), &base("[::1]")).expect("ipv6 endpoint");
+        let spec = ep.display();
         assert_eq!(spec, "[::1]:/share/docs/readme.txt");
-        // The whole point: it parses back into an endpoint.
-        let parsed = RemoteEndpoint::parse(&spec).expect("IPv6 spec must re-parse");
-        assert_eq!(parsed.host, "::1");
+        let reparsed = RemoteEndpoint::parse(&spec).expect("IPv6 spec must re-parse");
+        assert_eq!(reparsed.host, "::1");
     }
 
-    /// d-33 round 2: a non-default port survives in the
-    /// authority (also via `host_port_display`).
+    /// d-34: a non-default port on the base carries into
+    /// the derived endpoint + its display.
     #[test]
-    fn pull_source_non_default_port_authority() {
+    fn pull_source_endpoint_non_default_port() {
         let view = BrowseView::Module {
             name: "share".to_string(),
             path: vec![],
         };
         let row = dir_row("logs");
-        let spec =
-            pull_source_spec(&view, Some(&row), "host:9999").expect("spec for a non-default port");
-        assert_eq!(spec, "host:9999:/share/logs/");
+        let ep =
+            pull_source_endpoint(&view, Some(&row), &base("host:9999")).expect("port endpoint");
+        assert_eq!(ep.port, 9999);
+        assert_eq!(ep.display(), "host:9999:/share/logs");
     }
 }

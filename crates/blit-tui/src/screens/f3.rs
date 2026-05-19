@@ -59,16 +59,18 @@ use std::time::Instant;
 
 /// Render the F3 pane into a caller-supplied area (router-aware).
 ///
-/// d-33: `host` is the remote host (from the operator's
-/// `--remote`), used to render the canonical pull-source
-/// spec in the Stats block. `None` when no remote is
-/// configured.
+/// d-33 / d-34: `pull_spec` is the pre-rendered canonical
+/// pull-source spec for the cursor (the caller derives it
+/// from `browse::pull_source_endpoint(...).display()` so
+/// the screens layer stays free of `blit_core` types).
+/// `None` when no remote is configured or nothing is
+/// selectable.
 pub fn render_into(
     frame: &mut Frame,
     area: Rect,
     state: &BrowseState,
     remote_label: &str,
-    host: Option<&str>,
+    pull_spec: Option<&str>,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -85,7 +87,7 @@ pub fn render_into(
 
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
-    render_stats(frame, chunks[2], state, host);
+    render_stats(frame, chunks[2], state, pull_spec);
     render_footer(frame, chunks[3], state, now);
 }
 
@@ -152,7 +154,7 @@ fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, host: Option<&str>) {
+fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, pull_spec: Option<&str>) {
     let block = Block::default().borders(Borders::ALL).title(" Stats ");
     // d-26: when a filter is active, show "<V>/<N>
     // entries" so the operator can see how many rows the
@@ -179,16 +181,16 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, host: Option
                 )),
                 Line::from(format!("View: {} · {}", state.breadcrumb(), count_fragment,)),
             ];
-            // d-33: canonical remote pull-source spec for
-            // the cursor. Foundation for F3
-            // transfer-from-cursor — the destination prompt
-            // + pull execution land in follow-on slices.
-            if let Some(spec) =
-                host.and_then(|h| crate::browse::pull_source_spec(state.view(), Some(row), h))
-            {
+            // d-33 / d-34: canonical remote pull-source
+            // spec for the cursor, pre-rendered by the
+            // caller via `pull_source_endpoint().display()`.
+            // Foundation for F3 transfer-from-cursor — the
+            // destination prompt + pull execution land in
+            // follow-on slices.
+            if let Some(spec) = pull_spec {
                 lines.push(Line::from(vec![
                     Span::styled("Pull: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(spec),
+                    Span::raw(spec.to_string()),
                 ]));
             }
             lines
