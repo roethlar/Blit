@@ -671,6 +671,17 @@ async fn run_router(
                 {
                     continue;
                 }
+                // d-26: F3's `/` filter edit mode mirrors
+                // the F4 Verify pattern — while editing,
+                // chars / Backspace / Esc / Enter route
+                // to the filter API instead of the normal
+                // F3 dispatcher.
+                if app.current_screen == Screen::F3
+                    && app.browse.is_editing_filter()
+                    && handle_f3_filter_keystroke(&key, &mut app)
+                {
+                    continue;
+                }
                 // If handle_verify_keystroke returned false
                 // (F-keys, Ctrl-c) or we're not in editing
                 // mode, fall through to the action
@@ -992,6 +1003,9 @@ async fn handle_pane_action(
             }
             UserAction::Ascend => {
                 app.browse.ascend();
+            }
+            UserAction::F3FilterBegin => {
+                app.browse.begin_edit_filter();
             }
             _ => {}
         },
@@ -2229,6 +2243,62 @@ fn handle_verify_keystroke(
     }
 }
 
+/// d-26: F3 filter-mode keystroke router. Mirrors the
+/// `handle_verify_keystroke` shape — returns `true` when
+/// the key was absorbed (so the outer dispatcher skips
+/// `key_action`), or `false` when the key should pass
+/// through (Ctrl-c emergency quit, F-keys, `?` help).
+///
+/// `/` while NOT editing is handled in the action
+/// dispatcher (`UserAction::F3FilterBegin`); this
+/// function only runs when `is_editing_filter` is true.
+fn handle_f3_filter_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+    // Emergency quit always falls through to key_action.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    // F-keys navigate panes; let the dispatcher handle.
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    // `?` is the global help toggle — even mid-filter.
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.browse.cancel_filter();
+            true
+        }
+        KeyCode::Enter => {
+            app.browse.commit_filter();
+            true
+        }
+        KeyCode::Backspace => {
+            app.browse.pop_filter_char();
+            true
+        }
+        KeyCode::Char(c) => {
+            // Skip Ctrl-/Alt-modified chars so terminal
+            // shortcuts don't get appended as garbled
+            // filter text.
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return false;
+            }
+            app.browse.push_filter_char(c);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Spawn a `compare_trees` run on a blocking task. Both
 /// inputs are local path strings; the task parses them to
 /// `PathBuf` and runs the comparison with a default
@@ -2434,6 +2504,11 @@ enum UserAction {
     /// No-op if the cursor isn't anchored on a live row
     /// (operator presses j/k first to select).
     CancelSelectedTransfer,
+    /// d-26: F3 only. `/` enters filter-edit mode for the
+    /// current view's row list. Subsequent chars route
+    /// through `handle_f3_filter_keystroke` (separate
+    /// from the action dispatcher).
+    F3FilterBegin,
 }
 
 /// Lightweight key-event copy. Avoids carrying a
@@ -2527,6 +2602,11 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // active transfer. F1/F3/F4 ignore in their
         // dispatch arms.
         KeyCode::Char('K') => Some(UserAction::CancelSelectedTransfer),
+        // d-26: `/` opens F3's filter input. F1/F2/F4
+        // ignore the variant. While editing, the F3
+        // filter keystroke handler absorbs all input
+        // before this dispatcher runs.
+        KeyCode::Char('/') => Some(UserAction::F3FilterBegin),
         // `H` toggles Verify mode (size+mtime ↔ checksum).
         // Capital chosen because lowercase `h` is the
         // Ascend / left-arrow alias used by F3 navigation.
@@ -3461,6 +3541,153 @@ mod tests {
             key_action(&k(KeyCode::Char('?'))),
             Some(UserAction::ToggleHelp)
         ));
+    }
+
+    /// d-26: `/` is mapped to F3FilterBegin. F1/F2/F4
+    /// dispatch arms ignore the variant.
+    #[test]
+    fn key_action_maps_slash_to_f3_filter_begin() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('/'))),
+            Some(UserAction::F3FilterBegin)
+        ));
+    }
+
+    /// d-26 helper: build a fresh `AppState` for keystroke
+    /// tests. Mirrors the boilerplate of
+    /// `handle_verify_keystroke_returns_false_for_question_mark`.
+    fn make_test_app_state(screen: Screen) -> AppState {
+        AppState {
+            current_screen: screen,
+            parsed_remote: None,
+            remote_label: String::new(),
+            daemons: DaemonsState::new(),
+            daemons_last_fetched: None,
+            detail_tx: mpsc::channel::<DetailUpdate>(1).0,
+            discovery_refresh_tx: mpsc::channel::<()>(1).0,
+            transfers: TransfersState::new(),
+            transfers_status: ConnectionStatus::NoRemote,
+            transfers_setup_gen: 0,
+            transfers_setup_pending: false,
+            browse: BrowseState::new(),
+            browse_last_fetched_view: None,
+            browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
+            profile: profile::ProfileState::new(),
+            profile_reply_tx: mpsc::channel::<ProfileReply>(1).0,
+            verify: verify::VerifyState::new(),
+            diagnostics: diagnostics::DiagnosticsState::new(),
+            diagnostics_reply_tx: mpsc::channel::<DiagnosticsReply>(1).0,
+            help: help::HelpOverlay::default(),
+            transfer: transfer::TransferState::new(),
+            transfer_reply_tx: mpsc::channel::<TransferReply>(1).0,
+            cancel_status: F2CancelStatus::Idle,
+            cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
+            cancel_request_seq: 0,
+        }
+    }
+
+    /// d-26: chars append to the filter while editing.
+    #[test]
+    fn handle_f3_filter_keystroke_routes_chars_to_filter() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        let consumed = handle_f3_filter_keystroke(&k(KeyCode::Char('p')), &mut app);
+        assert!(consumed);
+        assert_eq!(app.browse.filter(), "p");
+    }
+
+    /// d-26: Backspace pops one char.
+    #[test]
+    fn handle_f3_filter_keystroke_routes_backspace_to_pop() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        app.browse.push_filter_char('p');
+        app.browse.push_filter_char('h');
+        let consumed = handle_f3_filter_keystroke(&k(KeyCode::Backspace), &mut app);
+        assert!(consumed);
+        assert_eq!(app.browse.filter(), "p");
+    }
+
+    /// d-26: Enter commits — filter persists, edit mode exits.
+    #[test]
+    fn handle_f3_filter_keystroke_routes_enter_to_commit() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        app.browse.push_filter_char('p');
+        let consumed = handle_f3_filter_keystroke(&k(KeyCode::Enter), &mut app);
+        assert!(consumed);
+        assert_eq!(app.browse.filter(), "p");
+        assert!(!app.browse.is_editing_filter());
+    }
+
+    /// d-26: Esc cancels — filter clears, edit mode exits.
+    #[test]
+    fn handle_f3_filter_keystroke_routes_esc_to_cancel() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        app.browse.push_filter_char('p');
+        let consumed = handle_f3_filter_keystroke(&k(KeyCode::Esc), &mut app);
+        assert!(consumed);
+        assert_eq!(app.browse.filter(), "");
+        assert!(!app.browse.is_editing_filter());
+    }
+
+    /// d-26: `?` is still global from filter-edit mode —
+    /// returns false so the dispatcher's ToggleHelp runs.
+    #[test]
+    fn handle_f3_filter_keystroke_returns_false_for_question_mark() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        let consumed = handle_f3_filter_keystroke(&k(KeyCode::Char('?')), &mut app);
+        assert!(!consumed);
+        // Filter unchanged.
+        assert_eq!(app.browse.filter(), "");
+    }
+
+    /// d-26: F-keys still navigate panes from filter-edit
+    /// mode — returns false so the dispatcher routes to
+    /// Navigate(Screen::Fx).
+    #[test]
+    fn handle_f3_filter_keystroke_returns_false_for_f_keys() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        for n in 1..=4 {
+            let consumed = handle_f3_filter_keystroke(&k(KeyCode::F(n)), &mut app);
+            assert!(
+                !consumed,
+                "F{n} must bubble back to the dispatcher for pane nav"
+            );
+        }
+    }
+
+    /// d-26: Ctrl-c is the emergency quit shortcut — always
+    /// falls through to `should_quit`.
+    #[test]
+    fn handle_f3_filter_keystroke_returns_false_for_ctrl_c() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        let key = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let consumed = handle_f3_filter_keystroke(&key, &mut app);
+        assert!(!consumed);
+    }
+
+    /// d-26: Ctrl-modified chars don't get inserted as
+    /// garbled filter text — returns false so the
+    /// dispatcher can route them (or ignore them).
+    #[test]
+    fn handle_f3_filter_keystroke_returns_false_for_ctrl_chars() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse.begin_edit_filter();
+        let key = KeyEvent {
+            code: KeyCode::Char('a'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let consumed = handle_f3_filter_keystroke(&key, &mut app);
+        assert!(!consumed);
+        assert_eq!(app.browse.filter(), "");
     }
 
     /// e-1 round-2 regression: `?` is GLOBAL, including

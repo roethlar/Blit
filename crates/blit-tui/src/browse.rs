@@ -23,6 +23,18 @@
 //! `q` and `Esc` are reserved for Quit and are NOT
 //! interpreted as ascend — the operator's muscle memory for
 //! quitting wins over the file-manager Esc convention.
+//!
+//! d-26: substring filter. `/` enters filter-edit mode;
+//! chars append, Backspace pops, Enter commits (filter
+//! persists, normal navigation resumes), Esc cancels
+//! (filter cleared). Filter is case-insensitive and
+//! matches anywhere in the row name. Cursor invariant
+//! during/after filtering: `self.selected` always points
+//! at a row that matches the filter (or sits at index 0
+//! if no row matches). Changing views (descend / ascend
+//! / fresh fetch result) clears the filter so the
+//! operator starts each new directory with full
+//! visibility.
 
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
@@ -92,6 +104,15 @@ pub struct BrowseState {
     /// by the event loop to discard stale fetch replies
     /// (same generation pattern as `DaemonsState`).
     pending_request_id: u64,
+    /// d-26: case-insensitive substring filter applied to
+    /// row names. Empty string = "match everything".
+    filter: String,
+    /// d-26: `true` while the operator is actively typing
+    /// into the filter (input router captures chars +
+    /// Backspace + Esc + Enter). `false` means either the
+    /// filter is unused OR the operator has committed it
+    /// (and is now navigating the filtered list normally).
+    editing_filter: bool,
 }
 
 impl Default for BrowseState {
@@ -108,6 +129,8 @@ impl BrowseState {
             selected: 0,
             status: BrowseFetchStatus::Idle,
             pending_request_id: 0,
+            filter: String::new(),
+            editing_filter: false,
         }
     }
 
@@ -119,6 +142,12 @@ impl BrowseState {
         &self.rows
     }
 
+    /// Raw cursor index into `self.rows()`. d-26 routed
+    /// the renderer through `visible_selected_position`
+    /// (filter-aware), so production code no longer
+    /// reads this — only tests probing the model
+    /// directly.
+    #[cfg(test)]
     pub fn selected_index(&self) -> usize {
         self.selected
     }
@@ -134,6 +163,12 @@ impl BrowseState {
     /// Apply a fresh module-list result. The renderer
     /// translates `Module` rows into BrowseRowKind::Module
     /// rows; cursor resets to 0.
+    ///
+    /// d-26: a fresh fetch result invalidates the d-26
+    /// filter — the operator was filtering against the
+    /// previous row set, so the active filter no longer
+    /// reflects what they typed for. Reset to empty +
+    /// non-editing so the new view starts visible.
     pub fn apply_modules(&mut self, modules: Vec<Module>, fetched_at: Instant) {
         if !matches!(self.view, BrowseView::Modules) {
             // View moved away while the fetch was in flight
@@ -153,6 +188,7 @@ impl BrowseState {
             .collect();
         self.selected = 0;
         self.status = BrowseFetchStatus::Loaded { fetched_at };
+        self.reset_filter();
     }
 
     /// Apply a fresh directory listing result. Caller
@@ -185,6 +221,9 @@ impl BrowseState {
             .collect();
         self.selected = 0;
         self.status = BrowseFetchStatus::Loaded { fetched_at };
+        // d-26: fresh fetch → drop the filter, same
+        // rationale as `apply_modules`.
+        self.reset_filter();
     }
 
     /// Surface a fetch failure for the *current* view (the
@@ -195,17 +234,40 @@ impl BrowseState {
         self.status = BrowseFetchStatus::Error { message };
     }
 
-    /// Move the cursor down one. No-op at the last row.
+    /// Move the cursor down one matching row. No-op at
+    /// the last matching row.
+    ///
+    /// d-26: filter-aware. When `filter` is non-empty,
+    /// skips non-matching rows so the operator only
+    /// traverses what's visible in the table.
     pub fn select_next(&mut self) {
-        if self.selected + 1 < self.rows.len() {
-            self.selected += 1;
+        let mut i = self.selected + 1;
+        while i < self.rows.len() {
+            if self.row_matches(&self.rows[i]) {
+                self.selected = i;
+                return;
+            }
+            i += 1;
         }
     }
 
-    /// Move the cursor up one. No-op at row 0.
+    /// Move the cursor up one matching row. No-op at the
+    /// first matching row. d-26: same filter-aware skip
+    /// as `select_next`.
     pub fn select_prev(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
+        if self.selected == 0 {
+            return;
+        }
+        let mut i = self.selected - 1;
+        loop {
+            if self.row_matches(&self.rows[i]) {
+                self.selected = i;
+                return;
+            }
+            if i == 0 {
+                return;
+            }
+            i -= 1;
         }
     }
 
@@ -233,6 +295,9 @@ impl BrowseState {
         self.rows.clear();
         self.selected = 0;
         self.status = BrowseFetchStatus::Idle;
+        // d-26: changing view drops the filter — the new
+        // view's rows haven't even been fetched yet.
+        self.reset_filter();
         Some(&self.view)
     }
 
@@ -253,6 +318,8 @@ impl BrowseState {
         self.rows.clear();
         self.selected = 0;
         self.status = BrowseFetchStatus::Idle;
+        // d-26: same view-change rationale as `descend`.
+        self.reset_filter();
         Some(&self.view)
     }
 
@@ -285,6 +352,119 @@ impl BrowseState {
                 }
             }
         }
+    }
+
+    // ---- d-26: filter API ----
+
+    /// Current filter text. Empty string = no filter.
+    pub fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    /// `true` while the operator is actively typing into
+    /// the filter — the input router routes chars,
+    /// Backspace, Esc, Enter to the filter API rather
+    /// than the normal F3 dispatch.
+    pub fn is_editing_filter(&self) -> bool {
+        self.editing_filter
+    }
+
+    /// Enter filter-edit mode. Existing filter text is
+    /// preserved so an operator can resume editing
+    /// without retyping.
+    pub fn begin_edit_filter(&mut self) {
+        self.editing_filter = true;
+    }
+
+    /// Exit edit mode but keep the filter applied. The
+    /// cursor was already kept on a matching row by
+    /// `push_filter_char` / `pop_filter_char`, so no
+    /// further bookkeeping is needed here.
+    pub fn commit_filter(&mut self) {
+        self.editing_filter = false;
+    }
+
+    /// Exit edit mode AND clear the filter — equivalent
+    /// to "give me back the full view". Cursor snaps to
+    /// row 0 (the new first-matching row in the cleared
+    /// filter).
+    pub fn cancel_filter(&mut self) {
+        self.reset_filter();
+        self.selected = 0;
+    }
+
+    /// Append one char to the filter and snap the cursor
+    /// to the first matching row (or 0 if the new filter
+    /// matches no rows).
+    pub fn push_filter_char(&mut self, c: char) {
+        self.filter.push(c);
+        self.selected = self.first_matching_row().unwrap_or(0);
+    }
+
+    /// Drop the last char from the filter. Cursor snaps
+    /// to first matching row (the looser filter may
+    /// reveal earlier rows that were hidden).
+    /// Returns true if a char was actually popped.
+    pub fn pop_filter_char(&mut self) -> bool {
+        let popped = self.filter.pop().is_some();
+        if popped {
+            self.selected = self.first_matching_row().unwrap_or(0);
+        }
+        popped
+    }
+
+    /// Indices into `self.rows()` that match the current
+    /// filter. With an empty filter this is `0..len()`.
+    /// The renderer uses this to build the visible table.
+    pub fn visible_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.rows.len()).collect();
+        }
+        (0..self.rows.len())
+            .filter(|&i| self.row_matches(&self.rows[i]))
+            .collect()
+    }
+
+    /// Position of `self.selected` within `visible_indices()`.
+    /// Renderer feeds this into `TableState::with_selected`.
+    /// Returns `None` if the cursor isn't on a visible
+    /// row (which the cursor invariants forbid, but the
+    /// API is defensive).
+    pub fn visible_selected_position(&self) -> Option<usize> {
+        if self.rows.is_empty() {
+            return None;
+        }
+        self.visible_indices()
+            .iter()
+            .position(|&i| i == self.selected)
+    }
+
+    /// Internal helper: does this row pass the current
+    /// filter? Empty filter passes everything;
+    /// non-empty filter does a case-insensitive substring
+    /// match on `row.name`.
+    fn row_matches(&self, row: &BrowseRow) -> bool {
+        if self.filter.is_empty() {
+            return true;
+        }
+        let needle = self.filter.to_lowercase();
+        row.name.to_lowercase().contains(&needle)
+    }
+
+    /// First row index that matches the current filter,
+    /// or `None` if no row matches. Used after a filter
+    /// change to keep the cursor on something visible.
+    fn first_matching_row(&self) -> Option<usize> {
+        (0..self.rows.len()).find(|&i| self.row_matches(&self.rows[i]))
+    }
+
+    /// Reset filter + edit-mode to the cleared state.
+    /// Called from `apply_modules` / `apply_listing` /
+    /// `descend` / `ascend` whenever the row set changes
+    /// underneath us.
+    fn reset_filter(&mut self) {
+        self.filter.clear();
+        self.editing_filter = false;
     }
 }
 
@@ -538,5 +718,254 @@ mod tests {
             BrowseFetchStatus::Error { message } => assert_eq!(message, "connect refused"),
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    // d-26: filter state machine + filter-aware nav.
+
+    fn populated_state() -> BrowseState {
+        let mut state = BrowseState::new();
+        state.apply_modules(
+            vec![
+                module("home", false),
+                module("backups", true),
+                module("photos", false),
+                module("scratch", false),
+            ],
+            Instant::now(),
+        );
+        state
+    }
+
+    #[test]
+    fn new_state_has_empty_filter_and_not_editing() {
+        let state = BrowseState::new();
+        assert_eq!(state.filter(), "");
+        assert!(!state.is_editing_filter());
+    }
+
+    #[test]
+    fn begin_edit_filter_enters_edit_mode() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        assert!(state.is_editing_filter());
+        // Filter text not changed by begin alone.
+        assert_eq!(state.filter(), "");
+    }
+
+    #[test]
+    fn push_filter_char_appends_and_snaps_cursor() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        // "p" matches "backups" (has a `p`) and "photos".
+        // first_matching_row returns the lowest-index
+        // match → "backups" (idx 1).
+        state.push_filter_char('p');
+        assert_eq!(state.filter(), "p");
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+    }
+
+    #[test]
+    fn push_filter_char_is_case_insensitive() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('B'); // matches "backups"
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+    }
+
+    #[test]
+    fn pop_filter_char_widens_match_set() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('p');
+        state.push_filter_char('h'); // "ph" → photos only
+        assert_eq!(state.filter(), "ph");
+        assert_eq!(state.visible_indices(), vec![2]);
+        let popped = state.pop_filter_char();
+        assert!(popped);
+        assert_eq!(state.filter(), "p");
+    }
+
+    #[test]
+    fn pop_filter_char_returns_false_on_empty_filter() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        assert!(!state.pop_filter_char());
+    }
+
+    #[test]
+    fn cancel_filter_clears_text_and_exits_mode() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('p');
+        state.cancel_filter();
+        assert_eq!(state.filter(), "");
+        assert!(!state.is_editing_filter());
+        // Cursor goes back to row 0 (the new first match
+        // in the cleared filter).
+        assert_eq!(state.selected_index(), 0);
+    }
+
+    #[test]
+    fn commit_filter_keeps_text_and_exits_mode() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        // Push "ph" → only "photos" matches ("backups"
+        // has 'p' but not 'h' next-letter contiguously).
+        state.push_filter_char('p');
+        state.push_filter_char('h');
+        state.commit_filter();
+        assert_eq!(state.filter(), "ph");
+        assert!(!state.is_editing_filter());
+        // Cursor on the unique match.
+        assert_eq!(state.rows()[state.selected_index()].name, "photos");
+    }
+
+    #[test]
+    fn visible_indices_returns_all_rows_with_empty_filter() {
+        let state = populated_state();
+        assert_eq!(state.visible_indices(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn visible_indices_filters_by_substring() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s'); // backups, photos, scratch
+        let indices = state.visible_indices();
+        assert_eq!(indices, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn visible_indices_empty_when_no_match() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z'); // nothing matches
+        assert!(state.visible_indices().is_empty());
+        // Cursor snaps to 0 (defensive fallback).
+        assert_eq!(state.selected_index(), 0);
+    }
+
+    #[test]
+    fn select_next_skips_non_matching_rows_when_filter_active() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s'); // matches backups, photos, scratch
+                                     // Cursor starts on "backups" (first match @ idx 1).
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+        state.select_next();
+        assert_eq!(state.rows()[state.selected_index()].name, "photos");
+        state.select_next();
+        assert_eq!(state.rows()[state.selected_index()].name, "scratch");
+        // At last match — no-op.
+        state.select_next();
+        assert_eq!(state.rows()[state.selected_index()].name, "scratch");
+    }
+
+    #[test]
+    fn select_prev_skips_non_matching_rows_when_filter_active() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s');
+        // Position cursor on "scratch".
+        state.select_next();
+        state.select_next();
+        assert_eq!(state.rows()[state.selected_index()].name, "scratch");
+        state.select_prev();
+        assert_eq!(state.rows()[state.selected_index()].name, "photos");
+        state.select_prev();
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+        state.select_prev();
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+    }
+
+    #[test]
+    fn visible_selected_position_maps_into_filtered_ordinal() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s');
+        // Filter visible: backups (raw 1), photos (raw 2),
+        // scratch (raw 3). Cursor starts on raw 1, which
+        // is visible-ordinal 0.
+        assert_eq!(state.visible_selected_position(), Some(0));
+        state.select_next();
+        assert_eq!(state.visible_selected_position(), Some(1));
+        state.select_next();
+        assert_eq!(state.visible_selected_position(), Some(2));
+    }
+
+    #[test]
+    fn descend_clears_filter() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('p');
+        state.commit_filter();
+        // Cursor is on "photos"; descend into it.
+        state.descend();
+        assert_eq!(state.filter(), "");
+        assert!(!state.is_editing_filter());
+    }
+
+    #[test]
+    fn ascend_clears_filter() {
+        let mut state = populated_state();
+        // Set up nested view first.
+        state.descend(); // → Module { home, [] }
+        state.apply_listing(
+            "home",
+            &[],
+            vec![dir_entry("photos", true), dir_entry("readme.txt", false)],
+            Instant::now(),
+        );
+        state.begin_edit_filter();
+        state.push_filter_char('r');
+        state.commit_filter();
+        assert_eq!(state.filter(), "r");
+        state.ascend();
+        assert_eq!(state.filter(), "");
+        assert!(!state.is_editing_filter());
+    }
+
+    #[test]
+    fn apply_modules_clears_stale_filter() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s');
+        // A new fetch lands — filter must drop.
+        state.apply_modules(
+            vec![module("home", false), module("other", false)],
+            Instant::now(),
+        );
+        assert_eq!(state.filter(), "");
+        assert!(!state.is_editing_filter());
+    }
+
+    #[test]
+    fn apply_listing_clears_stale_filter() {
+        let mut state = populated_state();
+        state.descend(); // → home
+        state.apply_listing("home", &[], vec![dir_entry("photos", true)], Instant::now());
+        state.begin_edit_filter();
+        state.push_filter_char('p');
+        // Another listing lands (e.g. operator pressed
+        // `r` to refresh) — filter must reset.
+        state.apply_listing(
+            "home",
+            &[],
+            vec![dir_entry("photos", true), dir_entry("readme.txt", false)],
+            Instant::now(),
+        );
+        assert_eq!(state.filter(), "");
+        assert!(!state.is_editing_filter());
+    }
+
+    #[test]
+    fn select_next_with_no_match_keeps_cursor_at_zero() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z');
+        state.select_next();
+        // No matching rows → select_next walks to end
+        // without finding a match → cursor unchanged.
+        assert_eq!(state.selected_index(), 0);
     }
 }

@@ -6,21 +6,29 @@
 //! emits widgets. Navigation + RPC fetching live in
 //! `main::run_f3_event_loop`.
 //!
-//! Layout:
+//! Layout (d-26 polish — `/` filter fragment in footer +
+//! visible-only rows in the table):
 //!
 //! ```text
 //! ┌── header (1 line) ───────────────────────────────┐
 //! │ blit-tui · F3 Browse · <remote> · <breadcrumb>   │
 //! ├── entries table (Min 5) ─────────────────────────┤
 //! │ name  kind  size  mtime                          │
-//! │ ...                                              │
+//! │ ...   (rows filtered by d-26 filter when set)    │
 //! ├── stats block (Length 3) ────────────────────────┤
 //! │ Selected: photos/ · <kind> · <size>              │
-//! │ View: <breadcrumb> · <N> entries                 │
+//! │ View: <breadcrumb> · <V>/<N> entries (when       │
+//! │       filtered) or <N> entries (no filter)       │
 //! ├── footer (1 line) ───────────────────────────────┤
-//! │ status · q quit · r refresh · enter into · esc up│
+//! │ status · [filter: foo │ filter: foo_] · q quit … │
 //! └──────────────────────────────────────────────────┘
 //! ```
+//!
+//! d-26's filter fragment renders one of:
+//! - hidden (no filter, not editing)
+//! - `filter: foo_` (cyan, while editing — trailing `_`
+//!   marks the cursor position)
+//! - `filter: foo` (green, applied + not editing)
 
 use crate::browse::{BrowseFetchStatus, BrowseRow, BrowseRowKind, BrowseState, BrowseView};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -51,7 +59,7 @@ pub fn render_into(
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
     render_stats(frame, chunks[2], state);
-    render_footer(frame, chunks[3], state.status(), now);
+    render_footer(frame, chunks[3], state, now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_label: &str) {
@@ -68,7 +76,15 @@ fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_labe
 }
 
 fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
-    let rows: Vec<Row> = state.rows().iter().map(row_to_table_row).collect();
+    // d-26: filter-aware — only rows that match the
+    // current filter make it into the table. With an
+    // empty filter `visible_indices()` returns all rows
+    // so this is a no-op vs. pre-d-26 behavior.
+    let visible_indices = state.visible_indices();
+    let rows: Vec<Row> = visible_indices
+        .iter()
+        .map(|&i| row_to_table_row(&state.rows()[i]))
+        .collect();
     let widths = [
         Constraint::Min(20),
         Constraint::Length(10),
@@ -101,12 +117,26 @@ fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         );
-    let mut table_state = TableState::default().with_selected(Some(state.selected_index()));
+    // d-26: TableState's index addresses the visible-row
+    // ordinal, not the underlying `state.rows()` index.
+    // `visible_selected_position` maps the model cursor
+    // back into the visible list.
+    let mut table_state = TableState::default().with_selected(state.visible_selected_position());
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState) {
     let block = Block::default().borders(Borders::ALL).title(" Stats ");
+    // d-26: when a filter is active, show "<V>/<N>
+    // entries" so the operator can see how many rows the
+    // filter is hiding.
+    let total = state.rows().len();
+    let visible = state.visible_indices().len();
+    let count_fragment = if state.filter().is_empty() {
+        format!("{total} entries")
+    } else {
+        format!("{visible}/{total} entries")
+    };
     let lines = match state.selected_row() {
         Some(row) => vec![
             Line::from(format!(
@@ -119,11 +149,7 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState) {
                     "—".to_string()
                 },
             )),
-            Line::from(format!(
-                "View: {} · {} entries",
-                state.breadcrumb(),
-                state.rows().len(),
-            )),
+            Line::from(format!("View: {} · {}", state.breadcrumb(), count_fragment,)),
         ],
         None => vec![Line::from(Span::styled(
             "(no entries)",
@@ -134,8 +160,8 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState) {
     frame.render_widget(para, area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, status: &BrowseFetchStatus, now: Instant) {
-    let status_span = match status {
+fn render_footer(frame: &mut Frame, area: Rect, state: &BrowseState, now: Instant) {
+    let status_span = match state.status() {
         BrowseFetchStatus::Idle => Span::styled("idle", Style::default().fg(Color::DarkGray)),
         BrowseFetchStatus::Pending => {
             Span::styled("fetching...", Style::default().fg(Color::Yellow))
@@ -148,8 +174,28 @@ fn render_footer(frame: &mut Frame, area: Rect, status: &BrowseFetchStatus, now:
             Span::styled(format!("error: {message}"), Style::default().fg(Color::Red))
         }
     };
-    let line = Line::from(vec![
-        status_span,
+    // d-26: filter fragment sits between status and the
+    // key hints. Hidden when the filter is empty AND not
+    // editing — so just pressing `/` produces a visible
+    // "filter: _" cursor even before the operator types.
+    let mut spans: Vec<Span> = vec![status_span];
+    if !state.filter().is_empty() || state.is_editing_filter() {
+        spans.push(Span::raw("  ·  "));
+        let fragment = if state.is_editing_filter() {
+            format!("filter: {}_", state.filter())
+        } else {
+            format!("filter: {}", state.filter())
+        };
+        let color = if state.is_editing_filter() {
+            Color::Cyan
+        } else {
+            Color::Green
+        };
+        spans.push(Span::styled(fragment, Style::default().fg(color)));
+    }
+    // Tail: shared key hints. `/` joins the keymap since
+    // d-26 made it bindable on F3.
+    spans.extend([
         Span::raw("  ·  "),
         Span::styled("q/Esc", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" quit  ·  "),
@@ -158,9 +204,11 @@ fn render_footer(frame: &mut Frame, area: Rect, status: &BrowseFetchStatus, now:
         Span::styled("enter", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" into  ·  "),
         Span::styled("←", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" up"),
+        Span::raw(" up  ·  "),
+        Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" filter"),
     ]);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn row_to_table_row(row: &BrowseRow) -> Row<'static> {
