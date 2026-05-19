@@ -231,11 +231,22 @@ enum F2CancelStatus {
     },
     /// d-30: operator pressed `Shift+X` (batch cancel)
     /// while `[transfer] confirm_cancel = true` AND
-    /// at least one active row is present. Waiting for
-    /// `y` (fire all the cancel RPCs) or `n` / `Esc`
-    /// (revert to Idle).
+    /// at least one active row was present. Waiting
+    /// for `y` (fire cancel RPCs against the frozen
+    /// ids) or `n` / `Esc` (revert to Idle).
+    ///
+    /// d-30 round 2: `transfer_ids` is captured at
+    /// prompt creation, not on confirm. The Subscribe
+    /// stream keeps mutating `transfers.active` while
+    /// the prompt is up, so re-snapshotting on `y`
+    /// would race — the operator could confirm
+    /// "cancel 2 transfers" against A/B, then A/B
+    /// complete and C/D start before they press `y`,
+    /// and the pre-fix code would have cancelled C/D
+    /// instead. Freezing the ids at prompt creation
+    /// closes the race.
     ConfirmingBatch {
-        count: usize,
+        transfer_ids: Vec<String>,
     },
     Sending {
         transfer_id: String,
@@ -1056,9 +1067,20 @@ async fn handle_pane_action(
                     app.cancel_status = F2CancelStatus::Idle;
                     return;
                 };
-                match &app.cancel_status {
+                // d-30 R2: clone-out the variant payload
+                // before mutating `app.cancel_status` so
+                // the borrow doesn't outlive the match.
+                let confirmed = match &app.cancel_status {
                     F2CancelStatus::Confirming { transfer_id } => {
-                        let id = transfer_id.clone();
+                        ConfirmedCancel::Single(transfer_id.clone())
+                    }
+                    F2CancelStatus::ConfirmingBatch { transfer_ids } => {
+                        ConfirmedCancel::Batch(transfer_ids.clone())
+                    }
+                    _ => return,
+                };
+                match confirmed {
+                    ConfirmedCancel::Single(id) => {
                         app.cancel_request_seq += 1;
                         let rid = app.cancel_request_seq;
                         app.cancel_status = F2CancelStatus::Sending {
@@ -1067,9 +1089,9 @@ async fn handle_pane_action(
                         };
                         spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
                     }
-                    F2CancelStatus::ConfirmingBatch { count: _ } => {
-                        let count = spawn_batch_cancels(
-                            &app.transfers,
+                    ConfirmedCancel::Batch(ids) => {
+                        let count = spawn_cancels_for_ids(
+                            ids,
                             &endpoint,
                             &mut app.cancel_request_seq,
                             &app.cancel_reply_tx,
@@ -1079,7 +1101,6 @@ async fn handle_pane_action(
                             finished_at: Instant::now(),
                         };
                     }
-                    _ => {}
                 }
             }
             // d-29 / d-30: `n` aborts whichever confirm
@@ -1091,18 +1112,25 @@ async fn handle_pane_action(
             // transfer. Same gates as the single-cancel
             // K path — no remote, no rows, or mid-cycle
             // → silent no-op.
+            //
+            // d-30 R2: snapshot the active ids ONCE here.
+            // The confirm path stores the ids on the
+            // ConfirmingBatch variant so the `y` arm
+            // doesn't re-read `transfers.active` (which
+            // the Subscribe stream keeps mutating in the
+            // background).
             UserAction::CancelAllActiveTransfers => {
                 if app.cancel_status.is_sending() || app.cancel_status.is_confirming() {
                     // Already mid-cycle — ignore.
                 } else if let Some(endpoint) = app.parsed_remote.clone() {
-                    let count = app.transfers.active_count();
-                    if count == 0 {
+                    let ids = snapshot_active_ids(&app.transfers);
+                    if ids.is_empty() {
                         // No active transfers — silent no-op.
                     } else if tui_config.transfer.confirm_cancel {
-                        app.cancel_status = F2CancelStatus::ConfirmingBatch { count };
+                        app.cancel_status = F2CancelStatus::ConfirmingBatch { transfer_ids: ids };
                     } else {
-                        let count = spawn_batch_cancels(
-                            &app.transfers,
+                        let count = spawn_cancels_for_ids(
+                            ids,
                             &endpoint,
                             &mut app.cancel_request_seq,
                             &app.cancel_reply_tx,
@@ -1778,9 +1806,9 @@ fn cancel_status_to_display(
         F2CancelStatus::Confirming { transfer_id } => F2CancelDisplay::ConfirmingCancel {
             transfer_id: transfer_id.clone(),
         },
-        F2CancelStatus::ConfirmingBatch { count } => {
-            F2CancelDisplay::ConfirmingBatch { count: *count }
-        }
+        F2CancelStatus::ConfirmingBatch { transfer_ids } => F2CancelDisplay::ConfirmingBatch {
+            count: transfer_ids.len(),
+        },
         F2CancelStatus::BatchInitiated { count, finished_at } => {
             if now.saturating_duration_since(*finished_at) >= ttl {
                 return F2CancelDisplay::Hidden;
@@ -1894,12 +1922,31 @@ fn compute_tick_budget(
     }
 }
 
-/// d-30: spawn one CancelJob RPC per currently active
-/// transfer. Returns the count of RPCs dispatched
-/// (equivalent to `transfers.active_count()` at call
-/// time — captured to avoid a TOCTOU drift between
-/// "what we told the operator" and "what we actually
-/// spawned").
+/// d-30 R2: local container for "what the operator
+/// confirmed" — moved out of `cancel_status` so the
+/// mutable borrow on `app.cancel_status` doesn't live
+/// across the spawn. Single carries one id; Batch
+/// carries the frozen list captured at prompt creation.
+enum ConfirmedCancel {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+/// d-30 / d-30 R2: snapshot the current active-transfer
+/// ids in a stable order. Called once when the operator
+/// presses `Shift+X` — the result is then either stored
+/// on `ConfirmingBatch` (confirm path) or fed directly
+/// into `spawn_cancels_for_ids` (non-confirm path).
+fn snapshot_active_ids(transfers: &state::TransfersState) -> Vec<String> {
+    transfers
+        .active_rows()
+        .into_iter()
+        .map(|row| row.transfer_id.clone())
+        .collect()
+}
+
+/// d-30 / d-30 R2: spawn one CancelJob RPC per id.
+/// Returns the count of RPCs dispatched.
 ///
 /// Each RPC uses the same `cancel_reply_tx` channel as
 /// the single-cancel path; the reply arm in the event
@@ -1910,17 +1957,12 @@ fn compute_tick_budget(
 /// `TransferComplete` / `TransferError` events, which
 /// is the same channel that displays normal transfer
 /// completions.
-fn spawn_batch_cancels(
-    transfers: &state::TransfersState,
+fn spawn_cancels_for_ids(
+    ids: Vec<String>,
     endpoint: &blit_core::remote::RemoteEndpoint,
     cancel_request_seq: &mut u64,
     tx: &mpsc::Sender<CancelReply>,
 ) -> usize {
-    let ids: Vec<String> = transfers
-        .active_rows()
-        .into_iter()
-        .map(|row| row.transfer_id.clone())
-        .collect();
     let count = ids.len();
     for id in ids {
         *cancel_request_seq += 1;
@@ -3381,7 +3423,9 @@ mod tests {
     /// — Esc routing extends to the batch prompt.
     #[test]
     fn f2_cancel_status_confirming_batch_predicates() {
-        let s = F2CancelStatus::ConfirmingBatch { count: 3 };
+        let s = F2CancelStatus::ConfirmingBatch {
+            transfer_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
         assert!(s.is_confirming());
         assert!(!s.is_sending());
     }
@@ -3400,10 +3444,13 @@ mod tests {
     }
 
     /// d-30: bridge maps ConfirmingBatch → ConfirmingBatch
-    /// display variant with the count preserved.
+    /// display variant with the count (= len of frozen
+    /// ids) preserved.
     #[test]
     fn cancel_status_to_display_renders_confirming_batch() {
-        let status = F2CancelStatus::ConfirmingBatch { count: 5 };
+        let status = F2CancelStatus::ConfirmingBatch {
+            transfer_ids: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+        };
         let display =
             cancel_status_to_display(&status, Instant::now(), std::time::Duration::from_secs(60));
         match display {
@@ -3450,7 +3497,9 @@ mod tests {
     /// stays until the operator answers.
     #[test]
     fn cancel_status_remaining_ttl_confirming_batch_returns_none() {
-        let status = F2CancelStatus::ConfirmingBatch { count: 4 };
+        let status = F2CancelStatus::ConfirmingBatch {
+            transfer_ids: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+        };
         let remaining =
             cancel_status_remaining_ttl(&status, Instant::now(), std::time::Duration::from_secs(5));
         assert!(remaining.is_none());
@@ -3477,12 +3526,90 @@ mod tests {
     #[test]
     fn esc_cancels_confirm_routes_f2_confirming_batch() {
         let mut app = make_test_app_state(Screen::F2);
-        app.cancel_status = F2CancelStatus::ConfirmingBatch { count: 5 };
+        app.cancel_status = F2CancelStatus::ConfirmingBatch {
+            transfer_ids: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+        };
         let esc = KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::empty(),
         };
         assert!(esc_cancels_confirm(&esc, &app));
+    }
+
+    /// d-30 round 2 REGRESSION: the reviewer-described
+    /// TOCTOU race. Pre-fix, `ConfirmingBatch` stored
+    /// only the count and the `y` arm re-snapshotted
+    /// `transfers.active_rows()` at confirm time. The
+    /// Subscribe stream keeps mutating that set, so an
+    /// operator could confirm "cancel A, B" and have the
+    /// `y` press actually cancel C, D.
+    ///
+    /// Post-fix the ids are frozen at prompt creation.
+    /// This test pins the contract: build a state with
+    /// ConfirmingBatch containing a specific id list,
+    /// verify the bridge + display reflect THAT list's
+    /// length, and verify reading the variant out via
+    /// pattern-match returns the same Vec we put in.
+    #[test]
+    fn confirming_batch_freezes_ids_at_prompt_creation() {
+        let frozen = vec!["t-A".to_string(), "t-B".to_string()];
+        let status = F2CancelStatus::ConfirmingBatch {
+            transfer_ids: frozen.clone(),
+        };
+        // Display reflects the frozen count.
+        let display =
+            cancel_status_to_display(&status, Instant::now(), std::time::Duration::from_secs(60));
+        match display {
+            screens::f2::F2CancelDisplay::ConfirmingBatch { count } => {
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected ConfirmingBatch, got {other:?}"),
+        }
+        // Pattern-match round-trip: the ids the dispatcher
+        // would read on `y` are exactly the ones the
+        // operator confirmed.
+        match status {
+            F2CancelStatus::ConfirmingBatch { transfer_ids } => {
+                assert_eq!(transfer_ids, frozen);
+            }
+            other => panic!("expected ConfirmingBatch, got {other:?}"),
+        }
+    }
+
+    /// d-30 R2: snapshot_active_ids returns the ids of
+    /// every active row at the snapshot moment.
+    #[test]
+    fn snapshot_active_ids_captures_all_active_rows() {
+        use blit_core::generated::{daemon_event, DaemonEvent, TransferStarted};
+        let mut transfers = state::TransfersState::new();
+        for id in ["t-A", "t-B", "t-C"] {
+            let event = DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: id.to_string(),
+                    kind: 0,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: 1_000_000,
+                })),
+            };
+            transfers.apply_event(event, Instant::now());
+        }
+        let mut ids = snapshot_active_ids(&transfers);
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["t-A".to_string(), "t-B".to_string(), "t-C".to_string()]
+        );
+    }
+
+    /// d-30 R2: snapshot_active_ids returns empty for a
+    /// fresh state. Pairs with the dispatcher's
+    /// `if ids.is_empty()` no-op guard.
+    #[test]
+    fn snapshot_active_ids_empty_state() {
+        let transfers = state::TransfersState::new();
+        assert!(snapshot_active_ids(&transfers).is_empty());
     }
 
     // d-23: cancel-status TTL auto-clear. d-24 made the

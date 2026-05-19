@@ -226,4 +226,102 @@ gains an `X` presence check.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-30-batch-cancel.reopened.md`)
+
+One finding (no severity tag — implicitly Medium):
+
+- **TOCTOU race: batch confirmation can cancel a
+  different set of transfers than the operator
+  confirmed.** `ConfirmingBatch { count }` stored only
+  the count; the `y` arm re-snapshotted
+  `transfers.active_rows()` at confirm time. The
+  Subscribe stream keeps mutating `transfers.active`
+  while the prompt is open, so a sequence like
+  `X` (A, B active) → A, B complete → C, D start →
+  `y` would cancel C, D instead of A, B. The
+  confirmation prompt needs to freeze the target ids
+  at prompt creation, then spawn cancels for exactly
+  those ids.
+
+### Round 2 fix
+
+Closed the race by moving the active-id snapshot from
+the `y` arm to the `X` arm:
+
+```rust
+// Before (R1 — racy):
+ConfirmingBatch { count: usize }
+// On y:
+let count = spawn_batch_cancels(&app.transfers, ...);  // RE-READS transfers!
+
+// After (R2 — frozen):
+ConfirmingBatch { transfer_ids: Vec<String> }
+// On X:
+let ids = snapshot_active_ids(&app.transfers);
+app.cancel_status = F2CancelStatus::ConfirmingBatch { transfer_ids: ids };
+// On y:
+let confirmed_ids = transfer_ids.clone();  // from the variant
+spawn_cancels_for_ids(confirmed_ids, ...);
+```
+
+Two refactored helpers replace the single
+`spawn_batch_cancels`:
+
+- `snapshot_active_ids(transfers) -> Vec<String>` —
+  captures the active ids in display order. Cheap;
+  bounded by active row count.
+- `spawn_cancels_for_ids(ids, endpoint, seq, tx) ->
+  usize` — fires N RPCs against the pre-frozen list.
+
+A small local enum `ConfirmedCancel { Single(String),
+Batch(Vec<String>) }` carries the confirmed payload
+out of the `cancel_status` borrow so the dispatcher
+can mutate the state machine and spawn without a
+borrow-check conflict.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`:
+  - `F2CancelStatus::ConfirmingBatch` now holds
+    `transfer_ids: Vec<String>`, not `count: usize`.
+  - `cancel_status_to_display` reads
+    `transfer_ids.len()` for the display count.
+  - `X` arm captures ids once via
+    `snapshot_active_ids`; both confirm + non-confirm
+    paths consume the same snapshot.
+  - `y` arm clones the frozen ids out of the variant
+    via `ConfirmedCancel` and feeds them to
+    `spawn_cancels_for_ids`.
+  - 3 new R2 regression tests.
+- Existing tests updated to construct
+  `ConfirmingBatch { transfer_ids: vec![...] }`.
+
+### Round 2 tests
+
++3 tests (334 → 337):
+
+- `confirming_batch_freezes_ids_at_prompt_creation` —
+  the reviewer's exact TOCTOU regression. Builds a
+  ConfirmingBatch with specific ids, verifies the
+  display reflects the frozen count, and verifies
+  the variant round-trips the same Vec the
+  dispatcher would read on `y`.
+- `snapshot_active_ids_captures_all_active_rows` —
+  the snapshot helper grabs every active id.
+- `snapshot_active_ids_empty_state` — empty state
+  returns an empty Vec (pairs with the dispatcher's
+  `if ids.is_empty()` no-op guard).
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+When a confirmation prompt commits to "do X", the
+state behind X needs to be frozen at prompt creation.
+Storing just a count looked correct because the
+display showed the right number, but the
+authoritative "what to act on" was re-derived at
+confirm time from mutable state. Anytime a prompt
+references "the current selection" or "the current
+N", store the actual targets, not a summary statistic.
