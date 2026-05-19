@@ -236,4 +236,93 @@ the global key-presence check.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-26-f3-filter.reopened.md`)
+
+One Medium-severity finding:
+
+- **Zero-match filters leave a hidden row actionable.**
+  `push_filter_char`'s fallback (`selected = 0` when
+  `first_matching_row()` returns None) put the cursor
+  on a hidden row that `selected_row()` and `descend()`
+  still happily returned/walked into. Reproduction:
+  `/zz` → empty table → Enter → descends into raw row
+  0 even though the operator's view was empty. The
+  Stats block also displayed that hidden row's name as
+  "Selected", contradicting `0/N entries`.
+
+### Round 2 fix
+
+Made the cursor-read API filter-aware so the renderer
+and the dispatcher consistently see "nothing selected"
+during a zero-match filter:
+
+```rust
+pub fn selected_row(&self) -> Option<&BrowseRow> {
+    let row = self.rows.get(self.selected)?;
+    if self.row_matches(row) { Some(row) } else { None }
+}
+
+pub fn descend(&mut self) -> Option<&BrowseView> {
+    let row = self.rows.get(self.selected)?;
+    if !self.row_matches(row) {
+        return None;
+    }
+    /* ...rest unchanged... */
+}
+```
+
+This propagates correctly to the call sites the
+reviewer flagged:
+- `render_stats` already branches on
+  `state.selected_row()`; the `None` arm renders the
+  `(no entries)` line, which is the right thing to
+  show under a zero-match filter.
+- The F3 dispatcher's `app.browse.descend()` becomes a
+  no-op — no view change, no stale row consumed.
+
+Left `select_next` / `select_prev` alone — they
+already no-op'd on a zero-match filter (no row to
+advance to), and the post-fix `selected_row()` makes
+the empty-cursor state honest.
+
+The `selected = 0` fallback in
+`push_filter_char` / `pop_filter_char` / `cancel_filter`
+stays as the defensive "where else would we put the
+cursor" placeholder, but now nothing reads from that
+placeholder when the filter actually matches nothing.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/browse.rs`:
+  - `selected_row()` filter-aware.
+  - `descend()` filter-aware (early return on hidden
+    row).
+  - 4 new R2 regression tests.
+
+### Round 2 tests
+
++4 tests (299 → 303):
+
+- `selected_row_is_none_when_filter_matches_nothing` —
+  pins the Stats-block symptom directly.
+- `descend_no_ops_when_filter_matches_nothing` — pins
+  the dispatcher symptom directly.
+- `zero_match_then_commit_then_enter_is_inert` — the
+  reviewer's exact reproduction (`/zz` Enter Enter).
+- `filter_tightening_to_partial_match_still_advances_cursor`
+  — happy-path companion: the R2 fix didn't regress
+  the case where the filter still has matches.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+Two parallel cursor-read paths (raw `selected_row()` /
+`descend()` vs. filtered `visible_selected_position()`)
+diverged on the edge case. Anytime there's an active
+filter, every cursor-consuming API needs to either
+honor the filter or document that it intentionally
+doesn't. The fix here was to make the filter the
+single source of truth for "what's the cursor on" —
+the unfiltered fallback exists only as a placeholder.

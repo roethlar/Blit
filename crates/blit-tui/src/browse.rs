@@ -152,8 +152,22 @@ impl BrowseState {
         self.selected
     }
 
+    /// The row the cursor is on, IF it's currently visible
+    /// under the active filter. Returns `None` when the
+    /// filter matches no rows (cursor sits on hidden row 0
+    /// as a defensive fallback) or — more generally — when
+    /// `self.selected` somehow points at a non-matching
+    /// row. d-26 round-2 fix: pre-fix this returned the raw
+    /// row 0, which let the Stats block display a hidden
+    /// row as "Selected" and let `descend` step into it on
+    /// a zero-match filter.
     pub fn selected_row(&self) -> Option<&BrowseRow> {
-        self.rows.get(self.selected)
+        let row = self.rows.get(self.selected)?;
+        if self.row_matches(row) {
+            Some(row)
+        } else {
+            None
+        }
     }
 
     pub fn status(&self) -> &BrowseFetchStatus {
@@ -274,8 +288,17 @@ impl BrowseState {
     /// Descend into the selected row. Module → enter its
     /// root; Directory → push onto path. No-op on File.
     /// Returns the new view if navigation happened.
+    ///
+    /// d-26 round-2 fix: no-op when the cursor is on a
+    /// row that's hidden by the active filter — otherwise
+    /// `/zz` + Enter would step into raw row 0 even
+    /// though the table is empty from the operator's
+    /// perspective.
     pub fn descend(&mut self) -> Option<&BrowseView> {
         let row = self.rows.get(self.selected)?;
+        if !self.row_matches(row) {
+            return None;
+        }
         match &row.kind {
             BrowseRowKind::Module { .. } => {
                 let name = row.name.clone();
@@ -967,5 +990,91 @@ mod tests {
         // No matching rows → select_next walks to end
         // without finding a match → cursor unchanged.
         assert_eq!(state.selected_index(), 0);
+    }
+
+    // d-26 round 2: zero-match filter must not surface a
+    // hidden row as selected / actionable.
+
+    /// Reviewer-flagged regression: `/zz` matches nothing,
+    /// `selected = 0` falls back to a hidden row. The
+    /// renderer's "Selected: foo" line and the
+    /// dispatcher's `descend` both used to read that
+    /// hidden row. Post-fix: `selected_row()` returns
+    /// `None` and `descend()` no-ops.
+    #[test]
+    fn selected_row_is_none_when_filter_matches_nothing() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z'); // matches none of home/backups/photos/scratch
+        assert!(state.visible_indices().is_empty());
+        assert!(
+            state.selected_row().is_none(),
+            "selected_row must hide row 0 when the filter matches no rows; \
+             pre-fix this returned the raw row 0 and the Stats block lied \
+             about what was selected"
+        );
+    }
+
+    /// Reviewer-flagged regression: pressing Enter / → / l
+    /// while the filter matches zero rows used to step
+    /// into raw row 0. Post-fix: `descend` no-ops, view
+    /// is unchanged.
+    #[test]
+    fn descend_no_ops_when_filter_matches_nothing() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z');
+        let view_before = state.view().clone();
+        let result = state.descend();
+        assert!(result.is_none(), "descend on a hidden row must return None");
+        // View unchanged — operator stayed in Modules.
+        match (state.view(), &view_before) {
+            (BrowseView::Modules, BrowseView::Modules) => {}
+            other => panic!("descend leaked into {:?}", other.0),
+        }
+    }
+
+    /// End-to-end scenario the reviewer described:
+    /// `/zz` + commit + descend. Pre-fix the operator
+    /// would silently step into a hidden module; post-fix
+    /// everything is inert.
+    #[test]
+    fn zero_match_then_commit_then_enter_is_inert() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z');
+        state.push_filter_char('z');
+        state.commit_filter(); // Enter while editing
+        assert_eq!(state.filter(), "zz");
+        assert!(!state.is_editing_filter());
+        // Enter again (now in nav mode, dispatcher calls descend).
+        let view_before = state.view().clone();
+        let result = state.descend();
+        assert!(result.is_none());
+        assert!(state.selected_row().is_none());
+        assert!(matches!(state.view(), BrowseView::Modules));
+        // And the original view fields are intact.
+        assert!(matches!(view_before, BrowseView::Modules));
+    }
+
+    /// A filter that hides the previously-selected row but
+    /// matches others must STILL move the cursor — push
+    /// already snaps to first_matching_row. This pins the
+    /// non-pathological case so the round-2 fix didn't
+    /// regress it.
+    #[test]
+    fn filter_tightening_to_partial_match_still_advances_cursor() {
+        let mut state = populated_state();
+        // Cursor starts on "home" (idx 0).
+        state.begin_edit_filter();
+        // "ph" matches only "photos" — push_filter_char
+        // snaps cursor to first_matching_row.
+        state.push_filter_char('p');
+        state.push_filter_char('h');
+        assert!(
+            state.selected_row().is_some(),
+            "matching row must be visible"
+        );
+        assert_eq!(state.selected_row().unwrap().name, "photos");
     }
 }
