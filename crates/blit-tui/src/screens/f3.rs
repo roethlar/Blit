@@ -6,8 +6,9 @@
 //! emits widgets. Navigation + RPC fetching live in
 //! `main::run_f3_event_loop`.
 //!
-//! Layout (d-26 polish — `/` filter fragment in footer +
-//! visible-only rows in the table):
+//! Layout (d-26 / d-28 polish — `/` filter fragment in
+//! footer, visible-only rows in the table, differentiated
+//! empty-state message in Stats):
 //!
 //! ```text
 //! ┌── header (1 line) ───────────────────────────────┐
@@ -19,6 +20,8 @@
 //! │ Selected: photos/ · <kind> · <size>              │
 //! │ View: <breadcrumb> · <V>/<N> entries (when       │
 //! │       filtered) or <N> entries (no filter)       │
+//! │ — or, when nothing is selectable —               │
+//! │ (no entries) / (no rows match filter) [d-28]     │
 //! ├── footer (1 line) ───────────────────────────────┤
 //! │ status · [filter: foo │ filter: foo_] · q quit … │
 //! └──────────────────────────────────────────────────┘
@@ -29,6 +32,14 @@
 //! - `filter: foo_` (cyan, while editing — trailing `_`
 //!   marks the cursor position)
 //! - `filter: foo` (green, applied + not editing)
+//!
+//! d-28: when the Stats block has nothing to highlight
+//! (cursor sits on a hidden row or rows are empty), the
+//! message distinguishes the two reasons:
+//! - `(no rows match filter)` — rows loaded, filter
+//!   excludes everything. Hint to relax the filter.
+//! - `(no entries)` — empty rowset (pre-fetch or genuinely
+//!   empty module/directory).
 
 use crate::browse::{BrowseFetchStatus, BrowseRow, BrowseRowKind, BrowseState, BrowseView};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -152,7 +163,11 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState) {
             Line::from(format!("View: {} · {}", state.breadcrumb(), count_fragment,)),
         ],
         None => vec![Line::from(Span::styled(
-            "(no entries)",
+            // d-28: differentiated empty-state message —
+            // `(no rows match filter)` when a non-empty
+            // filter excludes every loaded row, `(no
+            // entries)` otherwise.
+            state.empty_state_message(),
             Style::default().fg(Color::DarkGray),
         ))],
     };

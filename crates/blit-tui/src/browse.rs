@@ -471,6 +471,24 @@ impl BrowseState {
             .collect()
     }
 
+    /// d-28: message the Stats block renders when nothing
+    /// is "selected" from the filter-aware cursor's
+    /// perspective. Distinguishes the two empty-cursor
+    /// reasons so the operator knows whether to wait for
+    /// data or relax the filter:
+    ///
+    /// - `(no rows match filter)` when rows are loaded
+    ///   but the active filter excludes everything.
+    /// - `(no entries)` for every other empty state
+    ///   (fresh pre-fetch state, empty module list, etc.).
+    pub fn empty_state_message(&self) -> &'static str {
+        if !self.rows.is_empty() && !self.filter.is_empty() && self.visible_indices().is_empty() {
+            "(no rows match filter)"
+        } else {
+            "(no entries)"
+        }
+    }
+
     /// Position of `self.selected` within `visible_indices()`.
     /// Renderer feeds this into `TableState::with_selected`.
     /// Returns `None` if the cursor isn't on a visible
@@ -1254,6 +1272,59 @@ mod tests {
         // docs, photos (dirs alphabetical), then afile.txt,
         // zfile.txt (files alphabetical).
         assert_eq!(names, vec!["docs", "photos", "afile.txt", "zfile.txt"]);
+    }
+
+    // d-28: differentiated empty-state message.
+
+    /// Fresh state — no rows, no filter. Renderer falls
+    /// through to the standard `(no entries)` line.
+    #[test]
+    fn empty_state_message_when_no_rows_returns_no_entries() {
+        let state = BrowseState::new();
+        assert_eq!(state.empty_state_message(), "(no entries)");
+    }
+
+    /// Populated rows, non-empty filter that matches
+    /// everything — `empty_state_message` would be wrong
+    /// to even ask in this case (selected_row returns
+    /// Some), but the helper's contract should still be
+    /// honest: it's not a "no rows match filter" state.
+    #[test]
+    fn empty_state_message_when_filter_has_matches_returns_no_entries() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('p'); // matches backups + photos
+        assert!(!state.visible_indices().is_empty());
+        assert_eq!(state.empty_state_message(), "(no entries)");
+    }
+
+    /// d-28 headline: populated rows + filter that excludes
+    /// everything → operator-facing hint that the filter,
+    /// not the data, is what's hiding the view.
+    #[test]
+    fn empty_state_message_when_filter_matches_nothing_returns_filter_hint() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z'); // matches nothing in populated_state
+        assert!(state.visible_indices().is_empty());
+        assert_eq!(state.empty_state_message(), "(no rows match filter)");
+    }
+
+    /// Edge case: no rows AND non-empty filter. The
+    /// filter can't be "the reason" the view is empty —
+    /// there were no rows to filter in the first place.
+    /// Fall through to `(no entries)`.
+    #[test]
+    fn empty_state_message_when_no_rows_with_filter_returns_no_entries() {
+        let mut state = BrowseState::new();
+        // No fetch — rows empty. Manually start the
+        // filter to simulate the operator typing into an
+        // unloaded view.
+        state.begin_edit_filter();
+        state.push_filter_char('x');
+        assert!(state.rows().is_empty());
+        assert!(!state.filter().is_empty());
+        assert_eq!(state.empty_state_message(), "(no entries)");
     }
 
     /// `sort_priority` directly: pins the numeric ranks
