@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-36-hot-reload-config | Feature | Ctrl+R hot-reload of tui.toml (keeps current on parse error) | `[~]` | `phase5/a1` | `27a8005` |
 
 ## Open findings
 
