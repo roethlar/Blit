@@ -35,6 +35,15 @@
 //! / fresh fetch result) clears the filter so the
 //! operator starts each new directory with full
 //! visibility.
+//!
+//! d-27: rows are sorted by `(kind_priority, name)` —
+//! directories before files, then alphabetical
+//! (case-insensitive) within each kind. The daemon
+//! holds modules in a `HashMap` and `ls.rs` sorts by raw
+//! `PathBuf`, so without client-side sorting F3 could
+//! shuffle modules between reconnects and mix dirs +
+//! files in arbitrary `PathBuf` order. Sorting here
+//! gives a stable, scannable display.
 
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
@@ -183,6 +192,14 @@ impl BrowseState {
     /// previous row set, so the active filter no longer
     /// reflects what they typed for. Reset to empty +
     /// non-editing so the new view starts visible.
+    ///
+    /// d-27: rows are sorted case-insensitively by name.
+    /// The daemon stores modules in a `HashMap`, so
+    /// `list_modules` returns rows in non-deterministic
+    /// hash order — pre-d-27 the F3 module list shuffled
+    /// across reconnects. Sorting client-side gives the
+    /// operator a stable visual scan order without any
+    /// daemon-side change.
     pub fn apply_modules(&mut self, modules: Vec<Module>, fetched_at: Instant) {
         if !matches!(self.view, BrowseView::Modules) {
             // View moved away while the fetch was in flight
@@ -200,6 +217,7 @@ impl BrowseState {
                 mtime_seconds: 0,
             })
             .collect();
+        sort_rows(&mut self.rows);
         self.selected = 0;
         self.status = BrowseFetchStatus::Loaded { fetched_at };
         self.reset_filter();
@@ -233,6 +251,11 @@ impl BrowseState {
                 mtime_seconds: e.mtime_seconds,
             })
             .collect();
+        // d-27: same sort as `apply_modules`. Dirs sort
+        // before files via `sort_priority`, then
+        // alphabetical within each group — matches
+        // file-manager conventions and `ls --group-directories-first`.
+        sort_rows(&mut self.rows);
         self.selected = 0;
         self.status = BrowseFetchStatus::Loaded { fetched_at };
         // d-26: fresh fetch → drop the filter, same
@@ -491,6 +514,36 @@ impl BrowseState {
     }
 }
 
+/// d-27: stable sort key for browse rows. Directories
+/// sort before files; within each kind, alphabetical
+/// by `name` (case-insensitive). Module rows (top-level
+/// view) all hash to the same priority — only the name
+/// matters there.
+///
+/// Public-within-the-crate so tests can probe the
+/// helper directly. `sort_by_cached_key` builds the
+/// composite key once per row, avoiding the
+/// `to_lowercase()` allocation on every comparator
+/// call.
+fn sort_rows(rows: &mut [BrowseRow]) {
+    rows.sort_by_cached_key(|row| (sort_priority(&row.kind), row.name.to_lowercase()));
+}
+
+/// Sort-priority companion to [`sort_rows`]. Lower
+/// number = sorted earlier:
+///
+/// - 0: modules (top-level view; all rows share this
+///   priority so it's effectively a name-only sort).
+/// - 1: directories.
+/// - 2: files.
+fn sort_priority(kind: &BrowseRowKind) -> u8 {
+    match kind {
+        BrowseRowKind::Module { .. } => 0,
+        BrowseRowKind::Directory => 1,
+        BrowseRowKind::File => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,14 +583,17 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(state.rows().len(), 2);
-        assert_eq!(state.rows()[0].name, "home");
+        // d-27: rows are now sorted alphabetically — input
+        // [home, backups] → display [backups, home].
+        assert_eq!(state.rows()[0].name, "backups");
+        assert_eq!(state.rows()[1].name, "home");
         assert!(matches!(
             state.rows()[0].kind,
-            BrowseRowKind::Module { read_only: false }
+            BrowseRowKind::Module { read_only: true }
         ));
         assert!(matches!(
             state.rows()[1].kind,
-            BrowseRowKind::Module { read_only: true }
+            BrowseRowKind::Module { read_only: false }
         ));
         assert_eq!(state.selected_index(), 0);
     }
@@ -853,9 +909,14 @@ mod tests {
     fn visible_indices_filters_by_substring() {
         let mut state = populated_state();
         state.begin_edit_filter();
-        state.push_filter_char('s'); // backups, photos, scratch
+        state.push_filter_char('s');
+        // d-27: populated_state() input is [home, backups,
+        // photos, scratch] → sorted to [backups, home,
+        // photos, scratch]. 's' matches backups (raw 0),
+        // photos (raw 2), scratch (raw 3) — "home" has no
+        // 's'. Indices reflect the sorted layout.
         let indices = state.visible_indices();
-        assert_eq!(indices, vec![1, 2, 3]);
+        assert_eq!(indices, vec![0, 2, 3]);
     }
 
     #[test]
@@ -922,7 +983,8 @@ mod tests {
         state.begin_edit_filter();
         state.push_filter_char('p');
         state.commit_filter();
-        // Cursor is on "photos"; descend into it.
+        // Cursor is on first 'p' match ("backups" — d-27
+        // sort order). Descend into it.
         state.descend();
         assert_eq!(state.filter(), "");
         assert!(!state.is_editing_filter());
@@ -931,10 +993,12 @@ mod tests {
     #[test]
     fn ascend_clears_filter() {
         let mut state = populated_state();
-        // Set up nested view first.
-        state.descend(); // → Module { home, [] }
+        // d-27 sort: cursor at row 0 = "backups". Descend
+        // sets view to Module { backups, [] }; the
+        // apply_listing args must match.
+        state.descend();
         state.apply_listing(
-            "home",
+            "backups",
             &[],
             vec![dir_entry("photos", true), dir_entry("readme.txt", false)],
             Instant::now(),
@@ -965,14 +1029,20 @@ mod tests {
     #[test]
     fn apply_listing_clears_stale_filter() {
         let mut state = populated_state();
-        state.descend(); // → home
-        state.apply_listing("home", &[], vec![dir_entry("photos", true)], Instant::now());
+        // d-27 sort: row 0 = "backups". Descend into it.
+        state.descend();
+        state.apply_listing(
+            "backups",
+            &[],
+            vec![dir_entry("photos", true)],
+            Instant::now(),
+        );
         state.begin_edit_filter();
         state.push_filter_char('p');
         // Another listing lands (e.g. operator pressed
         // `r` to refresh) — filter must reset.
         state.apply_listing(
-            "home",
+            "backups",
             &[],
             vec![dir_entry("photos", true), dir_entry("readme.txt", false)],
             Instant::now(),
@@ -1076,5 +1146,108 @@ mod tests {
             "matching row must be visible"
         );
         assert_eq!(state.selected_row().unwrap().name, "photos");
+    }
+
+    // d-27: stable sort — alphabetical, dirs-first.
+
+    /// Input is reverse-alphabetical; sort restores
+    /// ascending order. Pins the lexicographic case.
+    #[test]
+    fn apply_modules_sorts_alphabetically() {
+        let mut state = BrowseState::new();
+        state.apply_modules(
+            vec![
+                module("zeta", false),
+                module("alpha", false),
+                module("mu", false),
+            ],
+            Instant::now(),
+        );
+        let names: Vec<&str> = state.rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+    }
+
+    /// Sort is case-insensitive — "Backups" and "alpha"
+    /// land where their lowercased forms order them, not
+    /// where ASCII-uppercase-first would put them
+    /// ("Backups" < "alpha" by raw bytes).
+    #[test]
+    fn apply_modules_sort_is_case_insensitive() {
+        let mut state = BrowseState::new();
+        state.apply_modules(
+            vec![
+                module("Backups", false),
+                module("alpha", false),
+                module("Cache", false),
+            ],
+            Instant::now(),
+        );
+        let names: Vec<&str> = state.rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "Backups", "Cache"]);
+    }
+
+    /// Daemon-side `modules: HashMap` returns rows in
+    /// hash order — non-deterministic across reconnects.
+    /// d-27's client-side sort gives the operator a
+    /// stable display regardless of fetch order.
+    #[test]
+    fn apply_modules_sort_is_deterministic_regardless_of_input_order() {
+        let input_a = vec![
+            module("home", false),
+            module("backups", true),
+            module("photos", false),
+        ];
+        let input_b = vec![
+            module("photos", false),
+            module("home", false),
+            module("backups", true),
+        ];
+        let mut state_a = BrowseState::new();
+        state_a.apply_modules(input_a, Instant::now());
+        let mut state_b = BrowseState::new();
+        state_b.apply_modules(input_b, Instant::now());
+        let names_a: Vec<&str> = state_a.rows().iter().map(|r| r.name.as_str()).collect();
+        let names_b: Vec<&str> = state_b.rows().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names_a, names_b);
+        assert_eq!(names_a, vec!["backups", "home", "photos"]);
+    }
+
+    /// Directory listings: dirs sort before files, then
+    /// alphabetical within each group. Matches `ls
+    /// --group-directories-first` and file-manager
+    /// conventions.
+    #[test]
+    fn apply_listing_sorts_dirs_before_files() {
+        let mut state = BrowseState::new();
+        state.apply_modules(vec![module("home", false)], Instant::now());
+        state.descend();
+        state.apply_listing(
+            "home",
+            &[],
+            vec![
+                dir_entry("zfile.txt", false),
+                dir_entry("photos", true),
+                dir_entry("afile.txt", false),
+                dir_entry("docs", true),
+            ],
+            Instant::now(),
+        );
+        let names: Vec<&str> = state.rows().iter().map(|r| r.name.as_str()).collect();
+        // docs, photos (dirs alphabetical), then afile.txt,
+        // zfile.txt (files alphabetical).
+        assert_eq!(names, vec!["docs", "photos", "afile.txt", "zfile.txt"]);
+    }
+
+    /// `sort_priority` directly: pins the numeric ranks
+    /// that drive the directory-first invariant.
+    #[test]
+    fn sort_priority_matrix() {
+        assert_eq!(
+            sort_priority(&BrowseRowKind::Module { read_only: false }),
+            0
+        );
+        assert_eq!(sort_priority(&BrowseRowKind::Module { read_only: true }), 0);
+        assert_eq!(sort_priority(&BrowseRowKind::Directory), 1);
+        assert_eq!(sort_priority(&BrowseRowKind::File), 2);
     }
 }
