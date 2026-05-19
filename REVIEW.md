@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-31-help-scroll | Feature | Scrollable help overlay (j/k) for small terminals | `[~]` | `phase5/a1` | `13459b4` |
 
 ## Open findings
 
