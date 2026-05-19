@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-33-f3-pull-source | Feature | F3 transfer-from-cursor slice 1 — pull-source spec preview in Stats | `[ ]` | `phase5/a1` | `1138800` |
+| d-33-f3-pull-source (round 2) | Feature | Bracketed IPv6 display authority for the pull-source preview | `[~]` | `phase5/a1` | `7baf2a4` |
 
 ## Open findings
 
