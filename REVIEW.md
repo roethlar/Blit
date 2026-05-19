@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-35-f3-pull-execute | Feature | F3 transfer slice 3 — pull destination prompt + execution (completes feature) | `[ ]` | `phase5/a1` | `eab7b36` |
+| d-35-f3-pull-execute (round 2) | Feature | F3 pull dest resolved via resolve_destination (rsync-style nesting) | `[~]` | `phase5/a1` | `beb5d9e` |
 
 ## Open findings
 
