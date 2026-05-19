@@ -155,4 +155,90 @@ prompt; bubbles through for F-keys / `?` / Ctrl-c.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-35-f3-pull-execute.reopened.md`)
+
+One finding:
+
+- **The F3 dest skipped `resolve_destination`.** d-35
+  round 1 passed the raw typed path straight to
+  `PullSyncExecution.dest_root`. But `run_pull_sync`
+  treats `dest_root` as already-resolved — a single-file
+  pull expects the final FILE path, and a directory pull
+  into an existing local dir must nest under the source
+  basename. Without the CLI's `resolve_destination`
+  step: "pull a file into an existing dir" tried to
+  create the dir itself as the output file, and "pull a
+  dir into an existing dir" merged its contents instead
+  of nesting. The semantics are pinned by the CLI's
+  `remote_pull_subpath.rs` tests.
+
+### Round 2 fix
+
+`begin_run` now applies `resolve_destination` (the same
+`blit_app::transfers::resolution` entry the CLI uses)
+before producing the `PullLaunch.dest_root`:
+
+```rust
+let raw_source = source.display();
+let resolved = resolve_destination(
+    &raw_source,
+    &raw_dest,
+    &Endpoint::Remote(source.clone()),
+    Endpoint::Local(PathBuf::from(&raw_dest)),
+);
+let dest_root = match resolved {
+    Endpoint::Local(p) => p,
+    Endpoint::Remote(_) => PathBuf::from(&raw_dest), // unreachable: Local stays Local
+};
+```
+
+Semantics now match the CLI:
+- non-container dest (no trailing slash, doesn't exist)
+  → used as-is (exact target / rename);
+- trailing-slash or existing-dir dest → nest under the
+  source basename (`dir` → `dest/dir`, `file.txt` →
+  `dest/file.txt`).
+
+The d-34 source `display()` drops the trailing slash for
+directories, so a dir pull is always "the dir itself"
+(non-contents) → nests under basename, never merges.
+
+The existing begin_run tests use non-container dests
+(non-existent, no trailing slash), so they're unchanged.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/f3pull.rs`:
+  - `begin_run` resolves the dest via
+    `resolve_destination`.
+  - Imports `blit_app::endpoints::Endpoint` +
+    `resolution::resolve_destination`.
+  - 5 new resolution tests.
+
+### Round 2 tests
+
++5 tests (376 → 381):
+
+- `resolve_non_container_dest_used_as_is`.
+- `resolve_trailing_slash_dest_nests_under_basename` —
+  dir `2024` into `/x/` → `/x/2024`.
+- `resolve_file_into_container_appends_filename` —
+  `readme.txt` into `/x/` → `/x/readme.txt` (the final
+  file path).
+- `resolve_existing_dir_dest_nests_under_basename` —
+  uses a real tempdir; dir nests under basename.
+- `resolve_file_into_existing_dir_appends_filename` —
+  tempdir; file → `<dir>/readme.txt`.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+A library entry point that documents "treats this arg as
+already resolved" means the caller owns the resolution.
+The CLI and TUI are now both callers of
+`run_pull_sync`; both must run `resolve_destination`
+first. Reusing a shared execution function doesn't mean
+reusing only the function — it means reusing the whole
+call contract, pre-steps included.

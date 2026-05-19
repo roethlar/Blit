@@ -27,6 +27,8 @@
 //!    state (guarded by `request_id` so a stale reply from
 //!    a superseded run is dropped).
 
+use blit_app::endpoints::Endpoint;
+use blit_app::transfers::resolution::resolve_destination;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use std::path::PathBuf;
 
@@ -170,11 +172,35 @@ impl F3PullState {
             self.status = F3PullStatus::EnteringDest { source, dest };
             return None;
         }
+        let raw_dest = dest.trim().to_string();
+        // d-35 round 2: apply the same rsync-style
+        // destination resolution the CLI runs before a
+        // pull (`resolve_destination`). `run_pull_sync`
+        // treats `dest_root` as already-resolved — a
+        // single-file pull expects the final FILE path,
+        // and a directory pull into an existing local dir
+        // must nest under the source basename rather than
+        // merge. Skipping this (round 1) made
+        // "pull file into existing dir" try to create the
+        // dir itself as the output file, and
+        // "pull dir into existing dir" merge contents.
+        let raw_source = source.display();
+        let resolved = resolve_destination(
+            &raw_source,
+            &raw_dest,
+            &Endpoint::Remote(source.clone()),
+            Endpoint::Local(PathBuf::from(&raw_dest)),
+        );
+        let dest_root = match resolved {
+            Endpoint::Local(p) => p,
+            // resolve_destination preserves the dst
+            // variant; a Local dst can't become Remote.
+            Endpoint::Remote(_) => PathBuf::from(&raw_dest),
+        };
         self.request_seq += 1;
         let request_id = self.request_seq;
-        let dest_root = PathBuf::from(dest.trim());
         self.status = F3PullStatus::Running {
-            dest: dest.trim().to_string(),
+            dest: raw_dest,
             request_id,
         };
         Some(PullLaunch {
@@ -408,5 +434,69 @@ mod tests {
         // A second begin while running must not reset.
         s.begin(endpoint("nas:/m/y"));
         assert!(s.is_running());
+    }
+
+    // d-35 round 2: rsync-style destination resolution.
+    // `run_pull_sync` treats `dest_root` as the already
+    // resolved target, so begin_run must apply the same
+    // `resolve_destination` semantics the CLI does.
+
+    fn launch_for(source: &str, dest: &str) -> PathBuf {
+        let mut s = F3PullState::new();
+        s.begin(endpoint(source));
+        for c in dest.chars() {
+            s.push_char(c);
+        }
+        s.begin_run().expect("launch").dest_root
+    }
+
+    /// Non-existent, non-trailing-slash dest → used as-is
+    /// (the operator named an exact target path / rename).
+    #[test]
+    fn resolve_non_container_dest_used_as_is() {
+        let dest_root = launch_for("nas:/photos/2024", "/tmp/blit-no-such-dir-xyz/out");
+        assert_eq!(dest_root, PathBuf::from("/tmp/blit-no-such-dir-xyz/out"));
+    }
+
+    /// Trailing-slash dest is a container even when it
+    /// doesn't exist → nest under the source basename.
+    #[test]
+    fn resolve_trailing_slash_dest_nests_under_basename() {
+        // Dir source `2024` into container `/tmp/x/` →
+        // `/tmp/x/2024`.
+        let dest_root = launch_for("nas:/photos/2024", "/tmp/blit-no-such-dir-xyz/");
+        assert_eq!(dest_root, PathBuf::from("/tmp/blit-no-such-dir-xyz/2024"));
+    }
+
+    /// File source into a trailing-slash container →
+    /// `<dir>/<filename>` (the final file path
+    /// `run_pull_sync` expects for a single-file pull).
+    #[test]
+    fn resolve_file_into_container_appends_filename() {
+        let dest_root = launch_for("nas:/docs/readme.txt", "/tmp/blit-no-such-dir-xyz/");
+        assert_eq!(
+            dest_root,
+            PathBuf::from("/tmp/blit-no-such-dir-xyz/readme.txt")
+        );
+    }
+
+    /// An EXISTING local directory is a container too —
+    /// dir source nests under its basename rather than
+    /// merging into the dir.
+    #[test]
+    fn resolve_existing_dir_dest_nests_under_basename() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = tmp.path().to_string_lossy().to_string();
+        let dest_root = launch_for("nas:/photos/2024", &dest);
+        assert_eq!(dest_root, tmp.path().join("2024"));
+    }
+
+    /// File source into an existing dir → `<dir>/<file>`.
+    #[test]
+    fn resolve_file_into_existing_dir_appends_filename() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dest = tmp.path().to_string_lossy().to_string();
+        let dest_root = launch_for("nas:/docs/readme.txt", &dest);
+        assert_eq!(dest_root, tmp.path().join("readme.txt"));
     }
 }
