@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-33-f3-pull-source | Feature | F3 transfer-from-cursor slice 1 — pull-source spec preview in Stats | `[~]` | `phase5/a1` | `1138800` |
 
 ## Open findings
 
