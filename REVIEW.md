@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-30-batch-cancel | Feature | F2 batch cancel via Shift+X — cancel all active transfers in one keystroke | `[~]` | `phase5/a1` | `aaa9c42` |
+| d-30-batch-cancel | Feature | F2 batch cancel via Shift+X — cancel all active transfers in one keystroke | `[ ]` | `phase5/a1` | `aaa9c42` |
 
 ## Open findings
 
