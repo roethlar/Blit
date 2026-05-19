@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-33-f3-pull-source (round 2) | Feature | Bracketed IPv6 display authority for the pull-source preview | `[~]` | `phase5/a1` | `7baf2a4` |
+| _none_ | | | | | |
 
 ## Open findings
 
@@ -137,3 +137,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `7b5310e` Configurable live-tick interval + source-doc sync (`e-5-config-live-tick-interval` round 2)
 - `72b742b` Verify path prefill config + schema doc sync (`e-6-verify-prefill` round 2)
 - `12ee960` Configurable tab-strip accent with contrasting active-tab foreground (`e-7-config-theme` round 2)
+- `7baf2a4` F3 pull-source spec preview with bracketed IPv6 authority (`d-33-f3-pull-source` round 2)
