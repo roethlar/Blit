@@ -1259,7 +1259,12 @@ async fn handle_pane_action(
             // no-op — F3 is a remote browser.
             UserAction::Descend => {
                 if let Some(endpoint) = f1_browse_target(&app.daemons) {
-                    retarget_browse(app, endpoint);
+                    retarget_browse(app, endpoint.clone());
+                    // d-48: F2 follows — restart the Subscribe
+                    // stream against the daemon we just switched
+                    // to, so its transfers track what we browse.
+                    let gen = reset_f2_for_resubscribe(app, &endpoint, transfers_event_rx);
+                    spawn_f2_setup_task(endpoint, gen, f2_setup_tx.clone());
                 }
             }
             _ => {}
@@ -1991,13 +1996,38 @@ fn f1_browse_target(daemons: &daemons::DaemonsState) -> Option<RemoteEndpoint> {
 /// d-47: point the F3 browser at `endpoint` and jump to F3.
 /// Resets the browse state to a fresh Modules view and clears
 /// `browse_last_fetched_view` so the loop's fetch driver kicks a
-/// fresh listing for the new daemon. `parsed_remote` (the F2
-/// target) is intentionally left alone.
+/// fresh listing for the new daemon.
 fn retarget_browse(app: &mut AppState, endpoint: RemoteEndpoint) {
     app.browse_target = Some(endpoint);
     app.browse = browse::BrowseState::new();
     app.browse_last_fetched_view = None;
     app.current_screen = Screen::F3;
+}
+
+/// d-48: reset F2 state so its Subscribe stream re-opens against
+/// `endpoint` (F2 follows the daemon the operator switched to on
+/// F1). Drops the old stream (`event_rx = None`), clears the rows,
+/// repoints `parsed_remote` and the label, marks a setup pending,
+/// and bumps the generation so a stale in-flight setup reply from
+/// the previous daemon is ignored by the loop's gen gate. Returns
+/// the new generation for the caller's `spawn_f2_setup_task`.
+///
+/// Mirrors the startup / `r`-refresh setup path exactly — same
+/// machinery, just retargeted — so the generation-guarded
+/// lifecycle (a1-6b round 3) stays intact.
+fn reset_f2_for_resubscribe(
+    app: &mut AppState,
+    endpoint: &RemoteEndpoint,
+    transfers_event_rx: &mut Option<mpsc::Receiver<EventOrError>>,
+) -> u64 {
+    app.parsed_remote = Some(endpoint.clone());
+    app.remote_label = endpoint.host_port_display();
+    app.transfers = state::TransfersState::new();
+    app.transfers_status = ConnectionStatus::Connecting;
+    *transfers_event_rx = None;
+    app.transfers_setup_pending = true;
+    app.transfers_setup_gen += 1;
+    app.transfers_setup_gen
 }
 
 fn handle_f3_refresh(
@@ -5397,6 +5427,36 @@ mod tests {
             f1_browse_target(&daemons).is_some(),
             "Enter on a remote daemon resolves to its endpoint"
         );
+    }
+
+    /// d-48: `reset_f2_for_resubscribe` repoints F2 at the new
+    /// daemon — sets parsed_remote/label, clears the stream + rows,
+    /// marks a setup pending, and bumps the generation (so a stale
+    /// in-flight reply from the old daemon is dropped).
+    #[test]
+    fn reset_f2_for_resubscribe_repoints_and_bumps_generation() {
+        let mut app = make_test_app_state(Screen::F1);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
+        let gen_before = app.transfers_setup_gen;
+        // Simulate a live F2 stream + a pending flag cleared.
+        let (_tx, rx) = mpsc::channel::<EventOrError>(1);
+        let mut event_rx = Some(rx);
+        app.transfers_setup_pending = false;
+
+        let other = RemoteEndpoint::parse("skippy:/media/").expect("other");
+        let gen = reset_f2_for_resubscribe(&mut app, &other, &mut event_rx);
+
+        assert_eq!(
+            app.parsed_remote.as_ref().map(|e| e.host_port_display()),
+            Some(other.host_port_display()),
+            "F2 now targets the new daemon"
+        );
+        assert!(event_rx.is_none(), "old Subscribe stream is dropped");
+        assert!(app.transfers_setup_pending, "a fresh setup is pending");
+        assert_eq!(gen, gen_before + 1, "generation bumped");
+        assert_eq!(app.transfers_setup_gen, gen_before + 1);
+        assert!(matches!(app.transfers_status, ConnectionStatus::Connecting));
+        assert_eq!(app.transfers.active_count(), 0, "old rows cleared");
     }
 
     /// d-47: `retarget_browse` points F3 at a new daemon — sets
