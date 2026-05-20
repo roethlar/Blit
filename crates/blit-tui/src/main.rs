@@ -215,6 +215,9 @@ struct AppState {
     /// by the TUI process. Renders into the F3 footer.
     f3_pull: f3pull::F3PullState,
     f3_pull_reply_tx: mpsc::Sender<F3PullReply>,
+    /// d-37: live pull-progress snapshots from the running
+    /// pull task.
+    f3_pull_progress_tx: mpsc::Sender<F3PullProgress>,
     /// d-36: transient banner shown after a `Ctrl+R`
     /// config reload (`config reloaded` on success, the
     /// parse error on failure). Auto-hides via a
@@ -475,6 +478,11 @@ async fn run_router(
     // d-35: F3 pull reply channel.
     let (f3_pull_reply_tx, mut f3_pull_reply_rx) = mpsc::channel::<F3PullReply>(2);
 
+    // d-37: F3 pull live-progress channel. Small bounded
+    // buffer — the forwarder `try_send`s, dropping
+    // intermediate snapshots when full.
+    let (f3_pull_progress_tx, mut f3_pull_progress_rx) = mpsc::channel::<F3PullProgress>(8);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -514,6 +522,7 @@ async fn run_router(
         cancel_request_seq: 0,
         f3_pull: f3pull::F3PullState::new(),
         f3_pull_reply_tx: f3_pull_reply_tx.clone(),
+        f3_pull_progress_tx: f3_pull_progress_tx.clone(),
         reload_banner: None,
     };
 
@@ -1082,6 +1091,12 @@ async fn run_router(
                             app.f3_pull.apply_error(request_id, message);
                         }
                     }
+                }
+            }
+            // d-37: F3 pull live-progress snapshots.
+            snapshot = f3_pull_progress_rx.recv() => {
+                if let Some(F3PullProgress { request_id, files, bytes }) = snapshot {
+                    app.f3_pull.apply_progress(request_id, files, bytes);
                 }
             }
         }
@@ -2056,7 +2071,13 @@ fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDispl
         F3PullStatus::EnteringDest { dest, .. } => {
             F3PullDisplay::EnteringDest { dest: dest.clone() }
         }
-        F3PullStatus::Running { dest, .. } => F3PullDisplay::Running { dest: dest.clone() },
+        F3PullStatus::Running {
+            dest, files, bytes, ..
+        } => F3PullDisplay::Running {
+            dest: dest.clone(),
+            files: *files,
+            bytes: *bytes,
+        },
         F3PullStatus::Done {
             files, bytes, dest, ..
         } => F3PullDisplay::Done {
@@ -2091,15 +2112,61 @@ struct F3PullReply {
 /// pull needs only `run_pull_sync`; the mirror-purge half
 /// (`apply_pull_mirror_purge`) is a no-op when
 /// `mirror_mode = false`, so it's skipped.
+/// d-37: live progress snapshot forwarded from a running
+/// pull to the event loop.
+struct F3PullProgress {
+    request_id: u64,
+    files: usize,
+    bytes: u64,
+}
+
 fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
     dest_root: std::path::PathBuf,
     tx: mpsc::Sender<F3PullReply>,
+    // d-37: live byte/file progress snapshots. `try_send`
+    // means a full channel just drops an intermediate
+    // update — the authoritative final count rides the
+    // `F3PullReply`.
+    progress_tx: mpsc::Sender<F3PullProgress>,
 ) {
     use blit_app::transfers::remote::{run_pull_sync, PullSyncExecution};
     use blit_core::remote::pull::PullSyncOptions;
+    use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
+        // d-37: progress monitor. run_pull_sync reports
+        // ProgressEvents into `pe_rx`; the forwarder
+        // accumulates cumulative (files, bytes) — the
+        // events are per-chunk deltas, same as the CLI's
+        // monitor sums — and ships snapshots to the UI.
+        let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let progress = RemoteTransferProgress::new(pe_tx);
+        let forwarder = tokio::spawn(async move {
+            let mut files = 0usize;
+            let mut bytes = 0u64;
+            while let Some(event) = pe_rx.recv().await {
+                match event {
+                    ProgressEvent::Payload { files: f, bytes: b } => {
+                        files += f;
+                        bytes += b;
+                    }
+                    ProgressEvent::FileComplete { bytes: b, .. } => {
+                        files += 1;
+                        bytes += b;
+                    }
+                    ProgressEvent::ManifestBatch { .. } => continue,
+                }
+                // Lossy on a full channel — progress is
+                // approximate; the reply carries the truth.
+                let _ = progress_tx.try_send(F3PullProgress {
+                    request_id,
+                    files,
+                    bytes,
+                });
+            }
+        });
+
         let remote_label = source.display();
         let execution = PullSyncExecution {
             remote: source,
@@ -2109,7 +2176,7 @@ fn spawn_f3_pull(
             mirror_mode: false,
             remote_label,
         };
-        let result = run_pull_sync(execution, None)
+        let result = run_pull_sync(execution, Some(&progress))
             .await
             .map(|outcome| {
                 (
@@ -2118,6 +2185,10 @@ fn spawn_f3_pull(
                 )
             })
             .map_err(|err| format!("{err:#}"));
+        // Close the progress channel → the forwarder drains
+        // and exits before we send the terminal reply.
+        drop(progress);
+        let _ = forwarder.await;
         let _ = tx.send(F3PullReply { request_id, result }).await;
     });
 }
@@ -2827,6 +2898,7 @@ fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                     launch.source,
                     launch.dest_root,
                     app.f3_pull_reply_tx.clone(),
+                    app.f3_pull_progress_tx.clone(),
                 );
             }
             // Absorb Enter even on an empty dest (begin_run
@@ -4582,6 +4654,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             reload_banner: None,
         }
     }
@@ -4820,6 +4893,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             reload_banner: None,
         };
         app.verify.cycle_focus(); // Source
@@ -4873,6 +4947,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             reload_banner: None,
         };
 
@@ -4979,6 +5054,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             reload_banner: None,
         };
 
@@ -5044,6 +5120,7 @@ mod tests {
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
+            f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             reload_banner: None,
         };
 

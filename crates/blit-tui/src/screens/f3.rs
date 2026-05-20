@@ -37,7 +37,8 @@
 //! remote→local PullSync owned by the TUI process. The
 //! footer shows one of:
 //! - `pull → <dest>_` (cyan, EnteringDest — typing)
-//! - `pulling → <dest>...` (yellow, Running)
+//! - `pulling → <dest>... (N file(s) · X)` (yellow,
+//!   Running — d-37 live byte counter once data flows)
 //! - `pulled N file(s) · X → <dest>` (green, Done)
 //! - `pull failed: <msg>` (red, Error)
 //!
@@ -74,8 +75,13 @@ pub enum F3PullDisplay {
     /// Destination prompt open; `dest` is what the
     /// operator has typed so far.
     EnteringDest { dest: String },
-    /// PullSync in flight.
-    Running { dest: String },
+    /// PullSync in flight. d-37: live cumulative
+    /// counters (0 until the first progress event).
+    Running {
+        dest: String,
+        files: usize,
+        bytes: u64,
+    },
     /// Pull finished — files + bytes pulled, dest path.
     Done {
         files: usize,
@@ -287,12 +293,19 @@ fn render_footer(
                 Style::default().fg(Color::Cyan),
             ));
         }
-        F3PullDisplay::Running { dest } => {
+        F3PullDisplay::Running { dest, files, bytes } => {
             spans.push(Span::raw("  ·  "));
-            spans.push(Span::styled(
-                format!("pulling → {dest}..."),
-                Style::default().fg(Color::Yellow),
-            ));
+            // d-37: show the live count once bytes start
+            // flowing; before that just "pulling →".
+            let frag = if *bytes > 0 || *files > 0 {
+                format!(
+                    "pulling → {dest}... ({files} file(s) · {})",
+                    format_bytes(*bytes)
+                )
+            } else {
+                format!("pulling → {dest}...")
+            };
+            spans.push(Span::styled(frag, Style::default().fg(Color::Yellow)));
         }
         F3PullDisplay::Done { files, bytes, dest } => {
             spans.push(Span::raw("  ·  "));

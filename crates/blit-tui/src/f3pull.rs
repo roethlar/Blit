@@ -45,8 +45,16 @@ pub enum F3PullStatus {
         /// The destination path the operator is typing.
         dest: String,
     },
-    /// PullSync RPC in flight.
-    Running { dest: String, request_id: u64 },
+    /// PullSync RPC in flight. d-37: `files` / `bytes` are
+    /// live cumulative counters fed by the progress
+    /// forwarder (0 until the first `Payload` /
+    /// `FileComplete` event lands).
+    Running {
+        dest: String,
+        request_id: u64,
+        files: usize,
+        bytes: u64,
+    },
     /// Pull finished successfully. (The remote source is
     /// still shown in the Stats block's `Pull:` line, so
     /// the footer fragment only needs the outcome + dest.)
@@ -202,12 +210,32 @@ impl F3PullState {
         self.status = F3PullStatus::Running {
             dest: raw_dest,
             request_id,
+            files: 0,
+            bytes: 0,
         };
         Some(PullLaunch {
             source,
             dest_root,
             request_id,
         })
+    }
+
+    /// d-37: apply a live progress snapshot. Updates the
+    /// `Running` counters in place; generation-guarded so
+    /// a snapshot from a superseded run is dropped.
+    pub fn apply_progress(&mut self, request_id: u64, files: usize, bytes: u64) {
+        if let F3PullStatus::Running {
+            request_id: rid,
+            files: f,
+            bytes: b,
+            ..
+        } = &mut self.status
+        {
+            if *rid == request_id {
+                *f = files;
+                *b = bytes;
+            }
+        }
     }
 
     /// Apply a successful pull reply. Dropped if `request_id`
@@ -218,6 +246,7 @@ impl F3PullState {
             F3PullStatus::Running {
                 request_id: rid,
                 dest,
+                ..
             } if *rid == request_id => {
                 self.status = F3PullStatus::Done {
                     dest: dest.clone(),
@@ -337,6 +366,67 @@ mod tests {
         // Source endpoint carried through.
         assert_eq!(launch.source.display(), "nas:/photos/2024");
         assert!(s.is_running());
+    }
+
+    #[test]
+    fn begin_run_starts_with_zero_progress() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        s.begin_run().expect("launch");
+        match s.status() {
+            F3PullStatus::Running { files, bytes, .. } => {
+                assert_eq!(*files, 0);
+                assert_eq!(*bytes, 0);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_progress_updates_running_counters() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        s.apply_progress(launch.request_id, 3, 4096);
+        match s.status() {
+            F3PullStatus::Running { files, bytes, .. } => {
+                assert_eq!(*files, 3);
+                assert_eq!(*bytes, 4096);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_progress_drops_stale_request() {
+        let mut s = F3PullState::new();
+        s.begin(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        let launch = s.begin_run().expect("launch");
+        s.apply_progress(launch.request_id + 99, 5, 5);
+        match s.status() {
+            F3PullStatus::Running { files, bytes, .. } => {
+                assert_eq!(*files, 0, "stale progress must not apply");
+                assert_eq!(*bytes, 0);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_progress_noop_when_not_running() {
+        let mut s = F3PullState::new();
+        // Idle — apply_progress must be a harmless no-op.
+        s.apply_progress(1, 9, 9);
+        assert!(matches!(s.status(), F3PullStatus::Idle));
     }
 
     #[test]
