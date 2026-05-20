@@ -104,12 +104,13 @@ pub enum F3PullDisplay {
 pub enum F3DelDisplay {
     /// No delete fragment.
     Hidden,
-    /// Confirm prompt open for `path`.
-    Confirming { path: String },
+    /// Confirm prompt open. `label` is the target — a single
+    /// path spec, or "N items" for a d-49 batch.
+    Confirming { label: String },
     /// Purge RPC in flight.
     Deleting,
     /// Purge succeeded.
-    Done { files_deleted: u64 },
+    Done { label: String, files_deleted: u64 },
     /// Purge failed.
     Error { message: String },
 }
@@ -421,10 +422,10 @@ fn render_footer(
     // the frozen target path; the operator answers y/N.
     match del {
         F3DelDisplay::Hidden => {}
-        F3DelDisplay::Confirming { path } => {
+        F3DelDisplay::Confirming { label } => {
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(
-                format!("delete {path}? y/N"),
+                format!("delete {label}? y/N"),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
         }
@@ -435,10 +436,13 @@ fn render_footer(
                 Style::default().fg(Color::Yellow),
             ));
         }
-        F3DelDisplay::Done { files_deleted } => {
+        F3DelDisplay::Done {
+            label,
+            files_deleted,
+        } => {
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(
-                format!("deleted {files_deleted} file(s)"),
+                format!("deleted {label} — {files_deleted} file(s)"),
                 Style::default().fg(Color::Green),
             ));
         }

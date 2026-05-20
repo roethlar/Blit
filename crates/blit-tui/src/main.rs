@@ -1488,13 +1488,30 @@ async fn handle_pane_action(
                 // (TUI_DESIGN §5.3). The daemon also rejects the
                 // Purge, but gating here avoids opening a confirm
                 // prompt for an operation that can't succeed.
-                let target = app.browse_target.as_ref().and_then(|base| {
-                    browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
-                });
-                if let Some(target) = target {
-                    if !app.browse.current_module_read_only() && is_deletable_remote_path(&target) {
-                        let path = target.display();
-                        app.f3_del.begin(target, path);
+                let base = if app.browse.current_module_read_only() {
+                    None
+                } else {
+                    app.browse_target.clone()
+                };
+                if let Some(base) = base {
+                    // d-50: a non-empty multi-select is the batch
+                    // target; otherwise the cursor row.
+                    let batch = app.browse.marked_count() > 0;
+                    let endpoints: Vec<RemoteEndpoint> = if batch {
+                        app.browse.marked_endpoints(&base)
+                    } else {
+                        browse::pull_source_endpoint(
+                            app.browse.view(),
+                            app.browse.selected_row(),
+                            &base,
+                        )
+                        .into_iter()
+                        .collect()
+                    };
+                    if let Some((module_ep, rel_paths, label, gate)) =
+                        build_delete_request(endpoints, batch)
+                    {
+                        app.f3_del.begin(module_ep, rel_paths, label, gate);
                     }
                 }
             }
@@ -2384,18 +2401,34 @@ fn f3_del_to_display(
 ) -> screens::f3::F3DelDisplay {
     use f3del::F3DelStatus;
     use screens::f3::F3DelDisplay;
-    let matches = |path: &str| current_path == Some(path);
+    // d-50: a single-row delete carries `gate_path = Some(spec)`
+    // and hides its outcome once the cursor leaves that path
+    // (the d-45 behavior). A batch carries `None` and shows the
+    // outcome until the next action (its rows are gone after the
+    // post-delete refresh anyway).
+    let gated = |gate: &Option<String>| match gate {
+        Some(p) => current_path == Some(p.as_str()),
+        None => true,
+    };
     match status {
         F3DelStatus::Idle => F3DelDisplay::Hidden,
-        F3DelStatus::Confirming { path, .. } => F3DelDisplay::Confirming { path: path.clone() },
+        F3DelStatus::Confirming { label, .. } => F3DelDisplay::Confirming {
+            label: label.clone(),
+        },
         F3DelStatus::Deleting { .. } => F3DelDisplay::Deleting,
         F3DelStatus::Done {
-            path,
+            label,
             files_deleted,
-        } if matches(path) => F3DelDisplay::Done {
+            gate_path,
+        } if gated(gate_path) => F3DelDisplay::Done {
+            label: label.clone(),
             files_deleted: *files_deleted,
         },
-        F3DelStatus::Error { path, message } if matches(path) => F3DelDisplay::Error {
+        F3DelStatus::Error {
+            label,
+            message,
+            gate_path,
+        } if gated(gate_path) => F3DelDisplay::Error {
             message: message.clone(),
         },
         _ => F3DelDisplay::Hidden,
@@ -2431,27 +2464,28 @@ struct F3DelReply {
 /// dispatcher (before the prompt opens), so by here the path is
 /// known-deletable; the daemon still enforces read-only modules
 /// and containment, surfacing as `Err`.
-fn spawn_f3_del(request_id: u64, endpoint: RemoteEndpoint, tx: mpsc::Sender<F3DelReply>) {
+fn spawn_f3_del(
+    request_id: u64,
+    module_endpoint: RemoteEndpoint,
+    rel_paths: Vec<String>,
+    tx: mpsc::Sender<F3DelReply>,
+) {
     tokio::spawn(async move {
-        let result = run_f3_del(&endpoint)
+        let result = run_f3_del(&module_endpoint, rel_paths)
             .await
             .map_err(|err| format!("{err:#}"));
         let _ = tx.send(F3DelReply { request_id, result }).await;
     });
 }
 
-/// d-45: resolve `(module, rel_path)` and issue the single-path
-/// Purge. Split from the spawn for symmetry with the du helper.
-async fn run_f3_del(endpoint: &RemoteEndpoint) -> eyre::Result<u64> {
+/// d-45 / d-50: issue one `Purge` deleting `rel_paths` under
+/// `module_endpoint`'s module. `rel_paths` are already canonical
+/// forward-slash wire paths (built by `del_wire_path` at the
+/// dispatch boundary). Returns the daemon's total files-deleted.
+async fn run_f3_del(module_endpoint: &RemoteEndpoint, rel_paths: Vec<String>) -> eyre::Result<u64> {
     use blit_app::admin::rm;
-    let (module, rel_path) = rm::extract_module_and_path(endpoint)?;
-    // d-45 R2: build the wire path with the canonical
-    // forward-slash component join (same as `blit rm`), NOT
-    // `to_string_lossy` — a Windows client assembles cursor
-    // paths with `PathBuf::push` (backslashes), but the Purge
-    // wire contract is forward-slash relative paths.
-    let rel = del_wire_path(&rel_path);
-    rm::purge(endpoint, module, vec![rel]).await
+    let (module, _) = rm::extract_module_and_path(module_endpoint)?;
+    rm::purge(module_endpoint, module, rel_paths).await
 }
 
 /// d-45 R2: the module-relative Purge wire path for a cursor
@@ -2460,6 +2494,48 @@ async fn run_f3_del(endpoint: &RemoteEndpoint) -> eyre::Result<u64> {
 /// boundary is named + unit-testable.
 fn del_wire_path(rel_path: &std::path::Path) -> String {
     blit_app::endpoints::rel_path_to_string(rel_path)
+}
+
+/// d-50: assemble a delete request from resolved cursor/marked
+/// endpoints. Filters out non-deletable targets (module roots),
+/// converts each to a canonical wire rel-path, and returns
+/// `(module_endpoint, rel_paths, label, gate_path)` or `None`
+/// when nothing is deletable.
+///
+/// - `batch` (a multi-select was active) → label "N item(s)",
+///   `gate_path = None` (outcome shows until the next action).
+/// - single cursor row → label is the path spec, `gate_path =
+///   Some(spec)` (outcome hides once the cursor leaves it, the
+///   d-45 behavior).
+///
+/// All targets share one module (they come from one F3 view), so
+/// the first endpoint carries the module for the single `Purge`.
+fn build_delete_request(
+    endpoints: Vec<RemoteEndpoint>,
+    batch: bool,
+) -> Option<(RemoteEndpoint, Vec<String>, String, Option<String>)> {
+    use blit_app::admin::rm;
+    let deletable: Vec<RemoteEndpoint> = endpoints
+        .into_iter()
+        .filter(is_deletable_remote_path)
+        .collect();
+    let module_endpoint = deletable.first()?.clone();
+    let mut rel_paths = Vec::with_capacity(deletable.len());
+    for ep in &deletable {
+        if let Ok((_module, rel_path)) = rm::extract_module_and_path(ep) {
+            rel_paths.push(del_wire_path(&rel_path));
+        }
+    }
+    if rel_paths.is_empty() {
+        return None;
+    }
+    let (label, gate_path) = if batch {
+        (format!("{} item(s)", rel_paths.len()), None)
+    } else {
+        let spec = module_endpoint.display();
+        (spec.clone(), Some(spec))
+    };
+    Some((module_endpoint, rel_paths, label, gate_path))
 }
 
 /// d-45: may this cursor endpoint be deleted from the TUI?
@@ -3470,7 +3546,8 @@ fn handle_f3_delete_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             if let Some(launch) = app.f3_del.confirm() {
                 spawn_f3_del(
                     launch.request_id,
-                    launch.endpoint,
+                    launch.module_endpoint,
+                    launch.rel_paths,
                     app.f3_del_reply_tx.clone(),
                 );
             }
@@ -5395,7 +5472,12 @@ mod tests {
         app.browse_last_fetched_view = Some(app.browse.view().clone());
         // Drive a delete to the Deleting state and capture its id.
         let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
-        app.f3_del.begin(ep, "nas:/home/old.txt".to_string());
+        app.f3_del.begin(
+            ep,
+            vec!["old.txt".to_string()],
+            "nas:/home/old.txt".to_string(),
+            Some("nas:/home/old.txt".to_string()),
+        );
         let launch = app.f3_del.confirm().expect("confirm");
         // Apply the success reply exactly as the select arm does.
         if app.f3_del.apply_done(launch.request_id, 1) {
@@ -5546,7 +5628,12 @@ mod tests {
         let mut app = make_test_app_state(Screen::F3);
         app.browse_last_fetched_view = Some(app.browse.view().clone());
         let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
-        app.f3_del.begin(ep, "nas:/home/old.txt".to_string());
+        app.f3_del.begin(
+            ep,
+            vec!["old.txt".to_string()],
+            "nas:/home/old.txt".to_string(),
+            Some("nas:/home/old.txt".to_string()),
+        );
         let launch = app.f3_del.confirm().expect("confirm");
         let stale = launch.request_id + 99;
         if app.f3_del.apply_done(stale, 1) {
@@ -5565,37 +5652,92 @@ mod tests {
     // d-45: delete display bridge. Confirming/Deleting always
     // show; Done/Error are path-gated like du.
 
+    /// d-50: `build_delete_request` — single vs batch shaping +
+    /// module-root filtering.
+    #[test]
+    fn build_delete_request_single_is_gated_with_path_label() {
+        let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
+        let (module_ep, rels, label, gate) =
+            build_delete_request(vec![ep], false).expect("deletable");
+        assert_eq!(rels, vec!["old.txt".to_string()]);
+        assert_eq!(label, module_ep.display());
+        assert_eq!(gate.as_deref(), Some(module_ep.display().as_str()));
+    }
+
+    #[test]
+    fn build_delete_request_batch_counts_and_is_ungated() {
+        let a = RemoteEndpoint::parse("nas:/home/a.txt").expect("a");
+        let b = RemoteEndpoint::parse("nas:/home/b.txt").expect("b");
+        let (_module_ep, rels, label, gate) =
+            build_delete_request(vec![a, b], true).expect("deletable");
+        assert_eq!(rels.len(), 2);
+        assert!(rels.contains(&"a.txt".to_string()));
+        assert!(rels.contains(&"b.txt".to_string()));
+        assert_eq!(label, "2 item(s)");
+        assert!(gate.is_none(), "batch outcome is not path-gated");
+    }
+
+    #[test]
+    fn build_delete_request_filters_module_roots() {
+        // A module root is not deletable → nothing to delete.
+        let root = RemoteEndpoint::parse("nas:/home/").expect("module root");
+        assert!(build_delete_request(vec![root], false).is_none());
+    }
+
     #[test]
     fn f3_del_display_confirming_always_shows() {
         use screens::f3::F3DelDisplay;
         let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
         let status = f3del::F3DelStatus::Confirming {
-            endpoint: ep,
-            path: "nas:/home/old.txt".to_string(),
+            module_endpoint: ep,
+            rel_paths: vec!["old.txt".to_string()],
+            label: "nas:/home/old.txt".to_string(),
+            gate_path: Some("nas:/home/old.txt".to_string()),
         };
         // Shows even when the cursor is on a different path —
         // it's an active prompt, not a stale outcome.
         match f3_del_to_display(&status, Some("nas:/home/other")) {
-            F3DelDisplay::Confirming { path } => assert_eq!(path, "nas:/home/old.txt"),
+            F3DelDisplay::Confirming { label } => assert_eq!(label, "nas:/home/old.txt"),
             other => panic!("expected Confirming, got {other:?}"),
         }
     }
 
     #[test]
-    fn f3_del_display_done_is_path_gated() {
+    fn f3_del_display_single_is_path_gated_batch_is_not() {
         use screens::f3::F3DelDisplay;
-        let status = f3del::F3DelStatus::Done {
-            path: "nas:/home/old.txt".to_string(),
+        // Single delete: gate_path Some → hides when cursor moves.
+        let single = f3del::F3DelStatus::Done {
+            label: "nas:/home/old.txt".to_string(),
             files_deleted: 3,
+            gate_path: Some("nas:/home/old.txt".to_string()),
         };
-        match f3_del_to_display(&status, Some("nas:/home/old.txt")) {
-            F3DelDisplay::Done { files_deleted } => assert_eq!(files_deleted, 3),
-            other => panic!("expected Done, got {other:?}"),
-        }
-        // Cursor moved → stale outcome hides.
         assert!(matches!(
-            f3_del_to_display(&status, Some("nas:/home/other")),
-            F3DelDisplay::Hidden
+            f3_del_to_display(&single, Some("nas:/home/old.txt")),
+            F3DelDisplay::Done {
+                files_deleted: 3,
+                ..
+            }
+        ));
+        assert!(
+            matches!(
+                f3_del_to_display(&single, Some("nas:/home/other")),
+                F3DelDisplay::Hidden
+            ),
+            "single-delete outcome hides once the cursor leaves the path"
+        );
+
+        // Batch delete: gate_path None → shows regardless of cursor.
+        let batch = f3del::F3DelStatus::Done {
+            label: "3 item(s)".to_string(),
+            files_deleted: 9,
+            gate_path: None,
+        };
+        assert!(matches!(
+            f3_del_to_display(&batch, Some("nas:/home/anywhere")),
+            F3DelDisplay::Done {
+                files_deleted: 9,
+                ..
+            }
         ));
     }
 

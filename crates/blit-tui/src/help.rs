@@ -123,7 +123,7 @@ fn help_lines() -> Vec<Line<'static>> {
         ),
         kv("u", "disk usage of selected subtree (F3)"),
         kv("space", "multi-select rows (F3)"),
-        kv("D", "delete selected path (F3) — y/N confirm"),
+        kv("D", "delete cursor row or marked set (F3) — y/N confirm"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
         kv("c / d / e", "clear / disable / enable history"),
@@ -453,14 +453,14 @@ mod tests {
             "c / d / e",
             "s",
             "?",
-            "r",                              // refresh (global as of d-16 R2)
-            "/",                              // d-26: F3 filter
-            "X",                              // d-30: F2 batch cancel
-            "p",                              // d-35: F3 pull
-            "disk usage of selected subtree", // d-41: F3 du (`u`)
-            "jump to first / last row",       // d-42: g / G
-            "delete selected path",           // d-45: F3 delete (`D`)
-            "multi-select rows",              // d-49: F3 space
+            "r",                               // refresh (global as of d-16 R2)
+            "/",                               // d-26: F3 filter
+            "X",                               // d-30: F2 batch cancel
+            "p",                               // d-35: F3 pull
+            "disk usage of selected subtree",  // d-41: F3 du (`u`)
+            "jump to first / last row",        // d-42: g / G
+            "delete cursor row or marked set", // d-45/d-50: F3 delete (`D`)
+            "multi-select rows",               // d-49: F3 space
         ] {
             assert!(
                 text.contains(needle),

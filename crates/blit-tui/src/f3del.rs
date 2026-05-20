@@ -1,57 +1,78 @@
-//! F3 delete state — purge a remote path from the F3 cursor
-//! (d-45, TUI_DESIGN §5.3 `D: delete`).
+//! F3 delete state — purge the F3 cursor row OR the d-49 marked
+//! set (d-45 / d-50, TUI_DESIGN §5.3 `D: delete`).
 //!
 //! Destructive, so it's gated behind a confirm prompt: `D` opens
-//! `delete <path>? y/N`, `y`/`Y` fires the `Purge` RPC, `n`/`N`/
-//! `Esc` aborts. The target (resolved `RemoteEndpoint` + its
-//! display spec) is **frozen** into the `Confirming` state at
-//! prompt-open time — moving the cursor afterward can't change
-//! what gets deleted (the d-30 batch-cancel freezing lesson).
+//! `delete <label>? y/N` (the label is a single path spec, or
+//! "N item(s)" for a batch), `y`/`Y` fires one `Purge` RPC over
+//! all `rel_paths`, `n`/`N`/`Esc` aborts. Targets are **frozen**
+//! into the `Confirming` state at prompt-open time — changing the
+//! cursor/selection afterward can't change what gets deleted (the
+//! d-30 batch-cancel freezing lesson). All targets share one
+//! module (they come from a single F3 view), so one `Purge`
+//! suffices.
 //!
 //! Safety:
-//! - The dispatcher refuses to open the prompt for a module root
-//!   or empty rel-path (you can't nuke a whole module from the
-//!   TUI — mirrors `blit rm`'s guard).
-//! - Read-only modules are enforced **server-side**: the daemon
-//!   rejects `Purge` on a read-only module and the error surfaces
-//!   in the footer. (Client-side key-disable is a known gap — the
-//!   daemon is the authority, so this is safe, just less polished
-//!   than the design's "disable the key".)
+//! - The dispatcher refuses module roots / empty rel-paths (you
+//!   can't nuke a whole module from the TUI — mirrors `blit rm`).
+//! - Read-only modules are gated client-side (d-46) and enforced
+//!   server-side as a backstop (the daemon rejects `Purge`).
 //!
-//! Outcome rendering is **path-gated** (the d-41 du pattern): the
-//! `Done`/`Error` fragment only shows while the cursor is still on
-//! the deleted path, so a stale outcome never lingers against the
-//! wrong row — no TTL machinery needed. Replies are
+//! Outcome rendering: a **single**-row delete is path-gated (the
+//! d-41 du pattern — `gate_path = Some(spec)`, hides once the
+//! cursor leaves it). A **batch** carries `gate_path = None` and
+//! shows its outcome until the next action (its rows are gone
+//! after the post-delete refresh anyway). Replies are
 //! generation-guarded by `request_id`.
 
 use blit_core::remote::endpoint::RemoteEndpoint;
 
-/// Lifecycle of an F3 delete.
+/// Lifecycle of an F3 delete (single cursor row OR a d-49 batch).
+///
+/// `label` is the human-readable target shown in the prompt /
+/// outcome — the canonical path for a single delete, or
+/// "N items" for a batch. `gate_path` carries the d-45 outcome
+/// gating: `Some(spec)` for a single delete (Done/Error hide once
+/// the cursor leaves that path); `None` for a batch (the rows are
+/// gone after the post-delete refresh, so the outcome simply
+/// shows until the next action).
 #[derive(Debug, Clone)]
 pub enum F3DelStatus {
     /// No delete in progress.
     Idle,
-    /// Confirm prompt open. `endpoint` + `path` are frozen at
-    /// open time; `path` is the canonical display spec (shown in
-    /// the prompt and used for outcome gating).
+    /// Confirm prompt open. `module_endpoint` + `rel_paths` are
+    /// frozen at open time (all targets share one module).
     Confirming {
-        endpoint: RemoteEndpoint,
-        path: String,
+        module_endpoint: RemoteEndpoint,
+        rel_paths: Vec<String>,
+        label: String,
+        gate_path: Option<String>,
     },
-    /// `Purge` RPC in flight for `path`.
-    Deleting { request_id: u64, path: String },
+    /// `Purge` RPC in flight.
+    Deleting {
+        request_id: u64,
+        label: String,
+        gate_path: Option<String>,
+    },
     /// Purge succeeded; `files_deleted` is the daemon's count.
-    Done { path: String, files_deleted: u64 },
+    Done {
+        label: String,
+        files_deleted: u64,
+        gate_path: Option<String>,
+    },
     /// Purge failed.
-    Error { path: String, message: String },
+    Error {
+        label: String,
+        message: String,
+        gate_path: Option<String>,
+    },
 }
 
 /// Launch params handed from [`F3DelState::confirm`] to the spawn
-/// helper. The frozen `path` lives on the `Deleting` status (for
-/// the footer + outcome gating); the spawn only needs the
-/// endpoint and the generation id.
+/// helper. All `rel_paths` are deleted under `module_endpoint`'s
+/// module in one `Purge`.
 pub struct DelLaunch {
-    pub endpoint: RemoteEndpoint,
+    pub module_endpoint: RemoteEndpoint,
+    pub rel_paths: Vec<String>,
     pub request_id: u64,
 }
 
@@ -94,14 +115,28 @@ impl F3DelState {
         matches!(self.status, F3DelStatus::Deleting { .. })
     }
 
-    /// Open the confirm prompt for `endpoint` (display spec
-    /// `path`). No-op if a delete is already confirming or
-    /// deleting.
-    pub fn begin(&mut self, endpoint: RemoteEndpoint, path: String) {
-        if self.is_confirming() || self.is_deleting() {
+    /// Open the confirm prompt to delete `rel_paths` under
+    /// `module_endpoint`'s module. `label` is shown in the prompt
+    /// / outcome; `gate_path` is `Some(spec)` for a single-row
+    /// delete (outcome gated on the cursor staying there) or
+    /// `None` for a batch. No-op if already confirming/deleting,
+    /// or if `rel_paths` is empty.
+    pub fn begin(
+        &mut self,
+        module_endpoint: RemoteEndpoint,
+        rel_paths: Vec<String>,
+        label: String,
+        gate_path: Option<String>,
+    ) {
+        if self.is_confirming() || self.is_deleting() || rel_paths.is_empty() {
             return;
         }
-        self.status = F3DelStatus::Confirming { endpoint, path };
+        self.status = F3DelStatus::Confirming {
+            module_endpoint,
+            rel_paths,
+            label,
+            gate_path,
+        };
     }
 
     /// Abort the confirm prompt (`n`/`Esc`) — back to Idle. No-op
@@ -116,18 +151,29 @@ impl F3DelState {
     /// and transitions to `Deleting`. Returns `None` (no state
     /// change) unless currently confirming.
     pub fn confirm(&mut self) -> Option<DelLaunch> {
-        let (endpoint, path) = match std::mem::replace(&mut self.status, F3DelStatus::Idle) {
-            F3DelStatus::Confirming { endpoint, path } => (endpoint, path),
-            other => {
-                self.status = other;
-                return None;
-            }
-        };
+        let (module_endpoint, rel_paths, label, gate_path) =
+            match std::mem::replace(&mut self.status, F3DelStatus::Idle) {
+                F3DelStatus::Confirming {
+                    module_endpoint,
+                    rel_paths,
+                    label,
+                    gate_path,
+                } => (module_endpoint, rel_paths, label, gate_path),
+                other => {
+                    self.status = other;
+                    return None;
+                }
+            };
         self.request_seq += 1;
         let request_id = self.request_seq;
-        self.status = F3DelStatus::Deleting { request_id, path };
+        self.status = F3DelStatus::Deleting {
+            request_id,
+            label,
+            gate_path,
+        };
         Some(DelLaunch {
-            endpoint,
+            module_endpoint,
+            rel_paths,
             request_id,
         })
     }
@@ -138,11 +184,13 @@ impl F3DelState {
         match &self.status {
             F3DelStatus::Deleting {
                 request_id: rid,
-                path,
+                label,
+                gate_path,
             } if *rid == request_id => {
                 self.status = F3DelStatus::Done {
-                    path: path.clone(),
+                    label: label.clone(),
                     files_deleted,
+                    gate_path: gate_path.clone(),
                 };
                 true
             }
@@ -155,11 +203,13 @@ impl F3DelState {
         match &self.status {
             F3DelStatus::Deleting {
                 request_id: rid,
-                path,
+                label,
+                gate_path,
             } if *rid == request_id => {
                 self.status = F3DelStatus::Error {
-                    path: path.clone(),
+                    label: label.clone(),
                     message,
+                    gate_path: gate_path.clone(),
                 };
                 true
             }
@@ -181,27 +231,73 @@ mod tests {
         assert!(matches!(F3DelState::new().status(), F3DelStatus::Idle));
     }
 
+    /// Single-row delete helper: one rel-path, gated on the spec.
+    fn begin_single(s: &mut F3DelState, spec: &str, rel: &str) {
+        s.begin(
+            endpoint(spec),
+            vec![rel.to_string()],
+            spec.to_string(),
+            Some(spec.to_string()),
+        );
+    }
+
     #[test]
     fn begin_opens_confirm_with_frozen_target() {
         let mut s = F3DelState::new();
-        s.begin(
-            endpoint("nas:/home/old.txt"),
-            "nas:/home/old.txt".to_string(),
-        );
+        begin_single(&mut s, "nas:/home/old.txt", "old.txt");
         match s.status() {
-            F3DelStatus::Confirming { path, .. } => assert_eq!(path, "nas:/home/old.txt"),
+            F3DelStatus::Confirming {
+                label,
+                rel_paths,
+                gate_path,
+                ..
+            } => {
+                assert_eq!(label, "nas:/home/old.txt");
+                assert_eq!(rel_paths, &vec!["old.txt".to_string()]);
+                assert_eq!(gate_path.as_deref(), Some("nas:/home/old.txt"));
+            }
             other => panic!("expected Confirming, got {other:?}"),
         }
         assert!(s.is_confirming());
     }
 
     #[test]
-    fn cancel_returns_to_idle() {
+    fn begin_with_empty_rel_paths_is_noop() {
+        let mut s = F3DelState::new();
+        s.begin(endpoint("nas:/m/a"), vec![], "0 items".to_string(), None);
+        assert!(matches!(s.status(), F3DelStatus::Idle));
+    }
+
+    #[test]
+    fn batch_confirm_carries_all_rel_paths_and_no_gate() {
         let mut s = F3DelState::new();
         s.begin(
-            endpoint("nas:/home/old.txt"),
-            "nas:/home/old.txt".to_string(),
+            endpoint("nas:/home/"),
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "c.txt".to_string(),
+            ],
+            "3 item(s)".to_string(),
+            None,
         );
+        let launch = s.confirm().expect("confirm");
+        assert_eq!(launch.rel_paths.len(), 3);
+        match s.status() {
+            F3DelStatus::Deleting {
+                label, gate_path, ..
+            } => {
+                assert_eq!(label, "3 item(s)");
+                assert!(gate_path.is_none(), "batch outcome is not path-gated");
+            }
+            other => panic!("expected Deleting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_returns_to_idle() {
+        let mut s = F3DelState::new();
+        begin_single(&mut s, "nas:/home/old.txt", "old.txt");
         s.cancel();
         assert!(matches!(s.status(), F3DelStatus::Idle));
     }
@@ -209,15 +305,15 @@ mod tests {
     #[test]
     fn confirm_transitions_to_deleting_and_returns_launch() {
         let mut s = F3DelState::new();
-        s.begin(
-            endpoint("nas:/home/old.txt"),
-            "nas:/home/old.txt".to_string(),
-        );
+        begin_single(&mut s, "nas:/home/old.txt", "old.txt");
         let launch = s.confirm().expect("confirm yields a launch");
+        assert_eq!(launch.rel_paths, vec!["old.txt".to_string()]);
         match s.status() {
-            F3DelStatus::Deleting { request_id, path } => {
+            F3DelStatus::Deleting {
+                request_id, label, ..
+            } => {
                 assert_eq!(*request_id, launch.request_id);
-                assert_eq!(path, "nas:/home/old.txt");
+                assert_eq!(label, "nas:/home/old.txt");
             }
             other => panic!("expected Deleting, got {other:?}"),
         }
@@ -233,25 +329,26 @@ mod tests {
     #[test]
     fn begin_is_noop_while_deleting() {
         let mut s = F3DelState::new();
-        s.begin(endpoint("nas:/m/a"), "nas:/a".to_string());
+        begin_single(&mut s, "nas:/m/a", "a");
         let _ = s.confirm();
         // Now Deleting — a second begin must not reopen a prompt.
-        s.begin(endpoint("nas:/m/b"), "nas:/b".to_string());
+        begin_single(&mut s, "nas:/m/b", "b");
         assert!(s.is_deleting());
     }
 
     #[test]
     fn apply_done_updates_deleting() {
         let mut s = F3DelState::new();
-        s.begin(endpoint("nas:/m/a"), "nas:/a".to_string());
+        begin_single(&mut s, "nas:/m/a", "a");
         let launch = s.confirm().unwrap();
         assert!(s.apply_done(launch.request_id, 3));
         match s.status() {
             F3DelStatus::Done {
-                path,
+                label,
                 files_deleted,
+                ..
             } => {
-                assert_eq!(path, "nas:/a");
+                assert_eq!(label, "nas:/m/a");
                 assert_eq!(*files_deleted, 3);
             }
             other => panic!("expected Done, got {other:?}"),
@@ -261,12 +358,12 @@ mod tests {
     #[test]
     fn apply_error_updates_deleting() {
         let mut s = F3DelState::new();
-        s.begin(endpoint("nas:/m/a"), "nas:/a".to_string());
+        begin_single(&mut s, "nas:/m/a", "a");
         let launch = s.confirm().unwrap();
         assert!(s.apply_error(launch.request_id, "read-only module".to_string()));
         match s.status() {
-            F3DelStatus::Error { path, message } => {
-                assert_eq!(path, "nas:/a");
+            F3DelStatus::Error { label, message, .. } => {
+                assert_eq!(label, "nas:/m/a");
                 assert_eq!(message, "read-only module");
             }
             other => panic!("expected Error, got {other:?}"),
@@ -276,7 +373,7 @@ mod tests {
     #[test]
     fn apply_done_drops_stale_request() {
         let mut s = F3DelState::new();
-        s.begin(endpoint("nas:/m/a"), "nas:/a".to_string());
+        begin_single(&mut s, "nas:/m/a", "a");
         let launch = s.confirm().unwrap();
         assert!(!s.apply_done(launch.request_id + 99, 1));
         assert!(s.is_deleting());

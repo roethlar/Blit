@@ -187,6 +187,19 @@ impl BrowseState {
         self.marked.len()
     }
 
+    /// d-50: resolve the marked rows to remote endpoints (for
+    /// batch actions). Reuses `pull_source_endpoint` per row, so
+    /// the same parse-fidelity guarantees apply. Returns them in
+    /// the table's display order (deterministic). Empty when
+    /// nothing is marked.
+    pub fn marked_endpoints(&self, base: &RemoteEndpoint) -> Vec<RemoteEndpoint> {
+        self.rows
+            .iter()
+            .filter(|r| self.marked.contains(&r.name))
+            .filter_map(|r| pull_source_endpoint(&self.view, Some(r), base))
+            .collect()
+    }
+
     /// d-46: read-only status of the module being browsed.
     /// `false` at the modules list or when no module is
     /// entered. The F3 `D` delete dispatcher consults this.
