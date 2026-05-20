@@ -13,7 +13,7 @@
 //! error keeps the current config rather than reverting
 //! to defaults.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24 / d-40):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24 / d-40 / d-52):
 //!
 //! ```toml
 //! [verify]
@@ -35,6 +35,7 @@
 //! cancel_status_ttl_ms = 5000   # d-24: F2 cancel-fragment TTL (clamped to [250, 60000])
 //! confirm_cancel = false        # d-29: opt-in `K` confirm prompt (y/N)
 //! pull_status_ttl_ms = 5000     # d-40: F3 pull-outcome TTL (clamped to [250, 60000])
+//! delete_status_ttl_ms = 5000   # d-52: F3 batch-delete outcome TTL (clamped to [250, 60000])
 //! ```
 //!
 //! Future slices can grow the schema (per-pane tick
@@ -210,6 +211,13 @@ pub struct TransferDefaults {
     /// so the two outcome fragments tune independently.
     /// Clamped to `[MIN_PULL_TTL_MS, MAX_PULL_TTL_MS]`.
     pub pull_status_ttl_ms: u64,
+    /// d-52: milliseconds a *batch* F3 delete outcome
+    /// (`deleted N item(s)`) stays on screen before the
+    /// d-50 auto-hide sweep clears it. (Single-row deletes
+    /// self-hide on cursor move, so they ignore this.) A
+    /// sibling of `pull_status_ttl_ms`. Clamped to
+    /// `[MIN_DELETE_TTL_MS, MAX_DELETE_TTL_MS]`.
+    pub delete_status_ttl_ms: u64,
 }
 
 impl TransferDefaults {
@@ -249,6 +257,22 @@ impl TransferDefaults {
         self.pull_status_ttl_ms
             .clamp(Self::MIN_PULL_TTL_MS, Self::MAX_PULL_TTL_MS)
     }
+
+    /// d-52 baseline: 5s, mirroring the d-50 hardcoded
+    /// `F3DelState::BATCH_TERMINAL_TTL` this field overrides.
+    pub const DEFAULT_DELETE_TTL_MS: u64 = 5_000;
+    /// Floor — same rationale as [`Self::MIN_CANCEL_TTL_MS`].
+    pub const MIN_DELETE_TTL_MS: u64 = 250;
+    /// Ceiling — same rationale as [`Self::MAX_CANCEL_TTL_MS`].
+    pub const MAX_DELETE_TTL_MS: u64 = 60_000;
+
+    /// d-52: clamped batch-delete outcome TTL. The loop reads
+    /// this each frame and feeds it to the d-50
+    /// `clear_terminal_if_expired` sweep.
+    pub fn delete_status_ttl_ms_clamped(&self) -> u64 {
+        self.delete_status_ttl_ms
+            .clamp(Self::MIN_DELETE_TTL_MS, Self::MAX_DELETE_TTL_MS)
+    }
 }
 
 impl Default for TransferDefaults {
@@ -257,6 +281,7 @@ impl Default for TransferDefaults {
             cancel_status_ttl_ms: Self::DEFAULT_CANCEL_TTL_MS,
             confirm_cancel: false,
             pull_status_ttl_ms: Self::DEFAULT_PULL_TTL_MS,
+            delete_status_ttl_ms: Self::DEFAULT_DELETE_TTL_MS,
         }
     }
 }
@@ -691,6 +716,48 @@ mod tests {
         let cfg = load_from_path(&path, |_| {});
         assert_eq!(cfg.transfer.pull_status_ttl_ms, 3000);
         assert_eq!(cfg.transfer.pull_status_ttl_ms_clamped(), 3000);
+    }
+
+    // d-52: [transfer] delete_status_ttl_ms — batch-delete TTL.
+
+    #[test]
+    fn transfer_default_delete_ttl_is_5000ms() {
+        let cfg = TuiConfig::default();
+        assert_eq!(
+            cfg.transfer.delete_status_ttl_ms,
+            TransferDefaults::DEFAULT_DELETE_TTL_MS
+        );
+        assert_eq!(
+            cfg.transfer.delete_status_ttl_ms_clamped(),
+            TransferDefaults::DEFAULT_DELETE_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_delete_ttl_parses_and_clamps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\ndelete_status_ttl_ms = 2000\n").expect("write");
+        let cfg = load_from_path(&path, |_| {});
+        assert_eq!(cfg.transfer.delete_status_ttl_ms_clamped(), 2000);
+
+        // Floor + ceiling clamp.
+        let floor = TransferDefaults {
+            delete_status_ttl_ms: 0,
+            ..TransferDefaults::default()
+        };
+        assert_eq!(
+            floor.delete_status_ttl_ms_clamped(),
+            TransferDefaults::MIN_DELETE_TTL_MS
+        );
+        let ceiling = TransferDefaults {
+            delete_status_ttl_ms: u64::MAX,
+            ..TransferDefaults::default()
+        };
+        assert_eq!(
+            ceiling.delete_status_ttl_ms_clamped(),
+            TransferDefaults::MAX_DELETE_TTL_MS
+        );
     }
 
     #[test]

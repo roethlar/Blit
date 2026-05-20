@@ -265,15 +265,17 @@ impl F3DelState {
             self.status = F3DelStatus::Idle;
         }
     }
-
-    /// d-50 R2: batch terminal outcomes auto-hide after this.
-    /// Matches the d-38 fixed 5s baseline.
-    pub const BATCH_TERMINAL_TTL: Duration = Duration::from_secs(5);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Representative batch-outcome TTL for the auto-hide tests.
+    /// `clear_terminal_if_expired` takes the TTL as a parameter
+    /// (d-52 sources it from config), so the tests just need a
+    /// concrete duration.
+    const TEST_TTL: Duration = Duration::from_secs(5);
 
     fn endpoint(raw: &str) -> RemoteEndpoint {
         RemoteEndpoint::parse(raw).expect("endpoint")
@@ -458,7 +460,7 @@ mod tests {
         assert!(s.apply_done(launch.request_id, 2, finished));
         assert!(s.is_batch_terminal(), "batch Done needs the loop to tick");
 
-        let ttl = F3DelState::BATCH_TERMINAL_TTL;
+        let ttl = TEST_TTL;
         // Within the TTL → still shown.
         s.clear_terminal_if_expired(finished + ttl - Duration::from_millis(1), ttl);
         assert!(matches!(s.status(), F3DelStatus::Done { .. }));
@@ -483,10 +485,7 @@ mod tests {
             "single delete is not a batch terminal"
         );
         // Well past the TTL — single outcome must still stand.
-        s.clear_terminal_if_expired(
-            finished + F3DelState::BATCH_TERMINAL_TTL + Duration::from_secs(60),
-            F3DelState::BATCH_TERMINAL_TTL,
-        );
+        s.clear_terminal_if_expired(finished + TEST_TTL + Duration::from_secs(60), TEST_TTL);
         assert!(
             matches!(s.status(), F3DelStatus::Done { .. }),
             "single-row outcome is left to its cursor-move path gate"

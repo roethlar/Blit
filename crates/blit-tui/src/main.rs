@@ -645,8 +645,10 @@ async fn run_router(
         // d-50 R2: auto-hide a batch delete outcome (single-row
         // deletes self-hide on cursor move; batch has no such
         // event, so it expires on a TTL like the d-38 pull TTL).
-        app.f3_del
-            .clear_terminal_if_expired(now, f3del::F3DelState::BATCH_TERMINAL_TTL);
+        // d-52: TTL is operator-tunable via
+        // `[transfer] delete_status_ttl_ms`, read each frame.
+        let delete_ttl = Duration::from_millis(tui_config.transfer.delete_status_ttl_ms_clamped());
+        app.f3_del.clear_terminal_if_expired(now, delete_ttl);
         // d-36: accent + reload banner are recomputed each
         // frame from the (possibly hot-reloaded) config, so
         // a `Ctrl+R` theme change takes effect immediately.
