@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-46-readonly-delete-gate | Feature | `D` disabled on read-only modules | `[x]` | `phase5/a1` | `57c5bc6` |
+| d-47-f1-browse-nav | Feature | `enter` on an F1 daemon row browses it on F3 | `[~]` | `phase5/a1` | `065fd95` |
 
 ## Open findings
 
