@@ -1180,7 +1180,20 @@ async fn run_router(
                 if let Some(F3DelReply { request_id, result }) = reply {
                     match result {
                         Ok(files_deleted) => {
-                            app.f3_del.apply_done(request_id, files_deleted);
+                            // d-45 R2: a stale delete reply (superseded
+                            // run) returns false — only refresh the
+                            // listing when THIS delete actually applied,
+                            // so the deleted row leaves the F3 table
+                            // instead of lingering as an apparently-live
+                            // entry. Reuses the `r`-key refresh path; the
+                            // loop auto-kicks the re-fetch.
+                            if app.f3_del.apply_done(request_id, files_deleted) {
+                                handle_f3_refresh(
+                                    &mut app.browse,
+                                    app.parsed_remote.is_some(),
+                                    &mut app.browse_last_fetched_view,
+                                );
+                            }
                         }
                         Err(message) => {
                             app.f3_del.apply_error(request_id, message);
@@ -2327,8 +2340,21 @@ fn spawn_f3_del(request_id: u64, endpoint: RemoteEndpoint, tx: mpsc::Sender<F3De
 async fn run_f3_del(endpoint: &RemoteEndpoint) -> eyre::Result<u64> {
     use blit_app::admin::rm;
     let (module, rel_path) = rm::extract_module_and_path(endpoint)?;
-    let rel = rel_path.to_string_lossy().to_string();
+    // d-45 R2: build the wire path with the canonical
+    // forward-slash component join (same as `blit rm`), NOT
+    // `to_string_lossy` — a Windows client assembles cursor
+    // paths with `PathBuf::push` (backslashes), but the Purge
+    // wire contract is forward-slash relative paths.
+    let rel = del_wire_path(&rel_path);
     rm::purge(endpoint, module, vec![rel]).await
+}
+
+/// d-45 R2: the module-relative Purge wire path for a cursor
+/// endpoint — forward-slash joined regardless of client OS.
+/// Thin wrapper over `rel_path_to_string` so the conversion
+/// boundary is named + unit-testable.
+fn del_wire_path(rel_path: &std::path::Path) -> String {
+    blit_app::endpoints::rel_path_to_string(rel_path)
 }
 
 /// d-45: may this cursor endpoint be deleted from the TUI?
@@ -5206,6 +5232,88 @@ mod tests {
     fn is_deletable_accepts_a_sub_path() {
         let path = RemoteEndpoint::parse("nas:/home/photos/old.jpg").expect("sub path");
         assert!(is_deletable_remote_path(&path));
+    }
+
+    /// d-45 R2 (reviewer reopen): the Purge wire path must be a
+    /// forward-slash relative path regardless of client OS — NOT
+    /// a `to_string_lossy` of a platform-shaped `PathBuf`. Pins
+    /// the conversion boundary at `(module, rel_path)` → wire.
+    #[test]
+    fn del_wire_path_is_forward_slash_joined() {
+        use blit_app::admin::rm;
+        // Resolve a multi-component cursor endpoint the same way
+        // the dispatcher does, then run the conversion boundary.
+        let ep = RemoteEndpoint::parse("nas:/home/photos/old.jpg").expect("ep");
+        let (module, rel_path) = rm::extract_module_and_path(&ep).expect("extract");
+        assert_eq!(module, "home");
+        assert_eq!(
+            del_wire_path(&rel_path),
+            "photos/old.jpg",
+            "wire path must be forward-slash joined, not a platform PathBuf render"
+        );
+        // Also pin it directly against a component-pushed path
+        // (how a Windows client assembles the cursor path).
+        let mut built = std::path::PathBuf::new();
+        built.push("photos");
+        built.push("old.jpg");
+        assert_eq!(del_wire_path(&built), "photos/old.jpg");
+    }
+
+    /// d-45 R2: a successful delete reply must refresh the F3
+    /// listing so the deleted row can't linger as an
+    /// apparently-live entry. Pins that an applied delete +
+    /// the refresh path invalidate `browse_last_fetched_view`.
+    #[test]
+    fn successful_delete_invalidates_browse_view() {
+        let mut app = make_test_app_state(Screen::F3);
+        // A remote must be configured for the refresh to run.
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("remote"));
+        // Pretend a fetch already happened for the current view.
+        app.browse_last_fetched_view = Some(app.browse.view().clone());
+        // Drive a delete to the Deleting state and capture its id.
+        let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
+        app.f3_del.begin(ep, "nas:/home/old.txt".to_string());
+        let launch = app.f3_del.confirm().expect("confirm");
+        // Apply the success reply exactly as the select arm does.
+        if app.f3_del.apply_done(launch.request_id, 1) {
+            handle_f3_refresh(
+                &mut app.browse,
+                app.parsed_remote.is_some(),
+                &mut app.browse_last_fetched_view,
+            );
+        }
+        assert!(
+            app.browse_last_fetched_view.is_none(),
+            "a successful delete must invalidate the fetched view so the listing refreshes"
+        );
+        assert!(matches!(
+            app.f3_del.status(),
+            f3del::F3DelStatus::Done { .. }
+        ));
+    }
+
+    /// d-45 R2: a *stale* delete reply (superseded run) must NOT
+    /// trigger a refresh — `apply_done` returns false and the
+    /// view stays as-is.
+    #[test]
+    fn stale_delete_reply_does_not_refresh() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.browse_last_fetched_view = Some(app.browse.view().clone());
+        let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
+        app.f3_del.begin(ep, "nas:/home/old.txt".to_string());
+        let launch = app.f3_del.confirm().expect("confirm");
+        let stale = launch.request_id + 99;
+        if app.f3_del.apply_done(stale, 1) {
+            handle_f3_refresh(
+                &mut app.browse,
+                app.parsed_remote.is_some(),
+                &mut app.browse_last_fetched_view,
+            );
+        }
+        assert!(
+            app.browse_last_fetched_view.is_some(),
+            "a stale (superseded) delete reply must not invalidate the view"
+        );
     }
 
     // d-45: delete display bridge. Confirming/Deleting always
