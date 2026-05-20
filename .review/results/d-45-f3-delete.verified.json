@@ -1,0 +1,16 @@
+{
+  "id": "d-45-f3-delete",
+  "sha": "d794820aa4eb239739f6dd5a6df55a511d939e86",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T19:37:33Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "Round-2 del_wire_path uses the shared forward-slash component join instead of rendering a native PathBuf.",
+    "Successful applied delete replies now invalidate the F3 browse view via the existing refresh path; stale replies do not refresh."
+  ]
+}
