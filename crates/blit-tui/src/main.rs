@@ -6951,11 +6951,26 @@ mod tests {
     /// d-60 (data-loss guard): a move whose source is a module
     /// root is refused — like F3 `v`, the daemon rejects empty/root
     /// purge paths, so it must not even open the confirm.
+    ///
+    /// d-60 R2 (reviewer reopen): the source MUST be a *valid*
+    /// module-root endpoint (`nas:9031:/home/` — module syntax
+    /// requires the trailing slash) so the test exercises the
+    /// `is_deletable_remote_path` gate rather than tripping a parse
+    /// failure (the round-1 `nas:9031:/home` didn't parse, so the
+    /// test passed for the wrong reason). The paired subpath test
+    /// below proves a normal move source still reaches the confirm.
     #[test]
     fn handle_f1_trigger_keystroke_move_rejects_module_root_source() {
+        // Sanity: this is a parseable endpoint (a module root), so
+        // we actually reach + exercise the d-60 gate.
+        assert!(
+            RemoteEndpoint::parse("nas:9031:/home/").is_ok(),
+            "test source must parse, else it gates for the wrong reason"
+        );
+
         let mut app = make_test_app_state(Screen::F1);
-        // Source = a module root (no rel path), dest = local.
-        app.f1_trigger.begin("nas:9031:/home".to_string());
+        // Source = a module root (rel path empty), dest = local.
+        app.f1_trigger.begin("nas:9031:/home/".to_string());
         for c in "/tmp/out".chars() {
             app.f1_trigger.push_char(c);
         }
@@ -6963,12 +6978,32 @@ mod tests {
         app.f1_trigger.cycle_kind(true);
         app.f1_trigger.cycle_kind(true);
         assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
-        // "nas:9031:/home" is a module root → gated, no confirm.
+        // Module root → the d-60 gate refuses it: no confirm opens.
         assert!(
             !app.f3_pull.is_confirming_destructive(),
-            "module-root move source is refused"
+            "module-root move source is refused by the gate"
         );
         assert_eq!(app.current_screen, Screen::F1, "stays on F1 (no jump)");
+    }
+
+    /// d-60 R2: the paired positive case — a move whose source is a
+    /// real subpath (not a module root) DOES reach the F3
+    /// destructive confirm, proving the gate refuses only roots.
+    #[test]
+    fn handle_f1_trigger_keystroke_move_subpath_reaches_confirm() {
+        let mut app = make_test_app_state(Screen::F1);
+        app.f1_trigger.begin("nas:9031:/home/docs".to_string());
+        for c in "/tmp/out".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        app.f1_trigger.cycle_kind(true);
+        app.f1_trigger.cycle_kind(true);
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(
+            app.f3_pull.is_confirming_destructive(),
+            "a real subpath move source reaches the confirm gate"
+        );
+        assert_eq!(app.current_screen, Screen::F3, "jumped to F3 to confirm");
     }
 
     #[test]
