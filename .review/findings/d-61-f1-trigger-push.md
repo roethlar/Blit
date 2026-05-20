@@ -1,9 +1,9 @@
 # d-61-f1-trigger-push: local→remote copy push from the F1 trigger
 
 **Severity**: Feature (designed — TUI_DESIGN §1 "between any two endpoints")
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `68f5389`
+**Commit**: `3508007` (round 1: `68f5389`)
 
 ## What
 
@@ -18,12 +18,19 @@ TUI at all (only the CLI could push). d-61 adds it: a local→remote
 ### Direction detection in the trigger commit
 
 On Enter, `take()` yields `(source, dest, kind)`. The handler
-already parses `source` as a `RemoteEndpoint` → pull family. d-61
-adds the `else` branch: if the source does **not** parse as a
-remote endpoint (it's a local path) and `kind == Copy`, parse the
-**dest** as a remote endpoint; if that succeeds it's a push
-(local → remote). Neither-parses → dropped (inline parse-error
-feedback is a follow-up, as in d-58).
+classifies the source with
+`blit_app::endpoints::parse_transfer_endpoint` (round 2 — see the
+reviewer note; the round-1 raw `RemoteEndpoint::parse` was the
+footgun):
+
+- `Ok(Endpoint::Remote(src))` → remote→local (pull family):
+  Copy launches via `start_pull`; Mirror/Move route through the
+  F3 confirm gate (Move gated against module roots, d-60).
+- `Ok(Endpoint::Local(path))` → local→remote push (Copy only);
+  the dest must itself parse as `Endpoint::Remote`, else drop.
+- `Err(_)` → a malformed remote-shaped (`:/`) or forward-slash
+  input → **drop** (must not become a local push). Inline
+  parse-error feedback is a follow-up.
 
 ### A dedicated push lifecycle (no F3 reuse)
 
@@ -103,4 +110,26 @@ detection, state machine, and footer wiring are unit-tested.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reopened)
+
+> Malformed remote-shaped sources are misclassified as local push
+> sources. The push branch is entered whenever
+> `RemoteEndpoint::parse(src)` fails and kind is Copy — but that
+> parser also fails for malformed remote-shaped inputs (e.g.
+> `nas:9031:/home`, missing the module trailing slash). So
+> `src: nas:9031:/home  dst: other:9031:/backup/` falls through to
+> push, launching `spawn_f1_push(PathBuf::from("nas:9031:/home"))`
+> — the same footgun the transfer parser avoids. Distinguish a
+> genuine local source from a malformed remote-shaped one (reject
+> `:/` / `://` on parse failure, or reuse the strict transfer
+> parser). Add a regression test for that case.
+
+**Response (3508007):** Replaced the raw `RemoteEndpoint::parse`
+classification with `blit_app::endpoints::parse_transfer_endpoint`
+— the exact strict parser the CLI uses, which returns `Err` for
+`:/`-shaped inputs and `Local` only for genuine paths. The source
+match is now `Remote → pull`, `Local → push`, `Err → drop`; the
+push dest is parsed the same way. Added the reviewer's regression
+case (`..._malformed_remote_source_does_not_push`): `nas:9031:/home`
+→ `other:9031:/backup/` starts neither a push nor a pull. 539
+tests green, fmt + clippy clean.
