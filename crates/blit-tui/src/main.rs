@@ -2120,6 +2120,40 @@ struct F3PullProgress {
     bytes: u64,
 }
 
+/// d-37 round 2: fold one pull `ProgressEvent` into the
+/// running `(files, bytes)` totals using pull-receive
+/// semantics. Bytes come from `Payload` only; file count
+/// from `FileComplete` only.
+///
+/// The TCP data-plane path emits BOTH
+/// `Payload { files: 0, bytes: N }` and
+/// `FileComplete { bytes: N }` for the same completed
+/// file (`pipeline.rs` `execute_receive_pipeline`), so
+/// adding bytes from both would double-count and the
+/// footer would snap backward when the authoritative
+/// reply total lands. The direct-gRPC path emits
+/// `FileComplete { bytes: 0 }` (`pull.rs`
+/// `finalize_active_file`) with bytes carried by
+/// `Payload` — so counting bytes from `Payload` alone is
+/// correct on both paths, and counting one file per
+/// `FileComplete` is correct on both paths.
+fn accumulate_pull_progress(
+    files: &mut usize,
+    bytes: &mut u64,
+    event: &blit_core::remote::transfer::ProgressEvent,
+) {
+    use blit_core::remote::transfer::ProgressEvent;
+    match event {
+        ProgressEvent::Payload { bytes: b, .. } => {
+            *bytes = bytes.saturating_add(*b);
+        }
+        ProgressEvent::FileComplete { .. } => {
+            *files = files.saturating_add(1);
+        }
+        ProgressEvent::ManifestBatch { .. } => {}
+    }
+}
+
 fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
@@ -2137,26 +2171,16 @@ fn spawn_f3_pull(
     tokio::spawn(async move {
         // d-37: progress monitor. run_pull_sync reports
         // ProgressEvents into `pe_rx`; the forwarder
-        // accumulates cumulative (files, bytes) — the
-        // events are per-chunk deltas, same as the CLI's
-        // monitor sums — and ships snapshots to the UI.
+        // accumulates cumulative (files, bytes) via
+        // `accumulate_pull_progress` and ships snapshots
+        // to the UI.
         let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
         let progress = RemoteTransferProgress::new(pe_tx);
         let forwarder = tokio::spawn(async move {
             let mut files = 0usize;
             let mut bytes = 0u64;
             while let Some(event) = pe_rx.recv().await {
-                match event {
-                    ProgressEvent::Payload { files: f, bytes: b } => {
-                        files += f;
-                        bytes += b;
-                    }
-                    ProgressEvent::FileComplete { bytes: b, .. } => {
-                        files += 1;
-                        bytes += b;
-                    }
-                    ProgressEvent::ManifestBatch { .. } => continue,
-                }
+                accumulate_pull_progress(&mut files, &mut bytes, &event);
                 // Lossy on a full channel — progress is
                 // approximate; the reply carries the truth.
                 let _ = progress_tx.try_send(F3PullProgress {
@@ -4851,6 +4875,113 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
         };
         assert!(!handle_f3_pull_keystroke(&key, &mut app));
+    }
+
+    // d-37 round 2: pull-progress accumulator semantics.
+
+    /// The reviewer-flagged regression: the TCP data-plane
+    /// path emits `Payload { bytes: N }` AND
+    /// `FileComplete { bytes: N }` for the SAME file.
+    /// Bytes must come from Payload only — the pair must
+    /// total N bytes / 1 file, not 2N.
+    #[test]
+    fn accumulate_pull_progress_data_plane_pair_no_double_count() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        accumulate_pull_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::Payload {
+                files: 0,
+                bytes: 1024,
+            },
+        );
+        accumulate_pull_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::FileComplete {
+                path: "f.txt".to_string(),
+                bytes: 1024,
+            },
+        );
+        assert_eq!(bytes, 1024, "bytes from Payload only — not doubled");
+        assert_eq!(files, 1, "one file from the FileComplete");
+    }
+
+    /// Direct-gRPC path: bytes arrive via `Payload` chunks,
+    /// `FileComplete` carries `bytes: 0`. Bytes accumulate
+    /// from the chunks; the file is counted once.
+    #[test]
+    fn accumulate_pull_progress_grpc_chunks_then_zero_byte_complete() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        for chunk in [4096u64, 4096, 2000] {
+            accumulate_pull_progress(
+                &mut files,
+                &mut bytes,
+                &ProgressEvent::Payload {
+                    files: 0,
+                    bytes: chunk,
+                },
+            );
+        }
+        accumulate_pull_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::FileComplete {
+                path: "big.bin".to_string(),
+                bytes: 0,
+            },
+        );
+        assert_eq!(bytes, 10192);
+        assert_eq!(files, 1);
+    }
+
+    /// ManifestBatch events don't touch the byte/file
+    /// totals (they're a discovery-phase signal).
+    #[test]
+    fn accumulate_pull_progress_manifest_batch_is_inert() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        accumulate_pull_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::ManifestBatch { files: 12 },
+        );
+        assert_eq!(files, 0);
+        assert_eq!(bytes, 0);
+    }
+
+    /// Multi-file data-plane transfer: each file emits the
+    /// Payload+FileComplete pair; totals stay honest.
+    #[test]
+    fn accumulate_pull_progress_multi_file_data_plane() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        for (i, size) in [100u64, 200, 300].iter().enumerate() {
+            accumulate_pull_progress(
+                &mut files,
+                &mut bytes,
+                &ProgressEvent::Payload {
+                    files: 0,
+                    bytes: *size,
+                },
+            );
+            accumulate_pull_progress(
+                &mut files,
+                &mut bytes,
+                &ProgressEvent::FileComplete {
+                    path: format!("f{i}"),
+                    bytes: *size,
+                },
+            );
+        }
+        assert_eq!(bytes, 600);
+        assert_eq!(files, 3);
     }
 
     /// e-1 round-2 regression: `?` is GLOBAL, including

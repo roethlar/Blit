@@ -129,4 +129,75 @@ unit-tested.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-37-f3-pull-progress.reopened.md`)
+
+One finding:
+
+- **Double-counted bytes on the data-plane path.** The
+  forwarder added bytes from BOTH `Payload` and
+  `FileComplete`. But the TCP data-plane receive path
+  (`pipeline.rs` `execute_receive_pipeline`) emits both
+  `Payload { files: 0, bytes: N }` AND
+  `FileComplete { bytes: N }` for the same completed
+  file. F3 uses `PullSyncOptions::default()`, so that
+  path is in scope — the footer could show ~2× the bytes
+  mid-transfer, then snap backward when the authoritative
+  `F3PullReply` total landed.
+
+### Round 2 fix
+
+Extracted the accumulation into a pure
+`accumulate_pull_progress(files, bytes, event)` with
+pull-receive semantics:
+
+- **bytes** come from `Payload` only.
+- **file count** comes from `FileComplete` only (ignore
+  its `bytes`).
+
+This is correct on both data-plane paths:
+- **TCP data-plane**: `Payload(0, N)` + `FileComplete(N)`
+  → bytes += N (Payload), files += 1 (FileComplete,
+  byte field ignored) = N bytes / 1 file. No double.
+- **Direct-gRPC**: chunk `Payload`s carry the bytes,
+  `FileComplete(0)` carries no bytes → bytes sum from
+  chunks, files += 1. Correct.
+
+The forwarder now calls the helper; the logic is no
+longer inline-and-untestable.
+
+### Round 2 file changes
+
+- `crates/blit-tui/src/main.rs`:
+  - New pure `accumulate_pull_progress` helper.
+  - Forwarder calls it instead of the inline match.
+  - 4 new accumulator tests.
+
+### Round 2 tests
+
++4 tests (390 → 394):
+
+- `accumulate_pull_progress_data_plane_pair_no_double_count`
+  — the reviewer's exact regression: `Payload{bytes:1024}`
+  + `FileComplete{bytes:1024}` → 1024 bytes / 1 file, NOT
+  2048.
+- `accumulate_pull_progress_grpc_chunks_then_zero_byte_complete`
+  — chunk Payloads sum; `FileComplete{bytes:0}` counts
+  the file.
+- `accumulate_pull_progress_manifest_batch_is_inert`.
+- `accumulate_pull_progress_multi_file_data_plane` — the
+  pair per file across 3 files totals honestly.
+
+`cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, and `cargo test --workspace` all green.
+
+### Lesson restated
+
+When two event types can describe the same underlying
+fact (here: a completed file's bytes reported as both a
+`Payload` and a `FileComplete`), summing both
+double-counts. Pick one event as the byte authority and
+one as the count authority — and unit-test the
+accumulator against the actual emitter's event sequence,
+not an assumed one. The CLI's monitor sums both too;
+the TUI's footer is more visible mid-transfer, so the
+discrepancy surfaced here.
