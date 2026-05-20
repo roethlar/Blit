@@ -409,6 +409,20 @@ impl DaemonsState {
             self.selected -= 1;
         }
     }
+
+    /// d-42: jump to the first row (`g`). No-op when empty.
+    pub fn select_first(&mut self) {
+        if !self.rows.is_empty() {
+            self.selected = 0;
+        }
+    }
+
+    /// d-42: jump to the last row (`G`). No-op when empty.
+    pub fn select_last(&mut self) {
+        if !self.rows.is_empty() {
+            self.selected = self.rows.len() - 1;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +475,20 @@ mod tests {
             2,
             "discovered: 2 remotes, Local doesn't count",
         );
+    }
+
+    /// d-42: `g` / `G` jump the F1 cursor to the first /
+    /// last daemon row.
+    #[test]
+    fn select_first_and_last_jump_the_cursor() {
+        let mut state = DaemonsState::new();
+        state.replace_from_discovery(&[svc("alpha", &[]), svc("bravo", &[])], Instant::now());
+        // Rows: Local(0), alpha(1), bravo(2).
+        let last = state.rows().len() - 1;
+        state.select_last();
+        assert_eq!(state.selected_index(), last);
+        state.select_first();
+        assert_eq!(state.selected_index(), 0);
     }
 
     /// d-11 round 2: `has_live_timestamp` returns true

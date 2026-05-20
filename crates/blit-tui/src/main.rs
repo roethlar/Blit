@@ -1180,6 +1180,8 @@ async fn handle_pane_action(
             }
             UserAction::SelectNext => app.daemons.select_next(),
             UserAction::SelectPrev => app.daemons.select_prev(),
+            UserAction::SelectFirst => app.daemons.select_first(),
+            UserAction::SelectLast => app.daemons.select_last(),
             _ => {}
         },
         Screen::F2 => match action {
@@ -1343,6 +1345,8 @@ async fn handle_pane_action(
             }
             UserAction::SelectNext => app.browse.select_next(),
             UserAction::SelectPrev => app.browse.select_prev(),
+            UserAction::SelectFirst => app.browse.select_first(),
+            UserAction::SelectLast => app.browse.select_last(),
             UserAction::Descend => {
                 app.browse.descend();
             }
@@ -3327,6 +3331,12 @@ enum UserAction {
     Refresh,
     SelectNext,
     SelectPrev,
+    /// d-42: jump the cursor to the first row (`g`).
+    /// Honored by F1 and F3 list panes.
+    SelectFirst,
+    /// d-42: jump the cursor to the last row (`G`).
+    /// Honored by F1 and F3 list panes.
+    SelectLast,
     /// F3: descend into the cursor row (enter / →).
     Descend,
     /// F3: pop back one level (←). Mapped only on the
@@ -3471,6 +3481,15 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         KeyCode::Char('r') => Some(UserAction::Refresh),
         KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') => Some(UserAction::SelectPrev),
+        // d-42: vim-style jump to first / last row. `g`
+        // (first) and `G` (last) extend the j/k cursor on
+        // the F1 and F3 list panes; other panes ignore the
+        // variants in their dispatch arms. Home/End alias
+        // for operators who don't think in vim. Single `g`
+        // (not the vim `gg` double-tap) — no chord state to
+        // track, and `G` is already the natural pair.
+        KeyCode::Char('g') | KeyCode::Home => Some(UserAction::SelectFirst),
+        KeyCode::Char('G') | KeyCode::End => Some(UserAction::SelectLast),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UserAction::Descend),
         KeyCode::Left | KeyCode::Char('h') => Some(UserAction::Ascend),
         // F4 profile lifecycle keys. The Ctrl-c quit
@@ -4959,6 +4978,27 @@ mod tests {
         assert!(matches!(
             key_action(&k(KeyCode::Char('u'))),
             Some(UserAction::F3DuBegin)
+        ));
+    }
+
+    /// d-42: `g`/Home → SelectFirst, `G`/End → SelectLast.
+    #[test]
+    fn key_action_maps_jump_keys() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('g'))),
+            Some(UserAction::SelectFirst)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Home)),
+            Some(UserAction::SelectFirst)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('G'))),
+            Some(UserAction::SelectLast)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::End)),
+            Some(UserAction::SelectLast)
         ));
     }
 

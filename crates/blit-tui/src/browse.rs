@@ -310,6 +310,25 @@ impl BrowseState {
         }
     }
 
+    /// d-42: jump the cursor to the first matching row
+    /// (`g`). No-op when nothing matches the filter.
+    pub fn select_first(&mut self) {
+        if let Some(i) = self.first_matching_row() {
+            self.selected = i;
+        }
+    }
+
+    /// d-42: jump the cursor to the last matching row
+    /// (`G`). No-op when nothing matches the filter.
+    pub fn select_last(&mut self) {
+        if let Some(i) = (0..self.rows.len())
+            .rev()
+            .find(|&i| self.row_matches(&self.rows[i]))
+        {
+            self.selected = i;
+        }
+    }
+
     /// Descend into the selected row. Module → enter its
     /// root; Directory → push onto path. No-op on File.
     /// Returns the new view if navigation happened.
@@ -1058,6 +1077,47 @@ mod tests {
         assert_eq!(state.rows()[state.selected_index()].name, "backups");
         state.select_prev();
         assert_eq!(state.rows()[state.selected_index()].name, "backups");
+    }
+
+    #[test]
+    fn select_first_and_last_no_filter() {
+        let mut state = populated_state();
+        // d-27 sorts rows alphabetically:
+        // backups(0), home(1), photos(2), scratch(3).
+        state.select_next(); // → home
+        assert_eq!(state.rows()[state.selected_index()].name, "home");
+        state.select_last();
+        assert_eq!(state.rows()[state.selected_index()].name, "scratch");
+        state.select_first();
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+    }
+
+    #[test]
+    fn select_first_and_last_are_filter_aware() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s'); // backups, photos, scratch
+        state.select_last();
+        assert_eq!(
+            state.rows()[state.selected_index()].name,
+            "scratch",
+            "G must land on the last MATCHING row"
+        );
+        state.select_first();
+        assert_eq!(
+            state.rows()[state.selected_index()].name,
+            "backups",
+            "g must land on the first matching row, not raw row 0 (home)"
+        );
+    }
+
+    #[test]
+    fn select_first_last_noop_on_empty() {
+        let mut state = BrowseState::new();
+        state.select_first();
+        assert_eq!(state.selected_index(), 0);
+        state.select_last();
+        assert_eq!(state.selected_index(), 0);
     }
 
     #[test]
