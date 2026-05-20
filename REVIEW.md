@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-39-f3-pull-throughput | Feature | MiB/s rate on F3 pull progress footer | `[~]` | `phase5/a1` | `43258ab` |
 
 ## Open findings
 
