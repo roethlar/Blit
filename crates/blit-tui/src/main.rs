@@ -923,13 +923,13 @@ async fn run_router(
                 {
                     continue;
                 }
-                // d-55: F3's `m` mirror confirm is modal while
-                // open — route y/n/Esc to the mirror handler
-                // (destructive, like the delete confirm) before
-                // the normal F3 dispatcher.
+                // d-55/d-57: F3's `m` mirror / `v` move confirm is
+                // modal while open — route y/n/Esc to the destructive
+                // handler (like the delete confirm) before the normal
+                // F3 dispatcher.
                 if app.current_screen == Screen::F3
-                    && app.f3_pull.is_confirming_mirror()
-                    && handle_f3_mirror_confirm_keystroke(&key, &mut app)
+                    && app.f3_pull.is_confirming_destructive()
+                    && handle_f3_destructive_confirm_keystroke(&key, &mut app)
                 {
                     continue;
                 }
@@ -1505,21 +1505,47 @@ async fn handle_pane_action(
                 }
             }
             // d-55: `m` opens the mirror destination prompt for the
-            // cursor row. Same source resolution as `p`; the mirror
-            // flag rides the pull state so commit routes through the
+            // cursor row. Same source resolution as `p`; the kind
+            // rides the pull state so commit routes through the
             // destructive confirm. The mirror reads FROM the remote
             // and deletes at the LOCAL dest, so no read-only gate is
             // needed (read-only is about writing to the module).
             UserAction::F3MirrorBegin => {
                 let busy = app.f3_pull.is_entering_dest()
                     || app.f3_pull.is_running()
-                    || app.f3_pull.is_confirming_mirror();
+                    || app.f3_pull.is_confirming_destructive();
                 let source = app.browse_target.as_ref().and_then(|base| {
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                 });
                 if !busy {
                     if let Some(source) = source {
                         app.f3_pull.begin_mirror(source);
+                    }
+                }
+            }
+            // d-57: `v` opens the move destination prompt for the
+            // cursor row. Like mirror, but the destructive phase
+            // deletes the REMOTE source after a complete receive.
+            // That deletes from the module, so it IS gated on
+            // read-only — a read-only source can't be moved out of.
+            UserAction::F3MoveBegin => {
+                let busy = app.f3_pull.is_entering_dest()
+                    || app.f3_pull.is_running()
+                    || app.f3_pull.is_confirming_destructive();
+                let source = if app.browse.current_module_read_only() {
+                    None
+                } else {
+                    app.browse_target.as_ref().and_then(|base| {
+                        browse::pull_source_endpoint(
+                            app.browse.view(),
+                            app.browse.selected_row(),
+                            base,
+                        )
+                    })
+                };
+                if !busy {
+                    if let Some(source) = source {
+                        app.f3_pull.begin_move(source);
                     }
                 }
             }
@@ -2440,45 +2466,63 @@ fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDispl
     use screens::f3::F3PullDisplay;
     match status {
         F3PullStatus::Idle => F3PullDisplay::Hidden,
-        F3PullStatus::EnteringDest { dest, mirror, .. } => F3PullDisplay::EnteringDest {
+        F3PullStatus::EnteringDest { dest, kind, .. } => F3PullDisplay::EnteringDest {
             dest: dest.clone(),
-            mirror: *mirror,
+            // imperative verb ("pull"/"mirror"/"move")
+            verb: kind.verbs().0,
         },
-        // d-55: destructive mirror confirm (y/N).
-        F3PullStatus::ConfirmMirror { dest, .. } => {
-            F3PullDisplay::ConfirmMirror { dest: dest.clone() }
-        }
+        // d-55/d-57: destructive confirm (y/N). The detail spells
+        // out what gets removed so the operator knows the stakes.
+        F3PullStatus::Confirm { dest, kind, .. } => F3PullDisplay::Confirm {
+            dest: dest.clone(),
+            verb: kind.verbs().0,
+            detail: confirm_detail(*kind),
+        },
         F3PullStatus::Running {
             dest,
             files,
             bytes,
             bytes_per_sec,
-            mirror,
+            kind,
             ..
         } => F3PullDisplay::Running {
             dest: dest.clone(),
             files: *files,
             bytes: *bytes,
             bytes_per_sec: *bytes_per_sec,
-            mirror: *mirror,
+            // present participle ("pulling"/"mirroring"/"moving")
+            verb: kind.verbs().1,
         },
         F3PullStatus::Done {
             files,
             bytes,
             dest,
-            mirror,
+            kind,
             deleted,
             ..
         } => F3PullDisplay::Done {
             files: *files,
             bytes: *bytes,
             dest: dest.clone(),
-            mirror: *mirror,
+            // past tense ("pulled"/"mirrored"/"moved")
+            verb: kind.verbs().2,
             deleted: *deleted,
         },
         F3PullStatus::Error { message, .. } => F3PullDisplay::Error {
             message: message.clone(),
         },
+    }
+}
+
+/// d-55/d-57: the destructive-confirm detail line for each kind —
+/// what the operator is about to lose. `Copy` is non-destructive
+/// and never reaches the confirm gate.
+fn confirm_detail(kind: f3pull::PullKind) -> &'static str {
+    use f3pull::PullKind;
+    match kind {
+        PullKind::Mirror => "deletes extraneous",
+        PullKind::Move => "deletes the remote source",
+        PullKind::Copy => "",
     }
 }
 
@@ -2837,21 +2881,29 @@ fn pull_throughput(bytes: u64, elapsed_secs: f64) -> u64 {
     }
 }
 
-/// d-55 R2: build the `PullSyncOptions` for an F3 pull/mirror.
+/// d-55 R2 / d-57: build the `PullSyncOptions` for an F3 pull.
 ///
-/// The mirror flag MUST live here, on the options — the wire
+/// `mirror_mode` MUST live here, on the options — the wire
 /// `TransferOperationSpec` is built from `options`
 /// (`RemotePullClient::build_spec_from_options`), so it's
 /// `options.mirror_mode` that tells the daemon to compute the
 /// delete list. The execution-level `PullSyncExecution.mirror_mode`
 /// is only the receive-side `track_paths` flag; setting it alone
-/// (round 1) left the daemon emitting `MirrorMode::Off`, so
+/// (d-55 round 1) left the daemon emitting `MirrorMode::Off`, so
 /// `apply_pull_mirror_purge` had no paths to delete and the
 /// "mirror" silently behaved like a plain pull. The CLI sets the
 /// options field (`blit-cli/src/transfers/remote.rs`); we match it.
-fn f3_pull_options(mirror: bool) -> blit_core::remote::pull::PullSyncOptions {
+///
+/// d-57: a `Move` sets `require_complete_scan` so the daemon
+/// refuses a partial source scan — mirroring the CLI's move guard
+/// (`run_remote_pull_transfer_deferred(.., true)`). Deleting the
+/// remote source after an incomplete copy would lose the files
+/// that were skipped.
+fn f3_pull_options(kind: f3pull::PullKind) -> blit_core::remote::pull::PullSyncOptions {
+    use f3pull::PullKind;
     blit_core::remote::pull::PullSyncOptions {
-        mirror_mode: mirror,
+        mirror_mode: kind == PullKind::Mirror,
+        require_complete_scan: kind == PullKind::Move,
         ..blit_core::remote::pull::PullSyncOptions::default()
     }
 }
@@ -2860,10 +2912,9 @@ fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
     dest_root: std::path::PathBuf,
-    // d-55: `true` runs a mirror — `mirror_mode` on the
-    // PullSync plus the post-pull `apply_pull_mirror_purge`
-    // (deletes local files absent from the source).
-    mirror: bool,
+    // d-55/d-57: copy / mirror / move. Mirror runs the post-pull
+    // `apply_pull_mirror_purge`; move deletes the remote source.
+    kind: f3pull::PullKind,
     tx: mpsc::Sender<F3PullReply>,
     // d-37: live byte/file progress snapshots. `try_send`
     // means a full channel just drops an intermediate
@@ -2871,8 +2922,10 @@ fn spawn_f3_pull(
     // `F3PullReply`.
     progress_tx: mpsc::Sender<F3PullProgress>,
 ) {
+    use blit_app::admin::rm::delete_remote_path;
     use blit_app::transfers::remote::{apply_pull_mirror_purge, run_pull_sync, PullSyncExecution};
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+    use f3pull::PullKind;
     tokio::spawn(async move {
         // d-37: progress monitor. run_pull_sync reports
         // ProgressEvents into `pe_rx`; the forwarder
@@ -2899,43 +2952,72 @@ fn spawn_f3_pull(
             }
         });
 
+        // d-57: a move needs the source endpoint again after the
+        // receive (to delete it), but `source` moves into the
+        // execution — clone it up front for the move path only.
+        let move_source = (kind == PullKind::Move).then(|| source.clone());
         let remote_label = source.display();
         let execution = PullSyncExecution {
             remote: source,
             dest_root,
-            options: f3_pull_options(mirror),
+            options: f3_pull_options(kind),
             compute_checksums: false,
-            mirror_mode: mirror,
+            // receive-side track_paths — only meaningful for mirror.
+            mirror_mode: kind == PullKind::Mirror,
             remote_label,
         };
         // d-55: run_pull_sync does the receive half; the
-        // destructive purge (apply_pull_mirror_purge) is a
-        // separate step the lib wants run AFTER the progress
-        // monitor is torn down (see its doc comment). So:
-        // pull → drop progress → drain forwarder → purge.
+        // destructive step (mirror purge / move source-delete) is
+        // run AFTER the progress monitor is torn down. So:
+        // pull → drop progress → drain forwarder → destructive phase.
         let sync = run_pull_sync(execution, Some(&progress)).await;
-        // Close the progress channel → the forwarder drains
-        // and exits before we run the purge / send the reply.
+        // Close the progress channel → the forwarder drains and
+        // exits before we run the destructive phase / send the reply.
         drop(progress);
         let _ = forwarder.await;
         let result = match sync {
             Ok(outcome) => {
-                // No-op for a plain pull (mirror = false); for a
-                // mirror it deletes the daemon-listed extraneous
-                // local paths. A purge failure surfaces as the
-                // op's error.
-                match apply_pull_mirror_purge(&outcome, mirror).await {
-                    // d-56: surface the purge delete count (0 for a
-                    // plain pull or a mirror with nothing to remove).
-                    Ok(purge_stats) => {
-                        let deleted = purge_stats.map(|s| s.files_deleted).unwrap_or(0);
-                        Ok((
-                            outcome.report.files_transferred,
-                            outcome.report.bytes_transferred,
-                            deleted,
-                        ))
+                let transferred = (
+                    outcome.report.files_transferred,
+                    outcome.report.bytes_transferred,
+                );
+                match kind {
+                    // Plain pull — nothing to remove.
+                    PullKind::Copy => Ok((transferred.0, transferred.1, 0)),
+                    // d-55/d-56: delete local files absent from the
+                    // source; surface the purge count.
+                    PullKind::Mirror => match apply_pull_mirror_purge(&outcome, true).await {
+                        Ok(stats) => {
+                            let deleted = stats.map(|s| s.files_deleted).unwrap_or(0);
+                            Ok((transferred.0, transferred.1, deleted))
+                        }
+                        Err(err) => Err(format!("{err:#}")),
+                    },
+                    // d-57: delete the remote source only after a
+                    // successful receive. The `require_complete_scan`
+                    // option made the daemon refuse a partial scan, so
+                    // a successful pull means the whole source was
+                    // copied — safe to remove it now. A delete failure
+                    // surfaces as the op's error (the copy already
+                    // succeeded, but the operator must know the source
+                    // wasn't removed).
+                    PullKind::Move => {
+                        let source = move_source.expect("move_source set for Move");
+                        match blit_app::admin::rm::extract_module_and_path(&source) {
+                            Ok((_, rel_path)) => {
+                                let wire = del_wire_path(&rel_path);
+                                match delete_remote_path(&source, &wire).await {
+                                    Ok(removed) => Ok((transferred.0, transferred.1, removed)),
+                                    Err(err) => Err(format!(
+                                        "received but failed to delete remote source: {err:#}"
+                                    )),
+                                }
+                            }
+                            Err(err) => Err(format!(
+                                "received but cannot resolve remote source to delete: {err:#}"
+                            )),
+                        }
                     }
-                    Err(err) => Err(format!("{err:#}")),
                 }
             }
             Err(err) => Err(format!("{err:#}")),
@@ -2979,7 +3061,7 @@ fn advance_batch_pull(app: &mut AppState) {
                     launch.request_id,
                     launch.source,
                     launch.dest_root,
-                    launch.mirror,
+                    launch.kind,
                     app.f3_pull_reply_tx.clone(),
                     app.f3_pull_progress_tx.clone(),
                 );
@@ -3754,7 +3836,7 @@ fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                     launch.request_id,
                     launch.source,
                     launch.dest_root,
-                    launch.mirror,
+                    launch.kind,
                     app.f3_pull_reply_tx.clone(),
                     app.f3_pull_progress_tx.clone(),
                 );
@@ -3829,15 +3911,14 @@ fn handle_f3_delete_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
     }
 }
 
-/// d-55: handle a keystroke while the F3 mirror confirm prompt
-/// is open. Returns `true` if consumed. Modal like the delete
-/// confirm (a mirror deletes local files absent from the
-/// source): `y`/`Y` launches the mirror, `n`/`N`/`Esc` aborts,
-/// and every other key is swallowed so a stray `p`/`m`/`/`
-/// can't stack another prompt or move the cursor mid-confirm.
-/// `?` (help), Ctrl-c (emergency quit), and F-keys (pane nav)
-/// fall through to the dispatcher.
-fn handle_f3_mirror_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+/// d-55/d-57: handle a keystroke while the F3 destructive confirm
+/// (mirror `m` / move `v`) prompt is open. Returns `true` if
+/// consumed. Modal like the delete confirm: `y`/`Y` launches the
+/// op, `n`/`N`/`Esc` aborts, and every other key is swallowed so a
+/// stray `p`/`m`/`v`/`/` can't stack another prompt or move the
+/// cursor mid-confirm. `?` (help), Ctrl-c (emergency quit), and
+/// F-keys (pane nav) fall through to the dispatcher.
+fn handle_f3_destructive_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
@@ -3853,12 +3934,12 @@ fn handle_f3_mirror_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> boo
     }
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if let Some(launch) = app.f3_pull.confirm_mirror() {
+            if let Some(launch) = app.f3_pull.confirm_destructive() {
                 spawn_f3_pull(
                     launch.request_id,
                     launch.source,
                     launch.dest_root,
-                    launch.mirror,
+                    launch.kind,
                     app.f3_pull_reply_tx.clone(),
                     app.f3_pull_progress_tx.clone(),
                 );
@@ -3866,7 +3947,7 @@ fn handle_f3_mirror_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> boo
             true
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.f3_pull.cancel_mirror();
+            app.f3_pull.cancel_destructive();
             true
         }
         // Modal: swallow everything else (no accidental nav or
@@ -4109,6 +4190,13 @@ enum UserAction {
     /// deletes local files absent from the source). No-op if no
     /// remote / nothing selectable / an op already in flight.
     F3MirrorBegin,
+    /// d-57: F3 only. `v` opens the move destination prompt for
+    /// the cursor-selected remote path. Like mirror, but the
+    /// destructive phase deletes the REMOTE source after a
+    /// complete receive. Gated on read-only (deletes from the
+    /// module). No-op if no remote / nothing selectable / an op
+    /// already in flight.
+    F3MoveBegin,
     /// d-41: F3 only. `u` (usage) runs a DiskUsage query
     /// for the cursor-selected remote path and shows the
     /// subtree byte/file total in the Stats block. No-op if
@@ -4265,6 +4353,13 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // confirm is open the F3 keystroke handlers absorb input
         // before this dispatcher runs, so `m` is a text char then.
         KeyCode::Char('m') => Some(UserAction::F3MirrorBegin),
+        // d-57: `v` (move) on F3 — TUI_DESIGN §5.3 lists
+        // `v: move`. Free in the global map (the F4 local move is
+        // `V`, case-distinct). Pulls the cursor source then deletes
+        // the remote source. While the dest prompt or destructive
+        // confirm is open the F3 keystroke handlers absorb input
+        // first, so `v` is a text char then.
+        KeyCode::Char('v') => Some(UserAction::F3MoveBegin),
         // d-53: `P` (Shift+p) batch-pulls the F3 marked set —
         // the natural pair to `p` (the design lists `c` for
         // copy, but `c` is ProfileClear in the global map; `P`
@@ -6526,7 +6621,7 @@ mod tests {
             app.f3_pull.push_char(c);
         }
         app.f3_pull.begin_run();
-        assert!(app.f3_pull.is_confirming_mirror());
+        assert!(app.f3_pull.is_confirming_destructive());
         app
     }
 
@@ -6534,10 +6629,40 @@ mod tests {
     // for the detached task — run under a runtime. The task
     // races off to a non-existent daemon and is ignored; we
     // only assert the synchronous state transition to Running.
+    /// d-57: a move sits on the same destructive confirm gate; `y`
+    /// launches it as a `Move`-kind run. Needs a tokio reactor for
+    /// the detached spawn (the task races to a non-existent daemon
+    /// and is ignored).
     #[tokio::test]
-    async fn handle_f3_mirror_confirm_keystroke_y_launches() {
+    async fn handle_f3_destructive_confirm_keystroke_y_launches_move() {
+        let mut app = make_test_app_state(Screen::F3);
+        let source = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
+        app.f3_pull.begin_move(source);
+        for c in "/tmp/out".chars() {
+            app.f3_pull.push_char(c);
+        }
+        app.f3_pull.begin_run();
+        assert!(app.f3_pull.is_confirming_destructive());
+        assert!(handle_f3_destructive_confirm_keystroke(
+            &k(KeyCode::Char('y')),
+            &mut app
+        ));
+        match app.f3_pull.status() {
+            f3pull::F3PullStatus::Running { kind, .. } => {
+                assert_eq!(*kind, f3pull::PullKind::Move, "y launches a move run");
+            }
+            other => panic!("expected Running move, got {other:?}"),
+        }
+    }
+
+    // `y` calls `spawn_f3_pull`, which needs a tokio reactor
+    // for the detached task — run under a runtime. The task
+    // races off to a non-existent daemon and is ignored; we
+    // only assert the synchronous state transition to Running.
+    #[tokio::test]
+    async fn handle_f3_destructive_confirm_keystroke_y_launches() {
         let mut app = app_with_mirror_confirm();
-        assert!(handle_f3_mirror_confirm_keystroke(
+        assert!(handle_f3_destructive_confirm_keystroke(
             &k(KeyCode::Char('y')),
             &mut app
         ));
@@ -6545,10 +6670,13 @@ mod tests {
     }
 
     #[test]
-    fn handle_f3_mirror_confirm_keystroke_n_and_esc_cancel() {
+    fn handle_f3_destructive_confirm_keystroke_n_and_esc_cancel() {
         for cancel in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
             let mut app = app_with_mirror_confirm();
-            assert!(handle_f3_mirror_confirm_keystroke(&k(cancel), &mut app));
+            assert!(handle_f3_destructive_confirm_keystroke(
+                &k(cancel),
+                &mut app
+            ));
             assert!(
                 matches!(app.f3_pull.status(), f3pull::F3PullStatus::Idle),
                 "{cancel:?} aborts the mirror"
@@ -6560,13 +6688,13 @@ mod tests {
     /// swallowed (returns true) but changes nothing — no
     /// prompt-stacking or cursor moves mid-confirm.
     #[test]
-    fn handle_f3_mirror_confirm_keystroke_swallows_other_keys() {
+    fn handle_f3_destructive_confirm_keystroke_swallows_other_keys() {
         let mut app = app_with_mirror_confirm();
-        assert!(handle_f3_mirror_confirm_keystroke(
+        assert!(handle_f3_destructive_confirm_keystroke(
             &k(KeyCode::Char('p')),
             &mut app
         ));
-        assert!(app.f3_pull.is_confirming_mirror(), "still confirming");
+        assert!(app.f3_pull.is_confirming_destructive(), "still confirming");
     }
 
     /// d-55 R2 regression (reviewer reopen): the F3 mirror must
@@ -6584,9 +6712,11 @@ mod tests {
         use blit_core::remote::pull::RemotePullClient;
         let endpoint = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
 
-        let mirror_spec =
-            RemotePullClient::build_spec_from_options(&endpoint, &f3_pull_options(true))
-                .expect("mirror spec");
+        let mirror_spec = RemotePullClient::build_spec_from_options(
+            &endpoint,
+            &f3_pull_options(f3pull::PullKind::Mirror),
+        )
+        .expect("mirror spec");
         assert_ne!(
             mirror_spec.mirror_mode,
             MirrorMode::Off as i32,
@@ -6596,9 +6726,11 @@ mod tests {
         // build_spec default for mirror_mode without delete_all).
         assert_eq!(mirror_spec.mirror_mode, MirrorMode::FilteredSubset as i32);
 
-        let copy_spec =
-            RemotePullClient::build_spec_from_options(&endpoint, &f3_pull_options(false))
-                .expect("copy spec");
+        let copy_spec = RemotePullClient::build_spec_from_options(
+            &endpoint,
+            &f3_pull_options(f3pull::PullKind::Copy),
+        )
+        .expect("copy spec");
         assert_eq!(
             copy_spec.mirror_mode,
             MirrorMode::Off as i32,
@@ -6606,11 +6738,47 @@ mod tests {
         );
     }
 
-    /// d-56: the bridge carries the mirror flag + purge delete
-    /// count from the pull state into the renderer-facing Done
-    /// display, so the footer can report "mirrored … · N deleted".
+    /// d-57 (data-loss guard): a move MUST set
+    /// `require_complete_scan` so the daemon refuses a partial
+    /// source scan — otherwise files skipped by an incomplete
+    /// scan would survive the copy but be deleted with the rest
+    /// of the source. A move is NOT a mirror, so its spec stays
+    /// `MirrorMode::Off` (the source delete is a separate purge,
+    /// not a destination-purge mirror).
     #[test]
-    fn f3_pull_to_display_done_carries_mirror_and_deleted() {
+    fn f3_move_options_require_complete_scan_and_not_mirror() {
+        use blit_core::generated::MirrorMode;
+        use blit_core::remote::pull::RemotePullClient;
+        let move_opts = f3_pull_options(f3pull::PullKind::Move);
+        assert!(
+            move_opts.require_complete_scan,
+            "move must refuse a partial scan before deleting the source"
+        );
+        assert!(!move_opts.mirror_mode, "move is not a destination mirror");
+
+        let endpoint = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
+        let spec =
+            RemotePullClient::build_spec_from_options(&endpoint, &move_opts).expect("move spec");
+        assert_eq!(
+            spec.mirror_mode,
+            MirrorMode::Off as i32,
+            "move's source delete is a separate purge, not a mirror"
+        );
+        assert!(
+            spec.require_complete_scan,
+            "the scan-complete guard must reach the wire spec"
+        );
+        // Copy/mirror never set the scan guard.
+        assert!(!f3_pull_options(f3pull::PullKind::Copy).require_complete_scan);
+        assert!(!f3_pull_options(f3pull::PullKind::Mirror).require_complete_scan);
+    }
+
+    /// d-56/d-57: the bridge carries the past-tense verb + the
+    /// destructive-phase delete count from the pull state into the
+    /// renderer-facing Done display, so the footer can report
+    /// "mirrored … · N deleted".
+    #[test]
+    fn f3_pull_to_display_done_carries_verb_and_deleted() {
         use screens::f3::F3PullDisplay;
         let mut s = f3pull::F3PullState::new();
         let source = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
@@ -6619,13 +6787,11 @@ mod tests {
             s.push_char(c);
         }
         s.begin_run();
-        let launch = s.confirm_mirror().expect("confirm");
+        let launch = s.confirm_destructive().expect("confirm");
         s.apply_done(launch.request_id, 7, 700, 3, Instant::now());
         match f3_pull_to_display(s.status()) {
-            F3PullDisplay::Done {
-                mirror, deleted, ..
-            } => {
-                assert!(mirror, "bridge preserves the mirror verb flag");
+            F3PullDisplay::Done { verb, deleted, .. } => {
+                assert_eq!(verb, "mirrored", "bridge maps the kind to the past verb");
                 assert_eq!(deleted, 3, "bridge preserves the purge delete count");
             }
             other => panic!("expected Done, got {other:?}"),
@@ -6633,11 +6799,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_f3_mirror_confirm_keystroke_lets_escapes_bubble() {
+    fn handle_f3_destructive_confirm_keystroke_lets_escapes_bubble() {
         // `?` (help), Ctrl-c (quit), F-keys (pane nav) must
         // fall through to the dispatcher.
         let mut app = app_with_mirror_confirm();
-        assert!(!handle_f3_mirror_confirm_keystroke(
+        assert!(!handle_f3_destructive_confirm_keystroke(
             &k(KeyCode::Char('?')),
             &mut app
         ));
@@ -6645,9 +6811,9 @@ mod tests {
             code: KeyCode::Char('c'),
             modifiers: KeyModifiers::CONTROL,
         };
-        assert!(!handle_f3_mirror_confirm_keystroke(&ctrl_c, &mut app));
+        assert!(!handle_f3_destructive_confirm_keystroke(&ctrl_c, &mut app));
         for n in 1..=4 {
-            assert!(!handle_f3_mirror_confirm_keystroke(
+            assert!(!handle_f3_destructive_confirm_keystroke(
                 &k(KeyCode::F(n)),
                 &mut app
             ));
@@ -7154,14 +7320,17 @@ mod tests {
             key_action(&k(KeyCode::Char('M'))),
             Some(UserAction::TransferMirror)
         ));
-        // d-5: capital V triggers move. Lowercase v stays
-        // unmapped (reserved for a future visual / multi-
-        // select polish on F3).
+        // d-5: capital V triggers the F4 local move. d-57:
+        // lowercase `v` is the F3 move (case-distinct, like
+        // `m`/`M`).
         assert!(matches!(
             key_action(&k(KeyCode::Char('V'))),
             Some(UserAction::TransferMove)
         ));
-        assert!(key_action(&k(KeyCode::Char('v'))).is_none());
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('v'))),
+            Some(UserAction::F3MoveBegin)
+        ));
     }
 
     /// d-6: `H` maps to the Verify-mode toggle. Lowercase

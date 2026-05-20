@@ -36,15 +36,15 @@
 //!
 //! d-35: `p` opens a destination prompt and runs a
 //! remote→local PullSync owned by the TUI process. The
-//! footer shows one of (d-55: `m` mirror swaps the verb to
-//! mirror/mirroring/mirrored and adds a destructive confirm):
+//! footer shows one of (d-55 `m` mirror / d-57 `v` move swap
+//! the verb and add a destructive confirm):
 //! - `pull → <dest>_` (cyan, EnteringDest — typing)
-//! - `mirror → <dest>? deletes extraneous y/N` (red,
-//!   ConfirmMirror — destructive gate)
+//! - `mirror → <dest>? deletes extraneous y/N` (red, Confirm
+//!   — mirror gate); move shows `deletes the remote source`
 //! - `pulling → <dest>... (N file(s) · X)` (yellow,
 //!   Running — d-37 live byte counter once data flows)
 //! - `pulled N file(s) · X → <dest>` (green, Done); a mirror
-//!   appends `· N deleted` when the purge removed files (d-56)
+//!   or move appends `· N deleted` when it removed files (d-56)
 //! - `pull failed: <msg>` (red, Error)
 //!
 //! d-26's filter fragment renders one of:
@@ -73,37 +73,46 @@ use std::time::Instant;
 /// lifecycle. Bridged from `f3pull::F3PullStatus` by
 /// `main.rs` so the screens layer doesn't reach into the
 /// pull state machine's internals.
+///
+/// d-55/d-57: copy / mirror / move share this shape; the bridge
+/// passes the right footer `verb` (so the `screens` layer never
+/// needs `f3pull::PullKind`).
 #[derive(Debug, Clone)]
 pub enum F3PullDisplay {
     /// No pull fragment (Idle).
     Hidden,
-    /// Destination prompt open; `dest` is what the
-    /// operator has typed so far. d-55: `mirror` switches
-    /// the verb to "mirror".
-    EnteringDest { dest: String, mirror: bool },
-    /// d-55: destructive mirror confirm prompt (y/N) — a
-    /// mirror deletes local files absent from the source.
-    ConfirmMirror { dest: String },
+    /// Destination prompt open; `dest` is what the operator has
+    /// typed so far. `verb` is the imperative ("pull"/"mirror"/
+    /// "move").
+    EnteringDest { dest: String, verb: &'static str },
+    /// d-55/d-57: destructive confirm prompt (y/N). `verb` is the
+    /// op ("mirror"/"move"); `detail` is what gets deleted
+    /// ("deletes extraneous" / "deletes the remote source").
+    Confirm {
+        dest: String,
+        verb: &'static str,
+        detail: &'static str,
+    },
     /// PullSync in flight. d-37: live cumulative
     /// counters (0 until the first progress event).
     /// d-39: `bytes_per_sec` is average throughput
-    /// (0 until ~1s elapsed). d-55: `mirror` switches the verb.
+    /// (0 until ~1s elapsed). `verb` is the present participle.
     Running {
         dest: String,
         files: usize,
         bytes: u64,
         bytes_per_sec: u64,
-        mirror: bool,
+        verb: &'static str,
     },
-    /// Pull finished — files + bytes pulled, dest path.
-    /// d-55: `mirror` switches the verb to "mirrored".
-    /// d-56: `deleted` is the mirror purge count (shown only
-    /// for a mirror that removed local files).
+    /// Pull finished — files + bytes pulled, dest path. `verb` is
+    /// the past tense ("pulled"/"mirrored"/"moved").
+    /// d-56: `deleted` is the destructive-phase removal count
+    /// (shown only when > 0).
     Done {
         files: usize,
         bytes: u64,
         dest: String,
-        mirror: bool,
+        verb: &'static str,
         deleted: u64,
     },
     /// Pull failed.
@@ -385,20 +394,20 @@ fn render_footer(
     // d-35: pull fragment — prompt / progress / outcome.
     match pull {
         F3PullDisplay::Hidden => {}
-        F3PullDisplay::EnteringDest { dest, mirror } => {
+        F3PullDisplay::EnteringDest { dest, verb } => {
             spans.push(Span::raw("  ·  "));
-            let verb = if *mirror { "mirror" } else { "pull" };
             spans.push(Span::styled(
                 format!("{verb} → {dest}_"),
                 Style::default().fg(Color::Cyan),
             ));
         }
-        // d-55: destructive mirror confirm — red, like delete.
-        // A mirror removes local files absent from the source.
-        F3PullDisplay::ConfirmMirror { dest } => {
+        // d-55/d-57: destructive confirm — red, like delete.
+        // A mirror removes local extraneous files; a move removes
+        // the remote source.
+        F3PullDisplay::Confirm { dest, verb, detail } => {
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(
-                format!("mirror → {dest}? deletes extraneous y/N"),
+                format!("{verb} → {dest}? {detail} y/N"),
                 Style::default().fg(Color::Red),
             ));
         }
@@ -407,13 +416,11 @@ fn render_footer(
             files,
             bytes,
             bytes_per_sec,
-            mirror,
+            verb,
         } => {
             spans.push(Span::raw("  ·  "));
-            // d-55: "mirroring" vs "pulling".
-            let verb = if *mirror { "mirroring" } else { "pulling" };
             // d-37: show the live count once bytes start
-            // flowing; before that just "pulling →".
+            // flowing; before that just "{verb} →".
             // d-39: append throughput once the rate
             // settles (suppressed for the first ~1s).
             let frag = if *bytes > 0 || *files > 0 {
@@ -435,16 +442,16 @@ fn render_footer(
             files,
             bytes,
             dest,
-            mirror,
+            verb,
             deleted,
         } => {
             spans.push(Span::raw("  ·  "));
-            // d-55: "mirrored" vs "pulled".
-            let verb = if *mirror { "mirrored" } else { "pulled" };
-            // d-56: report the purge count for a mirror. A copy
-            // never deletes; a mirror that found nothing to remove
-            // shows no suffix (cleaner than "· 0 deleted").
-            let purge = if *mirror && *deleted > 0 {
+            // d-56/d-57: report the destructive-phase removal count
+            // (mirror purge / move source delete). A copy never
+            // deletes (always 0 → no suffix); a destructive op that
+            // removed nothing also shows no suffix (cleaner than
+            // "· 0 deleted").
+            let purge = if *deleted > 0 {
                 format!(" · {deleted} deleted")
             } else {
                 String::new()

@@ -122,6 +122,7 @@ fn help_lines() -> Vec<Line<'static>> {
             "pull selected → local dir (F3) — Enter runs, Esc cancels",
         ),
         kv("m", "mirror selected → local dir (F3) — y/N confirm"),
+        kv("v", "move selected → local dir, delete source (F3) — y/N"),
         kv("P", "pull marked set → local dir (F3) — Shift+p"),
         kv("u", "disk usage of selected subtree (F3)"),
         kv("space", "multi-select rows (F3)"),
@@ -172,9 +173,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // 40→41 for `D` delete; d-49 bumped 41→42 for `space`
     // multi-select; d-51 bumped 42→43 for `a` select-all;
     // d-53 bumped 43→44 for `P` batch pull; d-55 bumped
-    // 44→45 for `m` mirror. d-31: when the area is shorter
-    // than the modal, the operator scrolls with j/k.
-    let modal = centered(area, 70, 45);
+    // 44→45 for `m` mirror; d-57 bumped 45→46 for `v` move.
+    // d-31: when the area is shorter than the modal, the
+    // operator scrolls with j/k.
+    let modal = centered(area, 70, 46);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
