@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-40-config-pull-ttl | Feature | Operator-tunable F3 pull-outcome TTL | `[~]` | `phase5/a1` | `c4aca4f` |
 
 ## Open findings
 
