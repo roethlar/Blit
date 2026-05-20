@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-53-f3-batch-pull | Feature | `P` pulls the marked set sequentially (round 2) | `[x]` | `phase5/a1` | `8b2cecb` |
+| d-54-f1-module-capacity | Feature | Per-module used/total in F1 detail | `[~]` | `phase5/a1` | `9777dd3` |
 
 ## Open findings
 
