@@ -2025,6 +2025,15 @@ fn reset_f2_for_resubscribe(
     app.transfers = state::TransfersState::new();
     app.transfers_status = ConnectionStatus::Connecting;
     *transfers_event_rx = None;
+    // d-48 R2: drop any pending/in-flight cancel from the OLD
+    // daemon. A `Confirming`/`ConfirmingBatch` left open would,
+    // on `y`, fire CancelJob with the old daemon's transfer
+    // id(s) against the new daemon's endpoint (the confirm path
+    // re-reads `parsed_remote`, now repointed). Clearing to Idle
+    // also drops a late `Sending` reply — the reply arm only
+    // applies when status is `Sending` with a matching id, so a
+    // non-`Sending` status makes the stale reply inert.
+    app.cancel_status = F2CancelStatus::Idle;
     app.transfers_setup_pending = true;
     app.transfers_setup_gen += 1;
     app.transfers_setup_gen
@@ -5443,6 +5452,12 @@ mod tests {
         let mut event_rx = Some(rx);
         app.transfers_setup_pending = false;
 
+        // d-48 R2: a cancel confirm open against the OLD daemon
+        // must not survive the switch.
+        app.cancel_status = F2CancelStatus::Confirming {
+            transfer_id: "old-daemon-job".to_string(),
+        };
+
         let other = RemoteEndpoint::parse("skippy:/media/").expect("other");
         let gen = reset_f2_for_resubscribe(&mut app, &other, &mut event_rx);
 
@@ -5457,6 +5472,10 @@ mod tests {
         assert_eq!(app.transfers_setup_gen, gen_before + 1);
         assert!(matches!(app.transfers_status, ConnectionStatus::Connecting));
         assert_eq!(app.transfers.active_count(), 0, "old rows cleared");
+        assert!(
+            matches!(app.cancel_status, F2CancelStatus::Idle),
+            "a stale cancel confirm from the old daemon is cleared"
+        );
     }
 
     /// d-47: `retarget_browse` points F3 at a new daemon — sets
