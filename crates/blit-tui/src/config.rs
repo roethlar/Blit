@@ -13,7 +13,7 @@
 //! error keeps the current config rather than reverting
 //! to defaults.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24 / d-40):
 //!
 //! ```toml
 //! [verify]
@@ -34,6 +34,7 @@
 //! [transfer]
 //! cancel_status_ttl_ms = 5000   # d-24: F2 cancel-fragment TTL (clamped to [250, 60000])
 //! confirm_cancel = false        # d-29: opt-in `K` confirm prompt (y/N)
+//! pull_status_ttl_ms = 5000     # d-40: F3 pull-outcome TTL (clamped to [250, 60000])
 //! ```
 //!
 //! Future slices can grow the schema (per-pane tick
@@ -201,6 +202,14 @@ pub struct TransferDefaults {
     /// already on disk stays) so the prompt is opt-in
     /// safety for operators who type `K` reflexively.
     pub confirm_cancel: bool,
+    /// d-40: milliseconds the F3 pull outcome fragment
+    /// (`pulled N · X → <dest>` / `pull failed: <msg>`)
+    /// stays on screen after the pull finishes, before
+    /// the d-38 auto-hide sweep clears it back to Idle.
+    /// A sibling of `cancel_status_ttl_ms`, kept separate
+    /// so the two outcome fragments tune independently.
+    /// Clamped to `[MIN_PULL_TTL_MS, MAX_PULL_TTL_MS]`.
+    pub pull_status_ttl_ms: u64,
 }
 
 impl TransferDefaults {
@@ -216,12 +225,29 @@ impl TransferDefaults {
     /// truly-permanent retention can re-run the cancel.
     pub const MAX_CANCEL_TTL_MS: u64 = 60_000;
 
+    /// d-40 baseline: 5 seconds, mirroring the d-38
+    /// hardcoded `f3pull::F3PullState::TERMINAL_TTL` this
+    /// field now overrides.
+    pub const DEFAULT_PULL_TTL_MS: u64 = 5_000;
+    /// Floor — same rationale as [`Self::MIN_CANCEL_TTL_MS`].
+    pub const MIN_PULL_TTL_MS: u64 = 250;
+    /// Ceiling — same rationale as [`Self::MAX_CANCEL_TTL_MS`].
+    pub const MAX_PULL_TTL_MS: u64 = 60_000;
+
     /// Clamped accessor; the renderer reads this once per
     /// frame so out-of-range config values are silently
     /// normalized.
     pub fn cancel_status_ttl_ms_clamped(&self) -> u64 {
         self.cancel_status_ttl_ms
             .clamp(Self::MIN_CANCEL_TTL_MS, Self::MAX_CANCEL_TTL_MS)
+    }
+
+    /// d-40: clamped F3 pull outcome TTL. The loop reads
+    /// this each frame and feeds it to
+    /// `clear_terminal_if_expired`.
+    pub fn pull_status_ttl_ms_clamped(&self) -> u64 {
+        self.pull_status_ttl_ms
+            .clamp(Self::MIN_PULL_TTL_MS, Self::MAX_PULL_TTL_MS)
     }
 }
 
@@ -230,6 +256,7 @@ impl Default for TransferDefaults {
         Self {
             cancel_status_ttl_ms: Self::DEFAULT_CANCEL_TTL_MS,
             confirm_cancel: false,
+            pull_status_ttl_ms: Self::DEFAULT_PULL_TTL_MS,
         }
     }
 }
@@ -639,6 +666,69 @@ mod tests {
                 "in-range value passes through"
             );
         }
+    }
+
+    // d-40: [transfer] pull_status_ttl_ms clamp + parse.
+
+    #[test]
+    fn transfer_default_pull_ttl_is_5000ms() {
+        let cfg = TuiConfig::default();
+        assert_eq!(
+            cfg.transfer.pull_status_ttl_ms,
+            TransferDefaults::DEFAULT_PULL_TTL_MS
+        );
+        assert_eq!(
+            cfg.transfer.pull_status_ttl_ms_clamped(),
+            TransferDefaults::DEFAULT_PULL_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_pull_ttl_parses_from_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\npull_status_ttl_ms = 3000\n").expect("write");
+        let cfg = load_from_path(&path, |_| {});
+        assert_eq!(cfg.transfer.pull_status_ttl_ms, 3000);
+        assert_eq!(cfg.transfer.pull_status_ttl_ms_clamped(), 3000);
+    }
+
+    #[test]
+    fn transfer_pull_ttl_clamp_floor() {
+        let cfg = TransferDefaults {
+            pull_status_ttl_ms: 0,
+            ..TransferDefaults::default()
+        };
+        assert_eq!(
+            cfg.pull_status_ttl_ms_clamped(),
+            TransferDefaults::MIN_PULL_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_pull_ttl_clamp_ceiling() {
+        let cfg = TransferDefaults {
+            pull_status_ttl_ms: u64::MAX,
+            ..TransferDefaults::default()
+        };
+        assert_eq!(
+            cfg.pull_status_ttl_ms_clamped(),
+            TransferDefaults::MAX_PULL_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_pull_and_cancel_ttls_are_independent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tui.toml");
+        std::fs::write(
+            &path,
+            "[transfer]\ncancel_status_ttl_ms = 1000\npull_status_ttl_ms = 8000\n",
+        )
+        .expect("write");
+        let cfg = load_from_path(&path, |_| {});
+        assert_eq!(cfg.transfer.cancel_status_ttl_ms_clamped(), 1000);
+        assert_eq!(cfg.transfer.pull_status_ttl_ms_clamped(), 8000);
     }
 
     #[test]

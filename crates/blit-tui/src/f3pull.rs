@@ -321,16 +321,17 @@ impl F3PullState {
             self.status = F3PullStatus::Idle;
         }
     }
-
-    /// d-38: how long a Done / Error fragment stays on
-    /// screen before auto-hiding. Fixed (not yet
-    /// config-tunable) — long enough to read the outcome.
-    pub const TERMINAL_TTL: Duration = Duration::from_secs(5);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Representative fixed TTL for the auto-hide tests.
+    /// `clear_terminal_if_expired` takes the TTL as a
+    /// parameter (d-40 sources it from config), so the
+    /// tests just need any concrete duration.
+    const TEST_TTL: Duration = Duration::from_secs(5);
 
     fn endpoint(raw: &str) -> RemoteEndpoint {
         RemoteEndpoint::parse(raw).expect("endpoint")
@@ -696,13 +697,10 @@ mod tests {
         let finished = Instant::now();
         s.apply_done(rid, 5, 500, finished);
         // Within TTL → still showing.
-        s.clear_terminal_if_expired(finished, F3PullState::TERMINAL_TTL);
+        s.clear_terminal_if_expired(finished, TEST_TTL);
         assert!(s.is_terminal(), "within TTL the fragment stays");
         // Past TTL → cleared to Idle.
-        s.clear_terminal_if_expired(
-            finished + F3PullState::TERMINAL_TTL + Duration::from_millis(1),
-            F3PullState::TERMINAL_TTL,
-        );
+        s.clear_terminal_if_expired(finished + TEST_TTL + Duration::from_millis(1), TEST_TTL);
         assert!(matches!(s.status(), F3PullStatus::Idle));
     }
 
@@ -713,10 +711,7 @@ mod tests {
         let finished = Instant::now();
         s.apply_error(rid, "boom".to_string(), finished);
         // `>=` boundary: exactly TTL elapsed → hidden.
-        s.clear_terminal_if_expired(
-            finished + F3PullState::TERMINAL_TTL,
-            F3PullState::TERMINAL_TTL,
-        );
+        s.clear_terminal_if_expired(finished + TEST_TTL, TEST_TTL);
         assert!(matches!(s.status(), F3PullStatus::Idle));
     }
 
@@ -724,18 +719,12 @@ mod tests {
     fn clear_terminal_is_noop_on_running_and_idle() {
         let mut s = F3PullState::new();
         // Idle — no-op.
-        s.clear_terminal_if_expired(
-            Instant::now() + Duration::from_secs(3600),
-            F3PullState::TERMINAL_TTL,
-        );
+        s.clear_terminal_if_expired(Instant::now() + Duration::from_secs(3600), TEST_TTL);
         assert!(matches!(s.status(), F3PullStatus::Idle));
         // Running — a long-running pull must never be
         // cleared by the TTL sweep.
         launched(&mut s, "nas:/m/x");
-        s.clear_terminal_if_expired(
-            Instant::now() + Duration::from_secs(3600),
-            F3PullState::TERMINAL_TTL,
-        );
+        s.clear_terminal_if_expired(Instant::now() + Duration::from_secs(3600), TEST_TTL);
         assert!(s.is_running(), "Running is immune to the terminal TTL");
     }
 }

@@ -605,8 +605,11 @@ async fn run_router(
         // its TTL elapses (same state-level expiry as the
         // reload banner — `needs_live_tick` ticks while a
         // terminal fragment shows, then stops once cleared).
-        app.f3_pull
-            .clear_terminal_if_expired(now, f3pull::F3PullState::TERMINAL_TTL);
+        // d-40: TTL is operator-tunable via
+        // `[transfer] pull_status_ttl_ms`, read each frame so
+        // a Ctrl+R reload retunes it live.
+        let pull_ttl = Duration::from_millis(tui_config.transfer.pull_status_ttl_ms_clamped());
+        app.f3_pull.clear_terminal_if_expired(now, pull_ttl);
         // d-36: accent + reload banner are recomputed each
         // frame from the (possibly hot-reloaded) config, so
         // a `Ctrl+R` theme change takes effect immediately.
