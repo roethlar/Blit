@@ -734,8 +734,21 @@ async fn run_router(
         } else {
             None
         };
-        let tick_budget =
-            compute_tick_budget(needs_live_tick, live_tick_interval, cancel_remaining);
+        // d-40 R2: the F3 pull outcome fragment has its own
+        // auto-hide deadline. A short `pull_status_ttl_ms`
+        // must collapse the sleep budget exactly like the
+        // d-24 cancel TTL does, or a long `live_tick`
+        // interval would delay it (reviewer reopen).
+        let pull_remaining = if matches!(app.current_screen, Screen::F3) {
+            app.f3_pull.terminal_remaining(Instant::now(), pull_ttl)
+        } else {
+            None
+        };
+        let tick_budget = compute_tick_budget(
+            needs_live_tick,
+            live_tick_interval,
+            min_opt(cancel_remaining, pull_remaining),
+        );
         let live_tick = async {
             if let Some(dur) = tick_budget {
                 tokio::time::sleep(dur).await;
@@ -2319,6 +2332,26 @@ fn compute_tick_budget(
         (true, None) => Some(live_tick_interval),
         (false, Some(rem)) => Some(rem),
         (false, None) => None,
+    }
+}
+
+/// d-40 round 2: the shorter of two optional deadlines.
+///
+/// The loop has more than one auto-hide fragment that can
+/// pull the sleep budget below `live_tick.interval_ms`: the
+/// F2 cancel status (d-24) and the F3 pull outcome (d-40).
+/// They live on different screens so at most one is `Some`
+/// in practice, but merging generically keeps the budget
+/// correct if that ever changes — the loop must wake for
+/// whichever deadline is nearer.
+fn min_opt(
+    a: Option<std::time::Duration>,
+    b: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, b) => b,
     }
 }
 
@@ -4477,6 +4510,69 @@ mod tests {
     fn tick_budget_live_tick_only_returns_interval() {
         let budget = compute_tick_budget(true, std::time::Duration::from_millis(500), None);
         assert_eq!(budget, Some(std::time::Duration::from_millis(500)));
+    }
+
+    // d-40 R2 (reviewer reopen): the F3 pull outcome TTL
+    // must collapse the sleep budget just like the d-24
+    // cancel TTL, or a long live tick silently delays a
+    // short `pull_status_ttl_ms`.
+
+    #[test]
+    fn min_opt_picks_the_shorter_deadline() {
+        use std::time::Duration;
+        assert_eq!(
+            min_opt(
+                Some(Duration::from_millis(250)),
+                Some(Duration::from_millis(60_000))
+            ),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(
+            min_opt(Some(Duration::from_millis(900)), None),
+            Some(Duration::from_millis(900))
+        );
+        assert_eq!(
+            min_opt(None, Some(Duration::from_millis(120))),
+            Some(Duration::from_millis(120))
+        );
+        assert_eq!(min_opt(None, None), None);
+    }
+
+    /// The reviewer's exact scenario: 5s live tick, 250ms
+    /// pull TTL, an F3 terminal fragment showing (so
+    /// `pull_remaining = Some(~250ms)`). The sleep budget
+    /// must be no greater than the remaining pull TTL — i.e.
+    /// the loop wakes to hide the fragment on time, not ~20x
+    /// late. (`terminal_remaining`'s own behavior is covered
+    /// in `f3pull::tests`; here we assert the budget chain.)
+    #[test]
+    fn short_pull_ttl_overrides_long_live_tick() {
+        use std::time::Duration;
+        let live_tick = Duration::from_millis(5_000);
+        let pull_remaining = Some(Duration::from_millis(250));
+        let budget = compute_tick_budget(true, live_tick, min_opt(None, pull_remaining));
+        assert_eq!(
+            budget,
+            Some(Duration::from_millis(250)),
+            "budget must collapse to the 250ms pull deadline, not the 5s tick"
+        );
+    }
+
+    /// Both a cancel fragment and a pull fragment pending
+    /// (defensive — they're screen-exclusive in practice):
+    /// the loop wakes for whichever is nearer.
+    #[test]
+    fn budget_picks_nearer_of_cancel_and_pull_deadlines() {
+        use std::time::Duration;
+        let budget = compute_tick_budget(
+            true,
+            Duration::from_millis(5_000),
+            min_opt(
+                Some(Duration::from_millis(800)),
+                Some(Duration::from_millis(250)),
+            ),
+        );
+        assert_eq!(budget, Some(Duration::from_millis(250)));
     }
 
     /// `take_active_for_restore` is the pure state-transition

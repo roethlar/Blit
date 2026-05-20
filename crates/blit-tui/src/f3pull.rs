@@ -321,6 +321,32 @@ impl F3PullState {
             self.status = F3PullStatus::Idle;
         }
     }
+
+    /// d-40 round 2: wall-clock remaining before the d-38
+    /// auto-hide fires on a Done / Error fragment. Mirrors
+    /// `main::cancel_status_remaining_ttl` so the event
+    /// loop can collapse its sleep budget to
+    /// `min(live_tick_interval, remaining)` — otherwise a
+    /// short `pull_status_ttl_ms` (floor 250ms) could
+    /// linger up to a full `live_tick.interval_ms` (ceiling
+    /// 5s) before the next wake clears it.
+    ///
+    /// `None` when no terminal fragment is showing, or when
+    /// it has already expired (the next clear handles it;
+    /// no further wakeup is owed).
+    pub fn terminal_remaining(&self, now: Instant, ttl: Duration) -> Option<Duration> {
+        let finished_at = match &self.status {
+            F3PullStatus::Done { finished_at, .. } => *finished_at,
+            F3PullStatus::Error { finished_at, .. } => *finished_at,
+            _ => return None,
+        };
+        let elapsed = now.saturating_duration_since(finished_at);
+        if elapsed >= ttl {
+            None
+        } else {
+            Some(ttl - elapsed)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -726,5 +752,53 @@ mod tests {
         launched(&mut s, "nas:/m/x");
         s.clear_terminal_if_expired(Instant::now() + Duration::from_secs(3600), TEST_TTL);
         assert!(s.is_running(), "Running is immune to the terminal TTL");
+    }
+
+    // d-40 R2: `terminal_remaining` feeds the event loop's
+    // sleep budget so a short pull TTL isn't delayed by a
+    // long live tick (reviewer reopen).
+
+    #[test]
+    fn terminal_remaining_some_within_ttl_none_after() {
+        let mut s = F3PullState::new();
+        let rid = launched(&mut s, "nas:/m/x");
+        let finished = Instant::now();
+        s.apply_done(rid, 5, 500, finished);
+        // Partway through the window → remaining shrinks.
+        let elapsed = Duration::from_millis(100);
+        assert_eq!(
+            s.terminal_remaining(finished + elapsed, TEST_TTL),
+            Some(TEST_TTL - elapsed)
+        );
+        // At/after the boundary → None (the clear handles it).
+        assert!(s
+            .terminal_remaining(finished + TEST_TTL, TEST_TTL)
+            .is_none());
+        assert!(s
+            .terminal_remaining(finished + TEST_TTL + Duration::from_millis(1), TEST_TTL)
+            .is_none());
+    }
+
+    #[test]
+    fn terminal_remaining_none_on_idle_and_running() {
+        let mut s = F3PullState::new();
+        // Idle → no deadline.
+        assert!(s.terminal_remaining(Instant::now(), TEST_TTL).is_none());
+        // Running → no terminal deadline (only Done/Error).
+        launched(&mut s, "nas:/m/x");
+        assert!(s.terminal_remaining(Instant::now(), TEST_TTL).is_none());
+    }
+
+    #[test]
+    fn terminal_remaining_some_for_error_fragment() {
+        let mut s = F3PullState::new();
+        let rid = launched(&mut s, "nas:/m/x");
+        let finished = Instant::now();
+        s.apply_error(rid, "boom".to_string(), finished);
+        assert_eq!(
+            s.terminal_remaining(finished, TEST_TTL),
+            Some(TEST_TTL),
+            "fresh error fragment has the full TTL remaining"
+        );
     }
 }
