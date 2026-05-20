@@ -713,3 +713,134 @@ mod purge_filter_tests {
         assert!(extras.contains(&PathBuf::from("kept.log")));
     }
 }
+
+#[cfg(test)]
+mod disk_usage_depth_tests {
+    //! d-41 R2: pins the `stream_disk_usage` depth contract the
+    //! TUI's F3 `u` hotkey relies on. The TUI requests a bounded
+    //! depth (`main::F3_DU_MAX_DEPTH = 1`) so a single Stats-line
+    //! aggregate doesn't pull the full descendant stream over
+    //! gRPC. This test fails if `max_depth = Some(1)` ever stops
+    //! bounding the emitted rows, or if the root entry stops
+    //! carrying the complete subtree total.
+
+    use super::*;
+    use blit_core::generated::DiskUsageEntry;
+    use std::fs;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+    use tonic::Status;
+
+    #[test]
+    fn depth_one_bounds_stream_yet_root_total_is_complete() {
+        let tmp = tempdir().unwrap();
+        // Canonicalize: on macOS the temp dir is under a /var →
+        // /private/var symlink, and `stream_disk_usage`'s
+        // containment check compares the canonical start path
+        // against `module_root`. The real daemon always passes a
+        // canonical module root.
+        let root = fs::canonicalize(tmp.path()).unwrap();
+
+        // 3 immediate child dirs, each holding files nested up to
+        // 3 levels deep. ~180 files / many descendant paths — an
+        // unbounded (depth 0 → None) query would stream a row for
+        // each. A depth-1 query must stream only root + the 3
+        // immediate children.
+        let mut total_files = 0u64;
+        for child_name in ["alpha", "beta", "gamma"] {
+            let child = root.join(child_name);
+            fs::create_dir_all(child.join("deep/deeper")).unwrap();
+            for i in 0..20 {
+                fs::write(child.join(format!("f{i}.bin")), [0u8; 100]).unwrap();
+                fs::write(child.join("deep").join(format!("g{i}.bin")), [0u8; 100]).unwrap();
+                fs::write(
+                    child.join("deep/deeper").join(format!("h{i}.bin")),
+                    [0u8; 100],
+                )
+                .unwrap();
+                total_files += 3;
+            }
+        }
+
+        // Drain on a worker thread so `blocking_send` inside
+        // `stream_disk_usage` always has a receiver (no runtime
+        // needed — both ends are blocking).
+        let (tx, mut rx) = mpsc::channel::<Result<DiskUsageEntry, Status>>(4096);
+        let module_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            stream_disk_usage(module_root, PathBuf::from("."), Some(1), &tx)
+        });
+        let mut entries = Vec::new();
+        while let Some(item) = rx.blocking_recv() {
+            entries.push(item.expect("du entry"));
+        }
+        handle.join().unwrap().expect("stream_disk_usage ok");
+
+        // Bounded: root + 3 immediate children = 4 rows, NOT one
+        // per descendant path (~180+).
+        assert_eq!(
+            entries.len(),
+            4,
+            "depth=1 must bound the stream to root + immediate children; got {} rows: {:?}",
+            entries.len(),
+            entries
+                .iter()
+                .map(|e| e.relative_path.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        // The root aggregate (largest byte_total) still reflects
+        // the COMPLETE subtree despite the depth cap.
+        let root_entry = entries
+            .iter()
+            .max_by_key(|e| e.byte_total)
+            .expect("at least one entry");
+        assert_eq!(
+            root_entry.file_count, total_files,
+            "root must count every descendant file"
+        );
+        assert_eq!(
+            root_entry.byte_total,
+            total_files * 100,
+            "root must sum every descendant byte"
+        );
+    }
+
+    #[test]
+    fn depth_zero_is_unbounded_streaming_every_descendant() {
+        // Pins WHY the TUI must not request depth 0: the daemon
+        // (core.rs) maps request max_depth==0 to `None`, and this
+        // helper treats `None` as unbounded — every prefix path
+        // is emitted. This is the behavior d-41 R1 accidentally
+        // triggered.
+        let tmp = tempdir().unwrap();
+        // Canonicalize: on macOS the temp dir is under a /var →
+        // /private/var symlink, and `stream_disk_usage`'s
+        // containment check compares the canonical start path
+        // against `module_root`. The real daemon always passes a
+        // canonical module root.
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let child = root.join("alpha");
+        fs::create_dir_all(child.join("deep")).unwrap();
+        fs::write(child.join("a.bin"), [0u8; 10]).unwrap();
+        fs::write(child.join("deep/b.bin"), [0u8; 10]).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<Result<DiskUsageEntry, Status>>(4096);
+        let module_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            stream_disk_usage(module_root, PathBuf::from("."), None, &tx)
+        });
+        let mut paths = Vec::new();
+        while let Some(item) = rx.blocking_recv() {
+            paths.push(item.expect("entry").relative_path);
+        }
+        handle.join().unwrap().expect("ok");
+
+        // Unbounded emits root + alpha + alpha/deep (every prefix),
+        // i.e. strictly more than the depth-1 root+children bound.
+        assert!(
+            paths.len() > 2,
+            "unbounded (None) must stream nested descendant paths; got {paths:?}"
+        );
+    }
+}

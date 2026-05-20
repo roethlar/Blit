@@ -2226,6 +2226,29 @@ fn spawn_f3_du(request_id: u64, remote: RemoteEndpoint, tx: mpsc::Sender<F3DuRep
     });
 }
 
+/// d-41 round 2: depth requested for the F3 du query.
+///
+/// **Must be ≥ 1.** The daemon maps a request `max_depth == 0`
+/// to `None` = *unbounded* — it would then stream one row per
+/// descendant path (the full `blit du` response shape) for a
+/// hotkey that renders a single Stats line. `1` bounds the
+/// stream to the root + its immediate children. The root entry
+/// (depth 0) always accumulates every descendant's bytes
+/// regardless of the depth cap, so the subtree total is still
+/// complete; the cap only limits how many *rows* are streamed
+/// back. Round 1 used `0` and leaned on client-side max-byte
+/// folding to discard the flood — correct totals, but it pulled
+/// the entire descendant stream over gRPC (reviewer reopen).
+const F3_DU_MAX_DEPTH: u32 = 1;
+
+// d-41 R2 guard (compile-time): depth 0 means UNBOUNDED in the
+// daemon — F3 du would stream the full descendant tree for a
+// one-line aggregate. This fails the build if anyone reverts it.
+const _: () = assert!(
+    F3_DU_MAX_DEPTH >= 1,
+    "F3_DU_MAX_DEPTH must be >= 1; 0 is unbounded in the daemon"
+);
+
 /// d-41: stream the du aggregate for `remote` and return its
 /// `(bytes, files)` subtree total. Split out from the spawn so
 /// the accumulation (keep the max-byte entry) is unit-testable
@@ -2237,7 +2260,7 @@ async fn run_f3_du_total(remote: &RemoteEndpoint) -> eyre::Result<(u64, u64)> {
     let (module, rel_path) = module_and_rel_path(remote)?;
     let start_path = rel_path_to_string(&rel_path);
     let mut acc: Option<(u64, u64)> = None;
-    du::stream(remote, module, start_path, 0, |entry| {
+    du::stream(remote, module, start_path, F3_DU_MAX_DEPTH, |entry| {
         acc = du_total_from_entries(acc, entry.bytes, entry.files);
         Ok(())
     })
@@ -2246,10 +2269,10 @@ async fn run_f3_du_total(remote: &RemoteEndpoint) -> eyre::Result<(u64, u64)> {
 }
 
 /// d-41: fold one du entry into the running aggregate, keeping
-/// the entry with the most bytes. With `max_depth = 0` the
-/// daemon emits a single root row, but folding by max-bytes is
-/// robust if it ever emits children too — the root subtree
-/// (which contains every child) is always the largest.
+/// the entry with the most bytes. At [`F3_DU_MAX_DEPTH`] = 1 the
+/// daemon emits the root plus immediate children; the root
+/// subtree contains every child, so the max-byte entry is always
+/// the root total we want.
 fn du_total_from_entries(acc: Option<(u64, u64)>, bytes: u64, files: u64) -> Option<(u64, u64)> {
     match acc {
         Some((best_bytes, _)) if best_bytes >= bytes => acc,

@@ -2,9 +2,11 @@
 //! (d-41, TUI_DESIGN §5.3 "subtree: X across N files").
 //!
 //! Pressing `u` ("usage") on a browsable F3 row streams the
-//! daemon's `DiskUsage` RPC (`max_depth = 0` → a single root
-//! aggregate entry) and shows the subtree byte/file total in the
-//! Stats block.
+//! daemon's `DiskUsage` RPC with a bounded depth (see
+//! `main::F3_DU_MAX_DEPTH`) and shows the subtree byte/file
+//! total in the Stats block. The root entry carries the full
+//! subtree total regardless of the depth cap; the cap only
+//! bounds how many rows the daemon streams back.
 //!
 //! The result is bound to the path it was computed for. The
 //! renderer only surfaces it while the cursor still sits on that
