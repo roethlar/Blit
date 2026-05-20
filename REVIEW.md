@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-37-f3-pull-progress | Feature | Live byte/file counter on the F3 pull footer | `[ ]` | `phase5/a1` | `8fd9bff` |
+| d-37-f3-pull-progress (round 2) | Feature | Byte accumulator avoids data-plane double-count | `[~]` | `phase5/a1` | `cd1751a` |
 
 ## Open findings
 
