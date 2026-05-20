@@ -31,6 +31,7 @@ use blit_app::endpoints::Endpoint;
 use blit_app::transfers::resolution::resolve_destination;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Lifecycle of an F3 pull.
 #[derive(Debug, Clone)]
@@ -58,13 +59,18 @@ pub enum F3PullStatus {
     /// Pull finished successfully. (The remote source is
     /// still shown in the Stats block's `Pull:` line, so
     /// the footer fragment only needs the outcome + dest.)
+    /// d-38: `finished_at` drives the auto-hide TTL.
     Done {
         dest: String,
         files: usize,
         bytes: u64,
+        finished_at: Instant,
     },
     /// Pull failed (validation or transport).
-    Error { message: String },
+    Error {
+        message: String,
+        finished_at: Instant,
+    },
 }
 
 /// Launch params handed from [`F3PullState::begin_run`] to
@@ -240,8 +246,8 @@ impl F3PullState {
 
     /// Apply a successful pull reply. Dropped if `request_id`
     /// doesn't match the current `Running` run. Returns true
-    /// if applied.
-    pub fn apply_done(&mut self, request_id: u64, files: usize, bytes: u64) -> bool {
+    /// if applied. `at` stamps the d-38 auto-hide deadline.
+    pub fn apply_done(&mut self, request_id: u64, files: usize, bytes: u64, at: Instant) -> bool {
         match &self.status {
             F3PullStatus::Running {
                 request_id: rid,
@@ -252,6 +258,7 @@ impl F3PullState {
                     dest: dest.clone(),
                     files,
                     bytes,
+                    finished_at: at,
                 };
                 true
             }
@@ -260,17 +267,52 @@ impl F3PullState {
     }
 
     /// Apply a failed pull reply. Same generation guard.
-    pub fn apply_error(&mut self, request_id: u64, message: String) -> bool {
+    pub fn apply_error(&mut self, request_id: u64, message: String, at: Instant) -> bool {
         match &self.status {
             F3PullStatus::Running {
                 request_id: rid, ..
             } if *rid == request_id => {
-                self.status = F3PullStatus::Error { message };
+                self.status = F3PullStatus::Error {
+                    message,
+                    finished_at: at,
+                };
                 true
             }
             _ => false,
         }
     }
+
+    /// d-38: `true` while a terminal (Done / Error)
+    /// fragment is showing. The event loop ticks while
+    /// this holds so the fragment auto-hides on schedule.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            F3PullStatus::Done { .. } | F3PullStatus::Error { .. }
+        )
+    }
+
+    /// d-38: clear a Done / Error fragment back to Idle
+    /// once it's been on screen for `ttl`. Mirrors the
+    /// d-23 cancel-status auto-hide, but at the state
+    /// level (the reload-banner pattern) rather than
+    /// renderer-side, so `is_terminal` flips false once
+    /// expired and the loop stops ticking for it.
+    pub fn clear_terminal_if_expired(&mut self, now: Instant, ttl: Duration) {
+        let finished_at = match &self.status {
+            F3PullStatus::Done { finished_at, .. } => *finished_at,
+            F3PullStatus::Error { finished_at, .. } => *finished_at,
+            _ => return,
+        };
+        if now.saturating_duration_since(finished_at) >= ttl {
+            self.status = F3PullStatus::Idle;
+        }
+    }
+
+    /// d-38: how long a Done / Error fragment stays on
+    /// screen before auto-hiding. Fixed (not yet
+    /// config-tunable) — long enough to read the outcome.
+    pub const TERMINAL_TTL: Duration = Duration::from_secs(5);
 }
 
 #[cfg(test)]
@@ -448,7 +490,7 @@ mod tests {
             s.push_char(c);
         }
         let launch = s.begin_run().expect("launch");
-        let applied = s.apply_done(launch.request_id, 12, 4096);
+        let applied = s.apply_done(launch.request_id, 12, 4096, Instant::now());
         assert!(applied);
         match s.status() {
             F3PullStatus::Done {
@@ -470,7 +512,11 @@ mod tests {
             s.push_char(c);
         }
         let launch = s.begin_run().expect("launch");
-        assert!(s.apply_error(launch.request_id, "connection refused".to_string()));
+        assert!(s.apply_error(
+            launch.request_id,
+            "connection refused".to_string(),
+            Instant::now()
+        ));
         match s.status() {
             F3PullStatus::Error { message, .. } => assert_eq!(message, "connection refused"),
             other => panic!("expected Error, got {other:?}"),
@@ -487,7 +533,7 @@ mod tests {
         let launch = s.begin_run().expect("launch");
         // A reply for a different (older) request id must
         // not clobber the current Running state.
-        assert!(!s.apply_done(launch.request_id + 99, 1, 1));
+        assert!(!s.apply_done(launch.request_id + 99, 1, 1, Instant::now()));
         assert!(s.is_running());
     }
 
@@ -499,7 +545,7 @@ mod tests {
             s.push_char(c);
         }
         let first = s.begin_run().expect("first launch");
-        s.apply_done(first.request_id, 0, 0);
+        s.apply_done(first.request_id, 0, 0, Instant::now());
         // Second run.
         s.begin(endpoint("nas:/m/y"));
         for c in "/b".chars() {
@@ -588,5 +634,83 @@ mod tests {
         let dest = tmp.path().to_string_lossy().to_string();
         let dest_root = launch_for("nas:/docs/readme.txt", &dest);
         assert_eq!(dest_root, tmp.path().join("readme.txt"));
+    }
+
+    // d-38: terminal-fragment auto-hide TTL.
+
+    fn launched(state: &mut F3PullState, source: &str) -> u64 {
+        state.begin(endpoint(source));
+        for c in "/tmp/out".chars() {
+            state.push_char(c);
+        }
+        state.begin_run().expect("launch").request_id
+    }
+
+    #[test]
+    fn done_is_terminal_running_and_idle_are_not() {
+        let mut s = F3PullState::new();
+        assert!(!s.is_terminal(), "Idle is not terminal");
+        let rid = launched(&mut s, "nas:/m/x");
+        assert!(!s.is_terminal(), "Running is not terminal");
+        s.apply_done(rid, 1, 1, Instant::now());
+        assert!(s.is_terminal(), "Done is terminal");
+    }
+
+    #[test]
+    fn error_is_terminal() {
+        let mut s = F3PullState::new();
+        let rid = launched(&mut s, "nas:/m/x");
+        s.apply_error(rid, "boom".to_string(), Instant::now());
+        assert!(s.is_terminal());
+    }
+
+    #[test]
+    fn clear_terminal_hides_done_after_ttl() {
+        let mut s = F3PullState::new();
+        let rid = launched(&mut s, "nas:/m/x");
+        let finished = Instant::now();
+        s.apply_done(rid, 5, 500, finished);
+        // Within TTL → still showing.
+        s.clear_terminal_if_expired(finished, F3PullState::TERMINAL_TTL);
+        assert!(s.is_terminal(), "within TTL the fragment stays");
+        // Past TTL → cleared to Idle.
+        s.clear_terminal_if_expired(
+            finished + F3PullState::TERMINAL_TTL + Duration::from_millis(1),
+            F3PullState::TERMINAL_TTL,
+        );
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+    }
+
+    #[test]
+    fn clear_terminal_at_exact_boundary_hides() {
+        let mut s = F3PullState::new();
+        let rid = launched(&mut s, "nas:/m/x");
+        let finished = Instant::now();
+        s.apply_error(rid, "boom".to_string(), finished);
+        // `>=` boundary: exactly TTL elapsed → hidden.
+        s.clear_terminal_if_expired(
+            finished + F3PullState::TERMINAL_TTL,
+            F3PullState::TERMINAL_TTL,
+        );
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+    }
+
+    #[test]
+    fn clear_terminal_is_noop_on_running_and_idle() {
+        let mut s = F3PullState::new();
+        // Idle — no-op.
+        s.clear_terminal_if_expired(
+            Instant::now() + Duration::from_secs(3600),
+            F3PullState::TERMINAL_TTL,
+        );
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+        // Running — a long-running pull must never be
+        // cleared by the TTL sweep.
+        launched(&mut s, "nas:/m/x");
+        s.clear_terminal_if_expired(
+            Instant::now() + Duration::from_secs(3600),
+            F3PullState::TERMINAL_TTL,
+        );
+        assert!(s.is_running(), "Running is immune to the terminal TTL");
     }
 }

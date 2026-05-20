@@ -601,6 +601,12 @@ async fn run_router(
         {
             app.reload_banner = None;
         }
+        // d-38: auto-hide a finished F3 pull fragment once
+        // its TTL elapses (same state-level expiry as the
+        // reload banner — `needs_live_tick` ticks while a
+        // terminal fragment shows, then stops once cleared).
+        app.f3_pull
+            .clear_terminal_if_expired(now, f3pull::F3PullState::TERMINAL_TTL);
         // d-36: accent + reload banner are recomputed each
         // frame from the (possibly hot-reloaded) config, so
         // a `Ctrl+R` theme change takes effect immediately.
@@ -1083,12 +1089,13 @@ async fn run_router(
             // `request_id` to the current `Running` run).
             reply = f3_pull_reply_rx.recv() => {
                 if let Some(F3PullReply { request_id, result }) = reply {
+                    let at = Instant::now();
                     match result {
                         Ok((files, bytes)) => {
-                            app.f3_pull.apply_done(request_id, files, bytes);
+                            app.f3_pull.apply_done(request_id, files, bytes, at);
                         }
                         Err(message) => {
-                            app.f3_pull.apply_error(request_id, message);
+                            app.f3_pull.apply_error(request_id, message, at);
                         }
                     }
                 }
@@ -2410,6 +2417,11 @@ fn needs_live_tick(app: &AppState) -> bool {
     // d-36: tick while a reload banner is showing so it
     // auto-expires (the loop clears it once past TTL).
     if app.reload_banner.is_some() {
+        return true;
+    }
+    // d-38: tick while an F3 pull Done/Error fragment is
+    // showing so it auto-hides on its TTL.
+    if app.f3_pull.is_terminal() {
         return true;
     }
     match app.current_screen {
