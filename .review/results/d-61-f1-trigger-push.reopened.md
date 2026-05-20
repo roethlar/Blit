@@ -1,30 +1,22 @@
 # d-61-f1-trigger-push reopened
 
-Reviewed commit: `68f53897d61051bd99b59b015bb1a57436a09964`
-Reviewed at: `2026-05-20T23:45:01Z`
+Reviewed commit: `350800722f3f224fa72182da37c013d735ab7864`
+Reviewed at: `2026-05-20T23:51:06Z`
 Reviewer: `claude-reviewer`
 
 Validation:
 - `cargo fmt --all -- --check` passed.
 - `cargo clippy --workspace --all-targets -- -D warnings` passed.
-- `cargo test --workspace` passed (538 tests).
+- `cargo test --workspace` passed (539 tests).
 
 ## Finding
 
-### 1. Malformed remote-shaped sources are misclassified as local push sources
+### 1. Bare-host push destinations still start an invalid push
 
 Severity: Medium
 
-The d-61 push branch is entered whenever `RemoteEndpoint::parse(&src)` fails and the kind is `Copy` (`crates/blit-tui/src/main.rs:4001`). That treats every parse error as "source is local". But this parser also fails for malformed remote-shaped inputs, not only local paths. For example, `nas:9031:/home` looks like a module-root remote source but is invalid because module-root syntax requires the trailing slash; the parser rejects that shape at `crates/blit-core/src/remote/endpoint.rs:67`.
+Round 2 fixed the malformed-source classification issue. The remaining problem is on the destination side: the push branch accepts any `Ok(Endpoint::Remote(remote))` from `parse_transfer_endpoint(&dest)` before calling `app.f1_push.begin` and `spawn_f1_push` (`crates/blit-tui/src/main.rs:4014`). A bare host like `nas` or `nas:9031` parses successfully as `RemotePath::Discovery` (`crates/blit-core/src/remote/endpoint.rs:90`), so the TUI starts a push and shows the F1 running footer.
 
-With the current handler, a trigger commit like:
+That destination cannot succeed as a push target. The push client later rejects `RemotePath::Discovery` as "remote destination missing module specification" (`crates/blit-core/src/remote/push/client/helpers.rs:296`), and the app already has the right preflight helper for this: `ensure_remote_destination_supported` rejects bare-host destinations before any transfer starts (`crates/blit-app/src/endpoints.rs:75`).
 
-```text
-src: nas:9031:/home
-dst: other:9031:/backup/
-kind: copy
-```
-
-falls through to the local→remote push path if the destination parses, launching `spawn_f1_push` with `PathBuf::from("nas:9031:/home")` (`crates/blit-tui/src/main.rs:4013`). That is the same footgun the transfer parser avoids: remote-shaped typos must not silently become local filesystem paths.
-
-Expected fix: before entering the push branch, distinguish a genuinely local source from a malformed remote-shaped source. At minimum, reject/drop source strings containing remote syntax such as `:/` or `://` when `RemoteEndpoint::parse` fails, or reuse/extend the strict transfer endpoint parser semantics. Add a regression test where `src = "nas:9031:/home"` and `dst = "other:9031:/backup/"` does not start `f1_push` and does not start `f3_pull`.
+Expected fix: in the local-source push branch, require the parsed remote destination to pass the destination-shape gate before `f1_push.begin`/`spawn_f1_push`. Add a regression test where a local source with `dst = "nas:9031"` does not start `f1_push` and does not start `f3_pull`; keep the valid `nas:9031:/home/` test as the positive case.
