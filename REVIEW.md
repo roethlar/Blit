@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-54-f1-module-capacity | Feature | Per-module used/total in F1 detail | `[x]` | `phase5/a1` | `9777dd3` |
+| d-55-f3-mirror | Feature | F3 `m` mirror remote→local with confirm | `[~]` | `phase5/a1` | `3d1a1ad` |
 
 ## Open findings
 
