@@ -102,4 +102,44 @@ green.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-47-f1-browse-nav.reopened.md`)
+
+One finding:
+
+- **Enter on the Local row was not a no-op.** The finding claimed
+  Local was inert because F3 is a remote browser, but
+  `DaemonsState::endpoint_for_row` returns the loopback
+  `127.0.0.1:9031` for Local (so the daemon's own RPCs work) —
+  *not* `None`. Round 1 retargeted on any `Some`, so Enter on
+  Local jumped to F3 and browsed loopback instead of doing
+  nothing. My "Local is a no-op" assertion was simply wrong about
+  the helper's return.
+
+### Round 2 fix
+
+- Extracted `f1_browse_target(daemons) -> Option<RemoteEndpoint>`,
+  which `filter`s out `row.is_local()` before resolving the
+  endpoint — so Enter on Local returns `None` (genuine no-op).
+  The F1 `Descend` arm calls it.
+
+### Round 2 tests
+
++2 tests (459 → 461):
+
+- `f1_browse_target_is_none_for_local_row` — the reviewer's
+  specific ask: a fresh `DaemonsState` (cursor on Local) resolves
+  to `None`.
+- `f1_browse_target_is_some_for_remote_row` — a discovered remote
+  daemon resolves to `Some`.
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+Don't assert a helper's behavior from its name or intent —
+`endpoint_for_row` *sounds* like it'd return `None` for a
+non-remote row, but it returns loopback so the local daemon is
+reachable. Read the callee, and gate on the actual domain
+predicate (`is_local()`) rather than assuming a sentinel return.
