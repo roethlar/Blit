@@ -2833,6 +2833,25 @@ fn pull_throughput(bytes: u64, elapsed_secs: f64) -> u64 {
     }
 }
 
+/// d-55 R2: build the `PullSyncOptions` for an F3 pull/mirror.
+///
+/// The mirror flag MUST live here, on the options — the wire
+/// `TransferOperationSpec` is built from `options`
+/// (`RemotePullClient::build_spec_from_options`), so it's
+/// `options.mirror_mode` that tells the daemon to compute the
+/// delete list. The execution-level `PullSyncExecution.mirror_mode`
+/// is only the receive-side `track_paths` flag; setting it alone
+/// (round 1) left the daemon emitting `MirrorMode::Off`, so
+/// `apply_pull_mirror_purge` had no paths to delete and the
+/// "mirror" silently behaved like a plain pull. The CLI sets the
+/// options field (`blit-cli/src/transfers/remote.rs`); we match it.
+fn f3_pull_options(mirror: bool) -> blit_core::remote::pull::PullSyncOptions {
+    blit_core::remote::pull::PullSyncOptions {
+        mirror_mode: mirror,
+        ..blit_core::remote::pull::PullSyncOptions::default()
+    }
+}
+
 fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
@@ -2849,7 +2868,6 @@ fn spawn_f3_pull(
     progress_tx: mpsc::Sender<F3PullProgress>,
 ) {
     use blit_app::transfers::remote::{apply_pull_mirror_purge, run_pull_sync, PullSyncExecution};
-    use blit_core::remote::pull::PullSyncOptions;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
         // d-37: progress monitor. run_pull_sync reports
@@ -2881,7 +2899,7 @@ fn spawn_f3_pull(
         let execution = PullSyncExecution {
             remote: source,
             dest_root,
-            options: PullSyncOptions::default(),
+            options: f3_pull_options(mirror),
             compute_checksums: false,
             mirror_mode: mirror,
             remote_label,
@@ -6539,6 +6557,43 @@ mod tests {
             &mut app
         ));
         assert!(app.f3_pull.is_confirming_mirror(), "still confirming");
+    }
+
+    /// d-55 R2 regression (reviewer reopen): the F3 mirror must
+    /// build a mirror-ENABLED wire spec, not just carry the
+    /// post-pull purge flag. The daemon computes the delete list
+    /// from `TransferOperationSpec.mirror_mode`, which
+    /// `build_spec_from_options` derives from `options.mirror_mode`
+    /// — so a mirror whose options say `mirror_mode = false` would
+    /// get `MirrorMode::Off` and silently behave like a plain pull
+    /// (no deletions). Assert the spec is non-Off for a mirror and
+    /// Off for a copy.
+    #[test]
+    fn f3_mirror_options_build_mirror_enabled_spec() {
+        use blit_core::generated::MirrorMode;
+        use blit_core::remote::pull::RemotePullClient;
+        let endpoint = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
+
+        let mirror_spec =
+            RemotePullClient::build_spec_from_options(&endpoint, &f3_pull_options(true))
+                .expect("mirror spec");
+        assert_ne!(
+            mirror_spec.mirror_mode,
+            MirrorMode::Off as i32,
+            "a mirror must ask the daemon to compute deletions"
+        );
+        // No filter / no delete-all scope → FilteredSubset (the
+        // build_spec default for mirror_mode without delete_all).
+        assert_eq!(mirror_spec.mirror_mode, MirrorMode::FilteredSubset as i32);
+
+        let copy_spec =
+            RemotePullClient::build_spec_from_options(&endpoint, &f3_pull_options(false))
+                .expect("copy spec");
+        assert_eq!(
+            copy_spec.mirror_mode,
+            MirrorMode::Off as i32,
+            "a plain pull must never request deletions"
+        );
     }
 
     #[test]
