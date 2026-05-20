@@ -1543,6 +1543,21 @@ async fn handle_pane_action(
                         )
                     })
                 };
+                // d-57 R2 (reviewer reopen): a move deletes the
+                // remote source after the receive, so the source
+                // must be a deletable PATH — never a module root.
+                // In the top-level modules view `pull_source_endpoint`
+                // maps a module row to `Module { rel_path: "" }`; the
+                // daemon rejects empty/root purge paths, so without
+                // this gate `v` on a module row would copy the whole
+                // module locally and then fail the source delete. Same
+                // `is_deletable_remote_path` gate F3 delete (`D`) uses
+                // to refuse module-root purges. (This also covers the
+                // top-level read-only module row, which is a module
+                // root and so rejected here regardless of read-only —
+                // `current_module_read_only()` only tracks a descended
+                // module, not the selected top-level row.)
+                let source = source.filter(is_deletable_remote_path);
                 if !busy {
                     if let Some(source) = source {
                         app.f3_pull.begin_move(source);
@@ -6174,6 +6189,26 @@ mod tests {
         // A module root is not deletable → nothing to delete.
         let root = RemoteEndpoint::parse("nas:/home/").expect("module root");
         assert!(build_delete_request(vec![root], false).is_none());
+    }
+
+    /// d-57 R2 (reviewer reopen): the F3 move gate is the same
+    /// `is_deletable_remote_path` check delete uses — a move whose
+    /// source is a module root must be refused up front, because the
+    /// post-receive source delete (an empty/root purge path) would
+    /// fail at the daemon after the whole module was already copied.
+    #[test]
+    fn move_gate_rejects_module_root_accepts_paths() {
+        // Module root → rejected (the bug: would copy then fail).
+        let root = RemoteEndpoint::parse("nas:/home/").expect("module root");
+        assert!(
+            !is_deletable_remote_path(&root),
+            "a module root is not a moveable (deletable) source"
+        );
+        // A file / dir under a module → moveable.
+        let file = RemoteEndpoint::parse("nas:/home/docs/a.txt").expect("file");
+        assert!(is_deletable_remote_path(&file));
+        let dir = RemoteEndpoint::parse("nas:/home/docs/").expect("dir");
+        assert!(is_deletable_remote_path(&dir));
     }
 
     #[test]
