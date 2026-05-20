@@ -77,10 +77,13 @@ pub enum F3PullDisplay {
     EnteringDest { dest: String },
     /// PullSync in flight. d-37: live cumulative
     /// counters (0 until the first progress event).
+    /// d-39: `bytes_per_sec` is average throughput
+    /// (0 until ~1s elapsed).
     Running {
         dest: String,
         files: usize,
         bytes: u64,
+        bytes_per_sec: u64,
     },
     /// Pull finished — files + bytes pulled, dest path.
     Done {
@@ -293,13 +296,25 @@ fn render_footer(
                 Style::default().fg(Color::Cyan),
             ));
         }
-        F3PullDisplay::Running { dest, files, bytes } => {
+        F3PullDisplay::Running {
+            dest,
+            files,
+            bytes,
+            bytes_per_sec,
+        } => {
             spans.push(Span::raw("  ·  "));
             // d-37: show the live count once bytes start
             // flowing; before that just "pulling →".
+            // d-39: append throughput once the rate
+            // settles (suppressed for the first ~1s).
             let frag = if *bytes > 0 || *files > 0 {
+                let rate = if *bytes_per_sec > 0 {
+                    format!(" · {}/s", format_bytes(*bytes_per_sec))
+                } else {
+                    String::new()
+                };
                 format!(
-                    "pulling → {dest}... ({files} file(s) · {})",
+                    "pulling → {dest}... ({files} file(s) · {}{rate})",
                     format_bytes(*bytes)
                 )
             } else {

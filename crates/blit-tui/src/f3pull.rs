@@ -49,12 +49,15 @@ pub enum F3PullStatus {
     /// PullSync RPC in flight. d-37: `files` / `bytes` are
     /// live cumulative counters fed by the progress
     /// forwarder (0 until the first `Payload` /
-    /// `FileComplete` event lands).
+    /// `FileComplete` event lands). d-39: `bytes_per_sec`
+    /// is the average throughput (0 until ~1s elapsed, to
+    /// dodge meaningless early-transfer spikes).
     Running {
         dest: String,
         request_id: u64,
         files: usize,
         bytes: u64,
+        bytes_per_sec: u64,
     },
     /// Pull finished successfully. (The remote source is
     /// still shown in the Stats block's `Pull:` line, so
@@ -218,6 +221,7 @@ impl F3PullState {
             request_id,
             files: 0,
             bytes: 0,
+            bytes_per_sec: 0,
         };
         Some(PullLaunch {
             source,
@@ -226,20 +230,29 @@ impl F3PullState {
         })
     }
 
-    /// d-37: apply a live progress snapshot. Updates the
-    /// `Running` counters in place; generation-guarded so
-    /// a snapshot from a superseded run is dropped.
-    pub fn apply_progress(&mut self, request_id: u64, files: usize, bytes: u64) {
+    /// d-37 / d-39: apply a live progress snapshot. Updates
+    /// the `Running` counters + throughput in place;
+    /// generation-guarded so a snapshot from a superseded
+    /// run is dropped.
+    pub fn apply_progress(
+        &mut self,
+        request_id: u64,
+        files: usize,
+        bytes: u64,
+        bytes_per_sec: u64,
+    ) {
         if let F3PullStatus::Running {
             request_id: rid,
             files: f,
             bytes: b,
+            bytes_per_sec: bps,
             ..
         } = &mut self.status
         {
             if *rid == request_id {
                 *f = files;
                 *b = bytes;
+                *bps = bytes_per_sec;
             }
         }
     }
@@ -435,11 +448,17 @@ mod tests {
             s.push_char(c);
         }
         let launch = s.begin_run().expect("launch");
-        s.apply_progress(launch.request_id, 3, 4096);
+        s.apply_progress(launch.request_id, 3, 4096, 2048);
         match s.status() {
-            F3PullStatus::Running { files, bytes, .. } => {
+            F3PullStatus::Running {
+                files,
+                bytes,
+                bytes_per_sec,
+                ..
+            } => {
                 assert_eq!(*files, 3);
                 assert_eq!(*bytes, 4096);
+                assert_eq!(*bytes_per_sec, 2048);
             }
             other => panic!("expected Running, got {other:?}"),
         }
@@ -453,11 +472,17 @@ mod tests {
             s.push_char(c);
         }
         let launch = s.begin_run().expect("launch");
-        s.apply_progress(launch.request_id + 99, 5, 5);
+        s.apply_progress(launch.request_id + 99, 5, 5, 5);
         match s.status() {
-            F3PullStatus::Running { files, bytes, .. } => {
+            F3PullStatus::Running {
+                files,
+                bytes,
+                bytes_per_sec,
+                ..
+            } => {
                 assert_eq!(*files, 0, "stale progress must not apply");
                 assert_eq!(*bytes, 0);
+                assert_eq!(*bytes_per_sec, 0);
             }
             other => panic!("expected Running, got {other:?}"),
         }
@@ -467,7 +492,7 @@ mod tests {
     fn apply_progress_noop_when_not_running() {
         let mut s = F3PullState::new();
         // Idle — apply_progress must be a harmless no-op.
-        s.apply_progress(1, 9, 9);
+        s.apply_progress(1, 9, 9, 9);
         assert!(matches!(s.status(), F3PullStatus::Idle));
     }
 

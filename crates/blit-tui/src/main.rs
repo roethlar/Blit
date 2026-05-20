@@ -1102,8 +1102,15 @@ async fn run_router(
             }
             // d-37: F3 pull live-progress snapshots.
             snapshot = f3_pull_progress_rx.recv() => {
-                if let Some(F3PullProgress { request_id, files, bytes }) = snapshot {
-                    app.f3_pull.apply_progress(request_id, files, bytes);
+                if let Some(F3PullProgress {
+                    request_id,
+                    files,
+                    bytes,
+                    bytes_per_sec,
+                }) = snapshot
+                {
+                    app.f3_pull
+                        .apply_progress(request_id, files, bytes, bytes_per_sec);
                 }
             }
         }
@@ -2079,11 +2086,16 @@ fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDispl
             F3PullDisplay::EnteringDest { dest: dest.clone() }
         }
         F3PullStatus::Running {
-            dest, files, bytes, ..
+            dest,
+            files,
+            bytes,
+            bytes_per_sec,
+            ..
         } => F3PullDisplay::Running {
             dest: dest.clone(),
             files: *files,
             bytes: *bytes,
+            bytes_per_sec: *bytes_per_sec,
         },
         F3PullStatus::Done {
             files, bytes, dest, ..
@@ -2120,11 +2132,13 @@ struct F3PullReply {
 /// (`apply_pull_mirror_purge`) is a no-op when
 /// `mirror_mode = false`, so it's skipped.
 /// d-37: live progress snapshot forwarded from a running
-/// pull to the event loop.
+/// pull to the event loop. d-39: `bytes_per_sec` is the
+/// average throughput (0 until ~1s elapsed).
 struct F3PullProgress {
     request_id: u64,
     files: usize,
     bytes: u64,
+    bytes_per_sec: u64,
 }
 
 /// d-37 round 2: fold one pull `ProgressEvent` into the
@@ -2161,6 +2175,23 @@ fn accumulate_pull_progress(
     }
 }
 
+/// d-39: average pull throughput in bytes/sec.
+///
+/// Suppressed (returns 0) until at least one second has
+/// elapsed — `bytes / tiny_elapsed` produces meaningless
+/// multi-GiB/s spikes in the first moments of a transfer,
+/// and the footer reads better with no rate than a wrong
+/// one. After the warm-up it's a simple cumulative average
+/// (`bytes / elapsed`), matching the "is it moving" intent
+/// of the footer rather than an instantaneous rate.
+fn pull_throughput(bytes: u64, elapsed_secs: f64) -> u64 {
+    if elapsed_secs >= 1.0 {
+        (bytes as f64 / elapsed_secs) as u64
+    } else {
+        0
+    }
+}
+
 fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
@@ -2184,16 +2215,19 @@ fn spawn_f3_pull(
         let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
         let progress = RemoteTransferProgress::new(pe_tx);
         let forwarder = tokio::spawn(async move {
+            let started = Instant::now();
             let mut files = 0usize;
             let mut bytes = 0u64;
             while let Some(event) = pe_rx.recv().await {
                 accumulate_pull_progress(&mut files, &mut bytes, &event);
+                let bytes_per_sec = pull_throughput(bytes, started.elapsed().as_secs_f64());
                 // Lossy on a full channel — progress is
                 // approximate; the reply carries the truth.
                 let _ = progress_tx.try_send(F3PullProgress {
                     request_id,
                     files,
                     bytes,
+                    bytes_per_sec,
                 });
             }
         });
@@ -4994,6 +5028,30 @@ mod tests {
         }
         assert_eq!(bytes, 600);
         assert_eq!(files, 3);
+    }
+
+    #[test]
+    fn pull_throughput_suppressed_in_first_second() {
+        // d-39: a tiny elapsed window would otherwise
+        // report `bytes / 0.01s` = a bogus multi-GiB/s
+        // spike. Below the 1s warm-up it's pinned to 0.
+        assert_eq!(pull_throughput(1_000_000, 0.0), 0);
+        assert_eq!(pull_throughput(1_000_000, 0.5), 0);
+        assert_eq!(pull_throughput(1_000_000, 0.999), 0);
+    }
+
+    #[test]
+    fn pull_throughput_is_cumulative_average_after_warmup() {
+        // At exactly the 1s boundary and beyond, it's
+        // bytes / elapsed.
+        assert_eq!(pull_throughput(1_048_576, 1.0), 1_048_576);
+        assert_eq!(pull_throughput(1_048_576, 2.0), 524_288);
+        assert_eq!(pull_throughput(10_000_000, 4.0), 2_500_000);
+    }
+
+    #[test]
+    fn pull_throughput_zero_bytes_is_zero() {
+        assert_eq!(pull_throughput(0, 5.0), 0);
     }
 
     /// e-1 round-2 regression: `?` is GLOBAL, including
