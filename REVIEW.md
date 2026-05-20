@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-37-f3-pull-progress | Feature | Live byte/file counter on the F3 pull footer | `[~]` | `phase5/a1` | `8fd9bff` |
 
 ## Open findings
 
