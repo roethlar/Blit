@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-48-f2-follows-browse | Feature | F2 re-subscribes when you switch daemons on F1 | `[ ]` | `phase5/a1` | `f566a35` |
+| d-48-f2-follows-browse | Feature | F2 re-subscribes when you switch daemons on F1 (round 2) | `[~]` | `phase5/a1` | `68de015` |
 
 ## Open findings
 
