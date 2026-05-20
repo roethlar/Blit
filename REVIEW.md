@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-52-config-delete-ttl | Feature | Operator-tunable batch-delete TTL | `[x]` | `phase5/a1` | `b629be1` |
+| d-53-f3-batch-pull | Feature | `P` pulls the marked set sequentially | `[~]` | `phase5/a1` | `7188da6` |
 
 ## Open findings
 
