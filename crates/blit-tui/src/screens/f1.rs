@@ -44,6 +44,8 @@ pub struct TriggerPrompt {
     pub dest: String,
     /// `true` when the source field has focus (else dest).
     pub source_focused: bool,
+    /// d-59: `true` = mirror mode, `false` = copy.
+    pub mirror: bool,
 }
 
 pub fn render_into(
@@ -98,14 +100,26 @@ fn render_trigger(frame: &mut Frame, area: Rect, prompt: &TriggerPrompt) {
     } else {
         format!("{}_", prompt.dest)
     };
+    // d-59: mode indicator — mirror is destructive, so flag it red.
+    let (mode_label, mode_color) = if prompt.mirror {
+        ("mirror", Color::Red)
+    } else {
+        ("copy", Color::Green)
+    };
     let line = Line::from(vec![
         Span::styled("trigger ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("[", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            mode_label,
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("] ", Style::default().fg(Color::DarkGray)),
         Span::styled("src: ", Style::default().fg(Color::DarkGray)),
         Span::styled(src, src_style),
         Span::styled("  dst: ", Style::default().fg(Color::DarkGray)),
         Span::styled(dst, dst_style),
         Span::styled(
-            "   (Tab switch · Enter pull · Esc cancel)",
+            "   (Tab field · ↑↓ copy/mirror · Enter run · Esc cancel)",
             Style::default().fg(Color::DarkGray),
         ),
     ]);

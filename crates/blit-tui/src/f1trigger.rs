@@ -6,21 +6,25 @@
 //! selected daemon's `host:port:/`) and a local **destination**
 //! path — then runs the transfer.
 //!
-//! This first slice covers the remote→local **pull** only: on
-//! commit the modal hands the parsed source + dest to the
-//! verified F3 pull machine (`F3PullState::start_pull`) and the
-//! dispatcher jumps to F3 so the operator watches the pull in its
-//! existing footer. So there's no new execution path, reply
-//! channel, or progress UI here — just field collection. Push,
-//! mirror, and remote→remote (delegated) triggers are follow-ups.
+//! On commit the modal hands the parsed source + dest to the
+//! verified F3 pull machine and the dispatcher jumps to F3 so the
+//! operator watches the transfer in its existing footer — there's
+//! no new execution path, reply channel, or progress UI here, just
+//! field collection. d-59 adds a copy/mirror mode toggle
+//! (TUI_DESIGN §3 "Same flow as copy with --mirror flag"); a
+//! mirror routes through F3's destructive confirm gate. Push and
+//! remote→remote (delegated) triggers are follow-ups.
 //!
 //! Flow:
 //! 1. `t` on a daemon row → [`F1TriggerState::begin`] (source
-//!    prefilled, focus on the dest field).
-//! 2. The operator edits either field; `Tab` toggles focus.
+//!    prefilled, focus on the dest field, copy mode).
+//! 2. The operator edits either field; `Tab` toggles focus;
+//!    Up/Down ([`F1TriggerState::toggle_mirror`]) flips copy ⇄
+//!    mirror.
 //! 3. `Esc` → [`F1TriggerState::cancel`]. `Enter` →
-//!    [`F1TriggerState::take`] yields `(source, dest)` for the
-//!    dispatcher to parse + launch (or `None` if either is blank).
+//!    [`F1TriggerState::take`] yields `(source, dest, mirror)` for
+//!    the dispatcher to parse + launch (or `None` if either field
+//!    is blank).
 
 /// Which field the modal's keystrokes currently edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +42,12 @@ pub enum F1TriggerStatus {
         source: String,
         dest: String,
         focus: TriggerField,
+        /// d-59: `true` runs a mirror (delete-extraneous) instead
+        /// of a plain copy. TUI_DESIGN §3 "Same flow as copy with
+        /// --mirror flag in the options modal". Toggled with the
+        /// Up/Down arrows; the destructive confirm still happens on
+        /// F3 after commit.
+        mirror: bool,
     },
 }
 
@@ -82,6 +92,7 @@ impl F1TriggerState {
             source,
             dest: String::new(),
             focus: TriggerField::Dest,
+            mirror: false,
         };
     }
 
@@ -95,12 +106,20 @@ impl F1TriggerState {
         }
     }
 
+    /// d-59: Up/Down — flip between copy and mirror mode.
+    pub fn toggle_mirror(&mut self) {
+        if let F1TriggerStatus::Editing { mirror, .. } = &mut self.status {
+            *mirror = !*mirror;
+        }
+    }
+
     /// Append a char to the focused field.
     pub fn push_char(&mut self, c: char) {
         if let F1TriggerStatus::Editing {
             source,
             dest,
             focus,
+            ..
         } = &mut self.status
         {
             match focus {
@@ -117,6 +136,7 @@ impl F1TriggerState {
             source,
             dest,
             focus,
+            ..
         } = &mut self.status
         {
             match focus {
@@ -134,21 +154,24 @@ impl F1TriggerState {
     }
 
     /// `Enter` — close the modal and yield the trimmed
-    /// `(source, dest)` for the dispatcher to parse + launch.
-    /// Returns `None` (and stays open) when either field is blank
-    /// — there's nothing to launch yet.
-    pub fn take(&mut self) -> Option<(String, String)> {
-        let (source, dest) = match &self.status {
-            F1TriggerStatus::Editing { source, dest, .. } => {
-                (source.trim().to_string(), dest.trim().to_string())
-            }
+    /// `(source, dest, mirror)` for the dispatcher to parse +
+    /// launch. Returns `None` (and stays open) when either field
+    /// is blank — there's nothing to launch yet.
+    pub fn take(&mut self) -> Option<(String, String, bool)> {
+        let (source, dest, mirror) = match &self.status {
+            F1TriggerStatus::Editing {
+                source,
+                dest,
+                mirror,
+                ..
+            } => (source.trim().to_string(), dest.trim().to_string(), *mirror),
             F1TriggerStatus::Idle => return None,
         };
         if source.is_empty() || dest.is_empty() {
             return None;
         }
         self.status = F1TriggerStatus::Idle;
-        Some((source, dest))
+        Some((source, dest, mirror))
     }
 }
 
@@ -173,10 +196,12 @@ mod tests {
                 source,
                 dest,
                 focus,
+                mirror,
             } => {
                 assert_eq!(source, "nas:9031:/");
                 assert!(dest.is_empty());
                 assert_eq!(*focus, TriggerField::Dest, "dest is the field to fill");
+                assert!(!mirror, "trigger starts in copy mode");
             }
             other => panic!("expected Editing, got {other:?}"),
         }
@@ -239,10 +264,27 @@ mod tests {
         for c in "  /tmp/out  ".chars() {
             s.push_char(c);
         }
-        let (source, dest) = s.take().expect("both fields set");
+        let (source, dest, mirror) = s.take().expect("both fields set");
         assert_eq!(source, "nas:9031:/home/docs");
         assert_eq!(dest, "/tmp/out");
+        assert!(!mirror, "default mode is copy");
         assert!(matches!(s.status(), F1TriggerStatus::Idle), "take closes");
+    }
+
+    #[test]
+    fn toggle_mirror_flips_mode_and_take_reports_it() {
+        let mut s = F1TriggerState::new();
+        s.begin("nas:9031:/home".to_string());
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        s.toggle_mirror();
+        match s.status() {
+            F1TriggerStatus::Editing { mirror, .. } => assert!(*mirror),
+            other => panic!("expected Editing, got {other:?}"),
+        }
+        let (_, _, mirror) = s.take().expect("set");
+        assert!(mirror, "take reports the mirror mode");
     }
 
     #[test]

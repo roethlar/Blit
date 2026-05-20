@@ -2506,11 +2506,7 @@ fn classify_reload(
     }
 }
 
-/// d-35: bridge the F3 pull state machine to the
-/// renderer-facing `F3PullDisplay` (lives in
-/// `screens/f3.rs` so the screens layer doesn't reach
-/// into the `f3pull` module's internals).
-/// d-58: bridge the F1 trigger modal to the renderer-facing
+/// d-58/d-59: bridge the F1 trigger modal to the renderer-facing
 /// `TriggerPrompt`. `None` when the modal is closed.
 fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::TriggerPrompt> {
     use f1trigger::{F1TriggerStatus, TriggerField};
@@ -2520,14 +2516,20 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             source,
             dest,
             focus,
+            mirror,
         } => Some(screens::f1::TriggerPrompt {
             source: source.clone(),
             dest: dest.clone(),
             source_focused: *focus == TriggerField::Source,
+            mirror: *mirror,
         }),
     }
 }
 
+/// d-35: bridge the F3 pull state machine to the
+/// renderer-facing `F3PullDisplay` (lives in
+/// `screens/f3.rs` so the screens layer doesn't reach
+/// into the `f3pull` module's internals).
 fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDisplay {
     use f3pull::F3PullStatus;
     use screens::f3::F3PullDisplay;
@@ -3820,19 +3822,38 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             app.f1_trigger.toggle_focus();
             true
         }
+        KeyCode::Up | KeyCode::Down => {
+            // d-59: flip copy ⇄ mirror.
+            app.f1_trigger.toggle_mirror();
+            true
+        }
         KeyCode::Enter => {
             // take() closes the modal only when both fields are
             // non-blank; a blank field keeps it open (no-op here).
-            if let Some((src, dest)) = app.f1_trigger.take() {
-                // d-58: this slice runs a remote→local pull. A
-                // source that doesn't parse as a remote endpoint is
-                // dropped (no launch); inline parse-error feedback
-                // is a follow-up. The verified pull machine owns the
-                // execution + footer, so we just hand off and jump
-                // to F3. start_pull no-ops if a pull is already in
-                // flight there.
+            if let Some((src, dest, mirror)) = app.f1_trigger.take() {
+                // d-58/d-59: hand off to the verified F3 pull
+                // machine and jump to F3 to watch. A source that
+                // doesn't parse as a remote endpoint is dropped (no
+                // launch); inline parse-error feedback is a
+                // follow-up. The machine no-ops if a pull is already
+                // in flight there.
                 if let Ok(source) = RemoteEndpoint::parse(&src) {
-                    if let Some(launch) = app.f3_pull.start_pull(source, dest) {
+                    if mirror {
+                        // d-59: a mirror routes through the F3
+                        // destructive confirm gate (begin_mirror →
+                        // type dest → begin_run lands in Confirm,
+                        // returning None — no spawn yet). The
+                        // operator confirms y/N on F3, where the
+                        // confirm + execution already live.
+                        app.f3_pull.begin_mirror(source);
+                        for c in dest.chars() {
+                            app.f3_pull.push_char(c);
+                        }
+                        let _ = app.f3_pull.begin_run();
+                        if app.f3_pull.is_confirming_destructive() {
+                            app.current_screen = Screen::F3;
+                        }
+                    } else if let Some(launch) = app.f3_pull.start_pull(source, dest) {
                         spawn_f3_pull(
                             launch.request_id,
                             launch.source,
@@ -6857,6 +6878,27 @@ mod tests {
         assert!(!app.f1_trigger.is_editing(), "commit closes the modal");
         assert!(app.f3_pull.is_running(), "the pull launched");
         assert_eq!(app.current_screen, Screen::F3, "jumped to F3 to watch");
+    }
+
+    /// d-59: Up/Down flips the mode; committing a mirror routes
+    /// through the F3 destructive confirm gate (NOT a direct
+    /// launch) and jumps to F3 so the operator confirms y/N there.
+    #[test]
+    fn handle_f1_trigger_keystroke_mirror_routes_to_f3_confirm() {
+        let mut app = app_with_trigger_modal();
+        // Flip to mirror, then commit.
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Up), &mut app));
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(!app.f1_trigger.is_editing(), "commit closes the modal");
+        assert!(
+            app.f3_pull.is_confirming_destructive(),
+            "a mirror waits at the F3 confirm gate, not a direct launch"
+        );
+        assert!(
+            !app.f3_pull.is_running(),
+            "no PullSync until the operator confirms"
+        );
+        assert_eq!(app.current_screen, Screen::F3, "jumped to F3 to confirm");
     }
 
     #[test]
