@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-55-f3-mirror | Feature | F3 `m` mirror remote→local with confirm (round 2) | `[x]` | `phase5/a1` | `c2116f1` |
+| d-56-f3-mirror-delete-count | Feature | Surface mirror purge count in F3 footer | `[~]` | `phase5/a1` | `6c5d092` |
 
 ## Open findings
 
