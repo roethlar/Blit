@@ -3947,14 +3947,19 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             // take() closes the modal only when both fields are
             // non-blank; a blank field keeps it open (no-op here).
             if let Some((src, dest, kind)) = app.f1_trigger.take() {
-                // d-58…d-60: hand off to the verified F3 pull
-                // machine and jump to F3 to watch. A source that
-                // doesn't parse as a remote endpoint is dropped (no
-                // launch); inline parse-error feedback is a
-                // follow-up. The machine no-ops if a pull is already
-                // in flight there.
-                if let Ok(source) = RemoteEndpoint::parse(&src) {
-                    match kind {
+                // d-61 R2: classify the source with the strict
+                // transfer parser, NOT raw `RemoteEndpoint::parse`.
+                // The raw parser fails for BOTH genuine local paths
+                // and malformed remote-shaped typos (e.g.
+                // `nas:9031:/home`, missing the module trailing
+                // slash) — treating the latter as a local push
+                // source was a footgun. `parse_transfer_endpoint`
+                // returns Local only for real paths and Err for
+                // remote-shaped (`:/`) inputs, which we drop.
+                use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
+                match parse_transfer_endpoint(&src) {
+                    // Remote source → remote→local (pull family).
+                    Ok(Endpoint::Remote(source)) => match kind {
                         f3pull::PullKind::Copy => {
                             if let Some(launch) = app.f3_pull.start_pull(source, dest) {
                                 spawn_f3_pull(
@@ -3997,27 +4002,33 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                                 }
                             }
                         }
-                    }
-                } else if kind == f3pull::PullKind::Copy {
-                    // d-61: the source isn't a remote endpoint → push
-                    // direction (local path → remote). This slice
-                    // supports COPY push only; mirror/move push need
-                    // their own confirm gates (follow-ups). The dest
-                    // must parse as a remote endpoint; otherwise
-                    // neither direction is valid and we drop (inline
-                    // parse-error feedback is a follow-up). The push
+                    },
+                    // d-61: a genuine local-path source → push
+                    // direction (local → remote). COPY push only this
+                    // slice; mirror/move push need their own confirm
+                    // gates (follow-ups). The dest must itself be a
+                    // remote endpoint; otherwise we drop. The push
                     // status shows in the F1 footer — no screen jump.
-                    if let Ok(remote) = RemoteEndpoint::parse(&dest) {
-                        let label = remote.display();
-                        if let Some(request_id) = app.f1_push.begin(label) {
-                            spawn_f1_push(
-                                request_id,
-                                std::path::PathBuf::from(&src),
-                                remote,
-                                app.f1_push_reply_tx.clone(),
-                            );
+                    Ok(Endpoint::Local(local_src)) => {
+                        if kind == f3pull::PullKind::Copy {
+                            if let Ok(Endpoint::Remote(remote)) = parse_transfer_endpoint(&dest) {
+                                let label = remote.display();
+                                if let Some(request_id) = app.f1_push.begin(label) {
+                                    spawn_f1_push(
+                                        request_id,
+                                        local_src,
+                                        remote,
+                                        app.f1_push_reply_tx.clone(),
+                                    );
+                                }
+                            }
                         }
                     }
+                    // d-61 R2: a malformed remote-shaped source (or
+                    // forward-slash error) → drop. It must NOT
+                    // silently become a local push source. (Inline
+                    // parse-error feedback is a follow-up.)
+                    Err(_) => {}
                 }
             }
             true
@@ -7019,6 +7030,29 @@ mod tests {
             "push status shows on F1, no jump to F3"
         );
         assert!(!app.f3_pull.is_running(), "push is not a pull");
+    }
+
+    /// d-61 R2 (reviewer reopen): a malformed remote-shaped source
+    /// (`nas:9031:/home` — missing the module trailing slash) fails
+    /// `RemoteEndpoint::parse`, but it must NOT be misclassified as
+    /// a local push source. `parse_transfer_endpoint` returns Err
+    /// for `:/`-shaped inputs, so the commit drops: neither a push
+    /// nor a pull starts.
+    #[test]
+    fn handle_f1_trigger_keystroke_malformed_remote_source_does_not_push() {
+        let mut app = make_test_app_state(Screen::F1);
+        // Looks remote but is invalid (module root needs trailing
+        // slash); dest is a valid remote.
+        app.f1_trigger.begin("nas:9031:/home".to_string());
+        for c in "other:9031:/backup/".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(
+            !app.f1_push.is_running(),
+            "a malformed remote source must not become a local push"
+        );
+        assert!(!app.f3_pull.is_running(), "and it isn't a pull either");
     }
 
     /// d-61: push is copy-only this slice — a local source with
