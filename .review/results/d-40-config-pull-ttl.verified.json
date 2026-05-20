@@ -1,0 +1,16 @@
+{
+  "id": "d-40-config-pull-ttl",
+  "sha": "994c492bc3aa52adb63885359a1475b443273e56",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T16:48:58Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "Round 2 folds the F3 pull terminal remaining TTL into the event-loop tick budget via terminal_remaining and min_opt.",
+    "The prior 5s live-tick / 250ms pull-TTL gap is covered by short_pull_ttl_overrides_long_live_tick."
+  ]
+}
