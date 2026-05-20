@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-40-config-pull-ttl | Feature | Operator-tunable F3 pull-outcome TTL (round 2) | `[x]` | `phase5/a1` | `994c492` |
+| d-41-f3-du | Feature | Subtree disk-usage on the F3 cursor via `u` | `[~]` | `phase5/a1` | `d804f22` |
 
 ## Open findings
 
