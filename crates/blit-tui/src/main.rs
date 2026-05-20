@@ -1380,8 +1380,12 @@ async fn handle_pane_action(
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                 });
                 if let Some(target) = target {
-                    let id = app.f3_du.begin(target.display());
-                    spawn_f3_du(id, target, app.f3_du_reply_tx.clone());
+                    // d-43: a cache hit serves the total instantly
+                    // (status already Done); only a miss spawns the
+                    // RPC.
+                    if let f3du::DuBegin::Fetch(id) = app.f3_du.begin(target.display()) {
+                        spawn_f3_du(id, target, app.f3_du_reply_tx.clone());
+                    }
                 }
             }
             _ => {}
