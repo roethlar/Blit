@@ -26,6 +26,7 @@ mod browse;
 mod config;
 mod daemons;
 mod diagnostics;
+mod f1trigger;
 mod f3del;
 mod f3du;
 mod f3pull;
@@ -156,6 +157,9 @@ struct AppState {
     // F1
     daemons: DaemonsState,
     daemons_last_fetched: Option<String>,
+    /// d-58: `t` trigger-transfer modal (source/dest entry). On
+    /// commit it hands off to the F3 pull machine + jumps to F3.
+    f1_trigger: f1trigger::F1TriggerState,
     /// Sender into the F1 detail fetcher mpsc. Cloned by
     /// `maybe_kick_detail_fetch` into each spawned task.
     detail_tx: mpsc::Sender<DetailUpdate>,
@@ -518,6 +522,7 @@ async fn run_router(
         browse_target: parsed_remote.clone(),
         remote_label,
         daemons: DaemonsState::new(),
+        f1_trigger: f1trigger::F1TriggerState::new(),
         daemons_last_fetched: None,
         detail_tx: detail_tx.clone(),
         discovery_refresh_tx,
@@ -719,7 +724,13 @@ async fn run_router(
                     .map(|e| e.host_port_display())
                     .unwrap_or_else(|| app.remote_label.clone());
                 match app.current_screen {
-                    Screen::F1 => screens::f1::render_into(frame, body_area, &app.daemons, now),
+                    Screen::F1 => screens::f1::render_into(
+                        frame,
+                        body_area,
+                        &app.daemons,
+                        now,
+                        f1_trigger_prompt(&app.f1_trigger),
+                    ),
                     Screen::F2 => screens::f2::render_into(
                         frame,
                         body_area,
@@ -899,6 +910,16 @@ async fn run_router(
                 if app.current_screen == Screen::F4
                     && app.verify.focus().is_editing()
                     && handle_verify_keystroke(&key, &mut app, &verify_run_tx)
+                {
+                    continue;
+                }
+                // d-58: F1's `t` trigger-transfer modal is an
+                // input mode — while open, chars / Backspace / Tab
+                // / Esc / Enter route to the modal instead of the
+                // F1 dispatcher (so `t` etc. are text, not actions).
+                if app.current_screen == Screen::F1
+                    && app.f1_trigger.is_editing()
+                    && handle_f1_trigger_keystroke(&key, &mut app)
                 {
                     continue;
                 }
@@ -1307,6 +1328,19 @@ async fn handle_pane_action(
                     // to, so its transfers track what we browse.
                     let gen = reset_f2_for_resubscribe(app, &endpoint, transfers_event_rx);
                     spawn_f2_setup_task(endpoint, gen, f2_setup_tx.clone());
+                }
+            }
+            // d-58: `t` opens the trigger-transfer modal for the
+            // selected daemon (TUI_DESIGN §5.1 `[t] trigger
+            // transfer`). Source is prefilled to the daemon's
+            // `host:port:/` so the operator just appends a module
+            // path; dest starts empty. Local / no-endpoint rows are
+            // a no-op — a trigger needs a remote source. Commit runs
+            // a remote→local pull (see the trigger keystroke handler).
+            UserAction::F1TriggerBegin => {
+                if let Some(endpoint) = f1_browse_target(&app.daemons) {
+                    let prefill = format!("{}:/", endpoint.host_port_display());
+                    app.f1_trigger.begin(prefill);
                 }
             }
             _ => {}
@@ -2476,6 +2510,24 @@ fn classify_reload(
 /// renderer-facing `F3PullDisplay` (lives in
 /// `screens/f3.rs` so the screens layer doesn't reach
 /// into the `f3pull` module's internals).
+/// d-58: bridge the F1 trigger modal to the renderer-facing
+/// `TriggerPrompt`. `None` when the modal is closed.
+fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::TriggerPrompt> {
+    use f1trigger::{F1TriggerStatus, TriggerField};
+    match state.status() {
+        F1TriggerStatus::Idle => None,
+        F1TriggerStatus::Editing {
+            source,
+            dest,
+            focus,
+        } => Some(screens::f1::TriggerPrompt {
+            source: source.clone(),
+            dest: dest.clone(),
+            source_focused: *focus == TriggerField::Source,
+        }),
+    }
+}
+
 fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDisplay {
     use f3pull::F3PullStatus;
     use screens::f3::F3PullDisplay;
@@ -3737,6 +3789,82 @@ fn handle_verify_keystroke(
 /// d-26: F3 filter-mode keystroke router. Mirrors the
 /// `handle_verify_keystroke` shape — returns `true` when
 /// the key was absorbed (so the outer dispatcher skips
+/// d-58: handle a keystroke while the F1 trigger-transfer modal
+/// is open. Returns `true` if consumed. `Tab` toggles the focused
+/// field, chars / Backspace edit it, `Esc` cancels. `Enter`
+/// commits: the source string is parsed to a `RemoteEndpoint` and
+/// — when valid — handed to the verified F3 pull machine
+/// (`start_pull`, a remote→local copy) and the view jumps to F3 so
+/// the operator watches the pull in its existing footer. `?`
+/// (help), Ctrl-c (quit), and F-keys (pane nav) fall through.
+fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            app.f1_trigger.cancel();
+            true
+        }
+        KeyCode::Tab => {
+            app.f1_trigger.toggle_focus();
+            true
+        }
+        KeyCode::Enter => {
+            // take() closes the modal only when both fields are
+            // non-blank; a blank field keeps it open (no-op here).
+            if let Some((src, dest)) = app.f1_trigger.take() {
+                // d-58: this slice runs a remote→local pull. A
+                // source that doesn't parse as a remote endpoint is
+                // dropped (no launch); inline parse-error feedback
+                // is a follow-up. The verified pull machine owns the
+                // execution + footer, so we just hand off and jump
+                // to F3. start_pull no-ops if a pull is already in
+                // flight there.
+                if let Ok(source) = RemoteEndpoint::parse(&src) {
+                    if let Some(launch) = app.f3_pull.start_pull(source, dest) {
+                        spawn_f3_pull(
+                            launch.request_id,
+                            launch.source,
+                            launch.dest_root,
+                            launch.kind,
+                            app.f3_pull_reply_tx.clone(),
+                            app.f3_pull_progress_tx.clone(),
+                        );
+                        app.current_screen = Screen::F3;
+                    }
+                }
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            app.f1_trigger.pop_char();
+            true
+        }
+        KeyCode::Char(c) => {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                return false;
+            }
+            app.f1_trigger.push_char(c);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// `key_action`), or `false` when the key should pass
 /// through (Ctrl-c emergency quit, F-keys, `?` help).
 ///
@@ -4131,6 +4259,10 @@ enum UserAction {
     SelectLast,
     /// F3: descend into the cursor row (enter / →).
     Descend,
+    /// d-58: F1 only. `t` opens the trigger-transfer modal for
+    /// the selected daemon (source/dest entry → remote→local
+    /// pull). No-op off F1 / on a local row.
+    F1TriggerBegin,
     /// F3: pop back one level (←). Mapped only on the
     /// dedicated key; q/Esc remain Quit.
     Ascend,
@@ -4315,6 +4447,11 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         KeyCode::Char('G') | KeyCode::End => Some(UserAction::SelectLast),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UserAction::Descend),
         KeyCode::Left | KeyCode::Char('h') => Some(UserAction::Ascend),
+        // d-58: `t` (trigger transfer) on F1 — TUI_DESIGN §5.1.
+        // Only the F1 dispatcher acts on it; other panes ignore.
+        // While the trigger modal is open the F1 trigger keystroke
+        // handler absorbs input first, so `t` is a text char then.
+        KeyCode::Char('t') => Some(UserAction::F1TriggerBegin),
         // F4 profile lifecycle keys. The Ctrl-c quit
         // shortcut is intercepted by `should_quit` above
         // — only bare lowercase `c` reaches this arm.
@@ -6401,6 +6538,7 @@ mod tests {
             browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
+            f1_trigger: f1trigger::F1TriggerState::new(),
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -6644,6 +6782,96 @@ mod tests {
             key_action(&k(KeyCode::Char('M'))),
             Some(UserAction::TransferMirror)
         ));
+    }
+
+    // d-58: F1 `t` trigger-transfer modal.
+
+    #[test]
+    fn key_action_maps_t_to_f1_trigger_begin() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('t'))),
+            Some(UserAction::F1TriggerBegin)
+        ));
+    }
+
+    /// Helper: an F1 app with the trigger modal open (source
+    /// prefilled, dest typed).
+    fn app_with_trigger_modal() -> AppState {
+        let mut app = make_test_app_state(Screen::F1);
+        app.f1_trigger.begin("nas:9031:/".to_string());
+        // append a module path to the source
+        app.f1_trigger.toggle_focus();
+        for c in "home/docs".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        // back to dest, type a local path
+        app.f1_trigger.toggle_focus();
+        for c in "/tmp/out".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        assert!(app.f1_trigger.is_editing());
+        app
+    }
+
+    #[test]
+    fn handle_f1_trigger_keystroke_esc_cancels() {
+        let mut app = app_with_trigger_modal();
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Esc), &mut app));
+        assert!(!app.f1_trigger.is_editing(), "Esc closes the modal");
+    }
+
+    #[test]
+    fn handle_f1_trigger_keystroke_tab_toggles_focus() {
+        let mut app = app_with_trigger_modal();
+        // Focus is on dest after the helper; Tab → source.
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Tab), &mut app));
+        match app.f1_trigger.status() {
+            f1trigger::F1TriggerStatus::Editing { focus, .. } => {
+                assert_eq!(*focus, f1trigger::TriggerField::Source);
+            }
+            other => panic!("expected Editing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_f1_trigger_keystroke_chars_edit_dest() {
+        let mut app = make_test_app_state(Screen::F1);
+        app.f1_trigger.begin("nas:9031:/home".to_string());
+        for c in "/x".chars() {
+            assert!(handle_f1_trigger_keystroke(&k(KeyCode::Char(c)), &mut app));
+        }
+        match app.f1_trigger.status() {
+            f1trigger::F1TriggerStatus::Editing { dest, .. } => assert_eq!(dest, "/x"),
+            other => panic!("expected Editing, got {other:?}"),
+        }
+    }
+
+    /// `Enter` with a valid remote source + dest launches a pull
+    /// on the F3 machine and jumps to F3. Needs a tokio reactor
+    /// for the detached spawn (races to a non-existent daemon,
+    /// ignored).
+    #[tokio::test]
+    async fn handle_f1_trigger_keystroke_enter_launches_pull_and_jumps_to_f3() {
+        let mut app = app_with_trigger_modal();
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(!app.f1_trigger.is_editing(), "commit closes the modal");
+        assert!(app.f3_pull.is_running(), "the pull launched");
+        assert_eq!(app.current_screen, Screen::F3, "jumped to F3 to watch");
+    }
+
+    #[test]
+    fn handle_f1_trigger_keystroke_lets_escapes_bubble() {
+        let mut app = app_with_trigger_modal();
+        assert!(!handle_f1_trigger_keystroke(
+            &k(KeyCode::Char('?')),
+            &mut app
+        ));
+        let ctrl_c = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        assert!(!handle_f1_trigger_keystroke(&ctrl_c, &mut app));
+        assert!(!handle_f1_trigger_keystroke(&k(KeyCode::F(2)), &mut app));
     }
 
     /// Helper: an F3 app sitting on the mirror confirm gate
@@ -7002,6 +7230,7 @@ mod tests {
             browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
+            f1_trigger: f1trigger::F1TriggerState::new(),
             daemons_last_fetched: None,
             // Senders aren't called on the false branch
             // but the struct demands them.
@@ -7064,6 +7293,7 @@ mod tests {
             browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
+            f1_trigger: f1trigger::F1TriggerState::new(),
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7177,6 +7407,7 @@ mod tests {
             browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
+            f1_trigger: f1trigger::F1TriggerState::new(),
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7249,6 +7480,7 @@ mod tests {
             browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
+            f1_trigger: f1trigger::F1TriggerState::new(),
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,

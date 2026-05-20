@@ -36,7 +36,24 @@ use std::time::Instant;
 /// Render the F1 pane into a caller-supplied area. The
 /// router (a1-6) calls this with `body_area` from
 /// `screens::split_for_tabs` so the tab strip lives above.
-pub fn render_into(frame: &mut Frame, area: Rect, state: &DaemonsState, now: Instant) {
+/// d-58: renderer-facing snapshot of the F1 trigger-transfer
+/// modal. Bridged from `f1trigger::F1TriggerState` by `main.rs`
+/// so the screens layer doesn't reach into the modal's internals.
+pub struct TriggerPrompt {
+    pub source: String,
+    pub dest: String,
+    /// `true` when the source field has focus (else dest).
+    pub source_focused: bool,
+}
+
+pub fn render_into(
+    frame: &mut Frame,
+    area: Rect,
+    state: &DaemonsState,
+    now: Instant,
+    // d-58: `Some` while the `t` trigger modal is open.
+    trigger: Option<TriggerPrompt>,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -50,7 +67,49 @@ pub fn render_into(frame: &mut Frame, area: Rect, state: &DaemonsState, now: Ins
     render_header(frame, chunks[0], state);
     render_table(frame, chunks[1], state);
     render_detail(frame, chunks[2], state, now);
-    render_footer(frame, chunks[3], state.status(), now);
+    // d-58: the trigger modal, when open, replaces the discovery
+    // footer line with the source/dest entry prompt.
+    match trigger {
+        Some(prompt) => render_trigger(frame, chunks[3], &prompt),
+        None => render_footer(frame, chunks[3], state.status(), now),
+    }
+}
+
+/// d-58: render the trigger-transfer entry prompt on the footer
+/// line. The focused field's value is shown with a trailing
+/// cursor (`_`) and bold; the hint reminds Tab/Enter/Esc.
+fn render_trigger(frame: &mut Frame, area: Rect, prompt: &TriggerPrompt) {
+    let focused = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let unfocused = Style::default().fg(Color::DarkGray);
+    let (src_style, dst_style) = if prompt.source_focused {
+        (focused, unfocused)
+    } else {
+        (unfocused, focused)
+    };
+    let src = if prompt.source_focused {
+        format!("{}_", prompt.source)
+    } else {
+        prompt.source.clone()
+    };
+    let dst = if prompt.source_focused {
+        prompt.dest.clone()
+    } else {
+        format!("{}_", prompt.dest)
+    };
+    let line = Line::from(vec![
+        Span::styled("trigger ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("src: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(src, src_style),
+        Span::styled("  dst: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(dst, dst_style),
+        Span::styled(
+            "   (Tab switch · Enter pull · Esc cancel)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &DaemonsState) {
@@ -712,7 +771,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_into(frame, area, &state, now);
+                render_into(frame, area, &state, now, None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
