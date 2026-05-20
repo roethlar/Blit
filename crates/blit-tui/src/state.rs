@@ -357,6 +357,21 @@ impl TransfersState {
         self.selected_active_id = Some(rows[prev_idx].transfer_id.clone());
     }
 
+    /// d-44: anchor the cursor on the first active row (`g`).
+    /// No-op when there are no active transfers — leaves the
+    /// cursor unanchored rather than inventing a selection.
+    pub fn select_first_active(&mut self) {
+        let rows = self.active_rows();
+        self.selected_active_id = rows.first().map(|r| r.transfer_id.clone());
+    }
+
+    /// d-44: anchor the cursor on the last active row (`G`).
+    /// No-op when there are no active transfers.
+    pub fn select_last_active(&mut self) {
+        let rows = self.active_rows();
+        self.selected_active_id = rows.last().map(|r| r.transfer_id.clone());
+    }
+
     pub fn recent_count(&self) -> usize {
         self.recent.len()
     }
@@ -486,6 +501,37 @@ mod tests {
     fn select_next_active_no_op_on_empty_list() {
         let mut state = TransfersState::new();
         state.select_next_active();
+        assert!(state.selected_active_index().is_none());
+    }
+
+    /// d-44: `g` / `G` anchor the F2 cursor on the first /
+    /// last active row.
+    #[test]
+    fn select_first_and_last_active_anchor_the_cursor() {
+        let mut state = TransfersState::new();
+        state.apply_event(started_event("t-1"), Instant::now());
+        state.apply_event(started_event("t-2"), Instant::now());
+        state.apply_event(started_event("t-3"), Instant::now());
+        state.select_last_active();
+        assert_eq!(
+            state.selected_active_index(),
+            Some(2),
+            "G anchors on the last active row"
+        );
+        state.select_first_active();
+        assert_eq!(
+            state.selected_active_index(),
+            Some(0),
+            "g anchors on the first active row"
+        );
+    }
+
+    #[test]
+    fn select_first_last_active_noop_on_empty_list() {
+        let mut state = TransfersState::new();
+        state.select_first_active();
+        assert!(state.selected_active_index().is_none());
+        state.select_last_active();
         assert!(state.selected_active_index().is_none());
     }
 

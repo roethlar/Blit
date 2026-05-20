@@ -1215,6 +1215,8 @@ async fn handle_pane_action(
             // subsequent presses walk through.
             UserAction::SelectNext => app.transfers.select_next_active(),
             UserAction::SelectPrev => app.transfers.select_prev_active(),
+            UserAction::SelectFirst => app.transfers.select_first_active(),
+            UserAction::SelectLast => app.transfers.select_last_active(),
             // d-22: cancel the cursor-selected transfer.
             // Gated on a confirmed live selection AND a
             // remote being configured AND no cancel
