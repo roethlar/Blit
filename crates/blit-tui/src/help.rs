@@ -122,6 +122,7 @@ fn help_lines() -> Vec<Line<'static>> {
             "pull selected → local dir (F3) — Enter runs, Esc cancels",
         ),
         kv("u", "disk usage of selected subtree (F3)"),
+        kv("D", "delete selected path (F3) — y/N confirm"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
         kv("c / d / e", "clear / disable / enable history"),
@@ -163,10 +164,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // `/` filter row; d-30 bumped 35→36 for `X` batch
     // cancel; d-35 bumped 36→37 for `p` pull; d-36 bumped
     // 37→38 for `Ctrl-R` reload; d-41 bumped 38→39 for `u`
-    // du; d-42 bumped 39→40 for `g / G` jump. d-31: when
-    // the area is shorter than the modal, the operator
-    // scrolls with j/k.
-    let modal = centered(area, 70, 40);
+    // du; d-42 bumped 39→40 for `g / G` jump; d-45 bumped
+    // 40→41 for `D` delete. d-31: when the area is shorter
+    // than the modal, the operator scrolls with j/k.
+    let modal = centered(area, 70, 41);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -379,9 +380,10 @@ mod tests {
     /// appears when it's useful.
     #[test]
     fn scrollbar_absent_when_content_fits() {
-        // 80×40 → modal is 36 rows, inner 34 == keymap
-        // length, so nothing overflows.
-        let text = render_to_string(HelpOverlay::default(), 80, 40);
+        // d-45: the keymap grew to ~39 lines; render in a
+        // 44-row area (modal 41, inner 39) so it fits
+        // exactly and no scrollbar is needed.
+        let text = render_to_string(HelpOverlay::default(), 80, 44);
         assert!(
             !text.contains('▲') && !text.contains('▼'),
             "non-overflowing modal must not show scroll markers; got:\n{text}"
@@ -411,7 +413,10 @@ mod tests {
     #[test]
     fn help_modal_documents_all_public_keys() {
         use ratatui::{backend::TestBackend, Terminal};
-        let backend = TestBackend::new(80, 40);
+        // d-45: tall enough that the full keymap (now ~39
+        // lines + borders) renders without clipping the
+        // bottom section the grep checks.
+        let backend = TestBackend::new(80, 44);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
@@ -452,6 +457,7 @@ mod tests {
             "p",                              // d-35: F3 pull
             "disk usage of selected subtree", // d-41: F3 du (`u`)
             "jump to first / last row",       // d-42: g / G
+            "delete selected path",           // d-45: F3 delete (`D`)
         ] {
             assert!(
                 text.contains(needle),

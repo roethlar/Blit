@@ -96,6 +96,24 @@ pub enum F3PullDisplay {
     Error { message: String },
 }
 
+/// d-45: renderer-facing snapshot of the F3 delete lifecycle.
+/// `Confirming`/`Deleting` always show (active operation);
+/// `Done`/`Error` are path-gated by the bridge (hidden once the
+/// cursor leaves the deleted path), like the du display.
+#[derive(Debug, Clone)]
+pub enum F3DelDisplay {
+    /// No delete fragment.
+    Hidden,
+    /// Confirm prompt open for `path`.
+    Confirming { path: String },
+    /// Purge RPC in flight.
+    Deleting,
+    /// Purge succeeded.
+    Done { files_deleted: u64 },
+    /// Purge failed.
+    Error { message: String },
+}
+
 /// d-41: renderer-facing snapshot of the F3 du (disk-usage)
 /// query for the *current cursor row*. Bridged from
 /// `f3du::F3DuStatus` by `main.rs`, which also resolves the
@@ -130,6 +148,7 @@ pub fn render_into(
     pull_spec: Option<&str>,
     pull: &F3PullDisplay,
     du: &F3DuDisplay,
+    del: &F3DelDisplay,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -148,7 +167,7 @@ pub fn render_into(
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
     render_stats(frame, chunks[2], state, pull_spec, du);
-    render_footer(frame, chunks[3], state, pull, now);
+    render_footer(frame, chunks[3], state, pull, del, now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_label: &str) {
@@ -298,6 +317,7 @@ fn render_footer(
     area: Rect,
     state: &BrowseState,
     pull: &F3PullDisplay,
+    del: &F3DelDisplay,
     now: Instant,
 ) {
     let status_span = match state.status() {
@@ -379,6 +399,40 @@ fn render_footer(
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(
                 format!("pull failed: {message}"),
+                Style::default().fg(Color::Red),
+            ));
+        }
+    }
+    // d-45: delete fragment — confirm prompt / progress /
+    // outcome. The confirm is rendered in red (destructive) with
+    // the frozen target path; the operator answers y/N.
+    match del {
+        F3DelDisplay::Hidden => {}
+        F3DelDisplay::Confirming { path } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("delete {path}? y/N"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        F3DelDisplay::Deleting => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                "deleting...".to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        F3DelDisplay::Done { files_deleted } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("deleted {files_deleted} file(s)"),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        F3DelDisplay::Error { message } => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                format!("delete failed: {message}"),
                 Style::default().fg(Color::Red),
             ));
         }

@@ -26,6 +26,7 @@ mod browse;
 mod config;
 mod daemons;
 mod diagnostics;
+mod f3del;
 mod f3du;
 mod f3pull;
 mod help;
@@ -223,6 +224,10 @@ struct AppState {
     /// total for the cursor row, shown in the Stats block.
     f3_du: f3du::F3DuState,
     f3_du_reply_tx: mpsc::Sender<F3DuReply>,
+    /// d-45: F3 delete (`D`) lifecycle — confirm prompt +
+    /// remote Purge for the cursor row.
+    f3_del: f3del::F3DelState,
+    f3_del_reply_tx: mpsc::Sender<F3DelReply>,
     /// d-36: transient banner shown after a `Ctrl+R`
     /// config reload (`config reloaded` on success, the
     /// parse error on failure). Auto-hides via a
@@ -491,6 +496,9 @@ async fn run_router(
     // d-41: F3 du reply channel.
     let (f3_du_reply_tx, mut f3_du_reply_rx) = mpsc::channel::<F3DuReply>(2);
 
+    // d-45: F3 delete reply channel.
+    let (f3_del_reply_tx, mut f3_del_reply_rx) = mpsc::channel::<F3DelReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -533,6 +541,8 @@ async fn run_router(
         f3_pull_progress_tx: f3_pull_progress_tx.clone(),
         f3_du: f3du::F3DuState::new(),
         f3_du_reply_tx: f3_du_reply_tx.clone(),
+        f3_del: f3del::F3DelState::new(),
+        f3_del_reply_tx: f3_del_reply_tx.clone(),
         reload_banner: None,
     };
 
@@ -699,6 +709,7 @@ async fn run_router(
                         f3_pull_spec.as_deref(),
                         &f3_pull_to_display(app.f3_pull.status()),
                         &f3_du_to_display(app.f3_du.status(), f3_pull_spec.as_deref()),
+                        &f3_del_to_display(app.f3_del.status(), f3_pull_spec.as_deref()),
                         now,
                     ),
                     Screen::F4 => screens::f4::render_into(
@@ -873,6 +884,15 @@ async fn run_router(
                 if app.current_screen == Screen::F3
                     && app.f3_pull.is_entering_dest()
                     && handle_f3_pull_keystroke(&key, &mut app)
+                {
+                    continue;
+                }
+                // d-45: F3's `D` delete confirm is modal while
+                // open — route keystrokes to the delete handler
+                // (y/n/Esc) before the normal F3 dispatcher.
+                if app.current_screen == Screen::F3
+                    && app.f3_del.is_confirming()
+                    && handle_f3_delete_keystroke(&key, &mut app)
                 {
                     continue;
                 }
@@ -1154,6 +1174,20 @@ async fn run_router(
                     }
                 }
             }
+            // d-45: F3 delete (Purge) replies. Same generation
+            // guard as the du/pull replies.
+            reply = f3_del_reply_rx.recv() => {
+                if let Some(F3DelReply { request_id, result }) = reply {
+                    match result {
+                        Ok(files_deleted) => {
+                            app.f3_del.apply_done(request_id, files_deleted);
+                        }
+                        Err(message) => {
+                            app.f3_del.apply_error(request_id, message);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1387,6 +1421,23 @@ async fn handle_pane_action(
                     // RPC.
                     if let f3du::DuBegin::Fetch(id) = app.f3_du.begin(target.display()) {
                         spawn_f3_du(id, target, app.f3_du_reply_tx.clone());
+                    }
+                }
+            }
+            // d-45: `D` opens the delete confirm prompt. Gated
+            // on a resolvable cursor endpoint that is NOT a
+            // module root — refusing to delete a whole module
+            // from the TUI (mirrors `blit rm`). Read-only
+            // modules are enforced server-side: the Purge fails
+            // and the error surfaces in the footer.
+            UserAction::F3DeleteBegin => {
+                let target = app.parsed_remote.as_ref().and_then(|base| {
+                    browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
+                });
+                if let Some(target) = target {
+                    if is_deletable_remote_path(&target) {
+                        let path = target.display();
+                        app.f3_del.begin(target, path);
                     }
                 }
             }
@@ -2204,6 +2255,35 @@ fn f3_du_to_display(
     }
 }
 
+/// d-45: bridge the F3 delete state to the renderer-facing
+/// `F3DelDisplay`. `Confirming` / `Deleting` always show (an
+/// active operation); `Done` / `Error` are path-gated like the
+/// du display — a stale outcome hides once the cursor leaves the
+/// deleted path.
+fn f3_del_to_display(
+    status: &f3del::F3DelStatus,
+    current_path: Option<&str>,
+) -> screens::f3::F3DelDisplay {
+    use f3del::F3DelStatus;
+    use screens::f3::F3DelDisplay;
+    let matches = |path: &str| current_path == Some(path);
+    match status {
+        F3DelStatus::Idle => F3DelDisplay::Hidden,
+        F3DelStatus::Confirming { path, .. } => F3DelDisplay::Confirming { path: path.clone() },
+        F3DelStatus::Deleting { .. } => F3DelDisplay::Deleting,
+        F3DelStatus::Done {
+            path,
+            files_deleted,
+        } if matches(path) => F3DelDisplay::Done {
+            files_deleted: *files_deleted,
+        },
+        F3DelStatus::Error { path, message } if matches(path) => F3DelDisplay::Error {
+            message: message.clone(),
+        },
+        _ => F3DelDisplay::Hidden,
+    }
+}
+
 /// d-35: reply envelope from a spawned F3 pull task.
 struct F3PullReply {
     request_id: u64,
@@ -2218,6 +2298,54 @@ struct F3DuReply {
     /// Ok((bytes, files)) for the subtree root, or a
     /// flattened error string.
     result: Result<(u64, u64), String>,
+}
+
+/// d-45: reply envelope from a spawned F3 delete task.
+struct F3DelReply {
+    request_id: u64,
+    /// Ok(files_deleted) or a flattened error string (e.g. the
+    /// daemon's read-only-module rejection).
+    result: Result<u64, String>,
+}
+
+/// d-45: spawn a `Purge` for an F3 cursor row and post the
+/// outcome back on `tx`. The module-root guard runs in the
+/// dispatcher (before the prompt opens), so by here the path is
+/// known-deletable; the daemon still enforces read-only modules
+/// and containment, surfacing as `Err`.
+fn spawn_f3_del(request_id: u64, endpoint: RemoteEndpoint, tx: mpsc::Sender<F3DelReply>) {
+    tokio::spawn(async move {
+        let result = run_f3_del(&endpoint)
+            .await
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx.send(F3DelReply { request_id, result }).await;
+    });
+}
+
+/// d-45: resolve `(module, rel_path)` and issue the single-path
+/// Purge. Split from the spawn for symmetry with the du helper.
+async fn run_f3_del(endpoint: &RemoteEndpoint) -> eyre::Result<u64> {
+    use blit_app::admin::rm;
+    let (module, rel_path) = rm::extract_module_and_path(endpoint)?;
+    let rel = rel_path.to_string_lossy().to_string();
+    rm::purge(endpoint, module, vec![rel]).await
+}
+
+/// d-45: may this cursor endpoint be deleted from the TUI?
+///
+/// Refuses a module root or empty rel-path — you can't nuke a
+/// whole module via `D` (mirrors `blit rm`'s guard). Also refuses
+/// `Discovery` (bare-host) endpoints, which carry no path.
+/// Pure — the dispatcher gates the confirm prompt on this.
+fn is_deletable_remote_path(endpoint: &RemoteEndpoint) -> bool {
+    use blit_app::admin::rm;
+    match rm::extract_module_and_path(endpoint) {
+        Ok((_module, rel_path)) => {
+            let rel = rel_path.to_string_lossy();
+            !rel.is_empty() && rel != "."
+        }
+        Err(_) => false,
+    }
 }
 
 /// d-41: spawn a `DiskUsage` query for an F3 cursor row and
@@ -3185,6 +3313,48 @@ fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
     }
 }
 
+/// d-45: handle a keystroke while the F3 delete confirm prompt is
+/// open. Returns `true` if consumed. This is a **modal** confirm
+/// (delete is destructive): `y`/`Y` fires the Purge, `n`/`N`/`Esc`
+/// aborts, and every other key is swallowed so a stray `p`/`u`/`/`
+/// can't stack another prompt or move the cursor mid-confirm. The
+/// only escapes are `?` (help), Ctrl-c (emergency quit), and
+/// F-keys (pane navigation), which fall through to the dispatcher.
+fn handle_f3_delete_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(launch) = app.f3_del.confirm() {
+                spawn_f3_del(
+                    launch.request_id,
+                    launch.endpoint,
+                    app.f3_del_reply_tx.clone(),
+                );
+            }
+            true
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.f3_del.cancel();
+            true
+        }
+        // Modal: swallow everything else (no accidental nav or
+        // prompt-stacking during a destructive confirm).
+        _ => true,
+    }
+}
+
 /// Spawn a `compare_trees` run on a blocking task. Both
 /// inputs are local path strings; the task parses them to
 /// `PathBuf` and runs the comparison with a default
@@ -3418,6 +3588,11 @@ enum UserAction {
     /// subtree byte/file total in the Stats block. No-op if
     /// no remote is configured or nothing is selectable.
     F3DuBegin,
+    /// d-45: F3 only. `D` (Shift+d) opens a delete confirm
+    /// prompt for the cursor-selected remote path. No-op for
+    /// a module root / non-deletable cursor, or when a delete
+    /// is already confirming or in flight.
+    F3DeleteBegin,
     /// d-36: `Ctrl+R` re-reads `tui.toml` and swaps the
     /// live config (theme, tick interval, transfer knobs)
     /// without restarting the TUI. Global — works from
@@ -3553,6 +3728,14 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // open the text-input handler absorbs `u` first, so
         // it's only a du trigger in normal F3 nav mode.
         KeyCode::Char('u') => Some(UserAction::F3DuBegin),
+        // d-45: `D` (Shift+d) opens the F3 delete confirm
+        // prompt for the cursor row. Capital chosen because
+        // lowercase `d` is ProfileDisable (F4) and delete is
+        // destructive — a deliberate Shift guards it. Other
+        // panes ignore the variant. While the confirm prompt
+        // is open the F3 delete keystroke handler absorbs
+        // y/n/Esc before this dispatcher runs.
+        KeyCode::Char('D') => Some(UserAction::F3DeleteBegin),
         // d-30: `X` (Shift+x) on F2 cancels every active
         // transfer in one keystroke. Other panes ignore.
         // Mnemonic: cross out everything.
@@ -4987,6 +5170,81 @@ mod tests {
         ));
     }
 
+    /// d-45: `D` maps to F3DeleteBegin. Other panes ignore it.
+    #[test]
+    fn key_action_maps_shift_d_to_f3_delete_begin() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('D'))),
+            Some(UserAction::F3DeleteBegin)
+        ));
+        // Lowercase `d` stays ProfileDisable (F4), NOT delete.
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('d'))),
+            Some(UserAction::ProfileDisable)
+        ));
+    }
+
+    // d-45: only non-root remote paths are deletable from the
+    // TUI (mirrors `blit rm`'s module-root guard).
+
+    #[test]
+    fn is_deletable_rejects_module_root_and_discovery() {
+        // A module root (no rel-path) must NOT be deletable.
+        // Trailing slash = the module-root form.
+        let root = RemoteEndpoint::parse("nas:/home/").expect("module root");
+        assert!(
+            !is_deletable_remote_path(&root),
+            "deleting a whole module from the TUI must be refused"
+        );
+        // A bare-host discovery endpoint carries no path.
+        if let Ok(disco) = RemoteEndpoint::parse("nas") {
+            assert!(!is_deletable_remote_path(&disco));
+        }
+    }
+
+    #[test]
+    fn is_deletable_accepts_a_sub_path() {
+        let path = RemoteEndpoint::parse("nas:/home/photos/old.jpg").expect("sub path");
+        assert!(is_deletable_remote_path(&path));
+    }
+
+    // d-45: delete display bridge. Confirming/Deleting always
+    // show; Done/Error are path-gated like du.
+
+    #[test]
+    fn f3_del_display_confirming_always_shows() {
+        use screens::f3::F3DelDisplay;
+        let ep = RemoteEndpoint::parse("nas:/home/old.txt").expect("ep");
+        let status = f3del::F3DelStatus::Confirming {
+            endpoint: ep,
+            path: "nas:/home/old.txt".to_string(),
+        };
+        // Shows even when the cursor is on a different path —
+        // it's an active prompt, not a stale outcome.
+        match f3_del_to_display(&status, Some("nas:/home/other")) {
+            F3DelDisplay::Confirming { path } => assert_eq!(path, "nas:/home/old.txt"),
+            other => panic!("expected Confirming, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn f3_del_display_done_is_path_gated() {
+        use screens::f3::F3DelDisplay;
+        let status = f3del::F3DelStatus::Done {
+            path: "nas:/home/old.txt".to_string(),
+            files_deleted: 3,
+        };
+        match f3_del_to_display(&status, Some("nas:/home/old.txt")) {
+            F3DelDisplay::Done { files_deleted } => assert_eq!(files_deleted, 3),
+            other => panic!("expected Done, got {other:?}"),
+        }
+        // Cursor moved → stale outcome hides.
+        assert!(matches!(
+            f3_del_to_display(&status, Some("nas:/home/other")),
+            F3DelDisplay::Hidden
+        ));
+    }
+
     /// d-42: `g`/Home → SelectFirst, `G`/End → SelectLast.
     #[test]
     fn key_action_maps_jump_keys() {
@@ -5143,6 +5401,8 @@ mod tests {
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
             f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
+            f3_del: f3del::F3DelState::new(),
+            f3_del_reply_tx: mpsc::channel::<F3DelReply>(1).0,
             reload_banner: None,
         }
     }
@@ -5515,6 +5775,8 @@ mod tests {
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
             f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
+            f3_del: f3del::F3DelState::new(),
+            f3_del_reply_tx: mpsc::channel::<F3DelReply>(1).0,
             reload_banner: None,
         };
         app.verify.cycle_focus(); // Source
@@ -5571,6 +5833,8 @@ mod tests {
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
             f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
+            f3_del: f3del::F3DelState::new(),
+            f3_del_reply_tx: mpsc::channel::<F3DelReply>(1).0,
             reload_banner: None,
         };
 
@@ -5680,6 +5944,8 @@ mod tests {
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
             f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
+            f3_del: f3del::F3DelState::new(),
+            f3_del_reply_tx: mpsc::channel::<F3DelReply>(1).0,
             reload_banner: None,
         };
 
@@ -5748,6 +6014,8 @@ mod tests {
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
             f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
+            f3_del: f3del::F3DelState::new(),
+            f3_del_reply_tx: mpsc::channel::<F3DelReply>(1).0,
             reload_banner: None,
         };
 
@@ -6025,11 +6293,10 @@ mod tests {
             key_action(&k(KeyCode::Char('e'))),
             Some(UserAction::ProfileEnable)
         ));
-        // Uppercase D / E remain unmapped (Profile keys
-        // are lowercase-only). Uppercase C is now mapped
-        // to TransferCopy as of d-4, so it's covered in
-        // `key_action_maps_transfer_triggers`.
-        assert!(key_action(&k(KeyCode::Char('D'))).is_none());
+        // Uppercase E remains unmapped. Uppercase C is
+        // TransferCopy (d-4); uppercase D is F3DeleteBegin
+        // (d-45) — both covered in their own tests. The
+        // Profile keys themselves are lowercase-only.
         assert!(key_action(&k(KeyCode::Char('E'))).is_none());
         // Ctrl-c remains Quit (not ProfileClear).
         assert!(matches!(
