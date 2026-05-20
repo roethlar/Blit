@@ -25,6 +25,7 @@
 //! generation-guarded by `request_id`.
 
 use blit_core::remote::endpoint::RemoteEndpoint;
+use std::time::{Duration, Instant};
 
 /// Lifecycle of an F3 delete (single cursor row OR a d-49 batch).
 ///
@@ -54,16 +55,19 @@ pub enum F3DelStatus {
         gate_path: Option<String>,
     },
     /// Purge succeeded; `files_deleted` is the daemon's count.
+    /// d-50 R2: `finished_at` drives the batch auto-hide TTL.
     Done {
         label: String,
         files_deleted: u64,
         gate_path: Option<String>,
+        finished_at: Instant,
     },
     /// Purge failed.
     Error {
         label: String,
         message: String,
         gate_path: Option<String>,
+        finished_at: Instant,
     },
 }
 
@@ -179,8 +183,9 @@ impl F3DelState {
     }
 
     /// Apply a successful Purge reply. Generation-guarded — a
-    /// superseded delete's reply is dropped.
-    pub fn apply_done(&mut self, request_id: u64, files_deleted: u64) -> bool {
+    /// superseded delete's reply is dropped. `at` stamps the
+    /// outcome for the d-50 R2 batch auto-hide TTL.
+    pub fn apply_done(&mut self, request_id: u64, files_deleted: u64, at: Instant) -> bool {
         match &self.status {
             F3DelStatus::Deleting {
                 request_id: rid,
@@ -191,6 +196,7 @@ impl F3DelState {
                     label: label.clone(),
                     files_deleted,
                     gate_path: gate_path.clone(),
+                    finished_at: at,
                 };
                 true
             }
@@ -199,7 +205,7 @@ impl F3DelState {
     }
 
     /// Apply a failed Purge reply. Same generation guard.
-    pub fn apply_error(&mut self, request_id: u64, message: String) -> bool {
+    pub fn apply_error(&mut self, request_id: u64, message: String, at: Instant) -> bool {
         match &self.status {
             F3DelStatus::Deleting {
                 request_id: rid,
@@ -210,12 +216,59 @@ impl F3DelState {
                     label: label.clone(),
                     message,
                     gate_path: gate_path.clone(),
+                    finished_at: at,
                 };
                 true
             }
             _ => false,
         }
     }
+
+    /// d-50 R2: `true` while an *un-gated* (batch) terminal
+    /// outcome is showing. Single-row deletes carry
+    /// `gate_path = Some(..)` and self-hide on cursor movement
+    /// (an event), so they don't need the loop to keep ticking;
+    /// batch outcomes (`gate_path = None`) have no such event, so
+    /// the loop ticks to expire them via `clear_terminal_if_expired`.
+    pub fn is_batch_terminal(&self) -> bool {
+        matches!(
+            &self.status,
+            F3DelStatus::Done {
+                gate_path: None,
+                ..
+            } | F3DelStatus::Error {
+                gate_path: None,
+                ..
+            }
+        )
+    }
+
+    /// d-50 R2: auto-hide a batch (`gate_path = None`) terminal
+    /// outcome once it's been on screen for `ttl` (the d-38
+    /// pull-TTL pattern). Single-row outcomes are left to their
+    /// cursor-move path gate, so they're untouched here.
+    pub fn clear_terminal_if_expired(&mut self, now: Instant, ttl: Duration) {
+        let finished_at = match &self.status {
+            F3DelStatus::Done {
+                gate_path: None,
+                finished_at,
+                ..
+            }
+            | F3DelStatus::Error {
+                gate_path: None,
+                finished_at,
+                ..
+            } => *finished_at,
+            _ => return,
+        };
+        if now.saturating_duration_since(finished_at) >= ttl {
+            self.status = F3DelStatus::Idle;
+        }
+    }
+
+    /// d-50 R2: batch terminal outcomes auto-hide after this.
+    /// Matches the d-38 fixed 5s baseline.
+    pub const BATCH_TERMINAL_TTL: Duration = Duration::from_secs(5);
 }
 
 #[cfg(test)]
@@ -341,7 +394,7 @@ mod tests {
         let mut s = F3DelState::new();
         begin_single(&mut s, "nas:/m/a", "a");
         let launch = s.confirm().unwrap();
-        assert!(s.apply_done(launch.request_id, 3));
+        assert!(s.apply_done(launch.request_id, 3, Instant::now()));
         match s.status() {
             F3DelStatus::Done {
                 label,
@@ -360,7 +413,11 @@ mod tests {
         let mut s = F3DelState::new();
         begin_single(&mut s, "nas:/m/a", "a");
         let launch = s.confirm().unwrap();
-        assert!(s.apply_error(launch.request_id, "read-only module".to_string()));
+        assert!(s.apply_error(
+            launch.request_id,
+            "read-only module".to_string(),
+            Instant::now()
+        ));
         match s.status() {
             F3DelStatus::Error { label, message, .. } => {
                 assert_eq!(label, "nas:/m/a");
@@ -375,7 +432,64 @@ mod tests {
         let mut s = F3DelState::new();
         begin_single(&mut s, "nas:/m/a", "a");
         let launch = s.confirm().unwrap();
-        assert!(!s.apply_done(launch.request_id + 99, 1));
+        assert!(!s.apply_done(launch.request_id + 99, 1, Instant::now()));
         assert!(s.is_deleting());
+    }
+
+    /// Batch helper: N rel-paths, ungated outcome.
+    fn begin_batch(s: &mut F3DelState, rels: &[&str]) {
+        s.begin(
+            endpoint("nas:/home/"),
+            rels.iter().map(|r| r.to_string()).collect(),
+            format!("{} item(s)", rels.len()),
+            None,
+        );
+    }
+
+    /// d-50 R2 (reviewer reopen): a batch delete outcome
+    /// (`gate_path = None`) auto-hides after the TTL — it has no
+    /// cursor-move event to clear it.
+    #[test]
+    fn batch_outcome_auto_hides_after_ttl() {
+        let mut s = F3DelState::new();
+        begin_batch(&mut s, &["a.txt", "b.txt"]);
+        let launch = s.confirm().unwrap();
+        let finished = Instant::now();
+        assert!(s.apply_done(launch.request_id, 2, finished));
+        assert!(s.is_batch_terminal(), "batch Done needs the loop to tick");
+
+        let ttl = F3DelState::BATCH_TERMINAL_TTL;
+        // Within the TTL → still shown.
+        s.clear_terminal_if_expired(finished + ttl - Duration::from_millis(1), ttl);
+        assert!(matches!(s.status(), F3DelStatus::Done { .. }));
+        // Past the TTL → cleared to Idle.
+        s.clear_terminal_if_expired(finished + ttl, ttl);
+        assert!(matches!(s.status(), F3DelStatus::Idle));
+        assert!(!s.is_batch_terminal());
+    }
+
+    /// A single-row outcome (`gate_path = Some`) is NOT swept by
+    /// the TTL — it relies on the cursor-move path gate, so the
+    /// TTL clear must leave it alone.
+    #[test]
+    fn single_outcome_is_not_swept_by_batch_ttl() {
+        let mut s = F3DelState::new();
+        begin_single(&mut s, "nas:/m/a", "a");
+        let launch = s.confirm().unwrap();
+        let finished = Instant::now();
+        assert!(s.apply_done(launch.request_id, 1, finished));
+        assert!(
+            !s.is_batch_terminal(),
+            "single delete is not a batch terminal"
+        );
+        // Well past the TTL — single outcome must still stand.
+        s.clear_terminal_if_expired(
+            finished + F3DelState::BATCH_TERMINAL_TTL + Duration::from_secs(60),
+            F3DelState::BATCH_TERMINAL_TTL,
+        );
+        assert!(
+            matches!(s.status(), F3DelStatus::Done { .. }),
+            "single-row outcome is left to its cursor-move path gate"
+        );
     }
 }

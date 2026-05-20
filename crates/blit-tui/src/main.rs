@@ -642,6 +642,11 @@ async fn run_router(
         // a Ctrl+R reload retunes it live.
         let pull_ttl = Duration::from_millis(tui_config.transfer.pull_status_ttl_ms_clamped());
         app.f3_pull.clear_terminal_if_expired(now, pull_ttl);
+        // d-50 R2: auto-hide a batch delete outcome (single-row
+        // deletes self-hide on cursor move; batch has no such
+        // event, so it expires on a TTL like the d-38 pull TTL).
+        app.f3_del
+            .clear_terminal_if_expired(now, f3del::F3DelState::BATCH_TERMINAL_TTL);
         // d-36: accent + reload banner are recomputed each
         // frame from the (possibly hot-reloaded) config, so
         // a `Ctrl+R` theme change takes effect immediately.
@@ -1209,7 +1214,7 @@ async fn run_router(
                             // instead of lingering as an apparently-live
                             // entry. Reuses the `r`-key refresh path; the
                             // loop auto-kicks the re-fetch.
-                            if app.f3_del.apply_done(request_id, files_deleted) {
+                            if app.f3_del.apply_done(request_id, files_deleted, Instant::now()) {
                                 handle_f3_refresh(
                                     &mut app.browse,
                                     app.browse_target.is_some(),
@@ -1218,7 +1223,7 @@ async fn run_router(
                             }
                         }
                         Err(message) => {
-                            app.f3_del.apply_error(request_id, message);
+                            app.f3_del.apply_error(request_id, message, Instant::now());
                         }
                     }
                 }
@@ -2420,6 +2425,7 @@ fn f3_del_to_display(
             label,
             files_deleted,
             gate_path,
+            ..
         } if gated(gate_path) => F3DelDisplay::Done {
             label: label.clone(),
             files_deleted: *files_deleted,
@@ -2428,6 +2434,7 @@ fn f3_del_to_display(
             label,
             message,
             gate_path,
+            ..
         } if gated(gate_path) => F3DelDisplay::Error {
             message: message.clone(),
         },
@@ -2983,6 +2990,12 @@ fn needs_live_tick(app: &AppState) -> bool {
     // d-38: tick while an F3 pull Done/Error fragment is
     // showing so it auto-hides on its TTL.
     if app.f3_pull.is_terminal() {
+        return true;
+    }
+    // d-50 R2: tick while a batch delete outcome is showing so
+    // it auto-hides on its TTL (single-row outcomes are
+    // event-cleared, so they don't need ticking).
+    if app.f3_del.is_batch_terminal() {
         return true;
     }
     match app.current_screen {
@@ -5480,7 +5493,7 @@ mod tests {
         );
         let launch = app.f3_del.confirm().expect("confirm");
         // Apply the success reply exactly as the select arm does.
-        if app.f3_del.apply_done(launch.request_id, 1) {
+        if app.f3_del.apply_done(launch.request_id, 1, Instant::now()) {
             handle_f3_refresh(
                 &mut app.browse,
                 app.parsed_remote.is_some(),
@@ -5636,7 +5649,7 @@ mod tests {
         );
         let launch = app.f3_del.confirm().expect("confirm");
         let stale = launch.request_id + 99;
-        if app.f3_del.apply_done(stale, 1) {
+        if app.f3_del.apply_done(stale, 1, Instant::now()) {
             handle_f3_refresh(
                 &mut app.browse,
                 app.parsed_remote.is_some(),
@@ -5710,6 +5723,7 @@ mod tests {
             label: "nas:/home/old.txt".to_string(),
             files_deleted: 3,
             gate_path: Some("nas:/home/old.txt".to_string()),
+            finished_at: Instant::now(),
         };
         assert!(matches!(
             f3_del_to_display(&single, Some("nas:/home/old.txt")),
@@ -5731,6 +5745,7 @@ mod tests {
             label: "3 item(s)".to_string(),
             files_deleted: 9,
             gate_path: None,
+            finished_at: Instant::now(),
         };
         assert!(matches!(
             f3_del_to_display(&batch, Some("nas:/home/anywhere")),
