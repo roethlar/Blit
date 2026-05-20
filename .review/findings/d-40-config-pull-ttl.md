@@ -100,20 +100,9 @@ green.
 
 ## Known gaps
 
-1. **No min(tick, remaining) precision.** Same as d-38 known
-   gap #2: the fragment can linger up to one `live_tick`
-   interval past its TTL because the sweep runs per-frame, not
-   on a TTL-exact timer. Acceptable for a 250ms–60s retention
-   window. (The d-24 precision fix mattered only because the
-   cancel TTL drives the *sleep budget*; the pull TTL does not,
-   so there's no correctness issue here, only ±one-tick
-   cosmetic lag.)
-
-## Out of scope
-
-- Folding the pull TTL into the sleep-budget computation (d-24
-  style) — unnecessary; `needs_live_tick` already wakes the
-  loop while a terminal fragment shows.
+_(Round 1 listed "no min(tick, remaining) precision" as an
+acceptable gap. The reviewer correctly rejected that reasoning —
+see Round 2. There are no remaining known gaps.)_
 
 This closes the d-38 known-gaps list. The F3 pull feature
 (d-33 → d-40) is now fully config-aware: preview, resolved
@@ -122,4 +111,71 @@ operator-tunable self-cleaning outcome.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-40-config-pull-ttl.reopened.md`)
+
+One finding:
+
+- **The configured pull TTL can still be delayed by the live
+  tick budget.** The loop reads `pull_status_ttl_ms` and clears
+  expired pull terminal state, but only on the normal live-tick
+  wake. The tick-budget computation considered only
+  `cancel_remaining`, not the F3 pull terminal deadline. So
+  `pull_status_ttl_ms = 250` could stay visible until the next
+  `live_tick.interval_ms` wake — and since the live tick ceiling
+  is 5000ms, a 250ms result could linger ~5s. This is the exact
+  class of bug d-24 already fixed for cancel status. The
+  reviewer asked for the pull deadline to be folded into the
+  budget (a helper analogous to `cancel_status_remaining_ttl`)
+  plus coverage of the 5s-tick / 250ms-TTL / F3-terminal
+  scenario.
+
+  My round-1 "Out of scope" note had it backwards: I claimed
+  `needs_live_tick` waking the loop was sufficient, but that
+  only guarantees a wake *at the live-tick cadence*, which is
+  precisely the thing that's too coarse for a short TTL.
+
+### Round 2 fix
+
+- New `F3PullState::terminal_remaining(now, ttl) -> Option<Duration>`
+  in `f3pull.rs` — the wall-clock remaining before the d-38
+  auto-hide fires on a Done/Error fragment, mirroring
+  `cancel_status_remaining_ttl`. `None` when no fragment shows
+  or it has already expired.
+- New pure `min_opt(a, b)` helper in `main.rs` — the shorter of
+  two optional deadlines.
+- The loop now computes `pull_remaining` (gated on `Screen::F3`)
+  and feeds `min_opt(cancel_remaining, pull_remaining)` into the
+  unchanged `compute_tick_budget`, so the budget collapses to
+  `min(live_tick, cancel_remaining, pull_remaining)`.
+
+### Round 2 tests
+
++6 tests (407 → 413):
+
+- `f3pull::tests::terminal_remaining_some_within_ttl_none_after`
+  — remaining shrinks within the window; `None` at/after the
+  `>=` boundary.
+- `f3pull::tests::terminal_remaining_none_on_idle_and_running`.
+- `f3pull::tests::terminal_remaining_some_for_error_fragment`.
+- `min_opt_picks_the_shorter_deadline` (incl. the `None` arms).
+- `short_pull_ttl_overrides_long_live_tick` — the reviewer's
+  exact scenario: `compute_tick_budget(true, 5s, min_opt(None,
+  Some(250ms))) == Some(250ms)`, asserting the budget never
+  exceeds the pull deadline.
+- `budget_picks_nearer_of_cancel_and_pull_deadlines` — when both
+  are pending, the nearer wins.
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+Any auto-hide fragment with an operator-tunable TTL must feed
+its remaining deadline into the loop's sleep budget — otherwise
+a long `live_tick.interval_ms` silently bounds a short TTL. d-24
+established this for cancel status; d-40 R1 reintroduced the bug
+for the pull fragment by reasoning that "the loop already ticks"
+was enough. It isn't: ticking at the live-tick cadence is the
+problem, not the solution. The budget must collapse to the
+nearest deadline across *all* pending fragments.
