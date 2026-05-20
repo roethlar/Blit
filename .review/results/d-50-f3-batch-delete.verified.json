@@ -1,0 +1,16 @@
+{
+  "id": "d-50-f3-batch-delete",
+  "sha": "9eed9a30d7ca98029e6a3656dcf66d5b4cb0de52",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T20:59:52Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "D now deletes the F3 marked set in a single Purge, falling back to the cursor row when nothing is marked.",
+    "Round 2 adds a concrete TTL lifecycle for ungated batch Done/Error outcomes while preserving single-row path-gated behavior."
+  ]
+}

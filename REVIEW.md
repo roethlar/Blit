@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-50-f3-batch-delete | Feature | `D` deletes the marked set in one Purge (round 2) | `[~]` | `phase5/a1` | `9eed9a3` |
+| d-50-f3-batch-delete | Feature | `D` deletes the marked set in one Purge (round 2) | `[x]` | `phase5/a1` | `9eed9a3` |
 
 ## Open findings
 
