@@ -191,7 +191,10 @@ fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
     let visible_indices = state.visible_indices();
     let rows: Vec<Row> = visible_indices
         .iter()
-        .map(|&i| row_to_table_row(&state.rows()[i]))
+        .map(|&i| {
+            let row = &state.rows()[i];
+            row_to_table_row(row, state.is_marked(&row.name))
+        })
         .collect();
     let widths = [
         Constraint::Min(20),
@@ -352,6 +355,16 @@ fn render_footer(
         };
         spans.push(Span::styled(fragment, Style::default().fg(color)));
     }
+    // d-49: multi-select count.
+    if state.marked_count() > 0 {
+        spans.push(Span::raw("  ·  "));
+        spans.push(Span::styled(
+            format!("{} selected", state.marked_count()),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     // d-35: pull fragment — prompt / progress / outcome.
     match pull {
         F3PullDisplay::Hidden => {}
@@ -453,7 +466,7 @@ fn render_footer(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn row_to_table_row(row: &BrowseRow) -> Row<'static> {
+fn row_to_table_row(row: &BrowseRow, marked: bool) -> Row<'static> {
     let kind = kind_label(&row.kind);
     let size = match &row.kind {
         BrowseRowKind::File => format_bytes(row.size_bytes),
@@ -464,8 +477,21 @@ fn row_to_table_row(row: &BrowseRow) -> Row<'static> {
     } else {
         "—".to_string()
     };
+    // d-49: a leading marker + bold name flags a multi-selected
+    // row. The marker keeps selection visible even on the
+    // (cyan-highlighted) cursor row.
+    let name = if marked {
+        format!("◉ {}", row.name)
+    } else {
+        format!("  {}", row.name)
+    };
+    let name_cell = if marked {
+        Cell::from(name).style(Style::default().add_modifier(Modifier::BOLD))
+    } else {
+        Cell::from(name)
+    };
     Row::new(vec![
-        Cell::from(row.name.clone()),
+        name_cell,
         Cell::from(kind.to_string()),
         Cell::from(size),
         Cell::from(mtime),

@@ -48,6 +48,7 @@
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -133,6 +134,14 @@ pub struct BrowseState {
     /// the TUI (TUI_DESIGN §5.3: "Read-only modules disable
     /// the key"), matching the daemon's own enforcement.
     module_read_only: bool,
+    /// d-49: multi-select set (TUI_DESIGN §5.3 `space`).
+    /// Holds the names of marked rows in the CURRENT view —
+    /// `space` toggles the cursor row. Cleared whenever the
+    /// row set changes (descend / ascend / re-fetch) via
+    /// `reset_view_state`, since names are only unique within
+    /// a single view. The foundation for batch transfer /
+    /// delete (a later slice consumes the marked set).
+    marked: HashSet<String>,
 }
 
 impl Default for BrowseState {
@@ -152,7 +161,30 @@ impl BrowseState {
             filter: String::new(),
             editing_filter: false,
             module_read_only: false,
+            marked: HashSet::new(),
         }
+    }
+
+    /// d-49: toggle the cursor row's mark (`space`). No-op when
+    /// the cursor isn't on a visible row (the filter-aware
+    /// `selected_row` returns `None`). Marks are keyed by row
+    /// name within the current view.
+    pub fn toggle_mark(&mut self) {
+        if let Some(name) = self.selected_row().map(|r| r.name.clone()) {
+            if !self.marked.remove(&name) {
+                self.marked.insert(name);
+            }
+        }
+    }
+
+    /// d-49: is the named row marked?
+    pub fn is_marked(&self, name: &str) -> bool {
+        self.marked.contains(name)
+    }
+
+    /// d-49: number of marked rows in the current view.
+    pub fn marked_count(&self) -> usize {
+        self.marked.len()
     }
 
     /// d-46: read-only status of the module being browsed.
@@ -239,7 +271,7 @@ impl BrowseState {
         sort_rows(&mut self.rows);
         self.selected = 0;
         self.status = BrowseFetchStatus::Loaded { fetched_at };
-        self.reset_filter();
+        self.reset_view_state();
     }
 
     /// Apply a fresh directory listing result. Caller
@@ -279,7 +311,7 @@ impl BrowseState {
         self.status = BrowseFetchStatus::Loaded { fetched_at };
         // d-26: fresh fetch → drop the filter, same
         // rationale as `apply_modules`.
-        self.reset_filter();
+        self.reset_view_state();
     }
 
     /// Surface a fetch failure for the *current* view (the
@@ -385,7 +417,7 @@ impl BrowseState {
         self.status = BrowseFetchStatus::Idle;
         // d-26: changing view drops the filter — the new
         // view's rows haven't even been fetched yet.
-        self.reset_filter();
+        self.reset_view_state();
         Some(&self.view)
     }
 
@@ -410,7 +442,7 @@ impl BrowseState {
         self.selected = 0;
         self.status = BrowseFetchStatus::Idle;
         // d-26: same view-change rationale as `descend`.
-        self.reset_filter();
+        self.reset_view_state();
         Some(&self.view)
     }
 
@@ -480,7 +512,7 @@ impl BrowseState {
     /// row 0 (the new first-matching row in the cleared
     /// filter).
     pub fn cancel_filter(&mut self) {
-        self.reset_filter();
+        self.reset_view_state();
         self.selected = 0;
     }
 
@@ -570,10 +602,13 @@ impl BrowseState {
     /// Reset filter + edit-mode to the cleared state.
     /// Called from `apply_modules` / `apply_listing` /
     /// `descend` / `ascend` whenever the row set changes
-    /// underneath us.
-    fn reset_filter(&mut self) {
+    /// underneath us. Clears the filter AND the d-49 multi-
+    /// select marks — both are keyed to the current row set,
+    /// which is about to be replaced.
+    fn reset_view_state(&mut self) {
         self.filter.clear();
         self.editing_filter = false;
+        self.marked.clear();
     }
 }
 
@@ -1162,6 +1197,60 @@ mod tests {
         assert_eq!(state.rows()[state.selected_index()].name, "home");
         state.descend();
         assert!(!state.current_module_read_only());
+    }
+
+    // d-49: multi-select marks.
+
+    #[test]
+    fn toggle_mark_marks_and_unmarks_cursor_row() {
+        let mut state = populated_state();
+        // Sorted: backups(0), home(1), photos(2), scratch(3).
+        let name = state.rows()[state.selected_index()].name.clone();
+        assert!(!state.is_marked(&name));
+        state.toggle_mark();
+        assert!(state.is_marked(&name), "first toggle marks");
+        assert_eq!(state.marked_count(), 1);
+        state.toggle_mark();
+        assert!(!state.is_marked(&name), "second toggle unmarks");
+        assert_eq!(state.marked_count(), 0);
+    }
+
+    #[test]
+    fn marks_accumulate_across_rows() {
+        let mut state = populated_state();
+        state.toggle_mark(); // backups
+        state.select_next();
+        state.toggle_mark(); // home
+        assert_eq!(state.marked_count(), 2);
+        assert!(state.is_marked("backups"));
+        assert!(state.is_marked("home"));
+        assert!(!state.is_marked("photos"));
+    }
+
+    #[test]
+    fn marks_clear_on_descend() {
+        let mut state = populated_state();
+        state.toggle_mark(); // mark backups
+        assert_eq!(state.marked_count(), 1);
+        state.descend(); // into backups (view change)
+        assert_eq!(
+            state.marked_count(),
+            0,
+            "changing views drops marks (names aren't unique across views)"
+        );
+    }
+
+    #[test]
+    fn toggle_mark_is_noop_when_filter_hides_cursor() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('z'); // matches nothing
+        state.toggle_mark();
+        assert_eq!(
+            state.marked_count(),
+            0,
+            "no visible cursor row → nothing to mark"
+        );
     }
 
     #[test]

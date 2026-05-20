@@ -122,6 +122,7 @@ fn help_lines() -> Vec<Line<'static>> {
             "pull selected → local dir (F3) — Enter runs, Esc cancels",
         ),
         kv("u", "disk usage of selected subtree (F3)"),
+        kv("space", "multi-select rows (F3)"),
         kv("D", "delete selected path (F3) — y/N confirm"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
@@ -165,9 +166,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // cancel; d-35 bumped 36→37 for `p` pull; d-36 bumped
     // 37→38 for `Ctrl-R` reload; d-41 bumped 38→39 for `u`
     // du; d-42 bumped 39→40 for `g / G` jump; d-45 bumped
-    // 40→41 for `D` delete. d-31: when the area is shorter
-    // than the modal, the operator scrolls with j/k.
-    let modal = centered(area, 70, 41);
+    // 40→41 for `D` delete; d-49 bumped 41→42 for `space`
+    // multi-select. d-31: when the area is shorter than the
+    // modal, the operator scrolls with j/k.
+    let modal = centered(area, 70, 42);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -458,6 +460,7 @@ mod tests {
             "disk usage of selected subtree", // d-41: F3 du (`u`)
             "jump to first / last row",       // d-42: g / G
             "delete selected path",           // d-45: F3 delete (`D`)
+            "multi-select rows",              // d-49: F3 space
         ] {
             assert!(
                 text.contains(needle),

@@ -1434,6 +1434,8 @@ async fn handle_pane_action(
             UserAction::SelectPrev => app.browse.select_prev(),
             UserAction::SelectFirst => app.browse.select_first(),
             UserAction::SelectLast => app.browse.select_last(),
+            // d-49: `space` toggles the cursor row's mark.
+            UserAction::F3ToggleMark => app.browse.toggle_mark(),
             UserAction::Descend => {
                 app.browse.descend();
             }
@@ -3717,6 +3719,10 @@ enum UserAction {
     /// subtree byte/file total in the Stats block. No-op if
     /// no remote is configured or nothing is selectable.
     F3DuBegin,
+    /// d-49: F3 only. `space` toggles the multi-select mark on
+    /// the cursor row (TUI_DESIGN §5.3). Foundation for batch
+    /// transfer / delete; other panes ignore it.
+    F3ToggleMark,
     /// d-45: F3 only. `D` (Shift+d) opens a delete confirm
     /// prompt for the cursor-selected remote path. No-op for
     /// a module root / non-deletable cursor, or when a delete
@@ -3857,6 +3863,11 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // open the text-input handler absorbs `u` first, so
         // it's only a du trigger in normal F3 nav mode.
         KeyCode::Char('u') => Some(UserAction::F3DuBegin),
+        // d-49: `space` toggles the F3 multi-select mark on the
+        // cursor row. Other panes ignore it. While the F3
+        // filter / pull-dest prompt is open the text handlers
+        // absorb space as a character first.
+        KeyCode::Char(' ') => Some(UserAction::F3ToggleMark),
         // d-45: `D` (Shift+d) opens the F3 delete confirm
         // prompt for the cursor row. Capital chosen because
         // lowercase `d` is ProfileDisable (F4) and delete is
@@ -5286,6 +5297,15 @@ mod tests {
         assert!(matches!(
             key_action(&k(KeyCode::Char('/'))),
             Some(UserAction::F3FilterBegin)
+        ));
+    }
+
+    /// d-49: `space` maps to F3ToggleMark.
+    #[test]
+    fn key_action_maps_space_to_f3_toggle_mark() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char(' '))),
+            Some(UserAction::F3ToggleMark)
         ));
     }
 
