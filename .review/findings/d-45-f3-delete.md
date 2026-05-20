@@ -112,4 +112,57 @@ green.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-45-f3-delete.reopened.md`)
+
+Two findings:
+
+1. **TUI delete didn't use the CLI's canonical wire-path
+   construction.** `run_f3_del` built the Purge path with
+   `rel_path.to_string_lossy()`. The CLI joins path components
+   with `/` instead. F3 cursor endpoints are assembled with
+   `PathBuf::push`, so a **Windows** client could send a
+   backslash-shaped path that a Unix daemon won't match — the
+   intended remote entry wouldn't be deleted.
+2. **Successful delete left the F3 listing stale.** The reply
+   branch applied `apply_done` but never refreshed `BrowseState`,
+   so the deleted row stayed visible and actionable until a
+   manual refresh.
+
+### Round 2 fixes
+
+1. `run_f3_del` now builds the wire path via a named
+   `del_wire_path` boundary that calls
+   `blit_app::endpoints::rel_path_to_string` — the same
+   forward-slash component-join the CLI uses. OS-independent.
+2. The delete-success branch now calls `handle_f3_refresh`
+   (the `r`-key refresh path) **only when `apply_done` actually
+   applied** (a stale/superseded reply returns false and doesn't
+   refresh). The loop auto-kicks the re-fetch, so the deleted row
+   leaves the table.
+
+### Round 2 tests
+
++4 tests (452 → 455):
+
+- `del_wire_path_is_forward_slash_joined` — the reviewer's pin:
+  `nas:/home/photos/old.jpg` → module `home`, wire path
+  `photos/old.jpg`; also a component-pushed `PathBuf` →
+  `photos/old.jpg`.
+- `successful_delete_invalidates_browse_view` — an applied
+  delete + refresh clears `browse_last_fetched_view`.
+- `stale_delete_reply_does_not_refresh` — a superseded reply
+  leaves the view intact.
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+A wire protocol that carries relative paths has a canonical
+on-the-wire form (here: forward slashes). Client code that
+assembles paths with the platform's `PathBuf` must convert at
+the wire boundary, not `to_string_lossy` a native path. And a
+mutating browser action must reconcile the view it mutated —
+deleting a row the operator can still see and act on is a
+correctness bug, not just cosmetics.
