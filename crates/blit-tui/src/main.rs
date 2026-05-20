@@ -226,6 +226,10 @@ struct AppState {
     /// by the TUI process. Renders into the F3 footer.
     f3_pull: f3pull::F3PullState,
     f3_pull_reply_tx: mpsc::Sender<F3PullReply>,
+    /// d-53: sequential batch-pull (`P`) over the F3 marked
+    /// set. Drives the single-source `f3_pull` machine one
+    /// source at a time; `None` when no batch is running.
+    f3_batch_pull: Option<BatchPull>,
     /// d-37: live pull-progress snapshots from the running
     /// pull task.
     f3_pull_progress_tx: mpsc::Sender<F3PullProgress>,
@@ -547,6 +551,7 @@ async fn run_router(
         cancel_reply_tx: cancel_reply_tx.clone(),
         cancel_request_seq: 0,
         f3_pull: f3pull::F3PullState::new(),
+        f3_batch_pull: None,
         f3_pull_reply_tx: f3_pull_reply_tx.clone(),
         f3_pull_progress_tx: f3_pull_progress_tx.clone(),
         f3_du: f3du::F3DuState::new(),
@@ -739,6 +744,8 @@ async fn run_router(
                         &f3_pull_to_display(app.f3_pull.status()),
                         &f3_du_to_display(app.f3_du.status(), f3_pull_spec.as_deref()),
                         &f3_del_to_display(app.f3_del.status(), f3_pull_spec.as_deref()),
+                        // d-53: batch-pull progress (current/total).
+                        app.f3_batch_pull.as_ref().map(|b| (b.done + 1, b.total)),
                         now,
                     ),
                     Screen::F4 => screens::f4::render_into(
@@ -1168,10 +1175,26 @@ async fn run_router(
                     let at = Instant::now();
                     match result {
                         Ok((files, bytes)) => {
-                            app.f3_pull.apply_done(request_id, files, bytes, at);
+                            let applied = app.f3_pull.apply_done(request_id, files, bytes, at);
+                            // d-53: advance the batch — start the
+                            // next queued source with the same
+                            // dest, or clear the batch when done.
+                            // Only advance on an applied (current-
+                            // generation) reply.
+                            if applied {
+                                advance_batch_pull(&mut app);
+                            }
                         }
                         Err(message) => {
-                            app.f3_pull.apply_error(request_id, message, at);
+                            let applied =
+                                app.f3_pull.apply_error(request_id, message, at);
+                            // d-53: abort the rest of the batch on
+                            // a failed pull — don't silently keep
+                            // pulling after an error the operator
+                            // hasn't seen.
+                            if applied {
+                                app.f3_batch_pull = None;
+                            }
                         }
                     }
                 }
@@ -1466,6 +1489,32 @@ async fn handle_pane_action(
                 if !busy {
                     if let Some(source) = source {
                         app.f3_pull.begin(source);
+                    }
+                }
+            }
+            // d-53: `P` batch-pulls the marked set. Opens the
+            // dest prompt for the first source and queues the
+            // rest; on each pull's completion the reply arm
+            // starts the next with the same dest. No-op without
+            // marks or with a pull already in flight.
+            UserAction::F3BatchPullBegin => {
+                let busy = app.f3_pull.is_entering_dest()
+                    || app.f3_pull.is_running()
+                    || app.f3_batch_pull.is_some();
+                if !busy && app.browse.marked_count() > 0 {
+                    if let Some(base) = app.browse_target.clone() {
+                        let mut sources: std::collections::VecDeque<RemoteEndpoint> =
+                            app.browse.marked_endpoints(&base).into_iter().collect();
+                        if let Some(first) = sources.pop_front() {
+                            let total = sources.len() + 1;
+                            app.f3_batch_pull = Some(BatchPull {
+                                remaining: sources,
+                                raw_dest: String::new(),
+                                done: 0,
+                                total,
+                            });
+                            app.f3_pull.begin(first);
+                        }
                     }
                 }
             }
@@ -2446,6 +2495,19 @@ fn f3_del_to_display(
     }
 }
 
+/// d-53: sequential batch-pull state. `P` on F3 pulls every
+/// marked source into one destination, one at a time, reusing
+/// the single-source `f3_pull` machine. `raw_dest` is captured
+/// once (when the operator confirms the first pull's prompt) and
+/// reused for each queued source; `remaining` holds the sources
+/// not yet started. `done`/`total` drive the footer counter.
+struct BatchPull {
+    remaining: std::collections::VecDeque<RemoteEndpoint>,
+    raw_dest: String,
+    done: usize,
+    total: usize,
+}
+
 /// d-35: reply envelope from a spawned F3 pull task.
 struct F3PullReply {
     request_id: u64,
@@ -2774,6 +2836,43 @@ fn spawn_f3_pull(
         let _ = forwarder.await;
         let _ = tx.send(F3PullReply { request_id, result }).await;
     });
+}
+
+/// d-53: drive the sequential batch pull forward after one
+/// source's pull completed. Bumps the done count, then starts
+/// the next queued source (with the captured dest) and spawns
+/// its task — or clears the batch when the queue is empty.
+fn advance_batch_pull(app: &mut AppState) {
+    // Scope the `&mut app.f3_batch_pull` borrow so it ends before
+    // we touch `app.f3_pull` / spawn below.
+    let next = {
+        let Some(batch) = app.f3_batch_pull.as_mut() else {
+            return;
+        };
+        batch.done += 1;
+        batch
+            .remaining
+            .pop_front()
+            .map(|src| (src, batch.raw_dest.clone()))
+    };
+    match next {
+        Some((source, raw_dest)) => {
+            if let Some(launch) = app.f3_pull.start_pull(source, raw_dest) {
+                spawn_f3_pull(
+                    launch.request_id,
+                    launch.source,
+                    launch.dest_root,
+                    app.f3_pull_reply_tx.clone(),
+                    app.f3_pull_progress_tx.clone(),
+                );
+            } else {
+                // Blank dest or unexpectedly busy — stop the batch
+                // rather than spin.
+                app.f3_batch_pull = None;
+            }
+        }
+        None => app.f3_batch_pull = None,
+    }
 }
 
 /// d-24 round 2: how much wall-clock time remains before the
@@ -3503,9 +3602,21 @@ fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
     match key.code {
         KeyCode::Esc => {
             app.f3_pull.cancel();
+            // d-53: Esc on the prompt aborts the whole batch
+            // (nothing has run yet — the dest was never
+            // confirmed).
+            app.f3_batch_pull = None;
             true
         }
         KeyCode::Enter => {
+            // d-53: capture the entered dest once for the batch
+            // before begin_run consumes it, so queued sources
+            // reuse it.
+            if let Some(batch) = app.f3_batch_pull.as_mut() {
+                if let Some(dest) = app.f3_pull.entering_dest() {
+                    batch.raw_dest = dest.to_string();
+                }
+            }
             if let Some(launch) = app.f3_pull.begin_run() {
                 spawn_f3_pull(
                     launch.request_id,
@@ -3514,6 +3625,11 @@ fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                     app.f3_pull_reply_tx.clone(),
                     app.f3_pull_progress_tx.clone(),
                 );
+            } else {
+                // Empty dest → begin_run is a no-op and the
+                // prompt stays open; the batch dest we just
+                // captured is blank, which is fine (re-captured
+                // on the next Enter).
             }
             // Absorb Enter even on an empty dest (begin_run
             // is a no-op there and the prompt stays open).
@@ -3813,6 +3929,11 @@ enum UserAction {
     /// subtree byte/file total in the Stats block. No-op if
     /// no remote is configured or nothing is selectable.
     F3DuBegin,
+    /// d-53: F3 only. `P` (Shift+p) pulls the marked set into a
+    /// local destination, sequentially — the batch pair to `p`
+    /// (pull cursor). No-op without marks or with a pull already
+    /// in flight. Other panes ignore it.
+    F3BatchPullBegin,
     /// d-49: F3 only. `space` toggles the multi-select mark on
     /// the cursor row (TUI_DESIGN §5.3). Foundation for batch
     /// transfer / delete; other panes ignore it.
@@ -3951,6 +4072,13 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // F3 pull keystroke handler absorbs input before
         // this dispatcher runs, so `p` is a text char then.
         KeyCode::Char('p') => Some(UserAction::F3PullBegin),
+        // d-53: `P` (Shift+p) batch-pulls the F3 marked set —
+        // the natural pair to `p` (the design lists `c` for
+        // copy, but `c` is ProfileClear in the global map; `P`
+        // pairs with `p` and is free, same divergence approach
+        // as `u` for du / `s` for dump). While the dest prompt
+        // is open the pull keystroke handler absorbs input first.
+        KeyCode::Char('P') => Some(UserAction::F3BatchPullBegin),
         // d-41: `u` (usage) runs du for the F3 cursor row.
         // Other panes ignore the variant. TUI_DESIGN §5.3
         // lists `d` for du, but `d` is already
@@ -5401,6 +5529,36 @@ mod tests {
         ));
     }
 
+    /// d-53: when the last queued source finishes (`remaining`
+    /// empty), `advance_batch_pull` clears the batch. (The
+    /// start-next path spawns a task and is exercised manually.)
+    #[test]
+    fn advance_batch_pull_clears_when_queue_empty() {
+        let mut app = make_test_app_state(Screen::F3);
+        app.f3_batch_pull = Some(BatchPull {
+            remaining: std::collections::VecDeque::new(),
+            raw_dest: "/tmp/out".to_string(),
+            done: 2,
+            total: 3,
+        });
+        advance_batch_pull(&mut app);
+        assert!(app.f3_batch_pull.is_none(), "an empty queue ends the batch");
+    }
+
+    /// d-53: `P` maps to F3BatchPullBegin (and `p` stays the
+    /// single-cursor pull).
+    #[test]
+    fn key_action_maps_shift_p_to_batch_pull() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('P'))),
+            Some(UserAction::F3BatchPullBegin)
+        ));
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('p'))),
+            Some(UserAction::F3PullBegin)
+        ));
+    }
+
     /// d-49: `space` maps to F3ToggleMark.
     #[test]
     fn key_action_maps_space_to_f3_toggle_mark() {
@@ -5929,6 +6087,7 @@ mod tests {
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
+            f3_batch_pull: None,
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
@@ -6304,6 +6463,7 @@ mod tests {
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
+            f3_batch_pull: None,
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
@@ -6363,6 +6523,7 @@ mod tests {
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
+            f3_batch_pull: None,
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
@@ -6475,6 +6636,7 @@ mod tests {
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
+            f3_batch_pull: None,
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),
@@ -6546,6 +6708,7 @@ mod tests {
             cancel_reply_tx: mpsc::channel::<CancelReply>(1).0,
             cancel_request_seq: 0,
             f3_pull: f3pull::F3PullState::new(),
+            f3_batch_pull: None,
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
             f3_du: f3du::F3DuState::new(),

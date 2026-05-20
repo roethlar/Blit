@@ -150,6 +150,7 @@ pub fn render_into(
     pull: &F3PullDisplay,
     du: &F3DuDisplay,
     del: &F3DelDisplay,
+    batch_pull: Option<(usize, usize)>,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -168,7 +169,7 @@ pub fn render_into(
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
     render_stats(frame, chunks[2], state, pull_spec, du);
-    render_footer(frame, chunks[3], state, pull, del, now);
+    render_footer(frame, chunks[3], state, pull, del, batch_pull, now);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_label: &str) {
@@ -322,6 +323,7 @@ fn render_footer(
     state: &BrowseState,
     pull: &F3PullDisplay,
     del: &F3DelDisplay,
+    batch_pull: Option<(usize, usize)>,
     now: Instant,
 ) {
     let status_span = match state.status() {
@@ -453,6 +455,17 @@ fn render_footer(
                 Style::default().fg(Color::Red),
             ));
         }
+    }
+    // d-53: batch-pull progress (current/total) while a `P`
+    // batch is running.
+    if let Some((current, total)) = batch_pull {
+        spans.push(Span::raw("  ·  "));
+        spans.push(Span::styled(
+            format!("batch pull {current}/{total}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     // Tail: shared key hints. `/` joins the keymap since
     // d-26 made it bindable on F3; `p` since d-35.

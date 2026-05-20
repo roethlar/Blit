@@ -121,6 +121,7 @@ fn help_lines() -> Vec<Line<'static>> {
             "p",
             "pull selected → local dir (F3) — Enter runs, Esc cancels",
         ),
+        kv("P", "pull marked set → local dir (F3) — Shift+p"),
         kv("u", "disk usage of selected subtree (F3)"),
         kv("space", "multi-select rows (F3)"),
         kv("a", "select / clear all visible rows (F3)"),
@@ -168,10 +169,11 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // 37→38 for `Ctrl-R` reload; d-41 bumped 38→39 for `u`
     // du; d-42 bumped 39→40 for `g / G` jump; d-45 bumped
     // 40→41 for `D` delete; d-49 bumped 41→42 for `space`
-    // multi-select; d-51 bumped 42→43 for `a` select-all.
-    // d-31: when the area is shorter than the modal, the
-    // operator scrolls with j/k.
-    let modal = centered(area, 70, 43);
+    // multi-select; d-51 bumped 42→43 for `a` select-all;
+    // d-53 bumped 43→44 for `P` batch pull. d-31: when the
+    // area is shorter than the modal, the operator scrolls
+    // with j/k.
+    let modal = centered(area, 70, 44);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -387,7 +389,7 @@ mod tests {
         // d-45: the keymap grew to ~39 lines; render in a
         // 44-row area (modal 41, inner 39) so it fits
         // exactly and no scrollbar is needed.
-        let text = render_to_string(HelpOverlay::default(), 80, 44);
+        let text = render_to_string(HelpOverlay::default(), 80, 46);
         assert!(
             !text.contains('▲') && !text.contains('▼'),
             "non-overflowing modal must not show scroll markers; got:\n{text}"
@@ -420,7 +422,7 @@ mod tests {
         // d-45: tall enough that the full keymap (now ~39
         // lines + borders) renders without clipping the
         // bottom section the grep checks.
-        let backend = TestBackend::new(80, 44);
+        let backend = TestBackend::new(80, 46);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| {
@@ -459,6 +461,7 @@ mod tests {
             "/",                               // d-26: F3 filter
             "X",                               // d-30: F2 batch cancel
             "p",                               // d-35: F3 pull
+            "pull marked set",                 // d-53: F3 batch pull (`P`)
             "disk usage of selected subtree",  // d-41: F3 du (`u`)
             "jump to first / last row",        // d-42: g / G
             "delete cursor row or marked set", // d-45/d-50: F3 delete (`D`)

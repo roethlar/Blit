@@ -164,6 +164,29 @@ impl F3PullState {
         }
     }
 
+    /// d-53: the destination the operator has typed so far,
+    /// while the prompt is open. Used by the batch-copy
+    /// coordinator to capture the dest once before `begin_run`
+    /// consumes it, so it can be reused for the queued sources.
+    pub fn entering_dest(&self) -> Option<&str> {
+        match &self.status {
+            F3PullStatus::EnteringDest { dest, .. } => Some(dest.as_str()),
+            _ => None,
+        }
+    }
+
+    /// d-53: start a pull for `source` into `raw_dest` directly,
+    /// bypassing the prompt — drives queued batch-copy sources
+    /// after the operator entered the dest once. No-op (`None`)
+    /// if a pull is already entering-dest/running or `raw_dest`
+    /// is blank.
+    pub fn start_pull(&mut self, source: RemoteEndpoint, raw_dest: String) -> Option<PullLaunch> {
+        if self.is_entering_dest() || self.is_running() {
+            return None;
+        }
+        self.launch(source, raw_dest)
+    }
+
     /// Commit the prompt (Enter). Returns the launch params
     /// and transitions to `Running`. Returns `None` (and
     /// stays in `EnteringDest`) when the dest is empty —
@@ -183,13 +206,25 @@ impl F3PullState {
                 return None;
             }
         };
-        if dest.trim().is_empty() {
-            // Restore the prompt so the operator can keep
-            // typing.
-            self.status = F3PullStatus::EnteringDest { source, dest };
+        match self.launch(source.clone(), dest.clone()) {
+            Some(launch) => Some(launch),
+            None => {
+                // Empty dest → restore the prompt so the
+                // operator can keep typing.
+                self.status = F3PullStatus::EnteringDest { source, dest };
+                None
+            }
+        }
+    }
+
+    /// d-53: shared core of `begin_run` / `start_pull` — resolve
+    /// the destination and transition to `Running`. Returns
+    /// `None` (no state change) when `raw_dest_in` is blank.
+    fn launch(&mut self, source: RemoteEndpoint, raw_dest_in: String) -> Option<PullLaunch> {
+        if raw_dest_in.trim().is_empty() {
             return None;
         }
-        let raw_dest = dest.trim().to_string();
+        let raw_dest = raw_dest_in.trim().to_string();
         // d-35 round 2: apply the same rsync-style
         // destination resolution the CLI runs before a
         // pull (`resolve_destination`). `run_pull_sync`
@@ -696,6 +731,44 @@ mod tests {
             state.push_char(c);
         }
         state.begin_run().expect("launch").request_id
+    }
+
+    #[test]
+    fn entering_dest_reports_typed_dest() {
+        let mut s = F3PullState::new();
+        assert_eq!(s.entering_dest(), None, "no prompt → None");
+        s.begin(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        assert_eq!(s.entering_dest(), Some("/tmp/out"));
+    }
+
+    #[test]
+    fn start_pull_launches_directly_without_prompt() {
+        let mut s = F3PullState::new();
+        // d-53: queued batch source goes straight to Running.
+        let launch = s
+            .start_pull(endpoint("nas:/m/y"), "/tmp/out".to_string())
+            .expect("direct launch");
+        assert!(s.is_running());
+        assert_eq!(launch.request_id, 1);
+    }
+
+    #[test]
+    fn start_pull_is_noop_when_busy_or_blank() {
+        let mut s = F3PullState::new();
+        // Blank dest → None, stays Idle.
+        assert!(s
+            .start_pull(endpoint("nas:/m/y"), "  ".to_string())
+            .is_none());
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+        // Already running → None.
+        let _ = s.start_pull(endpoint("nas:/m/y"), "/tmp/out".to_string());
+        assert!(s.is_running());
+        assert!(s
+            .start_pull(endpoint("nas:/m/z"), "/tmp/out".to_string())
+            .is_none());
     }
 
     #[test]
