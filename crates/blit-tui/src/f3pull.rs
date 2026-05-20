@@ -45,6 +45,23 @@ pub enum F3PullStatus {
         source: RemoteEndpoint,
         /// The destination path the operator is typing.
         dest: String,
+        /// d-55: `true` when this prompt was opened by `m`
+        /// (mirror) rather than `p` (copy). On commit a
+        /// mirror routes through [`F3PullStatus::ConfirmMirror`]
+        /// (destructive confirm) instead of launching directly.
+        mirror: bool,
+    },
+    /// d-55: destructive mirror confirm. A mirror deletes
+    /// local files at `dest_root` that are absent from the
+    /// remote source, so — like F3 delete — it's gated behind
+    /// an explicit y/N before any filesystem mutation. `dest`
+    /// is the operator-typed string (for the prompt);
+    /// `dest_root` is the already-resolved target handed to
+    /// the launch on confirm.
+    ConfirmMirror {
+        source: RemoteEndpoint,
+        dest: String,
+        dest_root: PathBuf,
     },
     /// PullSync RPC in flight. d-37: `files` / `bytes` are
     /// live cumulative counters fed by the progress
@@ -58,6 +75,8 @@ pub enum F3PullStatus {
         files: usize,
         bytes: u64,
         bytes_per_sec: u64,
+        /// d-55: `true` for a mirror (verb shown as "mirror").
+        mirror: bool,
     },
     /// Pull finished successfully. (The remote source is
     /// still shown in the Stats block's `Pull:` line, so
@@ -68,6 +87,8 @@ pub enum F3PullStatus {
         files: usize,
         bytes: u64,
         finished_at: Instant,
+        /// d-55: `true` for a mirror (verb shown as "mirrored").
+        mirror: bool,
     },
     /// Pull failed (validation or transport).
     Error {
@@ -82,6 +103,9 @@ pub struct PullLaunch {
     pub source: RemoteEndpoint,
     pub dest_root: PathBuf,
     pub request_id: u64,
+    /// d-55: `true` for a mirror — the spawn helper sets
+    /// `mirror_mode` and runs the post-pull purge.
+    pub mirror: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -126,16 +150,45 @@ impl F3PullState {
         matches!(self.status, F3PullStatus::Running { .. })
     }
 
-    /// Open the destination prompt for `source`. No-op if a
-    /// pull is already entering-dest or running (the
-    /// dispatcher gates on that, but be defensive).
+    /// d-55: `true` while the destructive mirror confirm is
+    /// open — the input router treats it as a modal (y/N).
+    pub fn is_confirming_mirror(&self) -> bool {
+        matches!(self.status, F3PullStatus::ConfirmMirror { .. })
+    }
+
+    /// `true` when any stage of a pull/mirror is in progress
+    /// (prompt, confirm, or running) — the dispatcher gates a
+    /// new `p`/`m` on this so a second op can't stack.
+    fn is_busy(&self) -> bool {
+        self.is_entering_dest() || self.is_running() || self.is_confirming_mirror()
+    }
+
+    /// Open the destination prompt for `source` (copy). No-op
+    /// if an op is already in progress (the dispatcher gates on
+    /// that, but be defensive).
     pub fn begin(&mut self, source: RemoteEndpoint) {
-        if self.is_entering_dest() || self.is_running() {
+        if self.is_busy() {
             return;
         }
         self.status = F3PullStatus::EnteringDest {
             source,
             dest: String::new(),
+            mirror: false,
+        };
+    }
+
+    /// d-55: open the destination prompt for `source` in mirror
+    /// mode. Same prompt as [`begin`], but on commit it routes
+    /// through the destructive [`ConfirmMirror`] gate instead of
+    /// launching directly. No-op if an op is already in progress.
+    pub fn begin_mirror(&mut self, source: RemoteEndpoint) {
+        if self.is_busy() {
+            return;
+        }
+        self.status = F3PullStatus::EnteringDest {
+            source,
+            dest: String::new(),
+            mirror: true,
         };
     }
 
@@ -181,10 +234,10 @@ impl F3PullState {
     /// if a pull is already entering-dest/running or `raw_dest`
     /// is blank.
     pub fn start_pull(&mut self, source: RemoteEndpoint, raw_dest: String) -> Option<PullLaunch> {
-        if self.is_entering_dest() || self.is_running() {
+        if self.is_busy() {
             return None;
         }
-        self.launch(source, raw_dest)
+        self.launch(source, raw_dest, false)
     }
 
     /// Commit the prompt (Enter). Returns the launch params
@@ -194,8 +247,12 @@ impl F3PullState {
     pub fn begin_run(&mut self) -> Option<PullLaunch> {
         // Pull the payload out of EnteringDest without
         // cloning the endpoint.
-        let (source, dest) = match std::mem::replace(&mut self.status, F3PullStatus::Idle) {
-            F3PullStatus::EnteringDest { source, dest } => (source, dest),
+        let (source, dest, mirror) = match std::mem::replace(&mut self.status, F3PullStatus::Idle) {
+            F3PullStatus::EnteringDest {
+                source,
+                dest,
+                mirror,
+            } => (source, dest, mirror),
             // Not entering-dest — restore and bail. (The
             // `mem::replace` set Idle; for non-EnteringDest
             // states we want to keep what was there, but
@@ -206,21 +263,109 @@ impl F3PullState {
                 return None;
             }
         };
-        match self.launch(source.clone(), dest.clone()) {
-            Some(launch) => Some(launch),
-            None => {
-                // Empty dest → restore the prompt so the
-                // operator can keep typing.
-                self.status = F3PullStatus::EnteringDest { source, dest };
-                None
-            }
+        // Empty dest → restore the prompt so the operator can
+        // keep typing (applies to both copy and mirror).
+        if dest.trim().is_empty() {
+            self.status = F3PullStatus::EnteringDest {
+                source,
+                dest,
+                mirror,
+            };
+            return None;
+        }
+        if mirror {
+            // d-55: a mirror is destructive (deletes local files
+            // absent from the source), so commit routes through
+            // an explicit confirm rather than launching. Resolve
+            // the dest now so the confirm prompt and the eventual
+            // launch agree on the target.
+            let raw_dest = dest.trim().to_string();
+            let dest_root = Self::resolve_dest(&source, &raw_dest);
+            self.status = F3PullStatus::ConfirmMirror {
+                source,
+                dest: raw_dest,
+                dest_root,
+            };
+            None
+        } else {
+            self.launch(source, dest, false)
+        }
+    }
+
+    /// d-55: confirm the pending mirror (y on the
+    /// [`ConfirmMirror`] prompt) — bumps the run id and
+    /// transitions to `Running` with `mirror = true`, handing
+    /// back the launch params. No-op (`None`) unless a mirror
+    /// confirm is open.
+    pub fn confirm_mirror(&mut self) -> Option<PullLaunch> {
+        let (source, dest, dest_root) =
+            match std::mem::replace(&mut self.status, F3PullStatus::Idle) {
+                F3PullStatus::ConfirmMirror {
+                    source,
+                    dest,
+                    dest_root,
+                } => (source, dest, dest_root),
+                other => {
+                    self.status = other;
+                    return None;
+                }
+            };
+        self.request_seq += 1;
+        let request_id = self.request_seq;
+        self.status = F3PullStatus::Running {
+            dest,
+            request_id,
+            files: 0,
+            bytes: 0,
+            bytes_per_sec: 0,
+            mirror: true,
+        };
+        Some(PullLaunch {
+            source,
+            dest_root,
+            request_id,
+            mirror: true,
+        })
+    }
+
+    /// d-55: abort the pending mirror confirm (n / Esc) — back
+    /// to Idle. No-op unless a mirror confirm is open.
+    pub fn cancel_mirror(&mut self) {
+        if self.is_confirming_mirror() {
+            self.status = F3PullStatus::Idle;
+        }
+    }
+
+    /// d-55: rsync-style destination resolution, shared by the
+    /// copy launch and the mirror-confirm gate. `run_pull_sync`
+    /// treats `dest_root` as already-resolved (see [`launch`]),
+    /// so both paths must apply identical semantics or a mirror
+    /// would purge the wrong directory.
+    fn resolve_dest(source: &RemoteEndpoint, raw_dest: &str) -> PathBuf {
+        let raw_source = source.display();
+        let resolved = resolve_destination(
+            &raw_source,
+            raw_dest,
+            &Endpoint::Remote(source.clone()),
+            Endpoint::Local(PathBuf::from(raw_dest)),
+        );
+        match resolved {
+            Endpoint::Local(p) => p,
+            // resolve_destination preserves the dst variant; a
+            // Local dst can't become Remote.
+            Endpoint::Remote(_) => PathBuf::from(raw_dest),
         }
     }
 
     /// d-53: shared core of `begin_run` / `start_pull` — resolve
     /// the destination and transition to `Running`. Returns
     /// `None` (no state change) when `raw_dest_in` is blank.
-    fn launch(&mut self, source: RemoteEndpoint, raw_dest_in: String) -> Option<PullLaunch> {
+    fn launch(
+        &mut self,
+        source: RemoteEndpoint,
+        raw_dest_in: String,
+        mirror: bool,
+    ) -> Option<PullLaunch> {
         if raw_dest_in.trim().is_empty() {
             return None;
         }
@@ -236,19 +381,7 @@ impl F3PullState {
         // "pull file into existing dir" try to create the
         // dir itself as the output file, and
         // "pull dir into existing dir" merge contents.
-        let raw_source = source.display();
-        let resolved = resolve_destination(
-            &raw_source,
-            &raw_dest,
-            &Endpoint::Remote(source.clone()),
-            Endpoint::Local(PathBuf::from(&raw_dest)),
-        );
-        let dest_root = match resolved {
-            Endpoint::Local(p) => p,
-            // resolve_destination preserves the dst
-            // variant; a Local dst can't become Remote.
-            Endpoint::Remote(_) => PathBuf::from(&raw_dest),
-        };
+        let dest_root = Self::resolve_dest(&source, &raw_dest);
         self.request_seq += 1;
         let request_id = self.request_seq;
         self.status = F3PullStatus::Running {
@@ -257,11 +390,13 @@ impl F3PullState {
             files: 0,
             bytes: 0,
             bytes_per_sec: 0,
+            mirror,
         };
         Some(PullLaunch {
             source,
             dest_root,
             request_id,
+            mirror,
         })
     }
 
@@ -300,6 +435,7 @@ impl F3PullState {
             F3PullStatus::Running {
                 request_id: rid,
                 dest,
+                mirror,
                 ..
             } if *rid == request_id => {
                 self.status = F3PullStatus::Done {
@@ -307,6 +443,7 @@ impl F3PullState {
                     files,
                     bytes,
                     finished_at: at,
+                    mirror: *mirror,
                 };
                 true
             }
@@ -412,9 +549,14 @@ mod tests {
         s.begin(endpoint("nas:/photos/2024"));
         assert!(s.is_entering_dest());
         match s.status() {
-            F3PullStatus::EnteringDest { source, dest } => {
+            F3PullStatus::EnteringDest {
+                source,
+                dest,
+                mirror,
+            } => {
                 assert_eq!(source.display(), "nas:/photos/2024");
                 assert!(dest.is_empty());
+                assert!(!mirror, "begin opens a copy prompt");
             }
             other => panic!("expected EnteringDest, got {other:?}"),
         }
@@ -896,5 +1038,152 @@ mod tests {
             Some(TEST_TTL),
             "fresh error fragment has the full TTL remaining"
         );
+    }
+
+    // d-55: mirror flow — begin_mirror → ConfirmMirror →
+    // confirm_mirror, the destructive-confirm gate that
+    // distinguishes `m` from `p`.
+
+    #[test]
+    fn begin_mirror_opens_prompt_in_mirror_mode() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/photos/2024"));
+        assert!(s.is_entering_dest(), "mirror reuses the dest prompt");
+        match s.status() {
+            F3PullStatus::EnteringDest { mirror, .. } => {
+                assert!(*mirror, "begin_mirror flags the prompt as a mirror");
+            }
+            other => panic!("expected EnteringDest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_run_on_mirror_routes_to_confirm_not_running() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/photos/2024"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        // Enter on a mirror does NOT launch — it opens the
+        // destructive confirm gate.
+        assert!(
+            s.begin_run().is_none(),
+            "mirror Enter defers the launch to confirm"
+        );
+        assert!(s.is_confirming_mirror());
+        assert!(!s.is_running(), "no PullSync until the operator confirms");
+    }
+
+    #[test]
+    fn begin_run_on_empty_mirror_dest_keeps_prompt() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/m/"));
+        // No dest typed.
+        assert!(s.begin_run().is_none());
+        assert!(
+            s.is_entering_dest(),
+            "empty mirror dest keeps the prompt, doesn't confirm"
+        );
+        assert!(!s.is_confirming_mirror());
+    }
+
+    #[test]
+    fn confirm_mirror_launches_with_mirror_flag() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/photos/2024"));
+        for c in "/tmp/blit-no-such-dir-xyz/out".chars() {
+            s.push_char(c);
+        }
+        s.begin_run();
+        assert!(s.is_confirming_mirror());
+        let launch = s.confirm_mirror().expect("confirm launches the mirror");
+        assert!(launch.mirror, "the launch carries the mirror flag");
+        assert!(s.is_running());
+        match s.status() {
+            F3PullStatus::Running { mirror, .. } => assert!(*mirror),
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_mirror_returns_to_idle() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        s.begin_run();
+        assert!(s.is_confirming_mirror());
+        s.cancel_mirror();
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+    }
+
+    #[test]
+    fn confirm_mirror_is_noop_when_not_confirming() {
+        let mut s = F3PullState::new();
+        // Idle → nothing to confirm.
+        assert!(s.confirm_mirror().is_none());
+        assert!(matches!(s.status(), F3PullStatus::Idle));
+        // While entering-dest (not yet committed) → also a no-op.
+        s.begin_mirror(endpoint("nas:/m/x"));
+        assert!(s.confirm_mirror().is_none());
+        assert!(s.is_entering_dest());
+    }
+
+    /// The mirror confirm must resolve the dest with the SAME
+    /// rsync-style semantics as a copy — a mirror that purged
+    /// the wrong (un-nested) directory would be a data-loss bug.
+    #[test]
+    fn mirror_confirm_resolves_dest_like_copy() {
+        // Copy resolution: dir source into a trailing-slash
+        // container nests under the basename.
+        let copy_dest = launch_for("nas:/photos/2024", "/tmp/blit-no-such-dir-xyz/");
+
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/photos/2024"));
+        for c in "/tmp/blit-no-such-dir-xyz/".chars() {
+            s.push_char(c);
+        }
+        s.begin_run();
+        let mirror_launch = s.confirm_mirror().expect("confirm");
+        assert_eq!(
+            mirror_launch.dest_root, copy_dest,
+            "mirror resolves the purge target identically to a copy"
+        );
+    }
+
+    #[test]
+    fn mirror_done_carries_mirror_flag() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        s.begin_run();
+        let launch = s.confirm_mirror().expect("confirm");
+        s.apply_done(launch.request_id, 3, 300, Instant::now());
+        match s.status() {
+            F3PullStatus::Done { mirror, .. } => {
+                assert!(
+                    *mirror,
+                    "Done remembers it was a mirror for the footer verb"
+                )
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_is_noop_while_confirming_mirror() {
+        let mut s = F3PullState::new();
+        s.begin_mirror(endpoint("nas:/m/x"));
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        s.begin_run();
+        assert!(s.is_confirming_mirror());
+        // A `p` (or `m`) while a confirm is open must not reset.
+        s.begin(endpoint("nas:/m/y"));
+        assert!(s.is_confirming_mirror(), "confirm is modal vs a new op");
     }
 }

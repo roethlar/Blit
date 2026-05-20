@@ -74,23 +74,30 @@ pub enum F3PullDisplay {
     /// No pull fragment (Idle).
     Hidden,
     /// Destination prompt open; `dest` is what the
-    /// operator has typed so far.
-    EnteringDest { dest: String },
+    /// operator has typed so far. d-55: `mirror` switches
+    /// the verb to "mirror".
+    EnteringDest { dest: String, mirror: bool },
+    /// d-55: destructive mirror confirm prompt (y/N) — a
+    /// mirror deletes local files absent from the source.
+    ConfirmMirror { dest: String },
     /// PullSync in flight. d-37: live cumulative
     /// counters (0 until the first progress event).
     /// d-39: `bytes_per_sec` is average throughput
-    /// (0 until ~1s elapsed).
+    /// (0 until ~1s elapsed). d-55: `mirror` switches the verb.
     Running {
         dest: String,
         files: usize,
         bytes: u64,
         bytes_per_sec: u64,
+        mirror: bool,
     },
     /// Pull finished — files + bytes pulled, dest path.
+    /// d-55: `mirror` switches the verb to "mirrored".
     Done {
         files: usize,
         bytes: u64,
         dest: String,
+        mirror: bool,
     },
     /// Pull failed.
     Error { message: String },
@@ -371,11 +378,21 @@ fn render_footer(
     // d-35: pull fragment — prompt / progress / outcome.
     match pull {
         F3PullDisplay::Hidden => {}
-        F3PullDisplay::EnteringDest { dest } => {
+        F3PullDisplay::EnteringDest { dest, mirror } => {
+            spans.push(Span::raw("  ·  "));
+            let verb = if *mirror { "mirror" } else { "pull" };
+            spans.push(Span::styled(
+                format!("{verb} → {dest}_"),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        // d-55: destructive mirror confirm — red, like delete.
+        // A mirror removes local files absent from the source.
+        F3PullDisplay::ConfirmMirror { dest } => {
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(
-                format!("pull → {dest}_"),
-                Style::default().fg(Color::Cyan),
+                format!("mirror → {dest}? deletes extraneous y/N"),
+                Style::default().fg(Color::Red),
             ));
         }
         F3PullDisplay::Running {
@@ -383,8 +400,11 @@ fn render_footer(
             files,
             bytes,
             bytes_per_sec,
+            mirror,
         } => {
             spans.push(Span::raw("  ·  "));
+            // d-55: "mirroring" vs "pulling".
+            let verb = if *mirror { "mirroring" } else { "pulling" };
             // d-37: show the live count once bytes start
             // flowing; before that just "pulling →".
             // d-39: append throughput once the rate
@@ -396,18 +416,25 @@ fn render_footer(
                     String::new()
                 };
                 format!(
-                    "pulling → {dest}... ({files} file(s) · {}{rate})",
+                    "{verb} → {dest}... ({files} file(s) · {}{rate})",
                     format_bytes(*bytes)
                 )
             } else {
-                format!("pulling → {dest}...")
+                format!("{verb} → {dest}...")
             };
             spans.push(Span::styled(frag, Style::default().fg(Color::Yellow)));
         }
-        F3PullDisplay::Done { files, bytes, dest } => {
+        F3PullDisplay::Done {
+            files,
+            bytes,
+            dest,
+            mirror,
+        } => {
             spans.push(Span::raw("  ·  "));
+            // d-55: "mirrored" vs "pulled".
+            let verb = if *mirror { "mirrored" } else { "pulled" };
             spans.push(Span::styled(
-                format!("pulled {files} file(s) · {} → {dest}", format_bytes(*bytes)),
+                format!("{verb} {files} file(s) · {} → {dest}", format_bytes(*bytes)),
                 Style::default().fg(Color::Green),
             ));
         }
