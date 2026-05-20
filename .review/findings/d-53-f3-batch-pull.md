@@ -94,4 +94,50 @@ methods) are unit-tested.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-53-f3-batch-pull.reopened.md`)
+
+One finding:
+
+- **Batch reused single-source destination resolution → multiple
+  sources can target the same path.** Each queued source went
+  through `F3PullState::launch` → `resolve_destination`, which
+  treats a non-existing, slash-less dest as an *exact target /
+  rename*. So marking `a.txt` + `b.txt` and pulling into
+  `/tmp/out` (non-existing) made both resolve to `/tmp/out` —
+  overwrite/collision. A multi-source op needs a directory
+  (container) contract.
+
+### Round 2 fix
+
+The Enter handler now **container-normalizes** the batch
+destination: if the entered dest is non-empty and lacks a
+trailing slash (`needs_container_slash`), it appends one before
+`begin_run`/capture. `resolve_destination` then treats it as a
+container and nests every source under `<dest>/<basename>`.
+Basenames are unique within a single F3 view (marks are
+view-scoped), so the nested targets never collide. Single `p` is
+untouched — only the batch path normalizes.
+
+### Round 2 tests
+
++2 tests (485 → 487):
+
+- `f3pull::container_dest_nests_each_source_distinctly` — the
+  reviewer's regression: two sources + a container (trailing-
+  slash) dest resolve to **distinct** `dest_root`s ending in
+  their own basenames.
+- `main::needs_container_slash_cases` — slash forced for
+  `/tmp/out` & `relative/dir`; not for `/tmp/out/`, blank, or
+  whitespace.
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+Single-item destination semantics (exact-target-or-nest) don't
+carry over to multi-item operations: N items need a container, or
+they fight over one path. When fanning a single-source primitive
+out to a set, re-examine its destination contract — don't just
+reuse the per-item resolution.
