@@ -83,4 +83,42 @@ green.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-49-f3-multiselect.reopened.md`)
+
+One finding:
+
+- **`Esc` from filter edit unexpectedly cleared marks.** The
+  rename `reset_filter` → `reset_view_state` (now clearing marks)
+  was also wired into `cancel_filter`, but cancelling a filter
+  doesn't change the row set — so `/` + type + `Esc` dropped
+  every mark. Marks should only clear on an actual row-set
+  replacement.
+
+### Round 2 fix
+
+- Split `clear_filter_only` (filter text + edit mode, marks
+  preserved) out of `reset_view_state`. `cancel_filter` now calls
+  `clear_filter_only`; `reset_view_state` (= `clear_filter_only`
+  + `marked.clear()`) stays wired to the genuine row-set changes
+  (`descend` / `ascend` / `apply_modules` / `apply_listing`).
+
+### Round 2 test
+
++1 test (467 → 468):
+
+- `marks_survive_filter_cancel` — mark a row, enter filter edit,
+  `cancel_filter`, assert the mark survives and the filter text
+  is cleared.
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+Renaming a helper to take on a broader responsibility
+(`reset_filter` → `reset_view_state` + mark-clearing) silently
+changed every caller's behavior — including one (`cancel_filter`)
+where the new responsibility was wrong. When widening what a
+shared helper does, audit each call site against the *new*
+semantics, not just the rename.

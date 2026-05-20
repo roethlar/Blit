@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-49-f3-multiselect | Feature | `space` multi-select on F3 (batch-action foundation) | `[ ]` | `phase5/a1` | `d9fa2e0` |
+| d-49-f3-multiselect | Feature | `space` multi-select on F3 (batch-action foundation) (round 2) | `[~]` | `phase5/a1` | `8ad34ea` |
 
 ## Open findings
 
