@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-43-du-cache | Feature | Cache F3 subtree totals for re-entry | `[~]` | `phase5/a1` | `617733b` |
+| d-43-du-cache | Feature | Cache F3 subtree totals for re-entry | `[x]` | `phase5/a1` | `617733b` |
 
 ## Open findings
 
