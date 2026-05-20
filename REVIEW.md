@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-59-f1-trigger-mirror | Feature | Copy/mirror mode toggle in the F1 trigger modal | `[~]` | `phase5/a1` | `1725414` |
+| d-59-f1-trigger-mirror | Feature | Copy/mirror mode toggle in the F1 trigger modal | `[x]` | `phase5/a1` | `1725414` |
 
 ## Open findings
 
