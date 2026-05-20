@@ -119,15 +119,16 @@ green.
 
 ## Known gaps
 
-1. **Aggregate only, no per-child breakdown.** `max_depth = 0`
-   gives the subtree total, matching the design's single-line
-   Stats display. A drill-down du (per-child sizes) would be a
-   separate, larger feature (its own pane or modal).
+1. **Aggregate only, no per-child breakdown.** The query asks
+   for a bounded depth (root + immediate children — see Round 2)
+   and renders only the root subtree total, matching the
+   design's single-line Stats display. A drill-down du (per-child
+   sizes) would be a separate, larger feature.
 
 2. **No caching across re-entry.** TUI_DESIGN §5.3 mentions
    "cached for re-entry"; d-41 re-queries on each `u`. Caching
    is a clean follow-on (key the cache by canonical path), kept
-   out to stay atomic. Re-querying is cheap and always correct.
+   out to stay atomic.
 
 3. **No spinner cadence.** While `Running`, the Stats line shows
    a static "computing..." — the reply arrives via the channel
@@ -142,4 +143,61 @@ green.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-41-f3-du.reopened.md`)
+
+One finding:
+
+- **F3 `u` used unbounded `DiskUsage` for a one-line aggregate.**
+  R1 sent `max_depth = 0` believing it meant "single root
+  aggregate." It does not: the daemon (`core.rs`) maps request
+  `max_depth == 0` to `None` = *unbounded*, so
+  `stream_disk_usage` accumulates and emits **every** descendant
+  prefix path. The TUI then discarded all but the max-byte (root)
+  entry — correct totals, but it pulled the full `blit du`
+  response shape over gRPC for a hotkey that renders one line.
+  My R1 "re-querying is cheap" note was wrong for large subtrees.
+
+### Round 2 fix
+
+- New `F3_DU_MAX_DEPTH = 1` constant; `run_f3_du_total` requests
+  it instead of `0`. Depth 1 bounds the streamed rows to the
+  root + its immediate children. The root entry (depth 0)
+  accumulates every descendant's bytes regardless of the cap, so
+  the subtree total is still complete — the cap only limits how
+  many *rows* cross the wire.
+- A **compile-time** `const _: () = assert!(F3_DU_MAX_DEPTH >= 1, …)`
+  fails the build if the depth is ever reverted to the unbounded
+  `0` (chosen over a runtime test to dodge
+  `clippy::assertions_on_constants` and to catch the regression
+  at compile time).
+- Fixed the stale "single root entry" claim in the `f3du.rs`
+  module doc.
+
+### Round 2 tests
+
++3 tests (428 → 431):
+
+- `blit-daemon` `disk_usage_depth_tests::depth_one_bounds_stream_yet_root_total_is_complete`
+  — the contract test the reviewer asked for: a deep tree (~180
+  files across 3 children, nested 3 levels) queried at depth 1
+  streams **exactly 4 rows** (root + 3 children), and the root
+  entry still reports every descendant's bytes/files.
+- `disk_usage_depth_tests::depth_zero_is_unbounded_streaming_every_descendant`
+  — pins *why* depth 0 is wrong: `None` streams nested
+  descendant paths (> the depth-1 bound).
+- The compile-time const assertion (above) is itself a build
+  gate.
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+A "give me the aggregate" RPC and a "give me the full tree" RPC
+can share one `max_depth` field where `0` is overloaded to mean
+*unbounded*, not *root-only*. Client-side folding that produces
+the right number can mask a wire-level blowup. Verify the
+server's interpretation of boundary values, and pin it with a
+server-side test over a many-descendant tree — not just a
+client-side fold test.
