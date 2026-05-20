@@ -1444,11 +1444,15 @@ async fn handle_pane_action(
             // modules are enforced server-side: the Purge fails
             // and the error surfaces in the footer.
             UserAction::F3DeleteBegin => {
+                // d-46: read-only modules disable `D` up front
+                // (TUI_DESIGN §5.3). The daemon also rejects the
+                // Purge, but gating here avoids opening a confirm
+                // prompt for an operation that can't succeed.
                 let target = app.parsed_remote.as_ref().and_then(|base| {
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                 });
                 if let Some(target) = target {
-                    if is_deletable_remote_path(&target) {
+                    if !app.browse.current_module_read_only() && is_deletable_remote_path(&target) {
                         let path = target.display();
                         app.f3_del.begin(target, path);
                     }

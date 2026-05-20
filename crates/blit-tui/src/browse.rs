@@ -124,6 +124,15 @@ pub struct BrowseState {
     /// filter is unused OR the operator has committed it
     /// (and is now navigating the filtered list normally).
     editing_filter: bool,
+    /// d-46: read-only flag of the module currently being
+    /// browsed, captured on descend from the modules list
+    /// (where `BrowseRowKind::Module` carries it). `false`
+    /// at the modules-list level and until a module is
+    /// entered. The F3 delete (`D`) dispatcher gates on this
+    /// so a read-only module's entries can't be deleted from
+    /// the TUI (TUI_DESIGN §5.3: "Read-only modules disable
+    /// the key"), matching the daemon's own enforcement.
+    module_read_only: bool,
 }
 
 impl Default for BrowseState {
@@ -142,7 +151,15 @@ impl BrowseState {
             pending_request_id: 0,
             filter: String::new(),
             editing_filter: false,
+            module_read_only: false,
         }
+    }
+
+    /// d-46: read-only status of the module being browsed.
+    /// `false` at the modules list or when no module is
+    /// entered. The F3 `D` delete dispatcher consults this.
+    pub fn current_module_read_only(&self) -> bool {
+        self.module_read_only
     }
 
     pub fn view(&self) -> &BrowseView {
@@ -344,7 +361,11 @@ impl BrowseState {
             return None;
         }
         match &row.kind {
-            BrowseRowKind::Module { .. } => {
+            BrowseRowKind::Module { read_only } => {
+                // d-46: remember the module's read-only flag for
+                // the delete gate — it's lost once we leave the
+                // modules list (dir/file rows don't carry it).
+                self.module_read_only = *read_only;
                 let name = row.name.clone();
                 self.view = BrowseView::Module {
                     name,
@@ -377,6 +398,9 @@ impl BrowseState {
             BrowseView::Module { path, .. } => {
                 if path.is_empty() {
                     self.view = BrowseView::Modules;
+                    // d-46: back at the modules list — no module
+                    // is "current", so clear the read-only flag.
+                    self.module_read_only = false;
                 } else {
                     path.pop();
                 }
@@ -1108,6 +1132,47 @@ mod tests {
             state.rows()[state.selected_index()].name,
             "backups",
             "g must land on the first matching row, not raw row 0 (home)"
+        );
+    }
+
+    // d-46: the F3 delete gate reads `current_module_read_only`,
+    // captured on descend (dir/file rows don't carry the flag).
+
+    #[test]
+    fn module_read_only_tracks_descend_into_readonly_module() {
+        let mut state = populated_state();
+        // Sorted: backups(0, read-only), home(1), photos(2), scratch(3).
+        assert!(
+            !state.current_module_read_only(),
+            "at the modules list, no module is current"
+        );
+        // Cursor starts on backups (the read-only module).
+        assert_eq!(state.rows()[state.selected_index()].name, "backups");
+        state.descend();
+        assert!(
+            state.current_module_read_only(),
+            "descending into a read-only module sets the flag"
+        );
+    }
+
+    #[test]
+    fn module_read_only_false_for_writable_module() {
+        let mut state = populated_state();
+        state.select_next(); // → home (writable)
+        assert_eq!(state.rows()[state.selected_index()].name, "home");
+        state.descend();
+        assert!(!state.current_module_read_only());
+    }
+
+    #[test]
+    fn module_read_only_clears_on_ascend_to_modules() {
+        let mut state = populated_state();
+        state.descend(); // into backups (read-only)
+        assert!(state.current_module_read_only());
+        state.ascend(); // back to the modules list
+        assert!(
+            !state.current_module_read_only(),
+            "leaving the module clears the flag"
         );
     }
 
