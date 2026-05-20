@@ -755,6 +755,29 @@ mod tests {
         assert_eq!(launch.request_id, 1);
     }
 
+    /// d-53 R2 (reviewer reopen): with a container (trailing-
+    /// slash) destination, two batch sources resolve to DISTINCT
+    /// nested paths under their own basenames — they can't
+    /// collide on the same target. (The Enter handler forces the
+    /// trailing slash for batches; see `needs_container_slash`.)
+    #[test]
+    fn container_dest_nests_each_source_distinctly() {
+        let mut a = F3PullState::new();
+        let la = a
+            .start_pull(endpoint("nas:/m/a.txt"), "/tmp/blit-d53-out/".to_string())
+            .expect("a launch");
+        let mut b = F3PullState::new();
+        let lb = b
+            .start_pull(endpoint("nas:/m/b.txt"), "/tmp/blit-d53-out/".to_string())
+            .expect("b launch");
+        assert_ne!(
+            la.dest_root, lb.dest_root,
+            "a container dest must nest each source under its own basename"
+        );
+        assert!(la.dest_root.ends_with("a.txt"), "got {:?}", la.dest_root);
+        assert!(lb.dest_root.ends_with("b.txt"), "got {:?}", lb.dest_root);
+    }
+
     #[test]
     fn start_pull_is_noop_when_busy_or_blank() {
         let mut s = F3PullState::new();

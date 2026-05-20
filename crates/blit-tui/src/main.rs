@@ -2838,6 +2838,17 @@ fn spawn_f3_pull(
     });
 }
 
+/// d-53 R2: does this batch destination need a trailing slash to
+/// force container semantics? A non-empty dest that doesn't
+/// already end in `/` does — without it, `resolve_destination`
+/// treats a non-existing path as an exact target, so multiple
+/// batch sources would collide on the same path instead of
+/// nesting under it. Blank / already-slashed dests need nothing.
+fn needs_container_slash(dest: &str) -> bool {
+    let trimmed = dest.trim_end();
+    !trimmed.is_empty() && !trimmed.ends_with('/')
+}
+
 /// d-53: drive the sequential batch pull forward after one
 /// source's pull completed. Bumps the done count, then starts
 /// the next queued source (with the captured dest) and spawns
@@ -3609,12 +3620,26 @@ fn handle_f3_pull_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             true
         }
         KeyCode::Enter => {
-            // d-53: capture the entered dest once for the batch
-            // before begin_run consumes it, so queued sources
-            // reuse it.
-            if let Some(batch) = app.f3_batch_pull.as_mut() {
-                if let Some(dest) = app.f3_pull.entering_dest() {
-                    batch.raw_dest = dest.to_string();
+            // d-53 R2: for a batch, the destination MUST be a
+            // container — multiple sources resolved against a
+            // non-existing slash-less path would each become the
+            // same exact target (overwrite/collision). Force a
+            // trailing slash so `resolve_destination` nests every
+            // source under `<dest>/<basename>`. (Single `p` is
+            // untouched — only the batch path normalizes.) The
+            // basenames are unique within one F3 view, so the
+            // nested targets never collide.
+            if app.f3_batch_pull.is_some()
+                && needs_container_slash(app.f3_pull.entering_dest().unwrap_or(""))
+            {
+                app.f3_pull.push_char('/');
+            }
+            // d-53: capture the (now container-normalized) dest
+            // once for the batch before begin_run consumes it, so
+            // queued sources reuse it.
+            if let Some(dest) = app.f3_pull.entering_dest().map(str::to_string) {
+                if let Some(batch) = app.f3_batch_pull.as_mut() {
+                    batch.raw_dest = dest;
                 }
             }
             if let Some(launch) = app.f3_pull.begin_run() {
@@ -5527,6 +5552,18 @@ mod tests {
             key_action(&k(KeyCode::Char('/'))),
             Some(UserAction::F3FilterBegin)
         ));
+    }
+
+    /// d-53 R2: `needs_container_slash` — a batch dest gets a
+    /// trailing slash forced unless it's blank or already
+    /// slash-terminated.
+    #[test]
+    fn needs_container_slash_cases() {
+        assert!(needs_container_slash("/tmp/out"));
+        assert!(needs_container_slash("relative/dir"));
+        assert!(!needs_container_slash("/tmp/out/"), "already a container");
+        assert!(!needs_container_slash(""), "blank → nothing to do");
+        assert!(!needs_container_slash("   "), "whitespace → nothing to do");
     }
 
     /// d-53: when the last queued source finishes (`remaining`
