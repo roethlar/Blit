@@ -1,9 +1,9 @@
 # d-61-f1-trigger-push: local→remote copy push from the F1 trigger
 
 **Severity**: Feature (designed — TUI_DESIGN §1 "between any two endpoints")
-**Status**: In progress / pending review (round 2)
+**Status**: In progress / pending review (round 3)
 **Branch**: `phase5/a1`
-**Commit**: `3508007` (round 1: `68f5389`)
+**Commit**: `83e8675` (round 1: `68f5389`, round 2: `3508007`)
 
 ## What
 
@@ -27,7 +27,9 @@ footgun):
   Copy launches via `start_pull`; Mirror/Move route through the
   F3 confirm gate (Move gated against module roots, d-60).
 - `Ok(Endpoint::Local(path))` → local→remote push (Copy only);
-  the dest must itself parse as `Endpoint::Remote`, else drop.
+  the dest must parse as `Endpoint::Remote` **and** pass
+  `ensure_remote_destination_supported` (round 3 — reject a
+  bare-host `Discovery` dest), else drop.
 - `Err(_)` → a malformed remote-shaped (`:/`) or forward-slash
   input → **drop** (must not become a local push). Inline
   parse-error feedback is a follow-up.
@@ -133,3 +135,24 @@ push dest is parsed the same way. Added the reviewer's regression
 case (`..._malformed_remote_source_does_not_push`): `nas:9031:/home`
 → `other:9031:/backup/` starts neither a push nor a pull. 539
 tests green, fmt + clippy clean.
+
+### Round 2 (reopened)
+
+> Bare-host push destinations still start an invalid push. The
+> push branch accepts any `Ok(Endpoint::Remote)` from
+> `parse_transfer_endpoint(&dest)` before `f1_push.begin` /
+> `spawn_f1_push`. A bare host (`nas` / `nas:9031`) parses as
+> `RemotePath::Discovery`, which the push client later rejects
+> ("missing module specification") — but the TUI already started
+> a push and showed the Running footer. Require the dest to pass
+> the destination-shape gate (`ensure_remote_destination_supported`)
+> first. Add a regression test for `dst = "nas:9031"`.
+
+**Response (83e8675):** Gated the parsed remote dest with
+`ensure_remote_destination_supported` (the CLI's preflight)
+before `f1_push.begin`/`spawn_f1_push`, so a bare-host
+`Discovery` dest is dropped without starting a push. Added
+`..._bare_host_dest_does_not_push` (`/tmp/src` → `nas:9031`
+starts neither push nor pull); the valid `nas:9031:/home/` push
+test remains the positive case. 540 tests green, fmt + clippy
+clean.
