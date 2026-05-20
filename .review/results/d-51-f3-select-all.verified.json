@@ -1,0 +1,16 @@
+{
+  "id": "d-51-f3-select-all",
+  "sha": "e9140842d6cc7079b1641618b19357a99be9af40",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T21:06:58Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "`a` maps to F3 select-all in nav mode while existing filter, pull destination, delete confirm, and Verify edit handlers keep their modal precedence.",
+    "Select-all operates on filter-visible rows only, marks them all when any visible row is unmarked, and clears the visible set when all visible rows are already marked."
+  ]
+}

@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-51-f3-select-all | Feature | `a` selects/clears all visible F3 rows | `[~]` | `phase5/a1` | `e914084` |
+| d-51-f3-select-all | Feature | `a` selects/clears all visible F3 rows | `[x]` | `phase5/a1` | `e914084` |
 
 ## Open findings
 
