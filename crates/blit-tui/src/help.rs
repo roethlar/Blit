@@ -123,6 +123,7 @@ fn help_lines() -> Vec<Line<'static>> {
         ),
         kv("u", "disk usage of selected subtree (F3)"),
         kv("space", "multi-select rows (F3)"),
+        kv("a", "select / clear all visible rows (F3)"),
         kv("D", "delete cursor row or marked set (F3) — y/N confirm"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
@@ -167,9 +168,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // 37→38 for `Ctrl-R` reload; d-41 bumped 38→39 for `u`
     // du; d-42 bumped 39→40 for `g / G` jump; d-45 bumped
     // 40→41 for `D` delete; d-49 bumped 41→42 for `space`
-    // multi-select. d-31: when the area is shorter than the
-    // modal, the operator scrolls with j/k.
-    let modal = centered(area, 70, 42);
+    // multi-select; d-51 bumped 42→43 for `a` select-all.
+    // d-31: when the area is shorter than the modal, the
+    // operator scrolls with j/k.
+    let modal = centered(area, 70, 43);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -461,6 +463,7 @@ mod tests {
             "jump to first / last row",        // d-42: g / G
             "delete cursor row or marked set", // d-45/d-50: F3 delete (`D`)
             "multi-select rows",               // d-49: F3 space
+            "select / clear all visible rows", // d-51: F3 `a`
         ] {
             assert!(
                 text.contains(needle),

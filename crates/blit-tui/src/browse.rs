@@ -187,6 +187,31 @@ impl BrowseState {
         self.marked.len()
     }
 
+    /// d-51: toggle-mark every *visible* (filter-aware) row with
+    /// one key (`a`). If all visible rows are already marked,
+    /// clears them; otherwise marks them all. No-op on an empty
+    /// view. Operates on `visible_indices` so a filter scopes the
+    /// select-all to what the operator can see.
+    pub fn toggle_mark_all_visible(&mut self) {
+        let visible: Vec<String> = self
+            .visible_indices()
+            .into_iter()
+            .map(|i| self.rows[i].name.clone())
+            .collect();
+        if visible.is_empty() {
+            return;
+        }
+        if visible.iter().all(|n| self.marked.contains(n)) {
+            for n in &visible {
+                self.marked.remove(n);
+            }
+        } else {
+            for n in visible {
+                self.marked.insert(n);
+            }
+        }
+    }
+
     /// d-50: resolve the marked rows to remote endpoints (for
     /// batch actions). Reuses `pull_source_endpoint` per row, so
     /// the same parse-fidelity guarantees apply. Returns them in
@@ -1250,6 +1275,32 @@ mod tests {
         assert!(state.is_marked("backups"));
         assert!(state.is_marked("home"));
         assert!(!state.is_marked("photos"));
+    }
+
+    #[test]
+    fn toggle_mark_all_marks_then_clears_everything_visible() {
+        let mut state = populated_state();
+        let total = state.rows().len();
+        // First press: nothing marked → mark all.
+        state.toggle_mark_all_visible();
+        assert_eq!(state.marked_count(), total, "marks every visible row");
+        // Second press: all marked → clear all.
+        state.toggle_mark_all_visible();
+        assert_eq!(state.marked_count(), 0, "clears when already all-marked");
+    }
+
+    #[test]
+    fn toggle_mark_all_is_filter_scoped() {
+        let mut state = populated_state();
+        state.begin_edit_filter();
+        state.push_filter_char('s'); // backups, photos, scratch (3 of 4)
+        state.toggle_mark_all_visible();
+        assert_eq!(
+            state.marked_count(),
+            3,
+            "select-all marks only the filter-visible rows, not `home`"
+        );
+        assert!(!state.is_marked("home"));
     }
 
     #[test]

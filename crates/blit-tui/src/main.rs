@@ -1441,6 +1441,8 @@ async fn handle_pane_action(
             UserAction::SelectLast => app.browse.select_last(),
             // d-49: `space` toggles the cursor row's mark.
             UserAction::F3ToggleMark => app.browse.toggle_mark(),
+            // d-51: `a` marks/clears all visible rows.
+            UserAction::F3ToggleMarkAll => app.browse.toggle_mark_all_visible(),
             UserAction::Descend => {
                 app.browse.descend();
             }
@@ -3813,6 +3815,10 @@ enum UserAction {
     /// the cursor row (TUI_DESIGN §5.3). Foundation for batch
     /// transfer / delete; other panes ignore it.
     F3ToggleMark,
+    /// d-51: F3 only. `a` toggle-marks every visible row (mark
+    /// all, or clear all if already all-marked). Other panes
+    /// ignore it.
+    F3ToggleMarkAll,
     /// d-45: F3 only. `D` (Shift+d) opens a delete confirm
     /// prompt for the cursor-selected remote path. No-op for
     /// a module root / non-deletable cursor, or when a delete
@@ -3958,6 +3964,8 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // filter / pull-dest prompt is open the text handlers
         // absorb space as a character first.
         KeyCode::Char(' ') => Some(UserAction::F3ToggleMark),
+        // d-51: `a` marks/clears all visible F3 rows at once.
+        KeyCode::Char('a') => Some(UserAction::F3ToggleMarkAll),
         // d-45: `D` (Shift+d) opens the F3 delete confirm
         // prompt for the cursor row. Capital chosen because
         // lowercase `d` is ProfileDisable (F4) and delete is
@@ -4392,7 +4400,8 @@ mod tests {
 
     #[test]
     fn key_action_returns_none_for_unmapped_keys() {
-        assert!(key_action(&k(KeyCode::Char('a'))).is_none());
+        // `z` is unmapped (`a` became F3ToggleMarkAll in d-51).
+        assert!(key_action(&k(KeyCode::Char('z'))).is_none());
         assert!(key_action(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
         assert!(key_action(&k(KeyCode::Char('J'))).is_none()); // case-sensitive
                                                                // `K` was unmapped before d-22; it now maps
@@ -5396,6 +5405,15 @@ mod tests {
         assert!(matches!(
             key_action(&k(KeyCode::Char(' '))),
             Some(UserAction::F3ToggleMark)
+        ));
+    }
+
+    /// d-51: `a` maps to F3ToggleMarkAll.
+    #[test]
+    fn key_action_maps_a_to_f3_toggle_mark_all() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('a'))),
+            Some(UserAction::F3ToggleMarkAll)
         ));
     }
 
