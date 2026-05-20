@@ -1258,11 +1258,7 @@ async fn handle_pane_action(
             // (and any row without a resolvable endpoint) is a
             // no-op — F3 is a remote browser.
             UserAction::Descend => {
-                let target = app
-                    .daemons
-                    .selected_row()
-                    .and_then(daemons::DaemonsState::endpoint_for_row);
-                if let Some(endpoint) = target {
+                if let Some(endpoint) = f1_browse_target(&app.daemons) {
                     retarget_browse(app, endpoint);
                 }
             }
@@ -1977,6 +1973,21 @@ const F1_DETAIL_BUFFER: usize = 8;
 /// (so the next loop iteration's kick fires), and sets the
 /// status to `Error("refreshing")` which the kick path
 /// treats as a refresh trigger.
+/// d-47 R2: the daemon endpoint `enter` on F1 should browse, or
+/// `None` when the action is a no-op.
+///
+/// Gates out the **Local** row: `DaemonsState::endpoint_for_row`
+/// returns the loopback `127.0.0.1:9031` for Local (so the
+/// daemon's own RPCs work), but F3 is a *remote* browser — Enter
+/// on Local must do nothing, not browse loopback. (Round 1
+/// retargeted on any `Some`, which silently browsed loopback.)
+fn f1_browse_target(daemons: &daemons::DaemonsState) -> Option<RemoteEndpoint> {
+    daemons
+        .selected_row()
+        .filter(|row| !row.is_local())
+        .and_then(daemons::DaemonsState::endpoint_for_row)
+}
+
 /// d-47: point the F3 browser at `endpoint` and jump to F3.
 /// Resets the browse state to a fresh Modules view and clears
 /// `browse_last_fetched_view` so the loop's fetch driver kicks a
@@ -5343,6 +5354,49 @@ mod tests {
             app.f3_del.status(),
             f3del::F3DelStatus::Done { .. }
         ));
+    }
+
+    /// d-47 R2 (reviewer reopen): `enter` on the Local row must
+    /// be a no-op — F3 is a remote browser, and Local resolves to
+    /// loopback which we must NOT browse. A fresh DaemonsState has
+    /// only the Local row with the cursor on it.
+    #[test]
+    fn f1_browse_target_is_none_for_local_row() {
+        let daemons = daemons::DaemonsState::new();
+        assert!(
+            f1_browse_target(&daemons).is_none(),
+            "Enter on the Local row must not retarget the browser"
+        );
+    }
+
+    /// d-47 R2: `enter` on a discovered REMOTE daemon resolves to
+    /// that daemon's endpoint (the path that should retarget).
+    #[test]
+    fn f1_browse_target_is_some_for_remote_row() {
+        use blit_core::mdns::MdnsDiscoveredService;
+        use std::collections::HashMap;
+        use std::net::Ipv4Addr;
+
+        let mut daemons = daemons::DaemonsState::new();
+        let svc = MdnsDiscoveredService {
+            fullname: "skippy._blit._tcp.local.".to_string(),
+            instance_name: "skippy".to_string(),
+            hostname: "skippy.local.".to_string(),
+            port: 9031,
+            addresses: vec![Ipv4Addr::new(192, 168, 1, 20)],
+            properties: HashMap::new(),
+        };
+        daemons.replace_from_discovery(&[svc], std::time::Instant::now());
+        // Move the cursor off the Local row (index 0) onto skippy.
+        daemons.select_next();
+        assert!(
+            !daemons.selected_row().unwrap().is_local(),
+            "cursor should be on the remote row now"
+        );
+        assert!(
+            f1_browse_target(&daemons).is_some(),
+            "Enter on a remote daemon resolves to its endpoint"
+        );
     }
 
     /// d-47: `retarget_browse` points F3 at a new daemon — sets
