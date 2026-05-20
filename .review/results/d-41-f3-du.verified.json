@@ -1,0 +1,17 @@
+{
+  "id": "d-41-f3-du",
+  "sha": "271d77e1de48d31dd9981ff0c441f276fb1661f7",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T18:14:40Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace",
+    "cargo test -p blit-daemon disk_usage_depth_tests"
+  ],
+  "notes": [
+    "Round 2 changes F3 du from unbounded depth 0 to bounded F3_DU_MAX_DEPTH = 1.",
+    "Daemon depth tests pin that depth 1 keeps the root total complete while bounding streamed rows, and that depth 0 remains unbounded."
+  ]
+}

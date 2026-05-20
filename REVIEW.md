@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-41-f3-du | Feature | Subtree disk-usage on the F3 cursor via `u` (round 2) | `[~]` | `phase5/a1` | `271d77e` |
+| d-41-f3-du | Feature | Subtree disk-usage on the F3 cursor via `u` (round 2) | `[x]` | `phase5/a1` | `271d77e` |
 
 ## Open findings
 
