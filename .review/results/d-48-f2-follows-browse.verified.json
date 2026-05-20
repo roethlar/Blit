@@ -1,0 +1,16 @@
+{
+  "id": "d-48-f2-follows-browse",
+  "sha": "68de0152be3fe9de62452b0500324846d030b383",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T20:17:15Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "F1 daemon switching now repoints both F3 browse_target and F2 parsed_remote, drops the old Subscribe stream, clears F2 rows, and bumps the setup generation.",
+    "Round 2 clears cancel_status during the daemon switch so stale single/batch cancel confirmations and late Sending replies from the old daemon cannot act under the new active endpoint."
+  ]
+}
