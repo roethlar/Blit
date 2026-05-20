@@ -1,0 +1,16 @@
+{
+  "id": "d-47-f1-browse-nav",
+  "sha": "ab3e8a8f91a8bf1a84bf837dfff17dee72b65ed0",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T20:04:23Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "Round 2 routes F1 Descend through f1_browse_target, which filters out the synthetic Local row before resolving a RemoteEndpoint.",
+    "Regression coverage now pins Local row to None and a discovered remote row to Some, closing the reopened Local-row no-op finding."
+  ]
+}

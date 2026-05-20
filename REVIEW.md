@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-47-f1-browse-nav | Feature | `enter` on an F1 daemon row browses it on F3 (round 2) | `[~]` | `phase5/a1` | `ab3e8a8` |
+| d-47-f1-browse-nav | Feature | `enter` on an F1 daemon row browses it on F3 (round 2) | `[x]` | `phase5/a1` | `ab3e8a8` |
 
 ## Open findings
 
