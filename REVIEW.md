@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| _none_ | | | | | |
+| d-38-f3-pull-ttl | Feature | Auto-hide TTL on the F3 pull Done/Error fragment | `[~]` | `phase5/a1` | `7c523e8` |
 
 ## Open findings
 
