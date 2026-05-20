@@ -1,0 +1,16 @@
+{
+  "id": "d-46-readonly-delete-gate",
+  "sha": "57c5bc69a977367e4fcc638dfae5ab991ec8f4c5",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T19:45:27Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "BrowseState captures read_only on module descend and clears it when ascending back to the module list.",
+    "F3DeleteBegin now suppresses the delete confirm for read-only modules while keeping daemon-side enforcement as a backstop."
+  ]
+}
