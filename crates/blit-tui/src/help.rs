@@ -106,7 +106,7 @@ fn help_lines() -> Vec<Line<'static>> {
         section_header("F1 · F2 · F3 navigation"),
         kv("↑ ↓ / j k", "cursor (F1, F2 active, F3)"),
         kv("g / G", "jump to first / last row (F1, F2, F3)"),
-        kv("Enter / → / l", "descend (F3)"),
+        kv("Enter / → / l", "descend (F3) · browse daemon (F1)"),
         kv("← / h", "ascend (F3)"),
         kv(
             "K",

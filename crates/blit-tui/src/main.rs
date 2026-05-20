@@ -138,8 +138,17 @@ impl From<ScreenArg> for Screen {
 struct AppState {
     /// Active pane. Changes via F-key navigation.
     current_screen: Screen,
-    /// Shared remote endpoint (parsed once at startup).
+    /// Shared remote endpoint (parsed once at startup). This is
+    /// the F2 transfers target — its Subscribe stream stays bound
+    /// to the launch remote for the session.
     parsed_remote: Option<RemoteEndpoint>,
+    /// d-47: the F3 BROWSE target. Initialized to the launch
+    /// remote, but `enter` on an F1 daemon row retargets it so
+    /// the operator can browse any discovered daemon. F3
+    /// browse/pull/du/delete all key off this, not
+    /// `parsed_remote`. (F2 deliberately stays on the launch
+    /// remote — see the d-47 finding's known gaps.)
+    browse_target: Option<RemoteEndpoint>,
     /// Display label for the remote (raw user input or
     /// "(no remote)").
     remote_label: String,
@@ -502,6 +511,7 @@ async fn run_router(
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
+        browse_target: parsed_remote.clone(),
         remote_label,
         daemons: DaemonsState::new(),
         daemons_last_fetched: None,
@@ -597,15 +607,17 @@ async fn run_router(
             );
         }
         // F3 kicks a browse fetch when its view changed.
+        // d-47: keyed off `browse_target` (the F3 daemon), not
+        // `parsed_remote` (the F2 daemon).
         if matches!(app.current_screen, Screen::F3)
-            && app.parsed_remote.is_some()
+            && app.browse_target.is_some()
             && views_differ(app.browse_last_fetched_view.as_ref(), app.browse.view())
             && matches!(
                 app.browse.status(),
                 browse::BrowseFetchStatus::Idle | browse::BrowseFetchStatus::Error { .. }
             )
         {
-            if let Some(ep) = app.parsed_remote.as_ref() {
+            if let Some(ep) = app.browse_target.as_ref() {
                 kick_browse_fetch(&mut app.browse, ep, &app.browse_fetch_tx);
                 app.browse_last_fetched_view = Some(app.browse.view().clone());
             }
@@ -680,10 +692,20 @@ async fn run_router(
                 // `display()` rather than a hand-built
                 // string. Bound here so the owned String
                 // outlives the render call.
-                let f3_pull_spec: Option<String> = app.parsed_remote.as_ref().and_then(|base| {
+                // d-47: cursor specs derive from the F3 browse
+                // target, not the F2 remote.
+                let f3_pull_spec: Option<String> = app.browse_target.as_ref().and_then(|base| {
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                         .map(|e| e.display())
                 });
+                // d-47: F3 header shows the browsed daemon (which
+                // `enter` on F1 can change), falling back to the
+                // launch label when no browse target is set.
+                let f3_label: String = app
+                    .browse_target
+                    .as_ref()
+                    .map(|e| e.host_port_display())
+                    .unwrap_or_else(|| app.remote_label.clone());
                 match app.current_screen {
                     Screen::F1 => screens::f1::render_into(frame, body_area, &app.daemons, now),
                     Screen::F2 => screens::f2::render_into(
@@ -705,7 +727,7 @@ async fn run_router(
                         frame,
                         body_area,
                         &app.browse,
-                        &app.remote_label,
+                        &f3_label,
                         f3_pull_spec.as_deref(),
                         &f3_pull_to_display(app.f3_pull.status()),
                         &f3_du_to_display(app.f3_du.status(), f3_pull_spec.as_deref()),
@@ -1190,7 +1212,7 @@ async fn run_router(
                             if app.f3_del.apply_done(request_id, files_deleted) {
                                 handle_f3_refresh(
                                     &mut app.browse,
-                                    app.parsed_remote.is_some(),
+                                    app.browse_target.is_some(),
                                     &mut app.browse_last_fetched_view,
                                 );
                             }
@@ -1229,6 +1251,21 @@ async fn handle_pane_action(
             UserAction::SelectPrev => app.daemons.select_prev(),
             UserAction::SelectFirst => app.daemons.select_first(),
             UserAction::SelectLast => app.daemons.select_last(),
+            // d-47: `enter` / `l` / `→` on a daemon row switches
+            // the F3 browse target to that daemon and jumps to
+            // F3. Resolve the endpoint first so the immutable
+            // `app.daemons` borrow ends before we mutate. Local
+            // (and any row without a resolvable endpoint) is a
+            // no-op — F3 is a remote browser.
+            UserAction::Descend => {
+                let target = app
+                    .daemons
+                    .selected_row()
+                    .and_then(daemons::DaemonsState::endpoint_for_row);
+                if let Some(endpoint) = target {
+                    retarget_browse(app, endpoint);
+                }
+            }
             _ => {}
         },
         Screen::F2 => match action {
@@ -1388,7 +1425,7 @@ async fn handle_pane_action(
             UserAction::Refresh => {
                 handle_f3_refresh(
                     &mut app.browse,
-                    app.parsed_remote.is_some(),
+                    app.browse_target.is_some(),
                     &mut app.browse_last_fetched_view,
                 );
             }
@@ -1411,7 +1448,7 @@ async fn handle_pane_action(
             // already entering-dest or running.
             UserAction::F3PullBegin => {
                 let busy = app.f3_pull.is_entering_dest() || app.f3_pull.is_running();
-                let source = app.parsed_remote.as_ref().and_then(|base| {
+                let source = app.browse_target.as_ref().and_then(|base| {
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                 });
                 if !busy {
@@ -1425,7 +1462,7 @@ async fn handle_pane_action(
             // the canonical `.display()` spec is both the du
             // target and the path the renderer gates on.
             UserAction::F3DuBegin => {
-                let target = app.parsed_remote.as_ref().and_then(|base| {
+                let target = app.browse_target.as_ref().and_then(|base| {
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                 });
                 if let Some(target) = target {
@@ -1448,7 +1485,7 @@ async fn handle_pane_action(
                 // (TUI_DESIGN §5.3). The daemon also rejects the
                 // Purge, but gating here avoids opening a confirm
                 // prompt for an operation that can't succeed.
-                let target = app.parsed_remote.as_ref().and_then(|base| {
+                let target = app.browse_target.as_ref().and_then(|base| {
                     browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
                 });
                 if let Some(target) = target {
@@ -1940,6 +1977,18 @@ const F1_DETAIL_BUFFER: usize = 8;
 /// (so the next loop iteration's kick fires), and sets the
 /// status to `Error("refreshing")` which the kick path
 /// treats as a refresh trigger.
+/// d-47: point the F3 browser at `endpoint` and jump to F3.
+/// Resets the browse state to a fresh Modules view and clears
+/// `browse_last_fetched_view` so the loop's fetch driver kicks a
+/// fresh listing for the new daemon. `parsed_remote` (the F2
+/// target) is intentionally left alone.
+fn retarget_browse(app: &mut AppState, endpoint: RemoteEndpoint) {
+    app.browse_target = Some(endpoint);
+    app.browse = browse::BrowseState::new();
+    app.browse_last_fetched_view = None;
+    app.current_screen = Screen::F3;
+}
+
 fn handle_f3_refresh(
     state: &mut BrowseState,
     has_endpoint: bool,
@@ -5296,6 +5345,46 @@ mod tests {
         ));
     }
 
+    /// d-47: `retarget_browse` points F3 at a new daemon — sets
+    /// browse_target, resets the browse view to Modules, clears
+    /// the last-fetched marker (so the loop re-fetches), and
+    /// navigates to F3. `parsed_remote` (F2's target) is left
+    /// untouched.
+    #[test]
+    fn retarget_browse_switches_f3_target_and_navigates() {
+        let mut app = make_test_app_state(Screen::F1);
+        let launch = RemoteEndpoint::parse("nas:/home/").expect("launch");
+        app.parsed_remote = Some(launch.clone());
+        app.browse_target = Some(launch.clone());
+        // Pretend F3 had already fetched a module view.
+        app.browse.descend(); // (no rows → no-op, view stays Modules)
+        app.browse_last_fetched_view = Some(app.browse.view().clone());
+
+        let other = RemoteEndpoint::parse("skippy:/media/").expect("other daemon");
+        retarget_browse(&mut app, other.clone());
+
+        assert_eq!(app.current_screen, Screen::F3, "jumps to F3");
+        assert_eq!(
+            app.browse_target.as_ref().map(|e| e.host_port_display()),
+            Some(other.host_port_display()),
+            "F3 now targets the selected daemon"
+        );
+        assert!(
+            app.browse_last_fetched_view.is_none(),
+            "cleared so the loop re-fetches the new daemon's modules"
+        );
+        assert!(
+            matches!(app.browse.view(), browse::BrowseView::Modules),
+            "browse resets to the Modules list"
+        );
+        // F2's target is unchanged — it stays on the launch remote.
+        assert_eq!(
+            app.parsed_remote.as_ref().map(|e| e.host_port_display()),
+            Some(launch.host_port_display()),
+            "parsed_remote (F2) is not retargeted"
+        );
+    }
+
     /// d-45 R2: a *stale* delete reply (superseded run) must NOT
     /// trigger a refresh — `apply_done` returns false and the
     /// view stays as-is.
@@ -5485,6 +5574,7 @@ mod tests {
         AppState {
             current_screen: screen,
             parsed_remote: None,
+            browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             daemons_last_fetched: None,
@@ -5857,6 +5947,7 @@ mod tests {
         let mut app = AppState {
             current_screen: Screen::F4,
             parsed_remote: None,
+            browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             daemons_last_fetched: None,
@@ -5917,6 +6008,7 @@ mod tests {
         let mut app = AppState {
             current_screen: Screen::F4,
             parsed_remote: None,
+            browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             daemons_last_fetched: None,
@@ -6028,6 +6120,7 @@ mod tests {
         let mut app = AppState {
             current_screen: Screen::F4,
             parsed_remote: None,
+            browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             daemons_last_fetched: None,
@@ -6098,6 +6191,7 @@ mod tests {
         let mut app = AppState {
             current_screen: Screen::F1,
             parsed_remote: None,
+            browse_target: None,
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             daemons_last_fetched: None,
