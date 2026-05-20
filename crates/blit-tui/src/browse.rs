@@ -512,7 +512,11 @@ impl BrowseState {
     /// row 0 (the new first-matching row in the cleared
     /// filter).
     pub fn cancel_filter(&mut self) {
-        self.reset_view_state();
+        // d-49 R2: clearing the filter does NOT change the row
+        // set, so multi-select marks must survive — only the
+        // filter is dismissed. (Earlier this called
+        // `reset_view_state`, which also dropped marks.)
+        self.clear_filter_only();
         self.selected = 0;
     }
 
@@ -600,14 +604,22 @@ impl BrowseState {
     }
 
     /// Reset filter + edit-mode to the cleared state.
+    /// Clear only the filter text + edit mode, preserving the
+    /// d-49 multi-select marks. Used when the filter is
+    /// dismissed WITHOUT a row-set change (`cancel_filter`).
+    fn clear_filter_only(&mut self) {
+        self.filter.clear();
+        self.editing_filter = false;
+    }
+
     /// Called from `apply_modules` / `apply_listing` /
     /// `descend` / `ascend` whenever the row set changes
     /// underneath us. Clears the filter AND the d-49 multi-
     /// select marks — both are keyed to the current row set,
-    /// which is about to be replaced.
+    /// which is about to be replaced. (NOT called on a mere
+    /// filter cancel — see `clear_filter_only`.)
     fn reset_view_state(&mut self) {
-        self.filter.clear();
-        self.editing_filter = false;
+        self.clear_filter_only();
         self.marked.clear();
     }
 }
@@ -1238,6 +1250,26 @@ mod tests {
             0,
             "changing views drops marks (names aren't unique across views)"
         );
+    }
+
+    /// d-49 R2 (reviewer reopen): cancelling a filter (`Esc`)
+    /// does NOT change the row set, so marks must survive — only
+    /// a real view change (descend/ascend/re-fetch) drops them.
+    #[test]
+    fn marks_survive_filter_cancel() {
+        let mut state = populated_state();
+        state.toggle_mark(); // mark backups
+        assert_eq!(state.marked_count(), 1);
+        state.begin_edit_filter();
+        state.push_filter_char('h'); // filter to "home"
+        state.cancel_filter(); // Esc — same row set
+        assert_eq!(
+            state.marked_count(),
+            1,
+            "filter cancel must preserve marks (no row-set change)"
+        );
+        assert!(state.is_marked("backups"));
+        assert_eq!(state.filter(), "", "but the filter itself is cleared");
     }
 
     #[test]
