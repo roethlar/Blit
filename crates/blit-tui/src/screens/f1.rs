@@ -19,8 +19,8 @@
 //! │ ...                                              │
 //! ├── selected detail (Length 5) ────────────────────┤
 //! │ mycroft · 192.168.1.10:9031 · v0.1.0             │
-//! │ modules: home, media, backups                    │
-//! │ delegation: yes                                  │
+//! │ modules: home (12 GiB / 16 GiB), media, backups  │
+//! │ delegation: yes               [d-54: df capacity]│
 //! ├── footer (1 line) ───────────────────────────────┤
 //! │ status · q quit · r refresh · ↑↓ select          │
 //! └──────────────────────────────────────────────────┘
@@ -206,7 +206,11 @@ fn detail_body_for_remote(
     now: Instant,
 ) -> Vec<Line<'static>> {
     match detail {
-        Some(DaemonDetail::Loaded { state, fetched_at }) => {
+        Some(DaemonDetail::Loaded {
+            state,
+            capacities,
+            fetched_at,
+        }) => {
             let counters_line = format!(
                 "active: {} · recent: {} · push: {} · pull: {} · errors: {}",
                 state.active.len(),
@@ -235,8 +239,25 @@ fn detail_body_for_remote(
                 // mDNS-advertised names.
                 format!("modules: {} (from mDNS)", row.modules.join(", "))
             } else {
-                let names: Vec<String> = state.modules.iter().map(|m| m.name.clone()).collect();
-                format!("modules: {}", names.join(", "))
+                // d-54: annotate each module with its capacity
+                // (used / total) when the df fan-out got it;
+                // bare name otherwise.
+                let parts: Vec<String> = state
+                    .modules
+                    .iter()
+                    .map(
+                        |m| match capacities.iter().find(|(name, _, _)| name == &m.name) {
+                            Some((_, used, total)) if *total > 0 => format!(
+                                "{} ({} / {})",
+                                m.name,
+                                format_bytes(*used),
+                                format_bytes(*total)
+                            ),
+                            _ => m.name.clone(),
+                        },
+                    )
+                    .collect();
+                format!("modules: {}", parts.join(", "))
             };
             let uptime_line = format!(
                 "uptime: {} · as of {}",
@@ -323,7 +344,9 @@ fn local_detail_lines(
 ) -> Vec<Line<'static>> {
     let header = format!("{} · this machine", row.instance_name);
     let body = match detail {
-        Some(DaemonDetail::Loaded { state, fetched_at }) => {
+        Some(DaemonDetail::Loaded {
+            state, fetched_at, ..
+        }) => {
             let live = format!(
                 "local daemon detected · v{} · uptime {}",
                 state.version,
@@ -394,6 +417,23 @@ fn local_detail_lines(
 /// Format an uptime in seconds as e.g. "3d 4h 12m" or
 /// "1m 32s" — readable at glance, doesn't try to be
 /// millisecond-exact.
+/// d-54: byte formatter for the per-module capacity line. Same
+/// IEC tiers as the F2/F4 formatters (d-25); duplicated per the
+/// existing per-screen convention.
+fn format_bytes(n: u64) -> String {
+    if n >= 1 << 40 {
+        format!("{:.2} TiB", n as f64 / (1u64 << 40) as f64)
+    } else if n >= 1 << 30 {
+        format!("{:.2} GiB", n as f64 / (1u64 << 30) as f64)
+    } else if n >= 1 << 20 {
+        format!("{:.2} MiB", n as f64 / (1u64 << 20) as f64)
+    } else if n >= 1 << 10 {
+        format!("{:.2} KiB", n as f64 / (1u64 << 10) as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 fn format_uptime(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3600;
@@ -709,6 +749,7 @@ mod tests {
         };
         let detail = DaemonDetail::Loaded {
             state: Box::new(state),
+            capacities: Vec::new(),
             fetched_at: Instant::now(),
         };
         let lines = detail_lines(&r, Some(&detail), Instant::now());
@@ -721,6 +762,40 @@ mod tests {
         let uptime = line_text(&lines[3]);
         assert!(uptime.contains("uptime"));
         assert!(uptime.contains("1d"));
+    }
+
+    /// d-54: the modules line annotates each module with its
+    /// capacity (used / total) when the df fan-out provided it,
+    /// and falls back to the bare name when it didn't.
+    #[test]
+    fn detail_lines_annotate_module_capacity_with_fallback() {
+        use blit_core::generated::{DaemonState, ModuleInfo};
+        let r = row("mycroft");
+        let module = |n: &str| ModuleInfo {
+            name: n.to_string(),
+            path: format!("/srv/{n}"),
+            read_only: false,
+        };
+        let state = DaemonState {
+            modules: vec![module("home"), module("media")],
+            ..DaemonState::default()
+        };
+        let detail = DaemonDetail::Loaded {
+            state: Box::new(state),
+            // `home` has capacity; `media` does not (df failed).
+            capacities: vec![("home".to_string(), 12u64 << 30, 16u64 << 30)],
+            fetched_at: Instant::now(),
+        };
+        let lines = detail_lines(&r, Some(&detail), Instant::now());
+        let modules = line_text(&lines[2]);
+        assert!(
+            modules.contains("home (12.00 GiB / 16.00 GiB)"),
+            "home shows capacity: {modules}"
+        );
+        assert!(
+            modules.contains("media") && !modules.contains("media ("),
+            "media falls back to bare name: {modules}"
+        );
     }
 
     /// a1-3b: Pending state shows a "fetching..." spinner
@@ -773,6 +848,7 @@ mod tests {
         };
         let detail = DaemonDetail::Loaded {
             state: Box::new(state),
+            capacities: Vec::new(),
             fetched_at: Instant::now(),
         };
         let lines = detail_lines(&r, Some(&detail), Instant::now());

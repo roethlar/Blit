@@ -1008,8 +1008,9 @@ async fn run_router(
             update = detail_rx.recv() => {
                 if let Some(DetailUpdate { instance_name, request_id, result }) = update {
                     let detail = match result {
-                        Ok(daemon_state) => DaemonDetail::Loaded {
+                        Ok((daemon_state, capacities)) => DaemonDetail::Loaded {
                             state: Box::new(daemon_state),
+                            capacities,
                             fetched_at: Instant::now(),
                         },
                         Err(message) => DaemonDetail::Error { message },
@@ -2015,9 +2016,26 @@ fn spawn_detail_fetch(
     tx: mpsc::Sender<DetailUpdate>,
 ) {
     tokio::spawn(async move {
-        let result = jobs::query(&endpoint, 0)
-            .await
-            .map_err(|err| format!("{err:#}"));
+        let result = match jobs::query(&endpoint, 0).await {
+            Ok(state) => {
+                // d-54: fan out a `df` per advertised module to
+                // enrich the detail with capacity. Best-effort —
+                // a module whose FilesystemStats fails is simply
+                // omitted (the GetState succeeded, which is the
+                // primary payload). Sequential keeps it simple;
+                // module counts are small.
+                let mut capacities = Vec::new();
+                for module in &state.modules {
+                    if let Ok(stats) =
+                        blit_app::admin::df::query(&endpoint, module.name.clone()).await
+                    {
+                        capacities.push((module.name.clone(), stats.used_bytes, stats.total_bytes));
+                    }
+                }
+                Ok((state, capacities))
+            }
+            Err(err) => Err(format!("{err:#}")),
+        };
         let _ = tx
             .send(DetailUpdate {
                 instance_name,
@@ -2028,11 +2046,13 @@ fn spawn_detail_fetch(
     });
 }
 
-/// Reply envelope for the detail fetcher.
+/// Reply envelope for the detail fetcher. d-54: the `Ok`
+/// payload bundles the GetState snapshot with the per-module
+/// `(name, used, total)` capacity fan-out.
 struct DetailUpdate {
     instance_name: String,
     request_id: u64,
-    result: Result<DaemonState, String>,
+    result: Result<(DaemonState, Vec<(String, u64, u64)>), String>,
 }
 
 /// Bounded channel depth for detail-fetch replies. 8 is
@@ -5467,6 +5487,7 @@ mod tests {
             "alpha".to_string(),
             DaemonDetail::Loaded {
                 state: Box::new(prior_state),
+                capacities: Vec::new(),
                 fetched_at: Instant::now(),
             },
         );

@@ -130,6 +130,12 @@ pub enum DaemonDetail {
     /// renderer show "as of Xs ago" if we want.
     Loaded {
         state: Box<DaemonState>,
+        /// d-54: per-module `(name, used_bytes, total_bytes)`
+        /// from a `df`/FilesystemStats fan-out alongside the
+        /// GetState fetch. Best-effort — a module whose df
+        /// failed is simply absent, and the renderer falls back
+        /// to its name only. Empty when no modules / all failed.
+        capacities: Vec<(String, u64, u64)>,
         fetched_at: Instant,
     },
     /// Last fetch failed. Carry the message so the operator
@@ -516,6 +522,7 @@ mod tests {
             "alpha".to_string(),
             DaemonDetail::Loaded {
                 state: Box::new(DaemonState::default()),
+                capacities: Vec::new(),
                 fetched_at: Instant::now(),
             },
         );
@@ -859,6 +866,7 @@ mod tests {
             id,
             DaemonDetail::Loaded {
                 state: Box::new(DaemonState::default()),
+                capacities: Vec::new(),
                 fetched_at: Instant::now(),
             },
         );
