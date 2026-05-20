@@ -102,4 +102,52 @@ green.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 verdict — reopened (`.review/results/d-50-f3-batch-delete.reopened.md`)
+
+One finding:
+
+- **Batch Done/Error footer persisted indefinitely.** Batch sets
+  `gate_path = None`, which the bridge treats as always-visible
+  — but nothing ever cleared a batch terminal outcome, so
+  `deleted N item(s)` stayed on screen through Down / filter /
+  refresh / navigation. Single-row deletes self-hide on cursor
+  move; batch had no equivalent.
+
+### Round 2 fix
+
+Added the d-38 pull-TTL pattern, scoped to batch outcomes:
+
+- `F3DelStatus::Done`/`Error` carry `finished_at` (stamped by
+  `apply_*`, which now take an `at: Instant`).
+- `clear_terminal_if_expired(now, ttl)` sweeps **only**
+  `gate_path = None` (batch) terminals to `Idle` after the TTL;
+  single-row (`gate_path = Some`) outcomes are left to their
+  cursor-move path gate, untouched.
+- `is_batch_terminal()` gates `needs_live_tick`, so the loop
+  wakes to expire a batch outcome (single outcomes are
+  event-cleared and don't need ticking).
+- `BATCH_TERMINAL_TTL = 5s` (the d-38 fixed baseline); the loop
+  calls the clear each frame next to the pull-TTL clear.
+
+### Round 2 tests
+
++2 tests (473 → 475):
+
+- `batch_outcome_auto_hides_after_ttl` — batch Done stays within
+  the TTL, clears to Idle at/after it; `is_batch_terminal`
+  flips false.
+- `single_outcome_is_not_swept_by_batch_ttl` — a single-row
+  outcome survives the TTL sweep (relies on the path gate).
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace` all
+green.
+
+### Lesson restated
+
+A "shows until the next action" outcome needs a concrete clearing
+mechanism — there has to be an *action* that actually clears it.
+Single delete had one (cursor-move path gate); batch's
+`gate_path = None` removed the gate without substituting a timer,
+so "until the next action" was really "forever." The d-38 TTL is
+the substitute.
