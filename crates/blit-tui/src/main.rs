@@ -3956,7 +3956,9 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                 // source was a footgun. `parse_transfer_endpoint`
                 // returns Local only for real paths and Err for
                 // remote-shaped (`:/`) inputs, which we drop.
-                use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
+                use blit_app::endpoints::{
+                    ensure_remote_destination_supported, parse_transfer_endpoint, Endpoint,
+                };
                 match parse_transfer_endpoint(&src) {
                     // Remote source → remote→local (pull family).
                     Ok(Endpoint::Remote(source)) => match kind {
@@ -4011,15 +4013,27 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                     // status shows in the F1 footer — no screen jump.
                     Ok(Endpoint::Local(local_src)) => {
                         if kind == f3pull::PullKind::Copy {
+                            // d-61 R3 (reviewer reopen): the dest must
+                            // be a remote endpoint AND name a module /
+                            // root — a bare host (`nas:9031`) parses as
+                            // `RemotePath::Discovery`, which the push
+                            // client later rejects ("missing module
+                            // specification"). Gate it with the same
+                            // preflight the CLI uses
+                            // (`ensure_remote_destination_supported`)
+                            // so we don't start a push + show a Running
+                            // footer for a transfer that can't succeed.
                             if let Ok(Endpoint::Remote(remote)) = parse_transfer_endpoint(&dest) {
-                                let label = remote.display();
-                                if let Some(request_id) = app.f1_push.begin(label) {
-                                    spawn_f1_push(
-                                        request_id,
-                                        local_src,
-                                        remote,
-                                        app.f1_push_reply_tx.clone(),
-                                    );
+                                if ensure_remote_destination_supported(&remote).is_ok() {
+                                    let label = remote.display();
+                                    if let Some(request_id) = app.f1_push.begin(label) {
+                                        spawn_f1_push(
+                                            request_id,
+                                            local_src,
+                                            remote,
+                                            app.f1_push_reply_tx.clone(),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -7053,6 +7067,27 @@ mod tests {
             "a malformed remote source must not become a local push"
         );
         assert!(!app.f3_pull.is_running(), "and it isn't a pull either");
+    }
+
+    /// d-61 R3 (reviewer reopen): a bare-host push destination
+    /// (`nas:9031`) parses as a remote endpoint but is
+    /// `RemotePath::Discovery` — no module/root — which the push
+    /// client rejects. The dest-shape gate must refuse it BEFORE
+    /// starting a push, so no Running footer appears for a transfer
+    /// that can't succeed.
+    #[test]
+    fn handle_f1_trigger_keystroke_bare_host_dest_does_not_push() {
+        let mut app = make_test_app_state(Screen::F1);
+        app.f1_trigger.begin("/tmp/src".to_string());
+        for c in "nas:9031".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(
+            !app.f1_push.is_running(),
+            "a bare-host (module-less) dest must not start a push"
+        );
+        assert!(!app.f3_pull.is_running());
     }
 
     /// d-61: push is copy-only this slice — a local source with
