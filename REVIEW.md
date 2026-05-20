@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-37-f3-pull-progress (round 2) | Feature | Byte accumulator avoids data-plane double-count | `[~]` | `phase5/a1` | `cd1751a` |
+| _none_ | | | | | |
 
 ## Open findings
 
@@ -141,3 +141,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `eb1ee45` F3 pull-source preview derived via `RemoteEndpoint` (`d-34-f3-pull-endpoint`)
 - `beb5d9e` F3 pull destination prompt + execution with resolved local destinations (`d-35-f3-pull-execute` round 2)
 - `27a8005` Ctrl+R hot-reload of tui.toml with parse-error keep-current semantics (`d-36-hot-reload-config`)
+- `cd1751a` F3 pull live byte/file footer with pull-receive accumulator semantics (`d-37-f3-pull-progress` round 2)
