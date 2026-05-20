@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-48-f2-follows-browse | Feature | F2 re-subscribes when you switch daemons on F1 (round 2) | `[x]` | `phase5/a1` | `68de015` |
+| d-49-f3-multiselect | Feature | `space` multi-select on F3 (batch-action foundation) | `[~]` | `phase5/a1` | `d9fa2e0` |
 
 ## Open findings
 
