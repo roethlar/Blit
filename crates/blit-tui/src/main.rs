@@ -26,6 +26,7 @@ mod browse;
 mod config;
 mod daemons;
 mod diagnostics;
+mod f3du;
 mod f3pull;
 mod help;
 mod profile;
@@ -218,6 +219,10 @@ struct AppState {
     /// d-37: live pull-progress snapshots from the running
     /// pull task.
     f3_pull_progress_tx: mpsc::Sender<F3PullProgress>,
+    /// d-41: F3 disk-usage (`u`) lifecycle — the subtree
+    /// total for the cursor row, shown in the Stats block.
+    f3_du: f3du::F3DuState,
+    f3_du_reply_tx: mpsc::Sender<F3DuReply>,
     /// d-36: transient banner shown after a `Ctrl+R`
     /// config reload (`config reloaded` on success, the
     /// parse error on failure). Auto-hides via a
@@ -483,6 +488,9 @@ async fn run_router(
     // intermediate snapshots when full.
     let (f3_pull_progress_tx, mut f3_pull_progress_rx) = mpsc::channel::<F3PullProgress>(8);
 
+    // d-41: F3 du reply channel.
+    let (f3_du_reply_tx, mut f3_du_reply_rx) = mpsc::channel::<F3DuReply>(2);
+
     let mut app = AppState {
         current_screen: args.screen.into(),
         parsed_remote: parsed_remote.clone(),
@@ -523,6 +531,8 @@ async fn run_router(
         f3_pull: f3pull::F3PullState::new(),
         f3_pull_reply_tx: f3_pull_reply_tx.clone(),
         f3_pull_progress_tx: f3_pull_progress_tx.clone(),
+        f3_du: f3du::F3DuState::new(),
+        f3_du_reply_tx: f3_du_reply_tx.clone(),
         reload_banner: None,
     };
 
@@ -688,6 +698,7 @@ async fn run_router(
                         &app.remote_label,
                         f3_pull_spec.as_deref(),
                         &f3_pull_to_display(app.f3_pull.status()),
+                        &f3_du_to_display(app.f3_du.status(), f3_pull_spec.as_deref()),
                         now,
                     ),
                     Screen::F4 => screens::f4::render_into(
@@ -1129,6 +1140,20 @@ async fn run_router(
                         .apply_progress(request_id, files, bytes, bytes_per_sec);
                 }
             }
+            // d-41: F3 du replies. Same generation guard as the
+            // pull reply — `apply_*` drop a superseded query.
+            reply = f3_du_reply_rx.recv() => {
+                if let Some(F3DuReply { request_id, result }) = reply {
+                    match result {
+                        Ok((bytes, files)) => {
+                            app.f3_du.apply_done(request_id, bytes, files);
+                        }
+                        Err(message) => {
+                            app.f3_du.apply_error(request_id, message);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1340,6 +1365,19 @@ async fn handle_pane_action(
                     if let Some(source) = source {
                         app.f3_pull.begin(source);
                     }
+                }
+            }
+            // d-41: `u` runs du for the cursor row. Resolves
+            // the same cursor endpoint the pull preview uses;
+            // the canonical `.display()` spec is both the du
+            // target and the path the renderer gates on.
+            UserAction::F3DuBegin => {
+                let target = app.parsed_remote.as_ref().and_then(|base| {
+                    browse::pull_source_endpoint(app.browse.view(), app.browse.selected_row(), base)
+                });
+                if let Some(target) = target {
+                    let id = app.f3_du.begin(target.display());
+                    spawn_f3_du(id, target, app.f3_du_reply_tx.clone());
                 }
             }
             _ => {}
@@ -2126,12 +2164,97 @@ fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDispl
     }
 }
 
+/// d-41: bridge the F3 du state machine to the renderer-facing
+/// `F3DuDisplay`. This is where the path-match gating lives:
+/// the result only shows while the cursor is still on the path
+/// the du was computed for (`current_path`, the cursor's
+/// canonical spec). A `Running`/`Done`/`Error` for any other
+/// path renders as `Hidden`, so an outdated subtree total never
+/// appears against the wrong row.
+fn f3_du_to_display(
+    status: &f3du::F3DuStatus,
+    current_path: Option<&str>,
+) -> screens::f3::F3DuDisplay {
+    use f3du::F3DuStatus;
+    use screens::f3::F3DuDisplay;
+    let matches = |path: &str| current_path == Some(path);
+    match status {
+        F3DuStatus::Idle => F3DuDisplay::Hidden,
+        F3DuStatus::Running { path, .. } if matches(path) => F3DuDisplay::Running,
+        F3DuStatus::Done {
+            path, bytes, files, ..
+        } if matches(path) => F3DuDisplay::Done {
+            bytes: *bytes,
+            files: *files,
+        },
+        F3DuStatus::Error { path, message } if matches(path) => F3DuDisplay::Error {
+            message: message.clone(),
+        },
+        _ => F3DuDisplay::Hidden,
+    }
+}
+
 /// d-35: reply envelope from a spawned F3 pull task.
 struct F3PullReply {
     request_id: u64,
     /// Ok((files_transferred, bytes_transferred)) or a
     /// flattened error string.
     result: Result<(usize, u64), String>,
+}
+
+/// d-41: reply envelope from a spawned F3 du task.
+struct F3DuReply {
+    request_id: u64,
+    /// Ok((bytes, files)) for the subtree root, or a
+    /// flattened error string.
+    result: Result<(u64, u64), String>,
+}
+
+/// d-41: spawn a `DiskUsage` query for an F3 cursor row and
+/// post the subtree total back on `tx`. `max_depth = 0` makes
+/// the daemon stream a single aggregate entry for `remote`'s
+/// path; we keep the largest-byte entry defensively (the root
+/// dominates any child the daemon might also emit). The reply
+/// is generation-stamped with `request_id` so the loop drops it
+/// if a newer `u` superseded this one.
+fn spawn_f3_du(request_id: u64, remote: RemoteEndpoint, tx: mpsc::Sender<F3DuReply>) {
+    tokio::spawn(async move {
+        let result = run_f3_du_total(&remote)
+            .await
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx.send(F3DuReply { request_id, result }).await;
+    });
+}
+
+/// d-41: stream the du aggregate for `remote` and return its
+/// `(bytes, files)` subtree total. Split out from the spawn so
+/// the accumulation (keep the max-byte entry) is unit-testable
+/// without a live daemon — see `du_total_from_entries`.
+async fn run_f3_du_total(remote: &RemoteEndpoint) -> eyre::Result<(u64, u64)> {
+    use blit_app::admin::du;
+    use blit_app::endpoints::{module_and_rel_path, rel_path_to_string};
+
+    let (module, rel_path) = module_and_rel_path(remote)?;
+    let start_path = rel_path_to_string(&rel_path);
+    let mut acc: Option<(u64, u64)> = None;
+    du::stream(remote, module, start_path, 0, |entry| {
+        acc = du_total_from_entries(acc, entry.bytes, entry.files);
+        Ok(())
+    })
+    .await?;
+    acc.ok_or_else(|| eyre::eyre!("no disk-usage data returned"))
+}
+
+/// d-41: fold one du entry into the running aggregate, keeping
+/// the entry with the most bytes. With `max_depth = 0` the
+/// daemon emits a single root row, but folding by max-bytes is
+/// robust if it ever emits children too — the root subtree
+/// (which contains every child) is always the largest.
+fn du_total_from_entries(acc: Option<(u64, u64)>, bytes: u64, files: u64) -> Option<(u64, u64)> {
+    match acc {
+        Some((best_bytes, _)) if best_bytes >= bytes => acc,
+        _ => Some((bytes, files)),
+    }
 }
 
 /// d-35: spawn a remote→local PullSync for an F3
@@ -3251,6 +3374,11 @@ enum UserAction {
     /// if no remote / nothing selectable / a pull is
     /// already in flight.
     F3PullBegin,
+    /// d-41: F3 only. `u` (usage) runs a DiskUsage query
+    /// for the cursor-selected remote path and shows the
+    /// subtree byte/file total in the Stats block. No-op if
+    /// no remote is configured or nothing is selectable.
+    F3DuBegin,
     /// d-36: `Ctrl+R` re-reads `tui.toml` and swaps the
     /// live config (theme, tick interval, transfer knobs)
     /// without restarting the TUI. Global — works from
@@ -3367,6 +3495,16 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
         // F3 pull keystroke handler absorbs input before
         // this dispatcher runs, so `p` is a text char then.
         KeyCode::Char('p') => Some(UserAction::F3PullBegin),
+        // d-41: `u` (usage) runs du for the F3 cursor row.
+        // Other panes ignore the variant. TUI_DESIGN §5.3
+        // lists `d` for du, but `d` is already
+        // ProfileDisable on F4 (key_action is a global
+        // map); we rebind to the `u`(sage) mnemonic, the
+        // same divergence resolution used for `s`(napshot)
+        // dump. While the F3 filter or pull-dest prompt is
+        // open the text-input handler absorbs `u` first, so
+        // it's only a du trigger in normal F3 nav mode.
+        KeyCode::Char('u') => Some(UserAction::F3DuBegin),
         // d-30: `X` (Shift+x) on F2 cancels every active
         // transfer in one keystroke. Other panes ignore.
         // Mnemonic: cross out everything.
@@ -4791,6 +4929,116 @@ mod tests {
         ));
     }
 
+    /// d-41: `u` maps to F3DuBegin. Other panes ignore the
+    /// variant in their dispatch arms.
+    #[test]
+    fn key_action_maps_u_to_f3_du_begin() {
+        assert!(matches!(
+            key_action(&k(KeyCode::Char('u'))),
+            Some(UserAction::F3DuBegin)
+        ));
+    }
+
+    // d-41: pure du-aggregate accumulator. With max_depth 0
+    // the daemon emits a single root row, but folding by
+    // max-bytes is robust if it ever emits children too.
+
+    #[test]
+    fn du_total_keeps_first_entry_when_alone() {
+        assert_eq!(
+            du_total_from_entries(None, 14_680_064, 8_442),
+            Some((14_680_064, 8_442))
+        );
+    }
+
+    #[test]
+    fn du_total_keeps_largest_byte_entry() {
+        // A later, smaller child entry must NOT replace the
+        // larger root aggregate.
+        let acc = du_total_from_entries(None, 1_000, 10);
+        let acc = du_total_from_entries(acc, 9_000, 90); // bigger → replaces
+        let acc = du_total_from_entries(acc, 500, 5); // smaller → ignored
+        assert_eq!(acc, Some((9_000, 90)));
+    }
+
+    #[test]
+    fn du_total_equal_bytes_keeps_existing() {
+        let acc = du_total_from_entries(None, 1_000, 10);
+        // Equal bytes → keep the first (>= guard).
+        let acc = du_total_from_entries(acc, 1_000, 99);
+        assert_eq!(acc, Some((1_000, 10)));
+    }
+
+    // d-41: the du display bridge gates on the cursor still
+    // being on the queried path, so a stale total never
+    // shows against the wrong row.
+
+    #[test]
+    fn f3_du_display_shows_done_only_for_matching_path() {
+        use screens::f3::F3DuDisplay;
+        let status = f3du::F3DuStatus::Done {
+            path: "nas:/home/photos".to_string(),
+            bytes: 2048,
+            files: 7,
+        };
+        // Cursor still on the queried path → shown.
+        match f3_du_to_display(&status, Some("nas:/home/photos")) {
+            F3DuDisplay::Done { bytes, files } => {
+                assert_eq!(bytes, 2048);
+                assert_eq!(files, 7);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        // Cursor moved elsewhere → hidden (stale).
+        assert!(matches!(
+            f3_du_to_display(&status, Some("nas:/home/docs")),
+            F3DuDisplay::Hidden
+        ));
+        // No cursor spec at all → hidden.
+        assert!(matches!(
+            f3_du_to_display(&status, None),
+            F3DuDisplay::Hidden
+        ));
+    }
+
+    #[test]
+    fn f3_du_display_idle_is_always_hidden() {
+        use screens::f3::F3DuDisplay;
+        assert!(matches!(
+            f3_du_to_display(&f3du::F3DuStatus::Idle, Some("nas:/x")),
+            F3DuDisplay::Hidden
+        ));
+    }
+
+    #[test]
+    fn f3_du_display_running_and_error_gate_on_path() {
+        use screens::f3::F3DuDisplay;
+        let running = f3du::F3DuStatus::Running {
+            request_id: 1,
+            path: "nas:/a".to_string(),
+        };
+        assert!(matches!(
+            f3_du_to_display(&running, Some("nas:/a")),
+            F3DuDisplay::Running
+        ));
+        assert!(matches!(
+            f3_du_to_display(&running, Some("nas:/b")),
+            F3DuDisplay::Hidden
+        ));
+        let error = f3du::F3DuStatus::Error {
+            path: "nas:/a".to_string(),
+            message: "boom".to_string(),
+        };
+        match f3_du_to_display(&error, Some("nas:/a")) {
+            F3DuDisplay::Error { message } => assert_eq!(message, "boom"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(matches!(
+            f3_du_to_display(&error, Some("nas:/b")),
+            F3DuDisplay::Hidden
+        ));
+    }
+
     /// d-26 helper: build a fresh `AppState` for keystroke
     /// tests. Mirrors the boilerplate of
     /// `handle_verify_keystroke_returns_false_for_question_mark`.
@@ -4824,6 +5072,8 @@ mod tests {
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
+            f3_du: f3du::F3DuState::new(),
+            f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
             reload_banner: None,
         }
     }
@@ -5194,6 +5444,8 @@ mod tests {
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
+            f3_du: f3du::F3DuState::new(),
+            f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
             reload_banner: None,
         };
         app.verify.cycle_focus(); // Source
@@ -5248,6 +5500,8 @@ mod tests {
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
+            f3_du: f3du::F3DuState::new(),
+            f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
             reload_banner: None,
         };
 
@@ -5355,6 +5609,8 @@ mod tests {
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
+            f3_du: f3du::F3DuState::new(),
+            f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
             reload_banner: None,
         };
 
@@ -5421,6 +5677,8 @@ mod tests {
             f3_pull: f3pull::F3PullState::new(),
             f3_pull_reply_tx: mpsc::channel::<F3PullReply>(1).0,
             f3_pull_progress_tx: mpsc::channel::<F3PullProgress>(1).0,
+            f3_du: f3du::F3DuState::new(),
+            f3_du_reply_tx: mpsc::channel::<F3DuReply>(1).0,
             reload_banner: None,
         };
 

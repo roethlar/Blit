@@ -120,6 +120,7 @@ fn help_lines() -> Vec<Line<'static>> {
             "p",
             "pull selected → local dir (F3) — Enter runs, Esc cancels",
         ),
+        kv("u", "disk usage of selected subtree (F3)"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
         kv("c / d / e", "clear / disable / enable history"),
@@ -160,10 +161,10 @@ pub fn render_overlay(frame: &mut Frame, area: Rect, overlay: HelpOverlay) {
     // crashing on overflow. d-26 bumped 34→35 to fit the
     // `/` filter row; d-30 bumped 35→36 for `X` batch
     // cancel; d-35 bumped 36→37 for `p` pull; d-36 bumped
-    // 37→38 for `Ctrl-R` reload. d-31: when the area is
-    // shorter than the modal, the operator scrolls with
-    // j/k.
-    let modal = centered(area, 70, 38);
+    // 37→38 for `Ctrl-R` reload; d-41 bumped 38→39 for `u`
+    // du. d-31: when the area is shorter than the modal,
+    // the operator scrolls with j/k.
+    let modal = centered(area, 70, 39);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -443,10 +444,11 @@ mod tests {
             "c / d / e",
             "s",
             "?",
-            "r", // refresh (global as of d-16 R2)
-            "/", // d-26: F3 filter
-            "X", // d-30: F2 batch cancel
-            "p", // d-35: F3 pull
+            "r",                              // refresh (global as of d-16 R2)
+            "/",                              // d-26: F3 filter
+            "X",                              // d-30: F2 batch cancel
+            "p",                              // d-35: F3 pull
+            "disk usage of selected subtree", // d-41: F3 du (`u`)
         ] {
             assert!(
                 text.contains(needle),

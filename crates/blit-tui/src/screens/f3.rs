@@ -6,10 +6,10 @@
 //! emits widgets. Navigation + RPC fetching live in
 //! `main::run_f3_event_loop`.
 //!
-//! Layout (d-26 / d-28 / d-33 polish — `/` filter
+//! Layout (d-26 / d-28 / d-33 / d-41 polish — `/` filter
 //! fragment in footer, visible-only rows in the table,
 //! differentiated empty-state message + pull-source
-//! preview in Stats):
+//! preview + du subtree total in Stats):
 //!
 //! ```text
 //! ┌── header (1 line) ───────────────────────────────┐
@@ -17,11 +17,12 @@
 //! ├── entries table (Min 5) ─────────────────────────┤
 //! │ name  kind  size  mtime                          │
 //! │ ...   (rows filtered by d-26 filter when set)    │
-//! ├── stats block (Length 5) ────────────────────────┤
+//! ├── stats block (Length 6) ────────────────────────┤
 //! │ Selected: photos/ · <kind> · <size>              │
 //! │ View: <breadcrumb> · <V>/<N> entries (when       │
 //! │       filtered) or <N> entries (no filter)       │
 //! │ Pull: <host>:/<module>/<rel-path>   [d-33]       │
+//! │ Subtree: <size> across <N> files    [d-41 `u`]   │
 //! │ — or, when nothing is selectable —               │
 //! │ (no entries) / (no rows match filter) [d-28]     │
 //! ├── footer (1 line) ───────────────────────────────┤
@@ -95,6 +96,24 @@ pub enum F3PullDisplay {
     Error { message: String },
 }
 
+/// d-41: renderer-facing snapshot of the F3 du (disk-usage)
+/// query for the *current cursor row*. Bridged from
+/// `f3du::F3DuStatus` by `main.rs`, which also resolves the
+/// path-match gating — the bridge returns `Hidden` unless the
+/// du result pertains to the row the cursor is on now, so a
+/// stale figure never shows against the wrong path.
+#[derive(Debug, Clone)]
+pub enum F3DuDisplay {
+    /// No du line (Idle, or the du pertains to another row).
+    Hidden,
+    /// DiskUsage RPC in flight for the cursor row.
+    Running,
+    /// Subtree total for the cursor row.
+    Done { bytes: u64, files: u64 },
+    /// du query failed for the cursor row.
+    Error { message: String },
+}
+
 /// Render the F3 pane into a caller-supplied area (router-aware).
 ///
 /// d-33 / d-34: `pull_spec` is the pre-rendered canonical
@@ -110,6 +129,7 @@ pub fn render_into(
     remote_label: &str,
     pull_spec: Option<&str>,
     pull: &F3PullDisplay,
+    du: &F3DuDisplay,
     now: Instant,
 ) {
     let chunks = Layout::default()
@@ -118,15 +138,16 @@ pub fn render_into(
             Constraint::Length(1),
             Constraint::Min(5),
             // d-33: Stats grew from 4→5 rows for the
-            // "Pull:" preview line.
-            Constraint::Length(5),
+            // "Pull:" preview line. d-41: 5→6 for the
+            // "Subtree:" du line.
+            Constraint::Length(6),
             Constraint::Length(1),
         ])
         .split(area);
 
     render_header(frame, chunks[0], state, remote_label);
     render_table(frame, chunks[1], state);
-    render_stats(frame, chunks[2], state, pull_spec);
+    render_stats(frame, chunks[2], state, pull_spec, du);
     render_footer(frame, chunks[3], state, pull, now);
 }
 
@@ -193,7 +214,13 @@ fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
     frame.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, pull_spec: Option<&str>) {
+fn render_stats(
+    frame: &mut Frame,
+    area: Rect,
+    state: &BrowseState,
+    pull_spec: Option<&str>,
+    du: &F3DuDisplay,
+) {
     let block = Block::default().borders(Borders::ALL).title(" Stats ");
     // d-26: when a filter is active, show "<V>/<N>
     // entries" so the operator can see how many rows the
@@ -231,6 +258,25 @@ fn render_stats(frame: &mut Frame, area: Rect, state: &BrowseState, pull_spec: O
                     Span::styled("Pull: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(spec.to_string()),
                 ]));
+            }
+            // d-41: subtree disk-usage line for the cursor row,
+            // populated on demand by `u`. The bridge already
+            // gated this on the cursor still being on the
+            // queried path, so an outdated total never shows.
+            match du {
+                F3DuDisplay::Hidden => {}
+                F3DuDisplay::Running => lines.push(Line::from(vec![
+                    Span::styled("Subtree: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("computing...", Style::default().fg(Color::Yellow)),
+                ])),
+                F3DuDisplay::Done { bytes, files } => lines.push(Line::from(vec![
+                    Span::styled("Subtree: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("{} across {} files", format_bytes(*bytes), files)),
+                ])),
+                F3DuDisplay::Error { message } => lines.push(Line::from(vec![
+                    Span::styled("Subtree: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("error: {message}"), Style::default().fg(Color::Red)),
+                ])),
             }
             lines
         }
