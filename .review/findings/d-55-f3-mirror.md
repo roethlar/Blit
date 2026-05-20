@@ -1,9 +1,9 @@
 # d-55-f3-mirror: `m` mirrors a remote source → local
 
 **Severity**: Feature (designed — TUI_DESIGN §5.3 keymap)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `3d1a1ad`
+**Commit**: `c2116f1` (round 1: `3d1a1ad`)
 
 ## What
 
@@ -48,12 +48,29 @@ the mirror's `dest_root` equals the copy's for the same input.
 
 ### Execution (purge after progress teardown)
 
-`spawn_f3_pull` gains a `mirror` param. It sets `mirror_mode`
-on the PullSync, then — per `run_pull_sync`'s documented
-lifecycle — drops the progress channel, drains the forwarder,
-and only then calls `apply_pull_mirror_purge(&outcome, mirror)`
-(a no-op for a plain pull). A purge failure surfaces as the
-op's footer error.
+`spawn_f3_pull` gains a `mirror` param. It sets `mirror_mode`,
+then — per `run_pull_sync`'s documented lifecycle — drops the
+progress channel, drains the forwarder, and only then calls
+`apply_pull_mirror_purge(&outcome, mirror)` (a no-op for a
+plain pull). A purge failure surfaces as the op's footer error.
+
+**Round 2 (reviewer reopen — the load-bearing fix).** Round 1
+set only `PullSyncExecution.mirror_mode`, which is just the
+receive-side `track_paths` flag. The wire
+`TransferOperationSpec` — which tells the daemon to *compute*
+the delete list — is built from `options`
+(`RemotePullClient::build_spec_from_options`), and round 1 left
+`options: PullSyncOptions::default()` (`mirror_mode = false`),
+so the daemon emitted `MirrorMode::Off`,
+`outcome.report.paths_to_delete` was empty, and
+`apply_pull_mirror_purge` deleted nothing. The "mirror" ran the
+confirm + copy but silently behaved like a plain pull.
+
+Fix: a `f3_pull_options(mirror)` helper sets
+`options.mirror_mode = mirror`, matching how the CLI builds it
+(`blit-cli/src/transfers/remote.rs`). Now both the spec
+(daemon-side delete-list computation) and the purge flag are
+mirror-enabled.
 
 ### Footer + key
 
@@ -89,10 +106,14 @@ confirm no-op when not confirming; mirror dest resolves like
 copy; Done carries the mirror flag; begin is no-op while
 confirming.
 
-main.rs (5): `m` → F3MirrorBegin (`M` still TransferMirror);
+main.rs (6): `m` → F3MirrorBegin (`M` still TransferMirror);
 confirm `y` launches (under a tokio runtime — the spawn needs
 a reactor); `n`/`N`/`Esc` cancel; stray keys swallowed; `?` /
-Ctrl-c / F-keys bubble.
+Ctrl-c / F-keys bubble. **R2:** `f3_mirror_options_build_mirror_enabled_spec`
+— the F3 mirror builds a non-`Off` (`FilteredSubset`) wire spec
+via `build_spec_from_options`, while a copy stays `Off`. This is
+the regression guard the reviewer asked for: it would have
+caught round 1's behaves-like-a-plain-pull bug.
 
 The purge execution itself needs a live daemon (manual); the
 state machine, routing, dest resolution, and footer wiring are
@@ -119,4 +140,22 @@ unit-tested.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reopened)
+
+> F3 mirror never asks the daemon for mirror mode, so no purge
+> list is produced. `spawn_f3_pull` builds the execution with
+> `options: PullSyncOptions::default()`; the separate
+> `PullSyncExecution.mirror_mode` is only `track_paths`, while
+> the wire spec is built from `options` →
+> `build_spec_from_options` emits `MirrorMode::Off`. Pressing
+> `m`/`y` copies but the daemon computes no deletions. Set
+> `PullSyncOptions.mirror_mode = mirror` (as the CLI does) and
+> add regression coverage that the mirror builds a
+> mirror-enabled spec.
+
+**Response (c2116f1):** Fixed exactly as directed —
+`f3_pull_options(mirror)` sets `options.mirror_mode`, and the
+new `f3_mirror_options_build_mirror_enabled_spec` test asserts
+the spec is `FilteredSubset` (non-`Off`) for a mirror and `Off`
+for a copy, via the same `build_spec_from_options` the reviewer
+traced. Validation re-run green (503 tests, fmt + clippy).
