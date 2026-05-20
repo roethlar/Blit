@@ -10,21 +10,24 @@
 //! verified F3 pull machine and the dispatcher jumps to F3 so the
 //! operator watches the transfer in its existing footer — there's
 //! no new execution path, reply channel, or progress UI here, just
-//! field collection. d-59 adds a copy/mirror mode toggle
-//! (TUI_DESIGN §3 "Same flow as copy with --mirror flag"); a
-//! mirror routes through F3's destructive confirm gate. Push and
-//! remote→remote (delegated) triggers are follow-ups.
+//! field collection. d-59/d-60 add a copy/mirror/move kind cycle
+//! (TUI_DESIGN §1 "copy / mirror / move … between any two
+//! endpoints"); mirror and move route through F3's destructive
+//! confirm gate. Push and remote→remote (delegated) triggers are
+//! follow-ups.
 //!
 //! Flow:
 //! 1. `t` on a daemon row → [`F1TriggerState::begin`] (source
-//!    prefilled, focus on the dest field, copy mode).
+//!    prefilled, focus on the dest field, copy kind).
 //! 2. The operator edits either field; `Tab` toggles focus;
-//!    Up/Down ([`F1TriggerState::toggle_mirror`]) flips copy ⇄
-//!    mirror.
+//!    Up/Down ([`F1TriggerState::cycle_kind`]) cycles
+//!    copy → mirror → move.
 //! 3. `Esc` → [`F1TriggerState::cancel`]. `Enter` →
-//!    [`F1TriggerState::take`] yields `(source, dest, mirror)` for
+//!    [`F1TriggerState::take`] yields `(source, dest, kind)` for
 //!    the dispatcher to parse + launch (or `None` if either field
 //!    is blank).
+
+use crate::f3pull::PullKind;
 
 /// Which field the modal's keystrokes currently edit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,12 +45,11 @@ pub enum F1TriggerStatus {
         source: String,
         dest: String,
         focus: TriggerField,
-        /// d-59: `true` runs a mirror (delete-extraneous) instead
-        /// of a plain copy. TUI_DESIGN §3 "Same flow as copy with
-        /// --mirror flag in the options modal". Toggled with the
-        /// Up/Down arrows; the destructive confirm still happens on
-        /// F3 after commit.
-        mirror: bool,
+        /// d-59/d-60: transfer kind — copy / mirror / move.
+        /// TUI_DESIGN §1 "copy / mirror / move … between any two
+        /// endpoints". Cycled with the Up/Down arrows; mirror and
+        /// move route through F3's destructive confirm after commit.
+        kind: PullKind,
     },
 }
 
@@ -92,7 +94,7 @@ impl F1TriggerState {
             source,
             dest: String::new(),
             focus: TriggerField::Dest,
-            mirror: false,
+            kind: PullKind::Copy,
         };
     }
 
@@ -106,10 +108,19 @@ impl F1TriggerState {
         }
     }
 
-    /// d-59: Up/Down — flip between copy and mirror mode.
-    pub fn toggle_mirror(&mut self) {
-        if let F1TriggerStatus::Editing { mirror, .. } = &mut self.status {
-            *mirror = !*mirror;
+    /// d-59/d-60: Up/Down — cycle the transfer kind. `forward`
+    /// (Up) goes Copy → Mirror → Move → Copy; `!forward` (Down)
+    /// reverses.
+    pub fn cycle_kind(&mut self, forward: bool) {
+        if let F1TriggerStatus::Editing { kind, .. } = &mut self.status {
+            *kind = match (*kind, forward) {
+                (PullKind::Copy, true) => PullKind::Mirror,
+                (PullKind::Mirror, true) => PullKind::Move,
+                (PullKind::Move, true) => PullKind::Copy,
+                (PullKind::Copy, false) => PullKind::Move,
+                (PullKind::Mirror, false) => PullKind::Copy,
+                (PullKind::Move, false) => PullKind::Mirror,
+            };
         }
     }
 
@@ -154,24 +165,21 @@ impl F1TriggerState {
     }
 
     /// `Enter` — close the modal and yield the trimmed
-    /// `(source, dest, mirror)` for the dispatcher to parse +
+    /// `(source, dest, kind)` for the dispatcher to parse +
     /// launch. Returns `None` (and stays open) when either field
     /// is blank — there's nothing to launch yet.
-    pub fn take(&mut self) -> Option<(String, String, bool)> {
-        let (source, dest, mirror) = match &self.status {
+    pub fn take(&mut self) -> Option<(String, String, PullKind)> {
+        let (source, dest, kind) = match &self.status {
             F1TriggerStatus::Editing {
-                source,
-                dest,
-                mirror,
-                ..
-            } => (source.trim().to_string(), dest.trim().to_string(), *mirror),
+                source, dest, kind, ..
+            } => (source.trim().to_string(), dest.trim().to_string(), *kind),
             F1TriggerStatus::Idle => return None,
         };
         if source.is_empty() || dest.is_empty() {
             return None;
         }
         self.status = F1TriggerStatus::Idle;
-        Some((source, dest, mirror))
+        Some((source, dest, kind))
     }
 }
 
@@ -196,12 +204,12 @@ mod tests {
                 source,
                 dest,
                 focus,
-                mirror,
+                kind,
             } => {
                 assert_eq!(source, "nas:9031:/");
                 assert!(dest.is_empty());
                 assert_eq!(*focus, TriggerField::Dest, "dest is the field to fill");
-                assert!(!mirror, "trigger starts in copy mode");
+                assert_eq!(*kind, PullKind::Copy, "trigger starts in copy mode");
             }
             other => panic!("expected Editing, got {other:?}"),
         }
@@ -264,27 +272,41 @@ mod tests {
         for c in "  /tmp/out  ".chars() {
             s.push_char(c);
         }
-        let (source, dest, mirror) = s.take().expect("both fields set");
+        let (source, dest, kind) = s.take().expect("both fields set");
         assert_eq!(source, "nas:9031:/home/docs");
         assert_eq!(dest, "/tmp/out");
-        assert!(!mirror, "default mode is copy");
+        assert_eq!(kind, PullKind::Copy, "default mode is copy");
         assert!(matches!(s.status(), F1TriggerStatus::Idle), "take closes");
     }
 
     #[test]
-    fn toggle_mirror_flips_mode_and_take_reports_it() {
+    fn cycle_kind_advances_copy_mirror_move_and_take_reports_it() {
         let mut s = F1TriggerState::new();
         s.begin("nas:9031:/home".to_string());
         for c in "/tmp/out".chars() {
             s.push_char(c);
         }
-        s.toggle_mirror();
+        // Up cycles Copy → Mirror → Move → Copy.
+        s.cycle_kind(true);
+        assert!(
+            matches!(
+                s.status(),
+                F1TriggerStatus::Editing {
+                    kind: PullKind::Mirror,
+                    ..
+                }
+            ),
+            "Up: copy → mirror"
+        );
+        s.cycle_kind(true);
         match s.status() {
-            F1TriggerStatus::Editing { mirror, .. } => assert!(*mirror),
+            F1TriggerStatus::Editing { kind, .. } => assert_eq!(*kind, PullKind::Move),
             other => panic!("expected Editing, got {other:?}"),
         }
-        let (_, _, mirror) = s.take().expect("set");
-        assert!(mirror, "take reports the mirror mode");
+        // Down reverses Move → Mirror.
+        s.cycle_kind(false);
+        let (_, _, kind) = s.take().expect("set");
+        assert_eq!(kind, PullKind::Mirror, "take reports the cycled kind");
     }
 
     #[test]

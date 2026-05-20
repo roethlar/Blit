@@ -2516,12 +2516,21 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             source,
             dest,
             focus,
-            mirror,
+            kind,
         } => Some(screens::f1::TriggerPrompt {
             source: source.clone(),
             dest: dest.clone(),
             source_focused: *focus == TriggerField::Source,
-            mirror: *mirror,
+            // imperative verb ("copy"/"mirror"/"move"); pull's
+            // verb triple uses "pull" for Copy, so spell "copy"
+            // here to match the design's launcher vocabulary.
+            mode: match kind {
+                f3pull::PullKind::Copy => "copy",
+                f3pull::PullKind::Mirror => "mirror",
+                f3pull::PullKind::Move => "move",
+            },
+            // Mirror + move delete something → flag red.
+            destructive: kind.is_destructive(),
         }),
     }
 }
@@ -3822,47 +3831,69 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             app.f1_trigger.toggle_focus();
             true
         }
-        KeyCode::Up | KeyCode::Down => {
-            // d-59: flip copy ⇄ mirror.
-            app.f1_trigger.toggle_mirror();
+        KeyCode::Up => {
+            // d-59/d-60: cycle copy → mirror → move.
+            app.f1_trigger.cycle_kind(true);
+            true
+        }
+        KeyCode::Down => {
+            app.f1_trigger.cycle_kind(false);
             true
         }
         KeyCode::Enter => {
             // take() closes the modal only when both fields are
             // non-blank; a blank field keeps it open (no-op here).
-            if let Some((src, dest, mirror)) = app.f1_trigger.take() {
-                // d-58/d-59: hand off to the verified F3 pull
+            if let Some((src, dest, kind)) = app.f1_trigger.take() {
+                // d-58…d-60: hand off to the verified F3 pull
                 // machine and jump to F3 to watch. A source that
                 // doesn't parse as a remote endpoint is dropped (no
                 // launch); inline parse-error feedback is a
                 // follow-up. The machine no-ops if a pull is already
                 // in flight there.
                 if let Ok(source) = RemoteEndpoint::parse(&src) {
-                    if mirror {
-                        // d-59: a mirror routes through the F3
-                        // destructive confirm gate (begin_mirror →
+                    match kind {
+                        f3pull::PullKind::Copy => {
+                            if let Some(launch) = app.f3_pull.start_pull(source, dest) {
+                                spawn_f3_pull(
+                                    launch.request_id,
+                                    launch.source,
+                                    launch.dest_root,
+                                    launch.kind,
+                                    app.f3_pull_reply_tx.clone(),
+                                    app.f3_pull_progress_tx.clone(),
+                                );
+                                app.current_screen = Screen::F3;
+                            }
+                        }
+                        // d-59/d-60: a mirror / move routes through
+                        // the F3 destructive confirm gate (begin_* →
                         // type dest → begin_run lands in Confirm,
-                        // returning None — no spawn yet). The
-                        // operator confirms y/N on F3, where the
-                        // confirm + execution already live.
-                        app.f3_pull.begin_mirror(source);
-                        for c in dest.chars() {
-                            app.f3_pull.push_char(c);
+                        // returning None — no spawn yet). The operator
+                        // confirms y/N on F3, where the confirm +
+                        // execution already live.
+                        f3pull::PullKind::Mirror | f3pull::PullKind::Move => {
+                            // d-60: a move deletes the remote source,
+                            // so — like F3 `v` — refuse a module-root
+                            // source up front (the daemon rejects
+                            // empty/root purge paths). Mirror writes
+                            // only locally, so it has no such gate.
+                            let gated = kind == f3pull::PullKind::Move
+                                && !is_deletable_remote_path(&source);
+                            if !gated {
+                                if kind == f3pull::PullKind::Mirror {
+                                    app.f3_pull.begin_mirror(source);
+                                } else {
+                                    app.f3_pull.begin_move(source);
+                                }
+                                for c in dest.chars() {
+                                    app.f3_pull.push_char(c);
+                                }
+                                let _ = app.f3_pull.begin_run();
+                                if app.f3_pull.is_confirming_destructive() {
+                                    app.current_screen = Screen::F3;
+                                }
+                            }
                         }
-                        let _ = app.f3_pull.begin_run();
-                        if app.f3_pull.is_confirming_destructive() {
-                            app.current_screen = Screen::F3;
-                        }
-                    } else if let Some(launch) = app.f3_pull.start_pull(source, dest) {
-                        spawn_f3_pull(
-                            launch.request_id,
-                            launch.source,
-                            launch.dest_root,
-                            launch.kind,
-                            app.f3_pull_reply_tx.clone(),
-                            app.f3_pull_progress_tx.clone(),
-                        );
-                        app.current_screen = Screen::F3;
                     }
                 }
             }
@@ -6899,6 +6930,45 @@ mod tests {
             "no PullSync until the operator confirms"
         );
         assert_eq!(app.current_screen, Screen::F3, "jumped to F3 to confirm");
+    }
+
+    /// d-60: cycling to move (Up×2) and committing routes through
+    /// the F3 confirm gate as a Move-kind op.
+    #[test]
+    fn handle_f1_trigger_keystroke_move_routes_to_f3_confirm() {
+        let mut app = app_with_trigger_modal();
+        // Copy → Mirror → Move.
+        handle_f1_trigger_keystroke(&k(KeyCode::Up), &mut app);
+        handle_f1_trigger_keystroke(&k(KeyCode::Up), &mut app);
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(
+            app.f3_pull.is_confirming_destructive(),
+            "move waits at confirm"
+        );
+        assert_eq!(app.current_screen, Screen::F3);
+    }
+
+    /// d-60 (data-loss guard): a move whose source is a module
+    /// root is refused — like F3 `v`, the daemon rejects empty/root
+    /// purge paths, so it must not even open the confirm.
+    #[test]
+    fn handle_f1_trigger_keystroke_move_rejects_module_root_source() {
+        let mut app = make_test_app_state(Screen::F1);
+        // Source = a module root (no rel path), dest = local.
+        app.f1_trigger.begin("nas:9031:/home".to_string());
+        for c in "/tmp/out".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        // Cycle to move.
+        app.f1_trigger.cycle_kind(true);
+        app.f1_trigger.cycle_kind(true);
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        // "nas:9031:/home" is a module root → gated, no confirm.
+        assert!(
+            !app.f3_pull.is_confirming_destructive(),
+            "module-root move source is refused"
+        );
+        assert_eq!(app.current_screen, Screen::F1, "stays on F1 (no jump)");
     }
 
     #[test]
