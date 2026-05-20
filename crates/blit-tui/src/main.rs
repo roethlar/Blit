@@ -1185,8 +1185,9 @@ async fn run_router(
                 if let Some(F3PullReply { request_id, result }) = reply {
                     let at = Instant::now();
                     match result {
-                        Ok((files, bytes)) => {
-                            let applied = app.f3_pull.apply_done(request_id, files, bytes, at);
+                        Ok((files, bytes, deleted)) => {
+                            let applied =
+                                app.f3_pull.apply_done(request_id, files, bytes, deleted, at);
                             // d-53: advance the batch — start the
                             // next queued source with the same
                             // dest, or clear the batch when done.
@@ -2466,12 +2467,14 @@ fn f3_pull_to_display(status: &f3pull::F3PullStatus) -> screens::f3::F3PullDispl
             bytes,
             dest,
             mirror,
+            deleted,
             ..
         } => F3PullDisplay::Done {
             files: *files,
             bytes: *bytes,
             dest: dest.clone(),
             mirror: *mirror,
+            deleted: *deleted,
         },
         F3PullStatus::Error { message, .. } => F3PullDisplay::Error {
             message: message.clone(),
@@ -2572,9 +2575,10 @@ struct BatchPull {
 /// d-35: reply envelope from a spawned F3 pull task.
 struct F3PullReply {
     request_id: u64,
-    /// Ok((files_transferred, bytes_transferred)) or a
-    /// flattened error string.
-    result: Result<(usize, u64), String>,
+    /// Ok((files_transferred, bytes_transferred, files_deleted))
+    /// or a flattened error string. d-56: `files_deleted` is the
+    /// mirror purge count (0 for a plain pull).
+    result: Result<(usize, u64, u64), String>,
 }
 
 /// d-41: reply envelope from a spawned F3 du task.
@@ -2921,10 +2925,16 @@ fn spawn_f3_pull(
                 // local paths. A purge failure surfaces as the
                 // op's error.
                 match apply_pull_mirror_purge(&outcome, mirror).await {
-                    Ok(_purge_stats) => Ok((
-                        outcome.report.files_transferred,
-                        outcome.report.bytes_transferred,
-                    )),
+                    // d-56: surface the purge delete count (0 for a
+                    // plain pull or a mirror with nothing to remove).
+                    Ok(purge_stats) => {
+                        let deleted = purge_stats.map(|s| s.files_deleted).unwrap_or(0);
+                        Ok((
+                            outcome.report.files_transferred,
+                            outcome.report.bytes_transferred,
+                            deleted,
+                        ))
+                    }
                     Err(err) => Err(format!("{err:#}")),
                 }
             }
@@ -6594,6 +6604,32 @@ mod tests {
             MirrorMode::Off as i32,
             "a plain pull must never request deletions"
         );
+    }
+
+    /// d-56: the bridge carries the mirror flag + purge delete
+    /// count from the pull state into the renderer-facing Done
+    /// display, so the footer can report "mirrored … · N deleted".
+    #[test]
+    fn f3_pull_to_display_done_carries_mirror_and_deleted() {
+        use screens::f3::F3PullDisplay;
+        let mut s = f3pull::F3PullState::new();
+        let source = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
+        s.begin_mirror(source);
+        for c in "/tmp/out".chars() {
+            s.push_char(c);
+        }
+        s.begin_run();
+        let launch = s.confirm_mirror().expect("confirm");
+        s.apply_done(launch.request_id, 7, 700, 3, Instant::now());
+        match f3_pull_to_display(s.status()) {
+            F3PullDisplay::Done {
+                mirror, deleted, ..
+            } => {
+                assert!(mirror, "bridge preserves the mirror verb flag");
+                assert_eq!(deleted, 3, "bridge preserves the purge delete count");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[test]

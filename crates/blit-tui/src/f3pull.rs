@@ -89,6 +89,10 @@ pub enum F3PullStatus {
         finished_at: Instant,
         /// d-55: `true` for a mirror (verb shown as "mirrored").
         mirror: bool,
+        /// d-56: local files deleted by the mirror purge (0 for
+        /// a plain pull). Surfaced in the Done footer so a
+        /// destructive mirror reports what it removed.
+        deleted: u64,
     },
     /// Pull failed (validation or transport).
     Error {
@@ -430,7 +434,16 @@ impl F3PullState {
     /// Apply a successful pull reply. Dropped if `request_id`
     /// doesn't match the current `Running` run. Returns true
     /// if applied. `at` stamps the d-38 auto-hide deadline.
-    pub fn apply_done(&mut self, request_id: u64, files: usize, bytes: u64, at: Instant) -> bool {
+    /// d-56: `deleted` is the mirror purge's `files_deleted`
+    /// (0 for a plain pull), shown in the Done footer.
+    pub fn apply_done(
+        &mut self,
+        request_id: u64,
+        files: usize,
+        bytes: u64,
+        deleted: u64,
+        at: Instant,
+    ) -> bool {
         match &self.status {
             F3PullStatus::Running {
                 request_id: rid,
@@ -444,6 +457,7 @@ impl F3PullState {
                     bytes,
                     finished_at: at,
                     mirror: *mirror,
+                    deleted,
                 };
                 true
             }
@@ -719,7 +733,7 @@ mod tests {
             s.push_char(c);
         }
         let launch = s.begin_run().expect("launch");
-        let applied = s.apply_done(launch.request_id, 12, 4096, Instant::now());
+        let applied = s.apply_done(launch.request_id, 12, 4096, 0, Instant::now());
         assert!(applied);
         match s.status() {
             F3PullStatus::Done {
@@ -762,7 +776,7 @@ mod tests {
         let launch = s.begin_run().expect("launch");
         // A reply for a different (older) request id must
         // not clobber the current Running state.
-        assert!(!s.apply_done(launch.request_id + 99, 1, 1, Instant::now()));
+        assert!(!s.apply_done(launch.request_id + 99, 1, 1, 0, Instant::now()));
         assert!(s.is_running());
     }
 
@@ -774,7 +788,7 @@ mod tests {
             s.push_char(c);
         }
         let first = s.begin_run().expect("first launch");
-        s.apply_done(first.request_id, 0, 0, Instant::now());
+        s.apply_done(first.request_id, 0, 0, 0, Instant::now());
         // Second run.
         s.begin(endpoint("nas:/m/y"));
         for c in "/b".chars() {
@@ -942,7 +956,7 @@ mod tests {
         assert!(!s.is_terminal(), "Idle is not terminal");
         let rid = launched(&mut s, "nas:/m/x");
         assert!(!s.is_terminal(), "Running is not terminal");
-        s.apply_done(rid, 1, 1, Instant::now());
+        s.apply_done(rid, 1, 1, 0, Instant::now());
         assert!(s.is_terminal(), "Done is terminal");
     }
 
@@ -959,7 +973,7 @@ mod tests {
         let mut s = F3PullState::new();
         let rid = launched(&mut s, "nas:/m/x");
         let finished = Instant::now();
-        s.apply_done(rid, 5, 500, finished);
+        s.apply_done(rid, 5, 500, 0, finished);
         // Within TTL → still showing.
         s.clear_terminal_if_expired(finished, TEST_TTL);
         assert!(s.is_terminal(), "within TTL the fragment stays");
@@ -1001,7 +1015,7 @@ mod tests {
         let mut s = F3PullState::new();
         let rid = launched(&mut s, "nas:/m/x");
         let finished = Instant::now();
-        s.apply_done(rid, 5, 500, finished);
+        s.apply_done(rid, 5, 500, 0, finished);
         // Partway through the window → remaining shrinks.
         let elapsed = Duration::from_millis(100);
         assert_eq!(
@@ -1153,7 +1167,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_done_carries_mirror_flag() {
+    fn mirror_done_carries_mirror_flag_and_deleted_count() {
         let mut s = F3PullState::new();
         s.begin_mirror(endpoint("nas:/m/x"));
         for c in "/tmp/out".chars() {
@@ -1161,13 +1175,17 @@ mod tests {
         }
         s.begin_run();
         let launch = s.confirm_mirror().expect("confirm");
-        s.apply_done(launch.request_id, 3, 300, Instant::now());
+        // d-56: the purge deleted 4 local files.
+        s.apply_done(launch.request_id, 3, 300, 4, Instant::now());
         match s.status() {
-            F3PullStatus::Done { mirror, .. } => {
+            F3PullStatus::Done {
+                mirror, deleted, ..
+            } => {
                 assert!(
                     *mirror,
                     "Done remembers it was a mirror for the footer verb"
-                )
+                );
+                assert_eq!(*deleted, 4, "Done carries the purge delete count");
             }
             other => panic!("expected Done, got {other:?}"),
         }

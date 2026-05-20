@@ -36,11 +36,15 @@
 //!
 //! d-35: `p` opens a destination prompt and runs a
 //! remote→local PullSync owned by the TUI process. The
-//! footer shows one of:
+//! footer shows one of (d-55: `m` mirror swaps the verb to
+//! mirror/mirroring/mirrored and adds a destructive confirm):
 //! - `pull → <dest>_` (cyan, EnteringDest — typing)
+//! - `mirror → <dest>? deletes extraneous y/N` (red,
+//!   ConfirmMirror — destructive gate)
 //! - `pulling → <dest>... (N file(s) · X)` (yellow,
 //!   Running — d-37 live byte counter once data flows)
-//! - `pulled N file(s) · X → <dest>` (green, Done)
+//! - `pulled N file(s) · X → <dest>` (green, Done); a mirror
+//!   appends `· N deleted` when the purge removed files (d-56)
 //! - `pull failed: <msg>` (red, Error)
 //!
 //! d-26's filter fragment renders one of:
@@ -93,11 +97,14 @@ pub enum F3PullDisplay {
     },
     /// Pull finished — files + bytes pulled, dest path.
     /// d-55: `mirror` switches the verb to "mirrored".
+    /// d-56: `deleted` is the mirror purge count (shown only
+    /// for a mirror that removed local files).
     Done {
         files: usize,
         bytes: u64,
         dest: String,
         mirror: bool,
+        deleted: u64,
     },
     /// Pull failed.
     Error { message: String },
@@ -429,12 +436,24 @@ fn render_footer(
             bytes,
             dest,
             mirror,
+            deleted,
         } => {
             spans.push(Span::raw("  ·  "));
             // d-55: "mirrored" vs "pulled".
             let verb = if *mirror { "mirrored" } else { "pulled" };
+            // d-56: report the purge count for a mirror. A copy
+            // never deletes; a mirror that found nothing to remove
+            // shows no suffix (cleaner than "· 0 deleted").
+            let purge = if *mirror && *deleted > 0 {
+                format!(" · {deleted} deleted")
+            } else {
+                String::new()
+            };
             spans.push(Span::styled(
-                format!("{verb} {files} file(s) · {} → {dest}", format_bytes(*bytes)),
+                format!(
+                    "{verb} {files} file(s) · {} → {dest}{purge}",
+                    format_bytes(*bytes)
+                ),
                 Style::default().fg(Color::Green),
             ));
         }
