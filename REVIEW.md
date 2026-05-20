@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-38-f3-pull-ttl | Feature | Auto-hide TTL on the F3 pull Done/Error fragment | `[~]` | `phase5/a1` | `7c523e8` |
+| _none_ | | | | | |
 
 ## Open findings
 
@@ -142,3 +142,4 @@ Phase 5 A.1 sub-slices on branch `phase5/a1`:
 - `beb5d9e` F3 pull destination prompt + execution with resolved local destinations (`d-35-f3-pull-execute` round 2)
 - `27a8005` Ctrl+R hot-reload of tui.toml with parse-error keep-current semantics (`d-36-hot-reload-config`)
 - `cd1751a` F3 pull live byte/file footer with pull-receive accumulator semantics (`d-37-f3-pull-progress` round 2)
+- `7c523e8` F3 pull Done/Error footer auto-hide TTL (`d-38-f3-pull-ttl`)
