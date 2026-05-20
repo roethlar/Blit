@@ -26,6 +26,7 @@ mod browse;
 mod config;
 mod daemons;
 mod diagnostics;
+mod f1push;
 mod f1trigger;
 mod f3del;
 mod f3du;
@@ -160,6 +161,10 @@ struct AppState {
     /// d-58: `t` trigger-transfer modal (source/dest entry). On
     /// commit it hands off to the F3 pull machine + jumps to F3.
     f1_trigger: f1trigger::F1TriggerState,
+    /// d-61: local→remote push lifecycle (the trigger's push
+    /// direction). Status shown in the F1 footer.
+    f1_push: f1push::F1PushState,
+    f1_push_reply_tx: mpsc::Sender<F1PushReply>,
     /// Sender into the F1 detail fetcher mpsc. Cloned by
     /// `maybe_kick_detail_fetch` into each spawned task.
     detail_tx: mpsc::Sender<DetailUpdate>,
@@ -504,6 +509,8 @@ async fn run_router(
 
     // d-35: F3 pull reply channel.
     let (f3_pull_reply_tx, mut f3_pull_reply_rx) = mpsc::channel::<F3PullReply>(2);
+    // d-61: F1 push reply channel (terminal outcome only).
+    let (f1_push_reply_tx, mut f1_push_reply_rx) = mpsc::channel::<F1PushReply>(2);
 
     // d-37: F3 pull live-progress channel. Small bounded
     // buffer — the forwarder `try_send`s, dropping
@@ -523,6 +530,8 @@ async fn run_router(
         remote_label,
         daemons: DaemonsState::new(),
         f1_trigger: f1trigger::F1TriggerState::new(),
+        f1_push: f1push::F1PushState::new(),
+        f1_push_reply_tx,
         daemons_last_fetched: None,
         detail_tx: detail_tx.clone(),
         discovery_refresh_tx,
@@ -730,6 +739,7 @@ async fn run_router(
                         &app.daemons,
                         now,
                         f1_trigger_prompt(&app.f1_trigger),
+                        f1_push_status(&app.f1_push),
                     ),
                     Screen::F2 => screens::f2::render_into(
                         frame,
@@ -1228,6 +1238,20 @@ async fn run_router(
                             if applied {
                                 app.f3_batch_pull = None;
                             }
+                        }
+                    }
+                }
+            }
+            // d-61: F1 push replies. Generation-guarded in
+            // `F1PushState::apply_*` (compares `request_id`).
+            reply = f1_push_reply_rx.recv() => {
+                if let Some(F1PushReply { request_id, result }) = reply {
+                    match result {
+                        Ok((files, bytes)) => {
+                            app.f1_push.apply_done(request_id, files, bytes);
+                        }
+                        Err(message) => {
+                            app.f1_push.apply_error(request_id, message);
                         }
                     }
                 }
@@ -2535,6 +2559,33 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
     }
 }
 
+/// d-61: bridge the F1 push state to the renderer-facing
+/// `PushStatusDisplay`. `None` when Idle (the discovery footer
+/// shows instead).
+fn f1_push_status(state: &f1push::F1PushState) -> Option<screens::f1::PushStatusDisplay> {
+    use f1push::F1PushStatus;
+    use screens::f1::PushStatusDisplay;
+    match state.status() {
+        F1PushStatus::Idle => None,
+        F1PushStatus::Running { label, .. } => Some(PushStatusDisplay::Running {
+            label: label.clone(),
+        }),
+        F1PushStatus::Done {
+            files,
+            bytes,
+            label,
+            ..
+        } => Some(PushStatusDisplay::Done {
+            files: *files,
+            bytes: *bytes,
+            label: label.clone(),
+        }),
+        F1PushStatus::Error { message, .. } => Some(PushStatusDisplay::Error {
+            message: message.clone(),
+        }),
+    }
+}
+
 /// d-35: bridge the F3 pull state machine to the
 /// renderer-facing `F3PullDisplay` (lives in
 /// `screens/f3.rs` so the screens layer doesn't reach
@@ -2701,6 +2752,14 @@ struct F3PullReply {
     /// or a flattened error string. d-56: `files_deleted` is the
     /// mirror purge count (0 for a plain pull).
     result: Result<(usize, u64, u64), String>,
+}
+
+/// d-61: reply envelope from a spawned F1 push task.
+struct F1PushReply {
+    request_id: u64,
+    /// Ok((files_transferred, bytes_transferred)) or a flattened
+    /// error string.
+    result: Result<(u64, u64), String>,
 }
 
 /// d-41: reply envelope from a spawned F3 du task.
@@ -3101,6 +3160,50 @@ fn spawn_f3_pull(
             Err(err) => Err(format!("{err:#}")),
         };
         let _ = tx.send(F3PullReply { request_id, result }).await;
+    });
+}
+
+/// d-61: spawn a local→remote COPY push for an F1 trigger.
+/// Runs `run_remote_push` on a task and flattens the outcome into
+/// an [`F1PushReply`] (generation-guarded by `request_id`). No
+/// live progress in this slice — `progress = None`, so the footer
+/// shows Running until the terminal reply lands.
+fn spawn_f1_push(
+    request_id: u64,
+    local_source: std::path::PathBuf,
+    remote: RemoteEndpoint,
+    tx: mpsc::Sender<F1PushReply>,
+) {
+    use blit_app::endpoints::Endpoint;
+    use blit_app::transfers::remote::{run_remote_push, PushExecution};
+    use blit_core::fs_enum::FileFilter;
+    use blit_core::generated::MirrorMode;
+    tokio::spawn(async move {
+        let remote_label = remote.display();
+        let execution = PushExecution {
+            source: Endpoint::Local(local_source),
+            remote,
+            // Copy push: no filter, no mirror, no scan-complete
+            // gate. Mirror/move push (which need those) are
+            // follow-ups with their own confirm gates.
+            filter: FileFilter::default(),
+            mirror_mode: false,
+            mirror_kind: MirrorMode::Off,
+            force_grpc: false,
+            trace_data_plane: false,
+            require_complete_scan: false,
+            remote_label,
+        };
+        let result = run_remote_push(execution, None)
+            .await
+            .map(|outcome| {
+                (
+                    outcome.report.summary.files_transferred,
+                    outcome.report.summary.bytes_transferred,
+                )
+            })
+            .map_err(|err| format!("{err:#}"));
+        let _ = tx.send(F1PushReply { request_id, result }).await;
     });
 }
 
@@ -3893,6 +3996,26 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
                                     app.current_screen = Screen::F3;
                                 }
                             }
+                        }
+                    }
+                } else if kind == f3pull::PullKind::Copy {
+                    // d-61: the source isn't a remote endpoint → push
+                    // direction (local path → remote). This slice
+                    // supports COPY push only; mirror/move push need
+                    // their own confirm gates (follow-ups). The dest
+                    // must parse as a remote endpoint; otherwise
+                    // neither direction is valid and we drop (inline
+                    // parse-error feedback is a follow-up). The push
+                    // status shows in the F1 footer — no screen jump.
+                    if let Ok(remote) = RemoteEndpoint::parse(&dest) {
+                        let label = remote.display();
+                        if let Some(request_id) = app.f1_push.begin(label) {
+                            spawn_f1_push(
+                                request_id,
+                                std::path::PathBuf::from(&src),
+                                remote,
+                                app.f1_push_reply_tx.clone(),
+                            );
                         }
                     }
                 }
@@ -6591,6 +6714,8 @@ mod tests {
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             f1_trigger: f1trigger::F1TriggerState::new(),
+            f1_push: f1push::F1PushState::new(),
+            f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -6870,6 +6995,45 @@ mod tests {
         let mut app = app_with_trigger_modal();
         assert!(handle_f1_trigger_keystroke(&k(KeyCode::Esc), &mut app));
         assert!(!app.f1_trigger.is_editing(), "Esc closes the modal");
+    }
+
+    /// d-61: a local source + remote dest + Copy kind commits a
+    /// push (local→remote). The push status shows on F1 — no jump
+    /// to F3 (that's the pull direction). Needs a tokio reactor for
+    /// the detached push task (races to a non-existent daemon).
+    #[tokio::test]
+    async fn handle_f1_trigger_keystroke_enter_starts_push_for_local_source() {
+        let mut app = make_test_app_state(Screen::F1);
+        // Local-path source (does NOT parse as a remote endpoint),
+        // remote dest → push direction.
+        app.f1_trigger.begin("/tmp/src".to_string());
+        for c in "nas:9031:/home/".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(!app.f1_trigger.is_editing(), "commit closes the modal");
+        assert!(app.f1_push.is_running(), "a push launched");
+        assert_eq!(
+            app.current_screen,
+            Screen::F1,
+            "push status shows on F1, no jump to F3"
+        );
+        assert!(!app.f3_pull.is_running(), "push is not a pull");
+    }
+
+    /// d-61: push is copy-only this slice — a local source with
+    /// mirror/move selected does NOT launch (no push, no pull).
+    #[test]
+    fn handle_f1_trigger_keystroke_local_source_mirror_does_not_push() {
+        let mut app = make_test_app_state(Screen::F1);
+        app.f1_trigger.begin("/tmp/src".to_string());
+        for c in "nas:9031:/home/".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        app.f1_trigger.cycle_kind(true); // Copy → Mirror
+        assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
+        assert!(!app.f1_push.is_running(), "mirror push not supported yet");
+        assert!(!app.f3_pull.is_running());
     }
 
     #[test]
@@ -7378,6 +7542,8 @@ mod tests {
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             f1_trigger: f1trigger::F1TriggerState::new(),
+            f1_push: f1push::F1PushState::new(),
+            f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
             daemons_last_fetched: None,
             // Senders aren't called on the false branch
             // but the struct demands them.
@@ -7441,6 +7607,8 @@ mod tests {
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             f1_trigger: f1trigger::F1TriggerState::new(),
+            f1_push: f1push::F1PushState::new(),
+            f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7555,6 +7723,8 @@ mod tests {
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             f1_trigger: f1trigger::F1TriggerState::new(),
+            f1_push: f1push::F1PushState::new(),
+            f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7628,6 +7798,8 @@ mod tests {
             remote_label: String::new(),
             daemons: DaemonsState::new(),
             f1_trigger: f1trigger::F1TriggerState::new(),
+            f1_push: f1push::F1PushState::new(),
+            f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,

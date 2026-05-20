@@ -108,7 +108,10 @@ fn help_lines() -> Vec<Line<'static>> {
         kv("g / G", "jump to first / last row (F1, F2, F3)"),
         kv("Enter / → / l", "descend (F3) · browse daemon (F1)"),
         kv("← / h", "ascend (F3)"),
-        kv("t", "trigger transfer from daemon → local (F1)"),
+        kv(
+            "t",
+            "trigger transfer (F1) — remote↔local; ↑↓ copy/mirror/move",
+        ),
         kv(
             "K",
             "cancel selected transfer (F2) — y/N prompt if [transfer] confirm_cancel",

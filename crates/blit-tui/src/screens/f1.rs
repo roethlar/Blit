@@ -58,6 +58,8 @@ pub fn render_into(
     now: Instant,
     // d-58: `Some` while the `t` trigger modal is open.
     trigger: Option<TriggerPrompt>,
+    // d-61: `Some` while a push is running / showing its outcome.
+    push: Option<PushStatusDisplay>,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -72,12 +74,61 @@ pub fn render_into(
     render_header(frame, chunks[0], state);
     render_table(frame, chunks[1], state);
     render_detail(frame, chunks[2], state, now);
-    // d-58: the trigger modal, when open, replaces the discovery
-    // footer line with the source/dest entry prompt.
-    match trigger {
-        Some(prompt) => render_trigger(frame, chunks[3], &prompt),
-        None => render_footer(frame, chunks[3], state.status(), now),
+    // Footer line priority: the trigger modal (when open) >
+    // the d-61 push status (when active) > the discovery footer.
+    match (trigger, push) {
+        (Some(prompt), _) => render_trigger(frame, chunks[3], &prompt),
+        (None, Some(status)) => render_push(frame, chunks[3], &status),
+        (None, None) => render_footer(frame, chunks[3], state.status(), now),
     }
+}
+
+/// d-61: renderer-facing snapshot of the F1 push lifecycle.
+/// Bridged from `f1push::F1PushStatus` by `main.rs`.
+pub enum PushStatusDisplay {
+    Running {
+        label: String,
+    },
+    Done {
+        files: u64,
+        bytes: u64,
+        label: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// d-61: render the local→remote push status on the footer line.
+fn render_push(frame: &mut Frame, area: Rect, status: &PushStatusDisplay) {
+    let line = match status {
+        PushStatusDisplay::Running { label } => Line::from(vec![
+            Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(format!("→ {label}... "), Style::default().fg(Color::Yellow)),
+        ]),
+        PushStatusDisplay::Done {
+            files,
+            bytes,
+            label,
+        } => Line::from(vec![
+            Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(
+                    "pushed {files} file(s) · {} → {label}",
+                    format_bytes(*bytes)
+                ),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        PushStatusDisplay::Error { message } => Line::from(vec![
+            Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("failed: {message}"),
+                Style::default().fg(Color::Red),
+            ),
+        ]),
+    };
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// d-58: render the trigger-transfer entry prompt on the footer
@@ -789,7 +840,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_into(frame, area, &state, now, None);
+                render_into(frame, area, &state, now, None, None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
