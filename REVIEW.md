@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-44-f2-jump-nav | Feature | `g`/`G` jump on the F2 active-transfer cursor | `[x]` | `phase5/a1` | `8a41657` |
+| d-45-f3-delete | Feature | `D` deletes the F3 cursor path with y/N confirm | `[~]` | `phase5/a1` | `f0be497` |
 
 ## Open findings
 
