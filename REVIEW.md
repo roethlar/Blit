@@ -14,7 +14,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
 | d-62-f1-trigger-error | Feature | Inline validation feedback in the F1 trigger modal (round 2) | `[x]` | `phase5/a1` | `0b47a72` |
-| d-63-f1-push-progress | Feature | Live byte/file footer for the F1 push | `[~]` | `phase5/a1` | `391dcd3` |
+| d-63-f1-push-progress | Feature | Live byte/file footer for the F1 push | `[ ]` | `phase5/a1` | `391dcd3` |
 
 ## Open findings
 
