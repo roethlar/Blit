@@ -1,9 +1,9 @@
 # d-62-f1-trigger-error: inline validation feedback in the trigger
 
 **Severity**: Feature (closes d-58 known gap #2)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `f48a65e`
+**Commit**: `0b47a72` (round 1: `f48a65e`)
 
 ## What
 
@@ -104,4 +104,14 @@ existing no-push/no-pull guards.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reopened)
+
+> The module flow comment (`f1trigger.rs:25`) still documents
+> `Enter` as calling `F1TriggerState::take`, which this slice
+> removed in favor of `peek` / `close` / `set_error`. Update the
+> flow comment to match.
+
+**Response (0b47a72):** Updated the module-doc flow step 3 to
+describe `peek` (reads without closing), `close` on a successful
+launch, and `set_error` (keep the modal open with an inline
+message) on validation failure. Doc-only; 541 tests still green.
