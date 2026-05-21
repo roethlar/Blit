@@ -1,9 +1,9 @@
 # d-63-f1-push-progress: live byte/file footer for the F1 push
 
 **Severity**: Feature (closes d-61 known gap #2)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `391dcd3`
+**Commit**: `aba54f8` (round 1: `391dcd3`)
 
 ## What
 
@@ -88,4 +88,16 @@ semantics, state machine, and select wiring are unit-tested.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reopened)
+
+> `f1push.rs:12` still says "There's no live byte progress in this
+> first slice" and describes the lifecycle as only
+> `Running -> Done / Error` — false after d-63 added live counters.
+> Update the module docs to describe the progress-forwarder path
+> (or remove the stale statement).
+
+**Response (aba54f8):** Updated the f1push module-level doc to
+describe the d-63 progress forwarder feeding live
+`files`/`bytes`/`bytes_per_sec` into `Running` via
+`apply_progress` (authoritative totals still ride the terminal
+reply). Doc-only; 544 tests still green.
