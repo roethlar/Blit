@@ -23,9 +23,12 @@
 //!    Up/Down ([`F1TriggerState::cycle_kind`]) cycles
 //!    copy → mirror → move.
 //! 3. `Esc` → [`F1TriggerState::cancel`]. `Enter` →
-//!    [`F1TriggerState::take`] yields `(source, dest, kind)` for
-//!    the dispatcher to parse + launch (or `None` if either field
-//!    is blank).
+//!    [`F1TriggerState::peek`] reads `(source, dest, kind)` WITHOUT
+//!    closing (or `None` if either field is blank). The dispatcher
+//!    validates + launches, then either [`F1TriggerState::close`]s
+//!    on success or records [`F1TriggerState::set_error`] (keeping
+//!    the modal open with an inline message) on a validation
+//!    failure. d-62: edits clear a pending error.
 
 use crate::f3pull::PullKind;
 
