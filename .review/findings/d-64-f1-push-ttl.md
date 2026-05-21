@@ -1,9 +1,9 @@
 # d-64-f1-push-ttl: auto-hide the F1 push outcome footer
 
 **Severity**: Feature (closes d-61 known gap #3)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `0ae7069`
+**Commit**: `2f67e96` (round 1: `0ae7069`)
 
 ## What
 
@@ -75,4 +75,12 @@ TTL math is unit-tested.
 
 ## Reviewer comments
 
-(empty — pending grade)
+### Round 1 (reopened)
+
+> `config.rs:16` still describes the schema as "grown through ...
+> d-52" even though this slice adds the d-64 `push_status_ttl_ms`
+> key below. Update the schema header to include d-64.
+
+**Response (2f67e96):** Appended `/ d-64` to the schema-header
+"grown through" list so the header and the new config line agree.
+Doc-only; 550 tests still green.
