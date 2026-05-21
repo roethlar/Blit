@@ -6,11 +6,15 @@
 //! pushing a *local* path to a remote daemon — has no F3
 //! equivalent (F3 is a remote browser), so its lifecycle lives
 //! here, mirroring the F3 pull/delete shape: the dispatcher
-//! spawns `run_remote_push` on a task, the task replies, and the
-//! event loop applies the terminal state (generation-guarded by
-//! `request_id` so a stale reply from a superseded run is
-//! dropped). There's no live byte progress in this first slice —
-//! just Running → Done / Error, shown in the F1 footer.
+//! spawns `run_remote_push` on a task and the event loop applies
+//! the terminal state (generation-guarded by `request_id` so a
+//! stale reply from a superseded run is dropped). d-63: a progress
+//! forwarder feeds live `files` / `bytes` / `bytes_per_sec`
+//! counters into `Running` (via [`F1PushState::apply_progress`])
+//! while the push runs; the authoritative totals still ride the
+//! terminal reply. The whole lifecycle —
+//! Running (with live counters) → Done / Error — shows in the F1
+//! footer.
 //!
 //! Scope: **copy** push only. Mirror push (server-side
 //! delete-extraneous) and move push (delete the local source
