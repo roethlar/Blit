@@ -22,8 +22,17 @@ pub enum F1PushStatus {
     /// No push in progress / shown.
     Idle,
     /// Push RPC in flight. `label` is the remote destination
-    /// shown in the footer.
-    Running { request_id: u64, label: String },
+    /// shown in the footer. d-63: `files` / `bytes` are live
+    /// cumulative counters fed by the progress forwarder (0 until
+    /// the first event); `bytes_per_sec` is the average throughput
+    /// (0 until ~1s elapsed, matching the F3 pull footer).
+    Running {
+        request_id: u64,
+        label: String,
+        files: u64,
+        bytes: u64,
+        bytes_per_sec: u64,
+    },
     /// Push finished — files + bytes sent, dest label. (No
     /// auto-hide TTL in this slice; the terminal status persists
     /// until the next push begins — a follow-up could add one.)
@@ -78,8 +87,34 @@ impl F1PushState {
         }
         self.request_seq += 1;
         let request_id = self.request_seq;
-        self.status = F1PushStatus::Running { request_id, label };
+        self.status = F1PushStatus::Running {
+            request_id,
+            label,
+            files: 0,
+            bytes: 0,
+            bytes_per_sec: 0,
+        };
         Some(request_id)
+    }
+
+    /// d-63: apply a live progress snapshot. Updates the `Running`
+    /// counters in place; generation-guarded so a snapshot from a
+    /// superseded run is dropped.
+    pub fn apply_progress(&mut self, request_id: u64, files: u64, bytes: u64, bytes_per_sec: u64) {
+        if let F1PushStatus::Running {
+            request_id: rid,
+            files: f,
+            bytes: b,
+            bytes_per_sec: bps,
+            ..
+        } = &mut self.status
+        {
+            if *rid == request_id {
+                *f = files;
+                *b = bytes;
+                *bps = bytes_per_sec;
+            }
+        }
     }
 
     /// Apply a successful push reply. Dropped (returns false) if
@@ -89,6 +124,7 @@ impl F1PushState {
             F1PushStatus::Running {
                 request_id: rid,
                 label,
+                ..
             } if *rid == request_id => {
                 self.status = F1PushStatus::Done {
                     files,
@@ -133,10 +169,44 @@ mod tests {
         assert_eq!(rid, 1);
         assert!(s.is_running());
         match s.status() {
-            F1PushStatus::Running { request_id, label } => {
+            F1PushStatus::Running {
+                request_id,
+                label,
+                files,
+                bytes,
+                ..
+            } => {
                 assert_eq!(*request_id, 1);
                 assert_eq!(label, "nas:9031");
+                assert_eq!(*files, 0, "starts with zero progress");
+                assert_eq!(*bytes, 0);
             }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_progress_updates_running_counters() {
+        let mut s = F1PushState::new();
+        let rid = s.begin("nas:9031".to_string()).expect("started");
+        s.apply_progress(rid, 3, 4096, 2048);
+        match s.status() {
+            F1PushStatus::Running {
+                files,
+                bytes,
+                bytes_per_sec,
+                ..
+            } => {
+                assert_eq!(*files, 3);
+                assert_eq!(*bytes, 4096);
+                assert_eq!(*bytes_per_sec, 2048);
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+        // Stale progress (superseded run) is dropped.
+        s.apply_progress(rid + 99, 9, 9, 9);
+        match s.status() {
+            F1PushStatus::Running { files, .. } => assert_eq!(*files, 3, "stale dropped"),
             other => panic!("expected Running, got {other:?}"),
         }
     }

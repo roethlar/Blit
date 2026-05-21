@@ -91,6 +91,11 @@ pub fn render_into(
 pub enum PushStatusDisplay {
     Running {
         label: String,
+        /// d-63: live cumulative counters (0 until the first
+        /// progress event); `bytes_per_sec` is the average rate.
+        files: u64,
+        bytes: u64,
+        bytes_per_sec: u64,
     },
     Done {
         files: u64,
@@ -105,10 +110,33 @@ pub enum PushStatusDisplay {
 /// d-61: render the local→remote push status on the footer line.
 fn render_push(frame: &mut Frame, area: Rect, status: &PushStatusDisplay) {
     let line = match status {
-        PushStatusDisplay::Running { label } => Line::from(vec![
-            Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(format!("→ {label}... "), Style::default().fg(Color::Yellow)),
-        ]),
+        PushStatusDisplay::Running {
+            label,
+            files,
+            bytes,
+            bytes_per_sec,
+        } => {
+            // d-63: show the live count once data flows; before
+            // that just "→ dest...". Append the rate once it
+            // settles (suppressed for the first ~1s).
+            let frag = if *bytes > 0 || *files > 0 {
+                let rate = if *bytes_per_sec > 0 {
+                    format!(" · {}/s", format_bytes(*bytes_per_sec))
+                } else {
+                    String::new()
+                };
+                format!(
+                    "→ {label}... ({files} file(s) · {}{rate})",
+                    format_bytes(*bytes)
+                )
+            } else {
+                format!("→ {label}... ")
+            };
+            Line::from(vec![
+                Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(frag, Style::default().fg(Color::Yellow)),
+            ])
+        }
         PushStatusDisplay::Done {
             files,
             bytes,

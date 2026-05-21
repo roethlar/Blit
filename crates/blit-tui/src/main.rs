@@ -165,6 +165,8 @@ struct AppState {
     /// direction). Status shown in the F1 footer.
     f1_push: f1push::F1PushState,
     f1_push_reply_tx: mpsc::Sender<F1PushReply>,
+    /// d-63: live push progress snapshots (try_send, lossy).
+    f1_push_progress_tx: mpsc::Sender<F1PushProgress>,
     /// Sender into the F1 detail fetcher mpsc. Cloned by
     /// `maybe_kick_detail_fetch` into each spawned task.
     detail_tx: mpsc::Sender<DetailUpdate>,
@@ -511,6 +513,8 @@ async fn run_router(
     let (f3_pull_reply_tx, mut f3_pull_reply_rx) = mpsc::channel::<F3PullReply>(2);
     // d-61: F1 push reply channel (terminal outcome only).
     let (f1_push_reply_tx, mut f1_push_reply_rx) = mpsc::channel::<F1PushReply>(2);
+    // d-63: F1 push live-progress channel (small, lossy).
+    let (f1_push_progress_tx, mut f1_push_progress_rx) = mpsc::channel::<F1PushProgress>(8);
 
     // d-37: F3 pull live-progress channel. Small bounded
     // buffer — the forwarder `try_send`s, dropping
@@ -532,6 +536,7 @@ async fn run_router(
         f1_trigger: f1trigger::F1TriggerState::new(),
         f1_push: f1push::F1PushState::new(),
         f1_push_reply_tx,
+        f1_push_progress_tx,
         daemons_last_fetched: None,
         detail_tx: detail_tx.clone(),
         discovery_refresh_tx,
@@ -1240,6 +1245,19 @@ async fn run_router(
                             }
                         }
                     }
+                }
+            }
+            // d-63: F1 push live-progress snapshots.
+            snapshot = f1_push_progress_rx.recv() => {
+                if let Some(F1PushProgress {
+                    request_id,
+                    files,
+                    bytes,
+                    bytes_per_sec,
+                }) = snapshot
+                {
+                    app.f1_push
+                        .apply_progress(request_id, files, bytes, bytes_per_sec);
                 }
             }
             // d-61: F1 push replies. Generation-guarded in
@@ -2570,8 +2588,17 @@ fn f1_push_status(state: &f1push::F1PushState) -> Option<screens::f1::PushStatus
     use screens::f1::PushStatusDisplay;
     match state.status() {
         F1PushStatus::Idle => None,
-        F1PushStatus::Running { label, .. } => Some(PushStatusDisplay::Running {
+        F1PushStatus::Running {
+            label,
+            files,
+            bytes,
+            bytes_per_sec,
+            ..
+        } => Some(PushStatusDisplay::Running {
             label: label.clone(),
+            files: *files,
+            bytes: *bytes,
+            bytes_per_sec: *bytes_per_sec,
         }),
         F1PushStatus::Done {
             files,
@@ -3004,6 +3031,46 @@ fn accumulate_pull_progress(
     }
 }
 
+/// d-63: live progress snapshot from a running F1 push, forwarded
+/// to the event loop. `bytes_per_sec` is the average throughput
+/// (0 until ~1s elapsed), reusing [`pull_throughput`].
+struct F1PushProgress {
+    request_id: u64,
+    files: u64,
+    bytes: u64,
+    bytes_per_sec: u64,
+}
+
+/// d-63: fold one push `ProgressEvent` into the running
+/// `(files, bytes)` totals using push-SEND semantics.
+///
+/// Unlike the pull (receive) path, the push send path reports
+/// bytes on `FileComplete` (`data_plane.rs` `send_payloads`:
+/// `report_file_complete(path, header.size)`) and emits NO
+/// `Payload` events — so bytes AND files both come from
+/// `FileComplete` here (whereas `accumulate_pull_progress` takes
+/// bytes from `Payload` to avoid the receive path's
+/// `Payload`+`FileComplete` double-count). Counting bytes from
+/// `Payload` here would report 0; counting `FileComplete` bytes is
+/// correct and never double-counts because push emits no
+/// `Payload`.
+fn accumulate_push_progress(
+    files: &mut u64,
+    bytes: &mut u64,
+    event: &blit_core::remote::transfer::ProgressEvent,
+) {
+    use blit_core::remote::transfer::ProgressEvent;
+    match event {
+        ProgressEvent::FileComplete { bytes: b, .. } => {
+            *files = files.saturating_add(1);
+            *bytes = bytes.saturating_add(*b);
+        }
+        // Push send emits no Payload events; ignore defensively so
+        // a future emitter change can't double-count.
+        ProgressEvent::Payload { .. } | ProgressEvent::ManifestBatch { .. } => {}
+    }
+}
+
 /// d-39: average pull throughput in bytes/sec.
 ///
 /// Suppressed (returns 0) until at least one second has
@@ -3168,20 +3235,45 @@ fn spawn_f3_pull(
 
 /// d-61: spawn a local→remote COPY push for an F1 trigger.
 /// Runs `run_remote_push` on a task and flattens the outcome into
-/// an [`F1PushReply`] (generation-guarded by `request_id`). No
-/// live progress in this slice — `progress = None`, so the footer
-/// shows Running until the terminal reply lands.
+/// an [`F1PushReply`] (generation-guarded by `request_id`). d-63:
+/// a progress forwarder accumulates push-send `ProgressEvent`s
+/// into live `(files, bytes)` snapshots on `progress_tx` (lossy
+/// via `try_send`); the authoritative totals ride the reply.
 fn spawn_f1_push(
     request_id: u64,
     local_source: std::path::PathBuf,
     remote: RemoteEndpoint,
     tx: mpsc::Sender<F1PushReply>,
+    progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
     use blit_app::endpoints::Endpoint;
     use blit_app::transfers::remote::{run_remote_push, PushExecution};
     use blit_core::fs_enum::FileFilter;
     use blit_core::generated::MirrorMode;
+    use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
+        // d-63: progress monitor — run_remote_push reports
+        // ProgressEvents into `pe_rx`; the forwarder accumulates
+        // cumulative (files, bytes) via `accumulate_push_progress`
+        // and ships snapshots to the UI.
+        let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let progress = RemoteTransferProgress::new(pe_tx);
+        let forwarder = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut files = 0u64;
+            let mut bytes = 0u64;
+            while let Some(event) = pe_rx.recv().await {
+                accumulate_push_progress(&mut files, &mut bytes, &event);
+                let bytes_per_sec = pull_throughput(bytes, started.elapsed().as_secs_f64());
+                let _ = progress_tx.try_send(F1PushProgress {
+                    request_id,
+                    files,
+                    bytes,
+                    bytes_per_sec,
+                });
+            }
+        });
+
         let remote_label = remote.display();
         let execution = PushExecution {
             source: Endpoint::Local(local_source),
@@ -3197,7 +3289,7 @@ fn spawn_f1_push(
             require_complete_scan: false,
             remote_label,
         };
-        let result = run_remote_push(execution, None)
+        let result = run_remote_push(execution, Some(&progress))
             .await
             .map(|outcome| {
                 (
@@ -3206,6 +3298,10 @@ fn spawn_f1_push(
                 )
             })
             .map_err(|err| format!("{err:#}"));
+        // Close the progress channel → the forwarder drains and
+        // exits before the terminal reply.
+        drop(progress);
+        let _ = forwarder.await;
         let _ = tx.send(F1PushReply { request_id, result }).await;
     });
 }
@@ -3293,7 +3389,13 @@ fn plan_f1_trigger(
                 .f1_push
                 .begin(label)
                 .ok_or("a push is already running")?;
-            spawn_f1_push(request_id, local_src, remote, app.f1_push_reply_tx.clone());
+            spawn_f1_push(
+                request_id,
+                local_src,
+                remote,
+                app.f1_push_reply_tx.clone(),
+                app.f1_push_progress_tx.clone(),
+            );
             Ok(())
         }
     }
@@ -6743,6 +6845,7 @@ mod tests {
             f1_trigger: f1trigger::F1TriggerState::new(),
             f1_push: f1push::F1PushState::new(),
             f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
+            f1_push_progress_tx: mpsc::channel::<F1PushProgress>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7473,6 +7576,57 @@ mod tests {
         }
     }
 
+    // d-63: push-progress accumulator semantics. The push SEND
+    // path (data_plane.rs `send_payloads`) reports bytes on
+    // `FileComplete` and emits NO `Payload` — the opposite of the
+    // pull receive path. So the push accumulator must take bytes
+    // from FileComplete; taking them from Payload (like the pull
+    // accumulator) would report 0 bytes.
+
+    #[test]
+    fn accumulate_push_progress_counts_files_and_bytes_from_file_complete() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        for (i, size) in [100u64, 200, 300].iter().enumerate() {
+            accumulate_push_progress(
+                &mut files,
+                &mut bytes,
+                &ProgressEvent::FileComplete {
+                    path: format!("f{i}"),
+                    bytes: *size,
+                },
+            );
+        }
+        assert_eq!(files, 3);
+        assert_eq!(bytes, 600, "push counts bytes from FileComplete");
+    }
+
+    /// Push emits no Payload, but if one appeared it must NOT add
+    /// bytes (the FileComplete is authoritative for push) — guards
+    /// against a future double-count.
+    #[test]
+    fn accumulate_push_progress_ignores_payload_and_manifest() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        accumulate_push_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::Payload {
+                files: 0,
+                bytes: 999,
+            },
+        );
+        accumulate_push_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::ManifestBatch { files: 5 },
+        );
+        assert_eq!(files, 0);
+        assert_eq!(bytes, 0, "Payload/ManifestBatch don't move push totals");
+    }
+
     // d-37 round 2: pull-progress accumulator semantics.
 
     /// The reviewer-flagged regression: the TCP data-plane
@@ -7623,6 +7777,7 @@ mod tests {
             f1_trigger: f1trigger::F1TriggerState::new(),
             f1_push: f1push::F1PushState::new(),
             f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
+            f1_push_progress_tx: mpsc::channel::<F1PushProgress>(1).0,
             daemons_last_fetched: None,
             // Senders aren't called on the false branch
             // but the struct demands them.
@@ -7688,6 +7843,7 @@ mod tests {
             f1_trigger: f1trigger::F1TriggerState::new(),
             f1_push: f1push::F1PushState::new(),
             f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
+            f1_push_progress_tx: mpsc::channel::<F1PushProgress>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7804,6 +7960,7 @@ mod tests {
             f1_trigger: f1trigger::F1TriggerState::new(),
             f1_push: f1push::F1PushState::new(),
             f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
+            f1_push_progress_tx: mpsc::channel::<F1PushProgress>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
@@ -7879,6 +8036,7 @@ mod tests {
             f1_trigger: f1trigger::F1TriggerState::new(),
             f1_push: f1push::F1PushState::new(),
             f1_push_reply_tx: mpsc::channel::<F1PushReply>(1).0,
+            f1_push_progress_tx: mpsc::channel::<F1PushProgress>(1).0,
             daemons_last_fetched: None,
             detail_tx: mpsc::channel::<DetailUpdate>(1).0,
             discovery_refresh_tx: mpsc::channel::<()>(1).0,
