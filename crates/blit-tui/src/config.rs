@@ -36,6 +36,7 @@
 //! confirm_cancel = false        # d-29: opt-in `K` confirm prompt (y/N)
 //! pull_status_ttl_ms = 5000     # d-40: F3 pull-outcome TTL (clamped to [250, 60000])
 //! delete_status_ttl_ms = 5000   # d-52: F3 batch-delete outcome TTL (clamped to [250, 60000])
+//! push_status_ttl_ms = 5000     # d-64: F1 push-outcome TTL (clamped to [250, 60000])
 //! ```
 //!
 //! Future slices can grow the schema (per-pane tick
@@ -218,6 +219,13 @@ pub struct TransferDefaults {
     /// sibling of `pull_status_ttl_ms`. Clamped to
     /// `[MIN_DELETE_TTL_MS, MAX_DELETE_TTL_MS]`.
     pub delete_status_ttl_ms: u64,
+    /// d-64: milliseconds the F1 push outcome fragment
+    /// (`pushed N · X → <dest>` / `push failed: <msg>`) stays in
+    /// the F1 footer after the push finishes, before the d-64
+    /// auto-hide sweep clears it back to Idle. A sibling of
+    /// `pull_status_ttl_ms`. Clamped to
+    /// `[MIN_PUSH_TTL_MS, MAX_PUSH_TTL_MS]`.
+    pub push_status_ttl_ms: u64,
 }
 
 impl TransferDefaults {
@@ -273,6 +281,20 @@ impl TransferDefaults {
         self.delete_status_ttl_ms
             .clamp(Self::MIN_DELETE_TTL_MS, Self::MAX_DELETE_TTL_MS)
     }
+
+    /// d-64 baseline: 5s, matching the pull/delete outcome TTLs.
+    pub const DEFAULT_PUSH_TTL_MS: u64 = 5_000;
+    /// Floor — same rationale as [`Self::MIN_CANCEL_TTL_MS`].
+    pub const MIN_PUSH_TTL_MS: u64 = 250;
+    /// Ceiling — same rationale as [`Self::MAX_CANCEL_TTL_MS`].
+    pub const MAX_PUSH_TTL_MS: u64 = 60_000;
+
+    /// d-64: clamped F1 push outcome TTL. The loop reads this each
+    /// frame and feeds it to `clear_terminal_if_expired`.
+    pub fn push_status_ttl_ms_clamped(&self) -> u64 {
+        self.push_status_ttl_ms
+            .clamp(Self::MIN_PUSH_TTL_MS, Self::MAX_PUSH_TTL_MS)
+    }
 }
 
 impl Default for TransferDefaults {
@@ -282,6 +304,7 @@ impl Default for TransferDefaults {
             confirm_cancel: false,
             pull_status_ttl_ms: Self::DEFAULT_PULL_TTL_MS,
             delete_status_ttl_ms: Self::DEFAULT_DELETE_TTL_MS,
+            push_status_ttl_ms: Self::DEFAULT_PUSH_TTL_MS,
         }
     }
 }
@@ -757,6 +780,47 @@ mod tests {
         assert_eq!(
             ceiling.delete_status_ttl_ms_clamped(),
             TransferDefaults::MAX_DELETE_TTL_MS
+        );
+    }
+
+    // d-64: [transfer] push_status_ttl_ms — F1 push outcome TTL.
+
+    #[test]
+    fn transfer_default_push_ttl_is_5000ms() {
+        let cfg = TuiConfig::default();
+        assert_eq!(
+            cfg.transfer.push_status_ttl_ms,
+            TransferDefaults::DEFAULT_PUSH_TTL_MS
+        );
+        assert_eq!(
+            cfg.transfer.push_status_ttl_ms_clamped(),
+            TransferDefaults::DEFAULT_PUSH_TTL_MS
+        );
+    }
+
+    #[test]
+    fn transfer_push_ttl_parses_and_clamps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("tui.toml");
+        std::fs::write(&path, "[transfer]\npush_status_ttl_ms = 2000\n").expect("write");
+        let cfg = load_from_path(&path, |_| {});
+        assert_eq!(cfg.transfer.push_status_ttl_ms_clamped(), 2000);
+
+        let floor = TransferDefaults {
+            push_status_ttl_ms: 0,
+            ..TransferDefaults::default()
+        };
+        assert_eq!(
+            floor.push_status_ttl_ms_clamped(),
+            TransferDefaults::MIN_PUSH_TTL_MS
+        );
+        let ceiling = TransferDefaults {
+            push_status_ttl_ms: u64::MAX,
+            ..TransferDefaults::default()
+        };
+        assert_eq!(
+            ceiling.push_status_ttl_ms_clamped(),
+            TransferDefaults::MAX_PUSH_TTL_MS
         );
     }
 

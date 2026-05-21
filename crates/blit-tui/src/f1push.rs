@@ -20,6 +20,8 @@
 //! delete-extraneous) and move push (delete the local source
 //! after) are follow-ups — they need their own confirm gates.
 
+use std::time::{Duration, Instant};
+
 /// Lifecycle of an F1 push.
 #[derive(Debug, Clone)]
 pub enum F1PushStatus {
@@ -37,16 +39,20 @@ pub enum F1PushStatus {
         bytes: u64,
         bytes_per_sec: u64,
     },
-    /// Push finished — files + bytes sent, dest label. (No
-    /// auto-hide TTL in this slice; the terminal status persists
-    /// until the next push begins — a follow-up could add one.)
+    /// Push finished — files + bytes sent, dest label. d-64:
+    /// `finished_at` drives the auto-hide TTL.
     Done {
         files: u64,
         bytes: u64,
         label: String,
+        finished_at: Instant,
     },
-    /// Push failed (validation or transport).
-    Error { message: String },
+    /// Push failed (validation or transport). d-64: `finished_at`
+    /// drives the auto-hide TTL.
+    Error {
+        message: String,
+        finished_at: Instant,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -122,8 +128,9 @@ impl F1PushState {
     }
 
     /// Apply a successful push reply. Dropped (returns false) if
-    /// `request_id` doesn't match the current `Running` run.
-    pub fn apply_done(&mut self, request_id: u64, files: u64, bytes: u64) -> bool {
+    /// `request_id` doesn't match the current `Running` run. `at`
+    /// stamps the d-64 auto-hide deadline.
+    pub fn apply_done(&mut self, request_id: u64, files: u64, bytes: u64, at: Instant) -> bool {
         match &self.status {
             F1PushStatus::Running {
                 request_id: rid,
@@ -134,6 +141,7 @@ impl F1PushState {
                     files,
                     bytes,
                     label: label.clone(),
+                    finished_at: at,
                 };
                 true
             }
@@ -142,15 +150,60 @@ impl F1PushState {
     }
 
     /// Apply a failed push reply. Same generation guard.
-    pub fn apply_error(&mut self, request_id: u64, message: String) -> bool {
+    pub fn apply_error(&mut self, request_id: u64, message: String, at: Instant) -> bool {
         match &self.status {
             F1PushStatus::Running {
                 request_id: rid, ..
             } if *rid == request_id => {
-                self.status = F1PushStatus::Error { message };
+                self.status = F1PushStatus::Error {
+                    message,
+                    finished_at: at,
+                };
                 true
             }
             _ => false,
+        }
+    }
+
+    /// d-64: `true` while a terminal (Done / Error) fragment is
+    /// showing. The event loop ticks while this holds so the
+    /// fragment auto-hides on schedule.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            F1PushStatus::Done { .. } | F1PushStatus::Error { .. }
+        )
+    }
+
+    /// d-64: clear a Done / Error fragment back to Idle once it's
+    /// been on screen for `ttl` (mirrors the F3 pull/delete
+    /// auto-hide, at the state level).
+    pub fn clear_terminal_if_expired(&mut self, now: Instant, ttl: Duration) {
+        let finished_at = match &self.status {
+            F1PushStatus::Done { finished_at, .. } => *finished_at,
+            F1PushStatus::Error { finished_at, .. } => *finished_at,
+            _ => return,
+        };
+        if now.saturating_duration_since(finished_at) >= ttl {
+            self.status = F1PushStatus::Idle;
+        }
+    }
+
+    /// d-64: wall-clock remaining before the auto-hide fires on a
+    /// terminal fragment, so the loop can collapse its sleep
+    /// budget. `None` when no terminal is showing or it already
+    /// expired (mirrors `F3PullState::terminal_remaining`).
+    pub fn terminal_remaining(&self, now: Instant, ttl: Duration) -> Option<Duration> {
+        let finished_at = match &self.status {
+            F1PushStatus::Done { finished_at, .. } => *finished_at,
+            F1PushStatus::Error { finished_at, .. } => *finished_at,
+            _ => return None,
+        };
+        let elapsed = now.saturating_duration_since(finished_at);
+        if elapsed >= ttl {
+            None
+        } else {
+            Some(ttl - elapsed)
         }
     }
 }
@@ -227,7 +280,7 @@ mod tests {
     fn apply_done_records_terminal_state() {
         let mut s = F1PushState::new();
         let rid = s.begin("nas:9031".to_string()).expect("started");
-        assert!(s.apply_done(rid, 12, 4096));
+        assert!(s.apply_done(rid, 12, 4096, Instant::now()));
         match s.status() {
             F1PushStatus::Done {
                 files,
@@ -247,7 +300,7 @@ mod tests {
     fn apply_error_records_message() {
         let mut s = F1PushState::new();
         let rid = s.begin("nas:9031".to_string()).expect("started");
-        assert!(s.apply_error(rid, "connection refused".to_string()));
+        assert!(s.apply_error(rid, "connection refused".to_string(), Instant::now()));
         match s.status() {
             F1PushStatus::Error { message, .. } => assert_eq!(message, "connection refused"),
             other => panic!("expected Error, got {other:?}"),
@@ -259,9 +312,9 @@ mod tests {
         let mut s = F1PushState::new();
         let rid = s.begin("nas:9031".to_string()).expect("started");
         // A reply for a superseded id must not clobber Running.
-        assert!(!s.apply_done(rid + 99, 1, 1));
+        assert!(!s.apply_done(rid + 99, 1, 1, Instant::now()));
         assert!(s.is_running());
-        assert!(!s.apply_error(rid + 99, "x".to_string()));
+        assert!(!s.apply_error(rid + 99, "x".to_string(), Instant::now()));
         assert!(s.is_running());
     }
 
@@ -269,8 +322,69 @@ mod tests {
     fn run_ids_increment_so_a_new_push_supersedes() {
         let mut s = F1PushState::new();
         let first = s.begin("a".to_string()).expect("first");
-        s.apply_done(first, 0, 0);
+        s.apply_done(first, 0, 0, Instant::now());
         let second = s.begin("b".to_string()).expect("second");
         assert!(second > first, "ids monotonic → stale replies dropped");
+    }
+
+    // d-64: terminal auto-hide TTL.
+
+    const TEST_TTL: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn done_and_error_are_terminal_running_and_idle_are_not() {
+        let mut s = F1PushState::new();
+        assert!(!s.is_terminal(), "Idle not terminal");
+        let rid = s.begin("nas:9031".to_string()).expect("started");
+        assert!(!s.is_terminal(), "Running not terminal");
+        s.apply_done(rid, 1, 1, Instant::now());
+        assert!(s.is_terminal(), "Done is terminal");
+    }
+
+    #[test]
+    fn clear_terminal_hides_done_after_ttl() {
+        let mut s = F1PushState::new();
+        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let finished = Instant::now();
+        s.apply_done(rid, 5, 500, finished);
+        // Within TTL → still showing.
+        s.clear_terminal_if_expired(finished, TEST_TTL);
+        assert!(s.is_terminal());
+        // Past TTL → cleared.
+        s.clear_terminal_if_expired(finished + TEST_TTL + Duration::from_millis(1), TEST_TTL);
+        assert!(matches!(s.status(), F1PushStatus::Idle));
+    }
+
+    #[test]
+    fn clear_terminal_is_noop_on_running() {
+        let mut s = F1PushState::new();
+        s.begin("nas:9031".to_string()).expect("started");
+        // A long-running push must never be cleared by the sweep.
+        s.clear_terminal_if_expired(Instant::now() + Duration::from_secs(3600), TEST_TTL);
+        assert!(s.is_running(), "Running is immune to the terminal TTL");
+    }
+
+    #[test]
+    fn terminal_remaining_some_within_none_after_and_on_running() {
+        let mut s = F1PushState::new();
+        assert!(
+            s.terminal_remaining(Instant::now(), TEST_TTL).is_none(),
+            "Idle"
+        );
+        let rid = s.begin("nas:9031".to_string()).expect("started");
+        assert!(
+            s.terminal_remaining(Instant::now(), TEST_TTL).is_none(),
+            "Running has no terminal deadline"
+        );
+        let finished = Instant::now();
+        s.apply_error(rid, "boom".to_string(), finished);
+        let elapsed = Duration::from_millis(100);
+        assert_eq!(
+            s.terminal_remaining(finished + elapsed, TEST_TTL),
+            Some(TEST_TTL - elapsed)
+        );
+        assert!(s
+            .terminal_remaining(finished + TEST_TTL, TEST_TTL)
+            .is_none());
     }
 }

@@ -673,6 +673,10 @@ async fn run_router(
         // `[transfer] delete_status_ttl_ms`, read each frame.
         let delete_ttl = Duration::from_millis(tui_config.transfer.delete_status_ttl_ms_clamped());
         app.f3_del.clear_terminal_if_expired(now, delete_ttl);
+        // d-64: auto-hide the F1 push outcome (mirrors the pull TTL).
+        // Tunable via `[transfer] push_status_ttl_ms`, read each frame.
+        let push_ttl = Duration::from_millis(tui_config.transfer.push_status_ttl_ms_clamped());
+        app.f1_push.clear_terminal_if_expired(now, push_ttl);
         // d-36: accent + reload banner are recomputed each
         // frame from the (possibly hot-reloaded) config, so
         // a `Ctrl+R` theme change takes effect immediately.
@@ -828,10 +832,18 @@ async fn run_router(
         } else {
             None
         };
+        // d-64: the F1 push outcome fragment collapses the sleep
+        // budget the same way, so a short `push_status_ttl_ms`
+        // isn't delayed by a long live-tick interval.
+        let push_remaining = if matches!(app.current_screen, Screen::F1) {
+            app.f1_push.terminal_remaining(Instant::now(), push_ttl)
+        } else {
+            None
+        };
         let tick_budget = compute_tick_budget(
             needs_live_tick,
             live_tick_interval,
-            min_opt(cancel_remaining, pull_remaining),
+            min_opt(min_opt(cancel_remaining, pull_remaining), push_remaining),
         );
         let live_tick = async {
             if let Some(dur) = tick_budget {
@@ -1264,12 +1276,13 @@ async fn run_router(
             // `F1PushState::apply_*` (compares `request_id`).
             reply = f1_push_reply_rx.recv() => {
                 if let Some(F1PushReply { request_id, result }) = reply {
+                    let at = Instant::now();
                     match result {
                         Ok((files, bytes)) => {
-                            app.f1_push.apply_done(request_id, files, bytes);
+                            app.f1_push.apply_done(request_id, files, bytes, at);
                         }
                         Err(message) => {
-                            app.f1_push.apply_error(request_id, message);
+                            app.f1_push.apply_error(request_id, message, at);
                         }
                     }
                 }
@@ -3674,6 +3687,11 @@ fn needs_live_tick(app: &AppState) -> bool {
     // it auto-hides on its TTL (single-row outcomes are
     // event-cleared, so they don't need ticking).
     if app.f3_del.is_batch_terminal() {
+        return true;
+    }
+    // d-64: tick while an F1 push Done/Error fragment is showing
+    // so it auto-hides on its TTL.
+    if app.f1_push.is_terminal() {
         return true;
     }
     match app.current_screen {
