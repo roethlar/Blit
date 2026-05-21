@@ -13,7 +13,7 @@ See `.review/findings/<id>.md` for per-finding details.
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
-| d-61-f1-trigger-push | Feature | Local→remote copy push from the F1 trigger (round 3) | `[x]` | `phase5/a1` | `83e8675` |
+| d-62-f1-trigger-error | Feature | Inline validation feedback in the F1 trigger modal | `[~]` | `phase5/a1` | `f48a65e` |
 
 ## Open findings
 
