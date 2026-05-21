@@ -50,6 +50,10 @@ pub enum F1TriggerStatus {
         /// endpoints". Cycled with the Up/Down arrows; mirror and
         /// move route through F3's destructive confirm after commit.
         kind: PullKind,
+        /// d-62: a validation error from the last commit attempt
+        /// (e.g. an unparseable endpoint). Shown in the prompt;
+        /// cleared on the next edit. `None` = no error yet.
+        error: Option<String>,
     },
 }
 
@@ -95,16 +99,18 @@ impl F1TriggerState {
             dest: String::new(),
             focus: TriggerField::Dest,
             kind: PullKind::Copy,
+            error: None,
         };
     }
 
     /// `Tab` — toggle which field is being edited.
     pub fn toggle_focus(&mut self) {
-        if let F1TriggerStatus::Editing { focus, .. } = &mut self.status {
+        if let F1TriggerStatus::Editing { focus, error, .. } = &mut self.status {
             *focus = match focus {
                 TriggerField::Source => TriggerField::Dest,
                 TriggerField::Dest => TriggerField::Source,
             };
+            *error = None;
         }
     }
 
@@ -112,7 +118,7 @@ impl F1TriggerState {
     /// (Up) goes Copy → Mirror → Move → Copy; `!forward` (Down)
     /// reverses.
     pub fn cycle_kind(&mut self, forward: bool) {
-        if let F1TriggerStatus::Editing { kind, .. } = &mut self.status {
+        if let F1TriggerStatus::Editing { kind, error, .. } = &mut self.status {
             *kind = match (*kind, forward) {
                 (PullKind::Copy, true) => PullKind::Mirror,
                 (PullKind::Mirror, true) => PullKind::Move,
@@ -121,15 +127,18 @@ impl F1TriggerState {
                 (PullKind::Mirror, false) => PullKind::Copy,
                 (PullKind::Move, false) => PullKind::Mirror,
             };
+            *error = None;
         }
     }
 
-    /// Append a char to the focused field.
+    /// Append a char to the focused field. d-62: clears any
+    /// pending validation error (the operator is fixing the input).
     pub fn push_char(&mut self, c: char) {
         if let F1TriggerStatus::Editing {
             source,
             dest,
             focus,
+            error,
             ..
         } = &mut self.status
         {
@@ -137,6 +146,7 @@ impl F1TriggerState {
                 TriggerField::Source => source.push(c),
                 TriggerField::Dest => dest.push(c),
             }
+            *error = None;
         }
     }
 
@@ -147,9 +157,11 @@ impl F1TriggerState {
             source,
             dest,
             focus,
+            error,
             ..
         } = &mut self.status
         {
+            *error = None;
             match focus {
                 TriggerField::Source => source.pop().is_some(),
                 TriggerField::Dest => dest.pop().is_some(),
@@ -164,22 +176,40 @@ impl F1TriggerState {
         self.status = F1TriggerStatus::Idle;
     }
 
-    /// `Enter` — close the modal and yield the trimmed
-    /// `(source, dest, kind)` for the dispatcher to parse +
-    /// launch. Returns `None` (and stays open) when either field
-    /// is blank — there's nothing to launch yet.
-    pub fn take(&mut self) -> Option<(String, String, PullKind)> {
-        let (source, dest, kind) = match &self.status {
+    /// d-62: read the trimmed `(source, dest, kind)` WITHOUT
+    /// closing. `None` when either field is blank (nothing to
+    /// launch yet — the modal stays open silently). The dispatcher
+    /// validates the endpoints and then either [`close`]s (on a
+    /// successful launch) or records a [`set_error`] (keeping the
+    /// modal open for the operator to fix the typo).
+    pub fn peek(&self) -> Option<(String, String, PullKind)> {
+        match &self.status {
             F1TriggerStatus::Editing {
                 source, dest, kind, ..
-            } => (source.trim().to_string(), dest.trim().to_string(), *kind),
-            F1TriggerStatus::Idle => return None,
-        };
-        if source.is_empty() || dest.is_empty() {
-            return None;
+            } => {
+                let source = source.trim().to_string();
+                let dest = dest.trim().to_string();
+                if source.is_empty() || dest.is_empty() {
+                    None
+                } else {
+                    Some((source, dest, *kind))
+                }
+            }
+            F1TriggerStatus::Idle => None,
         }
+    }
+
+    /// d-62: close the modal after a successful launch.
+    pub fn close(&mut self) {
         self.status = F1TriggerStatus::Idle;
-        Some((source, dest, kind))
+    }
+
+    /// d-62: record a validation error and keep the modal open so
+    /// the operator can correct the input.
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        if let F1TriggerStatus::Editing { error, .. } = &mut self.status {
+            *error = Some(message.into());
+        }
     }
 }
 
@@ -205,6 +235,7 @@ mod tests {
                 dest,
                 focus,
                 kind,
+                ..
             } => {
                 assert_eq!(source, "nas:9031:/");
                 assert!(dest.is_empty());
@@ -266,21 +297,24 @@ mod tests {
     }
 
     #[test]
-    fn take_yields_trimmed_pair_and_closes() {
+    fn peek_yields_trimmed_pair_without_closing() {
         let mut s = F1TriggerState::new();
         s.begin("  nas:9031:/home/docs  ".to_string());
         for c in "  /tmp/out  ".chars() {
             s.push_char(c);
         }
-        let (source, dest, kind) = s.take().expect("both fields set");
+        let (source, dest, kind) = s.peek().expect("both fields set");
         assert_eq!(source, "nas:9031:/home/docs");
         assert_eq!(dest, "/tmp/out");
         assert_eq!(kind, PullKind::Copy, "default mode is copy");
-        assert!(matches!(s.status(), F1TriggerStatus::Idle), "take closes");
+        assert!(s.is_editing(), "peek does NOT close — the caller does");
+        // `close` is the explicit terminator.
+        s.close();
+        assert!(matches!(s.status(), F1TriggerStatus::Idle));
     }
 
     #[test]
-    fn cycle_kind_advances_copy_mirror_move_and_take_reports_it() {
+    fn cycle_kind_advances_copy_mirror_move_and_peek_reports_it() {
         let mut s = F1TriggerState::new();
         s.begin("nas:9031:/home".to_string());
         for c in "/tmp/out".chars() {
@@ -305,32 +339,44 @@ mod tests {
         }
         // Down reverses Move → Mirror.
         s.cycle_kind(false);
-        let (_, _, kind) = s.take().expect("set");
-        assert_eq!(kind, PullKind::Mirror, "take reports the cycled kind");
+        let (_, _, kind) = s.peek().expect("set");
+        assert_eq!(kind, PullKind::Mirror, "peek reports the cycled kind");
     }
 
     #[test]
-    fn take_keeps_modal_open_when_a_field_is_blank() {
+    fn peek_is_none_when_a_field_is_blank() {
         let mut s = F1TriggerState::new();
         s.begin("nas:9031:/home".to_string());
         // No dest typed.
-        assert!(s.take().is_none());
+        assert!(s.peek().is_none());
         assert!(s.is_editing(), "blank dest keeps the modal open");
-        // Blank source (clear it) also blocks.
-        s.toggle_focus();
-        while s.pop_char() {}
-        for c in "/tmp/out".chars() {
-            // refill dest after toggling back
-            let _ = c;
-        }
-        // Refill dest on its field.
-        s.toggle_focus();
+        // Type a dest, then blank the source → still None.
         for c in "/tmp/out".chars() {
             s.push_char(c);
         }
-        // Source is now blank → still blocked.
-        assert!(s.take().is_none());
+        s.toggle_focus();
+        while s.pop_char() {}
+        assert!(s.peek().is_none(), "blank source → None");
         assert!(s.is_editing());
+    }
+
+    #[test]
+    fn set_error_shows_and_edits_clear_it() {
+        let mut s = F1TriggerState::new();
+        s.begin("nas:9031:/home".to_string());
+        s.set_error("invalid source: nas:9031:/home");
+        match s.status() {
+            F1TriggerStatus::Editing { error, .. } => {
+                assert_eq!(error.as_deref(), Some("invalid source: nas:9031:/home"));
+            }
+            other => panic!("expected Editing, got {other:?}"),
+        }
+        // Any edit clears the error so stale feedback doesn't linger.
+        s.push_char('x');
+        match s.status() {
+            F1TriggerStatus::Editing { error, .. } => assert!(error.is_none()),
+            other => panic!("expected Editing, got {other:?}"),
+        }
     }
 
     #[test]

@@ -49,6 +49,9 @@ pub struct TriggerPrompt {
     pub mode: &'static str,
     /// d-60: `true` for mirror/move (destructive) → red tag.
     pub destructive: bool,
+    /// d-62: inline validation error from the last commit attempt
+    /// (shown in red after the prompt); `None` = no error.
+    pub error: Option<String>,
 }
 
 pub fn render_into(
@@ -161,6 +164,15 @@ fn render_trigger(frame: &mut Frame, area: Rect, prompt: &TriggerPrompt) {
     } else {
         Color::Green
     };
+    // d-62: a validation error from the last commit replaces the
+    // hint (red) so the operator sees why nothing launched.
+    let tail = match &prompt.error {
+        Some(msg) => Span::styled(format!("   ⚠ {msg}"), Style::default().fg(Color::Red)),
+        None => Span::styled(
+            "   (Tab field · ↑↓ copy/mirror/move · Enter run · Esc cancel)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    };
     let line = Line::from(vec![
         Span::styled("trigger ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("[", Style::default().fg(Color::DarkGray)),
@@ -173,10 +185,7 @@ fn render_trigger(frame: &mut Frame, area: Rect, prompt: &TriggerPrompt) {
         Span::styled(src, src_style),
         Span::styled("  dst: ", Style::default().fg(Color::DarkGray)),
         Span::styled(dst, dst_style),
-        Span::styled(
-            "   (Tab field · ↑↓ copy/mirror/move · Enter run · Esc cancel)",
-            Style::default().fg(Color::DarkGray),
-        ),
+        tail,
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }

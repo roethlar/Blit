@@ -2541,6 +2541,7 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             dest,
             focus,
             kind,
+            error,
         } => Some(screens::f1::TriggerPrompt {
             source: source.clone(),
             dest: dest.clone(),
@@ -2555,6 +2556,8 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             },
             // Mirror + move delete something → flag red.
             destructive: kind.is_destructive(),
+            // d-62: inline validation error from the last commit.
+            error: error.clone(),
         }),
     }
 }
@@ -3205,6 +3208,95 @@ fn spawn_f1_push(
             .map_err(|err| format!("{err:#}"));
         let _ = tx.send(F1PushReply { request_id, result }).await;
     });
+}
+
+/// d-62: classify + launch an F1 trigger commit. Returns `Ok(())`
+/// when a transfer was started (the caller closes the modal) or
+/// `Err(message)` with a human reason when the input is invalid
+/// (the caller keeps the modal open and shows the message).
+///
+/// Direction is decided by the strict transfer parser (d-61):
+/// remote source → remote→local (pull family); local source →
+/// local→remote push (copy only this slice). Both endpoints are
+/// validated up front so a typo'd or unsupported endpoint never
+/// silently starts — or silently drops — a transfer.
+fn plan_f1_trigger(
+    app: &mut AppState,
+    src: &str,
+    dest: &str,
+    kind: f3pull::PullKind,
+) -> Result<(), String> {
+    use blit_app::endpoints::{
+        ensure_remote_destination_supported, parse_transfer_endpoint, Endpoint,
+    };
+    let source = parse_transfer_endpoint(src).map_err(|_| format!("invalid source: {src}"))?;
+    match source {
+        // Remote source → remote→local (pull family).
+        Endpoint::Remote(source) => match kind {
+            f3pull::PullKind::Copy => {
+                let launch = app
+                    .f3_pull
+                    .start_pull(source, dest.to_string())
+                    .ok_or("a transfer is already in flight")?;
+                spawn_f3_pull(
+                    launch.request_id,
+                    launch.source,
+                    launch.dest_root,
+                    launch.kind,
+                    app.f3_pull_reply_tx.clone(),
+                    app.f3_pull_progress_tx.clone(),
+                );
+                app.current_screen = Screen::F3;
+                Ok(())
+            }
+            // Mirror / move route through the F3 destructive confirm
+            // gate. Move deletes the remote source, so refuse a
+            // module-root source up front (d-60).
+            f3pull::PullKind::Mirror | f3pull::PullKind::Move => {
+                if kind == f3pull::PullKind::Move && !is_deletable_remote_path(&source) {
+                    return Err("cannot move a module root".to_string());
+                }
+                if kind == f3pull::PullKind::Mirror {
+                    app.f3_pull.begin_mirror(source);
+                } else {
+                    app.f3_pull.begin_move(source);
+                }
+                for c in dest.chars() {
+                    app.f3_pull.push_char(c);
+                }
+                let _ = app.f3_pull.begin_run();
+                if app.f3_pull.is_confirming_destructive() {
+                    app.current_screen = Screen::F3;
+                    Ok(())
+                } else {
+                    Err("a transfer is already in flight".to_string())
+                }
+            }
+        },
+        // Local source → local→remote push (copy only this slice).
+        Endpoint::Local(local_src) => {
+            if kind != f3pull::PullKind::Copy {
+                return Err("push supports copy only (mirror/move not yet)".to_string());
+            }
+            let remote = match parse_transfer_endpoint(dest)
+                .map_err(|_| format!("invalid destination: {dest}"))?
+            {
+                Endpoint::Remote(r) => r,
+                Endpoint::Local(_) => {
+                    return Err("push destination must be remote (host:/module/)".to_string())
+                }
+            };
+            ensure_remote_destination_supported(&remote)
+                .map_err(|_| "destination needs a module (host:/module/)".to_string())?;
+            let label = remote.display();
+            let request_id = app
+                .f1_push
+                .begin(label)
+                .ok_or("a push is already running")?;
+            spawn_f1_push(request_id, local_src, remote, app.f1_push_reply_tx.clone());
+            Ok(())
+        }
+    }
 }
 
 /// d-53 R2: does this batch destination need a trailing slash to
@@ -3944,105 +4036,15 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             true
         }
         KeyCode::Enter => {
-            // take() closes the modal only when both fields are
-            // non-blank; a blank field keeps it open (no-op here).
-            if let Some((src, dest, kind)) = app.f1_trigger.take() {
-                // d-61 R2: classify the source with the strict
-                // transfer parser, NOT raw `RemoteEndpoint::parse`.
-                // The raw parser fails for BOTH genuine local paths
-                // and malformed remote-shaped typos (e.g.
-                // `nas:9031:/home`, missing the module trailing
-                // slash) — treating the latter as a local push
-                // source was a footgun. `parse_transfer_endpoint`
-                // returns Local only for real paths and Err for
-                // remote-shaped (`:/`) inputs, which we drop.
-                use blit_app::endpoints::{
-                    ensure_remote_destination_supported, parse_transfer_endpoint, Endpoint,
-                };
-                match parse_transfer_endpoint(&src) {
-                    // Remote source → remote→local (pull family).
-                    Ok(Endpoint::Remote(source)) => match kind {
-                        f3pull::PullKind::Copy => {
-                            if let Some(launch) = app.f3_pull.start_pull(source, dest) {
-                                spawn_f3_pull(
-                                    launch.request_id,
-                                    launch.source,
-                                    launch.dest_root,
-                                    launch.kind,
-                                    app.f3_pull_reply_tx.clone(),
-                                    app.f3_pull_progress_tx.clone(),
-                                );
-                                app.current_screen = Screen::F3;
-                            }
-                        }
-                        // d-59/d-60: a mirror / move routes through
-                        // the F3 destructive confirm gate (begin_* →
-                        // type dest → begin_run lands in Confirm,
-                        // returning None — no spawn yet). The operator
-                        // confirms y/N on F3, where the confirm +
-                        // execution already live.
-                        f3pull::PullKind::Mirror | f3pull::PullKind::Move => {
-                            // d-60: a move deletes the remote source,
-                            // so — like F3 `v` — refuse a module-root
-                            // source up front (the daemon rejects
-                            // empty/root purge paths). Mirror writes
-                            // only locally, so it has no such gate.
-                            let gated = kind == f3pull::PullKind::Move
-                                && !is_deletable_remote_path(&source);
-                            if !gated {
-                                if kind == f3pull::PullKind::Mirror {
-                                    app.f3_pull.begin_mirror(source);
-                                } else {
-                                    app.f3_pull.begin_move(source);
-                                }
-                                for c in dest.chars() {
-                                    app.f3_pull.push_char(c);
-                                }
-                                let _ = app.f3_pull.begin_run();
-                                if app.f3_pull.is_confirming_destructive() {
-                                    app.current_screen = Screen::F3;
-                                }
-                            }
-                        }
-                    },
-                    // d-61: a genuine local-path source → push
-                    // direction (local → remote). COPY push only this
-                    // slice; mirror/move push need their own confirm
-                    // gates (follow-ups). The dest must itself be a
-                    // remote endpoint; otherwise we drop. The push
-                    // status shows in the F1 footer — no screen jump.
-                    Ok(Endpoint::Local(local_src)) => {
-                        if kind == f3pull::PullKind::Copy {
-                            // d-61 R3 (reviewer reopen): the dest must
-                            // be a remote endpoint AND name a module /
-                            // root — a bare host (`nas:9031`) parses as
-                            // `RemotePath::Discovery`, which the push
-                            // client later rejects ("missing module
-                            // specification"). Gate it with the same
-                            // preflight the CLI uses
-                            // (`ensure_remote_destination_supported`)
-                            // so we don't start a push + show a Running
-                            // footer for a transfer that can't succeed.
-                            if let Ok(Endpoint::Remote(remote)) = parse_transfer_endpoint(&dest) {
-                                if ensure_remote_destination_supported(&remote).is_ok() {
-                                    let label = remote.display();
-                                    if let Some(request_id) = app.f1_push.begin(label) {
-                                        spawn_f1_push(
-                                            request_id,
-                                            local_src,
-                                            remote,
-                                            app.f1_push_reply_tx.clone(),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // d-61 R2: a malformed remote-shaped source (or
-                    // forward-slash error) → drop. It must NOT
-                    // silently become a local push source. (Inline
-                    // parse-error feedback is a follow-up.)
-                    Err(_) => {}
+            // d-62: `peek` reads the trimmed fields without closing.
+            // `None` = a blank field → stay open silently. Otherwise
+            // validate + launch; on a validation failure record an
+            // inline error and keep the modal open so the operator
+            // can fix the typo (rather than silently closing it).
+            if let Some((src, dest, kind)) = app.f1_trigger.peek() {
+                match plan_f1_trigger(app, &src, &dest, kind) {
+                    Ok(()) => app.f1_trigger.close(),
+                    Err(msg) => app.f1_trigger.set_error(msg),
                 }
             }
             true
@@ -7067,6 +7069,14 @@ mod tests {
             "a malformed remote source must not become a local push"
         );
         assert!(!app.f3_pull.is_running(), "and it isn't a pull either");
+        // d-62: the modal stays open with an inline error (instead
+        // of silently closing) so the operator can fix the typo.
+        match app.f1_trigger.status() {
+            f1trigger::F1TriggerStatus::Editing { error, .. } => {
+                assert!(error.is_some(), "a validation error is shown");
+            }
+            other => panic!("modal should stay open with an error, got {other:?}"),
+        }
     }
 
     /// d-61 R3 (reviewer reopen): a bare-host push destination
