@@ -13,7 +13,7 @@
 //! error keeps the current config rather than reverting
 //! to defaults.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24 / d-40 / d-52):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24 / d-40 / d-52 / d-64):
 //!
 //! ```toml
 //! [verify]
