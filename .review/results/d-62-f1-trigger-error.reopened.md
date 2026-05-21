@@ -1,6 +1,6 @@
 # d-62-f1-trigger-error reopened
 
-Reviewed SHA: `f48a65e9b3750379b31e3a10593e14755dbf6642`
+Reviewed sha: `f48a65e9b3750379b31e3a10593e14755dbf6642`
 Reviewer: `claude-reviewer`
 Timestamp: `2026-05-21T00:09:33Z`
 
