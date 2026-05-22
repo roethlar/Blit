@@ -57,6 +57,12 @@ pub enum F1TriggerStatus {
         /// (e.g. an unparseable endpoint). Shown in the prompt;
         /// cleared on the next edit. `None` = no error yet.
         error: Option<String>,
+        /// d-65: `true` while a destructive PUSH (mirror/move
+        /// local→remote) awaits a y/N confirm. The prompt switches
+        /// to the confirm line and the input router treats it as a
+        /// modal. `peek` still reads the same fields the confirm
+        /// then launches.
+        confirming: bool,
     },
 }
 
@@ -89,6 +95,34 @@ impl F1TriggerState {
         matches!(self.status, F1TriggerStatus::Editing { .. })
     }
 
+    /// d-65: `true` while a destructive PUSH confirm is open. The
+    /// input router checks this BEFORE `is_editing` so the confirm
+    /// handler (modal y/N) absorbs keystrokes.
+    pub fn is_confirming(&self) -> bool {
+        matches!(
+            self.status,
+            F1TriggerStatus::Editing {
+                confirming: true,
+                ..
+            }
+        )
+    }
+
+    /// d-65: open the destructive-push confirm gate (the fields
+    /// stay; `peek` still reads them for the launch on `y`).
+    pub fn begin_confirm(&mut self) {
+        if let F1TriggerStatus::Editing { confirming, .. } = &mut self.status {
+            *confirming = true;
+        }
+    }
+
+    /// d-65: abort the confirm (n / Esc) — back to plain editing.
+    pub fn cancel_confirm(&mut self) {
+        if let F1TriggerStatus::Editing { confirming, .. } = &mut self.status {
+            *confirming = false;
+        }
+    }
+
     /// Open the modal with `source` prefilled (the selected
     /// daemon's `host:port:/`) and the cursor on the dest field —
     /// the source is usually almost right, the dest is always
@@ -103,6 +137,7 @@ impl F1TriggerState {
             focus: TriggerField::Dest,
             kind: PullKind::Copy,
             error: None,
+            confirming: false,
         };
     }
 

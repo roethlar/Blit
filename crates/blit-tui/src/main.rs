@@ -940,6 +940,16 @@ async fn run_router(
                 {
                     continue;
                 }
+                // d-65: F1's destructive-push confirm is modal —
+                // route y/n/Esc to the confirm handler BEFORE the
+                // edit handler (the modal is still in Editing state,
+                // so is_editing is also true; this guard wins).
+                if app.current_screen == Screen::F1
+                    && app.f1_trigger.is_confirming()
+                    && handle_f1_trigger_confirm_keystroke(&key, &mut app)
+                {
+                    continue;
+                }
                 // d-58: F1's `t` trigger-transfer modal is an
                 // input mode — while open, chars / Backspace / Tab
                 // / Esc / Enter route to the modal instead of the
@@ -2573,6 +2583,7 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             focus,
             kind,
             error,
+            confirming,
         } => Some(screens::f1::TriggerPrompt {
             source: source.clone(),
             dest: dest.clone(),
@@ -2589,6 +2600,13 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             destructive: kind.is_destructive(),
             // d-62: inline validation error from the last commit.
             error: error.clone(),
+            // d-65: a destructive push awaiting y/N confirm. The
+            // detail spells out what gets deleted.
+            confirm_detail: confirming.then(|| match kind {
+                f3pull::PullKind::Mirror => "deletes extraneous at dest",
+                f3pull::PullKind::Move => "deletes the local source",
+                f3pull::PullKind::Copy => "",
+            }),
         }),
     }
 }
@@ -2606,26 +2624,51 @@ fn f1_push_status(state: &f1push::F1PushState) -> Option<screens::f1::PushStatus
             files,
             bytes,
             bytes_per_sec,
+            kind,
             ..
         } => Some(PushStatusDisplay::Running {
             label: label.clone(),
             files: *files,
             bytes: *bytes,
             bytes_per_sec: *bytes_per_sec,
+            // d-65: present-participle verb for the kind.
+            verb: push_present_verb(*kind),
         }),
         F1PushStatus::Done {
             files,
             bytes,
             label,
+            kind,
             ..
         } => Some(PushStatusDisplay::Done {
             files: *files,
             bytes: *bytes,
             label: label.clone(),
+            // d-65: past-tense verb for the kind.
+            verb: push_past_verb(*kind),
         }),
-        F1PushStatus::Error { message, .. } => Some(PushStatusDisplay::Error {
+        F1PushStatus::Error { message, kind, .. } => Some(PushStatusDisplay::Error {
             message: message.clone(),
+            verb: push_past_verb(*kind),
         }),
+    }
+}
+
+/// d-65: push footer verbs by kind. Copy reads as "push" (not
+/// "pull") since this is the local→remote direction.
+fn push_present_verb(kind: f3pull::PullKind) -> &'static str {
+    match kind {
+        f3pull::PullKind::Copy => "pushing",
+        f3pull::PullKind::Mirror => "mirroring",
+        f3pull::PullKind::Move => "moving",
+    }
+}
+
+fn push_past_verb(kind: f3pull::PullKind) -> &'static str {
+    match kind {
+        f3pull::PullKind::Copy => "pushed",
+        f3pull::PullKind::Mirror => "mirrored",
+        f3pull::PullKind::Move => "moved",
     }
 }
 
@@ -3256,6 +3299,10 @@ fn spawn_f1_push(
     request_id: u64,
     local_source: std::path::PathBuf,
     remote: RemoteEndpoint,
+    // d-65: copy / mirror / move. Mirror sets `mirror_mode` (the
+    // daemon deletes extraneous files at the dest); move deletes
+    // the LOCAL source after a successful push.
+    kind: f3pull::PullKind,
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
@@ -3264,6 +3311,7 @@ fn spawn_f1_push(
     use blit_core::fs_enum::FileFilter;
     use blit_core::generated::MirrorMode;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+    use f3pull::PullKind;
     tokio::spawn(async move {
         // d-63: progress monitor — run_remote_push reports
         // ProgressEvents into `pe_rx`; the forwarder accumulates
@@ -3287,66 +3335,122 @@ fn spawn_f1_push(
             }
         });
 
+        // d-65: a move deletes the local source after a successful
+        // push — keep a copy of the path before it moves into the
+        // execution (only the Move path needs it).
+        let move_source = (kind == PullKind::Move).then(|| local_source.clone());
+        let mirror = kind == PullKind::Mirror;
         let remote_label = remote.display();
         let execution = PushExecution {
             source: Endpoint::Local(local_source),
             remote,
-            // Copy push: no filter, no mirror, no scan-complete
-            // gate. Mirror/move push (which need those) are
-            // follow-ups with their own confirm gates.
+            // d-65: mirror sets mirror_mode (daemon deletes
+            // extraneous at the dest). No filter → MirrorMode::All
+            // (delete everything not in the source), matching
+            // `blit mirror` with the default delete scope. Copy/move
+            // push leave mirror_mode off.
             filter: FileFilter::default(),
-            mirror_mode: false,
-            mirror_kind: MirrorMode::Off,
+            mirror_mode: mirror,
+            mirror_kind: if mirror {
+                MirrorMode::All
+            } else {
+                MirrorMode::Off
+            },
             force_grpc: false,
             trace_data_plane: false,
             require_complete_scan: false,
             remote_label,
         };
-        let result = run_remote_push(execution, Some(&progress))
-            .await
-            .map(|outcome| {
-                (
-                    outcome.report.summary.files_transferred,
-                    outcome.report.summary.bytes_transferred,
-                )
-            })
-            .map_err(|err| format!("{err:#}"));
+        let sent = run_remote_push(execution, Some(&progress)).await;
         // Close the progress channel → the forwarder drains and
-        // exits before the terminal reply.
+        // exits before the (possibly long) move source-delete and
+        // the terminal reply.
         drop(progress);
         let _ = forwarder.await;
+        let result = match sent {
+            Ok(outcome) => {
+                let transferred = (
+                    outcome.report.summary.files_transferred,
+                    outcome.report.summary.bytes_transferred,
+                );
+                match move_source {
+                    // d-65: move — delete the local source only after
+                    // a successful push. A delete failure surfaces as
+                    // the op's error (the push already landed, but the
+                    // operator must know the source wasn't removed).
+                    Some(src) => match remove_local_source(&src) {
+                        Ok(()) => Ok(transferred),
+                        Err(err) => {
+                            Err(format!("pushed but failed to delete local source: {err:#}"))
+                        }
+                    },
+                    None => Ok(transferred),
+                }
+            }
+            Err(err) => Err(format!("{err:#}")),
+        };
         let _ = tx.send(F1PushReply { request_id, result }).await;
     });
 }
 
-/// d-62: classify + launch an F1 trigger commit. Returns `Ok(())`
-/// when a transfer was started (the caller closes the modal) or
-/// `Err(message)` with a human reason when the input is invalid
-/// (the caller keeps the modal open and shows the message).
+/// d-65: remove a local move source after its push landed. A dir
+/// is removed recursively, a file directly. Mirrors the CLI's
+/// local-source-delete step in `run_move`.
+fn remove_local_source(path: &std::path::Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+/// d-62/d-65: outcome of classifying an F1 trigger commit.
+enum TriggerOutcome {
+    /// A transfer started — the caller closes the modal.
+    Launched,
+    /// A destructive PUSH (mirror/move local→remote) needs a y/N
+    /// confirm before launching — the caller opens the confirm
+    /// gate. (Pull-family mirror/move confirm on F3 instead, so
+    /// they go straight to `Launched`.)
+    NeedsConfirm,
+    /// Invalid input — the caller keeps the modal open + shows the
+    /// message.
+    Rejected(String),
+}
+
+/// d-62: classify + launch an F1 trigger commit (or signal that a
+/// destructive push needs confirmation).
 ///
 /// Direction is decided by the strict transfer parser (d-61):
-/// remote source → remote→local (pull family); local source →
-/// local→remote push (copy only this slice). Both endpoints are
-/// validated up front so a typo'd or unsupported endpoint never
-/// silently starts — or silently drops — a transfer.
+/// remote source → remote→local (pull family, d-58…d-60); local
+/// source → local→remote push (copy/mirror/move, d-61/d-65). Both
+/// endpoints are validated up front so a typo'd or unsupported
+/// endpoint never silently starts — or silently drops — a
+/// transfer. d-65: a mirror/move PUSH is destructive (deletes at
+/// the remote dest / deletes the local source), so it returns
+/// `NeedsConfirm` unless `confirmed`; the caller's confirm handler
+/// re-calls with `confirmed = true`.
 fn plan_f1_trigger(
     app: &mut AppState,
     src: &str,
     dest: &str,
     kind: f3pull::PullKind,
-) -> Result<(), String> {
+    confirmed: bool,
+) -> TriggerOutcome {
     use blit_app::endpoints::{
         ensure_remote_destination_supported, parse_transfer_endpoint, Endpoint,
     };
-    let source = parse_transfer_endpoint(src).map_err(|_| format!("invalid source: {src}"))?;
+    let source = match parse_transfer_endpoint(src) {
+        Ok(s) => s,
+        Err(_) => return TriggerOutcome::Rejected(format!("invalid source: {src}")),
+    };
     match source {
         // Remote source → remote→local (pull family).
         Endpoint::Remote(source) => match kind {
             f3pull::PullKind::Copy => {
-                let launch = app
-                    .f3_pull
-                    .start_pull(source, dest.to_string())
-                    .ok_or("a transfer is already in flight")?;
+                let Some(launch) = app.f3_pull.start_pull(source, dest.to_string()) else {
+                    return TriggerOutcome::Rejected("a transfer is already in flight".into());
+                };
                 spawn_f3_pull(
                     launch.request_id,
                     launch.source,
@@ -3356,14 +3460,15 @@ fn plan_f1_trigger(
                     app.f3_pull_progress_tx.clone(),
                 );
                 app.current_screen = Screen::F3;
-                Ok(())
+                TriggerOutcome::Launched
             }
             // Mirror / move route through the F3 destructive confirm
-            // gate. Move deletes the remote source, so refuse a
-            // module-root source up front (d-60).
+            // gate (so they don't need the trigger's own confirm).
+            // Move deletes the remote source, so refuse a module-root
+            // source up front (d-60).
             f3pull::PullKind::Mirror | f3pull::PullKind::Move => {
                 if kind == f3pull::PullKind::Move && !is_deletable_remote_path(&source) {
-                    return Err("cannot move a module root".to_string());
+                    return TriggerOutcome::Rejected("cannot move a module root".into());
                 }
                 if kind == f3pull::PullKind::Mirror {
                     app.f3_pull.begin_mirror(source);
@@ -3376,40 +3481,47 @@ fn plan_f1_trigger(
                 let _ = app.f3_pull.begin_run();
                 if app.f3_pull.is_confirming_destructive() {
                     app.current_screen = Screen::F3;
-                    Ok(())
+                    TriggerOutcome::Launched
                 } else {
-                    Err("a transfer is already in flight".to_string())
+                    TriggerOutcome::Rejected("a transfer is already in flight".into())
                 }
             }
         },
-        // Local source → local→remote push (copy only this slice).
+        // Local source → local→remote push (copy / mirror / move).
         Endpoint::Local(local_src) => {
-            if kind != f3pull::PullKind::Copy {
-                return Err("push supports copy only (mirror/move not yet)".to_string());
-            }
-            let remote = match parse_transfer_endpoint(dest)
-                .map_err(|_| format!("invalid destination: {dest}"))?
-            {
-                Endpoint::Remote(r) => r,
-                Endpoint::Local(_) => {
-                    return Err("push destination must be remote (host:/module/)".to_string())
+            let remote = match parse_transfer_endpoint(dest) {
+                Ok(Endpoint::Remote(r)) => r,
+                Ok(Endpoint::Local(_)) => {
+                    return TriggerOutcome::Rejected(
+                        "push destination must be remote (host:/module/)".into(),
+                    )
                 }
+                Err(_) => return TriggerOutcome::Rejected(format!("invalid destination: {dest}")),
             };
-            ensure_remote_destination_supported(&remote)
-                .map_err(|_| "destination needs a module (host:/module/)".to_string())?;
+            if ensure_remote_destination_supported(&remote).is_err() {
+                return TriggerOutcome::Rejected(
+                    "destination needs a module (host:/module/)".into(),
+                );
+            }
+            // d-65: mirror (delete-extraneous at the remote) and move
+            // (delete the local source) are destructive — gate them
+            // behind a confirm. Copy launches immediately.
+            if kind.is_destructive() && !confirmed {
+                return TriggerOutcome::NeedsConfirm;
+            }
             let label = remote.display();
-            let request_id = app
-                .f1_push
-                .begin(label)
-                .ok_or("a push is already running")?;
+            let Some(request_id) = app.f1_push.begin(label, kind) else {
+                return TriggerOutcome::Rejected("a push is already running".into());
+            };
             spawn_f1_push(
                 request_id,
                 local_src,
                 remote,
+                kind,
                 app.f1_push_reply_tx.clone(),
                 app.f1_push_progress_tx.clone(),
             );
-            Ok(())
+            TriggerOutcome::Launched
         }
     }
 }
@@ -4112,6 +4224,48 @@ fn handle_verify_keystroke(
     }
 }
 
+/// d-65: handle a keystroke while the F1 destructive-push confirm
+/// is open. Modal like the F3 destructive confirm: `y`/`Y`
+/// launches (re-runs `plan_f1_trigger` with `confirmed = true`),
+/// `n`/`N`/`Esc` aborts back to editing, and every other key is
+/// swallowed. `?` / Ctrl-c / F-keys bubble.
+fn handle_f1_trigger_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some((src, dest, kind)) = app.f1_trigger.peek() {
+                match plan_f1_trigger(app, &src, &dest, kind, true) {
+                    TriggerOutcome::Launched => app.f1_trigger.close(),
+                    // A push that became busy between confirm and y:
+                    // drop back to editing with the reason.
+                    TriggerOutcome::Rejected(msg) => app.f1_trigger.set_error(msg),
+                    // Already past the confirm gate; can't recur.
+                    TriggerOutcome::NeedsConfirm => {}
+                }
+            }
+            true
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.f1_trigger.cancel_confirm();
+            true
+        }
+        // Modal: swallow everything else.
+        _ => true,
+    }
+}
+
 /// d-26: F3 filter-mode keystroke router. Mirrors the
 /// `handle_verify_keystroke` shape — returns `true` when
 /// the key was absorbed (so the outer dispatcher skips
@@ -4159,12 +4313,14 @@ fn handle_f1_trigger_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
             // d-62: `peek` reads the trimmed fields without closing.
             // `None` = a blank field → stay open silently. Otherwise
             // validate + launch; on a validation failure record an
-            // inline error and keep the modal open so the operator
-            // can fix the typo (rather than silently closing it).
+            // inline error and keep the modal open. d-65: a
+            // destructive push (mirror/move) opens a confirm gate
+            // instead of launching.
             if let Some((src, dest, kind)) = app.f1_trigger.peek() {
-                match plan_f1_trigger(app, &src, &dest, kind) {
-                    Ok(()) => app.f1_trigger.close(),
-                    Err(msg) => app.f1_trigger.set_error(msg),
+                match plan_f1_trigger(app, &src, &dest, kind, false) {
+                    TriggerOutcome::Launched => app.f1_trigger.close(),
+                    TriggerOutcome::NeedsConfirm => app.f1_trigger.begin_confirm(),
+                    TriggerOutcome::Rejected(msg) => app.f1_trigger.set_error(msg),
                 }
             }
             true
@@ -7221,19 +7377,65 @@ mod tests {
         assert!(!app.f3_pull.is_running());
     }
 
-    /// d-61: push is copy-only this slice — a local source with
-    /// mirror/move selected does NOT launch (no push, no pull).
-    #[test]
-    fn handle_f1_trigger_keystroke_local_source_mirror_does_not_push() {
+    /// d-65: a destructive push (mirror/move local→remote) opens
+    /// the confirm gate on Enter — it does NOT launch immediately,
+    /// and a `y` then launches it.
+    #[tokio::test]
+    async fn handle_f1_trigger_mirror_push_confirms_then_launches() {
         let mut app = make_test_app_state(Screen::F1);
         app.f1_trigger.begin("/tmp/src".to_string());
         for c in "nas:9031:/home/".chars() {
             app.f1_trigger.push_char(c);
         }
         app.f1_trigger.cycle_kind(true); // Copy → Mirror
+                                         // Enter opens the confirm gate — nothing launches yet.
         assert!(handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app));
-        assert!(!app.f1_push.is_running(), "mirror push not supported yet");
-        assert!(!app.f3_pull.is_running());
+        assert!(app.f1_trigger.is_confirming(), "destructive push confirms");
+        assert!(!app.f1_push.is_running(), "no push until y");
+        // y launches the mirror push.
+        assert!(handle_f1_trigger_confirm_keystroke(
+            &k(KeyCode::Char('y')),
+            &mut app
+        ));
+        assert!(app.f1_push.is_running(), "y launches the mirror push");
+        assert!(!app.f1_trigger.is_editing(), "modal closed on launch");
+    }
+
+    /// d-65: `n`/`Esc` at the confirm aborts back to editing — no
+    /// push, modal stays open.
+    #[test]
+    fn handle_f1_trigger_confirm_cancel_returns_to_editing() {
+        for cancel in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut app = make_test_app_state(Screen::F1);
+            app.f1_trigger.begin("/tmp/src".to_string());
+            for c in "nas:9031:/home/".chars() {
+                app.f1_trigger.push_char(c);
+            }
+            app.f1_trigger.cycle_kind(true); // Mirror
+            handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app);
+            assert!(app.f1_trigger.is_confirming());
+            assert!(handle_f1_trigger_confirm_keystroke(&k(cancel), &mut app));
+            assert!(!app.f1_push.is_running(), "{cancel:?}: no push");
+            assert!(app.f1_trigger.is_editing(), "back to editing");
+            assert!(!app.f1_trigger.is_confirming(), "confirm cleared");
+        }
+    }
+
+    /// d-65: a move push confirms then launches (the local-source
+    /// delete happens in the spawned task after the push lands).
+    #[tokio::test]
+    async fn handle_f1_trigger_move_push_confirms_then_launches() {
+        let mut app = make_test_app_state(Screen::F1);
+        app.f1_trigger.begin("/tmp/src".to_string());
+        for c in "nas:9031:/home/".chars() {
+            app.f1_trigger.push_char(c);
+        }
+        app.f1_trigger.cycle_kind(true); // Mirror
+        app.f1_trigger.cycle_kind(true); // Move
+        handle_f1_trigger_keystroke(&k(KeyCode::Enter), &mut app);
+        assert!(app.f1_trigger.is_confirming());
+        handle_f1_trigger_confirm_keystroke(&k(KeyCode::Char('y')), &mut app);
+        assert!(app.f1_push.is_running(), "y launches the move push");
     }
 
     #[test]

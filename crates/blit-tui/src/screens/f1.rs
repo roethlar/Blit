@@ -52,6 +52,9 @@ pub struct TriggerPrompt {
     /// d-62: inline validation error from the last commit attempt
     /// (shown in red after the prompt); `None` = no error.
     pub error: Option<String>,
+    /// d-65: `Some(detail)` while a destructive push awaits y/N
+    /// confirm — the prompt switches to a red confirm line.
+    pub confirm_detail: Option<&'static str>,
 }
 
 pub fn render_into(
@@ -96,14 +99,21 @@ pub enum PushStatusDisplay {
         files: u64,
         bytes: u64,
         bytes_per_sec: u64,
+        /// d-65: present-participle verb ("pushing"/"mirroring"/
+        /// "moving").
+        verb: &'static str,
     },
     Done {
         files: u64,
         bytes: u64,
         label: String,
+        /// d-65: past-tense verb ("pushed"/"mirrored"/"moved").
+        verb: &'static str,
     },
     Error {
         message: String,
+        /// d-65: past-tense verb for the failed op.
+        verb: &'static str,
     },
 }
 
@@ -115,6 +125,7 @@ fn render_push(frame: &mut Frame, area: Rect, status: &PushStatusDisplay) {
             files,
             bytes,
             bytes_per_sec,
+            verb,
         } => {
             // d-63: show the live count once data flows; before
             // that just "→ dest...". Append the rate once it
@@ -126,38 +137,30 @@ fn render_push(frame: &mut Frame, area: Rect, status: &PushStatusDisplay) {
                     String::new()
                 };
                 format!(
-                    "→ {label}... ({files} file(s) · {}{rate})",
+                    "{verb} → {label}... ({files} file(s) · {}{rate})",
                     format_bytes(*bytes)
                 )
             } else {
-                format!("→ {label}... ")
+                format!("{verb} → {label}... ")
             };
-            Line::from(vec![
-                Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(frag, Style::default().fg(Color::Yellow)),
-            ])
+            Line::from(vec![Span::styled(frag, Style::default().fg(Color::Yellow))])
         }
         PushStatusDisplay::Done {
             files,
             bytes,
             label,
-        } => Line::from(vec![
-            Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(
-                    "pushed {files} file(s) · {} → {label}",
-                    format_bytes(*bytes)
-                ),
-                Style::default().fg(Color::Green),
+            verb,
+        } => Line::from(vec![Span::styled(
+            format!(
+                "{verb} {files} file(s) · {} → {label}",
+                format_bytes(*bytes)
             ),
-        ]),
-        PushStatusDisplay::Error { message } => Line::from(vec![
-            Span::styled("push ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!("failed: {message}"),
-                Style::default().fg(Color::Red),
-            ),
-        ]),
+            Style::default().fg(Color::Green),
+        )]),
+        PushStatusDisplay::Error { message, verb } => Line::from(vec![Span::styled(
+            format!("{verb} failed: {message}"),
+            Style::default().fg(Color::Red),
+        )]),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -166,6 +169,22 @@ fn render_push(frame: &mut Frame, area: Rect, status: &PushStatusDisplay) {
 /// line. The focused field's value is shown with a trailing
 /// cursor (`_`) and bold; the hint reminds Tab/Enter/Esc.
 fn render_trigger(frame: &mut Frame, area: Rect, prompt: &TriggerPrompt) {
+    // d-65: a destructive push awaiting confirm replaces the entry
+    // prompt with a red y/N line (like the F3 destructive confirm).
+    if let Some(detail) = prompt.confirm_detail {
+        let line = Line::from(vec![
+            Span::styled(
+                prompt.mode,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} → {}? {detail} y/N", prompt.source, prompt.dest),
+                Style::default().fg(Color::Red),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let focused = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);

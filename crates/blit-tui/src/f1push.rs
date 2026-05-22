@@ -16,10 +16,14 @@
 //! Running (with live counters) → Done / Error — shows in the F1
 //! footer.
 //!
-//! Scope: **copy** push only. Mirror push (server-side
-//! delete-extraneous) and move push (delete the local source
-//! after) are follow-ups — they need their own confirm gates.
+//! d-65: the push `kind` (copy / mirror / move) drives the footer
+//! verb. Mirror (server-side delete-extraneous at the dest) and
+//! move (delete the local source after a successful push) are
+//! destructive, so the trigger gates them behind a y/N confirm
+//! before calling `begin`; the state machine itself is
+//! kind-agnostic beyond the verb.
 
+use crate::f3pull::PullKind;
 use std::time::{Duration, Instant};
 
 /// Lifecycle of an F1 push.
@@ -31,13 +35,15 @@ pub enum F1PushStatus {
     /// shown in the footer. d-63: `files` / `bytes` are live
     /// cumulative counters fed by the progress forwarder (0 until
     /// the first event); `bytes_per_sec` is the average throughput
-    /// (0 until ~1s elapsed, matching the F3 pull footer).
+    /// (0 until ~1s elapsed, matching the F3 pull footer). d-65:
+    /// `kind` (copy / mirror / move) drives the footer verb.
     Running {
         request_id: u64,
         label: String,
         files: u64,
         bytes: u64,
         bytes_per_sec: u64,
+        kind: PullKind,
     },
     /// Push finished — files + bytes sent, dest label. d-64:
     /// `finished_at` drives the auto-hide TTL.
@@ -46,12 +52,14 @@ pub enum F1PushStatus {
         bytes: u64,
         label: String,
         finished_at: Instant,
+        kind: PullKind,
     },
     /// Push failed (validation or transport). d-64: `finished_at`
     /// drives the auto-hide TTL.
     Error {
         message: String,
         finished_at: Instant,
+        kind: PullKind,
     },
 }
 
@@ -88,10 +96,11 @@ impl F1PushState {
         matches!(self.status, F1PushStatus::Running { .. })
     }
 
-    /// Begin a push to `label`. Bumps the run id, transitions to
-    /// `Running`, and returns the new `request_id` for the spawned
-    /// task. No-op (`None`) if a push is already running.
-    pub fn begin(&mut self, label: String) -> Option<u64> {
+    /// Begin a push to `label` of the given `kind`. Bumps the run
+    /// id, transitions to `Running`, and returns the new
+    /// `request_id` for the spawned task. No-op (`None`) if a push
+    /// is already running.
+    pub fn begin(&mut self, label: String, kind: PullKind) -> Option<u64> {
         if self.is_running() {
             return None;
         }
@@ -103,6 +112,7 @@ impl F1PushState {
             files: 0,
             bytes: 0,
             bytes_per_sec: 0,
+            kind,
         };
         Some(request_id)
     }
@@ -135,6 +145,7 @@ impl F1PushState {
             F1PushStatus::Running {
                 request_id: rid,
                 label,
+                kind,
                 ..
             } if *rid == request_id => {
                 self.status = F1PushStatus::Done {
@@ -142,6 +153,7 @@ impl F1PushState {
                     bytes,
                     label: label.clone(),
                     finished_at: at,
+                    kind: *kind,
                 };
                 true
             }
@@ -153,11 +165,14 @@ impl F1PushState {
     pub fn apply_error(&mut self, request_id: u64, message: String, at: Instant) -> bool {
         match &self.status {
             F1PushStatus::Running {
-                request_id: rid, ..
+                request_id: rid,
+                kind,
+                ..
             } if *rid == request_id => {
                 self.status = F1PushStatus::Error {
                     message,
                     finished_at: at,
+                    kind: *kind,
                 };
                 true
             }
@@ -222,7 +237,9 @@ mod tests {
     #[test]
     fn begin_transitions_to_running_with_label() {
         let mut s = F1PushState::new();
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         assert_eq!(rid, 1);
         assert!(s.is_running());
         match s.status() {
@@ -245,7 +262,9 @@ mod tests {
     #[test]
     fn apply_progress_updates_running_counters() {
         let mut s = F1PushState::new();
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         s.apply_progress(rid, 3, 4096, 2048);
         match s.status() {
             F1PushStatus::Running {
@@ -271,15 +290,20 @@ mod tests {
     #[test]
     fn begin_is_noop_while_running() {
         let mut s = F1PushState::new();
-        s.begin("a".to_string()).expect("first");
-        assert!(s.begin("b".to_string()).is_none(), "second push blocked");
+        s.begin("a".to_string(), PullKind::Copy).expect("first");
+        assert!(
+            s.begin("b".to_string(), PullKind::Copy).is_none(),
+            "second push blocked"
+        );
         assert!(s.is_running());
     }
 
     #[test]
     fn apply_done_records_terminal_state() {
         let mut s = F1PushState::new();
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         assert!(s.apply_done(rid, 12, 4096, Instant::now()));
         match s.status() {
             F1PushStatus::Done {
@@ -299,7 +323,9 @@ mod tests {
     #[test]
     fn apply_error_records_message() {
         let mut s = F1PushState::new();
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         assert!(s.apply_error(rid, "connection refused".to_string(), Instant::now()));
         match s.status() {
             F1PushStatus::Error { message, .. } => assert_eq!(message, "connection refused"),
@@ -310,7 +336,9 @@ mod tests {
     #[test]
     fn stale_reply_is_dropped() {
         let mut s = F1PushState::new();
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         // A reply for a superseded id must not clobber Running.
         assert!(!s.apply_done(rid + 99, 1, 1, Instant::now()));
         assert!(s.is_running());
@@ -321,9 +349,9 @@ mod tests {
     #[test]
     fn run_ids_increment_so_a_new_push_supersedes() {
         let mut s = F1PushState::new();
-        let first = s.begin("a".to_string()).expect("first");
+        let first = s.begin("a".to_string(), PullKind::Copy).expect("first");
         s.apply_done(first, 0, 0, Instant::now());
-        let second = s.begin("b".to_string()).expect("second");
+        let second = s.begin("b".to_string(), PullKind::Copy).expect("second");
         assert!(second > first, "ids monotonic → stale replies dropped");
     }
 
@@ -335,7 +363,9 @@ mod tests {
     fn done_and_error_are_terminal_running_and_idle_are_not() {
         let mut s = F1PushState::new();
         assert!(!s.is_terminal(), "Idle not terminal");
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         assert!(!s.is_terminal(), "Running not terminal");
         s.apply_done(rid, 1, 1, Instant::now());
         assert!(s.is_terminal(), "Done is terminal");
@@ -344,7 +374,9 @@ mod tests {
     #[test]
     fn clear_terminal_hides_done_after_ttl() {
         let mut s = F1PushState::new();
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         let finished = Instant::now();
         s.apply_done(rid, 5, 500, finished);
         // Within TTL → still showing.
@@ -358,7 +390,8 @@ mod tests {
     #[test]
     fn clear_terminal_is_noop_on_running() {
         let mut s = F1PushState::new();
-        s.begin("nas:9031".to_string()).expect("started");
+        s.begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         // A long-running push must never be cleared by the sweep.
         s.clear_terminal_if_expired(Instant::now() + Duration::from_secs(3600), TEST_TTL);
         assert!(s.is_running(), "Running is immune to the terminal TTL");
@@ -371,7 +404,9 @@ mod tests {
             s.terminal_remaining(Instant::now(), TEST_TTL).is_none(),
             "Idle"
         );
-        let rid = s.begin("nas:9031".to_string()).expect("started");
+        let rid = s
+            .begin("nas:9031".to_string(), PullKind::Copy)
+            .expect("started");
         assert!(
             s.terminal_remaining(Instant::now(), TEST_TTL).is_none(),
             "Running has no terminal deadline"
