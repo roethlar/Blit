@@ -1,9 +1,9 @@
 # d-65-f1-push-mirror-move: mirror/move for the F1 push direction
 
 **Severity**: Feature (designed — TUI_DESIGN §1 "copy / mirror / move")
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `2e8e8a2`
+**Commit**: `0f4cd64` (R1 `2e8e8a2`)
 
 ## What
 
@@ -96,6 +96,29 @@ verb are unit-tested.
 
 - remote→remote; multi-daemon F2; F1 `d` diagnostics.
 
+## Round 2 (fix)
+
+**Reviewer (High):** the F1 mirror push built `PushExecution` with
+`require_complete_scan: false` while `mirror_mode` + `MirrorMode::All`
+let the daemon purge the remote destination — a partial local source
+scan could thus delete valid remote files that only *looked*
+extraneous. The CLI guards this (`require_complete_scan: mirror_mode`,
+`crates/blit-cli/src/transfers/remote.rs`); this new TUI construction
+path did not, and the existing `remote_push_mirror_safety` coverage
+only exercised the CLI path.
+
+**Fix (`0f4cd64`):**
+
+- `require_complete_scan = mirror` — `true` only for the mirror push
+  (the sole kind that deletes at the dest); copy/move stay `false`
+  (an incomplete scan there only under-copies — safe/retryable).
+- Extracted the inline `PushExecution` construction into
+  `build_f1_push_execution(local_source, remote, kind)` so the
+  safety options are unit-pinnable (per the reviewer's suggestion).
+- New test `build_f1_push_execution_gates_mirror_purge_on_complete_scan`
+  pins: mirror → `mirror_mode` + `MirrorMode::All` +
+  `require_complete_scan`; copy/move → all off. 558 tests total.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)

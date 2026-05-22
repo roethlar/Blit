@@ -1,9 +1,9 @@
 # d-67-help-clear-confirm: flag the F4 clear y/N confirm in the keymap
 
 **Severity**: Feature (doc-consistency — keymap honesty)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2 — base refresh)
 **Branch**: `phase5/a1`
-**Commit**: `7c9589e`
+**Commit**: `0f4cd64` (R1 `7c9589e`)
 
 ## What
 
@@ -68,6 +68,14 @@ existing `help_modal_documents_all_public_keys` test).
 2. **remote→remote (delegated)** trigger and **multi-daemon F2**
    remain the substantial outstanding TUI_DESIGN features.
 
+## Round 2 (base refresh — no code change)
+
+The R1 sentinel (`7c9589e`) was blocked only as a stacked descendant
+of the reopened `d-65` base (the mirror-purge bug was still present in
+the tree at that SHA). d-67's own help-text + test-helper change was
+not faulted. Refreshed onto `0f4cd64` (d-65 R2 fixed); the d-67 change
+itself is byte-identical.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)

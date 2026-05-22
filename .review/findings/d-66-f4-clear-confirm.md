@@ -1,9 +1,9 @@
 # d-66-f4-clear-confirm: y/N gate on the F4 profile-history clear
 
 **Severity**: Feature (safety — destructive-action consistency)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2 — base refresh)
 **Branch**: `phase5/a1`
-**Commit**: `82f27e4`
+**Commit**: `0f4cd64` (R1 `82f27e4`)
 
 ## What
 
@@ -103,6 +103,14 @@ F4 interactive surface is otherwise feature-complete.
   opt-in), clearing history is irreversible, so the gate is
   always-on, matching the F3/F1 mirror·move confirms.
 
+## Round 2 (base refresh — no code change)
+
+The R1 sentinel (`82f27e4`) was a clean *Blocker* only because it was
+stacked on the reopened `d-65` base, which still carried the
+mirror-purge data-loss bug at that SHA. d-66's own logic was not
+faulted. Refreshed onto `0f4cd64` (d-65 R2 fixed); the d-66 change
+itself is byte-identical.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
