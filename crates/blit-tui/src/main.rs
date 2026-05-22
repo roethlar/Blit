@@ -3297,6 +3297,46 @@ fn spawn_f3_pull(
 }
 
 /// d-61: spawn a local→remote COPY push for an F1 trigger.
+/// d-65 R2: build the `PushExecution` for an F1 trigger push.
+/// Extracted from `spawn_f1_push` so the mirror-safety options are
+/// unit-pinnable (the reviewer flagged the inline construction as
+/// untested). Mirror sets `mirror_mode` + `MirrorMode::All` — the
+/// daemon deletes destination entries absent from the source — AND
+/// `require_complete_scan`, so a partial local enumeration can never
+/// drive that purge (an under-scanned source would otherwise make
+/// valid remote files look extraneous). This matches the CLI's
+/// `require_complete_scan: mirror_mode` in
+/// `crates/blit-cli/src/transfers/remote.rs`. Copy/move push never
+/// delete at the dest, so they leave both off — an incomplete scan
+/// there only under-copies, which is safe and retryable.
+fn build_f1_push_execution(
+    local_source: std::path::PathBuf,
+    remote: RemoteEndpoint,
+    kind: f3pull::PullKind,
+) -> blit_app::transfers::remote::PushExecution {
+    use blit_app::endpoints::Endpoint;
+    use blit_app::transfers::remote::PushExecution;
+    use blit_core::fs_enum::FileFilter;
+    use blit_core::generated::MirrorMode;
+    let mirror = kind == f3pull::PullKind::Mirror;
+    let remote_label = remote.display();
+    PushExecution {
+        source: Endpoint::Local(local_source),
+        remote,
+        filter: FileFilter::default(),
+        mirror_mode: mirror,
+        mirror_kind: if mirror {
+            MirrorMode::All
+        } else {
+            MirrorMode::Off
+        },
+        force_grpc: false,
+        trace_data_plane: false,
+        require_complete_scan: mirror,
+        remote_label,
+    }
+}
+
 /// Runs `run_remote_push` on a task and flattens the outcome into
 /// an [`F1PushReply`] (generation-guarded by `request_id`). d-63:
 /// a progress forwarder accumulates push-send `ProgressEvent`s
@@ -3313,10 +3353,7 @@ fn spawn_f1_push(
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
-    use blit_app::endpoints::Endpoint;
-    use blit_app::transfers::remote::{run_remote_push, PushExecution};
-    use blit_core::fs_enum::FileFilter;
-    use blit_core::generated::MirrorMode;
+    use blit_app::transfers::remote::run_remote_push;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     use f3pull::PullKind;
     tokio::spawn(async move {
@@ -3346,28 +3383,7 @@ fn spawn_f1_push(
         // push — keep a copy of the path before it moves into the
         // execution (only the Move path needs it).
         let move_source = (kind == PullKind::Move).then(|| local_source.clone());
-        let mirror = kind == PullKind::Mirror;
-        let remote_label = remote.display();
-        let execution = PushExecution {
-            source: Endpoint::Local(local_source),
-            remote,
-            // d-65: mirror sets mirror_mode (daemon deletes
-            // extraneous at the dest). No filter → MirrorMode::All
-            // (delete everything not in the source), matching
-            // `blit mirror` with the default delete scope. Copy/move
-            // push leave mirror_mode off.
-            filter: FileFilter::default(),
-            mirror_mode: mirror,
-            mirror_kind: if mirror {
-                MirrorMode::All
-            } else {
-                MirrorMode::Off
-            },
-            force_grpc: false,
-            trace_data_plane: false,
-            require_complete_scan: false,
-            remote_label,
-        };
+        let execution = build_f1_push_execution(local_source, remote, kind);
         let sent = run_remote_push(execution, Some(&progress)).await;
         // Close the progress channel → the forwarder drains and
         // exits before the (possibly long) move source-delete and
@@ -7560,6 +7576,39 @@ mod tests {
         ));
         assert!(!app.profile.is_confirming_clear(), "y disarms the confirm");
         blit_core::config::clear_config_dir_override();
+    }
+
+    /// d-65 R2: the mirror push must require a complete source
+    /// scan — a partial local enumeration could otherwise make
+    /// valid remote files look extraneous and get purged. Copy/move
+    /// never delete at the dest, so they leave the gate off.
+    #[test]
+    fn build_f1_push_execution_gates_mirror_purge_on_complete_scan() {
+        use blit_core::generated::MirrorMode;
+        let remote = RemoteEndpoint::parse("nas:9031:/home/").expect("remote");
+
+        let mirror = build_f1_push_execution(
+            std::path::PathBuf::from("/tmp/src"),
+            remote.clone(),
+            f3pull::PullKind::Mirror,
+        );
+        assert!(mirror.mirror_mode, "mirror enables the dest purge");
+        assert_eq!(mirror.mirror_kind, MirrorMode::All);
+        assert!(
+            mirror.require_complete_scan,
+            "mirror purge must be gated on a complete source scan",
+        );
+
+        for kind in [f3pull::PullKind::Copy, f3pull::PullKind::Move] {
+            let ex =
+                build_f1_push_execution(std::path::PathBuf::from("/tmp/src"), remote.clone(), kind);
+            assert!(!ex.mirror_mode, "{kind:?}: never purges the dest");
+            assert_eq!(ex.mirror_kind, MirrorMode::Off, "{kind:?}");
+            assert!(
+                !ex.require_complete_scan,
+                "{kind:?}: no dest delete, so no scan gate needed",
+            );
+        }
     }
 
     #[test]
