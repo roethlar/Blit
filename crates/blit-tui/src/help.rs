@@ -134,7 +134,7 @@ fn help_lines() -> Vec<Line<'static>> {
         kv("D", "delete cursor row or marked set (F3) — y/N confirm"),
         Line::from(""),
         section_header("F4 · Profile lifecycle"),
-        kv("c / d / e", "clear / disable / enable history"),
+        kv("c / d / e", "clear (y/N) / disable / enable history"),
         kv("s", "diagnostics snapshot"),
         Line::from(""),
         section_header("F4 · Verify form"),
@@ -497,6 +497,15 @@ mod tests {
             f4_profile.contains('s'),
             "F4 profile lifecycle section must list `s` (snapshot); got:\n{f4_profile}",
         );
+        // d-67: the `c` clear is destructive (wipes the
+        // history log), so the keymap must advertise its y/N
+        // confirm — matching how the F3 m/v/D and F4 M/V lines
+        // flag their prompts. `d`/`e` are reversible, so the
+        // hint sits inline on the shared line.
+        assert!(
+            f4_profile.contains("y/N"),
+            "F4 profile lifecycle must flag the `c` clear y/N confirm (d-66); got:\n{f4_profile}",
+        );
         let f4_verify = section_contents(&text, "F4 · Verify form");
         for needle in ["Tab", "Enter", "H", "O"] {
             assert!(
@@ -522,8 +531,8 @@ mod tests {
         // (this_header, next_header). The final entry's
         // next_header is empty, meaning "to end of text".
         let next_header: &str = match header {
-            "Navigation (global)" => "F1 · F3 navigation",
-            "F1 · F3 navigation" => "F4 · Profile lifecycle",
+            "Navigation (global)" => "F1 · F2 · F3 navigation",
+            "F1 · F2 · F3 navigation" => "F4 · Profile lifecycle",
             "F4 · Profile lifecycle" => "F4 · Verify form",
             "F4 · Verify form" => "F4 · Local transfer",
             "F4 · Local transfer" => "",
