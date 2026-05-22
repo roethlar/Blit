@@ -17,7 +17,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | d-63-f1-push-progress | Feature | Live byte/file footer for the F1 push (round 2) | `[x]` | `phase5/a1` | `aba54f8` |
 | d-64-f1-push-ttl | Feature | Auto-hide the F1 push outcome footer (round 2) | `[x]` | `phase5/a1` | `2f67e96` |
 | d-65-f1-push-mirror-move | Feature | Mirror/move for the F1 push direction | `[ ]` | `phase5/a1` | `2e8e8a2` |
-| d-66-f4-clear-confirm | Feature | y/N gate on the F4 profile-history clear | `[~]` | `phase5/a1` | `82f27e4` |
+| d-66-f4-clear-confirm | Feature | y/N gate on the F4 profile-history clear | `[ ]` | `phase5/a1` | `82f27e4` |
 | d-67-help-clear-confirm | Feature | Flag the F4 clear y/N confirm in the `?` keymap | `[~]` | `phase5/a1` | `7c9589e` |
 
 ## Open findings
