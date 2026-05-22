@@ -3,10 +3,10 @@
 //! indicator. Backed by a local file (`perf_local.jsonl`)
 //! and a predictor state file; no RPC.
 //!
-//! Atomic scope for a1-5: read-only display. The design
-//! also calls for [c] clear / [d] disable / [e] enable
-//! hotkeys; those are stateful and land in a future slice
-//! alongside the Verify and Diagnostics F4 sub-blocks.
+//! The pane also drives the design's lifecycle hotkeys:
+//! [d] disable / [e] enable toggle perf-history recording,
+//! and [c] clear wipes the on-disk log behind a y/N confirm
+//! (d-66 — `confirming_clear`, since the wipe is permanent).
 
 use blit_app::profile::ProfileReport;
 use std::time::Instant;
@@ -36,6 +36,13 @@ pub struct ProfileState {
     /// `begin_fetch`. Same dedup pattern as `BrowseState` —
     /// stale replies from a prior fetch are ignored.
     pending_request_id: u64,
+    /// d-66: `true` while a `[c] clear` keystroke is awaiting
+    /// y/N confirmation. Clearing the history log is permanent
+    /// (the records can't be recovered), so — like every other
+    /// destructive TUI action (F2 cancel, F3 delete, F3/F1
+    /// mirror·move) — it confirms before firing rather than
+    /// wiping on a single keystroke.
+    confirming_clear: bool,
 }
 
 impl Default for ProfileState {
@@ -50,6 +57,7 @@ impl ProfileState {
             report: None,
             status: ProfileFetchStatus::Idle,
             pending_request_id: 0,
+            confirming_clear: false,
         }
     }
 
@@ -85,6 +93,22 @@ impl ProfileState {
     /// and surfaces the error in the footer.
     pub fn note_fetch_error(&mut self, message: String) {
         self.status = ProfileFetchStatus::Error { message };
+    }
+
+    /// d-66: arm the destructive-clear confirm. The next
+    /// `y` runs the clear; `n`/`Esc` cancels.
+    pub fn begin_clear_confirm(&mut self) {
+        self.confirming_clear = true;
+    }
+
+    /// d-66: `true` while awaiting y/N for `[c] clear`.
+    pub fn is_confirming_clear(&self) -> bool {
+        self.confirming_clear
+    }
+
+    /// d-66: drop the pending clear confirm without clearing.
+    pub fn cancel_clear_confirm(&mut self) {
+        self.confirming_clear = false;
     }
 }
 
@@ -129,6 +153,16 @@ mod tests {
         state.apply_report(empty_report(), Instant::now());
         assert!(matches!(state.status(), ProfileFetchStatus::Loaded { .. }));
         assert!(state.report().is_some());
+    }
+
+    #[test]
+    fn clear_confirm_lifecycle() {
+        let mut state = ProfileState::new();
+        assert!(!state.is_confirming_clear(), "starts disarmed");
+        state.begin_clear_confirm();
+        assert!(state.is_confirming_clear(), "armed after begin");
+        state.cancel_clear_confirm();
+        assert!(!state.is_confirming_clear(), "disarmed after cancel");
     }
 
     #[test]

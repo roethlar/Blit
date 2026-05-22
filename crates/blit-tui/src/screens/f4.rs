@@ -1,11 +1,12 @@
 //! F4 Profile screen — header / records-summary block /
 //! predictor coefficients block / footer.
 //!
-//! Atomic scope for a1-5: read-only display of the
-//! profile data already produced by `blit_app::profile`.
-//! The design's [c] clear / [d] disable / [e] enable
-//! hotkeys + the Verify / Diagnostics sub-blocks land in
-//! later A.1 slices.
+//! Renders the profile data from `blit_app::profile`, the
+//! Verify form, the Diagnostics-dump block, and the local
+//! Transfer block. The lifecycle hotkeys are wired: [d]/[e]
+//! toggle history recording and [c] clears the log behind a
+//! y/N confirm (d-66) — the records-summary block shows the
+//! red confirm prompt while it's armed.
 //!
 //! Layout:
 //!
@@ -14,12 +15,15 @@
 //! │ blit-tui · F4 Profile · <state> · <records>    │
 //! ├── records summary (Length 4) ──────────────────┤
 //! │ Records: N · span: D days · ~Bytes total       │
-//! │ Predictor file: <path> (or "(not loaded)")     │
-//! ├── predictor block (Min 5) ─────────────────────┤
+//! │ (or the red d-66 clear-confirm prompt)         │
+//! ├── predictor block (Min 2) ─────────────────────┤
 //! │ copy   α=...  β=...  γ=...                     │
 //! │ mirror α=...  β=...  γ=...                     │
+//! ├── verify form (Length 9) ──────────────────────┤
+//! ├── diagnostics (Length 3) ──────────────────────┤
+//! ├── local transfer (Length 3) ───────────────────┤
 //! ├── footer (1 line) ─────────────────────────────┤
-//! │ status · q quit · r refresh                    │
+//! │ status · q quit · r refresh · c/d/e · s · tab  │
 //! └────────────────────────────────────────────────┘
 //! ```
 
@@ -332,12 +336,23 @@ fn render_records_summary(frame: &mut Frame, area: Rect, state: &ProfileState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Profile (local performance history) ");
-    let lines = match state.report() {
-        Some(report) => summary_lines(report),
-        None => vec![Line::from(Span::styled(
-            "(no report loaded yet — press r to refresh)",
-            Style::default().fg(Color::DarkGray),
-        ))],
+    // d-66: while a `[c] clear` confirm is armed, the block
+    // shows the destructive prompt instead of the summary —
+    // mirroring how the Local-transfer block surfaces its
+    // mirror/move confirms (red banner, no footer swap).
+    let lines = if state.is_confirming_clear() {
+        vec![Line::from(Span::styled(
+            "clear ALL local performance history? this is permanent · [y / N or Esc]",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))]
+    } else {
+        match state.report() {
+            Some(report) => summary_lines(report),
+            None => vec![Line::from(Span::styled(
+                "(no report loaded yet — press r to refresh)",
+                Style::default().fg(Color::DarkGray),
+            ))],
+        }
     };
     let para = Paragraph::new(lines).block(block);
     frame.render_widget(para, area);

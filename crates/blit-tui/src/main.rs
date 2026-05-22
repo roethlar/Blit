@@ -934,6 +934,16 @@ async fn run_router(
                     }
                     continue;
                 }
+                // d-66: F4's destructive clear-history confirm is
+                // modal — route y/n/Esc to the confirm handler
+                // before the verify-edit handler and before
+                // key_action (where bare Esc would map to Quit).
+                if app.current_screen == Screen::F4
+                    && app.profile.is_confirming_clear()
+                    && handle_profile_clear_confirm_keystroke(&key, &mut app)
+                {
+                    continue;
+                }
                 if app.current_screen == Screen::F4
                     && app.verify.focus().is_editing()
                     && handle_verify_keystroke(&key, &mut app, &verify_run_tx)
@@ -1752,14 +1762,11 @@ async fn handle_pane_action(
                 spawn_profile_fetch(id, app.profile_reply_tx.clone());
             }
             UserAction::ProfileClear => {
-                // Only re-fetch on success — otherwise
-                // begin_fetch's Pending → Loaded sequence
-                // would wipe the error banner.
-                let outcome = apply_profile_clear();
-                if apply_lifecycle_outcome(&mut app.profile, outcome) {
-                    let id = app.profile.begin_fetch();
-                    spawn_profile_fetch(id, app.profile_reply_tx.clone());
-                }
+                // d-66: clearing the history log is permanent, so
+                // arm a y/N confirm instead of wiping on this
+                // single keystroke. The actual clear runs from
+                // `handle_profile_clear_confirm_keystroke` on `y`.
+                app.profile.begin_clear_confirm();
             }
             UserAction::ProfileDisable => {
                 let outcome = apply_profile_set_enabled(false);
@@ -4259,6 +4266,47 @@ fn handle_f1_trigger_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> bo
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.f1_trigger.cancel_confirm();
+            true
+        }
+        // Modal: swallow everything else.
+        _ => true,
+    }
+}
+
+/// d-66: handle a keystroke while F4's destructive
+/// clear-history confirm is armed. Returns `true` when the
+/// key was consumed. `y` runs the clear (and re-fetches on
+/// success, mirroring the pre-d-66 inline handler); `n`/`Esc`
+/// cancels. Ctrl-c (quit), F-keys (pane nav), and `?` (help)
+/// fall through so the operator is never trapped in the modal.
+fn handle_profile_clear_confirm_keystroke(key: &KeyEvent, app: &mut AppState) -> bool {
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    if let KeyCode::F(_) = key.code {
+        return false;
+    }
+    if key.code == KeyCode::Char('?')
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            app.profile.cancel_clear_confirm();
+            // Only re-fetch on success — otherwise begin_fetch's
+            // Pending → Loaded sequence would wipe the error banner.
+            let outcome = apply_profile_clear();
+            if apply_lifecycle_outcome(&mut app.profile, outcome) {
+                let id = app.profile.begin_fetch();
+                spawn_profile_fetch(id, app.profile_reply_tx.clone());
+            }
+            true
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.profile.cancel_clear_confirm();
             true
         }
         // Modal: swallow everything else.
@@ -7436,6 +7484,82 @@ mod tests {
         assert!(app.f1_trigger.is_confirming());
         handle_f1_trigger_confirm_keystroke(&k(KeyCode::Char('y')), &mut app);
         assert!(app.f1_push.is_running(), "y launches the move push");
+    }
+
+    // d-66: F4 destructive clear-history confirm gate.
+
+    #[test]
+    fn handle_profile_clear_confirm_cancel_keeps_history() {
+        for cancel in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+            let mut app = make_test_app_state(Screen::F4);
+            app.profile.begin_clear_confirm();
+            assert!(app.profile.is_confirming_clear());
+            assert!(
+                handle_profile_clear_confirm_keystroke(&k(cancel), &mut app),
+                "{cancel:?}: consumed"
+            );
+            assert!(
+                !app.profile.is_confirming_clear(),
+                "{cancel:?}: confirm dropped without clearing"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_profile_clear_confirm_swallows_unrelated_keys() {
+        // A stray letter inside the modal must NOT leak through to
+        // the dispatcher AND must leave the confirm armed (the
+        // operator hasn't answered yet).
+        let mut app = make_test_app_state(Screen::F4);
+        app.profile.begin_clear_confirm();
+        assert!(handle_profile_clear_confirm_keystroke(
+            &k(KeyCode::Char('x')),
+            &mut app
+        ));
+        assert!(app.profile.is_confirming_clear(), "still awaiting y/N");
+    }
+
+    #[test]
+    fn handle_profile_clear_confirm_lets_escape_hatches_through() {
+        // Ctrl-c (quit), F-keys (pane nav), and `?` (help) must
+        // fall through so the operator is never trapped mid-confirm.
+        let ctrl_c = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+        };
+        for (key, what) in [
+            (ctrl_c, "ctrl-c"),
+            (k(KeyCode::F(2)), "F2"),
+            (k(KeyCode::Char('?')), "?"),
+        ] {
+            let mut app = make_test_app_state(Screen::F4);
+            app.profile.begin_clear_confirm();
+            assert!(
+                !handle_profile_clear_confirm_keystroke(&key, &mut app),
+                "{what}: falls through"
+            );
+            assert!(
+                app.profile.is_confirming_clear(),
+                "{what}: confirm untouched"
+            );
+        }
+    }
+
+    /// `y` runs the clear and drops the confirm. The clear targets
+    /// a tempdir config override so it never touches the operator's
+    /// real `perf_local.jsonl`; the spawned re-fetch needs a runtime.
+    #[tokio::test]
+    async fn handle_profile_clear_confirm_y_clears_and_disarms() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        blit_core::config::set_config_dir(tmp.path());
+        let mut app = make_test_app_state(Screen::F4);
+        app.profile.begin_clear_confirm();
+        assert!(handle_profile_clear_confirm_keystroke(
+            &k(KeyCode::Char('y')),
+            &mut app
+        ));
+        assert!(!app.profile.is_confirming_clear(), "y disarms the confirm");
+        blit_core::config::clear_config_dir_override();
     }
 
     #[test]
