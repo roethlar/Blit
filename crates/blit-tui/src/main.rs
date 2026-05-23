@@ -3527,14 +3527,22 @@ fn plan_f1_trigger(
         Ok(s) => s,
         Err(_) => return TriggerOutcome::Rejected(format!("invalid source: {src}")),
     };
-    // d-68: a remote source with a *remote* destination is a
-    // remote→remote delegated transfer, not a remote→local pull.
-    // Detect it up front so a remote dest is never mis-routed into
-    // the pull machine as a literal local path. Copy is supported
-    // (delegated); mirror/move delegation is a follow-up.
+    // d-68: with a remote source, classify the destination up front
+    // and branch on ALL three outcomes — a remote dest is a
+    // remote→remote delegated transfer (not a remote→local pull),
+    // and a remote-*shaped* typo (parse Err, e.g. `host:/module`
+    // missing its trailing slash) must be rejected rather than fall
+    // through into the pull machine as a literal local path. Only a
+    // genuine local dest (`Ok(Local)`) continues to remote→local.
+    // d-68 R2: the original guard only matched `Ok(Remote)` and
+    // silently dropped `Err(_)` into the local-pull mis-route.
     if let Endpoint::Remote(ref source_ep) = source {
-        if let Ok(Endpoint::Remote(dst_ep)) = parse_transfer_endpoint(dest) {
-            return plan_f1_delegated(app, source_ep.clone(), dst_ep, kind);
+        match parse_transfer_endpoint(dest) {
+            Ok(Endpoint::Remote(dst_ep)) => {
+                return plan_f1_delegated(app, source_ep.clone(), dst_ep, kind);
+            }
+            Ok(Endpoint::Local(_)) => { /* remote→local pull — handled below */ }
+            Err(_) => return TriggerOutcome::Rejected(format!("invalid destination: {dest}")),
         }
     }
     match source {
@@ -7755,6 +7763,55 @@ mod tests {
                 other => panic!("{kind:?}: expected Rejected, got {other:?}"),
             }
         }
+    }
+
+    /// d-68 R2: with a remote source, a remote-*shaped* but invalid
+    /// destination (module path missing its trailing slash) must be
+    /// rejected — NOT fall through into a remote→local pull that
+    /// treats `skippy:/backup` as a literal local directory.
+    #[test]
+    fn plan_f1_trigger_remote_source_rejects_malformed_remote_dest() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "skippy:/backup", // no trailing slash → remote-shaped parse error
+            f3pull::PullKind::Copy,
+            false,
+        );
+        match out {
+            TriggerOutcome::Rejected(msg) => assert!(msg.contains("invalid destination"), "{msg}"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        assert!(
+            !app.f3_pull.is_running(),
+            "must not start a local-path pull"
+        );
+        assert!(!app.f1_push.is_running(), "must not delegate");
+    }
+
+    /// d-68 R2: a remote source with a genuine *local* destination
+    /// still routes to the remote→local pull (the Ok(Local) arm
+    /// falls through, unchanged by the malformed-dest guard). Tokio:
+    /// the pull path spawns a task.
+    #[tokio::test]
+    async fn plan_f1_trigger_remote_source_local_dest_still_pulls() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "/tmp/pulled",
+            f3pull::PullKind::Copy,
+            false,
+        );
+        assert!(
+            matches!(out, TriggerOutcome::Launched),
+            "remote→local copy launches"
+        );
+        assert!(
+            app.f3_pull.is_running(),
+            "engages the remote→local pull machine"
+        );
     }
 
     #[test]
