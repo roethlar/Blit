@@ -320,7 +320,9 @@ enum F2CancelStatus {
     /// instead. Freezing the ids at prompt creation
     /// closes the race.
     ConfirmingBatch {
-        transfer_ids: Vec<String>,
+        /// m2f-8: `(daemon, transfer_id)` per active row, frozen at
+        /// prompt creation — each CancelJob targets its own daemon.
+        targets: Vec<(String, String)>,
     },
     Sending {
         transfer_id: String,
@@ -1500,8 +1502,8 @@ async fn handle_pane_action(
                         id: transfer_id.clone(),
                         daemon: daemon.clone(),
                     },
-                    F2CancelStatus::ConfirmingBatch { transfer_ids } => {
-                        ConfirmedCancel::Batch(transfer_ids.clone())
+                    F2CancelStatus::ConfirmingBatch { targets } => {
+                        ConfirmedCancel::Batch(targets.clone())
                     }
                     _ => return,
                 };
@@ -1520,17 +1522,11 @@ async fn handle_pane_action(
                         };
                         spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
                     }
-                    ConfirmedCancel::Batch(ids) => {
-                        // m2f-8: batch cancel still targets parsed_remote;
-                        // per-daemon batch is a follow-up (foreign ids are
-                        // NotFound-safe meanwhile).
-                        let Some(endpoint) = app.parsed_remote.clone() else {
-                            app.cancel_status = F2CancelStatus::Idle;
-                            return;
-                        };
-                        let count = spawn_cancels_for_ids(
-                            ids,
-                            &endpoint,
+                    // m2f-8: batch cancel sends each CancelJob to the
+                    // daemon that owns the transfer.
+                    ConfirmedCancel::Batch(targets) => {
+                        let count = spawn_cancels_for_targets(
+                            targets,
                             &mut app.cancel_request_seq,
                             &app.cancel_reply_tx,
                         );
@@ -1560,16 +1556,18 @@ async fn handle_pane_action(
             UserAction::CancelAllActiveTransfers => {
                 if app.cancel_status.is_sending() || app.cancel_status.is_confirming() {
                     // Already mid-cycle — ignore.
-                } else if let Some(endpoint) = app.parsed_remote.clone() {
-                    let ids = snapshot_active_ids(&app.transfers);
-                    if ids.is_empty() {
+                } else {
+                    // m2f-8: batch cancels every active row across ALL
+                    // watched daemons (each target carries its own
+                    // daemon) — no longer gated on parsed_remote.
+                    let targets = snapshot_active_targets(&app.transfers);
+                    if targets.is_empty() {
                         // No active transfers — silent no-op.
                     } else if tui_config.transfer.confirm_cancel {
-                        app.cancel_status = F2CancelStatus::ConfirmingBatch { transfer_ids: ids };
+                        app.cancel_status = F2CancelStatus::ConfirmingBatch { targets };
                     } else {
-                        let count = spawn_cancels_for_ids(
-                            ids,
-                            &endpoint,
+                        let count = spawn_cancels_for_targets(
+                            targets,
                             &mut app.cancel_request_seq,
                             &app.cancel_reply_tx,
                         );
@@ -2525,8 +2523,8 @@ fn cancel_status_to_display(
         F2CancelStatus::Confirming { transfer_id, .. } => F2CancelDisplay::ConfirmingCancel {
             transfer_id: transfer_id.clone(),
         },
-        F2CancelStatus::ConfirmingBatch { transfer_ids } => F2CancelDisplay::ConfirmingBatch {
-            count: transfer_ids.len(),
+        F2CancelStatus::ConfirmingBatch { targets } => F2CancelDisplay::ConfirmingBatch {
+            count: targets.len(),
         },
         F2CancelStatus::BatchInitiated { count, finished_at } => {
             if now.saturating_duration_since(*finished_at) >= ttl {
@@ -4023,11 +4021,9 @@ fn min_opt(
 enum ConfirmedCancel {
     /// m2f-7: single cancel carries the id + the daemon that owns it
     /// (CancelJob targets that daemon).
-    Single {
-        id: String,
-        daemon: String,
-    },
-    Batch(Vec<String>),
+    Single { id: String, daemon: String },
+    /// m2f-8: `(daemon, transfer_id)` per active row.
+    Batch(Vec<(String, String)>),
 }
 
 /// m2f-7: turn an F2 row's source-daemon identity (`host_port_display`)
@@ -4044,11 +4040,15 @@ fn cancel_endpoint(daemon: &str) -> Option<RemoteEndpoint> {
 /// presses `Shift+X` — the result is then either stored
 /// on `ConfirmingBatch` (confirm path) or fed directly
 /// into `spawn_cancels_for_ids` (non-confirm path).
-fn snapshot_active_ids(transfers: &state::TransfersState) -> Vec<String> {
+/// m2f-8: snapshot `(daemon, transfer_id)` for every active row, so a
+/// batch cancel sends each `CancelJob` to the daemon that owns the
+/// transfer (F2 shows rows from many daemons). Frozen at prompt
+/// creation (d-30 R2 race fix).
+fn snapshot_active_targets(transfers: &state::TransfersState) -> Vec<(String, String)> {
     transfers
         .active_rows()
         .into_iter()
-        .map(|row| row.transfer_id.clone())
+        .map(|row| (row.source_daemon.clone(), row.transfer_id.clone()))
         .collect()
 }
 
@@ -4064,17 +4064,23 @@ fn snapshot_active_ids(transfers: &state::TransfersState) -> Vec<String> {
 /// `TransferComplete` / `TransferError` events, which
 /// is the same channel that displays normal transfer
 /// completions.
-fn spawn_cancels_for_ids(
-    ids: Vec<String>,
-    endpoint: &blit_core::remote::RemoteEndpoint,
+/// m2f-8: spawn one CancelJob per `(daemon, id)` target, each against
+/// the daemon that owns it (`cancel_endpoint`). A target whose daemon
+/// identity is malformed is skipped. Returns the number spawned.
+fn spawn_cancels_for_targets(
+    targets: Vec<(String, String)>,
     cancel_request_seq: &mut u64,
     tx: &mpsc::Sender<CancelReply>,
 ) -> usize {
-    let count = ids.len();
-    for id in ids {
+    let mut count = 0;
+    for (daemon, id) in targets {
+        let Some(endpoint) = cancel_endpoint(&daemon) else {
+            continue;
+        };
         *cancel_request_seq += 1;
         let rid = *cancel_request_seq;
-        spawn_cancel_transfer(rid, endpoint.clone(), id, tx.clone());
+        spawn_cancel_transfer(rid, endpoint, id, tx.clone());
+        count += 1;
     }
     count
 }
@@ -6211,7 +6217,7 @@ mod tests {
     #[test]
     fn f2_cancel_status_confirming_batch_predicates() {
         let s = F2CancelStatus::ConfirmingBatch {
-            transfer_ids: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            targets: vec![("nas".to_string(), "a".to_string())],
         };
         assert!(s.is_confirming());
         assert!(!s.is_sending());
@@ -6236,7 +6242,13 @@ mod tests {
     #[test]
     fn cancel_status_to_display_renders_confirming_batch() {
         let status = F2CancelStatus::ConfirmingBatch {
-            transfer_ids: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+            targets: vec![
+                ("nas".into(), "a".into()),
+                ("nas".into(), "b".into()),
+                ("nas".into(), "c".into()),
+                ("nas".into(), "d".into()),
+                ("nas".into(), "e".into()),
+            ],
         };
         let display =
             cancel_status_to_display(&status, Instant::now(), std::time::Duration::from_secs(60));
@@ -6285,7 +6297,7 @@ mod tests {
     #[test]
     fn cancel_status_remaining_ttl_confirming_batch_returns_none() {
         let status = F2CancelStatus::ConfirmingBatch {
-            transfer_ids: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            targets: vec![("nas".into(), "a".into())],
         };
         let remaining =
             cancel_status_remaining_ttl(&status, Instant::now(), std::time::Duration::from_secs(5));
@@ -6314,7 +6326,7 @@ mod tests {
     fn esc_cancels_confirm_routes_f2_confirming_batch() {
         let mut app = make_test_app_state(Screen::F2);
         app.cancel_status = F2CancelStatus::ConfirmingBatch {
-            transfer_ids: vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()],
+            targets: vec![("nas".into(), "a".into())],
         };
         let esc = KeyEvent {
             code: KeyCode::Esc,
@@ -6339,9 +6351,13 @@ mod tests {
     /// pattern-match returns the same Vec we put in.
     #[test]
     fn confirming_batch_freezes_ids_at_prompt_creation() {
-        let frozen = vec!["t-A".to_string(), "t-B".to_string()];
+        // m2f-8: targets are (daemon, transfer_id) pairs.
+        let frozen = vec![
+            ("nas".to_string(), "t-A".to_string()),
+            ("skippy:9001".to_string(), "t-B".to_string()),
+        ];
         let status = F2CancelStatus::ConfirmingBatch {
-            transfer_ids: frozen.clone(),
+            targets: frozen.clone(),
         };
         // Display reflects the frozen count.
         let display =
@@ -6352,51 +6368,73 @@ mod tests {
             }
             other => panic!("expected ConfirmingBatch, got {other:?}"),
         }
-        // Pattern-match round-trip: the ids the dispatcher
+        // Pattern-match round-trip: the targets the dispatcher
         // would read on `y` are exactly the ones the
         // operator confirmed.
         match status {
-            F2CancelStatus::ConfirmingBatch { transfer_ids } => {
-                assert_eq!(transfer_ids, frozen);
+            F2CancelStatus::ConfirmingBatch { targets } => {
+                assert_eq!(targets, frozen);
             }
             other => panic!("expected ConfirmingBatch, got {other:?}"),
         }
     }
 
-    /// d-30 R2: snapshot_active_ids returns the ids of
-    /// every active row at the snapshot moment.
+    /// m2f-8: snapshot_active_targets captures (daemon, id) for every
+    /// active row across daemons at the snapshot moment.
     #[test]
-    fn snapshot_active_ids_captures_all_active_rows() {
+    fn snapshot_active_targets_captures_all_active_rows() {
         use blit_core::generated::{daemon_event, DaemonEvent, TransferStarted};
         let mut transfers = state::TransfersState::new();
-        for id in ["t-A", "t-B", "t-C"] {
-            let event = DaemonEvent {
-                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
-                    transfer_id: id.to_string(),
-                    kind: 0,
-                    peer: String::new(),
-                    module: String::new(),
-                    path: String::new(),
-                    start_unix_ms: 1_000_000,
-                })),
-            };
-            transfers.apply_event("", event, Instant::now());
-        }
-        let mut ids = snapshot_active_ids(&transfers);
-        ids.sort();
+        let started = |id: &str| DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                transfer_id: id.to_string(),
+                kind: 0,
+                peer: String::new(),
+                module: String::new(),
+                path: String::new(),
+                start_unix_ms: 1_000_000,
+            })),
+        };
+        transfers.apply_event("nas", started("t-A"), Instant::now());
+        transfers.apply_event("skippy:9001", started("t-B"), Instant::now());
+        let mut targets = snapshot_active_targets(&transfers);
+        targets.sort();
         assert_eq!(
-            ids,
-            vec!["t-A".to_string(), "t-B".to_string(), "t-C".to_string()]
+            targets,
+            vec![
+                ("nas".to_string(), "t-A".to_string()),
+                ("skippy:9001".to_string(), "t-B".to_string()),
+            ]
         );
     }
 
-    /// d-30 R2: snapshot_active_ids returns empty for a
-    /// fresh state. Pairs with the dispatcher's
-    /// `if ids.is_empty()` no-op guard.
+    /// m2f-8: snapshot_active_targets returns empty for a fresh state.
+    /// Pairs with the dispatcher's `if targets.is_empty()` no-op guard.
     #[test]
-    fn snapshot_active_ids_empty_state() {
+    fn snapshot_active_targets_empty_state() {
         let transfers = state::TransfersState::new();
-        assert!(snapshot_active_ids(&transfers).is_empty());
+        assert!(snapshot_active_targets(&transfers).is_empty());
+    }
+
+    /// m2f-8: batch cancel spawns one RPC per (daemon, id) target and
+    /// skips any whose daemon identity won't parse — returning the
+    /// count actually dispatched.
+    #[tokio::test]
+    async fn spawn_cancels_for_targets_skips_malformed_and_counts_valid() {
+        let (tx, _rx) = mpsc::channel::<CancelReply>(4);
+        let mut seq = 0u64;
+        let count = spawn_cancels_for_targets(
+            vec![
+                ("nas".to_string(), "t1".to_string()),
+                ("skippy:9001".to_string(), "t2".to_string()),
+                // Empty daemon identity → cancel_endpoint None → skipped.
+                (String::new(), "t3".to_string()),
+            ],
+            &mut seq,
+            &tx,
+        );
+        assert_eq!(count, 2, "two valid targets dispatched, malformed skipped");
+        assert_eq!(seq, 2, "request seq advanced once per dispatched cancel");
     }
 
     // d-23: cancel-status TTL auto-clear. d-24 made the
