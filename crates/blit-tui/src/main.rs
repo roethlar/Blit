@@ -528,6 +528,40 @@ async fn main() -> Result<()> {
             tui_config.keys.refresh,
         ));
     }
+    // keys-4: invalid (non-single-char) movement aliases fall back to
+    // their default character, and a movement alias colliding with a
+    // higher-precedence binding (quit > nav > refresh > movement) is
+    // disabled — the arrow / Home / End keys still move the cursor.
+    let move_raw = [
+        &tui_config.keys.move_down,
+        &tui_config.keys.move_up,
+        &tui_config.keys.move_top,
+        &tui_config.keys.move_bottom,
+    ];
+    const MOVE_LABEL: [&str; 4] = ["move_down", "move_up", "move_top", "move_bottom"];
+    let move_chars = tui_config.keys.movement_chars();
+    for (i, raw) in move_raw.iter().enumerate() {
+        if move_chars[i].is_none() {
+            config_warnings.push(format!(
+                "tui.toml [keys] {} = {:?} is not a single character; \
+                 using default {:?}",
+                MOVE_LABEL[i],
+                raw,
+                config::KeysDefaults::DEFAULT_MOVE[i],
+            ));
+        }
+    }
+    for (i, mv) in resolved.movement.iter().enumerate() {
+        if mv.is_none() {
+            config_warnings.push(format!(
+                "tui.toml [keys] {} = {:?} collides with a higher-precedence \
+                 key (quit / a pane alias / refresh / an earlier movement \
+                 key) and is disabled — pick a distinct key (the arrow / \
+                 Home / End keys still move the cursor)",
+                MOVE_LABEL[i], move_raw[i],
+            ));
+        }
+    }
 
     let mut guard = TuiGuard::new().context("entering TUI")?;
     let result = run_router(guard.terminal_mut(), &args, tui_config).await;
@@ -5617,18 +5651,40 @@ fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
             return Some(UserAction::Refresh);
         }
     }
+    // keys-4: configurable list-cursor aliases (down/up/top/bottom;
+    // defaults j/k/g/G). Like the pane aliases and refresh, plain press
+    // only (no Ctrl/Alt) and checked before the static action map — so
+    // remapping a movement key onto a static action char shadows that
+    // action. The arrow / Home / End keys in the match below are the
+    // non-remappable failsafe motion, so a collision (or a `None` slot,
+    // meaning the configured char collided with a higher-precedence
+    // binding: quit > nav > refresh > movement) can never strand the
+    // operator. `movement[i]` maps to down/up/top/bottom in order.
+    if !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        for (i, alias) in keymap.movement.iter().enumerate() {
+            if *alias == Some(key.code) {
+                return Some(match i {
+                    0 => UserAction::SelectNext,
+                    1 => UserAction::SelectPrev,
+                    2 => UserAction::SelectFirst,
+                    _ => UserAction::SelectLast,
+                });
+            }
+        }
+    }
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
-        KeyCode::Up | KeyCode::Char('k') => Some(UserAction::SelectPrev),
-        // d-42: vim-style jump to first / last row. `g`
-        // (first) and `G` (last) extend the j/k cursor on
-        // the F1 and F3 list panes; other panes ignore the
-        // variants in their dispatch arms. Home/End alias
-        // for operators who don't think in vim. Single `g`
-        // (not the vim `gg` double-tap) — no chord state to
-        // track, and `G` is already the natural pair.
-        KeyCode::Char('g') | KeyCode::Home => Some(UserAction::SelectFirst),
-        KeyCode::Char('G') | KeyCode::End => Some(UserAction::SelectLast),
+        // keys-4: the arrow / Home / End keys always move the cursor —
+        // the non-remappable failsafe for the configurable j/k/g/G
+        // aliases handled in the movement block above. d-42: Home/End
+        // jump to first / last row on the F1 and F3 list panes; other
+        // panes ignore the variants in their dispatch arms.
+        KeyCode::Down => Some(UserAction::SelectNext),
+        KeyCode::Up => Some(UserAction::SelectPrev),
+        KeyCode::Home => Some(UserAction::SelectFirst),
+        KeyCode::End => Some(UserAction::SelectLast),
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => Some(UserAction::Descend),
         KeyCode::Left | KeyCode::Char('h') => Some(UserAction::Ascend),
         // d-58: `t` (trigger transfer) on F1 — TUI_DESIGN §5.1.
@@ -6084,6 +6140,10 @@ struct KeyMap {
     /// when its configured char collided with a higher-precedence
     /// binding. The function keys F1-F4 navigate regardless.
     nav: [Option<KeyCode>; 4],
+    /// keys-4: list-cursor aliases, down/up/top/bottom order. Each is
+    /// `None` when its configured char collided with a higher-precedence
+    /// binding. The arrow / Home / End keys move the cursor regardless.
+    movement: [Option<KeyCode>; 4],
 }
 
 impl KeyMap {
@@ -6093,6 +6153,7 @@ impl KeyMap {
             quit: KeyCode::Char(resolved.quit),
             refresh: resolved.refresh.map(KeyCode::Char),
             nav: resolved.nav.map(|c| c.map(KeyCode::Char)),
+            movement: resolved.movement.map(|c| c.map(KeyCode::Char)),
         }
     }
 }
@@ -6377,6 +6438,115 @@ mod tests {
             key_action(&ev(KeyCode::F(2)), &custom),
             Some(UserAction::Navigate(Screen::F2))
         ));
+    }
+
+    /// keys-4: with the default keymap, both the j/k/g/G aliases and the
+    /// arrow / Home / End failsafe keys move the list cursor. Pins the
+    /// behavior-preservation of extracting j/k/g/G into the configurable
+    /// movement block (g/G had no prior dedicated test).
+    #[test]
+    fn key_action_default_movement_and_arrows() {
+        for (key, want) in [
+            (KeyCode::Char('j'), UserAction::SelectNext),
+            (KeyCode::Char('k'), UserAction::SelectPrev),
+            (KeyCode::Char('g'), UserAction::SelectFirst),
+            (KeyCode::Char('G'), UserAction::SelectLast),
+            (KeyCode::Down, UserAction::SelectNext),
+            (KeyCode::Up, UserAction::SelectPrev),
+            (KeyCode::Home, UserAction::SelectFirst),
+            (KeyCode::End, UserAction::SelectLast),
+        ] {
+            assert_eq!(
+                std::mem::discriminant(&ka(&k(key)).unwrap()),
+                std::mem::discriminant(&want),
+                "{key:?} should move the cursor"
+            );
+        }
+    }
+
+    /// keys-4: a remapped movement alias is honoured, the old default
+    /// char stops moving, and the arrow failsafe is unaffected.
+    #[test]
+    fn key_action_honours_remapped_movement() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.move_down = "n".to_string();
+        cfg.keys.move_up = "p".to_string();
+        let custom = KeyMap::from_config(&cfg);
+        let ev = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+        };
+        // Remapped 'n' → SelectNext, 'p' → SelectPrev.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('n')), &custom),
+            Some(UserAction::SelectNext)
+        ));
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('p')), &custom),
+            Some(UserAction::SelectPrev)
+        ));
+        // Old default 'j' no longer moves down (it's now unmapped).
+        assert!(key_action(&ev(KeyCode::Char('j')), &custom).is_none());
+        // Arrows are the non-remappable failsafe — still move.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Down), &custom),
+            Some(UserAction::SelectNext)
+        ));
+        // Unremapped top/bottom keep their defaults.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('g')), &custom),
+            Some(UserAction::SelectFirst)
+        ));
+    }
+
+    /// keys-4: movement is the lowest-precedence configurable binding
+    /// (quit > nav > refresh > movement). A movement alias colliding
+    /// with a higher-precedence key is disabled (`None`), the
+    /// higher-precedence action wins that char, and the arrow failsafe
+    /// still moves the cursor.
+    #[test]
+    fn movement_collision_disables_alias() {
+        let mut cfg = config::TuiConfig::default();
+        // 'q' = default quit (higher precedence), 'r' = default refresh.
+        cfg.keys.move_down = "q".to_string();
+        cfg.keys.move_up = "r".to_string();
+        let custom = KeyMap::from_config(&cfg);
+        assert!(custom.movement[0].is_none(), "down disabled vs quit");
+        assert!(custom.movement[1].is_none(), "up disabled vs refresh");
+        let ev = |code, modifiers| KeyEvent { code, modifiers };
+        // The colliding chars resolve to their higher-precedence action.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('q'), KeyModifiers::empty()), &custom),
+            Some(UserAction::Quit)
+        ));
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('r'), KeyModifiers::empty()), &custom),
+            Some(UserAction::Refresh)
+        ));
+        // Arrows still move regardless of the collision.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Down, KeyModifiers::empty()), &custom),
+            Some(UserAction::SelectNext)
+        ));
+        assert!(matches!(
+            key_action(&ev(KeyCode::Up, KeyModifiers::empty()), &custom),
+            Some(UserAction::SelectPrev)
+        ));
+    }
+
+    /// keys-4: invalid (non-single-char) movement values fall back to the
+    /// default char, and an internal duplicate disables the later slot.
+    #[test]
+    fn resolved_movement_invalid_and_internal_collision() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.move_top = "gg".to_string(); // not a single char → default 'g'
+        cfg.keys.move_bottom = "j".to_string(); // collides with move_down 'j'
+        let resolved = cfg.keys.resolved();
+        // Invalid move_top falls back to its default 'g'.
+        assert_eq!(resolved.movement[2], Some('g'));
+        // move_down keeps 'j'; move_bottom = 'j' collides → disabled.
+        assert_eq!(resolved.movement[0], Some('j'));
+        assert_eq!(resolved.movement[3], None);
     }
 
     /// dark-1: the base style is `None` only when both bg and fg are

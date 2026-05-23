@@ -26,6 +26,10 @@
 //! pane_f2 = "2"
 //! pane_f3 = "3"
 //! pane_f4 = "4"
+//! move_down = "j"               # keys-4: list-cursor aliases (arrows/Home/End always work too)
+//! move_up = "k"
+//! move_top = "g"
+//! move_bottom = "G"
 //!
 //! [verify]
 //! default_use_checksum = false  # `H` toggle's startup value
@@ -77,9 +81,9 @@ pub struct TuiConfig {
     pub keys: KeysDefaults,
 }
 
-/// keys-1/2/3: operator key remapping for the global keys. Covers quit
-/// (keys-1), refresh (keys-2), and the pane-switch digit aliases
-/// (keys-3); later slices extend to per-screen keys. Each binding is a
+/// keys-1/2/3/4: operator key remapping for the global keys. Covers quit
+/// (keys-1), refresh (keys-2), the pane-switch digit aliases (keys-3),
+/// and the list-cursor movement aliases (keys-4). Each binding is a
 /// single character claimed only on a PLAIN press (no Ctrl/Alt) so it
 /// can't hijack a chord for that character. See [`Self::resolved`] for
 /// the collision policy.
@@ -104,6 +108,19 @@ pub struct KeysDefaults {
     pub pane_f2: String,
     pub pane_f3: String,
     pub pane_f4: String,
+    /// keys-4: the list-cursor movement aliases (defaults `"j"`/`"k"`/
+    /// `"g"`/`"G"` → down / up / top / bottom). The arrow keys plus
+    /// `Home`/`End` always move the cursor too (conventional, not
+    /// remappable); these are the remappable plain-char aliases for
+    /// operators who don't think in vim. Non-single-char values fall
+    /// back to the default. Like refresh, they are checked before the
+    /// static action map, so remapping one onto a static action char
+    /// shadows that action — the arrow/`Home`/`End` failsafe means a
+    /// collision can never strand the operator.
+    pub move_down: String,
+    pub move_up: String,
+    pub move_top: String,
+    pub move_bottom: String,
 }
 
 /// keys-3: the effective global key bindings after the collision policy
@@ -115,6 +132,10 @@ pub struct ResolvedKeys {
     /// Pane-switch digit aliases, F1..F4 order.
     pub nav: [Option<char>; 4],
     pub refresh: Option<char>,
+    /// keys-4: list-cursor aliases in down/up/top/bottom order. `None`
+    /// means the configured char collided with a higher-precedence
+    /// binding and is disabled (the arrow / Home / End keys still move).
+    pub movement: [Option<char>; 4],
 }
 
 impl KeysDefaults {
@@ -122,6 +143,8 @@ impl KeysDefaults {
     pub const DEFAULT_REFRESH: char = 'r';
     /// Default pane-switch digit aliases, F1..F4 order.
     pub const DEFAULT_PANE: [char; 4] = ['1', '2', '3', '4'];
+    /// keys-4: default list-cursor aliases, down/up/top/bottom order.
+    pub const DEFAULT_MOVE: [char; 4] = ['j', 'k', 'g', 'G'];
 
     /// The configured quit key as a single `char`, or `None` when the
     /// value isn't exactly one character (caller warns + falls back to
@@ -148,23 +171,38 @@ impl KeysDefaults {
         ]
     }
 
+    /// keys-4: the configured list-cursor aliases (down/up/top/bottom),
+    /// each a single `char` or `None` when not a single character (caller
+    /// warns + falls back to the corresponding [`Self::DEFAULT_MOVE`]
+    /// character).
+    pub fn movement_chars(&self) -> [Option<char>; 4] {
+        [
+            single_char(&self.move_down),
+            single_char(&self.move_up),
+            single_char(&self.move_top),
+            single_char(&self.move_bottom),
+        ]
+    }
+
     /// Resolve the effective global bindings, applying the **collision
     /// policy**. `key_action` dispatches in a fixed order — quit, then
-    /// the pane-switch aliases, then refresh — so a lower-precedence
-    /// binding sharing a character with a higher one would be silently
-    /// unreachable. Policy: process bindings in that precedence order;
-    /// the first claim on a character wins, and any later binding that
-    /// collides is **disabled** (`None`). Each char is the configured
-    /// value, or its default when not a single character. A startup
-    /// warning flags every disabled binding.
+    /// the pane-switch aliases, then refresh, then the movement aliases
+    /// — so a lower-precedence binding sharing a character with a higher
+    /// one would be silently unreachable. Policy: process bindings in
+    /// that precedence order; the first claim on a character wins, and
+    /// any later binding that collides is **disabled** (`None`). Each
+    /// char is the configured value, or its default when not a single
+    /// character. A startup warning flags every disabled binding.
     pub fn resolved(&self) -> ResolvedKeys {
         let quit = self.quit_char().unwrap_or(Self::DEFAULT_QUIT);
         let pane_cfg = self.pane_chars();
         let refresh_cfg = self.refresh_char().unwrap_or(Self::DEFAULT_REFRESH);
+        let move_cfg = self.movement_chars();
 
         // Greedy claim in dispatch-precedence order: quit > nav1..4 >
-        // refresh. `claimed.insert` returns false when the char is
-        // already taken → that binding is disabled.
+        // refresh > movement(down/up/top/bottom). `claimed.insert`
+        // returns false when the char is already taken → that binding is
+        // disabled.
         let mut claimed = std::collections::HashSet::new();
         claimed.insert(quit);
 
@@ -182,7 +220,20 @@ impl KeysDefaults {
             None
         };
 
-        ResolvedKeys { quit, nav, refresh }
+        let mut movement = [None; 4];
+        for (i, slot) in movement.iter_mut().enumerate() {
+            let c = move_cfg[i].unwrap_or(Self::DEFAULT_MOVE[i]);
+            if claimed.insert(c) {
+                *slot = Some(c);
+            }
+        }
+
+        ResolvedKeys {
+            quit,
+            nav,
+            refresh,
+            movement,
+        }
     }
 }
 
@@ -205,6 +256,10 @@ impl Default for KeysDefaults {
             pane_f2: Self::DEFAULT_PANE[1].to_string(),
             pane_f3: Self::DEFAULT_PANE[2].to_string(),
             pane_f4: Self::DEFAULT_PANE[3].to_string(),
+            move_down: Self::DEFAULT_MOVE[0].to_string(),
+            move_up: Self::DEFAULT_MOVE[1].to_string(),
+            move_top: Self::DEFAULT_MOVE[2].to_string(),
+            move_bottom: Self::DEFAULT_MOVE[3].to_string(),
         }
     }
 }
