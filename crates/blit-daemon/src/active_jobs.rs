@@ -424,7 +424,7 @@ impl ActiveJobs {
         self.inner
             .table
             .lock()
-            .expect("active_jobs table poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(transfer_id.clone(), entry);
         ActiveJobGuard {
             inner: Arc::clone(&self.inner),
@@ -454,7 +454,7 @@ impl ActiveJobs {
     /// caller would be lied to.
     #[allow(dead_code)]
     pub fn cancel(&self, transfer_id: &str) -> CancelOutcome {
-        let guard = self.inner.table.lock().expect("active_jobs table poisoned");
+        let guard = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         match guard.get(transfer_id) {
             None => CancelOutcome::NotFound,
             Some(entry) if !entry.job.kind.supports_cancellation() => CancelOutcome::Unsupported,
@@ -479,7 +479,7 @@ impl ActiveJobs {
         self.inner
             .table
             .lock()
-            .expect("active_jobs table poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .map(|e| {
                 let mut job = e.job.clone();
@@ -520,7 +520,7 @@ impl ActiveJobs {
         transfer_id: &str,
         event: DaemonEvent,
     ) {
-        let mut table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = table.get_mut(transfer_id) {
             if entry.events_ring.len() >= JOB_EVENT_RING_CAP {
                 entry.events_ring.pop_front();
@@ -553,7 +553,7 @@ impl ActiveJobs {
         transfer_id_filter: &str,
         replay: bool,
     ) -> (broadcast::Receiver<DaemonEvent>, Vec<DaemonEvent>) {
-        let table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         let rx = events_tx.subscribe();
         let events = if replay && !transfer_id_filter.is_empty() {
             table
@@ -602,7 +602,7 @@ impl ActiveJobs {
     #[cfg(test)]
     pub fn for_each_progress_sample<F: FnMut(ProgressSample)>(&self, mut emit: F) {
         let now_ms = unix_ms_now();
-        let table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         for entry in table.values() {
             let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
             // swap returns the OLD value; cur_bytes/now_ms is the
@@ -646,7 +646,7 @@ impl ActiveJobs {
         F: FnMut(&ProgressSample) -> DaemonEvent,
     {
         let now_ms = unix_ms_now();
-        let mut table = self.inner.table.lock().expect("active_jobs table poisoned");
+        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
         let mut count: usize = 0;
         for entry in table.values_mut() {
             let cur_bytes = entry.bytes_counter.load(Ordering::Relaxed);
@@ -698,7 +698,7 @@ impl ActiveJobs {
         self.inner
             .recent
             .lock()
-            .expect("active_jobs recent poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect()
@@ -1200,7 +1200,7 @@ mod tests {
                 .inner
                 .table
                 .lock()
-                .expect("active_jobs table poisoned");
+                .unwrap_or_else(|e| e.into_inner());
             tx_locked.send(()).expect("locked-send");
             rx_release.recv().expect("release-recv");
             // _held drops here — mutex releases when this
@@ -1583,6 +1583,43 @@ mod tests {
         assert_eq!(table.recent().len(), 3);
         assert_eq!(table.clear_recent(), 3);
         assert!(table.recent().is_empty());
+    }
+
+    /// audit-3a: a poisoned table mutex must NOT cascade-panic
+    /// subsequent registry operations. Pre-fix the non-Drop paths used
+    /// `.expect("active_jobs table poisoned")`, so one panic while
+    /// holding the lock would crash every later `snapshot()` /
+    /// `register()` / GetState read. They now recover via
+    /// `unwrap_or_else(|e| e.into_inner())` like the Drop path always
+    /// has — serve degraded rather than not at all.
+    #[tokio::test]
+    async fn poisoned_table_mutex_recovers_instead_of_panicking() {
+        let table = ActiveJobs::new();
+        // A live row so the recovered snapshot has something to read.
+        let _guard = table.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "mod".to_string(),
+            "p".to_string(),
+        );
+        // Poison the table mutex: panic while holding the lock. The
+        // child test module can reach the private `inner`. Suppress the
+        // panic hook so the intentional panic doesn't spam test output.
+        let inner = table.inner.clone();
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = inner.table.lock().unwrap();
+            panic!("intentional poison");
+        }));
+        std::panic::set_hook(prev_hook);
+        assert!(poisoned.is_err());
+        assert!(inner.table.is_poisoned(), "table mutex must be poisoned");
+
+        // Pre-fix this panicked; now it recovers the row behind the
+        // poison.
+        let snap = table.snapshot();
+        assert_eq!(snap.len(), 1, "snapshot recovers the poisoned lock");
     }
 
     #[tokio::test]
