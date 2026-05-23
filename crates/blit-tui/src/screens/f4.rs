@@ -200,6 +200,9 @@ pub fn render_into(
     diagnostics: &DiagnosticsState,
     transfer: &TransferState,
     now: Instant,
+    // e-10: `[theme] accent_color` for the focused Verify-field
+    // highlight (matches the tab strip / F2 / F3).
+    accent: Color,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -223,7 +226,7 @@ pub fn render_into(
     render_header(frame, chunks[0], state);
     render_records_summary(frame, chunks[1], state);
     render_predictor(frame, chunks[2], state);
-    render_verify(frame, chunks[3], verify, now);
+    render_verify(frame, chunks[3], verify, now, accent);
     render_diagnostics(frame, chunks[4], diagnostics);
     render_transfer(frame, chunks[5], transfer, now);
     render_footer(frame, chunks[6], state.status(), verify, now);
@@ -380,16 +383,22 @@ fn render_predictor(frame: &mut Frame, area: Rect, state: &ProfileState) {
     frame.render_widget(para, area);
 }
 
-fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState, now: Instant) {
+fn render_verify(frame: &mut Frame, area: Rect, verify: &VerifyState, now: Instant, accent: Color) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Verify (local paths only) ");
     let focus = verify.focus();
-    let source_line = field_line("Source: ", &verify.source, focus == VerifyFocus::Source);
+    let source_line = field_line(
+        "Source: ",
+        &verify.source,
+        focus == VerifyFocus::Source,
+        accent,
+    );
     let dest_line = field_line(
         "Destin: ",
         &verify.destination,
         focus == VerifyFocus::Destination,
+        accent,
     );
     // Compose a single mode line that surfaces both d-6
     // (size+mtime vs checksum) and d-7 (two-way vs
@@ -502,7 +511,7 @@ fn verify_preview_lines(result: &blit_app::check::CheckResult, max: usize) -> Ve
     lines
 }
 
-fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
+fn field_line(label: &str, value: &str, focused: bool, accent: Color) -> Line<'static> {
     let label_span = Span::styled(
         label.to_string(),
         Style::default().add_modifier(Modifier::BOLD),
@@ -522,9 +531,12 @@ fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
         }
     };
     let value_style = if focused {
+        // e-10: the focused field highlight honors the `[theme]
+        // accent_color` with a contrasting foreground (white on dark
+        // accents), matching the tab strip (e-7) / F2 (e-9) / F3 (e-10).
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(super::contrasting_fg(accent))
+            .bg(accent)
             .add_modifier(Modifier::BOLD)
     } else if value.is_empty() {
         Style::default().fg(Color::DarkGray)
@@ -765,6 +777,32 @@ mod tests {
         assert_eq!(format_bytes(1u64 << 20), "1.00 MiB");
         assert_eq!(format_bytes(1u64 << 30), "1.00 GiB");
         assert_eq!(format_bytes(1u64 << 40), "1.00 TiB");
+    }
+
+    /// e-10: a focused Verify field highlights with the themed accent
+    /// background + a contrasting foreground (white on dark accents,
+    /// black on light); an unfocused field is not themed.
+    #[test]
+    fn verify_focused_field_uses_accent_with_contrast() {
+        // Dark accent → contrasting white foreground.
+        let line = field_line("Source: ", "x", true, Color::Red);
+        assert_eq!(line.spans[1].style.bg, Some(Color::Red));
+        assert_eq!(
+            line.spans[1].style.fg,
+            Some(Color::White),
+            "dark accent → white fg"
+        );
+        // Light accent → black foreground.
+        let line = field_line("Source: ", "x", true, Color::Cyan);
+        assert_eq!(line.spans[1].style.bg, Some(Color::Cyan));
+        assert_eq!(
+            line.spans[1].style.fg,
+            Some(Color::Black),
+            "light accent → black fg"
+        );
+        // Unfocused field carries no accent background.
+        let line = field_line("Source: ", "x", false, Color::Red);
+        assert_ne!(line.spans[1].style.bg, Some(Color::Red));
     }
 
     #[test]

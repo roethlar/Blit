@@ -831,6 +831,7 @@ async fn run_router(
                         // d-53: batch-pull progress (current/total).
                         app.f3_batch_pull.as_ref().map(|b| (b.done + 1, b.total)),
                         now,
+                        accent_color,
                     ),
                     Screen::F4 => screens::f4::render_into(
                         frame,
@@ -840,6 +841,7 @@ async fn run_router(
                         &app.diagnostics,
                         &app.transfer,
                         now,
+                        accent_color,
                     ),
                 }
                 if app.help.is_visible() {

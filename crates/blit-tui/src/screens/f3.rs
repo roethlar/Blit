@@ -175,6 +175,9 @@ pub fn render_into(
     del: &F3DelDisplay,
     batch_pull: Option<(usize, usize)>,
     now: Instant,
+    // e-10: `[theme] accent_color` for the browse-tree selection
+    // highlight (matches the tab strip / F2).
+    accent: Color,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -190,7 +193,7 @@ pub fn render_into(
         .split(area);
 
     render_header(frame, chunks[0], state, remote_label);
-    render_table(frame, chunks[1], state);
+    render_table(frame, chunks[1], state, accent);
     render_stats(frame, chunks[2], state, pull_spec, du);
     render_footer(frame, chunks[3], state, pull, del, batch_pull, now);
 }
@@ -208,7 +211,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &BrowseState, remote_labe
     frame.render_widget(para, area);
 }
 
-fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
+fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState, accent: Color) {
     // d-26: filter-aware — only rows that match the
     // current filter make it into the table. With an
     // empty filter `visible_indices()` returns all rows
@@ -247,10 +250,13 @@ fn render_table(frame: &mut Frame, area: Rect, state: &BrowseState) {
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(block_title))
+        // e-10: the browse-tree selection highlight honors the
+        // `[theme] accent_color` with a contrasting foreground (white on
+        // dark accents), matching the tab strip (e-7) and F2 (e-9).
         .row_highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(super::contrasting_fg(accent))
+                .bg(accent)
                 .add_modifier(Modifier::BOLD),
         );
     // d-26: TableState's index addresses the visible-row
@@ -638,6 +644,51 @@ fn format_since(now: Instant, then: Instant) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// e-10: the browse-tree selection highlight uses the themed accent
+    /// background paired with a contrasting foreground (white on a dark
+    /// accent), matching F2 (e-9) — not a black-on-dark hardcode.
+    #[test]
+    fn browse_row_highlight_uses_accent_with_contrast() {
+        use blit_app::admin::list_modules::Module;
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut state = BrowseState::new();
+        state.apply_modules(
+            vec![Module {
+                name: "home".to_string(),
+                path: "/srv/home".to_string(),
+                read_only: false,
+            }],
+            Instant::now(),
+        );
+        // selected_index defaults to 0 → the first row is highlighted.
+        let backend = TestBackend::new(120, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_table(frame, frame.area(), &state, Color::Red);
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.bg == Color::Red {
+                    found = true;
+                    assert_eq!(
+                        cell.fg,
+                        Color::White,
+                        "dark accent must use a contrasting (white) foreground"
+                    );
+                }
+            }
+        }
+        assert!(
+            found,
+            "the selected browse row paints the accent background"
+        );
+    }
 
     #[test]
     fn kind_label_covers_each_variant() {
