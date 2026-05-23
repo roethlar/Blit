@@ -1,9 +1,9 @@
 # d-71-f1-delegated-move: remote→remote delegated move
 
 **Severity**: Feature (TUI_DESIGN §1 "move … between any two endpoints")
-**Status**: In progress / pending review (round 2)
+**Status**: In progress / pending review (round 3)
 **Branch**: `phase5/a1`
-**Commit**: `c18c493` (R1 `be0121a`)
+**Commit**: `57ed8e9` (R2 `c18c493`, R1 `be0121a`)
 
 ## What
 
@@ -92,6 +92,30 @@ trailing-slash sources, is unchanged) and preserves the Remote variant
 basename (asserted via the launched run's resolved label,
 `backup/2024`); a trailing-slash source keeps the dest root.
 
+## Round 3 (fix)
+
+**Reviewer (data-loss, round 2):** R2 resolved the delegated branch,
+but the **local→remote push** branch had the identical gap — it
+launched `spawn_f1_push` with the raw parsed destination. `/tmp/src →
+nas:/home/` (move) should resolve to `nas:/home/src`; unresolved, the
+push writes to `nas:/home/` then deletes `/tmp/src` — same
+"wrong-target then source-delete" data loss on the push-move arm.
+(Independently spotted while auditing the push path; the reviewer's
+finding confirmed it.)
+
+**Fix (`57ed8e9`):** apply `resolve_destination(src, dest,
+&Endpoint::Local(local_src.clone()), Endpoint::Remote(remote))` before
+the push launch — same as the delegated branch and the F4
+local-transfer path. No-op for trailing-slash sources; preserves the
+Remote variant. Tests: container copy appends basename; the
+destructive move case the reviewer named (`/tmp/src → nas:/home/` ⇒
+`nas:/home/src`); trailing-source copy-contents keeps the dest root.
+576 tests.
+
+With this, all three F1 trigger directions (pull resolves in
+`F3PullState::resolve_dest`; push and delegated resolve in
+`plan_f1_trigger`) apply the CLI's destination resolution.
+
 ## Reviewer comments
 
-(empty — pending round-2 grade)
+(empty — pending round-3 grade)
