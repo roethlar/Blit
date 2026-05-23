@@ -251,11 +251,25 @@ pub struct TransferArgs {
     /// Resume interrupted transfers using block-level comparison
     #[arg(long, help_heading = "Reliability")]
     pub resume: bool,
-    // R58-F8: removed --retries flag. It was defined and stored
-    // into LocalMirrorOptions but never consumed by transfer
-    // code — a dead-code knob that lied to operators about
-    // having a retry budget. Re-add once we wire it to actual
-    // retry behavior in the transfer pipelines.
+    /// Retry the transfer up to N times on a transient failure (network
+    /// drop, stall timeout). 0 (default) disables retries. Because
+    /// transfers are resumable, each retry continues rather than
+    /// restarts.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Reliability"
+    )]
+    pub retry: u32,
+    /// Seconds to wait between retries (see --retry).
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = 5,
+        help_heading = "Reliability"
+    )]
+    pub wait: u64,
 
     // -- Filtering: restrict which files are eligible for transfer.
     // Filters apply identically to all source/destination combinations
@@ -597,6 +611,27 @@ mod tests {
         // them to run so a misconfigured arg/conflict surfaces here
         // rather than the first time a real user hits the bad path.
         Cli::command().debug_assert();
+    }
+
+    /// retry-wait: the `--retry`/`--wait` flags parse, default to no
+    /// retries / 5s, and accept explicit values.
+    #[test]
+    fn retry_wait_flags_parse_and_default() {
+        let cli = Cli::try_parse_from(["blit", "copy", "src", "dst"]).expect("parse defaults");
+        let Commands::Copy(args) = cli.command else {
+            panic!("expected Copy");
+        };
+        assert_eq!(args.retry, 0, "retry defaults to 0 (no retries)");
+        assert_eq!(args.wait, 5, "wait defaults to 5s");
+
+        let cli =
+            Cli::try_parse_from(["blit", "copy", "--retry", "3", "--wait", "10", "src", "dst"])
+                .expect("parse explicit");
+        let Commands::Copy(args) = cli.command else {
+            panic!("expected Copy");
+        };
+        assert_eq!(args.retry, 3);
+        assert_eq!(args.wait, 10);
     }
 
     #[test]
