@@ -390,14 +390,26 @@ impl ThemeDefaults {
     }
 
     /// dark-1/dark-2: the effective base `(background, foreground)`
-    /// colors. An explicit `background`/`foreground` wins; otherwise the
-    /// `mode` preset supplies it; otherwise `None` (terminal default).
-    /// Resolved per-field, so `mode = "dark"` + `foreground = "green"`
-    /// yields black bg + green fg.
+    /// colors. Resolved per-field: an **explicitly set** (non-empty)
+    /// field always overrides the `mode` preset — a recognized name
+    /// becomes that color, and an *unrecognized* one resolves to `None`
+    /// (terminal default), matching the startup warning rather than
+    /// silently falling through to the preset. Only an **unset** (empty)
+    /// field inherits the preset. So `mode = "dark"` + `foreground =
+    /// "green"` → black bg + green fg, while `mode = "dark"` +
+    /// `background = "blurple"` (typo) → terminal-default bg + white fg.
     pub fn resolved_base_colors(&self) -> (Option<RawColor>, Option<RawColor>) {
         let preset = self.mode_preset();
-        let bg = self.parse_background().or(preset.map(|(b, _)| b));
-        let fg = self.parse_foreground().or(preset.map(|(_, f)| f));
+        let bg = if self.background.is_empty() {
+            preset.map(|(b, _)| b)
+        } else {
+            self.parse_background()
+        };
+        let fg = if self.foreground.is_empty() {
+            preset.map(|(_, f)| f)
+        } else {
+            self.parse_foreground()
+        };
         (bg, fg)
     }
 }
@@ -1054,6 +1066,18 @@ mod tests {
         };
         assert!(bad.mode_is_invalid());
         assert_eq!(bad.resolved_base_colors(), (None, None));
+
+        // dark-2 round 2: an INVALID explicit field overrides the preset
+        // to None (terminal default, matching the warning) — it must NOT
+        // silently fall through to the preset color. Here bg="blurple"
+        // (typo) → terminal-default bg; fg unset → preset white.
+        let typo = ThemeDefaults {
+            mode: "dark".to_string(),
+            background: "blurple".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert!(typo.background_is_invalid());
+        assert_eq!(typo.resolved_base_colors(), (None, Some(RawColor::White)));
     }
 
     #[test]
