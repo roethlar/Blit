@@ -3151,6 +3151,29 @@ fn accumulate_push_progress(
     }
 }
 
+/// d-69: fold one delegated-pull `ProgressEvent` into the running
+/// `(files, bytes)` totals. The delegated path
+/// (`remote::report_bytes_progress`) reports cumulative deltas via
+/// `report_payload(file_delta, byte_delta)` — so a `Payload` carries
+/// BOTH the file and byte deltas (unlike the receive path, where
+/// `Payload.files` is unused and files come from `FileComplete`, and
+/// unlike push, where bytes ride `FileComplete`). It emits no
+/// `FileComplete`, so take both fields from `Payload` here.
+fn accumulate_delegated_progress(
+    files: &mut u64,
+    bytes: &mut u64,
+    event: &blit_core::remote::transfer::ProgressEvent,
+) {
+    use blit_core::remote::transfer::ProgressEvent;
+    match event {
+        ProgressEvent::Payload { files: f, bytes: b } => {
+            *files = files.saturating_add(*f as u64);
+            *bytes = bytes.saturating_add(*b);
+        }
+        ProgressEvent::FileComplete { .. } | ProgressEvent::ManifestBatch { .. } => {}
+    }
+}
+
 /// d-39: average pull throughput in bytes/sec.
 ///
 /// Suppressed (returns 0) until at least one second has
@@ -3449,18 +3472,43 @@ fn remove_local_source(path: &std::path::Path) -> std::io::Result<()> {
 /// not in the byte path) — and flatten the outcome into an
 /// [`F1PushReply`] (generation-guarded by `request_id`, reusing the
 /// F1 push footer). Copy-only and attached (`detach: false`,
-/// matching the CLI default); live byte progress is omitted for now
-/// because delegated reporting rides the pull data-plane rather than
-/// the push path, so this passes `None` and the authoritative totals
-/// land on the terminal reply.
+/// matching the CLI default). d-69: a progress forwarder turns the
+/// daemon's cumulative `BytesProgress` (delivered as `Payload`
+/// deltas via `report_bytes_progress`) into live `(files, bytes)`
+/// snapshots on `progress_tx`; the authoritative totals still ride
+/// the terminal reply.
 fn spawn_f1_delegated_pull(
     request_id: u64,
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     tx: mpsc::Sender<F1PushReply>,
+    progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
     use blit_app::transfers::remote::{run_delegated_pull, DelegatedPullExecution};
+    use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
+        // d-69: progress monitor — run_delegated_pull reports Payload
+        // deltas into `pe_rx`; the forwarder accumulates cumulative
+        // (files, bytes) via `accumulate_delegated_progress` and ships
+        // snapshots to the UI (lossy via try_send).
+        let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
+        let progress = RemoteTransferProgress::new(pe_tx);
+        let forwarder = tokio::spawn(async move {
+            let started = Instant::now();
+            let mut files = 0u64;
+            let mut bytes = 0u64;
+            while let Some(event) = pe_rx.recv().await {
+                accumulate_delegated_progress(&mut files, &mut bytes, &event);
+                let bytes_per_sec = pull_throughput(bytes, started.elapsed().as_secs_f64());
+                let _ = progress_tx.try_send(F1PushProgress {
+                    request_id,
+                    files,
+                    bytes,
+                    bytes_per_sec,
+                });
+            }
+        });
+
         let dst_label = dst.display();
         let execution = DelegatedPullExecution {
             src,
@@ -3475,7 +3523,12 @@ fn spawn_f1_delegated_pull(
             // lands with multi-daemon F2.
             detach: false,
         };
-        let result = match run_delegated_pull(execution, None, |_| {}).await {
+        let sent = run_delegated_pull(execution, Some(&progress), |_| {}).await;
+        // Close the progress channel → the forwarder drains and exits
+        // before the terminal reply.
+        drop(progress);
+        let _ = forwarder.await;
+        let result = match sent {
             Ok(outcome) => Ok((
                 outcome.summary.files_transferred,
                 outcome.summary.bytes_transferred,
@@ -3662,7 +3715,13 @@ fn plan_f1_delegated(
     let Some(request_id) = app.f1_push.begin_delegated(label) else {
         return TriggerOutcome::Rejected("a push is already running".into());
     };
-    spawn_f1_delegated_pull(request_id, src, dst, app.f1_push_reply_tx.clone());
+    spawn_f1_delegated_pull(
+        request_id,
+        src,
+        dst,
+        app.f1_push_reply_tx.clone(),
+        app.f1_push_progress_tx.clone(),
+    );
     TriggerOutcome::Launched
 }
 
@@ -8250,6 +8309,48 @@ mod tests {
         }
         assert_eq!(files, 3);
         assert_eq!(bytes, 600, "push counts bytes from FileComplete");
+    }
+
+    /// d-69: the delegated path reports cumulative deltas via
+    /// `report_payload(file_delta, byte_delta)`, so each `Payload`
+    /// carries BOTH counts and there are no `FileComplete` events.
+    #[test]
+    fn accumulate_delegated_progress_sums_files_and_bytes_from_payload() {
+        use blit_core::remote::transfer::ProgressEvent;
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        accumulate_delegated_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::Payload {
+                files: 2,
+                bytes: 500,
+            },
+        );
+        accumulate_delegated_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::Payload {
+                files: 1,
+                bytes: 250,
+            },
+        );
+        assert_eq!(
+            files, 3,
+            "delegated takes files from Payload, not FileComplete"
+        );
+        assert_eq!(bytes, 750);
+        // A stray FileComplete must NOT double-count files.
+        accumulate_delegated_progress(
+            &mut files,
+            &mut bytes,
+            &ProgressEvent::FileComplete {
+                path: "x".into(),
+                bytes: 99,
+            },
+        );
+        assert_eq!(files, 3, "FileComplete ignored on the delegated path");
+        assert_eq!(bytes, 750);
     }
 
     /// Push emits no Payload, but if one appeared it must NOT add

@@ -28,11 +28,11 @@
 //! pulls from the source daemon). It enters via `begin_delegated`
 //! and carries `delegated: true` so the footer reads
 //! "delegating / delegated" rather than "pushing / pushed" — the
-//! CLI host is not in the byte path. Delegated copy ships without
-//! live byte progress for now (the daemon reports via the pull
-//! data-plane, not the push path); the terminal summary still
-//! shows. Mirror/move and detached (F2-visible) delegation are
-//! follow-ups.
+//! CLI host is not in the byte path. d-69: live `files` / `bytes`
+//! counters now feed `Running` for delegated copy too, via a
+//! forwarder over the daemon's `Payload`-delta progress
+//! (`accumulate_delegated_progress`). Mirror/move and detached
+//! (F2-visible) delegation are follow-ups.
 
 use crate::f3pull::PullKind;
 use std::time::{Duration, Instant};
