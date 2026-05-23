@@ -1,9 +1,9 @@
 # m2f-5-f2-fanout: F2 watches all discovered daemons (merged streams)
 
 **Severity**: Feature (TUI_DESIGN §5.2 single-pane-of-glass)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `7a5e7a3`
+**Commit**: `49f1fce` (R1 `7a5e7a3`)
 
 ## What
 
@@ -73,6 +73,32 @@ model's multi-daemon coexistence is covered by m2f-2/m2f-3 tests
 `merge_snapshot_is_additive_per_daemon`). The N-stream subscribe runs
 against live daemons (manual).
 
+## Round 2 (fix)
+
+Two fan-out correctness findings:
+
+1. **F2 `r` didn't re-fan while a stream was live** — the live
+   branch only ran `refresh_via_get_state(parsed_remote)`, so newly
+   discovered daemons were never subscribed until the stream tore
+   down. Fixed: unified the refresh through `refan_f2_setup`, which
+   restarts the merged setup against the current `f2_watched_endpoints`
+   (drops the old merged rx → its forwarders exit → re-spawn),
+   whether or not a stream is live. The pending guard still prevents
+   duplicate setups. Removed the now-obsolete `should_spawn_f2_setup`
+   and `refresh_via_get_state`.
+
+2. **One daemon's Error dropped the whole merged receiver** — killing
+   every other daemon's forwarder. Fixed: extracted `apply_f2_event`;
+   `Error` keeps the receiver (status → Degraded), only `None` (all
+   senders closed) drops it.
+
+**Fix (`49f1fce`):** tests —
+`refan_f2_setup_respawns_on_live_refresh_and_guards_pending` (live rx
++ discovered daemon → drops rx, bumps gen, sets pending; no respawn
+while pending) and `apply_f2_event_error_keeps_receiver_none_drops_it`
+(Error keeps rx + a later event from another daemon still applies;
+None drops). 585 tests.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
