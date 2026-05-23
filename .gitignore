@@ -1,7 +1,10 @@
 # Rust build artifacts
 /target/
 **/target/
-Cargo.lock
+# Cargo.lock IS tracked (audit-7, owner decision 2026-05-23): this
+# workspace ships binaries (blit, blit-daemon, blit-tui,
+# blit-prometheus-bridge), so the lockfile is committed for reproducible
+# builds per Rust's binary-crate convention.
 agentcomms/
 agentcomms/**
 
