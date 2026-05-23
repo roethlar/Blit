@@ -1150,6 +1150,10 @@ async fn run_router(
                                 // fan-out (m2f-2) can distinguish sources.
                                 let f2_daemon = f2_source_label(&app);
                                 match snapshot_result {
+                                    // Initial F2 hydration → full replace (fresh
+                                    // start; nothing else is being watched yet).
+                                    // m2f-4's per-daemon fan-out will switch this to
+                                    // merge_snapshot so each daemon hydrates additively.
                                     Ok(snapshot) => app.transfers.replace_from_snapshot(&f2_daemon, snapshot, Instant::now()),
                                     Err(err) => {
                                         app.transfers_status = ConnectionStatus::Degraded(
@@ -5482,7 +5486,13 @@ async fn refresh_via_get_state(
 ) {
     match jobs::query(endpoint, 0).await {
         Ok(snapshot) => {
-            state.replace_from_snapshot(&endpoint.host, snapshot, Instant::now());
+            // m2f-3: use the host:port identity (matches f2_source_label /
+            // the live stream + reset label) — `endpoint.host` alone would
+            // tag refresh-hydrated rows differently from stream rows for a
+            // non-default-port daemon, so they'd never reconcile. And merge
+            // (not replace) so a refresh of one daemon leaves others intact
+            // once F2 fans out (m2f-4).
+            state.merge_snapshot(&endpoint.host_port_display(), snapshot, Instant::now());
             *status = ConnectionStatus::Live;
         }
         Err(err) => {

@@ -181,6 +181,35 @@ impl TransfersState {
         self.last_event_at = Some(fetched_at);
     }
 
+    /// m2f-3: hydrate from ONE daemon's `GetState` snapshot WITHOUT
+    /// disturbing other daemons' rows — the additive counterpart to
+    /// [`replace_from_snapshot`] that the multi-daemon fan-out (m2f-4)
+    /// needs (each watched daemon hydrates independently, then its
+    /// Subscribe stream mutates incrementally via `apply_event`).
+    ///
+    /// Replaces only `source_daemon`'s rows: drops its existing
+    /// active + recent entries, then inserts the snapshot's. Rows from
+    /// every other daemon are untouched. Recent rows are grouped by
+    /// this merge (the wire types carry no completion timestamp, so a
+    /// precise cross-daemon time interleave isn't possible); the
+    /// global ring stays bounded by [`TUI_RECENT_CAP`].
+    pub fn merge_snapshot(&mut self, source_daemon: &str, state: DaemonState, fetched_at: Instant) {
+        self.active.retain(|_, r| r.source_daemon != source_daemon);
+        self.recent.retain(|r| r.source_daemon != source_daemon);
+        for a in state.active {
+            let mut row: ActiveRow = a.into();
+            row.source_daemon = source_daemon.to_string();
+            let key = row_key(source_daemon, &row.transfer_id);
+            self.active.insert(key, row);
+        }
+        for r in state.recent.into_iter().rev() {
+            let mut row: RecentRow = r.into();
+            row.source_daemon = source_daemon.to_string();
+            self.push_recent(row);
+        }
+        self.last_event_at = Some(fetched_at);
+    }
+
     /// Apply one Subscribe stream event. Returns true when
     /// the event mutated state (useful for triggering a
     /// redraw); false when the event was for an unknown id
@@ -612,6 +641,53 @@ mod tests {
         assert_eq!(state.active_rows()[0].source_daemon, "nas:9002");
         // The :9001 recent row must not dedup-suppress :9002's t1.
         assert_eq!(state.recent_count(), 1);
+    }
+
+    /// m2f-3: `merge_snapshot` hydrates one daemon without disturbing
+    /// others — the additive primitive the fan-out (m2f-4) needs.
+    #[test]
+    fn merge_snapshot_is_additive_per_daemon() {
+        let active = |id: &str| ActiveTransfer {
+            transfer_id: id.to_string(),
+            ..Default::default()
+        };
+        let mut state = TransfersState::new();
+        // Daemon A: two active.
+        state.merge_snapshot(
+            "nas",
+            DaemonState {
+                active: vec![active("a1"), active("a2")],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        // Daemon B: one active — must NOT drop A's rows.
+        state.merge_snapshot(
+            "skippy",
+            DaemonState {
+                active: vec![active("b1")],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        assert_eq!(state.active_count(), 3, "A's 2 + B's 1 coexist");
+
+        // Re-merging A replaces only A's rows; B's stay.
+        state.merge_snapshot(
+            "nas",
+            DaemonState {
+                active: vec![active("a3")],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        assert_eq!(state.active_count(), 2, "A now has 1 (a3), B still has b1");
+        let daemons: std::collections::HashSet<&str> = state
+            .active_rows()
+            .iter()
+            .map(|r| r.source_daemon.as_str())
+            .collect();
+        assert!(daemons.contains("nas") && daemons.contains("skippy"));
     }
 
     /// m2f-1: a snapshot tags every row with the daemon it came from.
