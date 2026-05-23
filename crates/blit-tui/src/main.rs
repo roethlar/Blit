@@ -1112,7 +1112,8 @@ async fn run_router(
                         }
                     }
                     Some(EventOrError::Event(daemon_event)) => {
-                        app.transfers.apply_event(daemon_event, Instant::now());
+                        let f2_daemon = f2_source_label(&app);
+                        app.transfers.apply_event(&f2_daemon, daemon_event, Instant::now());
                         if matches!(app.transfers_status, ConnectionStatus::Connecting) {
                             app.transfers_status = ConnectionStatus::Live;
                         }
@@ -1144,8 +1145,12 @@ async fn run_router(
                         match reply.payload {
                             F2SetupPayload::Ready { event_rx, snapshot_result } => {
                                 let mut rx = event_rx;
+                                // m2f-1: F2 watches a single daemon (parsed_remote);
+                                // tag its rows + events with that daemon so the
+                                // fan-out (m2f-2) can distinguish sources.
+                                let f2_daemon = f2_source_label(&app);
                                 match snapshot_result {
-                                    Ok(snapshot) => app.transfers.replace_from_snapshot(snapshot, Instant::now()),
+                                    Ok(snapshot) => app.transfers.replace_from_snapshot(&f2_daemon, snapshot, Instant::now()),
                                     Err(err) => {
                                         app.transfers_status = ConnectionStatus::Degraded(
                                             format!("initial GetState failed: {err}"),
@@ -1154,6 +1159,7 @@ async fn run_router(
                                 }
                                 drain_startup_events(
                                     &mut rx,
+                                    &f2_daemon,
                                     &mut app.transfers,
                                     &mut app.transfers_status,
                                 );
@@ -5408,8 +5414,20 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
 /// lands in this buffer. Replaying onto the snapshot makes
 /// the state consistent before the main select loop takes
 /// over.
+/// m2f-1: label for the daemon F2 is currently watching — its
+/// `host` (concise for the row column). F2 watches a single daemon
+/// (`parsed_remote`) today; m2f-2 fans out and each stream supplies
+/// its own label via the tagged channel.
+fn f2_source_label(app: &AppState) -> String {
+    app.parsed_remote
+        .as_ref()
+        .map(|e| e.host.clone())
+        .unwrap_or_default()
+}
+
 fn drain_startup_events(
     rx: &mut mpsc::Receiver<EventOrError>,
+    source_daemon: &str,
     state: &mut TransfersState,
     status: &mut ConnectionStatus,
 ) {
@@ -5430,7 +5448,7 @@ fn drain_startup_events(
                 }
             }
             Ok(EventOrError::Event(event)) => {
-                state.apply_event(event, Instant::now());
+                state.apply_event(source_daemon, event, Instant::now());
                 // Same rule as Connected: first event is a
                 // stream-health signal. Don't paper over an
                 // existing Degraded snapshot status.
@@ -5460,7 +5478,7 @@ async fn refresh_via_get_state(
 ) {
     match jobs::query(endpoint, 0).await {
         Ok(snapshot) => {
-            state.replace_from_snapshot(snapshot, Instant::now());
+            state.replace_from_snapshot(&endpoint.host, snapshot, Instant::now());
             *status = ConnectionStatus::Live;
         }
         Err(err) => {
@@ -6213,7 +6231,7 @@ mod tests {
                     start_unix_ms: 1_000_000,
                 })),
             };
-            transfers.apply_event(event, Instant::now());
+            transfers.apply_event("", event, Instant::now());
         }
         let mut ids = snapshot_active_ids(&transfers);
         ids.sort();
@@ -6626,7 +6644,7 @@ mod tests {
 
         let mut state = TransfersState::new();
         let mut status = ConnectionStatus::Degraded("initial GetState failed: timeout".to_string());
-        drain_startup_events(&mut rx, &mut state, &mut status);
+        drain_startup_events(&mut rx, "", &mut state, &mut status);
         match status {
             ConnectionStatus::Degraded(msg) => {
                 assert!(msg.contains("initial GetState failed"));
@@ -6646,7 +6664,7 @@ mod tests {
 
         let mut state = TransfersState::new();
         let mut status = ConnectionStatus::Connecting;
-        drain_startup_events(&mut rx, &mut state, &mut status);
+        drain_startup_events(&mut rx, "", &mut state, &mut status);
         assert!(matches!(status, ConnectionStatus::Live));
     }
 
@@ -9201,6 +9219,7 @@ mod tests {
         // After a GetState snapshot lands, F2's footer
         // shows "last event Xs ago" → tick.
         app.transfers.replace_from_snapshot(
+            "",
             blit_core::generated::DaemonState::default(),
             std::time::Instant::now(),
         );

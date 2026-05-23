@@ -619,6 +619,7 @@ mod tests {
             bytes,
             ok,
             error_message: String::new(),
+            source_daemon: String::new(),
         }
     }
 
