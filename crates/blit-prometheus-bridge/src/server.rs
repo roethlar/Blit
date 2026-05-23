@@ -17,13 +17,22 @@ use blit_app::admin::jobs;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 /// Cap on how much of the request head we'll buffer before giving up
-/// looking for the end of headers — guards against an unbounded /
-/// slowloris-ish client. Prometheus request heads are well under 1 KiB.
+/// looking for the end of headers — bounds buffered bytes per
+/// connection. Prometheus request heads are well under 1 KiB.
 const MAX_REQUEST_HEAD: usize = 16 * 1024;
+
+/// Wall-clock deadline for receiving the full request head. Bounds the
+/// *time* a connection can hold a task (the byte cap alone doesn't: a
+/// client can connect and send nothing, or trickle bytes forever). This
+/// is the actual slowloris guard, and matters because `--listen` accepts
+/// any `SocketAddr`, including non-loopback binds. A Prometheus scrape
+/// sends its head in one segment immediately, so 5s is generous.
+const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Serve `/metrics` until the process is killed. Binds `addr`, then
 /// handles each connection on its own task.
@@ -63,7 +72,21 @@ async fn handle_conn(
     remote: &RemoteEndpoint,
     recent_limit: u32,
 ) -> Result<()> {
-    let head = read_request_head(&mut stream).await?;
+    let head = match read_request_head(&mut stream, REQUEST_HEAD_TIMEOUT).await? {
+        Some(head) => head,
+        None => {
+            // Slow/idle client never finished its head within the
+            // deadline — release the task + socket rather than parking
+            // it forever.
+            let resp = http_response(
+                "408 Request Timeout",
+                "text/plain; charset=utf-8",
+                "request timeout\n",
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return Ok(());
+        }
+    };
     let request_line = head.lines().next().unwrap_or("");
 
     let response = if request_target(request_line) == Some("/metrics") {
@@ -89,11 +112,23 @@ async fn handle_conn(
     Ok(())
 }
 
-/// Read the request head (up to the blank line that ends the headers),
-/// bounded by [`MAX_REQUEST_HEAD`]. We only need the request line, but
-/// reading to end-of-headers tolerates a request that arrives across
-/// multiple TCP segments.
-async fn read_request_head(stream: &mut TcpStream) -> Result<String> {
+/// Read the request head within `timeout`. Returns `Ok(None)` when the
+/// client didn't finish its head in time (slow/idle — the caller should
+/// release the connection), `Ok(Some(head))` otherwise. Wrapping the
+/// read in `tokio::time::timeout` is what actually bounds how long a
+/// connection can hold a task; [`MAX_REQUEST_HEAD`] only bounds bytes.
+async fn read_request_head(stream: &mut TcpStream, timeout: Duration) -> Result<Option<String>> {
+    match tokio::time::timeout(timeout, read_head_bytes(stream)).await {
+        Ok(result) => result.map(Some),
+        Err(_elapsed) => Ok(None),
+    }
+}
+
+/// Read up to the blank line that ends the headers, bounded by
+/// [`MAX_REQUEST_HEAD`]. We only need the request line, but reading to
+/// end-of-headers tolerates a request that arrives across multiple TCP
+/// segments. No timeout here — the caller wraps it.
+async fn read_head_bytes(stream: &mut TcpStream) -> Result<String> {
     let mut data = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -135,6 +170,41 @@ fn http_response(status: &str, content_type: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    /// Regression for the bridge-2 round-1 reopen: a client that
+    /// connects but never finishes its request head must be released by
+    /// the read timeout, not park the task forever. Drives the real
+    /// `read_request_head` against a live socket with an idle peer.
+    #[tokio::test]
+    async fn idle_client_released_by_read_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Connect but send nothing; hold the client open so the server
+        // side sees neither data nor EOF.
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+
+        let started = Instant::now();
+        // Outer guard: if the timeout doesn't work, fail loudly rather
+        // than hang the test runner.
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_request_head(&mut server_stream, Duration::from_millis(100)),
+        )
+        .await
+        .expect("read_request_head must return on its own, not hit the 2s guard");
+
+        assert!(
+            matches!(outcome, Ok(None)),
+            "an idle client should time out to Ok(None), got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the idle client should be released promptly"
+        );
+        drop(_client);
+    }
 
     #[test]
     fn request_target_extracts_get_path_only() {
