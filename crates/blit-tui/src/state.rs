@@ -180,6 +180,25 @@ impl TransfersState {
         self.last_event_at = Some(fetched_at);
     }
 
+    /// m2f-9 R3: reconcile the active table with the current watched
+    /// daemon set after a re-fan. Drops active rows whose `source_daemon`
+    /// is no longer watched — a daemon that left mDNS discovery can't
+    /// send a Complete/Error event, so its in-flight rows would otherwise
+    /// linger in the active table forever. **Recent rows are kept**: a
+    /// finished transfer is history regardless of whether its daemon is
+    /// still on the network. Clears the active cursor if the row it was
+    /// anchored to was just removed (same fall-off contract as a
+    /// terminated transfer).
+    pub fn retain_active_daemons(&mut self, watched: &std::collections::BTreeSet<String>) {
+        self.active
+            .retain(|_, r| watched.contains(&r.source_daemon));
+        if let Some(key) = self.selected_active_key.as_ref() {
+            if !self.active.contains_key(key) {
+                self.selected_active_key = None;
+            }
+        }
+    }
+
     /// Apply one Subscribe stream event. Returns true when
     /// the event mutated state (useful for triggering a
     /// redraw); false when the event was for an unknown id
@@ -588,6 +607,58 @@ mod tests {
         assert_eq!(state.active_rows()[0].source_daemon, "skippy");
         // And nas's t1 in recent doesn't dedup-suppress skippy's t1.
         assert_eq!(state.recent_count(), 1);
+    }
+
+    /// m2f-9 R3: when a daemon leaves the watch set, its in-flight
+    /// active rows are pruned (it can no longer send a Complete/Error),
+    /// but its recent rows survive as history. The active cursor clears
+    /// if it was anchored to a pruned row.
+    #[test]
+    fn retain_active_daemons_drops_unwatched_active_keeps_recent() {
+        let mut state = TransfersState::new();
+        state.apply_event("nas", started_event("a1"), Instant::now());
+        state.apply_event("skippy", started_event("b1"), Instant::now());
+        // skippy also has a completed (recent) transfer.
+        state.apply_event("skippy", started_event("b0"), Instant::now());
+        let complete = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
+                transfer_id: "b0".to_string(),
+                duration_ms: 1,
+                bytes: 0,
+                files: 0,
+                tcp_fallback_used: false,
+            })),
+        };
+        state.apply_event("skippy", complete, Instant::now());
+        assert_eq!(state.active_count(), 2, "nas:a1 + skippy:b1 active");
+        assert_eq!(state.recent_count(), 1, "skippy:b0 recent");
+
+        // Anchor the cursor on skippy's active row, then drop skippy
+        // from the watch set.
+        state.select_first_active();
+        let watched: std::collections::BTreeSet<String> = ["nas".to_string()].into_iter().collect();
+        state.retain_active_daemons(&watched);
+
+        let daemons: Vec<&str> = state
+            .active_rows()
+            .iter()
+            .map(|r| r.source_daemon.as_str())
+            .collect();
+        assert_eq!(
+            daemons,
+            vec!["nas"],
+            "only the watched daemon's active row remains"
+        );
+        assert_eq!(
+            state.recent_count(),
+            1,
+            "skippy's recent (history) row is kept"
+        );
+        // The cursor either fell off (anchored to skippy) or re-anchored
+        // to a surviving row — never points at a pruned daemon.
+        if let Some(daemon) = state.selected_active_daemon() {
+            assert_eq!(daemon, "nas", "cursor never points at a pruned daemon");
+        }
     }
 
     /// m2f-2 round 2: two daemon instances on the SAME host but

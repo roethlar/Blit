@@ -2011,7 +2011,16 @@ fn apply_lifecycle_outcome(
 ///
 /// No-op (returns `false`) while a setup is already pending — the
 /// round-3 overlap-race guard: pressing `r` mid-setup must NOT spawn
-/// a duplicate. Also a no-op when there's nothing to watch.
+/// a duplicate.
+///
+/// m2f-9 R3: reconciles the view to the watch set on every call. A
+/// daemon that left discovery can no longer send a Complete/Error
+/// event, so its in-flight active rows are pruned here
+/// ([`TransfersState::retain_active_daemons`]) rather than lingering
+/// forever. When the watch set is now **empty** (last daemon vanished /
+/// mDNS-only with nothing found), the live receiver is still dropped and
+/// F2 returns to the no-daemon state — the pre-R3 early-return left the
+/// stale stream live.
 fn refan_f2_setup(
     app: &mut AppState,
     transfers_event_rx: &mut Option<mpsc::Receiver<F2Event>>,
@@ -2021,12 +2030,22 @@ fn refan_f2_setup(
         return false;
     }
     let watched = f2_watched_endpoints(app);
+    // Reconcile first: drop active rows for daemons no longer watched
+    // (recent history is kept), so a shrink (`A+B → A`) doesn't strand
+    // `B`'s rows, and an empty set clears the table.
+    let watched_ids: std::collections::BTreeSet<String> =
+        watched.iter().map(|ep| ep.host_port_display()).collect();
+    app.transfers.retain_active_daemons(&watched_ids);
+    // Drop the old merged stream — its per-daemon forwarders exit when
+    // the receiver is gone.
+    *transfers_event_rx = None;
     if watched.is_empty() {
+        // Nothing left to watch. No stream to open; reflect the
+        // no-daemon state rather than leaving the vanished daemon's
+        // receiver live (the F2 pane shows no remote / mDNS-only).
+        app.transfers_status = ConnectionStatus::NoRemote;
         return false;
     }
-    // Drop the old merged stream — its per-daemon forwarders exit when
-    // the receiver is gone — then re-fan.
-    *transfers_event_rx = None;
     app.transfers_status = ConnectionStatus::Connecting;
     app.transfers_setup_gen += 1;
     app.transfers_setup_pending = true;
@@ -10056,6 +10075,129 @@ mod tests {
         assert!(
             f2_watched_identities(&app).contains("192.168.1.50:9050"),
             "discovered daemon is now watched"
+        );
+    }
+
+    /// m2f-9 R3: when the last watched daemon vanishes (mDNS-only, no
+    /// launch remote), the auto re-fan must drop the live receiver and
+    /// reconcile the view to empty. The pre-R3 early-return on an empty
+    /// watch set left the vanished daemon's stream live.
+    #[tokio::test]
+    async fn discovery_emptying_drops_receiver_and_clears_rows() {
+        let (tx, _rx) = mpsc::channel::<F2SetupReply>(1);
+        let mut app = make_test_app_state(Screen::F2); // no parsed_remote
+        let svc = |name: &str, ip: [u8; 4], port: u16| blit_core::mdns::MdnsDiscoveredService {
+            fullname: format!("{name}._blit._tcp.local."),
+            instance_name: name.to_string(),
+            hostname: format!("{name}.local."),
+            port,
+            addresses: vec![std::net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])],
+            properties: std::collections::HashMap::new(),
+        };
+        let started = |id: &str| {
+            use blit_core::generated::{daemon_event, DaemonEvent, TransferStarted};
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: id.to_string(),
+                    kind: 0,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: 1_000_000,
+                })),
+            }
+        };
+        app.daemons
+            .replace_from_discovery(&[svc("skippy", [192, 168, 1, 50], 9050)], Instant::now());
+        // A live receiver + an active row tagged with skippy's identity.
+        let (_etx, erx) = mpsc::channel::<F2Event>(1);
+        let mut event_rx = Some(erx);
+        app.transfers
+            .apply_event("192.168.1.50:9050", started("tA"), Instant::now());
+        assert_eq!(app.transfers.active_count(), 1);
+
+        // skippy vanishes from discovery.
+        let before = f2_watched_identities(&app);
+        app.daemons.replace_from_discovery(&[], Instant::now());
+        let spawned = handle_discovery_watch_change(&mut app, &before, &mut event_rx, &tx);
+
+        assert!(!spawned, "empty watch set → no new setup spawned");
+        assert!(event_rx.is_none(), "stale receiver dropped");
+        assert!(
+            app.transfers.active_rows().is_empty(),
+            "vanished daemon's active rows pruned"
+        );
+        assert!(
+            f2_watched_identities(&app).is_empty(),
+            "nothing left to watch"
+        );
+        assert!(matches!(app.transfers_status, ConnectionStatus::NoRemote));
+    }
+
+    /// m2f-9 R3: when the watch set shrinks (`A+B → A`), the re-fan
+    /// prunes the removed daemon's active rows — they can never complete
+    /// (its stream is gone), so they must not linger in the table while
+    /// the fresh setup hydrates only the remaining daemon.
+    #[tokio::test]
+    async fn discovery_shrink_prunes_removed_daemon_active_rows() {
+        let (tx, _rx) = mpsc::channel::<F2SetupReply>(1);
+        let mut app = make_test_app_state(Screen::F2);
+        let svc = |name: &str, ip: [u8; 4], port: u16| blit_core::mdns::MdnsDiscoveredService {
+            fullname: format!("{name}._blit._tcp.local."),
+            instance_name: name.to_string(),
+            hostname: format!("{name}.local."),
+            port,
+            addresses: vec![std::net::Ipv4Addr::new(ip[0], ip[1], ip[2], ip[3])],
+            properties: std::collections::HashMap::new(),
+        };
+        let started = |id: &str| {
+            use blit_core::generated::{daemon_event, DaemonEvent, TransferStarted};
+            DaemonEvent {
+                payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                    transfer_id: id.to_string(),
+                    kind: 0,
+                    peer: String::new(),
+                    module: String::new(),
+                    path: String::new(),
+                    start_unix_ms: 1_000_000,
+                })),
+            }
+        };
+        app.daemons.replace_from_discovery(
+            &[
+                svc("nas", [192, 168, 1, 50], 9050),
+                svc("skippy", [192, 168, 1, 51], 9051),
+            ],
+            Instant::now(),
+        );
+        let (_etx, erx) = mpsc::channel::<F2Event>(1);
+        let mut event_rx = Some(erx);
+        app.transfers
+            .apply_event("192.168.1.50:9050", started("tA"), Instant::now());
+        app.transfers
+            .apply_event("192.168.1.51:9051", started("tB"), Instant::now());
+        assert_eq!(app.transfers.active_count(), 2);
+
+        // skippy vanishes; nas remains.
+        app.daemons
+            .replace_from_discovery(&[svc("nas", [192, 168, 1, 50], 9050)], Instant::now());
+        // Not pending → re-fan prunes the removed daemon and respawns
+        // for the remaining one.
+        assert!(refan_f2_setup(&mut app, &mut event_rx, &tx));
+        let daemons: Vec<&str> = app
+            .transfers
+            .active_rows()
+            .iter()
+            .map(|r| r.source_daemon.as_str())
+            .collect();
+        assert_eq!(
+            daemons,
+            vec!["192.168.1.50:9050"],
+            "removed daemon's active row pruned, remaining daemon kept"
+        );
+        assert!(
+            app.transfers_setup_pending,
+            "fresh setup pending for the remaining daemon"
         );
     }
 
