@@ -60,6 +60,41 @@ separate concern; today such a stream's Error is absorbed by
 `apply_f2_event` (m2f-5) and the row simply stops updating until the
 next re-fan.
 
+## Round 2 (commit `1e6e871`)
+
+**Reopen finding:** the auto re-fan was gated on
+`transfers_event_rx.is_some()`. A daemon discovered *while the startup
+setup was still pending* (receiver not yet live) was lost: the change
+couldn't re-fan (the gate skipped it) and wasn't recorded, so the
+stale setup completed on the old watch set and later steady updates
+compared equal — the daemon stayed unwatched until a manual `r`. The
+same gate also skipped the mDNS-only launch (no `--remote`), where the
+first discovered daemon never auto-watched.
+
+**Fix:**
+- `AppState.transfers_refan_after_setup` — records a watch-set change
+  that arrives while `transfers_setup_pending` (when `refan_f2_setup`
+  would no-op).
+- `handle_discovery_watch_change(app, before, rx, tx)` — on a real
+  change, re-fans immediately when no setup is pending, else sets the
+  deferred flag. Replaces the `is_some()` gate, so the idle case (a
+  failed/never-run setup, e.g. mDNS-only launch picking up its first
+  daemon) now re-fans too.
+- `apply_deferred_refan(app, rx, tx)` — the setup-reply arm runs the
+  deferred re-fan once the pending setup lands and `pending` clears
+  (both `Ready` and `Failed`), so a daemon discovered mid-flight ends
+  up watched.
+
+**Tests:** 591 total (+1 over R1).
+`discovery_during_pending_setup_refans_after_it_lands` — startup setup
+pending (no live receiver), discovery adds `192.168.1.50:9050`, the
+change defers (no new gen spawned while pending); after the stale
+setup lands and pending clears, the deferred re-fan spawns a fresh
+fan-out (generation bumped, flag cleared) whose watch set includes the
+mid-flight daemon. The two decision points were extracted into the
+helpers above so the sequence is unit-testable without driving the
+event loop.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
