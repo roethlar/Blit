@@ -80,6 +80,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | audit-1c2-stall-wiring | Robustness | Wire StallGuard into the receive pipeline: generic-ize execute_receive_pipeline + 6 read helpers over AsyncRead, wrap the socket in pull.rs (unconditional → all pulls). Completes audit-1c (audit-1 item 3) | `[x]` | `phase5/a1` | `906cedf` |
 | retry-wait1-classifier-loop | Feature | retryable-error classifier (transient io kinds incl. StallGuard TimedOut; fatal eyre/path/gate not retried) + run_with_retries loop in blit-app. Owner-approved --retry/--wait part 1 of 2; part 2 adds flags+wiring | `[x]` | `phase5/a1` | `e5e59fb` |
 | retry-wait2-cli-wiring | Feature | --retry<N>/--wait<SECS> on TransferArgs (default 0/5) + wrap run_transfer/run_move in run_with_retries (resumable retry on transient failures). Completes the retry-wait feature (owner-approved follow-up) | `[x]` | `phase5/a1` | `68b34ac` |
+| audit-13-buffer-pool-double-locking | Performance | BufferPool release/return_vec: single-lock cache return via cache_returned_buffer + drop redundant per-release buffer_size zeroing (truncate common path); verified no consumer relies on pre-zeroed pool buffers (Gemini-sourced) | `[~]` | `phase5/a1` | `f9d3f2f` |
 
 ## Open findings
 
@@ -105,6 +106,9 @@ See `.review/findings/<id>.md` for per-finding details.
 | audit-10-cancel-completion-race | Bug | Cancel/completion race in delegated_pull: success recorded as "cancelled" under biased select | |
 | audit-11-data-plane-underflow | Bug | Buffer underflow in send_file_double_buffered when reader returns excess bytes | |
 | audit-12-buffer-pool-leak | Robustness | Semaphore permit leak on OOM panic in BufferPool acquire/try_acquire | |
+| audit-13-buffer-pool-double-locking | Performance | Double-locking and redundant memory zeroing in BufferPool | |
+| audit-14-resume-copy-redundant-seek | Performance | Redundant seek system calls in sequential block-level resume | |
+| audit-15-grpc-missing-connection-timeouts | Robustness | Missing request/idle timeouts on tonic gRPC server control plane | |
 
 ## Verified history
 
