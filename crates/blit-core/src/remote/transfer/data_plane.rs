@@ -281,6 +281,13 @@ impl DataPlaneSession {
                 remaining
             );
         }
+        // Clamp to the declared size before subtracting. A source that
+        // returns more bytes than `header.size` — a file that grew after
+        // the manifest was computed, or a lying `TransferSource` — would
+        // otherwise underflow `remaining` (debug: panic; release: wrap to
+        // u64::MAX → runaway loop) and push undeclared bytes onto the
+        // framed stream. We send exactly `header.size` and ignore excess.
+        bytes_a = (bytes_a as u64).min(remaining) as usize;
         remaining -= bytes_a as u64;
 
         // Main loop: write buf_a while reading into buf_b
@@ -303,6 +310,10 @@ impl DataPlaneSession {
                     remaining
                 );
             }
+            // Same clamp as the initial read: never subtract more than
+            // `remaining`, so an over-returning reader can neither
+            // underflow the counter nor send undeclared bytes.
+            let bytes_b = (bytes_b as u64).min(remaining) as usize;
             remaining -= bytes_b as u64;
 
             // Swap roles: buf_b becomes the write buffer, buf_a becomes read buffer
@@ -733,6 +744,58 @@ mod byte_progress_tests {
         assert!(
             report_count.load(Ordering::Relaxed) >= 1,
             "expected at least one intermediate report from the chunk loop"
+        );
+    }
+}
+
+#[cfg(test)]
+mod underflow_tests {
+    //! audit-11: `send_file_double_buffered` must not underflow
+    //! `remaining` when the source reader returns more bytes than
+    //! `header.size` (a file that grew after the manifest, or a lying
+    //! `TransferSource`). Before the clamp this panicked in debug and
+    //! wrapped to `u64::MAX` (runaway loop) in release.
+    use super::*;
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn over_returning_reader_sends_exactly_declared_size() {
+        // Loopback TCP pair: the session writes into `client`; a drain
+        // task on the accepted socket counts every byte received.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let drain = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut sink = Vec::new();
+            sock.read_to_end(&mut sink).await.unwrap();
+            sink.len()
+        });
+        let client = TcpStream::connect(addr).await.unwrap();
+
+        // 1 KiB buffers so the first read fills the whole buffer from the
+        // 4 KiB cursor — i.e. returns far more than the 100-byte header.
+        let pool = Arc::new(BufferPool::new(1024, 4, None));
+        let mut session = DataPlaneSession::from_stream(client, false, 64 * 1024, 1, pool).await;
+
+        let declared: u64 = 100;
+        let reader_payload = vec![0x5Au8; 4096];
+        let mut reader = std::io::Cursor::new(reader_payload);
+        let header = FileHeader {
+            size: declared,
+            ..Default::default()
+        };
+
+        session
+            .send_file_double_buffered(&mut reader, &header, "grew.bin")
+            .await
+            .expect("over-returning reader must not panic or underflow");
+
+        // Close the write side so the drain task's read_to_end completes.
+        drop(session);
+        let received = drain.await.unwrap();
+        assert_eq!(
+            received as u64, declared,
+            "must send exactly header.size bytes, never the reader's excess"
         );
     }
 }
