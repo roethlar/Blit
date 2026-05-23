@@ -3,7 +3,7 @@
 **Severity**: Test Gap
 **Status**: In progress / pending review
 **Branch**: `phase5/a1`
-**Commit**: `e06d23b`
+**Commit**: `4c4db89`
 **Parent finding**: `audit-6-test-gaps` (item 7).
 
 ## What
@@ -52,6 +52,19 @@ cfg-gated copy branches).
 One sub-item of audit-6. Remaining: 6a (blit-app), 6b (TUI render), 6c
 (bridge HTTP integration), 6e (pull-move/push-move). 6d + 6f verified.
 
+## Round 2 (commit `4c4db89`)
+
+**Reopen finding:** the macOS fallback test only asserted byte identity +
+`bytes_copied`, so it would also pass if `fcopyfile` were broken and the
+copy silently fell through to the buffered streaming tail — leaving the
+intended clonefile→fcopyfile hop unpinned.
+
+**Fix:** added `assert!(outcome.clone_succeeded)` after the
+pre-existing-destination copy. clonefile is forced to fail (EEXIST), and
+the buffered tail sets `clone_succeeded = false`, so a true value proves
+`fcopyfile` handled the copy — pinning the fast-path hop, not just
+end-to-end correctness.
+
 ## Reviewer comments
 
-(empty — pending review)
+(empty — pending round-2 grade)
