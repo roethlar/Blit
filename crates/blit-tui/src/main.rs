@@ -3745,6 +3745,27 @@ fn plan_f1_trigger(
                     "destination needs a module (host:/module/)".into(),
                 );
             }
+            // d-72: resolve the destination like the CLI (`run_copy` /
+            // `run_move` call `resolve_destination` before dispatch),
+            // matching the delegated path (d-71 R2) and the F4
+            // local-transfer path. A non-trailing-slash local source +
+            // a container remote dest must nest under
+            // `<dest>/<basename>`, not write into the dest root — for a
+            // push MOVE (deletes the local source) writing to the wrong
+            // remote target and then removing the source is data loss.
+            // No-op for trailing-slash ("copy contents") sources;
+            // preserves the Remote variant, so the rebind is infallible.
+            let remote = match resolve_destination(
+                src,
+                dest,
+                &Endpoint::Local(local_src.clone()),
+                Endpoint::Remote(remote),
+            ) {
+                Endpoint::Remote(r) => r,
+                Endpoint::Local(_) => {
+                    return TriggerOutcome::Rejected(format!("invalid destination: {dest}"))
+                }
+            };
             // d-65: mirror (delete-extraneous at the remote) and move
             // (delete the local source) are destructive — gate them
             // behind a confirm. Copy launches immediately.
@@ -7994,6 +8015,77 @@ mod tests {
                     "dest resolved to <container>/<basename>, got {label:?}"
                 );
             }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    /// d-72: the local→remote PUSH branch must resolve the dest like
+    /// the CLI too — a non-trailing-slash local source + a container
+    /// remote dest nests under `<dest>/<basename>`. (Push move deletes
+    /// the local source, so writing to the wrong remote target would
+    /// be data loss.) Asserted via the launched push's label.
+    #[tokio::test]
+    async fn plan_f1_trigger_push_resolves_container_dest() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "/home/me/work", // local source, no trailing slash
+            "skippy:/backup/",
+            f3pull::PullKind::Copy,
+            false,
+        );
+        assert!(matches!(out, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running { label, .. } => assert!(
+                label.contains("backup/work"),
+                "push dest resolved to <container>/<basename>, got {label:?}"
+            ),
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    /// d-71 R3: the destructive push MOVE case the reviewer called out
+    /// — `/tmp/src -> nas:/home/` must resolve to `nas:/home/src`
+    /// BEFORE launch, or the post-push local-source delete loses data
+    /// to the wrong remote target.
+    #[tokio::test]
+    async fn plan_f1_trigger_push_move_resolves_container_dest() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "/tmp/src",
+            "nas:/home/",
+            f3pull::PullKind::Move,
+            true, // pre-confirmed (move is destructive)
+        );
+        assert!(matches!(out, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running { label, .. } => assert!(
+                label.contains("home/src"),
+                "push move resolved to nas:/home/src, got {label:?}"
+            ),
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    /// d-71 R3: a trailing-slash ("copy contents") local source on the
+    /// PUSH branch must NOT append the basename — dest stays the root.
+    #[tokio::test]
+    async fn plan_f1_trigger_push_trailing_source_keeps_dest_root() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "/tmp/src/",
+            "nas:/home/",
+            f3pull::PullKind::Copy,
+            false,
+        );
+        assert!(matches!(out, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running { label, .. } => assert!(
+                !label.contains("src"),
+                "copy-contents keeps the dest root, got {label:?}"
+            ),
             other => panic!("expected Running, got {other:?}"),
         }
     }
