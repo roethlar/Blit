@@ -1,9 +1,9 @@
 # d-68-f1-remote-remote-copy: delegated copy from the F1 trigger
 
 **Severity**: Feature (TUI_DESIGN §1 "between any two endpoints")
-**Status**: In progress / pending review (round 3)
+**Status**: In progress / pending review (round 4)
 **Branch**: `phase5/a1`
-**Commit**: `9531dde` (R2 `96075cb`, R1 `1dcdc66`)
+**Commit**: `c93bcd6` (R3 `9531dde`, R2 `96075cb`, R1 `1dcdc66`)
 
 ## What
 
@@ -125,6 +125,29 @@ The three dest buckets for a remote source are now: remote
 module/root → delegate; discovery-or-local → pull; remote-shaped
 typo (`Err`) → reject.
 
+## Round 4 (fix)
+
+**Reviewer (Medium):** R3's `Err → reject` arm rejected Windows-style
+local destinations like `C:/tmp/out`. `RemoteEndpoint::parse` classifies
+`C:/path` / `C:\path` as local (`check_local_path → IsLocal`), but
+`parse_transfer_endpoint` (blit-app) re-converted that error to `Err`
+because the string contains `:/` — so a remote-source pull to a Windows
+local dest never reached `start_pull`. The CLI shared the same latent
+bug.
+
+**Fix (`c93bcd6`):** root-caused in `parse_transfer_endpoint` — it now
+honors the lower-level "input appears to be a local path" verdict and
+returns `Ok(Local)` *before* the `:/` remote-typo guard. Remote-shaped
+typos (`skippy:/backup`) still `Err`; genuine module dests still parse
+remote. Tests: blit-app unit tests
+(`windows_drive_paths_are_local`, `remote_shaped_typo_still_errors`,
+`module_dest_is_remote`) + the requested TUI regression
+`plan_f1_trigger_remote_source_windows_local_dest_pulls`. 566 blit-tui
+tests; blit-app endpoints suite green.
+
+Note: this fixes a shared blit-app classifier, so the CLI's
+`blit copy nas:/photos/ C:/tmp/out` benefits too.
+
 ## Reviewer comments
 
-(empty — pending round-3 grade)
+(empty — pending round-4 grade)
