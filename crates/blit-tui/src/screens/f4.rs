@@ -953,3 +953,50 @@ mod tests {
         assert!(text.contains("permission denied"));
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    //! audit-6 item 2: the existing F4 tests cover the pure line-builders
+    //! (predictor/summary/verify-preview), but never drive the actual
+    //! `render_into` through a real ratatui backend. These render the
+    //! whole F4 pane (Profile + Verify + Diagnostics + Transfer) into a
+    //! `TestBackend` and assert it doesn't panic — covering layout
+    //! arithmetic and widget construction, including the small-area clamp.
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn draw_f4_at(w: u16, h: u16) {
+        let state = ProfileState::default();
+        let verify = VerifyState::default();
+        let diagnostics = DiagnosticsState::default();
+        let transfer = TransferState::default();
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_into(
+                    frame,
+                    frame.area(),
+                    &state,
+                    &verify,
+                    &diagnostics,
+                    &transfer,
+                    Instant::now(),
+                    Color::Cyan,
+                );
+            })
+            .expect("draw must not error");
+    }
+
+    #[test]
+    fn f4_renders_default_state_without_panic() {
+        draw_f4_at(120, 40);
+    }
+
+    #[test]
+    fn f4_renders_tiny_area_without_panic() {
+        // F4's fixed-height layout wants ~23 rows; a far smaller terminal
+        // must clamp gracefully rather than panic on a zero/negative span.
+        draw_f4_at(8, 3);
+    }
+}
