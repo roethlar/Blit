@@ -1701,6 +1701,21 @@ async fn handle_pane_action(
                     }
                 }
             }
+            // rec-3: `E` clears the recent-transfers list. Empty the
+            // local view at once for responsiveness, then fan a
+            // `ClearRecent` RPC to every watched daemon so the rows
+            // don't reappear on the next snapshot. Fire-and-forget:
+            // recents are a view (already cleared locally), so a
+            // transiently-unreachable daemon at worst lets its old rows
+            // return on a later manual refresh — it never blocks the
+            // others and never affects planner telemetry. Active
+            // transfers are untouched.
+            UserAction::ClearRecent => {
+                app.transfers.clear_recent(std::time::Instant::now());
+                for endpoint in f2_watched_endpoints(app) {
+                    spawn_clear_recent(endpoint);
+                }
+            }
             // d-29: `y` confirms a pending cancel — promote
             // Confirming → Sending and fire the RPC.
             // d-30: `y` also promotes ConfirmingBatch →
@@ -4393,6 +4408,19 @@ fn spawn_cancel_transfer(
     });
 }
 
+/// rec-3: fire-and-forget `ClearRecent` RPC against `endpoint`. The F2
+/// "clear recent" action fans this to every watched daemon. The result
+/// is intentionally dropped: the recent list is cleared locally before
+/// this is spawned, so the daemon-side clear is best-effort — a
+/// transiently-unreachable daemon must not block clearing the others,
+/// and there's no per-daemon outcome worth surfacing (unlike a cancel).
+/// `ClearRecent` never touches the daemon's planner telemetry.
+fn spawn_clear_recent(endpoint: blit_core::remote::RemoteEndpoint) {
+    tokio::spawn(async move {
+        let _ = blit_app::admin::jobs::clear_recent(&endpoint).await;
+    });
+}
+
 /// dark-1: build the base frame style from the optional `[theme]`
 /// background / foreground colors. Returns `None` when BOTH are unset —
 /// so the caller skips painting a base layer and the terminal's own
@@ -5529,6 +5557,12 @@ enum UserAction {
     /// fire immediately. Outcomes propagate via the
     /// Subscribe stream rather than the per-reply path.
     CancelAllActiveTransfers,
+    /// rec-3: F2 only. `E` clears the recent-transfers list — empties
+    /// the local view immediately and fans a `ClearRecent` RPC to every
+    /// watched daemon so the rows don't return on the next snapshot.
+    /// Never touches the planner's `perf_local.jsonl` telemetry. Active
+    /// transfers are unaffected.
+    ClearRecent,
     /// d-35: F3 only. `p` opens the pull destination
     /// prompt for the cursor-selected remote path. No-op
     /// if no remote / nothing selectable / a pull is
@@ -5788,6 +5822,10 @@ fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
         // transfer in one keystroke. Other panes ignore.
         // Mnemonic: cross out everything.
         KeyCode::Char('X') => Some(UserAction::CancelAllActiveTransfers),
+        // rec-3: `E` (Shift+e) on F2 clears the recent-transfers list.
+        // Other panes ignore it. Capital chosen because lowercase `e`
+        // is ProfileEnable on F4; `E` is free. Mnemonic: Erase recents.
+        KeyCode::Char('E') => Some(UserAction::ClearRecent),
         // `H` toggles Verify mode (size+mtime ↔ checksum).
         // Capital chosen because lowercase `h` is the
         // Ascend / left-arrow alias used by F3 navigation.
@@ -6976,6 +7014,20 @@ mod tests {
         assert!(matches!(
             ka(&k(KeyCode::Char('X'))),
             Some(UserAction::CancelAllActiveTransfers)
+        ));
+    }
+
+    /// rec-3: `E` (Shift+e) maps to ClearRecent (F2 clear-recent).
+    /// Lowercase `e` stays ProfileEnable (case-sensitive).
+    #[test]
+    fn key_action_maps_shift_e_to_clear_recent() {
+        assert!(matches!(
+            ka(&k(KeyCode::Char('E'))),
+            Some(UserAction::ClearRecent)
+        ));
+        assert!(matches!(
+            ka(&k(KeyCode::Char('e'))),
+            Some(UserAction::ProfileEnable)
         ));
     }
 
@@ -10589,11 +10641,10 @@ mod tests {
             ka(&k(KeyCode::Char('e'))),
             Some(UserAction::ProfileEnable)
         ));
-        // Uppercase E remains unmapped. Uppercase C is
-        // TransferCopy (d-4); uppercase D is F3DeleteBegin
-        // (d-45) — both covered in their own tests. The
-        // Profile keys themselves are lowercase-only.
-        assert!(ka(&k(KeyCode::Char('E'))).is_none());
+        // The Profile keys themselves are lowercase-only.
+        // Uppercase C is TransferCopy (d-4); uppercase D is
+        // F3DeleteBegin (d-45); uppercase E is now ClearRecent
+        // (rec-3, F2 clear-recent) — each covered in its own test.
         // Ctrl-c remains Quit (not ProfileClear).
         assert!(matches!(
             ka(&KeyEvent {

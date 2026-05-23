@@ -464,6 +464,22 @@ impl TransfersState {
         self.recent.len()
     }
 
+    /// rec-3: drop every recent row from the local view. The TUI calls
+    /// this for an immediate, responsive "clear recent" before the
+    /// `ClearRecent` RPC(s) to the watched daemons land — clearing the
+    /// daemons' rings keeps the rows from re-appearing on the next
+    /// snapshot. Active rows are untouched (this only empties `recent`).
+    /// Returns the number of rows removed. `last_event_at` is bumped so
+    /// the F2 footer reflects the change.
+    pub fn clear_recent(&mut self, now: Instant) -> usize {
+        let cleared = self.recent.len();
+        self.recent.clear();
+        if cleared > 0 {
+            self.last_event_at = Some(now);
+        }
+        cleared
+    }
+
     fn push_recent(&mut self, row: RecentRow) {
         self.recent.push_front(row);
         while self.recent.len() > TUI_RECENT_CAP {
@@ -532,6 +548,38 @@ mod tests {
         let stamp = Instant::now();
         state.merge_snapshot("", DaemonState::default(), stamp);
         assert_eq!(state.last_event_at(), Some(stamp));
+    }
+
+    // rec-3: F2 "clear recent" empties the local recent view.
+
+    #[test]
+    fn clear_recent_empties_recent_keeps_active() {
+        let mut state = TransfersState::new();
+        let snap = DaemonState {
+            active: vec![make_active("a1", 0)],
+            recent: vec![make_record("r1", true), make_record("r2", false)],
+            ..Default::default()
+        };
+        state.merge_snapshot("daemon1", snap, Instant::now());
+        assert_eq!(state.recent_count(), 2);
+        assert_eq!(state.active_rows().len(), 1);
+
+        let cleared = state.clear_recent(Instant::now());
+        assert_eq!(cleared, 2, "returns the number of recents removed");
+        assert_eq!(state.recent_count(), 0, "recent view emptied");
+        assert_eq!(
+            state.active_rows().len(),
+            1,
+            "active transfers are untouched by a recent clear"
+        );
+    }
+
+    #[test]
+    fn clear_recent_empty_is_zero_and_leaves_last_event_unset() {
+        let mut state = TransfersState::new();
+        assert_eq!(state.clear_recent(Instant::now()), 0);
+        // A no-op clear must not fabricate activity in the footer.
+        assert_eq!(state.last_event_at(), None);
     }
 
     // d-21: F2 active-row cursor selection.

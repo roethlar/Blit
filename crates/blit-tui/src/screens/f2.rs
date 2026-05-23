@@ -24,7 +24,7 @@
 //! │ ...                                                             │
 //! ├── footer (1 line) ──────────────────────────────────────────────┤
 //! │ status · [last event Xs ago] · [d-22 cancel fragment] ·         │
-//! │   q/Esc quit · r refresh · K cancel selected                    │
+//! │   q/Esc quit · r refresh · K cancel selected · E clear recent   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -395,7 +395,9 @@ fn render_footer(
         Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" refresh  ·  "),
         Span::styled("K", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" cancel selected"),
+        Span::raw(" cancel selected  ·  "),
+        Span::styled("E", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" clear recent"),
     ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

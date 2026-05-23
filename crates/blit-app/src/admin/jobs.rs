@@ -8,7 +8,8 @@
 
 use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::{
-    CancelJobRequest, DaemonEvent, DaemonState, GetStateRequest, SubscribeRequest,
+    CancelJobRequest, ClearRecentRequest, DaemonEvent, DaemonState, GetStateRequest,
+    SubscribeRequest,
 };
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
@@ -99,6 +100,33 @@ pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<Cancel
             )),
         },
     }
+}
+
+/// Issue the `ClearRecent` RPC against `remote` (rec-2). Wipes the
+/// daemon's recent-transfers list (`GetState.recent[]`) — both the
+/// in-memory ring and its persisted `recents.jsonl` store — and returns
+/// the number of entries removed. Never affects the daemon's
+/// `perf_local.jsonl` planner telemetry. Errors only on transport /
+/// unexpected-status failures; clearing an already-empty list is a
+/// well-defined no-op that returns `0`.
+pub async fn clear_recent(remote: &RemoteEndpoint) -> Result<u32> {
+    let uri = remote.control_plane_uri();
+    let mut client = BlitClient::connect(uri.clone())
+        .await
+        .with_context(|| format!("connecting to {}", uri))?;
+
+    let response = client
+        .clear_recent(ClearRecentRequest {})
+        .await
+        .map_err(|status| {
+            eyre::eyre!(
+                "ClearRecent failed ({}): {}",
+                status.code(),
+                status.message()
+            )
+        })?;
+
+    Ok(response.into_inner().cleared)
 }
 
 /// Open a `Subscribe` stream against `remote`, optionally
