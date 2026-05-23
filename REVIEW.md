@@ -20,6 +20,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | d-66-f4-clear-confirm | Feature | y/N gate on the F4 profile-history clear (round 2) | `[x]` | `phase5/a1` | `0f4cd64` |
 | d-67-help-clear-confirm | Feature | Flag the F4 clear y/N confirm in the `?` keymap (round 2) | `[x]` | `phase5/a1` | `0f4cd64` |
 | d-68-f1-remote-remote-copy | Feature | Remote→remote delegated copy from the F1 trigger (round 4) | `[x]` | `phase5/a1` | `c93bcd6` |
+| d-69-f1-delegated-progress | Feature | Live byte/file footer for remote→remote delegated copy | `[~]` | `phase5/a1` | `2f1f5d2` |
 
 ## Open findings
 
