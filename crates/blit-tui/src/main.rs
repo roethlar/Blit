@@ -2607,11 +2607,21 @@ fn f1_trigger_prompt(state: &f1trigger::F1TriggerState) -> Option<screens::f1::T
             destructive: kind.is_destructive(),
             // d-62: inline validation error from the last commit.
             error: error.clone(),
-            // d-65: a destructive push awaiting y/N confirm. The
-            // detail spells out what gets deleted.
+            // d-65/d-71: a destructive transfer awaiting y/N confirm.
+            // The detail spells out what gets deleted. Move's victim
+            // depends on direction: a local→remote push move deletes
+            // the LOCAL source; a remote→remote delegated move deletes
+            // the REMOTE source — classify the source string to say
+            // which.
             confirm_detail: confirming.then(|| match kind {
                 f3pull::PullKind::Mirror => "deletes extraneous at dest",
-                f3pull::PullKind::Move => "deletes the local source",
+                f3pull::PullKind::Move => {
+                    use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
+                    match parse_transfer_endpoint(source) {
+                        Ok(Endpoint::Remote(_)) => "deletes the remote source",
+                        _ => "deletes the local source",
+                    }
+                }
                 f3pull::PullKind::Copy => "",
             }),
         }),
@@ -3507,7 +3517,11 @@ fn build_delegated_execution(
 /// `report_bytes_progress`) into live `(files, bytes)` snapshots on
 /// `progress_tx`; the authoritative totals still ride the terminal
 /// reply. d-70: `kind` selects copy vs mirror via
-/// [`build_delegated_execution`].
+/// [`build_delegated_execution`]. d-71: move runs a delegated copy
+/// then deletes the remote SOURCE — `require_complete_scan` (set for
+/// move by `f3_pull_options`) makes the daemon refuse a partial scan,
+/// so a successful copy means the whole source was transferred before
+/// the delete (mirrors the F3 remote→local move).
 fn spawn_f1_delegated_pull(
     request_id: u64,
     src: RemoteEndpoint,
@@ -3516,6 +3530,7 @@ fn spawn_f1_delegated_pull(
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
+    use blit_app::admin::rm::{delete_remote_path, extract_module_and_path};
     use blit_app::transfers::remote::run_delegated_pull;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
@@ -3541,17 +3556,45 @@ fn spawn_f1_delegated_pull(
             }
         });
 
+        // d-71: a move needs the source endpoint again after the copy
+        // (to delete it), but it moves into the execution — clone it
+        // up front for the move path only.
+        let move_source = (kind == f3pull::PullKind::Move).then(|| src.clone());
         let execution = build_delegated_execution(src, dst, kind);
         let sent = run_delegated_pull(execution, Some(&progress), |_| {}).await;
         // Close the progress channel → the forwarder drains and exits
-        // before the terminal reply.
+        // before the destructive phase / terminal reply.
         drop(progress);
         let _ = forwarder.await;
         let result = match sent {
-            Ok(outcome) => Ok((
-                outcome.summary.files_transferred,
-                outcome.summary.bytes_transferred,
-            )),
+            Ok(outcome) => {
+                let transferred = (
+                    outcome.summary.files_transferred,
+                    outcome.summary.bytes_transferred,
+                );
+                match move_source {
+                    // d-71: delete the remote source only after a
+                    // successful delegated copy. A delete failure
+                    // surfaces as the op's error (the copy already
+                    // landed, but the operator must know the source
+                    // wasn't removed).
+                    Some(source) => match extract_module_and_path(&source) {
+                        Ok((_, rel_path)) => {
+                            let wire = del_wire_path(&rel_path);
+                            match delete_remote_path(&source, &wire).await {
+                                Ok(_) => Ok(transferred),
+                                Err(err) => Err(format!(
+                                    "delegated but failed to delete remote source: {err:#}"
+                                )),
+                            }
+                        }
+                        Err(err) => Err(format!(
+                            "delegated but cannot resolve remote source to delete: {err:#}"
+                        )),
+                    },
+                    None => Ok(transferred),
+                }
+            }
             Err(err) => Err(format!("{err:#}")),
         };
         let _ = tx.send(F1PushReply { request_id, result }).await;
@@ -3709,13 +3752,13 @@ fn plan_f1_trigger(
     }
 }
 
-/// d-68/d-70: classify + launch a remote→remote delegated transfer
-/// from the F1 trigger. Copy delegates immediately; mirror (d-70) is
-/// destructive (the destination daemon purges entries absent from the
-/// source) so it routes through the trigger's y/N confirm — same gate
-/// the local→remote push mirror uses. Move delegation is still a
-/// follow-up (it needs a remote-source delete RPC), so reject it.
-/// The destination must resolve to a module (`host:/module/`).
+/// d-68/d-70/d-71: classify + launch a remote→remote delegated
+/// transfer from the F1 trigger. Copy delegates immediately; mirror
+/// (purges the dest) and move (deletes the remote source after the
+/// copy) are destructive, so they route through the trigger's y/N
+/// confirm — the same gate the local→remote push mirror/move uses.
+/// Move also refuses a module-root source up front. The destination
+/// must resolve to a module (`host:/module/`).
 fn plan_f1_delegated(
     app: &mut AppState,
     src: RemoteEndpoint,
@@ -3724,16 +3767,18 @@ fn plan_f1_delegated(
     confirmed: bool,
 ) -> TriggerOutcome {
     use blit_app::endpoints::ensure_remote_destination_supported;
-    if kind == f3pull::PullKind::Move {
-        return TriggerOutcome::Rejected(
-            "remote→remote move isn't supported yet (copy and mirror are)".into(),
-        );
-    }
     if ensure_remote_destination_supported(&dst).is_err() {
         return TriggerOutcome::Rejected("destination needs a module (host:/module/)".into());
     }
-    // d-70: mirror purges the destination — gate it behind the
-    // trigger's y/N confirm (copy launches straight away).
+    // d-71: move deletes the remote SOURCE after the copy, so refuse a
+    // module-root source up front — there's no single path to remove
+    // (same guard as the F3 remote→local move, d-60).
+    if kind == f3pull::PullKind::Move && !is_deletable_remote_path(&src) {
+        return TriggerOutcome::Rejected("cannot move a module root".into());
+    }
+    // d-70/d-71: mirror purges the destination, move deletes the
+    // remote source — both destructive, so gate behind the trigger's
+    // y/N confirm (copy launches straight away).
     if kind.is_destructive() && !confirmed {
         return TriggerOutcome::NeedsConfirm;
     }
@@ -7845,25 +7890,87 @@ mod tests {
         );
     }
 
-    /// d-68: remote→remote mirror/move aren't wired yet — they must
-    /// be rejected with a clear message, never silently mis-routed.
-    /// d-70: remote→remote MOVE is still a follow-up — rejected (it
-    /// needs a remote-source delete RPC). Mirror is now wired (see
-    /// the confirm test below).
+    /// d-71: remote→remote MOVE confirms (destructive — deletes the
+    /// remote source after the copy) then launches a delegated move.
+    #[tokio::test]
+    async fn plan_f1_trigger_remote_to_remote_move_confirms_then_launches() {
+        let mut app = make_test_app_state(Screen::F1);
+        // Source has a subpath so it's a deletable (non-module-root)
+        // remote path.
+        let unconfirmed = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/2024/",
+            "skippy:/backup/",
+            f3pull::PullKind::Move,
+            false,
+        );
+        assert!(
+            matches!(unconfirmed, TriggerOutcome::NeedsConfirm),
+            "move needs confirm"
+        );
+        assert!(!app.f1_push.is_running(), "no launch before confirm");
+
+        let confirmed = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/2024/",
+            "skippy:/backup/",
+            f3pull::PullKind::Move,
+            true,
+        );
+        assert!(matches!(confirmed, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running {
+                delegated, kind, ..
+            } => {
+                assert!(*delegated);
+                assert_eq!(*kind, f3pull::PullKind::Move);
+            }
+            other => panic!("expected delegated move Running, got {other:?}"),
+        }
+    }
+
+    /// d-71: the move confirm detail names the right victim by
+    /// direction — a remote source (delegated move) deletes the
+    /// REMOTE source; a local source (push move) deletes the LOCAL
+    /// source.
     #[test]
-    fn plan_f1_trigger_remote_to_remote_move_rejected() {
+    fn f1_trigger_prompt_move_detail_follows_source_direction() {
+        let to_move = |source: &str| {
+            let mut t = f1trigger::F1TriggerState::new();
+            t.begin(source.to_string());
+            for c in "skippy:/backup/".chars() {
+                t.push_char(c);
+            }
+            t.cycle_kind(true); // copy → mirror
+            t.cycle_kind(true); // mirror → move
+            t.begin_confirm();
+            f1_trigger_prompt(&t).expect("prompt").confirm_detail
+        };
+        assert_eq!(
+            to_move("nas:/photos/2024/"),
+            Some("deletes the remote source")
+        );
+        assert_eq!(to_move("/tmp/src"), Some("deletes the local source"));
+    }
+
+    /// d-71: a delegated move whose SOURCE is a module root is refused
+    /// up front — there's no single path to delete (mirrors the F3
+    /// remote→local move guard, d-60).
+    #[test]
+    fn plan_f1_trigger_remote_to_remote_move_module_root_source_rejected() {
         let mut app = make_test_app_state(Screen::F1);
         let out = plan_f1_trigger(
             &mut app,
-            "nas:/photos/",
+            "nas:/photos/", // module root — no subpath
             "skippy:/backup/",
             f3pull::PullKind::Move,
             false,
         );
         match out {
-            TriggerOutcome::Rejected(msg) => assert!(msg.contains("move isn't supported"), "{msg}"),
+            TriggerOutcome::Rejected(msg) => assert!(msg.contains("module root"), "{msg}"),
             other => panic!("expected Rejected, got {other:?}"),
         }
+        assert!(!app.f1_push.is_running());
     }
 
     /// d-70: remote→remote MIRROR is destructive (purges the dest), so
