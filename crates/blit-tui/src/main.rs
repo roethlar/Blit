@@ -196,6 +196,14 @@ struct AppState {
     /// set and later steady updates compare equal. The setup-reply arm
     /// consults this flag and re-fans once the pending setup lands.
     transfers_refan_after_setup: bool,
+    /// m2f-10: identities (`host_port_display`) of watched daemons whose
+    /// Subscribe stream has errored. With the m2f-5 fan-out, one daemon's
+    /// stream ending must NOT blank the whole F2 pane to "degraded" — the
+    /// other daemons are still live. The connection banner is derived
+    /// from this set vs. the watched total (see `f2_status_from_health`):
+    /// empty → Live, some → partial, all → fully degraded. A daemon is
+    /// removed when it sends a healthy signal (recovered) or on re-fan.
+    f2_degraded_daemons: std::collections::BTreeSet<String>,
 
     // F3
     browse: BrowseState,
@@ -590,6 +598,7 @@ async fn run_router(
         transfers_setup_gen: 0,
         transfers_setup_pending: false,
         transfers_refan_after_setup: false,
+        f2_degraded_daemons: std::collections::BTreeSet::new(),
         browse: BrowseState::new(),
         browse_last_fetched_view: None,
         browse_fetch_tx: browse_fetch_tx.clone(),
@@ -2036,6 +2045,10 @@ fn refan_f2_setup(
     let watched_ids: std::collections::BTreeSet<String> =
         watched.iter().map(|ep| ep.host_port_display()).collect();
     app.transfers.retain_active_daemons(&watched_ids);
+    // m2f-10: a re-fan opens fresh streams for the new watch set, so
+    // per-daemon stream health resets — any prior degraded marks belong
+    // to the streams we're dropping.
+    app.f2_degraded_daemons.clear();
     // Drop the old merged stream — its per-daemon forwarders exit when
     // the receiver is gone.
     *transfers_event_rx = None;
@@ -5651,17 +5664,49 @@ fn f2_watched_identities(app: &AppState) -> std::collections::BTreeSet<String> {
 /// other daemons' streams keep feeding F2; the whole-view status goes
 /// Degraded for now (per-daemon status is m2f-6). `None` arm reads
 /// `recv() == None`, the all-senders-closed condition.
+/// m2f-10: fold per-daemon stream health into the single F2 connection
+/// banner. `degraded` is the set of watched daemons whose stream has
+/// errored; `watched_total` is how many daemons F2 is fanning out to.
+///
+/// - none degraded → `Live`.
+/// - some (but not all) → `Degraded` with a "M/N streams down: ..."
+///   message — the pane keeps showing the live daemons' transfers, but
+///   the operator sees which ones dropped.
+/// - all degraded → `Degraded` "all N daemon stream(s) down".
+///
+/// `watched_total` is floored at the degraded count so a stale/zero
+/// total can't make "all-down" read as "partial".
+fn f2_status_from_health(
+    degraded: &std::collections::BTreeSet<String>,
+    watched_total: usize,
+) -> ConnectionStatus {
+    if degraded.is_empty() {
+        return ConnectionStatus::Live;
+    }
+    let total = watched_total.max(degraded.len());
+    if degraded.len() >= total {
+        ConnectionStatus::Degraded(format!("all {} daemon stream(s) down", degraded.len()))
+    } else {
+        let names: Vec<&str> = degraded.iter().map(String::as_str).collect();
+        ConnectionStatus::Degraded(format!(
+            "{}/{total} daemon streams down: {}",
+            degraded.len(),
+            names.join(", ")
+        ))
+    }
+}
+
 fn apply_f2_event(app: &mut AppState, event: Option<F2Event>) -> bool {
     match event {
         // m2f-4: the event carries its source daemon, so the row is
         // tagged with the stream's daemon.
         Some(F2Event {
+            daemon,
             kind: EventOrError::Connected,
-            ..
         }) => {
-            if matches!(app.transfers_status, ConnectionStatus::Connecting) {
-                app.transfers_status = ConnectionStatus::Live;
-            }
+            // m2f-10: a healthy signal clears this daemon from the
+            // degraded set (it reconnected) and the banner is re-derived.
+            mark_daemon_healthy(app, &daemon);
             true
         }
         Some(F2Event {
@@ -5670,18 +5715,26 @@ fn apply_f2_event(app: &mut AppState, event: Option<F2Event>) -> bool {
         }) => {
             app.transfers
                 .apply_event(&daemon, daemon_event, Instant::now());
-            if matches!(app.transfers_status, ConnectionStatus::Connecting) {
-                app.transfers_status = ConnectionStatus::Live;
-            }
+            // An event is itself proof the stream is live.
+            mark_daemon_healthy(app, &daemon);
             true
         }
         Some(F2Event {
-            kind: EventOrError::Error(msg),
-            ..
+            daemon,
+            // The per-daemon error text is intentionally not surfaced in
+            // the single-line banner — with the fan-out it could list
+            // many daemons, so the banner names the affected daemon
+            // identities (the actionable handle) and the count.
+            kind: EventOrError::Error(_),
         }) => {
-            app.transfers_status = ConnectionStatus::Degraded(msg);
-            // Keep the merged receiver: only this one daemon's forwarder
-            // ended; the others are still sending.
+            // m2f-10: record THIS daemon as degraded and re-derive the
+            // banner from the set vs. the watched total — one stream
+            // ending must not blank the pane when others are still live.
+            // Keep the merged receiver: only this daemon's forwarder
+            // ended; the others keep sending.
+            app.f2_degraded_daemons.insert(daemon);
+            let total = f2_watched_endpoints(app).len();
+            app.transfers_status = f2_status_from_health(&app.f2_degraded_daemons, total);
             true
         }
         None => {
@@ -5689,6 +5742,26 @@ fn apply_f2_event(app: &mut AppState, event: Option<F2Event>) -> bool {
                 ConnectionStatus::Degraded("all subscribe streams closed".to_string());
             false
         }
+    }
+}
+
+/// m2f-10: a watched daemon produced a healthy signal (Connected or any
+/// event).
+///
+/// - If the daemon was in the degraded set, its stream just recovered →
+///   re-derive the banner from the (now smaller) set.
+/// - Otherwise only lift an initial `Connecting` to `Live`. Crucially we
+///   must NOT overwrite a `Degraded` set by a failed initial `GetState`
+///   (snapshot health, set in the setup-reply arm) just because the
+///   stream is live — that distinction predates m2f-10 and the
+///   `drain_startup_events` path relies on it.
+fn mark_daemon_healthy(app: &mut AppState, daemon: &str) {
+    let recovered = app.f2_degraded_daemons.remove(daemon);
+    if recovered {
+        let total = f2_watched_endpoints(app).len();
+        app.transfers_status = f2_status_from_health(&app.f2_degraded_daemons, total);
+    } else if matches!(app.transfers_status, ConnectionStatus::Connecting) {
+        app.transfers_status = ConnectionStatus::Live;
     }
 }
 
@@ -7872,6 +7945,7 @@ mod tests {
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
             transfers_refan_after_setup: false,
+            f2_degraded_daemons: std::collections::BTreeSet::new(),
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9395,6 +9469,7 @@ mod tests {
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
             transfers_refan_after_setup: false,
+            f2_degraded_daemons: std::collections::BTreeSet::new(),
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9460,6 +9535,7 @@ mod tests {
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
             transfers_refan_after_setup: false,
+            f2_degraded_daemons: std::collections::BTreeSet::new(),
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9578,6 +9654,7 @@ mod tests {
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
             transfers_refan_after_setup: false,
+            f2_degraded_daemons: std::collections::BTreeSet::new(),
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9655,6 +9732,7 @@ mod tests {
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
             transfers_refan_after_setup: false,
+            f2_degraded_daemons: std::collections::BTreeSet::new(),
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -10246,6 +10324,125 @@ mod tests {
 
         // All senders closed (None) → drop the merged receiver.
         assert!(!apply_f2_event(&mut app, None));
+    }
+
+    /// m2f-10: the health→banner fold. None degraded is Live; a subset
+    /// is a partial Degraded that names the affected daemons; all (or a
+    /// count exceeding a stale total) is a full Degraded.
+    #[test]
+    fn f2_status_from_health_partial_vs_full() {
+        use std::collections::BTreeSet;
+        assert!(matches!(
+            f2_status_from_health(&BTreeSet::new(), 3),
+            ConnectionStatus::Live
+        ));
+
+        let one: BTreeSet<String> = ["skippy:9050".to_string()].into_iter().collect();
+        match f2_status_from_health(&one, 3) {
+            ConnectionStatus::Degraded(msg) => {
+                assert!(msg.contains("1/3"), "partial count in: {msg}");
+                assert!(msg.contains("skippy:9050"), "names the daemon: {msg}");
+            }
+            other => panic!("expected partial Degraded, got {other:?}"),
+        }
+
+        let all: BTreeSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        match f2_status_from_health(&all, 3) {
+            ConnectionStatus::Degraded(msg) => assert!(msg.contains("all 3"), "{msg}"),
+            other => panic!("expected full Degraded, got {other:?}"),
+        }
+        // A degraded count exceeding a stale/zero total reads as all-down,
+        // never as a nonsensical partial.
+        match f2_status_from_health(&all, 0) {
+            ConnectionStatus::Degraded(msg) => assert!(msg.contains("all 3"), "{msg}"),
+            other => panic!("expected full Degraded, got {other:?}"),
+        }
+    }
+
+    /// m2f-10: with two watched daemons, one stream erroring yields a
+    /// PARTIAL degrade (the pane stays usable for the live daemon), and
+    /// that daemon recovering returns the banner to Live — rather than
+    /// the pre-m2f-10 behavior of blanking the whole pane to Degraded.
+    #[test]
+    fn apply_f2_event_partial_degrade_then_recover() {
+        let mut app = make_test_app_state(Screen::F2);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
+        app.daemons.replace_from_discovery(
+            &[blit_core::mdns::MdnsDiscoveredService {
+                fullname: "skippy._blit._tcp.local.".to_string(),
+                instance_name: "skippy".to_string(),
+                hostname: "skippy.local.".to_string(),
+                port: 9050,
+                addresses: vec![std::net::Ipv4Addr::new(192, 168, 1, 50)],
+                properties: std::collections::HashMap::new(),
+            }],
+            Instant::now(),
+        );
+        assert_eq!(
+            f2_watched_endpoints(&app).len(),
+            2,
+            "nas + discovered skippy"
+        );
+
+        // skippy's stream errors → partial, not a full blank.
+        apply_f2_event(
+            &mut app,
+            Some(F2Event {
+                daemon: "192.168.1.50:9050".to_string(),
+                kind: EventOrError::Error("connection reset".to_string()),
+            }),
+        );
+        match &app.transfers_status {
+            ConnectionStatus::Degraded(msg) => {
+                assert!(msg.contains("1/2"), "one of two down: {msg}");
+                assert!(msg.contains("192.168.1.50:9050"), "names it: {msg}");
+            }
+            other => panic!("expected partial Degraded, got {other:?}"),
+        }
+        assert_eq!(app.f2_degraded_daemons.len(), 1);
+
+        // skippy recovers → back to Live, set cleared.
+        apply_f2_event(
+            &mut app,
+            Some(F2Event {
+                daemon: "192.168.1.50:9050".to_string(),
+                kind: EventOrError::Connected,
+            }),
+        );
+        assert!(
+            matches!(app.transfers_status, ConnectionStatus::Live),
+            "recovered → Live"
+        );
+        assert!(app.f2_degraded_daemons.is_empty());
+    }
+
+    /// m2f-10 regression guard: a healthy stream signal from a daemon
+    /// that was never degraded must NOT overwrite a `Degraded` set by a
+    /// failed initial `GetState` (snapshot health). The live stream may
+    /// be fine while the active/recent view is incomplete — that
+    /// distinction predates m2f-10 and must survive it.
+    #[test]
+    fn healthy_event_does_not_clobber_snapshot_degraded() {
+        let mut app = make_test_app_state(Screen::F2);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
+        app.transfers_status =
+            ConnectionStatus::Degraded("initial GetState failed: boom".to_string());
+        apply_f2_event(
+            &mut app,
+            Some(F2Event {
+                daemon: "nas".to_string(),
+                kind: EventOrError::Connected,
+            }),
+        );
+        match &app.transfers_status {
+            ConnectionStatus::Degraded(msg) => {
+                assert!(
+                    msg.contains("initial GetState failed"),
+                    "snapshot status kept: {msg}"
+                );
+            }
+            other => panic!("snapshot Degraded must persist, got {other:?}"),
+        }
     }
 
     /// a1-4 round-2 regression: refresh while F3 has no
