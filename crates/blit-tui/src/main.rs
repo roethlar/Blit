@@ -24,6 +24,7 @@
 
 mod browse;
 mod config;
+mod config_reload;
 mod daemons;
 mod diagnostics;
 mod display_f1;
@@ -42,6 +43,7 @@ mod state;
 mod transfer;
 mod verify;
 
+use crate::config_reload::reload_tui_config;
 use crate::display_f1::{f1_push_status, f1_trigger_prompt};
 use crate::display_f2::{cancel_status_remaining_ttl, cancel_status_to_display};
 use crate::display_f3::{f3_del_to_display, f3_du_to_display, f3_pull_to_display};
@@ -2885,55 +2887,6 @@ struct TransferReply {
     request_id: u64,
     kind: transfer::TransferKind,
     result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
-}
-
-/// d-36: re-read `tui.toml` for a `Ctrl+R` hot-reload.
-/// Returns the config to use plus the banner to show.
-///
-/// On a parse error, the CURRENT config is kept (the
-/// loader returns defaults on failure, which would
-/// silently wipe the operator's settings) and the banner
-/// carries the error. On success — including a missing
-/// file, which legitimately means "use defaults" — the
-/// freshly-loaded config is adopted.
-fn reload_tui_config(
-    current: &config::TuiConfig,
-    now: Instant,
-) -> (config::TuiConfig, ReloadBanner) {
-    let mut warning: Option<String> = None;
-    let loaded = config::load(|msg| warning = Some(msg));
-    classify_reload(loaded, warning, current, now)
-}
-
-/// Pure core of [`reload_tui_config`] — splits the I/O
-/// (`config::load`) from the keep-vs-adopt decision so
-/// the decision is unit-testable without touching the
-/// process-global config dir (which would race under
-/// parallel tests).
-fn classify_reload(
-    loaded: config::TuiConfig,
-    warning: Option<String>,
-    current: &config::TuiConfig,
-    now: Instant,
-) -> (config::TuiConfig, ReloadBanner) {
-    match warning {
-        Some(message) => (
-            current.clone(),
-            ReloadBanner {
-                message: format!("reload failed: {message} — kept previous"),
-                ok: false,
-                shown_at: now,
-            },
-        ),
-        None => (
-            loaded,
-            ReloadBanner {
-                message: "config reloaded".to_string(),
-                ok: true,
-                shown_at: now,
-            },
-        ),
-    }
 }
 
 /// d-53: sequential batch-pull state. `P` on F3 pulls every
@@ -5855,6 +5808,10 @@ fn is_quit(code: KeyCode, modifiers: KeyModifiers, quit: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // classify_reload's only non-test caller (reload_tui_config) moved to
+    // crate::config_reload in audit-7d5, so import it test-locally to avoid
+    // an unused-import warning in the non-test bin build.
+    use crate::config_reload::classify_reload;
 
     /// audit-8: the forwarder must observe a dropped receiver and stop,
     /// even when the underlying stream never produces a message. Before
