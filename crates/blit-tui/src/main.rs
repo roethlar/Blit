@@ -439,6 +439,22 @@ async fn main() -> Result<()> {
             config::ThemeDefaults::DEFAULT_ACCENT,
         ));
     }
+    // dark-1: a non-empty but unrecognized base bg/fg color name falls
+    // back to the terminal default. (Empty is the valid "unset" case.)
+    if tui_config.theme.background_is_invalid() {
+        config_warnings.push(format!(
+            "tui.toml [theme] background = {:?} is not a recognized color; \
+             using the terminal default",
+            tui_config.theme.background,
+        ));
+    }
+    if tui_config.theme.foreground_is_invalid() {
+        config_warnings.push(format!(
+            "tui.toml [theme] foreground = {:?} is not a recognized color; \
+             using the terminal default",
+            tui_config.theme.foreground,
+        ));
+    }
 
     // keys-1: a [keys] quit value that isn't a single character falls
     // back to the default. Same buffer-then-flush contract.
@@ -803,6 +819,20 @@ async fn run_router(
             .parse_accent()
             .map(raw_color_to_ratatui)
             .unwrap_or(ratatui::style::Color::Cyan);
+        // dark-1: optional base bg/fg painted under the whole TUI. Both
+        // `None` (the default) means "leave the terminal's own colors" —
+        // no base layer is drawn. Recomputed each frame so a `Ctrl+R`
+        // theme reload re-colors live, like the accent.
+        let base_style = base_theme_style(
+            tui_config
+                .theme
+                .parse_background()
+                .map(raw_color_to_ratatui),
+            tui_config
+                .theme
+                .parse_foreground()
+                .map(raw_color_to_ratatui),
+        );
         let reload_banner = app
             .reload_banner
             .as_ref()
@@ -819,6 +849,16 @@ async fn run_router(
             });
         terminal
             .draw(|frame| {
+                // dark-1: paint the base bg/fg over the whole frame FIRST,
+                // so every fg-only widget drawn on top inherits it (a
+                // `Style` with `bg: None` leaves the painted bg intact).
+                // `None` → no base layer → terminal default, as before.
+                if let Some(style) = base_style {
+                    frame.render_widget(
+                        ratatui::widgets::Block::default().style(style),
+                        frame.area(),
+                    );
+                }
                 let (tab_area, body_area) = screens::split_for_tabs(frame.area());
                 // e-2 R2: daemons = discovered remotes
                 // (excludes the synthetic Local row), and
@@ -4315,6 +4355,28 @@ fn spawn_cancel_transfer(
     });
 }
 
+/// dark-1: build the base frame style from the optional `[theme]`
+/// background / foreground colors. Returns `None` when BOTH are unset —
+/// so the caller skips painting a base layer and the terminal's own
+/// colors show through (the historical default). Pure, so the
+/// bg/fg → style mapping is unit-testable.
+fn base_theme_style(
+    bg: Option<ratatui::style::Color>,
+    fg: Option<ratatui::style::Color>,
+) -> Option<ratatui::style::Style> {
+    if bg.is_none() && fg.is_none() {
+        return None;
+    }
+    let mut style = ratatui::style::Style::default();
+    if let Some(bg) = bg {
+        style = style.bg(bg);
+    }
+    if let Some(fg) = fg {
+        style = style.fg(fg);
+    }
+    Some(style)
+}
+
 /// e-7: bridge from the config's `RawColor` (which lives
 /// in `config` to avoid leaking ratatui types into the
 /// schema layer) to the ratatui color used by the
@@ -6311,6 +6373,61 @@ mod tests {
             key_action(&ev(KeyCode::F(2)), &custom),
             Some(UserAction::Navigate(Screen::F2))
         ));
+    }
+
+    /// dark-1: the base style is `None` only when both bg and fg are
+    /// unset (→ no base layer, terminal default); otherwise it carries
+    /// whichever colors are set.
+    #[test]
+    fn base_theme_style_built_from_set_colors() {
+        use ratatui::style::Color;
+        assert!(base_theme_style(None, None).is_none());
+        let s = base_theme_style(Some(Color::Black), None).unwrap();
+        assert_eq!(s.bg, Some(Color::Black));
+        assert_eq!(s.fg, None);
+        let s = base_theme_style(None, Some(Color::White)).unwrap();
+        assert_eq!(s.fg, Some(Color::White));
+        assert_eq!(s.bg, None);
+        let s = base_theme_style(Some(Color::Black), Some(Color::White)).unwrap();
+        assert_eq!(s.bg, Some(Color::Black));
+        assert_eq!(s.fg, Some(Color::White));
+    }
+
+    /// dark-1: validates the mechanism the whole feature relies on — a
+    /// base layer's background shows through a fg-only widget rendered on
+    /// top (ratatui leaves a cell's bg unchanged when the widget's style
+    /// has `bg: None`).
+    #[test]
+    fn base_layer_bg_shows_through_fg_only_widget() {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Span;
+        use ratatui::widgets::{Block, Paragraph};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let backend = TestBackend::new(8, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                // Base layer: bg = Blue across the whole frame.
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(Color::Blue)),
+                    frame.area(),
+                );
+                // A fg-only widget on top (its style sets fg, not bg).
+                frame.render_widget(
+                    Paragraph::new(Span::styled("hi", Style::default().fg(Color::White))),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let cell = &buf[(0, 0)]; // the 'h'
+        assert_eq!(cell.fg, Color::White, "widget fg applied");
+        assert_eq!(
+            cell.bg,
+            Color::Blue,
+            "fg-only widget inherits the base layer's bg"
+        );
     }
 
     fn k(code: KeyCode) -> KeyEvent {

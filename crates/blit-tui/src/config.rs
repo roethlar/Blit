@@ -41,6 +41,8 @@
 //!
 //! [theme]
 //! accent_color = "cyan"         # e-7: active-tab background
+//! background = ""               # dark-1: base bg ("" = terminal default; "black"/"white"/...)
+//! foreground = ""               # dark-1: base fg ("" = terminal default)
 //!
 //! [transfer]
 //! cancel_status_ttl_ms = 5000   # d-24: F2 cancel-fragment TTL (clamped to [250, 60000])
@@ -318,6 +320,15 @@ pub struct ThemeDefaults {
     /// Active-tab background in the tab strip. Default
     /// `"cyan"` matches the d-15 visual baseline.
     pub accent_color: String,
+    /// dark-1: base background color painted under the whole TUI. Empty
+    /// (default) leaves the terminal's own background showing through
+    /// (the historical behavior). Set e.g. `"black"` to force a dark
+    /// scheme, `"white"` for light. A non-empty value that isn't a known
+    /// color name is ignored (warn + leave the terminal default).
+    pub background: String,
+    /// dark-1: base foreground (text) color. Same shape as
+    /// [`Self::background`]; empty leaves the terminal default.
+    pub foreground: String,
 }
 
 impl ThemeDefaults {
@@ -331,12 +342,48 @@ impl ThemeDefaults {
     pub fn parse_accent(&self) -> Option<RawColor> {
         accent_color_from_str(&self.accent_color)
     }
+
+    /// dark-1: the base background color, or `None` to leave the
+    /// terminal default. Empty string → `None` (intentionally unset);
+    /// a non-empty unknown name also → `None` (caller warns).
+    pub fn parse_background(&self) -> Option<RawColor> {
+        base_color(&self.background)
+    }
+
+    /// dark-1: the base foreground color, or `None` for terminal default.
+    pub fn parse_foreground(&self) -> Option<RawColor> {
+        base_color(&self.foreground)
+    }
+
+    /// dark-1: `true` when a base color string is non-empty yet not a
+    /// recognized color name — the caller warns and falls back to the
+    /// terminal default. (Empty is the valid "unset" case, not a typo.)
+    pub fn background_is_invalid(&self) -> bool {
+        !self.background.is_empty() && accent_color_from_str(&self.background).is_none()
+    }
+
+    pub fn foreground_is_invalid(&self) -> bool {
+        !self.foreground.is_empty() && accent_color_from_str(&self.foreground).is_none()
+    }
+}
+
+/// dark-1: parse a base bg/fg color string. Empty → `None` (leave
+/// terminal default); otherwise the recognized color, or `None` on an
+/// unknown name.
+fn base_color(value: &str) -> Option<RawColor> {
+    if value.is_empty() {
+        None
+    } else {
+        accent_color_from_str(value)
+    }
 }
 
 impl Default for ThemeDefaults {
     fn default() -> Self {
         Self {
             accent_color: Self::DEFAULT_ACCENT.to_string(),
+            background: String::new(),
+            foreground: String::new(),
         }
     }
 }
@@ -865,6 +912,7 @@ mod tests {
         ] {
             let theme = ThemeDefaults {
                 accent_color: name.to_string(),
+                ..ThemeDefaults::default()
             };
             assert_eq!(theme.parse_accent(), Some(expected), "color name {name:?}");
         }
@@ -874,6 +922,7 @@ mod tests {
     fn theme_parse_is_case_insensitive() {
         let theme = ThemeDefaults {
             accent_color: "CyAn".to_string(),
+            ..ThemeDefaults::default()
         };
         assert_eq!(theme.parse_accent(), Some(RawColor::Cyan));
     }
@@ -882,8 +931,40 @@ mod tests {
     fn theme_parse_unknown_color_returns_none() {
         let theme = ThemeDefaults {
             accent_color: "fuchsia".to_string(),
+            ..ThemeDefaults::default()
         };
         assert!(theme.parse_accent().is_none());
+    }
+
+    /// dark-1: base bg/fg default to unset (empty → `None`, terminal
+    /// default); a recognized name parses; a non-empty unknown name is
+    /// `None` + flagged invalid for the startup warning.
+    #[test]
+    fn theme_base_colors_parse_and_default_to_unset() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.theme.background, "");
+        assert_eq!(cfg.theme.foreground, "");
+        assert_eq!(cfg.theme.parse_background(), None);
+        assert_eq!(cfg.theme.parse_foreground(), None);
+        assert!(!cfg.theme.background_is_invalid());
+        assert!(!cfg.theme.foreground_is_invalid());
+
+        let t = ThemeDefaults {
+            background: "black".to_string(),
+            foreground: "white".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert_eq!(t.parse_background(), Some(RawColor::Black));
+        assert_eq!(t.parse_foreground(), Some(RawColor::White));
+        assert!(!t.background_is_invalid());
+
+        // Non-empty unknown → None + invalid (warned, falls back).
+        let t = ThemeDefaults {
+            background: "fuchsia".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert_eq!(t.parse_background(), None);
+        assert!(t.background_is_invalid());
     }
 
     #[test]
