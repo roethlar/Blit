@@ -5,15 +5,24 @@
 //! Metric set (bridge slice 1):
 //! - `blit_daemon_up{version}` gauge — 1 whenever a scrape
 //!   produced a snapshot (the print-once CLI only emits on a
-//!   successful query; the future HTTP server will emit 0 on a
+//!   successful query; a future HTTP-server slice will emit 0 on a
 //!   failed scrape).
 //! - `blit_daemon_uptime_seconds`, `blit_daemon_modules`,
 //!   `blit_daemon_delegation_enabled`, `blit_active_transfers`,
 //!   `blit_recent_transfers` gauges.
-//! - `blit_{push,pull,purge}_operations_total`,
-//!   `blit_transfer_errors_total` counters (from the daemon's
-//!   `Counters` snapshot — zero when the daemon ran without
-//!   `--metrics`, in which case the atomics never incremented).
+//!
+//! **Operation counters are deliberately NOT emitted yet.** The
+//! daemon always returns `counters: Some(..)` (see
+//! `crates/blit-daemon/src/service/core.rs` + `proto/blit.proto`):
+//! when `--metrics` is disabled the atomics never incremented, so the
+//! fields are *present but zero* — indistinguishable on the wire from
+//! a daemon that genuinely served zero operations. Publishing
+//! `blit_push_operations_total 0` for a busy-but-metrics-off daemon
+//! would be false telemetry once scraped. Until the wire grows a
+//! `metrics_enabled` signal (or omits `Counters` when disabled), this
+//! bridge exposes only the always-reliable gauges above (uptime /
+//! module count / delegation flag / live active+recent counts all come
+//! from fields independent of the `--metrics` flag).
 
 use blit_core::generated::DaemonState;
 use std::fmt::Write;
@@ -72,40 +81,10 @@ pub(crate) fn format_metrics(state: &DaemonState) -> String {
         state.recent.len() as u64,
     );
 
-    if let Some(c) = &state.counters {
-        metric(
-            &mut out,
-            "blit_push_operations_total",
-            "Cumulative push operations served.",
-            "counter",
-            "",
-            c.push_operations_total,
-        );
-        metric(
-            &mut out,
-            "blit_pull_operations_total",
-            "Cumulative pull operations served.",
-            "counter",
-            "",
-            c.pull_operations_total,
-        );
-        metric(
-            &mut out,
-            "blit_purge_operations_total",
-            "Cumulative purge operations served.",
-            "counter",
-            "",
-            c.purge_operations_total,
-        );
-        metric(
-            &mut out,
-            "blit_transfer_errors_total",
-            "Cumulative transfer errors.",
-            "counter",
-            "",
-            c.transfer_errors_total,
-        );
-    }
+    // NOTE: operation counters (push/pull/purge/errors) are NOT emitted
+    // here — see the module docs. `state.counters` is always `Some`, so
+    // we cannot tell a real zero from a metrics-disabled zero, and
+    // publishing false zeros would corrupt a Prometheus counter series.
 
     out
 }
@@ -139,6 +118,10 @@ mod tests {
     use super::*;
     use blit_core::generated::{ActiveTransfer, Counters, ModuleInfo, TransferRecord};
 
+    /// Mirrors the DEFAULT daemon's `GetState` shape: `counters` is
+    /// `Some(..)` even though this daemon ran without `--metrics`, so
+    /// the operation totals are present-but-zero. The bridge must NOT
+    /// publish those zeros (see `omits_operation_counters_*`).
     fn sample_state() -> DaemonState {
         DaemonState {
             version: "0.1.0".to_string(),
@@ -146,42 +129,50 @@ mod tests {
             modules: vec![ModuleInfo::default(), ModuleInfo::default()],
             active: vec![ActiveTransfer::default()],
             recent: vec![TransferRecord::default(), TransferRecord::default()],
+            // Default/metrics-disabled daemon: present-but-zero counters.
             counters: Some(Counters {
-                push_operations_total: 10,
-                pull_operations_total: 20,
-                purge_operations_total: 3,
-                active_transfers: 1,
-                transfer_errors_total: 2,
+                push_operations_total: 0,
+                pull_operations_total: 0,
+                purge_operations_total: 0,
+                active_transfers: 0,
+                transfer_errors_total: 0,
             }),
             delegation_enabled: true,
         }
     }
 
     #[test]
-    fn formats_gauges_and_counters() {
+    fn formats_gauges_from_reliable_fields() {
         let out = format_metrics(&sample_state());
-        // Gauges.
         assert!(out.contains("blit_daemon_uptime_seconds 3600"), "{out}");
         assert!(out.contains("blit_daemon_modules 2"), "{out}");
         assert!(out.contains("blit_daemon_delegation_enabled 1"), "{out}");
+        // active/recent come from the live tables, not the metrics
+        // atomics, so they're reliable regardless of `--metrics`.
         assert!(out.contains("blit_active_transfers 1"), "{out}");
         assert!(out.contains("blit_recent_transfers 2"), "{out}");
-        // Counters carry the cumulative totals.
-        assert!(out.contains("blit_push_operations_total 10"), "{out}");
-        assert!(out.contains("blit_pull_operations_total 20"), "{out}");
-        assert!(out.contains("blit_purge_operations_total 3"), "{out}");
-        assert!(out.contains("blit_transfer_errors_total 2"), "{out}");
+    }
+
+    /// Regression guard for the round-1 reopen: even given the real
+    /// daemon shape (`counters: Some(present-but-zero)`), the bridge
+    /// must omit the operation-counter families — a metrics-disabled
+    /// daemon's zeros are not genuine and would be false telemetry.
+    #[test]
+    fn omits_operation_counters_to_avoid_false_zeros() {
+        let out = format_metrics(&sample_state());
+        assert!(!out.contains("blit_push_operations_total"), "{out}");
+        assert!(!out.contains("blit_pull_operations_total"), "{out}");
+        assert!(!out.contains("blit_purge_operations_total"), "{out}");
+        assert!(!out.contains("blit_transfer_errors_total"), "{out}");
+        // ...and no counter TYPE lines leak either.
+        assert!(!out.contains("counter"), "{out}");
     }
 
     #[test]
-    fn emits_help_and_type_lines_with_correct_kinds() {
+    fn emits_help_and_type_lines_for_gauges() {
         let out = format_metrics(&sample_state());
         assert!(
             out.contains("# TYPE blit_daemon_uptime_seconds gauge"),
-            "{out}"
-        );
-        assert!(
-            out.contains("# TYPE blit_push_operations_total counter"),
             "{out}"
         );
         assert!(out.contains("# HELP blit_active_transfers "), "{out}");
@@ -195,16 +186,6 @@ mod tests {
         state.delegation_enabled = false;
         let out = format_metrics(&state);
         assert!(out.contains("blit_daemon_delegation_enabled 0"), "{out}");
-    }
-
-    #[test]
-    fn missing_counters_omits_counter_families_but_keeps_gauges() {
-        let mut state = sample_state();
-        state.counters = None;
-        let out = format_metrics(&state);
-        assert!(!out.contains("blit_push_operations_total"), "{out}");
-        // Gauges still present.
-        assert!(out.contains("blit_active_transfers 1"), "{out}");
     }
 
     #[test]
