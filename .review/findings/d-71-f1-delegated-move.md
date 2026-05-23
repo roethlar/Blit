@@ -1,9 +1,9 @@
 # d-71-f1-delegated-move: remote→remote delegated move
 
 **Severity**: Feature (TUI_DESIGN §1 "move … between any two endpoints")
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `be0121a`
+**Commit**: `c18c493` (R1 `be0121a`)
 
 ## What
 
@@ -72,6 +72,26 @@ TUI_DESIGN follow-ups touch a different area:
    multi-daemon F2).
 2. **Multi-daemon F2** (the large outstanding pane work).
 
+## Round 2 (fix)
+
+**Reviewer (data-loss):** the remote→remote path delegated with the
+raw parsed destination, skipping the `resolve_destination` step the
+CLI runs before every copy/mirror/move. A non-trailing-slash source +
+a container dest (`nas:/photos/2024` → `skippy:/backup/`) should
+resolve to `skippy:/backup/2024`; without it the daemon writes into
+the dest root and a delegated move then deletes the source — data
+loss to the wrong target. The R1 tests used a trailing-slash source,
+hiding the missing basename-append.
+
+**Fix (`c18c493`):** call `resolve_destination(src, dest, &source,
+Endpoint::Remote(dst_ep))` before `plan_f1_delegated`, for all
+delegated kinds. It's a no-op for trailing-slash ("copy contents")
+sources (so the verified d-68 copy / d-70 mirror behavior, which used
+trailing-slash sources, is unchanged) and preserves the Remote variant
+(infallible rebind). Two tests: a non-trailing source appends the
+basename (asserted via the launched run's resolved label,
+`backup/2024`); a trailing-slash source keeps the dest root.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
