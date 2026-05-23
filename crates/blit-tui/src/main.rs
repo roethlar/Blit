@@ -455,6 +455,14 @@ async fn main() -> Result<()> {
             tui_config.theme.foreground,
         ));
     }
+    // dark-2: a non-empty mode that isn't a known preset is ignored.
+    if tui_config.theme.mode_is_invalid() {
+        config_warnings.push(format!(
+            "tui.toml [theme] mode = {:?} is not a recognized preset \
+             (use \"dark\" or \"light\"); ignoring it",
+            tui_config.theme.mode,
+        ));
+    }
 
     // keys-1: a [keys] quit value that isn't a single character falls
     // back to the default. Same buffer-then-flush contract.
@@ -819,19 +827,15 @@ async fn run_router(
             .parse_accent()
             .map(raw_color_to_ratatui)
             .unwrap_or(ratatui::style::Color::Cyan);
-        // dark-1: optional base bg/fg painted under the whole TUI. Both
-        // `None` (the default) means "leave the terminal's own colors" —
-        // no base layer is drawn. Recomputed each frame so a `Ctrl+R`
-        // theme reload re-colors live, like the accent.
+        // dark-1/dark-2: optional base bg/fg painted under the whole TUI.
+        // resolved_base_colors applies the `mode` preset with explicit
+        // background/foreground overriding it. Both `None` (the default)
+        // means "leave the terminal's own colors" — no base layer.
+        // Recomputed each frame so a `Ctrl+R` theme reload re-colors live.
+        let (base_bg, base_fg) = tui_config.theme.resolved_base_colors();
         let base_style = base_theme_style(
-            tui_config
-                .theme
-                .parse_background()
-                .map(raw_color_to_ratatui),
-            tui_config
-                .theme
-                .parse_foreground()
-                .map(raw_color_to_ratatui),
+            base_bg.map(raw_color_to_ratatui),
+            base_fg.map(raw_color_to_ratatui),
         );
         let reload_banner = app
             .reload_banner

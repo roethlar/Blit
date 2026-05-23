@@ -41,6 +41,7 @@
 //!
 //! [theme]
 //! accent_color = "cyan"         # e-7: active-tab background
+//! mode = ""                     # dark-2: ""|"dark"|"light" preset (explicit bg/fg override it)
 //! background = ""               # dark-1: base bg ("" = terminal default; "black"/"white"/...)
 //! foreground = ""               # dark-1: base fg ("" = terminal default)
 //!
@@ -329,6 +330,12 @@ pub struct ThemeDefaults {
     /// dark-1: base foreground (text) color. Same shape as
     /// [`Self::background`]; empty leaves the terminal default.
     pub foreground: String,
+    /// dark-2: a base color-scheme preset. `"dark"` → black bg / white
+    /// fg; `"light"` → white bg / black fg; empty (default) → no preset
+    /// (terminal default unless `background`/`foreground` are set). An
+    /// explicit `background`/`foreground` always overrides the preset.
+    /// A non-empty unknown value is ignored (warn + no preset).
+    pub mode: String,
 }
 
 impl ThemeDefaults {
@@ -365,6 +372,34 @@ impl ThemeDefaults {
     pub fn foreground_is_invalid(&self) -> bool {
         !self.foreground.is_empty() && accent_color_from_str(&self.foreground).is_none()
     }
+
+    /// dark-2: the `(background, foreground)` colors implied by the
+    /// `mode` preset, or `None` for an empty/unknown mode.
+    pub fn mode_preset(&self) -> Option<(RawColor, RawColor)> {
+        match self.mode.trim().to_ascii_lowercase().as_str() {
+            "dark" => Some((RawColor::Black, RawColor::White)),
+            "light" => Some((RawColor::White, RawColor::Black)),
+            _ => None,
+        }
+    }
+
+    /// dark-2: `true` when `mode` is non-empty but not a known preset
+    /// (caller warns + ignores it).
+    pub fn mode_is_invalid(&self) -> bool {
+        !self.mode.trim().is_empty() && self.mode_preset().is_none()
+    }
+
+    /// dark-1/dark-2: the effective base `(background, foreground)`
+    /// colors. An explicit `background`/`foreground` wins; otherwise the
+    /// `mode` preset supplies it; otherwise `None` (terminal default).
+    /// Resolved per-field, so `mode = "dark"` + `foreground = "green"`
+    /// yields black bg + green fg.
+    pub fn resolved_base_colors(&self) -> (Option<RawColor>, Option<RawColor>) {
+        let preset = self.mode_preset();
+        let bg = self.parse_background().or(preset.map(|(b, _)| b));
+        let fg = self.parse_foreground().or(preset.map(|(_, f)| f));
+        (bg, fg)
+    }
 }
 
 /// dark-1: parse a base bg/fg color string. Empty → `None` (leave
@@ -384,6 +419,7 @@ impl Default for ThemeDefaults {
             accent_color: Self::DEFAULT_ACCENT.to_string(),
             background: String::new(),
             foreground: String::new(),
+            mode: String::new(),
         }
     }
 }
@@ -965,6 +1001,59 @@ mod tests {
         };
         assert_eq!(t.parse_background(), None);
         assert!(t.background_is_invalid());
+    }
+
+    /// dark-2: `mode` presets expand to base bg/fg; explicit
+    /// `background`/`foreground` override the preset per-field; an
+    /// unknown mode is ignored + flagged.
+    #[test]
+    fn theme_mode_presets_and_override() {
+        let dark = ThemeDefaults {
+            mode: "dark".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert_eq!(dark.mode_preset(), Some((RawColor::Black, RawColor::White)));
+        assert_eq!(
+            dark.resolved_base_colors(),
+            (Some(RawColor::Black), Some(RawColor::White))
+        );
+        assert!(!dark.mode_is_invalid());
+
+        // Case-insensitive.
+        let light = ThemeDefaults {
+            mode: "LIGHT".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert_eq!(
+            light.resolved_base_colors(),
+            (Some(RawColor::White), Some(RawColor::Black))
+        );
+
+        // Explicit foreground overrides the dark preset's fg; bg stays
+        // the preset black.
+        let mixed = ThemeDefaults {
+            mode: "dark".to_string(),
+            foreground: "green".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert_eq!(
+            mixed.resolved_base_colors(),
+            (Some(RawColor::Black), Some(RawColor::Green))
+        );
+
+        // No mode + no explicit → terminal default (None, None).
+        assert_eq!(
+            TuiConfig::default().theme.resolved_base_colors(),
+            (None, None)
+        );
+
+        // Unknown mode → ignored + flagged.
+        let bad = ThemeDefaults {
+            mode: "solarized".to_string(),
+            ..ThemeDefaults::default()
+        };
+        assert!(bad.mode_is_invalid());
+        assert_eq!(bad.resolved_base_colors(), (None, None));
     }
 
     #[test]
