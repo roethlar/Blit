@@ -205,17 +205,23 @@ impl BufferPool {
     /// Returns a buffer from the cache if available, otherwise allocates a new one.
     /// If a memory budget is set and exceeded, this will wait until memory is released.
     pub async fn acquire(self: &Arc<Self>) -> PoolBuffer {
-        // If we have a memory budget, acquire a permit first
-        if let Some(ref sem) = self.memory_semaphore {
-            // This will wait if we've exceeded the memory budget
-            let permit = sem
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore closed unexpectedly");
-            // We need to forget the permit since we'll release it manually in PoolBuffer::drop
-            std::mem::forget(permit);
-        }
+        // If we have a memory budget, acquire a permit (waits if the
+        // budget is exhausted). Keep it OWNED in a local through the
+        // allocation below — `std::mem::forget` (transfer to manual
+        // release via PoolBuffer::drop) happens only after the
+        // possibly-panicking `vec!`. If the allocation panics (capacity
+        // overflow / OOM unwind), the local permit drops during unwind
+        // and the semaphore is restored instead of leaking a permit
+        // forever (audit-12).
+        let permit = match self.memory_semaphore {
+            Some(ref sem) => Some(
+                sem.clone()
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore closed unexpectedly"),
+            ),
+            None => None,
+        };
 
         // Try to get a buffer from the cache
         let buffer = {
@@ -234,6 +240,11 @@ impl BufferPool {
 
         self.in_use.fetch_add(1, Ordering::Relaxed);
 
+        // Allocation succeeded: hand the permit to manual management.
+        if let Some(permit) = permit {
+            std::mem::forget(permit);
+        }
+
         PoolBuffer {
             data: Some(data),
             pool: Arc::clone(self),
@@ -243,13 +254,17 @@ impl BufferPool {
     /// Try to acquire a buffer without waiting.
     /// Returns None if memory budget is exceeded or no buffers available.
     pub fn try_acquire(self: &Arc<Self>) -> Option<PoolBuffer> {
-        // If we have a memory budget, try to acquire a permit
-        if let Some(ref sem) = self.memory_semaphore {
-            match sem.clone().try_acquire_owned() {
-                Ok(permit) => std::mem::forget(permit),
+        // If we have a memory budget, try to acquire a permit. Keep it
+        // owned through the allocation; `forget` only after the
+        // possibly-panicking `vec!` so an unwind restores the semaphore
+        // rather than leaking the permit (audit-12).
+        let permit = match self.memory_semaphore {
+            Some(ref sem) => match sem.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
                 Err(_) => return None,
-            }
-        }
+            },
+            None => None,
+        };
 
         let buffer = {
             let mut cache = self.cache.lock();
@@ -265,6 +280,11 @@ impl BufferPool {
         };
 
         self.in_use.fetch_add(1, Ordering::Relaxed);
+
+        // Allocation succeeded: hand the permit to manual management.
+        if let Some(permit) = permit {
+            std::mem::forget(permit);
+        }
 
         Some(PoolBuffer {
             data: Some(data),
@@ -477,6 +497,47 @@ mod pool_tests {
 
         drop(buf2);
         drop(buf3);
+    }
+
+    /// audit-12: if the buffer allocation panics, the memory-budget
+    /// permit must be released by stack unwinding, not leaked. A leaked
+    /// permit permanently shrinks the pool and can starve all future
+    /// acquirers.
+    ///
+    /// `buffer_size = usize::MAX` makes `vec![0u8; usize::MAX]` panic with
+    /// "capacity overflow" (size exceeds isize::MAX) — an unwinding panic,
+    /// not an allocator abort — which is exactly the path the fix
+    /// protects. With `budget = 1024` the semaphore has exactly 1 permit.
+    #[test]
+    fn try_acquire_releases_permit_when_allocation_panics() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let pool = Arc::new(BufferPool::new(usize::MAX, 4, Some(1024)));
+
+        // Silence the default panic hook for the two intentional panics.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        // First acquire takes the lone permit, then panics in `vec!`.
+        let first = catch_unwind(AssertUnwindSafe(|| pool.try_acquire()));
+        // Second acquire discriminates the bug from the fix:
+        //   - permit leaked  → try_acquire_owned fails → returns None
+        //     (no panic) → catch_unwind is Ok(None).
+        //   - permit restored → reaches `vec!` again → panics →
+        //     catch_unwind is Err.
+        let second = catch_unwind(AssertUnwindSafe(|| pool.try_acquire()));
+
+        std::panic::set_hook(prev);
+
+        assert!(
+            first.is_err(),
+            "allocating usize::MAX bytes must panic (capacity overflow)"
+        );
+        assert!(
+            second.is_err(),
+            "second acquire must reach the allocation — proving the permit \
+             was released by unwind, not leaked"
+        );
     }
 
     #[tokio::test]
