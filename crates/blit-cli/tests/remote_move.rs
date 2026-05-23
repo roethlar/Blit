@@ -179,4 +179,14 @@ fn test_remote_move_remote_to_local_directory_tree() {
         !remote_sub.join("inner/y.txt").exists(),
         "remote source inner/y.txt should be deleted"
     );
+    // Symmetric to the push direction: the recursive move must remove the
+    // source directory tree, not just unlink the files.
+    assert!(
+        !remote_sub.join("inner").exists(),
+        "remote source nested dir inner/ should be removed"
+    );
+    assert!(
+        !remote_sub.exists(),
+        "remote source tree/ should be fully removed after the move"
+    );
 }
