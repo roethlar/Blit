@@ -1,9 +1,9 @@
 # d-68-f1-remote-remote-copy: delegated copy from the F1 trigger
 
 **Severity**: Feature (TUI_DESIGN §1 "between any two endpoints")
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `1dcdc66`
+**Commit**: `96075cb` (R1 `1dcdc66`)
 
 ## What
 
@@ -89,6 +89,21 @@ where the destination daemon pulls from the source.
 2. **detach + F2 visibility** (needs multi-daemon F2).
 3. **live byte progress** for delegated copy.
 
+## Round 2 (fix)
+
+**Reviewer (Medium):** the remote→remote detection only matched
+`Ok(Remote)` and dropped `Err(_)` — so a remote-*shaped* typo dest
+(e.g. `skippy:/backup`, a module path missing its trailing slash,
+which `parse_transfer_endpoint` deliberately rejects) still fell
+through into the remote→local pull as a literal local path. Same
+mis-route class the slice meant to close.
+
+**Fix (`96075cb`):** parse the destination once for a remote source
+and branch on all three outcomes — `Ok(Remote)` delegates,
+`Ok(Local)` stays remote→local, `Err(_)` → `Rejected("invalid
+destination: …")`. Two new tests: malformed remote-dest is rejected
+(no pull, no delegate); a genuine local dest still pulls. 564 tests.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
