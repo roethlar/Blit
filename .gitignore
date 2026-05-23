@@ -32,6 +32,9 @@ logs/
 
 # OS specific
 Thumbs.db
+# macOS AppleDouble resource-fork sidecars (created when copying onto
+# some filesystems); never belong in the repo.
+._*
 
 # Local benchmark/diagnostic results — not for the repo
 testing/
