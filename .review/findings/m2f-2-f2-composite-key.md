@@ -1,9 +1,9 @@
 # m2f-2-f2-composite-key: key F2 transfers by (daemon, transfer_id)
 
 **Severity**: Feature (multi-daemon F2 correctness foundation)
-**Status**: In progress / pending review
+**Status**: In progress / pending review (round 2)
 **Branch**: `phase5/a1`
-**Commit**: `08a0642`
+**Commit**: `1aed724` (R1 `08a0642`)
 
 ## What
 
@@ -69,6 +69,25 @@ verified d-21/d-22 cursor + dedup tests pass unchanged (579 total,
 - **m2f-4:** dynamic discovery (subscribe to daemons appearing
   later) + per-daemon reconnect / degraded state.
 
+## Round 2 (fix)
+
+**Reviewer:** the composite key's daemon component came from
+`f2_source_label` returning `endpoint.host` (host-only). Two daemon
+instances on the same host but different ports are valid (F1 rows
+carry a `port`, `host_port_display` preserves non-default ports), so
+both would yield the same `source_daemon` and `row_key` would collide
+exactly like the pre-m2f-2 bare-id map — including the recent dedup.
+
+**Fix (`1aed724`):** `f2_source_label` now returns
+`endpoint.host_port_display()` — host, plus `:port` when non-default,
+IPv6 bracketed — a stable identity that also serves as the row's
+display label. The `state.rs` model already keys by whatever
+identity string it's handed, so distinct `nas:9001` / `nas:9002`
+identities stay distinct. Tests: `f2_source_label_includes_non_default_port`
+(includes `:9444`, drops the default port); `same_host_different_port_daemons_stay_distinct`
+(two same-host/different-port daemons, same `transfer_id` → distinct
+active rows; recent dedup stays distinct). 581 tests.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
