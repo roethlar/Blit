@@ -15,10 +15,11 @@
 //!   destructive confirm gate; the view jumps to F3.
 //! - **local → remote** (push, d-61/d-65): runs `run_remote_push`;
 //!   mirror/move gate behind the trigger's own y/N confirm.
-//! - **remote → remote** (delegated copy, d-68): runs
-//!   `run_delegated_pull`; copy-only for now (mirror/move
-//!   delegation rejected). Both push and delegated show in the F1
-//!   push footer.
+//! - **remote → remote** (delegated, d-68/d-70): runs
+//!   `run_delegated_pull`; copy + mirror wired (mirror gates
+//!   behind the trigger's y/N confirm, like push); move is still a
+//!   follow-up (needs a remote-source delete). Both push and
+//!   delegated show in the F1 push footer.
 //!
 //! Flow:
 //! 1. `t` on a daemon row → [`F1TriggerState::begin`] (source

@@ -120,12 +120,13 @@ impl F1PushState {
         self.begin_inner(label, kind, false)
     }
 
-    /// d-68: begin a remote→remote *delegated* copy (the destination
-    /// daemon pulls from the source). Same lifecycle as a push, but
-    /// `delegated: true` swaps the footer verb. Copy-only for now, so
-    /// no `kind` parameter.
-    pub fn begin_delegated(&mut self, label: String) -> Option<u64> {
-        self.begin_inner(label, PullKind::Copy, true)
+    /// d-68/d-70: begin a remote→remote *delegated* transfer (the
+    /// destination daemon pulls from the source). Same lifecycle as a
+    /// push, but `delegated: true` adjusts the footer verb. d-68
+    /// shipped copy; d-70 adds mirror (`kind` drives the verb +
+    /// destructive confirm at the call site).
+    pub fn begin_delegated(&mut self, label: String, kind: PullKind) -> Option<u64> {
+        self.begin_inner(label, kind, true)
     }
 
     fn begin_inner(&mut self, label: String, kind: PullKind, delegated: bool) -> Option<u64> {
@@ -357,7 +358,7 @@ mod tests {
     fn begin_delegated_marks_running_and_flows_to_done() {
         let mut s = F1PushState::new();
         let rid = s
-            .begin_delegated("skippy:/b/".to_string())
+            .begin_delegated("skippy:/b/".to_string(), PullKind::Copy)
             .expect("started");
         match s.status() {
             F1PushStatus::Running {

@@ -2670,29 +2670,27 @@ fn f1_push_status(state: &f1push::F1PushState) -> Option<screens::f1::PushStatus
 }
 
 /// d-65: push footer verbs by kind. Copy reads as "push" (not
-/// "pull") since this is the local→remote direction. d-68: a
-/// remote→remote delegated copy reads "delegating/delegated" — the
-/// CLI host isn't in the byte path, so neither "push" nor "pull"
-/// fits (delegated is copy-only, so `kind` is ignored when set).
+/// "pull") since this is the local→remote direction. d-68/d-70: a
+/// remote→remote delegated copy reads "delegating/delegated" (the
+/// CLI host isn't in the byte path, so neither push nor pull fits);
+/// a delegated mirror reads "mirroring/mirrored" — the destructive
+/// dest-purge is the salient thing and the footer label shows the
+/// remote dest, so the delegated context stays clear.
 fn push_present_verb(kind: f3pull::PullKind, delegated: bool) -> &'static str {
-    if delegated {
-        return "delegating";
-    }
-    match kind {
-        f3pull::PullKind::Copy => "pushing",
-        f3pull::PullKind::Mirror => "mirroring",
-        f3pull::PullKind::Move => "moving",
+    match (delegated, kind) {
+        (true, f3pull::PullKind::Copy) => "delegating",
+        (_, f3pull::PullKind::Mirror) => "mirroring",
+        (_, f3pull::PullKind::Move) => "moving",
+        (false, f3pull::PullKind::Copy) => "pushing",
     }
 }
 
 fn push_past_verb(kind: f3pull::PullKind, delegated: bool) -> &'static str {
-    if delegated {
-        return "delegated";
-    }
-    match kind {
-        f3pull::PullKind::Copy => "pushed",
-        f3pull::PullKind::Mirror => "mirrored",
-        f3pull::PullKind::Move => "moved",
+    match (delegated, kind) {
+        (true, f3pull::PullKind::Copy) => "delegated",
+        (_, f3pull::PullKind::Mirror) => "mirrored",
+        (_, f3pull::PullKind::Move) => "moved",
+        (false, f3pull::PullKind::Copy) => "pushed",
     }
 }
 
@@ -3467,24 +3465,58 @@ fn remove_local_source(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-/// d-68: run a remote→remote *delegated* copy on a task — the
+/// d-70: build the `DelegatedPullExecution` for an F1 remote→remote
+/// transfer. Extracted from `spawn_f1_delegated_pull` so the
+/// mirror option is unit-pinnable (cf. the d-65 push builder). The
+/// options come from `f3_pull_options(kind)`: copy → no flags;
+/// mirror → `mirror_mode` on, `require_complete_scan` OFF. The OFF is
+/// deliberate and matches the CLI's delegated path
+/// (`crates/blit-cli/src/transfers/mod.rs` passes
+/// `require_complete_scan = false` for delegated copy/mirror) — in a
+/// delegated transfer the *daemons* enumerate, not this client, so
+/// the d-65 client-side partial-scan guard doesn't apply. (Move,
+/// which the CLI scans-completely for, is rejected upstream.) Always
+/// attached (`detach: false`); detached/F2-visible delegation is a
+/// follow-up.
+fn build_delegated_execution(
+    src: RemoteEndpoint,
+    dst: RemoteEndpoint,
+    kind: f3pull::PullKind,
+) -> blit_app::transfers::remote::DelegatedPullExecution {
+    let dst_label = dst.display();
+    blit_app::transfers::remote::DelegatedPullExecution {
+        src,
+        dst,
+        options: f3_pull_options(kind),
+        trace_data_plane: false,
+        // The TUI doesn't surface a `--relay-via-cli` toggle yet, so
+        // don't suggest it in transport-error hints.
+        relay_fallback_suggestable: false,
+        dst_label,
+        detach: false,
+    }
+}
+
+/// d-68: run a remote→remote *delegated* transfer on a task — the
 /// destination daemon pulls from the source daemon (the CLI host is
 /// not in the byte path) — and flatten the outcome into an
 /// [`F1PushReply`] (generation-guarded by `request_id`, reusing the
-/// F1 push footer). Copy-only and attached (`detach: false`,
-/// matching the CLI default). d-69: a progress forwarder turns the
-/// daemon's cumulative `BytesProgress` (delivered as `Payload`
-/// deltas via `report_bytes_progress`) into live `(files, bytes)`
-/// snapshots on `progress_tx`; the authoritative totals still ride
-/// the terminal reply.
+/// F1 push footer). Attached (`detach: false`, matching the CLI
+/// default). d-69: a progress forwarder turns the daemon's cumulative
+/// `BytesProgress` (delivered as `Payload` deltas via
+/// `report_bytes_progress`) into live `(files, bytes)` snapshots on
+/// `progress_tx`; the authoritative totals still ride the terminal
+/// reply. d-70: `kind` selects copy vs mirror via
+/// [`build_delegated_execution`].
 fn spawn_f1_delegated_pull(
     request_id: u64,
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
+    kind: f3pull::PullKind,
     tx: mpsc::Sender<F1PushReply>,
     progress_tx: mpsc::Sender<F1PushProgress>,
 ) {
-    use blit_app::transfers::remote::{run_delegated_pull, DelegatedPullExecution};
+    use blit_app::transfers::remote::run_delegated_pull;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
         // d-69: progress monitor — run_delegated_pull reports Payload
@@ -3509,20 +3541,7 @@ fn spawn_f1_delegated_pull(
             }
         });
 
-        let dst_label = dst.display();
-        let execution = DelegatedPullExecution {
-            src,
-            dst,
-            options: f3_pull_options(f3pull::PullKind::Copy),
-            trace_data_plane: false,
-            // The TUI doesn't surface a `--relay-via-cli` toggle yet,
-            // so don't suggest it in transport-error hints.
-            relay_fallback_suggestable: false,
-            dst_label,
-            // Attached for now (CLI default). Detached + F2 visibility
-            // lands with multi-daemon F2.
-            detach: false,
-        };
+        let execution = build_delegated_execution(src, dst, kind);
         let sent = run_delegated_pull(execution, Some(&progress), |_| {}).await;
         // Close the progress channel → the forwarder drains and exits
         // before the terminal reply.
@@ -3601,7 +3620,7 @@ fn plan_f1_trigger(
             Ok(Endpoint::Remote(dst_ep))
                 if ensure_remote_destination_supported(&dst_ep).is_ok() =>
             {
-                return plan_f1_delegated(app, source_ep.clone(), dst_ep, kind);
+                return plan_f1_delegated(app, source_ep.clone(), dst_ep, kind, confirmed);
             }
             // Discovery (bare host) or genuine local path → pull below.
             Ok(_) => {}
@@ -3690,35 +3709,43 @@ fn plan_f1_trigger(
     }
 }
 
-/// d-68: classify + launch a remote→remote delegated transfer from
-/// the F1 trigger. Copy delegates immediately (reusing the F1 push
-/// footer with a "delegating/delegated" verb); mirror/move
-/// delegation is not wired yet, so reject them with a clear message
-/// rather than silently mis-routing. The destination must resolve to
-/// a module (`host:/module/`) — the same gate the push path applies.
+/// d-68/d-70: classify + launch a remote→remote delegated transfer
+/// from the F1 trigger. Copy delegates immediately; mirror (d-70) is
+/// destructive (the destination daemon purges entries absent from the
+/// source) so it routes through the trigger's y/N confirm — same gate
+/// the local→remote push mirror uses. Move delegation is still a
+/// follow-up (it needs a remote-source delete RPC), so reject it.
+/// The destination must resolve to a module (`host:/module/`).
 fn plan_f1_delegated(
     app: &mut AppState,
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     kind: f3pull::PullKind,
+    confirmed: bool,
 ) -> TriggerOutcome {
     use blit_app::endpoints::ensure_remote_destination_supported;
-    if kind != f3pull::PullKind::Copy {
+    if kind == f3pull::PullKind::Move {
         return TriggerOutcome::Rejected(
-            "remote→remote supports copy only for now (no mirror/move)".into(),
+            "remote→remote move isn't supported yet (copy and mirror are)".into(),
         );
     }
     if ensure_remote_destination_supported(&dst).is_err() {
         return TriggerOutcome::Rejected("destination needs a module (host:/module/)".into());
     }
+    // d-70: mirror purges the destination — gate it behind the
+    // trigger's y/N confirm (copy launches straight away).
+    if kind.is_destructive() && !confirmed {
+        return TriggerOutcome::NeedsConfirm;
+    }
     let label = dst.display();
-    let Some(request_id) = app.f1_push.begin_delegated(label) else {
+    let Some(request_id) = app.f1_push.begin_delegated(label, kind) else {
         return TriggerOutcome::Rejected("a push is already running".into());
     };
     spawn_f1_delegated_pull(
         request_id,
         src,
         dst,
+        kind,
         app.f1_push_reply_tx.clone(),
         app.f1_push_progress_tx.clone(),
     );
@@ -7820,18 +7847,83 @@ mod tests {
 
     /// d-68: remote→remote mirror/move aren't wired yet — they must
     /// be rejected with a clear message, never silently mis-routed.
+    /// d-70: remote→remote MOVE is still a follow-up — rejected (it
+    /// needs a remote-source delete RPC). Mirror is now wired (see
+    /// the confirm test below).
     #[test]
-    fn plan_f1_trigger_remote_to_remote_mirror_move_rejected() {
-        for kind in [f3pull::PullKind::Mirror, f3pull::PullKind::Move] {
-            let mut app = make_test_app_state(Screen::F1);
-            let out = plan_f1_trigger(&mut app, "nas:/photos/", "skippy:/backup/", kind, false);
-            match out {
-                TriggerOutcome::Rejected(msg) => {
-                    assert!(msg.contains("copy only"), "{kind:?}: {msg}")
-                }
-                other => panic!("{kind:?}: expected Rejected, got {other:?}"),
-            }
+    fn plan_f1_trigger_remote_to_remote_move_rejected() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "skippy:/backup/",
+            f3pull::PullKind::Move,
+            false,
+        );
+        match out {
+            TriggerOutcome::Rejected(msg) => assert!(msg.contains("move isn't supported"), "{msg}"),
+            other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    /// d-70: remote→remote MIRROR is destructive (purges the dest), so
+    /// it routes through the trigger's y/N confirm: unconfirmed →
+    /// NeedsConfirm (no launch); confirmed → delegated launch with
+    /// kind=Mirror.
+    #[tokio::test]
+    async fn plan_f1_trigger_remote_to_remote_mirror_confirms_then_launches() {
+        let mut app = make_test_app_state(Screen::F1);
+        let unconfirmed = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "skippy:/backup/",
+            f3pull::PullKind::Mirror,
+            false,
+        );
+        assert!(
+            matches!(unconfirmed, TriggerOutcome::NeedsConfirm),
+            "mirror needs confirm"
+        );
+        assert!(!app.f1_push.is_running(), "no launch before confirm");
+
+        let confirmed = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "skippy:/backup/",
+            f3pull::PullKind::Mirror,
+            true,
+        );
+        assert!(matches!(confirmed, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running {
+                delegated, kind, ..
+            } => {
+                assert!(*delegated, "delegated lifecycle");
+                assert_eq!(*kind, f3pull::PullKind::Mirror, "carries the mirror kind");
+            }
+            other => panic!("expected delegated mirror Running, got {other:?}"),
+        }
+    }
+
+    /// d-70: the delegated execution builder pins the mirror option.
+    /// Mirror sets `mirror_mode` but leaves `require_complete_scan`
+    /// OFF — matching the CLI's delegated path (the daemons scan, not
+    /// this client). Copy sets neither.
+    #[test]
+    fn build_delegated_execution_mirror_options() {
+        let src = RemoteEndpoint::parse("nas:/photos/").expect("src");
+        let dst = RemoteEndpoint::parse("skippy:/backup/").expect("dst");
+
+        let mirror = build_delegated_execution(src.clone(), dst.clone(), f3pull::PullKind::Mirror);
+        assert!(mirror.options.mirror_mode, "mirror enables the dest purge");
+        assert!(
+            !mirror.options.require_complete_scan,
+            "delegated mirror leaves scan-gate off (daemons scan, not the client)"
+        );
+
+        let copy = build_delegated_execution(src, dst, f3pull::PullKind::Copy);
+        assert!(!copy.options.mirror_mode, "copy never purges");
+        assert!(!copy.options.require_complete_scan);
     }
 
     /// d-68 R2: with a remote source, a remote-*shaped* but invalid
