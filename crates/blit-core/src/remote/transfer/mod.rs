@@ -6,6 +6,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod sink;
 pub mod source;
+pub mod stall_guard;
 pub mod tar_safety;
 
 pub use data_plane::{
