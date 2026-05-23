@@ -27,6 +27,12 @@
 use blit_core::generated::DaemonState;
 use std::fmt::Write;
 
+/// HELP text for `blit_daemon_up`. Shared between the success
+/// ([`format_metrics`]) and failed-scrape ([`down_metrics`]) bodies so
+/// the HELP line stays identical across scrapes — Prometheus warns when
+/// a metric's HELP changes between scrapes.
+const UP_HELP: &str = "Whether the daemon GetState scrape succeeded (1 = up, 0 = scrape failed).";
+
 /// Format one scrape's worth of metrics. Always ends with a
 /// trailing newline so concatenation stays line-oriented.
 pub(crate) fn format_metrics(state: &DaemonState) -> String {
@@ -35,7 +41,7 @@ pub(crate) fn format_metrics(state: &DaemonState) -> String {
     metric(
         &mut out,
         "blit_daemon_up",
-        "Whether the daemon GetState scrape succeeded (1 = this snapshot is live).",
+        UP_HELP,
         "gauge",
         &format!("{{version=\"{}\"}}", escape_label(&state.version)),
         1,
@@ -86,6 +92,17 @@ pub(crate) fn format_metrics(state: &DaemonState) -> String {
     // we cannot tell a real zero from a metrics-disabled zero, and
     // publishing false zeros would corrupt a Prometheus counter series.
 
+    out
+}
+
+/// Body for a FAILED scrape: just `blit_daemon_up 0`. The HTTP server
+/// (bridge-2) serves this when the GetState query fails, so Prometheus
+/// records the exporter as alive but the target daemon as down (a `0`
+/// gauge), rather than a scrape error. Same HELP/TYPE as the success
+/// path keeps the series consistent.
+pub(crate) fn down_metrics() -> String {
+    let mut out = String::new();
+    metric(&mut out, "blit_daemon_up", UP_HELP, "gauge", "", 0);
     out
 }
 
@@ -186,6 +203,15 @@ mod tests {
         state.delegation_enabled = false;
         let out = format_metrics(&state);
         assert!(out.contains("blit_daemon_delegation_enabled 0"), "{out}");
+    }
+
+    #[test]
+    fn down_metrics_reports_up_zero() {
+        let out = down_metrics();
+        assert!(out.contains("# TYPE blit_daemon_up gauge"), "{out}");
+        assert!(out.contains("blit_daemon_up 0"), "{out}");
+        // No version label (we couldn't scrape it).
+        assert!(!out.contains("version="), "{out}");
     }
 
     #[test]
