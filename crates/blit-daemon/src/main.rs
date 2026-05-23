@@ -1,6 +1,7 @@
 mod active_jobs;
 mod delegation_gate;
 mod metrics;
+mod recents_store;
 mod runtime;
 mod service;
 
@@ -110,6 +111,14 @@ async fn main() -> Result<()> {
     // The handle is owned by the runtime for the daemon's
     // lifetime; on process exit tokio aborts in-flight tasks.
     let _progress_ticker = spawn_progress_ticker(&service);
+
+    // rec-1: hydrate the recent-runs ring from disk and arm
+    // write-through persistence before serving, so `GetState.recent[]`
+    // survives daemon restarts. A store that can't be read degrades to
+    // an empty ring (handled in `recents_store::load`); only path
+    // resolution can fail here, which is fatal config breakage worth
+    // surfacing.
+    let _recents_writer = active_jobs::spawn_recents_writer(service.active_jobs.arm_persistence()?);
 
     println!("blitd v2 listening on {}", addr);
 

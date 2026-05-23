@@ -89,9 +89,9 @@ use blit_core::generated::DaemonEvent;
 use blit_core::remote::transfer::ByteProgressSink;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// Default depth of the recent-runs ring buffer. Mirrors the
@@ -116,7 +116,8 @@ pub const JOB_EVENT_RING_CAP: usize = 64;
 /// dispatch sites in `service/core.rs`. When milestone C
 /// introduces the `TransferStarted.Kind` wire enum, the
 /// conversion will live in the GetState handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActiveJobKind {
     Push,
     Pull,
@@ -229,7 +230,7 @@ pub struct ActiveJob {
 /// the read consumer (`GetState` handler) lands in b-4; the
 /// `recent()` tests in this module exercise them so the
 /// shape is locked in now.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
 pub struct TransferRecord {
     pub transfer_id: String,
@@ -342,6 +343,16 @@ struct Inner {
     /// unique within a single millisecond when multiple
     /// transfers register at the same instant.
     counter: AtomicU64,
+    /// rec-1: persistence signal. Empty by default — `ActiveJobs::new`
+    /// and the test constructors leave persistence off, so they touch
+    /// no disk. [`ActiveJobs::arm_persistence`] installs the sender
+    /// (once) at daemon startup; after that, [`ActiveJobGuard::drop`]
+    /// pings it whenever it appends to the ring, and the writer task
+    /// rewrites `recents.jsonl`. A unit `()` signal (not the record)
+    /// keeps the ring the single source of truth — the writer reads the
+    /// current bounded ring rather than reconstructing it from a stream
+    /// of deltas.
+    persist_tx: OnceLock<mpsc::UnboundedSender<()>>,
 }
 
 impl ActiveJobs {
@@ -364,6 +375,7 @@ impl ActiveJobs {
                 recent: Mutex::new(VecDeque::with_capacity(limit)),
                 recent_limit: limit,
                 counter: AtomicU64::new(0),
+                persist_tx: OnceLock::new(),
             }),
         }
     }
@@ -691,6 +703,84 @@ impl ActiveJobs {
             .cloned()
             .collect()
     }
+
+    /// rec-1: hydrate the ring from the on-disk recents store and arm
+    /// write-through persistence, using the default
+    /// [`crate::recents_store::recents_path`]. Called once at daemon
+    /// startup (`main`), before serving, so the first `GetState`
+    /// already reflects pre-restart recents.
+    ///
+    /// Returns the [`RecentsWriter`] the caller must hand to
+    /// [`spawn_recents_writer`]; until it runs, ring appends still
+    /// queue persistence signals (the channel is unbounded), so none
+    /// are lost in the startup window.
+    pub fn arm_persistence(&self) -> eyre::Result<RecentsWriter> {
+        Ok(self.arm_persistence_at(crate::recents_store::recents_path()?))
+    }
+
+    /// [`Self::arm_persistence`] against an explicit path. Lets tests
+    /// drive hydration + write-through against a tempdir without
+    /// touching the global config dir.
+    pub fn arm_persistence_at(&self, path: std::path::PathBuf) -> RecentsWriter {
+        // Hydrate the ring from disk. Startup-only, so the ring is
+        // empty here; we still drain-then-extend (rather than assume
+        // empty) so the method is correct if ever called post-startup.
+        let loaded = crate::recents_store::load(&path, self.inner.recent_limit);
+        {
+            let mut ring = self.inner.recent.lock().unwrap_or_else(|e| e.into_inner());
+            ring.clear();
+            ring.extend(loaded);
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        // `set` fails only if persistence was already armed; the first
+        // arm wins and a duplicate call is a no-op writer that will
+        // never be pinged.
+        let _ = self.inner.persist_tx.set(tx);
+        RecentsWriter {
+            active_jobs: self.clone(),
+            rx,
+            path,
+        }
+    }
+}
+
+/// rec-1: the write-through half of recents persistence, produced by
+/// [`ActiveJobs::arm_persistence`]. Owns the persistence-signal
+/// receiver and a handle back to the ring; [`spawn_recents_writer`]
+/// drives its [`RecentsWriter::run`] loop on the runtime for the
+/// daemon's lifetime (mirroring the progress ticker).
+pub struct RecentsWriter {
+    active_jobs: ActiveJobs,
+    rx: mpsc::UnboundedReceiver<()>,
+    path: std::path::PathBuf,
+}
+
+impl RecentsWriter {
+    /// Drain persistence signals and rewrite the recents store. Each
+    /// signal coalesces with any others already queued (a burst of
+    /// completions collapses into one atomic rewrite of the current
+    /// ring), then writes the bounded ring to disk. Returns when the
+    /// sender is dropped (all `ActiveJobs` clones gone — daemon
+    /// shutdown).
+    pub async fn run(mut self) {
+        while self.rx.recv().await.is_some() {
+            // Coalesce: if several completions raced, one rewrite of
+            // the (already-updated) ring covers them all.
+            while self.rx.try_recv().is_ok() {}
+            let records = self.active_jobs.recent();
+            if let Err(e) = crate::recents_store::write_atomic(&self.path, &records) {
+                eprintln!("[blitd] failed to persist recents to {:?}: {e}", self.path);
+            }
+        }
+    }
+}
+
+/// rec-1: spawn the recents writer on the runtime. The handle is owned
+/// for the daemon's lifetime; on process exit tokio aborts it (any
+/// final unpersisted recents are immaterial). Mirrors
+/// [`crate::service::spawn_progress_ticker`].
+pub fn spawn_recents_writer(writer: RecentsWriter) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(writer.run())
 }
 
 impl Default for ActiveJobs {
@@ -892,6 +982,16 @@ impl Drop for ActiveJobGuard {
                 let bytes = entry.bytes_counter.load(Ordering::Relaxed);
                 let record = build_record(entry.job, outcome, bytes);
                 push_recent(&self.inner.recent, record, self.inner.recent_limit);
+                // rec-1: nudge the persistence writer (if armed). Drop
+                // is synchronous and on the runtime, so we must not do
+                // file I/O here — an unbounded-channel send is
+                // non-blocking and never awaits. `send` only errs if
+                // the writer task is gone (daemon shutting down), which
+                // we ignore: a recents write lost at shutdown is
+                // immaterial.
+                if let Some(tx) = self.inner.persist_tx.get() {
+                    let _ = tx.send(());
+                }
             }
         }
     }
@@ -1273,6 +1373,111 @@ mod tests {
         // Active row drained, but no ring entry pushed.
         assert!(table.snapshot().is_empty());
         assert!(table.recent().is_empty());
+    }
+
+    /// rec-1: a persisted record for hydration tests. Fields are all
+    /// public; `transfer_id` is a fixed marker since hydration replays
+    /// whatever was on disk verbatim (no id minting).
+    fn persisted_record(id: &str) -> TransferRecord {
+        TransferRecord {
+            transfer_id: id.to_string(),
+            kind: ActiveJobKind::Pull,
+            peer: "peer".to_string(),
+            module: "mod".to_string(),
+            path: "path".to_string(),
+            start_unix_ms: 1,
+            duration_ms: 2,
+            bytes: 3,
+            ok: true,
+            error_message: String::new(),
+        }
+    }
+
+    /// Poll the recents file until it holds at least `want` records or
+    /// the bounded attempt budget runs out — the writer task flushes
+    /// asynchronously after a completion signal.
+    async fn poll_recents(path: &std::path::Path, want: usize) -> Vec<TransferRecord> {
+        for _ in 0..100 {
+            let loaded = crate::recents_store::load(path, DEFAULT_RECENT_LIMIT);
+            if loaded.len() >= want {
+                return loaded;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        crate::recents_store::load(path, DEFAULT_RECENT_LIMIT)
+    }
+
+    /// rec-1: arming persistence hydrates the in-memory ring from the
+    /// on-disk store, oldest-first, so a restarted daemon's first
+    /// `GetState.recent[]` reflects pre-restart runs.
+    #[tokio::test]
+    async fn arm_persistence_hydrates_ring_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recents.jsonl");
+        crate::recents_store::write_atomic(&path, &[persisted_record("a"), persisted_record("b")])
+            .unwrap();
+
+        let table = ActiveJobs::with_recent_limit(DEFAULT_RECENT_LIMIT);
+        assert!(table.recent().is_empty(), "ring starts empty pre-arm");
+        let _writer = table.arm_persistence_at(path.clone());
+
+        let ids: Vec<_> = table.recent().into_iter().map(|r| r.transfer_id).collect();
+        assert_eq!(ids, ["a", "b"], "hydrated from disk, oldest-first");
+    }
+
+    /// rec-1: a completed transfer is written through to the recents
+    /// store by the writer task, so it survives a restart.
+    #[tokio::test]
+    async fn completed_transfer_writes_through_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recents.jsonl");
+
+        let table = ActiveJobs::with_recent_limit(DEFAULT_RECENT_LIMIT);
+        let writer = table.arm_persistence_at(path.clone());
+        let handle = tokio::spawn(writer.run());
+
+        {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                "wt-peer".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        } // drop → push_recent + persistence signal
+
+        let loaded = poll_recents(&path, 1).await;
+        assert_eq!(loaded.len(), 1, "completion flushed to disk");
+        assert_eq!(loaded[0].peer, "wt-peer");
+        assert!(loaded[0].ok);
+        handle.abort();
+    }
+
+    /// rec-1: persistence is opt-in — a table that was never armed
+    /// touches no disk on completion (the writer signal is a no-op when
+    /// the `OnceLock` is empty). Guards against a regression that would
+    /// make every `ActiveJobs` (including test/default ones) write.
+    #[tokio::test]
+    async fn unarmed_table_does_not_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("recents.jsonl");
+        let table = ActiveJobs::with_recent_limit(DEFAULT_RECENT_LIMIT);
+        {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                "p".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+        // Nothing armed → no writer → the store file is never created.
+        assert!(!path.exists(), "unarmed ActiveJobs must not write recents");
+        assert_eq!(
+            table.recent().len(),
+            1,
+            "but the in-memory ring still works"
+        );
     }
 
     #[tokio::test]
