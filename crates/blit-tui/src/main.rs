@@ -27,6 +27,7 @@ mod config;
 mod daemons;
 mod diagnostics;
 mod display_f1;
+mod display_f2;
 mod display_f3;
 mod f1push;
 mod f1trigger;
@@ -42,6 +43,7 @@ mod transfer;
 mod verify;
 
 use crate::display_f1::{f1_push_status, f1_trigger_prompt};
+use crate::display_f2::{cancel_status_remaining_ttl, cancel_status_to_display};
 use crate::display_f3::{f3_del_to_display, f3_du_to_display, f3_pull_to_display};
 use crate::progress_accum::{
     accumulate_delegated_progress, accumulate_pull_progress, accumulate_push_progress,
@@ -2885,78 +2887,6 @@ struct TransferReply {
     result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
 }
 
-/// d-22: convert the internal `F2CancelStatus` to the
-/// renderer-facing `F2CancelDisplay` (which lives in
-/// `screens/f2.rs` to avoid the screens layer reaching
-/// into main.rs's types).
-fn cancel_status_to_display(
-    status: &F2CancelStatus,
-    now: Instant,
-    ttl: std::time::Duration,
-) -> screens::f2::F2CancelDisplay {
-    use blit_app::admin::jobs::CancelJobOutcome;
-    use screens::f2::F2CancelDisplay;
-    match status {
-        F2CancelStatus::Idle => F2CancelDisplay::Hidden,
-        F2CancelStatus::Confirming { transfer_id, .. } => F2CancelDisplay::ConfirmingCancel {
-            transfer_id: transfer_id.clone(),
-        },
-        F2CancelStatus::ConfirmingBatch { targets } => F2CancelDisplay::ConfirmingBatch {
-            count: targets.len(),
-        },
-        F2CancelStatus::ConfirmingClearRecent => F2CancelDisplay::ConfirmingClearRecent,
-        F2CancelStatus::BatchInitiated { count, finished_at } => {
-            if now.saturating_duration_since(*finished_at) >= ttl {
-                return F2CancelDisplay::Hidden;
-            }
-            F2CancelDisplay::BatchInitiated { count: *count }
-        }
-        F2CancelStatus::Sending { transfer_id, .. } => F2CancelDisplay::Sending {
-            transfer_id: transfer_id.clone(),
-        },
-        F2CancelStatus::Done {
-            outcome,
-            finished_at,
-        } => {
-            // d-23: hide the terminal fragment after the
-            // TTL. The state itself stays — we don't mutate
-            // it from the renderer — but the operator sees
-            // the footer self-clean.
-            if now.saturating_duration_since(*finished_at) >= ttl {
-                return F2CancelDisplay::Hidden;
-            }
-            match outcome {
-                CancelJobOutcome::Cancelled { transfer_id: id } => F2CancelDisplay::Cancelled {
-                    transfer_id: id.clone(),
-                },
-                CancelJobOutcome::NotFound { transfer_id: id } => F2CancelDisplay::NotFound {
-                    transfer_id: id.clone(),
-                },
-                CancelJobOutcome::Unsupported {
-                    transfer_id: id,
-                    message,
-                } => F2CancelDisplay::Unsupported {
-                    transfer_id: id.clone(),
-                    message: message.clone(),
-                },
-            }
-        }
-        F2CancelStatus::Error {
-            transfer_id,
-            message,
-            finished_at,
-        } => {
-            if now.saturating_duration_since(*finished_at) >= ttl {
-                return F2CancelDisplay::Hidden;
-            }
-            F2CancelDisplay::Failed {
-                transfer_id: transfer_id.clone(),
-                message: message.clone(),
-            }
-        }
-    }
-}
-
 /// d-36: re-read `tui.toml` for a `Ctrl+R` hot-reload.
 /// Returns the config to use plus the banner to show.
 ///
@@ -3925,43 +3855,6 @@ fn advance_batch_pull(app: &mut AppState) {
             }
         }
         None => app.f3_batch_pull = None,
-    }
-}
-
-/// d-24 round 2: how much wall-clock time remains before the
-/// d-23 auto-hide kicks in on a Done/Error cancel fragment.
-///
-/// Returns `Some(remaining)` only while the fragment is still
-/// visible. `None` for:
-/// - `Idle` / `Sending` — no deadline (Sending waits for the
-///   RPC reply, not a timer).
-/// - Already-expired Done/Error — the renderer already returns
-///   `Hidden`, so no further wakeup is needed.
-///
-/// The event loop reads this to ensure a short
-/// `cancel_status_ttl_ms` isn't silently bounded by a longer
-/// `live_tick.interval_ms` (round-1 R2 reopen). The fix is
-/// `min(live_tick_interval, remaining)` while F2 is visible.
-fn cancel_status_remaining_ttl(
-    status: &F2CancelStatus,
-    now: Instant,
-    ttl: std::time::Duration,
-) -> Option<std::time::Duration> {
-    let finished_at = match status {
-        F2CancelStatus::Done { finished_at, .. } => *finished_at,
-        F2CancelStatus::Error { finished_at, .. } => *finished_at,
-        // d-30: BatchInitiated has a finished_at like
-        // Done/Error — the loop must wake to hide it on
-        // the same TTL boundary as the single-cancel
-        // variants.
-        F2CancelStatus::BatchInitiated { finished_at, .. } => *finished_at,
-        _ => return None,
-    };
-    let elapsed = now.saturating_duration_since(finished_at);
-    if elapsed >= ttl {
-        None
-    } else {
-        Some(ttl - elapsed)
     }
 }
 

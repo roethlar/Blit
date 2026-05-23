@@ -68,3 +68,7 @@ background-task plumbing (`spawn_*`/`run_*` + Reply structs,
 `del_wire_path`); the F1 trigger planning
 (`plan_f1_trigger`/`plan_f1_delegated`/`TriggerOutcome`); and ultimately
 the `run_router` event loop / `handle_pane_action` / render orchestration.
+
+## Reviewer comments
+
+Verified. The verbatim extraction of F1 state→display mapping helpers (`f1_trigger_prompt`, `f1_push_status`) and the associated private verb helpers to the new `display_f1` module is correct, behavior-preserving, and keeps `main.rs` cleaner. Verified with clean clippy/fmt and all 630 workspace tests passing.
