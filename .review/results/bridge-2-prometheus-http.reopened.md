@@ -1,4 +1,4 @@
-Reviewed sha: `eade7dde1527e387bc63b42253012cd46a1f7859`
+Reviewed sha: `f7ff757dee22e220684e66c7736db66fe80f70ab`
 
 Verdict: reopened
 
@@ -7,12 +7,12 @@ Validation run:
 - `cargo fmt --all -- --check`: passed
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed
 - `cargo test --workspace`: passed
-- `cargo test -p blit-prometheus-bridge`: passed, 9 tests
+- `cargo test -p blit-prometheus-bridge`: passed, 10 tests
 
 Findings:
 
-1. Medium: idle or slow clients can park connection tasks forever.
+1. Medium: the daemon scrape itself is still unbounded, so hung daemon calls can park `/metrics` handlers indefinitely.
 
-   `crates/blit-prometheus-bridge/src/server.rs:52` spawns one task per accepted connection, and `read_request_head` then waits on `stream.read(&mut chunk).await` at `crates/blit-prometheus-bridge/src/server.rs:100` with no timeout. The 16 KiB cap at `crates/blit-prometheus-bridge/src/server.rs:105` only bounds buffered bytes after reads happen; it does not bound time. A client can connect and send nothing, or trickle bytes below the cap without ever ending headers, and each connection keeps a task and socket open indefinitely. This contradicts the comment at `crates/blit-prometheus-bridge/src/server.rs:23` that frames the cap as guarding against slowloris-style clients, and it is risky because `--listen` accepts any `SocketAddr`, including non-loopback binds.
+   The round-2 timeout closes the idle-client request-head hole, but once `GET /metrics` is parsed, `handle_conn` awaits `jobs::query(remote, recent_limit)` at `crates/blit-prometheus-bridge/src/server.rs:94` with no deadline. `jobs::query` opens a tonic channel and awaits `GetState` with no timeout in `crates/blit-app/src/admin/jobs.rs:22` through `crates/blit-app/src/admin/jobs.rs:33`. If the daemon endpoint accepts a connection but stalls, or the RPC never completes, the HTTP request task remains stuck until the lower transport eventually gives up. That also violates the advertised bridge behavior from the finding doc: a failed scrape should return `200` with `blit_daemon_up 0`, but a hung scrape returns nothing until Prometheus times out the target as a scrape error.
 
-   Add an explicit request-head read timeout, for example by wrapping `read_request_head` in `tokio::time::timeout` from `handle_conn`, or by timing out each read loop. Return a closed connection or a small `408 Request Timeout` response on timeout. Please add a regression test that connects to the server/helper and proves an idle client is released within the configured timeout.
+   Put a scrape deadline around the `jobs::query` call in the bridge server and route elapsed deadlines through `metrics::down_metrics()` the same way other query errors are handled. Please add a regression test that uses a pending scrape future or a fake/stalled endpoint to prove `/metrics` returns `blit_daemon_up 0` within the configured scrape timeout instead of hanging.
