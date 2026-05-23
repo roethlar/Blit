@@ -57,4 +57,4 @@ orchestration. Done incrementally so each stays compiler+test-verifiable.
 
 ## Reviewer comments
 
-(empty — pending review)
+Verified. The verbatim extraction of the five pure progress/throughput helper functions (`accumulate_pull_progress`, `accumulate_push_progress`, `accumulate_delegated_progress`, `pull_throughput`, and `du_total_from_entries`) from `main.rs` into the new `progress_accum` module is clean, behavior-preserving, and introduces zero behavior change. Crate-root re-exports successfully keep existing call sites and inline tests working out-of-the-box. Verified with clean clippy/fmt and all 630 workspace tests passing.
