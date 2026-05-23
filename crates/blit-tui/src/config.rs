@@ -13,9 +13,12 @@
 //! error keeps the current config rather than reverting
 //! to defaults.
 //!
-//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / d-24 / d-40 / d-52 / d-64):
+//! Current schema (grown through e-3 / e-4 / e-5 / e-6 / e-7 / e-8 / d-24 / d-40 / d-52 / d-64):
 //!
 //! ```toml
+//! [daemon]
+//! default_remote = ""           # e-8: fallback remote when no --remote flag (CLI flag wins)
+//!
 //! [verify]
 //! default_use_checksum = false  # `H` toggle's startup value
 //! default_one_way = false       # `O` toggle's startup value
@@ -59,6 +62,21 @@ pub struct TuiConfig {
     pub live_tick: LiveTickDefaults,
     pub theme: ThemeDefaults,
     pub transfer: TransferDefaults,
+    pub daemon: DaemonDefaults,
+}
+
+/// e-8: launch-time daemon defaults.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DaemonDefaults {
+    /// The remote the TUI points F2/F3 at when no `--remote`
+    /// CLI flag is given (`host` or `host:port`, optionally
+    /// with a `:/module/path`). Empty (default) means
+    /// "no default remote" — the TUI launches mDNS-only, as
+    /// before. The CLI flag, when present, always wins; this
+    /// only fills the gap so an operator who always targets
+    /// the same daemon doesn't retype it every launch.
+    pub default_remote: String,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -432,6 +450,22 @@ mod tests {
         let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
         assert!(cfg.verify.default_use_checksum);
         assert!(cfg.verify.default_one_way);
+    }
+
+    /// e-8: `[daemon] default_remote` parses, and defaults to empty
+    /// (mDNS-only launch) when the section is absent.
+    #[test]
+    fn daemon_default_remote_parses_and_defaults_empty() {
+        assert_eq!(
+            TuiConfig::default().daemon.default_remote,
+            "",
+            "no [daemon] section → no default remote"
+        );
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[daemon]\ndefault_remote = \"nas:9444:/m/\"\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.daemon.default_remote, "nas:9444:/m/");
     }
 
     /// e-6: path-prefill fields parse + default to empty.

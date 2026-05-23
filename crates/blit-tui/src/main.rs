@@ -457,6 +457,23 @@ async fn main() -> Result<()> {
 /// completion arrives through `f2_setup_rx`. The TUI's first
 /// draw therefore runs immediately, regardless of how slow
 /// or unreachable the remote is.
+/// e-8: resolve the launch remote. An explicit `--remote` flag always
+/// wins (returned verbatim, including a degenerate empty string, so the
+/// existing parse-error path is preserved). Absent a flag, fall back to
+/// `[daemon] default_remote` when it's non-blank; a blank/whitespace
+/// config value is treated as unset so the TUI launches mDNS-only.
+fn resolve_launch_remote(cli_remote: Option<&str>, config_default: &str) -> Option<String> {
+    if let Some(raw) = cli_remote {
+        return Some(raw.to_string());
+    }
+    let trimmed = config_default.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 async fn run_router(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     args: &Args,
@@ -475,15 +492,24 @@ async fn run_router(
     // surface the specific message (backslash guidance,
     // missing module-path syntax, etc.) instead of a
     // generic "invalid endpoint."
+    // e-8: an explicit `--remote` wins; otherwise fall back to
+    // `[daemon] default_remote` from tui.toml. A config-sourced remote
+    // flows through the same parse path, so a bad value surfaces the
+    // same F2/F3 banner as a bad CLI flag.
+    let launch_remote =
+        resolve_launch_remote(args.remote.as_deref(), &tui_config.daemon.default_remote);
     let (parsed_remote, parse_error_message): (Option<RemoteEndpoint>, Option<String>) =
-        match args.remote.as_deref() {
+        match launch_remote.as_deref() {
             Some(raw) => match RemoteEndpoint::parse(raw) {
                 Ok(ep) => (Some(ep), None),
                 Err(err) => (None, Some(format!("parse '{raw}': {err}"))),
             },
             None => (None, None),
         };
-    let remote_label = args.remote.as_deref().unwrap_or("(no remote)").to_string();
+    let remote_label = launch_remote
+        .as_deref()
+        .unwrap_or("(no remote)")
+        .to_string();
 
     // a1-6b: background tasks spawned ONCE here. Receivers
     // live in this function's scope; pane loops borrow them
@@ -7762,6 +7788,37 @@ mod tests {
             steady,
             f2_watched_identities(&app),
             "stable feed → no change"
+        );
+    }
+
+    /// e-8: the launch remote resolves CLI-first, then the
+    /// `[daemon] default_remote` config, then nothing. An explicit flag
+    /// always wins (even an empty one, preserving the existing
+    /// parse-error path); a blank/whitespace config is treated as unset.
+    #[test]
+    fn resolve_launch_remote_prefers_cli_then_config() {
+        // CLI flag present → used verbatim, config ignored.
+        assert_eq!(
+            resolve_launch_remote(Some("nas:/m/"), "skippy:/x/"),
+            Some("nas:/m/".to_string())
+        );
+        // An explicit empty flag still counts as "the operator said so".
+        assert_eq!(
+            resolve_launch_remote(Some(""), "skippy:/x/"),
+            Some(String::new())
+        );
+        // No flag → fall back to a non-blank config default.
+        assert_eq!(
+            resolve_launch_remote(None, "skippy:/x/"),
+            Some("skippy:/x/".to_string())
+        );
+        // No flag + blank/whitespace config → mDNS-only (None).
+        assert_eq!(resolve_launch_remote(None, ""), None);
+        assert_eq!(resolve_launch_remote(None, "   "), None);
+        // Config default is trimmed.
+        assert_eq!(
+            resolve_launch_remote(None, "  nas:/m/  "),
+            Some("nas:/m/".to_string())
         );
     }
 
