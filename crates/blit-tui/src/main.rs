@@ -5414,14 +5414,18 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
 /// lands in this buffer. Replaying onto the snapshot makes
 /// the state consistent before the main select loop takes
 /// over.
-/// m2f-1: label for the daemon F2 is currently watching — its
-/// `host` (concise for the row column). F2 watches a single daemon
-/// (`parsed_remote`) today; m2f-2 fans out and each stream supplies
-/// its own label via the tagged channel.
+/// m2f-1/m2f-2: stable identity for the daemon F2 is watching, used
+/// both as the `state::row_key` daemon component AND the row's
+/// display label. `host_port_display()` (host, plus `:port` when
+/// non-default) — NOT bare `host`: two daemon instances on the same
+/// host but different ports are valid here, so a host-only identity
+/// would collide their rows (m2f-2 round 2). F2 watches a single
+/// daemon (`parsed_remote`) today; m2f-3 fans out and each stream
+/// supplies its own identity.
 fn f2_source_label(app: &AppState) -> String {
     app.parsed_remote
         .as_ref()
-        .map(|e| e.host.clone())
+        .map(|e| e.host_port_display())
         .unwrap_or_default()
 }
 
@@ -7376,6 +7380,18 @@ mod tests {
     /// d-26 helper: build a fresh `AppState` for keystroke
     /// tests. Mirrors the boilerplate of
     /// `handle_verify_keystroke_returns_false_for_question_mark`.
+    /// m2f-2 round 2: the F2 source-daemon identity must include the
+    /// port (so two daemons on the same host stay distinct), not just
+    /// the host. `host_port_display` drops the default port.
+    #[test]
+    fn f2_source_label_includes_non_default_port() {
+        let mut app = make_test_app_state(Screen::F2);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:9444:/m/").expect("parse"));
+        assert_eq!(f2_source_label(&app), "nas:9444");
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/m/").expect("parse"));
+        assert_eq!(f2_source_label(&app), "nas", "default port dropped");
+    }
+
     fn make_test_app_state(screen: Screen) -> AppState {
         AppState {
             current_screen: screen,

@@ -581,6 +581,39 @@ mod tests {
         assert_eq!(state.recent_count(), 1);
     }
 
+    /// m2f-2 round 2: two daemon instances on the SAME host but
+    /// different ports are valid, and the daemon identity is
+    /// `host_port_display()` (e.g. `nas:9001` vs `nas:9002`). With the
+    /// same `transfer_id` they must stay distinct — a host-only
+    /// identity would have collided them like the pre-m2f-2 bare-id
+    /// map.
+    #[test]
+    fn same_host_different_port_daemons_stay_distinct() {
+        let mut state = TransfersState::new();
+        state.apply_event("nas:9001", started_event("t1"), Instant::now());
+        state.apply_event("nas:9002", started_event("t1"), Instant::now());
+        assert_eq!(
+            state.active_count(),
+            2,
+            "distinct port identities → two rows"
+        );
+
+        let complete = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
+                transfer_id: "t1".to_string(),
+                duration_ms: 1,
+                bytes: 0,
+                files: 0,
+                tcp_fallback_used: false,
+            })),
+        };
+        state.apply_event("nas:9001", complete, Instant::now());
+        assert_eq!(state.active_count(), 1, "only :9002 left");
+        assert_eq!(state.active_rows()[0].source_daemon, "nas:9002");
+        // The :9001 recent row must not dedup-suppress :9002's t1.
+        assert_eq!(state.recent_count(), 1);
+    }
+
     /// m2f-1: a snapshot tags every row with the daemon it came from.
     #[test]
     fn snapshot_tags_rows_with_source_daemon() {
