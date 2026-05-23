@@ -77,6 +77,10 @@ pub(crate) enum GateDenial {
     MasterSwitchOff,
     /// The locator's host failed parsing or normalization.
     InvalidHost(String),
+    /// The locator's port is 0 — IANA-reserved and not connectable.
+    /// audit-1: rejected at the gate, before DNS resolution or any
+    /// outbound connection attempt.
+    InvalidPort(u16),
     /// DNS resolution of the host failed or returned no addresses.
     UnresolvableHost(String),
     /// One or more resolved addresses are not covered by any allowlist
@@ -104,6 +108,9 @@ impl GateDenial {
             }
             GateDenial::InvalidHost(host) => {
                 format!("invalid source host '{host}'")
+            }
+            GateDenial::InvalidPort(port) => {
+                format!("source port {port} is reserved and not connectable")
             }
             GateDenial::UnresolvableHost(host) => {
                 format!("could not resolve source host '{host}'")
@@ -275,6 +282,15 @@ pub(crate) async fn validate_source<R: HostResolver + ?Sized>(
 
     if locator.host.trim().is_empty() {
         return Err(GateDenial::InvalidHost(locator.host.to_string()));
+    }
+
+    // audit-1: reject the IANA-reserved port 0 at the gate, before any
+    // DNS resolution or outbound connection. Port 0 is never a valid
+    // delegation target — fail fast with a clear reason rather than
+    // letting it fall through to a resolve/connect that would error
+    // opaquely (or, on some stacks, bind an ephemeral port).
+    if locator.port == 0 {
+        return Err(GateDenial::InvalidPort(locator.port));
     }
 
     // Locator's host can be a literal IP (with or without brackets) or
@@ -507,6 +523,27 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, GateDenial::MasterSwitchOff);
+    }
+
+    /// audit-1: port 0 is rejected at the gate, before DNS. The resolver
+    /// has no scripted responses, so had the gate reached resolution it
+    /// would surface `UnresolvableHost` — asserting `InvalidPort` proves
+    /// the port-0 check fires first (no DNS, no outbound connect).
+    #[tokio::test]
+    async fn port_zero_rejected_before_dns() {
+        let cfg = DelegationConfig {
+            allow_delegated_pull: true, // past the master switch
+            allowed_source_hosts: vec![],
+        };
+        let resolver = ScriptedResolver::new(vec![]);
+        let locator = LocatorView {
+            host: "example.com",
+            port: 0,
+        };
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
+        assert_eq!(err, GateDenial::InvalidPort(0));
     }
 
     #[tokio::test]
