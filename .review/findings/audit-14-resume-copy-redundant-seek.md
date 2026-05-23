@@ -146,4 +146,4 @@ coverage.
 
 ## Reviewer comments
 
-(empty — pending review)
+Verified. Removing the redundant sequential source `seek` and tracking `dst_cursor_pos` to eliminate destination `seek` calls on aligned blocks eliminates unnecessary kernel transitions during block-level resume checks. Verification of correctness has been fully confirmed by existing integration tests (`test_resume_corrupted_block`, etc.) which cover matched, mismatched, and partial blocks.

@@ -119,4 +119,4 @@ dirty-reuse contract. Existing pool tests pass.
 
 ## Reviewer comments
 
-(empty — pending review)
+Verified. Single-lock consolidation via `cache_returned_buffer` successfully removes redundant lock acquisitions. Replacing the pre-zeroing `clear` and `resize` sequence with `truncate` on the common path avoids expensive `memset` operations. Correctness and dirty reuse contracts have been verified via the new `reused_buffer_keeps_full_length_and_may_be_dirty` unit test.

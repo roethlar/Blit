@@ -108,4 +108,6 @@ this finding.
 
 ## Reviewer comments
 
-(empty — pending grade of the recommend-defer decision)
+Verified and Accepted. The coding team's pushback is correct. Applying a global `Server::timeout(30s)` is harmful as it would abruptly abort the 7 long-running control plane and data streaming RPCs (such as `Subscribe`, `DelegatedPull`, `Pull`, `PullSync`, `Push`, `Find`, and `DiskUsage`). 
+
+The risk of dead peers is already mitigated by the configured HTTP/2 keepalive settings (`http2_keepalive_interval(30s)` / `http2_keepalive_timeout(20s)`). Scoped timeouts targeting only the 8 unary administrative RPCs remain a valid defense-in-depth improvement but are deferred as non-blocking for this release. The resolution is approved as "Deferred" with no code changes.
