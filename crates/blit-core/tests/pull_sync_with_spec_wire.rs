@@ -171,6 +171,13 @@ impl Blit for SpyServer {
     ) -> Result<Response<blit_core::generated::CancelJobResponse>, Status> {
         unimplemented!()
     }
+
+    async fn clear_recent(
+        &self,
+        _: Request<blit_core::generated::ClearRecentRequest>,
+    ) -> Result<Response<blit_core::generated::ClearRecentResponse>, Status> {
+        unimplemented!()
+    }
 }
 
 async fn spawn_spy(captured: Arc<Mutex<Option<TransferOperationSpec>>>) -> u16 {

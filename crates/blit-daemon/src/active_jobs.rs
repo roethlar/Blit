@@ -704,6 +704,31 @@ impl ActiveJobs {
             .collect()
     }
 
+    /// rec-2: clear the recent-runs ring and, if persistence is armed,
+    /// trigger the writer to rewrite the on-disk store empty. Returns
+    /// the number of entries removed.
+    ///
+    /// **Never touches the planner's `perf_local.jsonl`.** This only
+    /// affects the recents ring and its dedicated `recents.jsonl`
+    /// backing store — the predictor's historical telemetry is a
+    /// separate store and is deliberately left intact (see module
+    /// [`crate::recents_store`] and [`blit_core::perf_history`]).
+    pub fn clear_recent(&self) -> usize {
+        let cleared = {
+            let mut ring = self.inner.recent.lock().unwrap_or_else(|e| e.into_inner());
+            let n = ring.len();
+            ring.clear();
+            n
+        };
+        // Persist the cleared state: the writer reads the now-empty ring
+        // and atomically rewrites recents.jsonl empty. Non-blocking, and
+        // a no-op when persistence isn't armed (test/default tables).
+        if let Some(tx) = self.inner.persist_tx.get() {
+            let _ = tx.send(());
+        }
+        cleared
+    }
+
     /// rec-1: hydrate the ring from the on-disk recents store and arm
     /// write-through persistence, using the default
     /// [`crate::recents_store::recents_path`]. Called once at daemon
@@ -1478,6 +1503,86 @@ mod tests {
             1,
             "but the in-memory ring still works"
         );
+    }
+
+    /// Poll the recents store until it loads empty (or the budget runs
+    /// out) — `clear_recent` empties the ring synchronously but the
+    /// on-disk rewrite is flushed asynchronously by the writer task.
+    async fn poll_recents_empty(path: &std::path::Path) -> bool {
+        for _ in 0..100 {
+            if crate::recents_store::load(path, DEFAULT_RECENT_LIMIT).is_empty() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        crate::recents_store::load(path, DEFAULT_RECENT_LIMIT).is_empty()
+    }
+
+    /// rec-2: `clear_recent` empties the in-memory ring and the on-disk
+    /// recents store, returning the count removed — and **never touches
+    /// the planner's `perf_local.jsonl`**. The sibling perf-telemetry
+    /// file (the predictor's training data) must be byte-for-byte intact
+    /// after a clear; this is the core safety property of the feature.
+    #[tokio::test]
+    async fn clear_recent_empties_store_but_not_perf_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let recents_path = dir.path().join("recents.jsonl");
+        // Stand in for the planner's telemetry living in the same dir.
+        let perf_local = dir.path().join("perf_local.jsonl");
+        let perf_contents = "{\"telemetry\":\"planner training data\"}\n";
+        std::fs::write(&perf_local, perf_contents).unwrap();
+
+        let table = ActiveJobs::with_recent_limit(DEFAULT_RECENT_LIMIT);
+        let writer = table.arm_persistence_at(recents_path.clone());
+        let handle = tokio::spawn(writer.run());
+
+        // One completed transfer → ring + store hold one entry.
+        {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                "p".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+        assert_eq!(poll_recents(&recents_path, 1).await.len(), 1);
+
+        let cleared = table.clear_recent();
+        assert_eq!(cleared, 1, "one entry removed");
+        assert!(table.recent().is_empty(), "in-memory ring emptied at once");
+        assert!(
+            poll_recents_empty(&recents_path).await,
+            "recents.jsonl rewritten empty by the writer"
+        );
+
+        // The critical assertion: planner telemetry is byte-for-byte
+        // untouched by the clear.
+        assert_eq!(
+            std::fs::read_to_string(&perf_local).unwrap(),
+            perf_contents,
+            "clear_recent must never touch perf_local.jsonl"
+        );
+        handle.abort();
+    }
+
+    /// rec-2: `clear_recent` on an unarmed table still empties the ring
+    /// (and is a no-op for persistence). Returns the count removed.
+    #[tokio::test]
+    async fn clear_recent_unarmed_empties_ring() {
+        let table = ActiveJobs::with_recent_limit(DEFAULT_RECENT_LIMIT);
+        for _ in 0..3 {
+            let guard = table.register(
+                ActiveJobKind::Pull,
+                "p".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+        }
+        assert_eq!(table.recent().len(), 3);
+        assert_eq!(table.clear_recent(), 3);
+        assert!(table.recent().is_empty());
     }
 
     #[tokio::test]

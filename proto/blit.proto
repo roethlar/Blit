@@ -75,6 +75,19 @@ service Blit {
   //                           doesn't honor cancellation today.
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
 
+  // Clear the daemon's recent-transfers list (GetState.recent[]).
+  // Wipes the in-memory recent-runs ring AND its persisted backing
+  // store (recents.jsonl). It deliberately does NOT touch the
+  // planner/predictor's historical telemetry (perf_local.jsonl) —
+  // that is a separate store and the operator clearing their recents
+  // view must never degrade prediction quality. rec-2 of the
+  // recent-persistence feature.
+  //
+  // Status semantics:
+  //   OK → recents cleared. ClearRecentResponse.cleared carries the
+  //        number of entries removed from the in-memory ring.
+  rpc ClearRecent(ClearRecentRequest) returns (ClearRecentResponse);
+
   // Server-streaming subscription to live daemon events. Used by the
   // TUI's F2 (Transfers) pane and by future `blit jobs watch` callers
   // that want a push stream rather than `GetState` polling.
@@ -821,6 +834,19 @@ message CancelJobResponse {
   // cancellation outcome (cancelled / unsupported / not found)
   // is encoded in the gRPC Status, not the response.
   string transfer_id = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// ClearRecent — wipe GetState.recent[] (in-memory ring + recents.jsonl).
+// Never touches the planner's perf_local.jsonl. rec-2 of
+// recent-persistence.
+// ─────────────────────────────────────────────────────────────────────
+
+message ClearRecentRequest {}
+
+message ClearRecentResponse {
+  // Number of recent entries removed from the in-memory ring.
+  uint32 cleared = 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────

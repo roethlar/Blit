@@ -716,6 +716,13 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     ) -> Result<tonic::Response<blit_core::generated::CancelJobResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
+
+    async fn clear_recent(
+        &self,
+        _: tonic::Request<blit_core::generated::ClearRecentRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::ClearRecentResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
 }
 
 struct RejectingPullSyncBlit;
@@ -869,6 +876,15 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         &self,
         _: tonic::Request<blit_core::generated::CancelJobRequest>,
     ) -> Result<tonic::Response<blit_core::generated::CancelJobResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
+        ))
+    }
+
+    async fn clear_recent(
+        &self,
+        _: tonic::Request<blit_core::generated::ClearRecentRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::ClearRecentResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

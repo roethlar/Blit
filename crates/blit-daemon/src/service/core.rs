@@ -15,14 +15,14 @@ use crate::runtime::{ModuleConfig, RootExport};
 use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
-    daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClientPullMessage,
-    ClientPushRequest, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
-    DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo,
-    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest,
-    ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk,
-    PullRequest, PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse,
-    SubscribeRequest, TransferComplete, TransferError, TransferProgress, TransferRecord,
-    TransferStarted,
+    daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClearRecentRequest,
+    ClearRecentResponse, ClientPullMessage, ClientPushRequest, CompletionRequest,
+    CompletionResponse, Counters, DaemonEvent, DaemonState, DelegatedPullProgress,
+    DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo, FilesystemStatsRequest,
+    FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest, ListModulesRequest,
+    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
+    PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse, SubscribeRequest,
+    TransferComplete, TransferError, TransferProgress, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -1129,6 +1129,23 @@ impl Blit for BlitService {
         }
     }
 
+    /// rec-2: clear the recent-transfers list. Wipes the in-memory
+    /// recent ring (what `GetState.recent[]` reads) and triggers the
+    /// persistence writer to rewrite `recents.jsonl` empty. Deliberately
+    /// does NOT touch the planner's `perf_local.jsonl` — `clear_recent`
+    /// on `ActiveJobs` only ever references the recents ring + its own
+    /// store. `ClearRecentRequest` is empty (the operator clears the
+    /// whole list); the response carries the count removed.
+    async fn clear_recent(
+        &self,
+        _request: Request<ClearRecentRequest>,
+    ) -> Result<Response<ClearRecentResponse>, Status> {
+        let cleared = self.active_jobs.clear_recent();
+        Ok(Response::new(ClearRecentResponse {
+            cleared: cleared as u32,
+        }))
+    }
+
     async fn disk_usage(
         &self,
         request: Request<DiskUsageRequest>,
@@ -1497,6 +1514,55 @@ mod tests {
             .await
             .expect_err("empty id must InvalidArgument");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// rec-2: `ClearRecent` returns the number of entries removed and
+    /// empties `GetState.recent[]`. (Persistence isn't armed in the
+    /// test service, so this exercises the ring-clearing + response
+    /// path; the on-disk + perf_local-untouched behavior is covered by
+    /// `active_jobs::clear_recent_empties_store_but_not_perf_local`.)
+    #[tokio::test]
+    async fn clear_recent_empties_recent_and_reports_count() {
+        let svc = empty_service();
+        // Two completed transfers → recent[] has two rows.
+        for _ in 0..2 {
+            let guard = svc.active_jobs.register(
+                ActiveJobKind::Pull,
+                "10.0.0.5:443".to_string(),
+                "mod".to_string(),
+                "p".to_string(),
+            );
+            guard.record_outcome(true, None);
+            drop(guard);
+        }
+        let before = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok")
+            .into_inner();
+        assert_eq!(before.recent.len(), 2);
+
+        let resp = svc
+            .clear_recent(Request::new(ClearRecentRequest {}))
+            .await
+            .expect("clear_recent ok")
+            .into_inner();
+        assert_eq!(resp.cleared, 2, "response reports entries removed");
+
+        let after = svc
+            .get_state(Request::new(GetStateRequest { recent_limit: 0 }))
+            .await
+            .expect("get_state ok")
+            .into_inner();
+        assert!(after.recent.is_empty(), "recent[] emptied after clear");
+
+        // Idempotent: a second clear removes nothing.
+        let resp2 = svc
+            .clear_recent(Request::new(ClearRecentRequest {}))
+            .await
+            .expect("clear_recent ok")
+            .into_inner();
+        assert_eq!(resp2.cleared, 0);
     }
 
     #[tokio::test]
