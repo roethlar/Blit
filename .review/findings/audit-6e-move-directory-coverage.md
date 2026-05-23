@@ -3,7 +3,7 @@
 **Severity**: Test Gap
 **Status**: In progress / pending review
 **Branch**: `phase5/a1`
-**Commit**: `5f92b66`
+**Commit**: `6d410ac`
 **Parent finding**: `audit-6-test-gaps` (item 5).
 
 ## What
@@ -41,6 +41,18 @@ harness:
 Closes the last audit-6 sub-item. audit-6 (6a/6b/6c/6d/6e/6f/6g) is now
 fully covered.
 
+## Round 2 (commit `6d410ac`)
+
+**Reopen finding:** the remote→local directory-move test asserted the
+source files were unlinked but not that the nested `inner/` dir and the
+`tree/` root were removed — asymmetric with the push direction (which
+asserts the whole source tree is gone).
+
+**Fix:** added the symmetric remote-side directory assertions
+(`!remote_sub.join("inner").exists()`, `!remote_sub.exists()`). Verified
+the pull-move does remove the empty source dirs, so it pins recursive
+source-tree removal, not just file unlinking.
+
 ## Reviewer comments
 
-(empty — pending review)
+(empty — pending round-2 grade)
