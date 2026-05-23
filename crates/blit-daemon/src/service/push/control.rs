@@ -206,7 +206,7 @@ pub(crate) async fn handle_push_stream(
                                 })?
                                 .port();
 
-                            let token = generate_token();
+                            let token = generate_token()?;
                             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
                             let module_for_transfer = module_ref.clone();
@@ -282,7 +282,7 @@ pub(crate) async fn handle_push_stream(
                 .local_addr()
                 .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
                 .port();
-            let token = generate_token();
+            let token = generate_token()?;
             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
             let upload_rx = upload_rx_opt.take().expect("upload receiver already taken");
             let module_for_transfer = module.clone();

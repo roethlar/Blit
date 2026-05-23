@@ -162,7 +162,7 @@ async fn stream_pull_non_streaming(
         .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
-    let token = generate_token();
+    let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
     let stream_target = pull_stream_count(total_bytes, tuning.max_streams as usize);
 
@@ -272,7 +272,7 @@ async fn stream_pull_streaming(
         .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
-    let token = generate_token();
+    let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
     let stream_target = pull_stream_count(pending_bytes, tuning.max_streams as usize);
 

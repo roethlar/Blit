@@ -561,7 +561,7 @@ async fn stream_via_data_plane(
         .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
-    let token = generate_token();
+    let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
     // Single stream for the resume path (multi-stream support lives in pull.rs).
@@ -694,7 +694,7 @@ async fn stream_via_data_plane_resume(
         .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
-    let token = generate_token();
+    let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
     // Send negotiation
