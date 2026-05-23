@@ -14,8 +14,10 @@
 
 use crate::metrics;
 use blit_app::admin::jobs;
+use blit_core::generated::DaemonState;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -33,6 +35,14 @@ const MAX_REQUEST_HEAD: usize = 16 * 1024;
 /// any `SocketAddr`, including non-loopback binds. A Prometheus scrape
 /// sends its head in one segment immediately, so 5s is generous.
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Deadline for the daemon `GetState` scrape itself. `jobs::query` has
+/// no internal timeout, so a daemon that accepts the connection but
+/// stalls would otherwise park the `/metrics` handler indefinitely. Kept
+/// below Prometheus's default `scrape_timeout` (10s) so the bridge
+/// answers with `blit_daemon_up 0` *before* Prometheus gives up and
+/// records a scrape error instead.
+const SCRAPE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Serve `/metrics` until the process is killed. Binds `addr`, then
 /// handles each connection on its own task.
@@ -90,14 +100,9 @@ async fn handle_conn(
     let request_line = head.lines().next().unwrap_or("");
 
     let response = if request_target(request_line) == Some("/metrics") {
-        // Pull model: scrape the daemon for THIS request.
-        let body = match jobs::query(remote, recent_limit).await {
-            Ok(state) => metrics::format_metrics(&state),
-            Err(err) => {
-                eprintln!("blit-prometheus-bridge: scrape failed: {err:#}");
-                metrics::down_metrics()
-            }
-        };
+        // Pull model: scrape the daemon for THIS request, under a
+        // deadline so a hung daemon can't park the handler.
+        let body = scrape_body(jobs::query(remote, recent_limit), SCRAPE_TIMEOUT).await;
         http_response("200 OK", "text/plain; version=0.0.4; charset=utf-8", &body)
     } else {
         http_response(
@@ -110,6 +115,29 @@ async fn handle_conn(
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+/// Run a GetState `scrape` under `timeout` and return the metrics body.
+/// A timed-out OR failed scrape both yield `down_metrics()`
+/// (`blit_daemon_up 0`), so a hung or unreachable daemon still produces
+/// a prompt `200` response rather than parking the handler until
+/// Prometheus times the target out. Generic over the scrape future so
+/// it's testable with a pending/failed future (no live daemon needed).
+async fn scrape_body<F>(scrape: F, timeout: Duration) -> String
+where
+    F: Future<Output = Result<DaemonState>>,
+{
+    match tokio::time::timeout(timeout, scrape).await {
+        Ok(Ok(state)) => metrics::format_metrics(&state),
+        Ok(Err(err)) => {
+            eprintln!("blit-prometheus-bridge: scrape failed: {err:#}");
+            metrics::down_metrics()
+        }
+        Err(_elapsed) => {
+            eprintln!("blit-prometheus-bridge: scrape timed out after {timeout:?}");
+            metrics::down_metrics()
+        }
+    }
 }
 
 /// Read the request head within `timeout`. Returns `Ok(None)` when the
@@ -204,6 +232,42 @@ mod tests {
             "the idle client should be released promptly"
         );
         drop(_client);
+    }
+
+    /// Regression for the bridge-2 round-2 reopen: a daemon that accepts
+    /// the connection but never answers GetState must not park the
+    /// handler — the scrape deadline routes to `blit_daemon_up 0`.
+    #[tokio::test]
+    async fn hung_scrape_returns_up_zero_within_timeout() {
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            // A scrape future that never resolves (stalled daemon).
+            scrape_body(
+                std::future::pending::<Result<DaemonState>>(),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("scrape_body must return on its own, not hit the 2s guard");
+        assert!(
+            outcome.contains("blit_daemon_up 0"),
+            "a hung scrape should report the daemon down: {outcome}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the handler should be released promptly"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_scrape_returns_up_zero() {
+        let body = scrape_body(
+            async { Err(eyre::eyre!("connection refused")) },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(body.contains("blit_daemon_up 0"), "{body}");
     }
 
     #[test]
