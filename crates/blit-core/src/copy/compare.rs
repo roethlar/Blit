@@ -1,8 +1,6 @@
 use crate::checksum::{self, ChecksumType};
 use crate::generated::ComparisonMode;
 use eyre::{Context, Result};
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -125,28 +123,4 @@ pub fn file_needs_copy_with_mode(src: &Path, dst: &Path, mode: ComparisonMode) -
             file_needs_copy_with_checksum_type(src, dst, None)
         }
     }
-}
-
-#[allow(dead_code)]
-fn files_have_different_content(src: &Path, dst: &Path) -> Result<bool> {
-    let src_hash = hash_file_content(src)?;
-    let dst_hash = hash_file_content(dst)?;
-    Ok(src_hash != dst_hash)
-}
-
-#[allow(dead_code)]
-fn hash_file_content(path: &Path) -> Result<[u8; 32]> {
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = [0u8; 64 * 1024];
-    let mut file = File::open(path)?;
-
-    loop {
-        let bytes_read = file.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    Ok(hasher.finalize().into())
 }

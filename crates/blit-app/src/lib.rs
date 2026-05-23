@@ -20,6 +20,5 @@ pub mod diagnostics;
 pub mod display;
 pub mod endpoints;
 pub mod profile;
-pub mod progress;
 pub mod scan;
 pub mod transfers;

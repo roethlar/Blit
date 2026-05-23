@@ -12,20 +12,13 @@
 //! different key.
 
 use std::path::PathBuf;
-use std::time::Instant;
 
 #[derive(Debug)]
 pub enum DiagnosticsStatus {
     Idle,
     Running,
-    Done {
-        path: PathBuf,
-        #[allow(dead_code)]
-        written_at: Instant,
-    },
-    Error {
-        message: String,
-    },
+    Done { path: PathBuf },
+    Error { message: String },
 }
 
 #[derive(Debug)]
@@ -68,10 +61,7 @@ impl DiagnosticsState {
         if request_id != self.request_id {
             return false;
         }
-        self.status = DiagnosticsStatus::Done {
-            path,
-            written_at: Instant::now(),
-        };
+        self.status = DiagnosticsStatus::Done { path };
         true
     }
 
