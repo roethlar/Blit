@@ -118,19 +118,30 @@ blit-daemon/
 ### blit-app
 
 Shared application/orchestration library sitting between the binaries
-(`blit-cli`, `blit-tui`) and `blit-core`. Holds the logic both
-front-ends need so it isn't duplicated or trapped in the CLI: endpoint
-parsing/classification (`endpoints`), transfer dispatch + destination
-resolution (`transfers::{dispatch, resolution, filter}`), the control-
-plane gRPC client with a DNS-aware connect timeout (`client`), admin-verb
-implementations (`admin::{ls, find, du, df, rm, jobs, list_modules}`),
-diagnostics dump, and profile/perf reporting. The CLI and TUI are thin
-shells over these helpers.
+(`blit-cli`, `blit-tui`, and `blit-prometheus-bridge`) and `blit-core`.
+Holds the logic the front-ends need so it isn't duplicated or trapped in
+the CLI. Public modules (`crates/blit-app/src/lib.rs`):
+
+| Module | Responsibility |
+|--------|----------------|
+| `endpoints` | Endpoint parsing/classification (local vs remote module/root) |
+| `transfers` | Transfer dispatch + destination resolution + filter assembly (`dispatch`, `resolution`, `filter`, `local`, `remote`, `remote_remote_direct`) |
+| `client` | Control-plane gRPC client with a DNS-aware (outer-timeout) connect |
+| `admin` | Admin-verb implementations (`ls`, `find`, `du`, `df`, `rm`, `jobs`, `list_modules`) — `jobs` is what the TUI and the Prometheus bridge call for `GetState`/`Subscribe`/`CancelJob`/`ClearRecent` |
+| `check` | Local-tree compare core |
+| `scan` | mDNS daemon discovery |
+| `diagnostics` | Diagnostics-dump emitter |
+| `profile` | Performance-history / predictor reporting |
+| `display` | Shared human-readable formatting helpers |
+
+The CLI and TUI are thin shells over these helpers; the Prometheus
+bridge consumes `admin::jobs` for its scrape (`GetState`).
 
 ### blit-tui
 
 Terminal UI (ratatui + crossterm) producing the `blit-tui` binary. Panes
-F1–F4 (trigger/daemons, transfers, browse, profile). It is a read-mostly
+F1–F4 (F1 trigger/daemons, F2 transfers, F3 browse, F4
+profile/verify/diagnostics). It is a read-mostly
 control surface over the daemon: it `Subscribe`s to each discovered
 daemon's `DaemonEvent` stream and renders live transfer state from
 `GetState`, can launch transfers/`CancelJob`/`ClearRecent`, and supports
