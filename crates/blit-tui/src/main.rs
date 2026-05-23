@@ -189,6 +189,13 @@ struct AppState {
     /// pressing `r` while a setup is in flight doesn't
     /// spawn a duplicate.
     transfers_setup_pending: bool,
+    /// m2f-9 R2: set when an mDNS discovery update changes the watched
+    /// set *while a setup is in flight* (`transfers_setup_pending`).
+    /// `refan_f2_setup` no-ops while pending, so the change would
+    /// otherwise be lost — the in-flight setup completes on the stale
+    /// set and later steady updates compare equal. The setup-reply arm
+    /// consults this flag and re-fans once the pending setup lands.
+    transfers_refan_after_setup: bool,
 
     // F3
     browse: BrowseState,
@@ -556,6 +563,7 @@ async fn run_router(
         },
         transfers_setup_gen: 0,
         transfers_setup_pending: false,
+        transfers_refan_after_setup: false,
         browse: BrowseState::new(),
         browse_last_fetched_view: None,
         browse_fetch_tx: browse_fetch_tx.clone(),
@@ -1080,23 +1088,20 @@ async fn run_router(
             update = disco_rx.recv() => {
                 match update {
                     Some(DiscoveryUpdate::Result(services)) => {
+                        // m2f-9: auto re-fan the merged Subscribe streams
+                        // when a discovery update changes the watched-daemon
+                        // set, so a newly discovered daemon's transfers
+                        // appear (and a vanished one's streams drop) without
+                        // an explicit `r`. The change is deferred if a setup
+                        // is already in flight (see handle_discovery_watch_change).
                         let before = f2_watched_identities(&app);
                         app.daemons.replace_from_discovery(&services, Instant::now());
-                        // m2f-9: if this discovery update changed the
-                        // watched-daemon set and F2 is already live, auto
-                        // re-fan the merged Subscribe streams so a newly
-                        // discovered daemon's transfers appear (and a
-                        // vanished one's streams drop) without an explicit
-                        // `r`. Gated on an active subscription: if the
-                        // operator hasn't entered F2 yet, no streams exist
-                        // to refresh. refan_f2_setup itself no-ops while a
-                        // setup is pending, so a burst of updates can't
-                        // stack respawns.
-                        if transfers_event_rx.is_some()
-                            && f2_watched_identities(&app) != before
-                        {
-                            refan_f2_setup(&mut app, &mut transfers_event_rx, &f2_setup_tx);
-                        }
+                        handle_discovery_watch_change(
+                            &mut app,
+                            &before,
+                            &mut transfers_event_rx,
+                            &f2_setup_tx,
+                        );
                     }
                     Some(DiscoveryUpdate::Error(msg)) => {
                         app.daemons.note_discovery_error(msg);
@@ -1187,6 +1192,18 @@ async fn run_router(
                                 app.transfers_status = ConnectionStatus::Degraded(err);
                             }
                         }
+                        // m2f-9 R2: a discovery update changed the watch set
+                        // while this setup was in flight. Now that it has
+                        // landed and `pending` is cleared, re-fan against the
+                        // current set so the daemon discovered mid-flight is
+                        // actually watched (a no-op if the set is now empty).
+                        // Applies to both Ready and Failed — a failed setup
+                        // followed by a daemon appearing should retry.
+                        apply_deferred_refan(
+                            &mut app,
+                            &mut transfers_event_rx,
+                            &f2_setup_tx,
+                        );
                     }
                 }
             }
@@ -1989,6 +2006,51 @@ fn refan_f2_setup(
     app.transfers_setup_pending = true;
     spawn_f2_setup_task(watched, app.transfers_setup_gen, f2_setup_tx.clone());
     true
+}
+
+/// m2f-9: react to an mDNS discovery update by comparing the watch set
+/// against `before` (captured before `replace_from_discovery`). On a
+/// genuine change, re-fan the merged Subscribe streams so the view
+/// tracks the current daemon set without a manual `r`.
+///
+/// R2: if a setup is already in flight (`transfers_setup_pending` — e.g.
+/// the startup fan-out, whose receiver isn't live yet), `refan_f2_setup`
+/// would no-op and silently drop the change. So in that case record a
+/// deferred re-fan instead; [`apply_deferred_refan`] runs it once the
+/// pending setup's reply lands. Returns whether a re-fan was spawned
+/// *now* (false when deferred or when nothing changed).
+fn handle_discovery_watch_change(
+    app: &mut AppState,
+    before: &std::collections::BTreeSet<String>,
+    transfers_event_rx: &mut Option<mpsc::Receiver<F2Event>>,
+    f2_setup_tx: &mpsc::Sender<F2SetupReply>,
+) -> bool {
+    if &f2_watched_identities(app) == before {
+        return false;
+    }
+    if app.transfers_setup_pending {
+        app.transfers_refan_after_setup = true;
+        false
+    } else {
+        refan_f2_setup(app, transfers_event_rx, f2_setup_tx)
+    }
+}
+
+/// m2f-9 R2: run a deferred re-fan recorded by
+/// [`handle_discovery_watch_change`] while a setup was pending. Called
+/// from the setup-reply arm once that setup has landed and `pending` is
+/// cleared, so the daemon discovered mid-flight ends up watched. Returns
+/// whether a re-fan was spawned.
+fn apply_deferred_refan(
+    app: &mut AppState,
+    transfers_event_rx: &mut Option<mpsc::Receiver<F2Event>>,
+    f2_setup_tx: &mpsc::Sender<F2SetupReply>,
+) -> bool {
+    if std::mem::take(&mut app.transfers_refan_after_setup) {
+        refan_f2_setup(app, transfers_event_rx, f2_setup_tx)
+    } else {
+        false
+    }
 }
 
 /// Reply envelope from the F2 setup task. Carries a
@@ -7733,6 +7795,7 @@ mod tests {
             transfers_status: ConnectionStatus::NoRemote,
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
+            transfers_refan_after_setup: false,
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9255,6 +9318,7 @@ mod tests {
             transfers_status: ConnectionStatus::NoRemote,
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
+            transfers_refan_after_setup: false,
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9319,6 +9383,7 @@ mod tests {
             transfers_status: ConnectionStatus::NoRemote,
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
+            transfers_refan_after_setup: false,
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9436,6 +9501,7 @@ mod tests {
             transfers_status: ConnectionStatus::NoRemote,
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
+            transfers_refan_after_setup: false,
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9512,6 +9578,7 @@ mod tests {
             transfers_status: ConnectionStatus::NoRemote,
             transfers_setup_gen: 0,
             transfers_setup_pending: false,
+            transfers_refan_after_setup: false,
             browse: BrowseState::new(),
             browse_last_fetched_view: None,
             browse_fetch_tx: mpsc::channel::<BrowseFetchReply>(1).0,
@@ -9870,6 +9937,68 @@ mod tests {
         assert!(
             !refan_f2_setup(&mut app, &mut event_rx, &tx),
             "no duplicate setup while one is pending"
+        );
+    }
+
+    /// m2f-9 R2 regression: a daemon discovered *while the initial setup
+    /// is still pending* must not be lost. The startup fan-out is in
+    /// flight (pending, no live receiver), discovery adds a daemon — the
+    /// change can't re-fan immediately (refan no-ops while pending), so
+    /// it's deferred; once the stale setup's reply lands and pending
+    /// clears, the deferred re-fan runs and F2 ends up watching the
+    /// discovered daemon without a manual `r`.
+    #[tokio::test]
+    async fn discovery_during_pending_setup_refans_after_it_lands() {
+        let (tx, _rx) = mpsc::channel::<F2SetupReply>(1);
+        let mut app = make_test_app_state(Screen::F2);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
+
+        // Startup fan-out in flight: pending, receiver not yet live.
+        app.transfers_setup_gen += 1;
+        app.transfers_setup_pending = true;
+        let gen_at_spawn = app.transfers_setup_gen;
+        let mut event_rx: Option<mpsc::Receiver<F2Event>> = None;
+
+        // Discovery adds a daemon while the setup is pending.
+        let before = f2_watched_identities(&app);
+        app.daemons.replace_from_discovery(
+            &[blit_core::mdns::MdnsDiscoveredService {
+                fullname: "skippy._blit._tcp.local.".to_string(),
+                instance_name: "skippy".to_string(),
+                hostname: "skippy.local.".to_string(),
+                port: 9050,
+                addresses: vec![std::net::Ipv4Addr::new(192, 168, 1, 50)],
+                properties: std::collections::HashMap::new(),
+            }],
+            Instant::now(),
+        );
+        let spawned_now = handle_discovery_watch_change(&mut app, &before, &mut event_rx, &tx);
+        assert!(!spawned_now, "can't re-fan while pending → deferred");
+        assert!(app.transfers_refan_after_setup, "deferred re-fan recorded");
+        assert_eq!(
+            app.transfers_setup_gen, gen_at_spawn,
+            "no new setup spawned while the first is still pending"
+        );
+
+        // The stale setup completes: clear pending, then run the deferred
+        // re-fan (mirrors the setup-reply arm).
+        app.transfers_setup_pending = false;
+        let did_refan = apply_deferred_refan(&mut app, &mut event_rx, &tx);
+        assert!(did_refan, "deferred re-fan spawns a fresh fan-out");
+        assert!(app.transfers_setup_pending, "the fresh setup is pending");
+        assert_eq!(
+            app.transfers_setup_gen,
+            gen_at_spawn + 1,
+            "generation bumped for the re-fan"
+        );
+        assert!(
+            !app.transfers_refan_after_setup,
+            "deferred flag cleared once consumed"
+        );
+        // The fresh fan-out's watch set includes the mid-flight daemon.
+        assert!(
+            f2_watched_identities(&app).contains("192.168.1.50:9050"),
+            "discovered daemon is now watched"
         );
     }
 
