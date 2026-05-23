@@ -49,6 +49,29 @@ and F4 panes also have hardcoded `Color::Cyan` selection/section colors;
 threading the accent through those is a possible follow-up but out of
 scope here to keep the slice atomic.
 
+## Round 2 (commit `7dd3e31`)
+
+**Reopen finding:** the highlight themed the *background* to the accent
+but kept `fg(Color::Black)`. A dark `accent_color` (black, red, green,
+blue, magenta, darkgray) then rendered the selected row as
+black-on-dark — unreadable. e-7 already solved exactly this for the tab
+strip via `contrasting_fg(accent)` (white on dark, black on light), and
+this slice's whole premise is to match that accessibility behavior.
+
+**Fix:**
+- `row_highlight_style` foreground now uses `super::contrasting_fg(accent)`
+  — the same helper the tab strip uses. It lives in the parent
+  `screens` module; a child module (`f2`) can call it via `super::`
+  without any visibility change.
+- The render test now uses a **dark** accent (red) and asserts every
+  accent-background cell carries the contrasting **white** foreground
+  (not just that the background is present) — so black-on-dark would
+  now fail the test.
+
+**Tests:** 600 total (unchanged count; the existing
+`active_row_highlight_uses_accent_color` test was strengthened to assert
+the foreground contrast).
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
