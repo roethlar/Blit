@@ -1,8 +1,9 @@
 # audit-4-windows-handle-leak: Windows HANDLE leak on GetFileInformationByHandle failure
 
 **Severity**: Bug
-**Status**: Open
-**Branch**: (none yet)
+**Status**: In progress / pending review (⚠ Windows-only — see Verification gap)
+**Branch**: `phase5/a1`
+**Commit**: `4e77897`
 
 ## What
 
@@ -35,3 +36,30 @@ TBD by coder. Primarily `crates/blit-core/src/change_journal/snapshot.rs`.
 - Windows-only: simulate `GetFileInformationByHandle` failure → verify
   handle is closed (Process Explorer or test double)
 - Existing change journal tests must still pass
+
+## Resolution (commit `4e77897`)
+
+**Implemented** the RAII-guard option: `OwnedHandle(HANDLE)` whose `Drop`
+calls `CloseHandle`. `capture_snapshot` wraps the `CreateFileW` result in
+it and uses `handle.0` for the FFI calls; the explicit `CloseHandle`
+block is removed. Every exit path — success, the
+`GetFileInformationByHandle` `?` error, and the early `Ok(None)` — now
+releases the handle via `Drop`. (`HANDLE` is `Copy`, so `handle.0` passes
+by value to the FFI calls without moving out of the guard.) The previous
+explicit close surfaced `CloseHandle` errors; the guard drops them —
+close failures during cleanup aren't actionable.
+
+### ⚠ Verification gap (reviewer / CI action required)
+
+`#[cfg(windows)]` code, **not compile-verified on the darwin dev host**:
+
+- darwin build / clippy / test: **unaffected** (the `windows` mod is
+  cfg-excluded), all pass.
+- `cargo fmt`: **does** cover this code (cfg-agnostic) — formatting OK.
+- `cargo check --target x86_64-pc-windows-msvc`: **blocked** — `blake3`'s
+  build script needs the MSVC assembler `ml64.exe`, absent here, so the
+  dependency chain fails before reaching `blit-core`.
+
+**Please run the Windows-target build + clippy in CI before relying on
+this.** The diff is a textbook RAII guard, reviewed by inspection, but is
+not machine-verified on the target.
