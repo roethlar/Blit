@@ -339,6 +339,14 @@ enum F2CancelStatus {
         /// prompt creation — each CancelJob targets its own daemon.
         targets: Vec<(String, String)>,
     },
+    /// rec-4: operator pressed `E` (clear recent). Waiting for `y`
+    /// (clear the recent list + fan a ClearRecent RPC to each watched
+    /// daemon) or `n` / `Esc` (revert to Idle). No per-transfer data —
+    /// the clear is the whole list. Modeled on this enum (rather than a
+    /// separate flag) so it reuses the existing confirm plumbing —
+    /// `is_confirming`, the `Esc` revert, the `n` abort, and the
+    /// K/X mutual-exclusion guards all apply unchanged.
+    ConfirmingClearRecent,
     Sending {
         transfer_id: String,
         request_id: u64,
@@ -386,7 +394,9 @@ impl F2CancelStatus {
     fn is_confirming(&self) -> bool {
         matches!(
             self,
-            F2CancelStatus::Confirming { .. } | F2CancelStatus::ConfirmingBatch { .. }
+            F2CancelStatus::Confirming { .. }
+                | F2CancelStatus::ConfirmingBatch { .. }
+                | F2CancelStatus::ConfirmingClearRecent
         )
     }
 }
@@ -1710,17 +1720,34 @@ async fn handle_pane_action(
             // return on a later manual refresh — it never blocks the
             // others and never affects planner telemetry. Active
             // transfers are untouched.
-            UserAction::ClearRecent => {
-                app.transfers.clear_recent(std::time::Instant::now());
-                for endpoint in f2_watched_endpoints(app) {
-                    spawn_clear_recent(endpoint);
-                }
+            // rec-4: `E` now asks first. It arms a `clear recent? y/N`
+            // confirm (the actual clear happens on `y`, below). Ignored
+            // while a cancel is mid-cycle (sending or another confirm
+            // up) so the single y/N prompt is never ambiguous — the
+            // operator finishes that interaction first.
+            UserAction::ClearRecent
+                if !app.cancel_status.is_sending() && !app.cancel_status.is_confirming() =>
+            {
+                app.cancel_status = F2CancelStatus::ConfirmingClearRecent;
             }
             // d-29: `y` confirms a pending cancel — promote
             // Confirming → Sending and fire the RPC.
             // d-30: `y` also promotes ConfirmingBatch →
             // BatchInitiated and spawns N RPCs.
             UserAction::TransferMirrorConfirm if app.cancel_status.is_confirming() => {
+                // rec-4: `y` on the clear-recent confirm. Reset the
+                // prompt, then run the same clear path as rec-3 (empty
+                // the local view + fan a ClearRecent RPC to each watched
+                // daemon). Handled before the cancel logic since
+                // ConfirmingClearRecent carries no cancel payload.
+                if matches!(app.cancel_status, F2CancelStatus::ConfirmingClearRecent) {
+                    app.cancel_status = F2CancelStatus::Idle;
+                    app.transfers.clear_recent(std::time::Instant::now());
+                    for endpoint in f2_watched_endpoints(app) {
+                        spawn_clear_recent(endpoint);
+                    }
+                    return;
+                }
                 // d-30 R2: clone-out the variant payload
                 // before mutating `app.cancel_status` so
                 // the borrow doesn't outlive the match.
@@ -2824,6 +2851,7 @@ fn cancel_status_to_display(
         F2CancelStatus::ConfirmingBatch { targets } => F2CancelDisplay::ConfirmingBatch {
             count: targets.len(),
         },
+        F2CancelStatus::ConfirmingClearRecent => F2CancelDisplay::ConfirmingClearRecent,
         F2CancelStatus::BatchInitiated { count, finished_at } => {
             if now.saturating_duration_since(*finished_at) >= ttl {
                 return F2CancelDisplay::Hidden;
@@ -7077,6 +7105,31 @@ mod tests {
             }
             other => panic!("expected ConfirmingBatch, got {other:?}"),
         }
+    }
+
+    /// rec-4: the clear-recent confirm is a confirming state (so Esc /
+    /// `n` revert it and K/X won't start over it), and is not a sending
+    /// state.
+    #[test]
+    fn f2_clear_recent_confirm_is_a_confirming_state() {
+        let s = F2CancelStatus::ConfirmingClearRecent;
+        assert!(s.is_confirming());
+        assert!(!s.is_sending());
+    }
+
+    /// rec-4: the clear-recent confirm renders the `clear recent? y/N`
+    /// footer prompt.
+    #[test]
+    fn cancel_status_to_display_renders_confirming_clear_recent() {
+        let display = cancel_status_to_display(
+            &F2CancelStatus::ConfirmingClearRecent,
+            Instant::now(),
+            std::time::Duration::from_secs(60),
+        );
+        assert!(
+            matches!(display, screens::f2::F2CancelDisplay::ConfirmingClearRecent),
+            "expected ConfirmingClearRecent, got {display:?}"
+        );
     }
 
     /// d-30: bridge maps BatchInitiated within TTL →

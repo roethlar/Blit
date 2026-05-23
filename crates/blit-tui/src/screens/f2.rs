@@ -112,6 +112,11 @@ pub enum F2CancelDisplay {
     ConfirmingBatch {
         count: usize,
     },
+    /// rec-4: `E` (clear recent) pressed. Footer shows
+    /// `clear recent? y/N` until the operator answers (`y`
+    /// clears, `n`/`Esc` aborts). No per-transfer data — the
+    /// clear is the whole recent list.
+    ConfirmingClearRecent,
     /// d-30: `Shift+X` confirmed (or fired directly when
     /// confirm_cancel = false). N parallel cancel RPCs
     /// are in flight; the footer shows
@@ -336,6 +341,13 @@ fn render_footer(
             spans.push(Span::raw("  ·  "));
             spans.push(Span::styled(
                 format!("cancel {count} transfers? y/N"),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        F2CancelDisplay::ConfirmingClearRecent => {
+            spans.push(Span::raw("  ·  "));
+            spans.push(Span::styled(
+                "clear recent? y/N".to_string(),
                 Style::default().fg(Color::Yellow),
             ));
         }
