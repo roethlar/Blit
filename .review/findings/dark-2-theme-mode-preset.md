@@ -51,6 +51,27 @@ functionally complete. Per-widget contrast follow-ups (any widget that
 hardcodes a bg/fg fighting the base layer) remain possible if found, but
 the fg-only widgets — the vast majority — inherit correctly.
 
+## Round 2 (commit `ce4c50f`)
+
+**Reopen finding:** `resolved_base_colors` used `parse_*().or(preset)`,
+but `parse_background`/`parse_foreground` return `None` for **both** an
+unset (empty) value **and** an invalid (non-empty unparseable) one. So
+`mode = "dark"` + `background = "blurple"` (a typo) fell through to the
+preset's black — contradicting the dark-1 startup warning ("using the
+terminal default") and the dark-2 per-field-override contract.
+
+**Fix (reviewer policy 1):** resolve each field on whether it is
+**empty**, not on parse success. A non-empty (explicitly set) field
+always overrides the preset — recognized → that color, unrecognized →
+`None` (terminal default, matching the warning). Only an empty field
+inherits the preset. This keeps an operator typo from silently becoming
+a preset color after they explicitly set that field.
+
+**Test:** `theme_mode_presets_and_override` extended — `mode = "dark"` +
+`background = "blurple"` → `(None, Some(White))`: the invalid bg is
+terminal-default (not preset black), while the unset fg still inherits
+the preset white.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
