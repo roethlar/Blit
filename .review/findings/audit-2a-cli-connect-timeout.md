@@ -3,7 +3,7 @@
 **Severity**: Robustness
 **Status**: In progress / pending review
 **Branch**: `phase5/a1`
-**Commit**: `5ded6c9`
+**Commit**: `179f5fa`
 **Parent finding**: `audit-2-cli-timeouts` (part 1 of 2). audit-2b will
 cover the `transfers/remote.rs` BlitClient sites, the
 `Remote{Pull,Push}Client::connect` data-path connects, and the
@@ -76,6 +76,19 @@ The same correction was applied pre-emptively to the blit-core
 `RemotePullClient::connect` / `RemotePushClient::connect` in audit-2b
 (which I was mid-writing with the same `connect_timeout`-only flaw).
 
+## Round 3 (commit `179f5fa`)
+
+**Reopen finding:** round-2 fixed the code, but two doc comments in the
+same file still asserted the false premise — the module doc
+(`client.rs:6-8`, "bounded `connect_timeout`") and the `CONNECT_TIMEOUT`
+doc (`client.rs:15-17`, "(and DNS, on tonic's connector)").
+
+**Fix:** rewrote both. The module doc now says the helper bounds the
+whole `connect()` future (DNS + TCP) via an outer `tokio::time::timeout`;
+the const doc explains `CONNECT_TIMEOUT` serves as both the outer
+whole-future bound and the inner TCP-phase `connect_timeout`, and that
+the outer bound is what covers slow DNS. Code unchanged.
+
 ## Reviewer comments
 
-(empty — pending round-2 grade)
+(empty — pending round-3 grade)
