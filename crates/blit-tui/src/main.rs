@@ -459,16 +459,49 @@ async fn main() -> Result<()> {
             config::KeysDefaults::DEFAULT_REFRESH,
         ));
     }
-    // keys-2 R2: quit/refresh collision policy. When the effective
-    // refresh resolves to the same character as quit, quit wins and
-    // refresh is disabled — flag it so the operator can pick a distinct
-    // key rather than silently lose refresh.
-    if tui_config.keys.resolved().1.is_none() {
+    // keys-3: invalid (non-single-char) pane-switch aliases fall back to
+    // their default digit.
+    let pane_raw = [
+        &tui_config.keys.pane_f1,
+        &tui_config.keys.pane_f2,
+        &tui_config.keys.pane_f3,
+        &tui_config.keys.pane_f4,
+    ];
+    let pane_chars = tui_config.keys.pane_chars();
+    for (i, raw) in pane_raw.iter().enumerate() {
+        if pane_chars[i].is_none() {
+            config_warnings.push(format!(
+                "tui.toml [keys] pane_f{} = {:?} is not a single character; \
+                 using default {:?}",
+                i + 1,
+                raw,
+                config::KeysDefaults::DEFAULT_PANE[i],
+            ));
+        }
+    }
+    // keys-2 R2 / keys-3: collision policy. A binding that resolves to a
+    // character already claimed by a higher-precedence binding (dispatch
+    // order: quit > pane aliases > refresh) is disabled — flag each so
+    // the operator can pick distinct keys rather than silently lose one.
+    let resolved = tui_config.keys.resolved();
+    for (i, nav) in resolved.nav.iter().enumerate() {
+        if nav.is_none() {
+            config_warnings.push(format!(
+                "tui.toml [keys] pane_f{} = {:?} collides with a \
+                 higher-precedence key (quit / an earlier pane alias) and \
+                 is disabled — pick a distinct key (F{} still navigates)",
+                i + 1,
+                pane_raw[i],
+                i + 1,
+            ));
+        }
+    }
+    if resolved.refresh.is_none() {
         config_warnings.push(format!(
-            "tui.toml [keys] refresh = {:?} resolves to the same key as \
-             quit = {:?}; quit takes precedence and refresh is disabled \
+            "tui.toml [keys] refresh = {:?} collides with a \
+             higher-precedence key (quit or a pane alias) and is disabled \
              — pick a distinct [keys] refresh",
-            tui_config.keys.refresh, tui_config.keys.quit,
+            tui_config.keys.refresh,
         ));
     }
 
@@ -5488,17 +5521,19 @@ fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
     // edit focus, handle_verify_keystroke captures the
     // digit as text input before this dispatcher runs,
     // so typing a path with "config/1/data" still works.
-    if let KeyCode::Char(c) = key.code {
-        if !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            match c {
-                '1' => return Some(UserAction::Navigate(Screen::F1)),
-                '2' => return Some(UserAction::Navigate(Screen::F2)),
-                '3' => return Some(UserAction::Navigate(Screen::F3)),
-                '4' => return Some(UserAction::Navigate(Screen::F4)),
-                _ => {}
+    // keys-3: the pane-switch digit aliases are configurable
+    // (`[keys] pane_fN`, default `1`-`4`). Plain press only (no
+    // Ctrl/Alt). A `None` slot means that alias collided with a
+    // higher-precedence binding and is disabled (the F-keys above still
+    // navigate). `nav[i]` maps to F1..F4 in order.
+    if !key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        const PANES: [Screen; 4] = [Screen::F1, Screen::F2, Screen::F3, Screen::F4];
+        for (i, alias) in keymap.nav.iter().enumerate() {
+            if *alias == Some(key.code) {
+                return Some(UserAction::Navigate(PANES[i]));
             }
         }
     }
@@ -5967,27 +6002,31 @@ async fn forward_subscribe_stream(
     }
 }
 
-/// keys-1/keys-2: the operator-remappable global key bindings, resolved
-/// from `[keys]` config. Quit + refresh today; later slices add more
-/// (pane switch, per-screen). Built once per keystroke from the
+/// keys-1/2/3: the operator-remappable global key bindings, resolved
+/// from `[keys]` config (with the collision policy already applied).
+/// Quit, refresh, and the pane-switch digit aliases today; later slices
+/// add per-screen keys. Built once per keystroke from the
 /// (hot-reloadable) config, so a `Ctrl+R` remap takes effect live.
 struct KeyMap {
     /// The configurable quit character. `Esc` / `Ctrl+C` quit regardless.
     quit: KeyCode,
     /// The configurable refresh character (plain press; `Ctrl+R` reload
-    /// is separate). `None` when the configured refresh collided with
-    /// quit — quit takes precedence (see `KeysDefaults::resolved`), so
-    /// there's no usable refresh key until the operator picks a distinct
-    /// one.
+    /// is separate). `None` when the configured refresh collided with a
+    /// higher-precedence binding (see `KeysDefaults::resolved`).
     refresh: Option<KeyCode>,
+    /// keys-3: pane-switch digit aliases, F1..F4 order. Each is `None`
+    /// when its configured char collided with a higher-precedence
+    /// binding. The function keys F1-F4 navigate regardless.
+    nav: [Option<KeyCode>; 4],
 }
 
 impl KeyMap {
     fn from_config(config: &config::TuiConfig) -> Self {
-        let (quit, refresh) = config.keys.resolved();
+        let resolved = config.keys.resolved();
         Self {
-            quit: KeyCode::Char(quit),
-            refresh: refresh.map(KeyCode::Char),
+            quit: KeyCode::Char(resolved.quit),
+            refresh: resolved.refresh.map(KeyCode::Char),
+            nav: resolved.nav.map(|c| c.map(KeyCode::Char)),
         }
     }
 }
@@ -6237,6 +6276,40 @@ mod tests {
                 &custom
             ),
             Some(UserAction::Quit)
+        ));
+    }
+
+    /// keys-3: a remapped pane-switch alias is honoured, the old default
+    /// digit stops navigating, other panes are unaffected, and the
+    /// conventional F-keys always navigate.
+    #[test]
+    fn key_action_honours_remapped_pane() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.pane_f2 = "t".to_string();
+        let custom = KeyMap::from_config(&cfg);
+        let ev = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+        };
+        // Remapped 't' → Navigate F2.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('t')), &custom),
+            Some(UserAction::Navigate(Screen::F2))
+        ));
+        // Old default '2' no longer navigates.
+        assert!(!matches!(
+            key_action(&ev(KeyCode::Char('2')), &custom),
+            Some(UserAction::Navigate(Screen::F2))
+        ));
+        // Other panes unaffected: '1' still → F1.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('1')), &custom),
+            Some(UserAction::Navigate(Screen::F1))
+        ));
+        // The function key F2 navigates regardless of the digit remap.
+        assert!(matches!(
+            key_action(&ev(KeyCode::F(2)), &custom),
+            Some(UserAction::Navigate(Screen::F2))
         ));
     }
 

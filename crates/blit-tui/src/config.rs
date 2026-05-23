@@ -22,6 +22,10 @@
 //! [keys]
 //! quit = "q"                    # keys-1: quit key (Esc + Ctrl+C always quit too)
 //! refresh = "r"                 # keys-2: refresh key (Ctrl+R reload unaffected)
+//! pane_f1 = "1"                 # keys-3: pane-switch digit aliases (F1-F4 keys also navigate)
+//! pane_f2 = "2"
+//! pane_f3 = "3"
+//! pane_f4 = "4"
 //!
 //! [verify]
 //! default_use_checksum = false  # `H` toggle's startup value
@@ -70,11 +74,12 @@ pub struct TuiConfig {
     pub keys: KeysDefaults,
 }
 
-/// keys-1/keys-2: operator key remapping for the global keys. Covers
-/// quit (keys-1) and refresh (keys-2); later slices extend to
-/// navigation / pane-switch / per-screen keys. Each binding is a single
-/// character claimed only on a PLAIN press (no Ctrl/Alt) so it can't
-/// hijack a chord for that character.
+/// keys-1/2/3: operator key remapping for the global keys. Covers quit
+/// (keys-1), refresh (keys-2), and the pane-switch digit aliases
+/// (keys-3); later slices extend to per-screen keys. Each binding is a
+/// single character claimed only on a PLAIN press (no Ctrl/Alt) so it
+/// can't hijack a chord for that character. See [`Self::resolved`] for
+/// the collision policy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeysDefaults {
@@ -87,11 +92,33 @@ pub struct KeysDefaults {
     /// active pane's fetch. A non-single-character value is ignored
     /// (warn + fall back to `r`). `Ctrl+R` (config reload) is unaffected.
     pub refresh: String,
+    /// keys-3: the digit-alias pane-switch keys (defaults `"1"`/`"2"`/
+    /// `"3"`/`"4"` → F1/F2/F3/F4). The function keys F1-F4 always
+    /// navigate too (conventional, not remappable); these are the
+    /// remappable plain-char aliases for terminals that drop F-keys.
+    /// Non-single-char values fall back to the default digit.
+    pub pane_f1: String,
+    pub pane_f2: String,
+    pub pane_f3: String,
+    pub pane_f4: String,
+}
+
+/// keys-3: the effective global key bindings after the collision policy
+/// is applied. `None` means the configured binding collided with a
+/// higher-precedence one and is disabled (see [`KeysDefaults::resolved`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedKeys {
+    pub quit: char,
+    /// Pane-switch digit aliases, F1..F4 order.
+    pub nav: [Option<char>; 4],
+    pub refresh: Option<char>,
 }
 
 impl KeysDefaults {
     pub const DEFAULT_QUIT: char = 'q';
     pub const DEFAULT_REFRESH: char = 'r';
+    /// Default pane-switch digit aliases, F1..F4 order.
+    pub const DEFAULT_PANE: [char; 4] = ['1', '2', '3', '4'];
 
     /// The configured quit key as a single `char`, or `None` when the
     /// value isn't exactly one character (caller warns + falls back to
@@ -106,22 +133,53 @@ impl KeysDefaults {
         single_char(&self.refresh)
     }
 
+    /// The configured pane-switch keys (F1..F4), each a single `char` or
+    /// `None` when not a single character (caller warns + falls back to
+    /// the corresponding [`Self::DEFAULT_PANE`] digit).
+    pub fn pane_chars(&self) -> [Option<char>; 4] {
+        [
+            single_char(&self.pane_f1),
+            single_char(&self.pane_f2),
+            single_char(&self.pane_f3),
+            single_char(&self.pane_f4),
+        ]
+    }
+
     /// Resolve the effective global bindings, applying the **collision
-    /// policy**. `key_action` dispatches quit before refresh, so a
-    /// refresh that resolves to the same character as quit would be
-    /// silently unreachable. Policy: **quit takes precedence; a
-    /// colliding refresh is DISABLED** (`None`) — the operator must pick
-    /// a distinct key (a startup warning flags it). Each char is the
-    /// configured value, or its default when not a single character.
-    /// Returns `(quit, refresh)` where `refresh` is `None` on collision.
-    pub fn resolved(&self) -> (char, Option<char>) {
+    /// policy**. `key_action` dispatches in a fixed order — quit, then
+    /// the pane-switch aliases, then refresh — so a lower-precedence
+    /// binding sharing a character with a higher one would be silently
+    /// unreachable. Policy: process bindings in that precedence order;
+    /// the first claim on a character wins, and any later binding that
+    /// collides is **disabled** (`None`). Each char is the configured
+    /// value, or its default when not a single character. A startup
+    /// warning flags every disabled binding.
+    pub fn resolved(&self) -> ResolvedKeys {
         let quit = self.quit_char().unwrap_or(Self::DEFAULT_QUIT);
-        let refresh = self.refresh_char().unwrap_or(Self::DEFAULT_REFRESH);
-        if refresh == quit {
-            (quit, None)
-        } else {
-            (quit, Some(refresh))
+        let pane_cfg = self.pane_chars();
+        let refresh_cfg = self.refresh_char().unwrap_or(Self::DEFAULT_REFRESH);
+
+        // Greedy claim in dispatch-precedence order: quit > nav1..4 >
+        // refresh. `claimed.insert` returns false when the char is
+        // already taken → that binding is disabled.
+        let mut claimed = std::collections::HashSet::new();
+        claimed.insert(quit);
+
+        let mut nav = [None; 4];
+        for (i, slot) in nav.iter_mut().enumerate() {
+            let c = pane_cfg[i].unwrap_or(Self::DEFAULT_PANE[i]);
+            if claimed.insert(c) {
+                *slot = Some(c);
+            }
         }
+
+        let refresh = if claimed.insert(refresh_cfg) {
+            Some(refresh_cfg)
+        } else {
+            None
+        };
+
+        ResolvedKeys { quit, nav, refresh }
     }
 }
 
@@ -140,6 +198,10 @@ impl Default for KeysDefaults {
         Self {
             quit: Self::DEFAULT_QUIT.to_string(),
             refresh: Self::DEFAULT_REFRESH.to_string(),
+            pane_f1: Self::DEFAULT_PANE[0].to_string(),
+            pane_f2: Self::DEFAULT_PANE[1].to_string(),
+            pane_f3: Self::DEFAULT_PANE[2].to_string(),
+            pane_f4: Self::DEFAULT_PANE[3].to_string(),
         }
     }
 }
@@ -582,25 +644,52 @@ mod tests {
         assert_eq!(multi.refresh_char(), None);
     }
 
-    /// keys-2 R2: the quit/refresh collision policy — quit wins; a
-    /// refresh resolving to the same char is disabled (`None`).
+    /// keys-2 R2 / keys-3: the collision policy in dispatch precedence
+    /// (quit > nav1..4 > refresh) — the first claim on a char wins,
+    /// later collisions are disabled (`None`).
     #[test]
     fn keys_resolved_collision_policy() {
-        let mk = |quit: &str, refresh: &str| KeysDefaults {
+        // quit + refresh, default nav.
+        let qr = |quit: &str, refresh: &str| KeysDefaults {
             quit: quit.to_string(),
             refresh: refresh.to_string(),
+            ..KeysDefaults::default()
         };
-        // Distinct → both active.
-        assert_eq!(mk("q", "r").resolved(), ('q', Some('r')));
+        // Distinct → both active; nav defaults 1-4.
+        let r = qr("q", "r").resolved();
+        assert_eq!(r.quit, 'q');
+        assert_eq!(r.refresh, Some('r'));
+        assert_eq!(r.nav, [Some('1'), Some('2'), Some('3'), Some('4')]);
         // refresh == quit → refresh disabled.
-        assert_eq!(mk("r", "r").resolved(), ('r', None));
-        // refresh set to the (default) quit char → disabled.
-        assert_eq!(mk("q", "q").resolved(), ('q', None));
-        // Invalid (multi-char) refresh falls back to default 'r', which
-        // is distinct from quit 'q' → active.
-        assert_eq!(mk("q", "rr").resolved(), ('q', Some('r')));
-        // ...but if quit is 'r', the fallback 'r' collides → disabled.
-        assert_eq!(mk("r", "rr").resolved(), ('r', None));
+        assert_eq!(qr("r", "r").resolved().refresh, None);
+        // refresh = default quit char → disabled.
+        assert_eq!(qr("q", "q").resolved().refresh, None);
+        // Multi-char refresh falls back to 'r' (distinct from quit 'q').
+        assert_eq!(qr("q", "rr").resolved().refresh, Some('r'));
+        // ...but with quit 'r', the fallback 'r' collides → disabled.
+        assert_eq!(qr("r", "rr").resolved().refresh, None);
+
+        // keys-3: a nav key colliding with quit is disabled; refresh is
+        // lowest precedence so it loses to a nav key on the same char.
+        let cfg = KeysDefaults {
+            quit: "1".to_string(),    // collides with default pane_f1 "1"
+            refresh: "2".to_string(), // collides with default pane_f2 "2"
+            ..KeysDefaults::default()
+        };
+        let r = cfg.resolved();
+        assert_eq!(r.quit, '1');
+        // pane_f1 "1" collides with quit → disabled; others survive.
+        assert_eq!(r.nav, [None, Some('2'), Some('3'), Some('4')]);
+        // refresh "2" loses to nav pane_f2 "2" (higher precedence) → None.
+        assert_eq!(r.refresh, None);
+
+        // Two nav keys set to the same char → the later one disabled.
+        let cfg = KeysDefaults {
+            pane_f2: "1".to_string(), // collides with default pane_f1 "1"
+            ..KeysDefaults::default()
+        };
+        let r = cfg.resolved();
+        assert_eq!(r.nav, [Some('1'), None, Some('3'), Some('4')]);
     }
 
     /// e-8: `[daemon] default_remote` parses, and defaults to empty
