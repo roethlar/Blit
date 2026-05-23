@@ -63,6 +63,26 @@ pane-switch) and eventually per-screen actions. Per-screen keys still
 dispatch through their existing handlers — those move under the keymap
 in later slices.
 
+## Round 2 (commit `19c6b7f`)
+
+**Reopen finding (Medium):** `is_quit` matched `code == quit`
+regardless of modifiers, and `key_action` checks `is_quit` before the
+modifier-aware branches. So `[keys] quit = "r"` made `Ctrl+R` return
+`Quit` before the `ReloadConfig` branch could run — hijacking the
+documented `Ctrl+R` config reload (and, generally, any Ctrl/Alt chord
+for whichever character the operator picked).
+
+**Fix:** the configured quit char now claims only a **plain** press —
+`is_quit` requires `!modifiers.intersects(CONTROL | ALT)` for the
+`code == quit` arm. Shift is still allowed (capitals are distinct
+`KeyCode`s anyway). `Esc` and `Ctrl+C` remain the modifier-aware
+failsafes regardless of the configured char.
+
+**Test (+1, 606 blit-tui):**
+`remapped_quit_does_not_steal_ctrl_chord` — with `quit = "r"`: plain
+`r` → `Quit`, `Ctrl+R` → `ReloadConfig` (not quit); `is_quit` rejects
+`Ctrl/Alt + char`; `Esc` / `Ctrl+C` still quit under the remap.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
