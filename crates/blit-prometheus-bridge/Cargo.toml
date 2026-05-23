@@ -1,0 +1,15 @@
+[package]
+name = "blit-prometheus-bridge"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+blit-core = { path = "../blit-core" }
+blit-app = { path = "../blit-app" }
+eyre = "0.6"
+
+[lints]
+workspace = true
