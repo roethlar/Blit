@@ -19,9 +19,11 @@ use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::sync::Semaphore;
 
 /// Cap on how much of the request head we'll buffer before giving up
 /// looking for the end of headers — bounds buffered bytes per
@@ -49,6 +51,16 @@ const SCRAPE_TIMEOUT: Duration = Duration::from_secs(8);
 /// was not — a client that stops reading (full socket buffer) would
 /// otherwise park the handler task on `write_all`/`flush` indefinitely.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// audit-5: cap on concurrently-handled scrape connections. A
+/// misconfigured / runaway Prometheus (or a deliberate flood) opening
+/// many simultaneous scrapes would otherwise spawn an unbounded number
+/// of handler tasks, each firing a `GetState` RPC at the daemon. The
+/// accept loop acquires a permit before accepting, so excess
+/// connections queue in the OS backlog (back-pressure) rather than
+/// piling up as tasks. 64 is generous — Prometheus opens one scrape per
+/// interval per server.
+const MAX_CONCURRENT_SCRAPES: usize = 64;
 
 /// audit-5: build the listener with `SO_REUSEADDR` so a quick
 /// restart can rebind the port while a previous socket lingers in
@@ -86,22 +98,47 @@ pub(crate) async fn serve(
         "blit-prometheus-bridge: serving http://{addr}/metrics (scraping {})",
         remote.display()
     );
+    // audit-5: bound concurrent handlers. Acquiring a permit BEFORE
+    // accepting back-pressures into the OS accept backlog under a scrape
+    // flood instead of spawning unbounded tasks.
+    let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_SCRAPES));
     loop {
-        let (stream, _peer) = match listener.accept().await {
+        // The semaphore is never closed, so acquire only errs on a bug;
+        // treat that as fatal-stop rather than spin.
+        let Ok(permit) = Arc::clone(&limiter).acquire_owned().await else {
+            break;
+        };
+        // audit-5: graceful shutdown — stop accepting on SIGINT/Ctrl-C
+        // so the process can exit cleanly (in-flight handlers, holding
+        // their own permits, run to completion as their tasks finish).
+        let accepted = tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("blit-prometheus-bridge: shutdown signal received; no longer accepting");
+                break;
+            }
+            res = listener.accept() => res,
+        };
+        let (stream, _peer) = match accepted {
             Ok(v) => v,
             Err(err) => {
                 // A single accept failure shouldn't kill the exporter.
+                // Dropping `permit` here frees the slot.
                 eprintln!("blit-prometheus-bridge: accept error: {err}");
                 continue;
             }
         };
         let remote = remote.clone();
         tokio::spawn(async move {
+            // Hold the permit for the handler's lifetime; dropped on
+            // completion, freeing the slot for the next connection.
+            let _permit = permit;
             if let Err(err) = handle_conn(stream, &remote, recent_limit).await {
                 eprintln!("blit-prometheus-bridge: connection error: {err}");
             }
         });
     }
+    Ok(())
 }
 
 /// Read one request, route it, write one response, close.
