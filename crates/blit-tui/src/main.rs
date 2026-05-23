@@ -6126,12 +6126,29 @@ struct F2Event {
 /// receiver is registered (so the caller knows this daemon is being
 /// watched). The fan-out calls this once per watched daemon, each
 /// pushing into the same merged receiver the event loop drains.
+/// Bound for opening one daemon's Subscribe stream (connect + the
+/// initial Subscribe RPC). audit-8: `jobs::subscribe`'s connect is
+/// already bounded by `connect_with_timeout` (audit-2a), but the
+/// Subscribe RPC itself was not — a daemon that accepted the TCP
+/// connection then stalled could hang `spawn_f2_setup_task` indefinitely
+/// (and with it the whole F2 fan-out). An OUTER `tokio::time::timeout`
+/// around the whole open bounds DNS + connect + the RPC together (the
+/// `feedback-server-await-timeouts` lesson: an inner connect_timeout
+/// alone doesn't cover the RPC).
+const SUBSCRIBE_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn open_subscribe_stream(
     endpoint: &RemoteEndpoint,
     merged_tx: mpsc::Sender<F2Event>,
 ) -> Result<(), String> {
-    let stream = jobs::subscribe(endpoint, "", false)
+    let stream = tokio::time::timeout(SUBSCRIBE_OPEN_TIMEOUT, jobs::subscribe(endpoint, "", false))
         .await
+        .map_err(|_| {
+            format!(
+                "subscribe to {} timed out after {SUBSCRIBE_OPEN_TIMEOUT:?}",
+                endpoint.host_port_display()
+            )
+        })?
         .map_err(|err| format!("subscribe: {err}"))?;
     // m2f-4: tag every signal from this stream with the daemon's
     // stable identity (host:port — matches the row_key daemon
@@ -6149,11 +6166,42 @@ async fn open_subscribe_stream(
     Ok(())
 }
 
+/// One iteration of the forwarder: race the next stream message against
+/// the receiver going away. audit-8: a forwarder parked on
+/// `stream.message().await` for a silent daemon would never notice that
+/// the merged receiver was dropped (e.g. an F2 re-fan sets
+/// `transfers_event_rx = None`), so the task leaked — holding an HTTP/2
+/// connection, a broadcast Receiver and an mpsc slot — until the daemon
+/// happened to emit an event. Racing `tx.closed()` makes the forwarder
+/// exit the instant its receiver disappears, regardless of stream
+/// silence. `biased` so a pending teardown wins promptly.
+///
+/// Generic over the message future purely so the exit-on-close invariant
+/// is unit-testable with `std::future` stand-ins (a real
+/// `tonic::Streaming` can't be constructed off the wire).
+enum ForwardStep {
+    /// The receiver was dropped — stop forwarding.
+    Closed,
+    /// The stream produced its next item (`Ok(Some)`), ended
+    /// (`Ok(None)`), or errored (`Err`).
+    Message(Result<Option<DaemonEvent>, tonic::Status>),
+}
+
+async fn forward_step<F>(next_msg: F, tx: &mpsc::Sender<F2Event>) -> ForwardStep
+where
+    F: std::future::Future<Output = Result<Option<DaemonEvent>, tonic::Status>>,
+{
+    tokio::select! {
+        biased;
+        _ = tx.closed() => ForwardStep::Closed,
+        msg = next_msg => ForwardStep::Message(msg),
+    }
+}
+
 /// Inner loop of the Subscribe forwarder task. Reads
 /// `stream.message()` and forwards events into `tx` until
-/// the stream ends, errors, or `tx` reports a closed
-/// receiver. Factored out of `open_subscribe_stream` so the
-/// spawn site is a single function call.
+/// the stream ends, errors, or `tx`'s receiver is gone. Factored out of
+/// `open_subscribe_stream` so the spawn site is a single function call.
 async fn forward_subscribe_stream(
     mut stream: tonic::Streaming<DaemonEvent>,
     daemon: String,
@@ -6165,19 +6213,20 @@ async fn forward_subscribe_stream(
         kind,
     };
     loop {
-        match stream.message().await {
-            Ok(Some(event)) => {
+        match forward_step(stream.message(), &tx).await {
+            ForwardStep::Closed => return,
+            ForwardStep::Message(Ok(Some(event))) => {
                 if tx.send(tag(EventOrError::Event(event))).await.is_err() {
                     return;
                 }
             }
-            Ok(None) => {
+            ForwardStep::Message(Ok(None)) => {
                 let _ = tx
                     .send(tag(EventOrError::Error("stream ended".to_string())))
                     .await;
                 return;
             }
-            Err(status) => {
+            ForwardStep::Message(Err(status)) => {
                 let _ = tx
                     .send(tag(EventOrError::Error(format!(
                         "stream: {}",
@@ -6243,6 +6292,36 @@ fn is_quit(code: KeyCode, modifiers: KeyModifiers, quit: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// audit-8: the forwarder must observe a dropped receiver and stop,
+    /// even when the underlying stream never produces a message. Before
+    /// the `tx.closed()` race a forwarder parked on a silent stream
+    /// leaked indefinitely after an F2 re-fan dropped the merged
+    /// receiver.
+    #[tokio::test]
+    async fn forward_step_exits_when_receiver_dropped_even_if_message_pending() {
+        let (tx, rx) = mpsc::channel::<F2Event>(4);
+        drop(rx); // simulate the F2 re-fan dropping the merged receiver
+        let never = std::future::pending::<Result<Option<DaemonEvent>, tonic::Status>>();
+        let step = forward_step(never, &tx).await;
+        assert!(
+            matches!(step, ForwardStep::Closed),
+            "a pending message must not keep the forwarder alive once the receiver is gone"
+        );
+    }
+
+    /// audit-8: while the receiver is live, a ready message is forwarded
+    /// (the close race must not starve normal delivery).
+    #[tokio::test]
+    async fn forward_step_yields_a_ready_message_while_receiver_live() {
+        let (tx, _rx) = mpsc::channel::<F2Event>(4);
+        let ready = std::future::ready(Ok(Some(DaemonEvent::default())));
+        let step = forward_step(ready, &tx).await;
+        assert!(
+            matches!(step, ForwardStep::Message(Ok(Some(_)))),
+            "a ready message must be delivered while the receiver is live"
+        );
+    }
 
     /// d-3 round-2 regression: the TUI diagnostics dump
     /// JSON must carry the same top-level shape as the
