@@ -121,7 +121,11 @@ async fn handle_conn(
                 "text/plain; charset=utf-8",
                 "request timeout\n",
             );
-            let _ = stream.write_all(resp.as_bytes()).await;
+            // audit-5b1 round 2: bound this write too. A client that
+            // already stopped reading (the very reason we hit the head
+            // timeout) must not now park the task on the 408 write —
+            // best-effort, errors ignored since we're closing anyway.
+            let _ = write_all_within(&mut stream, resp.as_bytes(), WRITE_TIMEOUT).await;
             return Ok(());
         }
     };
