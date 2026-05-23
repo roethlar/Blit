@@ -94,6 +94,33 @@ an idle peer that sends nothing, and asserts `read_request_head`
 (100 ms test timeout) returns `Ok(None)` promptly, wrapped in a 2 s
 outer guard so a broken timeout fails loudly instead of hanging.
 
+## Round 3 (commit `5eb9e61`)
+
+**Reopen finding (Medium):** round-2 bounded the request-head read, but
+the scrape itself was still unbounded — `jobs::query` (GetState) has no
+internal timeout, so a daemon that accepts the connection then stalls
+parked the `/metrics` handler indefinitely and never emitted the
+promised `blit_daemon_up 0` (Prometheus would record a scrape error).
+
+**Fix:**
+- `SCRAPE_TIMEOUT` (8s — below Prometheus's 10s default `scrape_timeout`
+  so the bridge answers `up 0` *before* Prometheus gives up) wraps the
+  scrape.
+- New `scrape_body<F: Future<Output = Result<DaemonState>>>(scrape,
+  timeout)`: `Ok(state)` → `format_metrics`; `Err` **or** elapsed →
+  `down_metrics()` (`blit_daemon_up 0`). Generic over the future so the
+  hung/failed paths are testable without a live daemon.
+- `handle_conn` now calls `scrape_body(jobs::query(..), SCRAPE_TIMEOUT)`.
+
+**Tests (+2, bridge crate now 12):**
+- `hung_scrape_returns_up_zero_within_timeout` — a
+  `std::future::pending` scrape with a 100 ms deadline yields a body
+  containing `blit_daemon_up 0` promptly, under a 2 s outer guard.
+- `failed_scrape_returns_up_zero` — an `Err` scrape → `up 0`.
+
+Both request-head and scrape are now deadline-bounded, so no client or
+daemon can park a handler.
+
 ## Reviewer comments
 
-(empty — pending round-2 grade)
+(empty — pending round-3 grade)
