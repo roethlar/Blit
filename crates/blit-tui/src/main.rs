@@ -3638,6 +3638,7 @@ fn plan_f1_trigger(
     use blit_app::endpoints::{
         ensure_remote_destination_supported, parse_transfer_endpoint, Endpoint,
     };
+    use blit_app::transfers::resolution::resolve_destination;
     let source = match parse_transfer_endpoint(src) {
         Ok(s) => s,
         Err(_) => return TriggerOutcome::Rejected(format!("invalid source: {src}")),
@@ -3663,7 +3664,22 @@ fn plan_f1_trigger(
             Ok(Endpoint::Remote(dst_ep))
                 if ensure_remote_destination_supported(&dst_ep).is_ok() =>
             {
-                return plan_f1_delegated(app, source_ep.clone(), dst_ep, kind, confirmed);
+                // d-71 R2: resolve the destination exactly like the CLI
+                // (`run_copy`/`run_move` call `resolve_destination`
+                // before dispatch) BEFORE delegating. Without it, a
+                // non-trailing-slash source + a container dest writes
+                // into the dest root instead of `<dest>/<basename>` —
+                // and for a move the source-delete then removes data
+                // that was copied to the wrong place. `resolve_destination`
+                // is a no-op for trailing-slash ("copy contents")
+                // sources, so it doesn't change copy/mirror behavior for
+                // those. It preserves the Remote variant for a remote
+                // dst, so the rebind is infallible.
+                let resolved = resolve_destination(src, dest, &source, Endpoint::Remote(dst_ep));
+                let Endpoint::Remote(resolved_dst) = resolved else {
+                    return TriggerOutcome::Rejected(format!("invalid destination: {dest}"));
+                };
+                return plan_f1_delegated(app, source_ep.clone(), resolved_dst, kind, confirmed);
             }
             // Discovery (bare host) or genuine local path → pull below.
             Ok(_) => {}
@@ -7951,6 +7967,59 @@ mod tests {
             Some("deletes the remote source")
         );
         assert_eq!(to_move("/tmp/src"), Some("deletes the local source"));
+    }
+
+    /// d-71 R2: a delegated transfer must resolve the destination like
+    /// the CLI BEFORE launch — a non-trailing-slash source + a
+    /// container dest appends the source basename
+    /// (`nas:/photos/2024` → `skippy:/backup/` ⇒ `skippy:/backup/2024`).
+    /// Without it a move would copy into the dest root and then delete
+    /// the wrong source (data loss). We assert via the launched run's
+    /// label, which is the resolved destination.
+    #[tokio::test]
+    async fn plan_f1_trigger_delegated_move_resolves_container_dest() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/2024", // no trailing slash → basename appends
+            "skippy:/backup/",  // container
+            f3pull::PullKind::Move,
+            true, // pre-confirmed so it launches
+        );
+        assert!(matches!(out, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running { label, .. } => {
+                assert!(
+                    label.contains("backup/2024"),
+                    "dest resolved to <container>/<basename>, got {label:?}"
+                );
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    /// d-71 R2: a trailing-slash ("copy contents") source must NOT
+    /// append the basename — the dest stays the container root.
+    #[tokio::test]
+    async fn plan_f1_trigger_delegated_trailing_source_keeps_dest_root() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/2024/", // trailing slash → contents
+            "skippy:/backup/",
+            f3pull::PullKind::Copy,
+            false,
+        );
+        assert!(matches!(out, TriggerOutcome::Launched));
+        match app.f1_push.status() {
+            f1push::F1PushStatus::Running { label, .. } => {
+                assert!(
+                    !label.contains("2024"),
+                    "copy-contents keeps the dest root, got {label:?}"
+                );
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
     }
 
     /// d-71: a delegated move whose SOURCE is a module root is refused
