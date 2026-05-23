@@ -613,7 +613,7 @@ async fn run_router(
     // Optional Subscribe receiver. Populated once F2 setup
     // completes (either at startup or after `r` re-opens
     // the stream in the future).
-    let mut transfers_event_rx: Option<mpsc::Receiver<EventOrError>> = None;
+    let mut transfers_event_rx: Option<mpsc::Receiver<F2Event>> = None;
 
     // ───────────────────────────────────────────────────
     // Unified event loop. Drains every pane's channels on
@@ -1106,19 +1106,21 @@ async fn run_router(
                 }
             }, if transfers_event_rx.is_some() => {
                 match event {
-                    Some(EventOrError::Connected) => {
+                    // m2f-4: the event carries its source daemon, so a
+                    // row is tagged with the stream's daemon rather than
+                    // the (single) parsed_remote.
+                    Some(F2Event { kind: EventOrError::Connected, .. }) => {
                         if matches!(app.transfers_status, ConnectionStatus::Connecting) {
                             app.transfers_status = ConnectionStatus::Live;
                         }
                     }
-                    Some(EventOrError::Event(daemon_event)) => {
-                        let f2_daemon = f2_source_label(&app);
-                        app.transfers.apply_event(&f2_daemon, daemon_event, Instant::now());
+                    Some(F2Event { daemon, kind: EventOrError::Event(daemon_event) }) => {
+                        app.transfers.apply_event(&daemon, daemon_event, Instant::now());
                         if matches!(app.transfers_status, ConnectionStatus::Connecting) {
                             app.transfers_status = ConnectionStatus::Live;
                         }
                     }
-                    Some(EventOrError::Error(msg)) => {
+                    Some(F2Event { kind: EventOrError::Error(msg), .. }) => {
                         app.transfers_status = ConnectionStatus::Degraded(msg);
                         transfers_event_rx = None;
                     }
@@ -1163,7 +1165,6 @@ async fn run_router(
                                 }
                                 drain_startup_events(
                                     &mut rx,
-                                    &f2_daemon,
                                     &mut app.transfers,
                                     &mut app.transfers_status,
                                 );
@@ -1382,7 +1383,7 @@ async fn run_router(
 async fn handle_pane_action(
     action: UserAction,
     app: &mut AppState,
-    transfers_event_rx: &mut Option<mpsc::Receiver<EventOrError>>,
+    transfers_event_rx: &mut Option<mpsc::Receiver<F2Event>>,
     f2_setup_tx: &mpsc::Sender<F2SetupReply>,
     tui_config: &config::TuiConfig,
 ) {
@@ -1966,7 +1967,7 @@ struct F2SetupReply {
 
 enum F2SetupPayload {
     Ready {
-        event_rx: mpsc::Receiver<EventOrError>,
+        event_rx: mpsc::Receiver<F2Event>,
         snapshot_result: Result<DaemonState, String>,
     },
     Failed(String),
@@ -2302,7 +2303,7 @@ fn retarget_browse(app: &mut AppState, endpoint: RemoteEndpoint) {
 fn reset_f2_for_resubscribe(
     app: &mut AppState,
     endpoint: &RemoteEndpoint,
-    transfers_event_rx: &mut Option<mpsc::Receiver<EventOrError>>,
+    transfers_event_rx: &mut Option<mpsc::Receiver<F2Event>>,
 ) -> u64 {
     app.parsed_remote = Some(endpoint.clone());
     app.remote_label = endpoint.host_port_display();
@@ -5434,43 +5435,46 @@ fn f2_source_label(app: &AppState) -> String {
 }
 
 fn drain_startup_events(
-    rx: &mut mpsc::Receiver<EventOrError>,
-    source_daemon: &str,
+    rx: &mut mpsc::Receiver<F2Event>,
     state: &mut TransfersState,
     status: &mut ConnectionStatus,
 ) {
     use tokio::sync::mpsc::error::TryRecvError;
     loop {
         match rx.try_recv() {
-            Ok(EventOrError::Connected) => {
-                // Connected is a stream-health signal, not a
-                // snapshot-health signal. Only let it
-                // transition Connecting → Live. If the
-                // caller already set Degraded (e.g. the
-                // initial GetState failed) we must not
-                // overwrite that — the live stream may be
-                // healthy but the active/recent state is
-                // incomplete and the user needs to know.
-                if matches!(status, ConnectionStatus::Connecting) {
-                    *status = ConnectionStatus::Live;
+            // m2f-4: each event carries its source daemon, so the
+            // applied row is tagged with the stream's daemon.
+            Ok(F2Event { daemon, kind }) => match kind {
+                EventOrError::Connected => {
+                    // Connected is a stream-health signal, not a
+                    // snapshot-health signal. Only let it
+                    // transition Connecting → Live. If the
+                    // caller already set Degraded (e.g. the
+                    // initial GetState failed) we must not
+                    // overwrite that — the live stream may be
+                    // healthy but the active/recent state is
+                    // incomplete and the user needs to know.
+                    if matches!(status, ConnectionStatus::Connecting) {
+                        *status = ConnectionStatus::Live;
+                    }
                 }
-            }
-            Ok(EventOrError::Event(event)) => {
-                state.apply_event(source_daemon, event, Instant::now());
-                // Same rule as Connected: first event is a
-                // stream-health signal. Don't paper over an
-                // existing Degraded snapshot status.
-                if matches!(status, ConnectionStatus::Connecting) {
-                    *status = ConnectionStatus::Live;
+                EventOrError::Event(event) => {
+                    state.apply_event(&daemon, event, Instant::now());
+                    // Same rule as Connected: first event is a
+                    // stream-health signal. Don't paper over an
+                    // existing Degraded snapshot status.
+                    if matches!(status, ConnectionStatus::Connecting) {
+                        *status = ConnectionStatus::Live;
+                    }
                 }
-            }
-            Ok(EventOrError::Error(msg)) => {
-                *status = ConnectionStatus::Degraded(msg);
-                // Continue draining — we don't expect more
-                // events after Error in practice (forwarder
-                // exits) but a benign extra Connected
-                // before Error shouldn't trip us up.
-            }
+                EventOrError::Error(msg) => {
+                    *status = ConnectionStatus::Degraded(msg);
+                    // Continue draining — we don't expect more
+                    // events after Error in practice (forwarder
+                    // exits) but a benign extra Connected
+                    // before Error shouldn't trip us up.
+                }
+            },
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
         }
     }
@@ -5511,6 +5515,17 @@ enum EventOrError {
     Error(String),
 }
 
+/// m2f-4: a Subscribe-stream signal tagged with the daemon it came
+/// from. The forwarder stamps each event with its daemon identity
+/// (`host_port_display()`) so the F2 event loop can route it to the
+/// right `(daemon, transfer_id)` rows — the per-event identity the
+/// m2f-5 fan-out (one forwarder per discovered daemon, all merged
+/// into one channel) relies on. Single daemon today.
+struct F2Event {
+    daemon: String,
+    kind: EventOrError,
+}
+
 /// Open the Subscribe stream synchronously (awaited inline)
 /// and spawn the forwarder task. Returns the mpsc Receiver
 /// only AFTER the subscribe RPC has succeeded — i.e. the
@@ -5529,15 +5544,24 @@ enum EventOrError {
 /// receiver.
 async fn open_subscribe_stream(
     endpoint: &RemoteEndpoint,
-) -> Result<mpsc::Receiver<EventOrError>, String> {
+) -> Result<mpsc::Receiver<F2Event>, String> {
     let stream = jobs::subscribe(endpoint, "", false)
         .await
         .map_err(|err| format!("subscribe: {err}"))?;
-    let (tx, rx) = mpsc::channel::<EventOrError>(TUI_EVENT_BUFFER);
+    // m2f-4: tag every signal from this stream with the daemon's
+    // stable identity (host:port — matches the row_key daemon
+    // component and the F2 header label).
+    let daemon = endpoint.host_port_display();
+    let (tx, rx) = mpsc::channel::<F2Event>(TUI_EVENT_BUFFER);
     // Send Connected immediately — subscribe() has returned
     // OK so the daemon broadcast receiver is registered.
-    let _ = tx.send(EventOrError::Connected).await;
-    tokio::spawn(forward_subscribe_stream(stream, tx));
+    let _ = tx
+        .send(F2Event {
+            daemon: daemon.clone(),
+            kind: EventOrError::Connected,
+        })
+        .await;
+    tokio::spawn(forward_subscribe_stream(stream, daemon, tx));
     Ok(rx)
 }
 
@@ -5548,24 +5572,33 @@ async fn open_subscribe_stream(
 /// spawn site is a single function call.
 async fn forward_subscribe_stream(
     mut stream: tonic::Streaming<DaemonEvent>,
-    tx: mpsc::Sender<EventOrError>,
+    daemon: String,
+    tx: mpsc::Sender<F2Event>,
 ) {
+    // m2f-4: every forwarded signal carries its source daemon.
+    let tag = |kind| F2Event {
+        daemon: daemon.clone(),
+        kind,
+    };
     loop {
         match stream.message().await {
             Ok(Some(event)) => {
-                if tx.send(EventOrError::Event(event)).await.is_err() {
+                if tx.send(tag(EventOrError::Event(event))).await.is_err() {
                     return;
                 }
             }
             Ok(None) => {
                 let _ = tx
-                    .send(EventOrError::Error("stream ended".to_string()))
+                    .send(tag(EventOrError::Error("stream ended".to_string())))
                     .await;
                 return;
             }
             Err(status) => {
                 let _ = tx
-                    .send(EventOrError::Error(format!("stream: {}", status.message())))
+                    .send(tag(EventOrError::Error(format!(
+                        "stream: {}",
+                        status.message()
+                    ))))
                     .await;
                 return;
             }
@@ -6651,14 +6684,19 @@ mod tests {
     /// the user the active/recent rows are complete.
     #[tokio::test]
     async fn drain_startup_events_connected_preserves_degraded() {
-        let (tx, mut rx) = mpsc::channel::<EventOrError>(4);
+        let (tx, mut rx) = mpsc::channel::<F2Event>(4);
         // Forwarder always pushes Connected first.
-        tx.send(EventOrError::Connected).await.unwrap();
+        tx.send(F2Event {
+            daemon: "nas".to_string(),
+            kind: EventOrError::Connected,
+        })
+        .await
+        .unwrap();
         drop(tx);
 
         let mut state = TransfersState::new();
         let mut status = ConnectionStatus::Degraded("initial GetState failed: timeout".to_string());
-        drain_startup_events(&mut rx, "", &mut state, &mut status);
+        drain_startup_events(&mut rx, &mut state, &mut status);
         match status {
             ConnectionStatus::Degraded(msg) => {
                 assert!(msg.contains("initial GetState failed"));
@@ -6672,14 +6710,56 @@ mod tests {
     /// next), Connected SHOULD flip to Live.
     #[tokio::test]
     async fn drain_startup_events_connected_flips_connecting_to_live() {
-        let (tx, mut rx) = mpsc::channel::<EventOrError>(4);
-        tx.send(EventOrError::Connected).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<F2Event>(4);
+        tx.send(F2Event {
+            daemon: "nas".to_string(),
+            kind: EventOrError::Connected,
+        })
+        .await
+        .unwrap();
         drop(tx);
 
         let mut state = TransfersState::new();
         let mut status = ConnectionStatus::Connecting;
-        drain_startup_events(&mut rx, "", &mut state, &mut status);
+        drain_startup_events(&mut rx, &mut state, &mut status);
         assert!(matches!(status, ConnectionStatus::Live));
+    }
+
+    /// m2f-4: a drained Event tags its row with the EVENT's source
+    /// daemon (carried per-event from the stream), not a single
+    /// global label — the per-stream identity the m2f-5 fan-out needs.
+    #[tokio::test]
+    async fn drain_startup_events_tags_row_with_event_daemon() {
+        let (tx, mut rx) = mpsc::channel::<F2Event>(4);
+        tx.send(F2Event {
+            daemon: "skippy:9001".to_string(),
+            kind: EventOrError::Event(DaemonEvent {
+                payload: Some(
+                    blit_core::generated::daemon_event::Payload::TransferStarted(
+                        blit_core::generated::TransferStarted {
+                            transfer_id: "t1".to_string(),
+                            kind: 0,
+                            peer: String::new(),
+                            module: String::new(),
+                            path: String::new(),
+                            start_unix_ms: 1,
+                        },
+                    ),
+                ),
+            }),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let mut state = TransfersState::new();
+        let mut status = ConnectionStatus::Connecting;
+        drain_startup_events(&mut rx, &mut state, &mut status);
+        assert_eq!(
+            state.active_rows()[0].source_daemon,
+            "skippy:9001",
+            "row tagged with the event's daemon"
+        );
     }
 
     /// a1-3b round-2 regression: cursor flick onto a row,
@@ -7053,7 +7133,7 @@ mod tests {
         app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
         let gen_before = app.transfers_setup_gen;
         // Simulate a live F2 stream + a pending flag cleared.
-        let (_tx, rx) = mpsc::channel::<EventOrError>(1);
+        let (_tx, rx) = mpsc::channel::<F2Event>(1);
         let mut event_rx = Some(rx);
         app.transfers_setup_pending = false;
 
