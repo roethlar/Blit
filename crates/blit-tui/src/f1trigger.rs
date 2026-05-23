@@ -2,19 +2,23 @@
 //!
 //! TUI_DESIGN §5.1's F1 detail block advertises
 //! `[t] trigger transfer`. Pressing `t` on a daemon row opens a
-//! two-field modal — a remote **source** spec (prefilled to the
-//! selected daemon's `host:port:/`) and a local **destination**
-//! path — then runs the transfer.
+//! two-field modal — a **source** spec (prefilled to the selected
+//! daemon's `host:port:/`) and a **destination** — then runs the
+//! transfer. This module is just field collection + a kind cycle;
+//! the dispatcher (`plan_f1_trigger`) classifies the endpoint pair
+//! and routes to the matching execution path.
 //!
-//! On commit the modal hands the parsed source + dest to the
-//! verified F3 pull machine and the dispatcher jumps to F3 so the
-//! operator watches the transfer in its existing footer — there's
-//! no new execution path, reply channel, or progress UI here, just
-//! field collection. d-59/d-60 add a copy/mirror/move kind cycle
-//! (TUI_DESIGN §1 "copy / mirror / move … between any two
-//! endpoints"); mirror and move route through F3's destructive
-//! confirm gate. Push and remote→remote (delegated) triggers are
-//! follow-ups.
+//! All three directions are now wired (TUI_DESIGN §1 "copy /
+//! mirror / move … between any two endpoints"):
+//! - **remote → local** (pull, d-58…d-60): hands off to the
+//!   verified F3 pull machine; mirror/move route through F3's
+//!   destructive confirm gate; the view jumps to F3.
+//! - **local → remote** (push, d-61/d-65): runs `run_remote_push`;
+//!   mirror/move gate behind the trigger's own y/N confirm.
+//! - **remote → remote** (delegated copy, d-68): runs
+//!   `run_delegated_pull`; copy-only for now (mirror/move
+//!   delegation rejected). Both push and delegated show in the F1
+//!   push footer.
 //!
 //! Flow:
 //! 1. `t` on a daemon row → [`F1TriggerState::begin`] (source

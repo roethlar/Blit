@@ -22,6 +22,17 @@
 //! destructive, so the trigger gates them behind a y/N confirm
 //! before calling `begin`; the state machine itself is
 //! kind-agnostic beyond the verb.
+//!
+//! d-68: this lifecycle is also reused for a remote→remote
+//! *delegated* copy triggered from F1 (the destination daemon
+//! pulls from the source daemon). It enters via `begin_delegated`
+//! and carries `delegated: true` so the footer reads
+//! "delegating / delegated" rather than "pushing / pushed" — the
+//! CLI host is not in the byte path. Delegated copy ships without
+//! live byte progress for now (the daemon reports via the pull
+//! data-plane, not the push path); the terminal summary still
+//! shows. Mirror/move and detached (F2-visible) delegation are
+//! follow-ups.
 
 use crate::f3pull::PullKind;
 use std::time::{Duration, Instant};
@@ -44,6 +55,9 @@ pub enum F1PushStatus {
         bytes: u64,
         bytes_per_sec: u64,
         kind: PullKind,
+        /// d-68: `true` for a remote→remote delegated copy (drives
+        /// the "delegating/delegated" verb instead of push verbs).
+        delegated: bool,
     },
     /// Push finished — files + bytes sent, dest label. d-64:
     /// `finished_at` drives the auto-hide TTL.
@@ -53,6 +67,7 @@ pub enum F1PushStatus {
         label: String,
         finished_at: Instant,
         kind: PullKind,
+        delegated: bool,
     },
     /// Push failed (validation or transport). d-64: `finished_at`
     /// drives the auto-hide TTL.
@@ -60,6 +75,7 @@ pub enum F1PushStatus {
         message: String,
         finished_at: Instant,
         kind: PullKind,
+        delegated: bool,
     },
 }
 
@@ -101,6 +117,18 @@ impl F1PushState {
     /// `request_id` for the spawned task. No-op (`None`) if a push
     /// is already running.
     pub fn begin(&mut self, label: String, kind: PullKind) -> Option<u64> {
+        self.begin_inner(label, kind, false)
+    }
+
+    /// d-68: begin a remote→remote *delegated* copy (the destination
+    /// daemon pulls from the source). Same lifecycle as a push, but
+    /// `delegated: true` swaps the footer verb. Copy-only for now, so
+    /// no `kind` parameter.
+    pub fn begin_delegated(&mut self, label: String) -> Option<u64> {
+        self.begin_inner(label, PullKind::Copy, true)
+    }
+
+    fn begin_inner(&mut self, label: String, kind: PullKind, delegated: bool) -> Option<u64> {
         if self.is_running() {
             return None;
         }
@@ -113,6 +141,7 @@ impl F1PushState {
             bytes: 0,
             bytes_per_sec: 0,
             kind,
+            delegated,
         };
         Some(request_id)
     }
@@ -146,6 +175,7 @@ impl F1PushState {
                 request_id: rid,
                 label,
                 kind,
+                delegated,
                 ..
             } if *rid == request_id => {
                 self.status = F1PushStatus::Done {
@@ -154,6 +184,7 @@ impl F1PushState {
                     label: label.clone(),
                     finished_at: at,
                     kind: *kind,
+                    delegated: *delegated,
                 };
                 true
             }
@@ -167,12 +198,14 @@ impl F1PushState {
             F1PushStatus::Running {
                 request_id: rid,
                 kind,
+                delegated,
                 ..
             } if *rid == request_id => {
                 self.status = F1PushStatus::Error {
                     message,
                     finished_at: at,
                     kind: *kind,
+                    delegated: *delegated,
                 };
                 true
             }
@@ -317,6 +350,40 @@ mod tests {
                 assert_eq!(label, "nas:9031");
             }
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_delegated_marks_running_and_flows_to_done() {
+        let mut s = F1PushState::new();
+        let rid = s
+            .begin_delegated("skippy:/b/".to_string())
+            .expect("started");
+        match s.status() {
+            F1PushStatus::Running {
+                delegated, kind, ..
+            } => {
+                assert!(*delegated, "delegated run flagged");
+                assert_eq!(*kind, PullKind::Copy, "delegated is copy-only");
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+        assert!(s.apply_done(rid, 7, 700, Instant::now()));
+        match s.status() {
+            F1PushStatus::Done { delegated, .. } => {
+                assert!(*delegated, "delegated flag carries to Done")
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_push_is_not_delegated() {
+        let mut s = F1PushState::new();
+        s.begin("nas:9031".to_string(), PullKind::Copy).expect("p");
+        match s.status() {
+            F1PushStatus::Running { delegated, .. } => assert!(!*delegated),
+            other => panic!("expected Running, got {other:?}"),
         }
     }
 
