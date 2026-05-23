@@ -7,13 +7,16 @@ This document describes the high-level architecture of Blit, a high-performance 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         User Layer                               │
-├──────────────────────────────┬──────────────────────────────────┤
-│  blit (CLI app + admin)      │      blit-daemon                 │
-│  copy/mirror/move/scan/list/ │      (gRPC server)               │
-│  list-modules/ls/find/du/df/ │                                  │
-│  rm/completions/profile/     │                                  │
-│  diagnostics                 │                                  │
-├──────────────────────────────┴──────────────────────────────────┤
+├───────────────────────────────────────┬─────────────────────────┤
+│  blit (CLI) │ blit-tui (TUI) │         │      blit-daemon         │
+│  blit-prometheus-bridge (exporter)     │      (gRPC server)       │
+│  copy/mirror/move/scan/list/           │                          │
+│  list-modules/ls/find/du/df/           │                          │
+│  rm/completions/profile/diagnostics    │                          │
+├───────────────────────────────────────┴─────────────────────────┤
+│      blit-app  (shared orchestration: endpoints, dispatch,       │
+│                client, admin verbs, diagnostics)                 │
+├──────────────────────────────────────────────────────────────────┤
 │                       blit-core                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │   Unified Transfer Pipeline (execute_sink_pipeline*)        │ │
@@ -111,6 +114,38 @@ blit-daemon/
     │   └── data_plane.rs # Data plane (TCP)
     └── util.rs       # Shared utilities
 ```
+
+### blit-app
+
+Shared application/orchestration library sitting between the binaries
+(`blit-cli`, `blit-tui`) and `blit-core`. Holds the logic both
+front-ends need so it isn't duplicated or trapped in the CLI: endpoint
+parsing/classification (`endpoints`), transfer dispatch + destination
+resolution (`transfers::{dispatch, resolution, filter}`), the control-
+plane gRPC client with a DNS-aware connect timeout (`client`), admin-verb
+implementations (`admin::{ls, find, du, df, rm, jobs, list_modules}`),
+diagnostics dump, and profile/perf reporting. The CLI and TUI are thin
+shells over these helpers.
+
+### blit-tui
+
+Terminal UI (ratatui + crossterm) producing the `blit-tui` binary. Panes
+F1–F4 (trigger/daemons, transfers, browse, profile). It is a read-mostly
+control surface over the daemon: it `Subscribe`s to each discovered
+daemon's `DaemonEvent` stream and renders live transfer state from
+`GetState`, can launch transfers/`CancelJob`/`ClearRecent`, and supports
+configurable keybindings and theming via `[keys]` / `[theme]` config.
+Daemon discovery is mDNS; multi-daemon F2 merges per-daemon Subscribe
+streams into one event channel.
+
+### blit-prometheus-bridge
+
+Standalone Prometheus exporter producing the `blit-prometheus-bridge`
+binary. A minimal hand-rolled HTTP server serves `GET /metrics`; each
+scrape triggers a fresh `GetState` against the configured daemon (pull
+model, no background poll) and formats the result as Prometheus text. A
+failed/timed-out scrape still returns `200` with `blit_daemon_up 0` so
+the target registers as up-but-down rather than a scrape error.
 
 ### Admin verbs
 
@@ -292,19 +327,37 @@ pub trait ZeroCopy {
 
 ### gRPC Services
 
-Defined in `proto/blit.proto`:
+Defined in `proto/blit.proto` — a single `Blit` service:
 
 ```protobuf
 service Blit {
+  // Transfer
   rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
   rpc Pull(PullRequest) returns (stream PullChunk);
+  rpc PullSync(stream ClientPullMessage) returns (stream ServerPullMessage);
+  rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
+
+  // Admin / query
   rpc List(ListRequest) returns (ListResponse);
   rpc Purge(PurgeRequest) returns (PurgeResponse);
+  rpc CompletePath(CompletionRequest) returns (CompletionResponse);
+  rpc ListModules(ListModulesRequest) returns (ListModulesResponse);
   rpc Find(FindRequest) returns (stream FindEntry);
   rpc DiskUsage(DiskUsageRequest) returns (stream DiskUsageEntry);
   rpc FilesystemStats(FilesystemStatsRequest) returns (FilesystemStatsResponse);
+
+  // Daemon state / observability (consumed by the TUI + Prometheus bridge)
+  rpc GetState(GetStateRequest) returns (DaemonState);
+  rpc Subscribe(SubscribeRequest) returns (stream DaemonEvent);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc ClearRecent(ClearRecentRequest) returns (ClearRecentResponse);
 }
 ```
+
+`DelegatedPull` lets a daemon pull from another daemon on a client's
+behalf (remote→remote). `GetState` / `Subscribe` expose live transfer
+state; `CancelJob` cancels an in-flight transfer (authorized to the
+originating peer); `ClearRecent` wipes the recent-transfers ring.
 
 ### Hybrid Data Plane
 
