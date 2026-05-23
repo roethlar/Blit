@@ -70,6 +70,30 @@ The accept loop + live scrape are integration (need a running daemon).
   await a wire signal distinguishing metrics-disabled zeros from real
   zeros. See [[feedback-getstate-counters-zero]].
 
+## Round 2 (commit `f7ff757`)
+
+**Reopen finding (Medium):** idle/slow clients parked connection tasks
+forever. The 16 KiB `MAX_REQUEST_HEAD` bounded buffered *bytes*, not
+*time* — a client could connect and send nothing, or trickle bytes below
+the cap without ever ending the headers, holding a task + socket
+indefinitely. That contradicted the slowloris-guard comment and is risky
+because `--listen` accepts any `SocketAddr`, including non-loopback.
+
+**Fix:**
+- `REQUEST_HEAD_TIMEOUT` (5s) wraps the head read in
+  `tokio::time::timeout`. A Prometheus scrape sends its head in one
+  segment immediately, so 5s is generous.
+- `read_request_head` now returns `Result<Option<String>>`: `Ok(None)`
+  means the deadline elapsed → `handle_conn` replies `408 Request
+  Timeout` and releases the connection. The inner (untimed) read loop is
+  `read_head_bytes`.
+
+**Test (+1, bridge crate now 10):**
+`idle_client_released_by_read_timeout` — binds a real listener, connects
+an idle peer that sends nothing, and asserts `read_request_head`
+(100 ms test timeout) returns `Ok(None)` promptly, wrapped in a 2 s
+outer guard so a broken timeout fails loudly instead of hanging.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
