@@ -21,7 +21,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 /// Cap on how much of the request head we'll buffer before giving up
 /// looking for the end of headers — bounds buffered bytes per
@@ -44,6 +44,36 @@ const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 /// records a scrape error instead.
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// audit-5: deadline for writing the HTTP response. The request *head*
+/// read is already bounded (`REQUEST_HEAD_TIMEOUT`), but the write side
+/// was not — a client that stops reading (full socket buffer) would
+/// otherwise park the handler task on `write_all`/`flush` indefinitely.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// audit-5: build the listener with `SO_REUSEADDR` so a quick
+/// restart can rebind the port while a previous socket lingers in
+/// `TIME_WAIT`, instead of failing with "address already in use".
+/// (`TcpListener::bind` does not set it on all platforms.)
+async fn build_listener(addr: SocketAddr) -> Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()
+    } else {
+        TcpSocket::new_v6()
+    }
+    .with_context(|| format!("creating listener socket for {addr}"))?;
+    socket
+        .set_reuseaddr(true)
+        .with_context(|| format!("setting SO_REUSEADDR for {addr}"))?;
+    socket
+        .bind(addr)
+        .with_context(|| format!("binding {addr}"))?;
+    // Backlog: generous for a scrape endpoint — Prometheus opens one
+    // short-lived connection per scrape interval.
+    socket
+        .listen(1024)
+        .with_context(|| format!("listening on {addr}"))
+}
+
 /// Serve `/metrics` until the process is killed. Binds `addr`, then
 /// handles each connection on its own task.
 pub(crate) async fn serve(
@@ -51,9 +81,7 @@ pub(crate) async fn serve(
     remote: RemoteEndpoint,
     recent_limit: u32,
 ) -> Result<()> {
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
+    let listener = build_listener(addr).await?;
     eprintln!(
         "blit-prometheus-bridge: serving http://{addr}/metrics (scraping {})",
         remote.display()
@@ -112,9 +140,31 @@ async fn handle_conn(
         )
     };
 
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
+    // audit-5: bound the response write so a client that stops reading
+    // can't park this handler forever.
+    write_all_within(&mut stream, response.as_bytes(), WRITE_TIMEOUT).await?;
     Ok(())
+}
+
+/// Write `bytes` then flush, under `timeout`. Generic over the writer so
+/// it's unit-testable with an in-memory pipe + a `pending` reader (no
+/// real socket needed). An elapsed deadline is an error, not a silent
+/// truncation.
+async fn write_all_within<W>(writer: &mut W, bytes: &[u8], timeout: Duration) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let write = async {
+        writer.write_all(bytes).await?;
+        writer.flush().await?;
+        Ok::<(), std::io::Error>(())
+    };
+    match tokio::time::timeout(timeout, write).await {
+        Ok(result) => result.context("writing HTTP response"),
+        Err(_elapsed) => Err(eyre::eyre!(
+            "writing HTTP response timed out after {timeout:?}"
+        )),
+    }
 }
 
 /// Run a GetState `scrape` under `timeout` and return the metrics body.
@@ -199,6 +249,52 @@ fn http_response(status: &str, content_type: &str, body: &str) -> String {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// audit-5: the listener binds via the SO_REUSEADDR path and is
+    /// usable. (Binding on :0 then reading back local_addr exercises
+    /// build_listener end to end.)
+    #[tokio::test]
+    async fn build_listener_binds_with_reuseaddr() {
+        let listener = build_listener("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("build_listener should bind");
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert_ne!(addr.port(), 0, "an ephemeral port was assigned");
+    }
+
+    /// audit-5: a write to a peer that never reads must surface a
+    /// timeout, not park the handler forever. A 1-byte duplex whose
+    /// other half is dropped-but-unread blocks `write_all` of a larger
+    /// payload, so a short deadline can only fire the timeout.
+    #[tokio::test]
+    async fn write_all_within_times_out_when_peer_never_reads() {
+        let (mut server_side, _client_side) = tokio::io::duplex(1);
+        // _client_side is never read from; its buffer fills at 1 byte.
+        let big = vec![b'x'; 64 * 1024];
+        let err = write_all_within(&mut server_side, &big, Duration::from_millis(20))
+            .await
+            .expect_err("a non-reading peer must time out");
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+    }
+
+    /// audit-5: the happy path writes all bytes and flushes within the
+    /// deadline.
+    #[tokio::test]
+    async fn write_all_within_succeeds_when_peer_reads() {
+        let (mut server_side, mut client_side) = tokio::io::duplex(1024);
+        let payload = b"HTTP/1.1 200 OK\r\n\r\nbody";
+        let reader = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            client_side.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+        write_all_within(&mut server_side, payload, Duration::from_secs(5))
+            .await
+            .expect("write should succeed");
+        drop(server_side); // EOF so read_to_end returns
+        assert_eq!(reader.await.unwrap(), payload);
+    }
 
     /// Regression for the bridge-2 round-1 reopen: a client that
     /// connects but never finishes its request head must be released by
