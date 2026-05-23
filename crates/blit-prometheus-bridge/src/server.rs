@@ -304,6 +304,73 @@ mod tests {
         assert_ne!(addr.port(), 0, "an ephemeral port was assigned");
     }
 
+    /// audit-6c: end-to-end HTTP integration. A real client speaks HTTP
+    /// to `handle_conn` over a loopback socket and reads the full
+    /// response. The scrape target is unreachable (127.0.0.1:1 →
+    /// ECONNREFUSED), so the scrape fails fast and the body is the
+    /// "daemon down" metrics — exercising the whole path (accept → read
+    /// request head → route /metrics → scrape → format → bounded write)
+    /// without standing up a daemon.
+    async fn http_roundtrip(remote_raw: &str, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = build_listener("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let remote = RemoteEndpoint::parse(remote_raw).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_conn(stream, &remote, 0).await.unwrap();
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        server.await.unwrap();
+        resp
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_http_200_with_down_metrics_when_daemon_unreachable() {
+        let resp = http_roundtrip("127.0.0.1:1", "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        assert!(
+            resp.starts_with("HTTP/1.1 200 OK"),
+            "expected 200 status line, got: {resp:?}"
+        );
+        assert!(
+            resp.contains("text/plain; version=0.0.4"),
+            "expected prometheus content-type, got: {resp}"
+        );
+        assert!(
+            resp.contains("Content-Length:"),
+            "framed response must carry Content-Length, got: {resp}"
+        );
+        // Unreachable daemon → down metrics (blit_daemon_up 0).
+        assert!(
+            resp.contains("blit_daemon_up 0"),
+            "expected down metrics body, got: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_path_serves_http_404() {
+        // Path != /metrics: scrape is never attempted, so the (unreachable)
+        // remote is irrelevant — the route is decided before any scrape.
+        let resp = http_roundtrip(
+            "127.0.0.1:1",
+            "GET /favicon.ico HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
+        .await;
+        assert!(
+            resp.starts_with("HTTP/1.1 404 Not Found"),
+            "expected 404 status line, got: {resp:?}"
+        );
+        assert!(
+            resp.contains("try GET /metrics"),
+            "expected the 404 hint body, got: {resp}"
+        );
+    }
+
     /// audit-5: a write to a peer that never reads must surface a
     /// timeout, not park the handler forever. A 1-byte duplex whose
     /// other half is dropped-but-unread blocks `write_all` of a larger
