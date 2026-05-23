@@ -72,3 +72,7 @@ planning (`plan_f1_trigger`/`plan_f1_delegated`/`TriggerOutcome`); and
 ultimately the `run_router` event loop / `handle_pane_action` key dispatch
 / render orchestration. Done incrementally so each stays
 compiler+test-verifiable.
+
+## Reviewer comments
+
+Verified. Moving the F3 state→display mapping helpers (`f3_pull_to_display`, `f3_du_to_display`, and `f3_del_to_display`) to `display_f3.rs` is correct and preserves TUI rendering logic. Keeping `confirm_detail` private to the module is also correct. Verified with clean clippy/fmt and all 630 workspace tests passing.
