@@ -3527,21 +3527,31 @@ fn plan_f1_trigger(
         Ok(s) => s,
         Err(_) => return TriggerOutcome::Rejected(format!("invalid source: {src}")),
     };
-    // d-68: with a remote source, classify the destination up front
-    // and branch on ALL three outcomes — a remote dest is a
-    // remote→remote delegated transfer (not a remote→local pull),
-    // and a remote-*shaped* typo (parse Err, e.g. `host:/module`
-    // missing its trailing slash) must be rejected rather than fall
-    // through into the pull machine as a literal local path. Only a
-    // genuine local dest (`Ok(Local)`) continues to remote→local.
-    // d-68 R2: the original guard only matched `Ok(Remote)` and
-    // silently dropped `Err(_)` into the local-pull mis-route.
+    // d-68: with a remote source, classify the destination up front.
+    // It's a remote→remote delegated transfer ONLY when the dest is a
+    // genuine remote module/root (`host:/module/…` or `host://…`);
+    // everything else stays on the remote→local pull path, where the
+    // dest is a local directory. Three buckets:
+    //   - Remote module/root  → delegated.
+    //   - Remote *discovery*  → bare `host` / `host:port` parses as a
+    //     discovery endpoint, but here it's an ordinary relative local
+    //     dest (e.g. `backup`) for the pull — fall through.
+    //   - genuine local dest  → fall through.
+    //   - parse Err           → a remote-*shaped* typo (e.g.
+    //     `host:/module` missing its trailing slash); reject rather
+    //     than mis-route into the pull as a literal local path.
+    // d-68 R2 added the Err→reject arm; R3 narrows delegation to
+    // supported remote dests so discovery doesn't steal relative
+    // local pull destinations.
     if let Endpoint::Remote(ref source_ep) = source {
         match parse_transfer_endpoint(dest) {
-            Ok(Endpoint::Remote(dst_ep)) => {
+            Ok(Endpoint::Remote(dst_ep))
+                if ensure_remote_destination_supported(&dst_ep).is_ok() =>
+            {
                 return plan_f1_delegated(app, source_ep.clone(), dst_ep, kind);
             }
-            Ok(Endpoint::Local(_)) => { /* remote→local pull — handled below */ }
+            // Discovery (bare host) or genuine local path → pull below.
+            Ok(_) => {}
             Err(_) => return TriggerOutcome::Rejected(format!("invalid destination: {dest}")),
         }
     }
@@ -7812,6 +7822,29 @@ mod tests {
             app.f3_pull.is_running(),
             "engages the remote→local pull machine"
         );
+    }
+
+    /// d-68 R3: a bare relative destination (`backup`) parses as a
+    /// remote *discovery* endpoint, but for a remote source it's an
+    /// ordinary local pull destination — it must fall through to the
+    /// remote→local pull, NOT be rejected as a non-module delegated
+    /// dest (the R2 over-correction the reviewer flagged).
+    #[tokio::test]
+    async fn plan_f1_trigger_remote_source_bare_dest_pulls_not_delegates() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "backup",
+            f3pull::PullKind::Copy,
+            false,
+        );
+        assert!(
+            matches!(out, TriggerOutcome::Launched),
+            "bare local dest pulls, not rejected"
+        );
+        assert!(app.f3_pull.is_running(), "remote→local pull engaged");
+        assert!(!app.f1_push.is_running(), "must not delegate a bare dest");
     }
 
     #[test]
