@@ -5959,7 +5959,13 @@ impl KeyMap {
 /// safety net for a stuck UI — the latter two always quit so a bad
 /// `[keys] quit` value can never lock the operator in.
 fn is_quit(code: KeyCode, modifiers: KeyModifiers, quit: KeyCode) -> bool {
-    code == quit
+    // keys-1 R2: the configured quit char claims only a PLAIN press —
+    // never a Ctrl/Alt chord for that character. Otherwise `quit = "r"`
+    // would steal `Ctrl+R` (config reload), and any future Ctrl/Alt
+    // chord for the chosen char. Shift is allowed (capitals are distinct
+    // KeyCodes anyway). `Esc` and `Ctrl+C` stay as modifier-aware
+    // failsafes regardless of the configured char.
+    (code == quit && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT))
         || matches!(code, KeyCode::Esc)
         || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
 }
@@ -6108,6 +6114,46 @@ mod tests {
             key_action(&ev(KeyCode::Char('q')), &custom),
             Some(UserAction::Quit)
         ));
+    }
+
+    /// keys-1 R2 regression: a remapped quit char must NOT hijack the
+    /// Ctrl/Alt chord for that character. `quit = "r"` claims a PLAIN
+    /// `r` (quit) but leaves `Ctrl+R` as config reload.
+    #[test]
+    fn remapped_quit_does_not_steal_ctrl_chord() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.quit = "r".to_string();
+        let custom = KeyMap::from_config(&cfg);
+        // Plain 'r' → quit (the operator's chosen quit key).
+        assert!(matches!(
+            key_action(
+                &KeyEvent {
+                    code: KeyCode::Char('r'),
+                    modifiers: KeyModifiers::empty(),
+                },
+                &custom
+            ),
+            Some(UserAction::Quit)
+        ));
+        // Ctrl+R → still config reload, NOT quit.
+        assert!(matches!(
+            key_action(
+                &KeyEvent {
+                    code: KeyCode::Char('r'),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                &custom
+            ),
+            Some(UserAction::ReloadConfig)
+        ));
+        // is_quit itself: the configured char with Ctrl/Alt is not quit.
+        let r = KeyCode::Char('r');
+        assert!(is_quit(r, KeyModifiers::empty(), r));
+        assert!(!is_quit(r, KeyModifiers::CONTROL, r));
+        assert!(!is_quit(r, KeyModifiers::ALT, r));
+        // Failsafes still fire under the remap.
+        assert!(is_quit(KeyCode::Esc, KeyModifiers::empty(), r));
+        assert!(is_quit(KeyCode::Char('c'), KeyModifiers::CONTROL, r));
     }
 
     fn k(code: KeyCode) -> KeyEvent {
