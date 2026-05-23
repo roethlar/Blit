@@ -1,43 +1,41 @@
-Reviewed sha: `be0121a5c0e6e37e3a803e929b4727f51c3997d6`
+Reviewed sha: `c18c49361b417b6e49916efe2508541f897c9cc9`
 
-# Reopened: d-71-f1-delegated-move
+# Reopened: d-71-f1-delegated-move round 2
 
 ## Finding
 
-`plan_f1_trigger` routes remote-source + remote-destination triggers straight into
-`plan_f1_delegated` with the raw parsed destination endpoint, but it never applies
-the shared `resolve_destination(raw_source, raw_dest, src_endpoint, raw_dst)`
-step that the CLI uses before every `copy` / `mirror` / `move`.
+Round 2 closes the remote→remote half of the first finding: the delegated branch
+now applies `resolve_destination` before `plan_f1_delegated`, and the new
+non-trailing-source regression covers `nas:/photos/2024 -> skippy:/backup/`.
 
-That is now a data-loss bug for delegated move. Example:
+The same data-loss class still exists in the local→remote F1 trigger branch. It
+parses the remote destination, validates it, and then launches `spawn_f1_push`
+with the raw destination endpoint:
+
+- `crates/blit-tui/src/main.rs:3733` parses `dest`.
+- `crates/blit-tui/src/main.rs:3754` uses `remote.display()` for the launched
+  label.
+- `crates/blit-tui/src/main.rs:3758` passes that same unresolved `remote` to
+  `spawn_f1_push`.
+
+Example:
 
 ```text
-source: nas:/photos/2024
-dest:   skippy:/backup/
+source: /tmp/src
+dest:   nas:/home/
 kind:   move
 ```
 
-CLI semantics resolve the destination to `skippy:/backup/2024` because the source
-has no trailing slash and the destination is a container. The d-71 TUI path passes
-`skippy:/backup/` unchanged to `build_delegated_execution`; the destination daemon
-therefore writes into the destination root/container itself. After that misplaced
-copy succeeds, `spawn_f1_delegated_pull` deletes `nas:/photos/2024`.
+CLI semantics resolve this to `nas:/home/src` because the source has no trailing
+slash and the destination is a container. The current TUI path pushes to
+`nas:/home/` unchanged, then `spawn_f1_push` deletes `/tmp/src` after the push
+succeeds. That is the same "copied to the wrong destination, then source-delete"
+failure mode, just on the local-source move arm.
 
-The new unit coverage uses `nas:/photos/2024/` as the source, which is a
-"copy contents" form and therefore hides the missing basename-append case. Please
-add a non-trailing-source regression that proves delegated move resolves the
-remote destination exactly like the CLI before the source-delete step can fire.
-
-Relevant code:
-
-- `crates/blit-tui/src/main.rs`: remote-source branch calls
-  `plan_f1_delegated(app, source_ep.clone(), dst_ep, kind, confirmed)` without
-  resolution.
-- `crates/blit-cli/src/transfers/mod.rs`: `run_move` parses raw endpoints and
-  resolves the destination before dispatch.
-- `crates/blit-app/src/transfers/resolution.rs`: existing
-  `resolve_destination_remote_source_appends_basename_on_container` test pins the
-  expected remote-source/container behavior.
+Please apply the same shared `resolve_destination(src, dest, &source, raw_dst)`
+step before the local→remote push launch, and add coverage for the destructive
+move case (`/tmp/src -> nas:/home/` resolves to `nas:/home/src`) plus the
+trailing-source "copy contents" no-append case if it is not already covered.
 
 ## Gates
 
