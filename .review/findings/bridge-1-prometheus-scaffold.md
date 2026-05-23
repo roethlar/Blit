@@ -71,6 +71,36 @@ Workspace 28 test binaries (new crate adds 5 unit tests in `metrics`):
 
 The live `jobs::query` path is integration (needs a daemon).
 
+## Round 2 (commit `9411754`)
+
+**Reopen finding:** the daemon **always** returns `counters: Some(..)`
+(`crates/blit-daemon/src/service/core.rs` + `proto/blit.proto:739`) —
+present-but-zero when `--metrics` is off, since the atomics never
+incremented. That's indistinguishable on the wire from a genuine zero.
+So the round-1 formatter's `if let Some(c) = &state.counters` always
+fired, publishing `blit_push_operations_total 0` etc. for a busy daemon
+running without `--metrics` — false telemetry once scraped into a
+Prometheus counter series. The round-1 test only covered `counters =
+None`, a state the real daemon never produces.
+
+**Fix (reviewer option 3 — omit until the wire can distinguish):**
+- `format_metrics` no longer emits the operation-counter families
+  (`push`/`pull`/`purge`/`transfer_errors_total`). It exposes only the
+  gauges that derive from `--metrics`-independent fields: `up`,
+  `uptime_seconds`, `modules`, `delegation_enabled`, `active_transfers`
+  (from the live `active[]` table), `recent_transfers` (from the live
+  `recent[]` ring). Module docs explain why.
+- Counters will return in a later slice once the wire grows a
+  `metrics_enabled` signal (or omits `Counters` when disabled) so a real
+  zero is distinguishable from a metrics-off zero — that's a
+  daemon/proto change, out of scope for this client-only bridge slice.
+
+**Tests:** 5 (unchanged count; reworked). `sample_state` now mirrors the
+real default-daemon shape (`counters: Some(all-zero)`).
+`omits_operation_counters_to_avoid_false_zeros` is the regression guard:
+given that shape, the formatter emits no `*_total` family and no
+`counter` TYPE line. Gauge tests unchanged.
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
