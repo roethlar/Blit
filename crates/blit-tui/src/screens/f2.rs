@@ -152,6 +152,9 @@ pub fn render_into(
     status: &ConnectionStatus,
     cancel: &F2CancelDisplay,
     now: Instant,
+    // e-9: `[theme] accent_color`, used for the active-row selection
+    // highlight (matches the tab strip).
+    accent: Color,
 ) {
     // d-14: the active-table "age" column compares
     // `start_unix_ms` (wall-clock at transfer start, sent
@@ -175,7 +178,7 @@ pub fn render_into(
         .split(area);
 
     render_header(frame, chunks[0], remote_label, state);
-    render_active_table(frame, chunks[1], state, now_unix_ms);
+    render_active_table(frame, chunks[1], state, now_unix_ms, accent);
     render_recent_table(frame, chunks[2], state);
     render_footer(frame, chunks[3], status, state.last_event_at(), cancel, now);
 }
@@ -194,7 +197,13 @@ fn render_header(frame: &mut Frame, area: Rect, remote_label: &str, state: &Tran
     frame.render_widget(para, area);
 }
 
-fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, now_unix_ms: u64) {
+fn render_active_table(
+    frame: &mut Frame,
+    area: Rect,
+    state: &TransfersState,
+    now_unix_ms: u64,
+    accent: Color,
+) {
     let rows: Vec<Row> = state
         .active_rows()
         .into_iter()
@@ -228,15 +237,17 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, no
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(" Active "))
         // d-21: highlight the row at the cursor index.
-        // Black-on-cyan matches the tab-strip active-tab
-        // visual (e-7 made that themable; the Active row
-        // highlight stays Cyan for now — operator-visible
-        // accent is the tab strip, the row highlight is
-        // an internal selection marker).
+        // e-9: the highlight background honors the `[theme]
+        // accent_color` (default cyan), matching the tab-strip
+        // active-tab visual. Now that F2 is multi-daemon (m2f-*),
+        // the operator navigates this selection to pick which
+        // daemon's transfer to cancel, so the same colorblind/
+        // palette accessibility rationale that made the tab strip
+        // themable (e-7) applies here too.
         .row_highlight_style(
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(accent)
                 .add_modifier(Modifier::BOLD),
         );
     let mut table_state = TableState::default().with_selected(state.selected_active_index());
@@ -618,6 +629,7 @@ mod tests {
                     &ConnectionStatus::Live,
                     &F2CancelDisplay::Hidden,
                     Instant::now(),
+                    Color::Cyan,
                 );
             })
             .expect("draw");
@@ -637,6 +649,58 @@ mod tests {
             text.contains("skippy:9001"),
             "active row shows its source daemon; got:\n{text}"
         );
+    }
+
+    /// e-9: the selected active row's highlight background uses the
+    /// supplied `[theme] accent_color`, not a hardcoded cyan. Renders
+    /// with an off-default accent (red) and asserts some cell carries
+    /// that background — i.e. the accent reached the row-highlight style.
+    #[test]
+    fn active_row_highlight_uses_accent_color() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut state = TransfersState::new();
+        state.merge_snapshot(
+            "skippy:9001",
+            blit_core::generated::DaemonState {
+                active: vec![blit_core::generated::ActiveTransfer {
+                    transfer_id: "t1".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        // Anchor the cursor so a row is highlighted.
+        state.select_first_active();
+
+        let backend = TestBackend::new(120, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_into(
+                    frame,
+                    frame.area(),
+                    &state,
+                    "skippy:9001",
+                    &ConnectionStatus::Live,
+                    &F2CancelDisplay::Hidden,
+                    Instant::now(),
+                    Color::Red,
+                );
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let has_accent_bg =
+            (0..buf.area.height).any(|y| (0..buf.area.width).any(|x| buf[(x, y)].bg == Color::Red));
+        assert!(
+            has_accent_bg,
+            "the selected row's highlight should paint the accent (red) background"
+        );
+        // And the default-cyan must NOT leak through when a custom accent
+        // is set (guards against a stray hardcoded cyan highlight).
+        let has_cyan_bg = (0..buf.area.height)
+            .any(|y| (0..buf.area.width).any(|x| buf[(x, y)].bg == Color::Cyan));
+        assert!(!has_cyan_bg, "no hardcoded cyan highlight remains");
     }
 
     #[test]

@@ -817,6 +817,7 @@ async fn run_router(
                             ),
                         ),
                         now,
+                        accent_color,
                     ),
                     Screen::F3 => screens::f3::render_into(
                         frame,
