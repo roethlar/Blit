@@ -116,7 +116,11 @@ fn metric(out: &mut String, name: &str, help: &str, kind: &str, labels: &str, va
 }
 
 /// Escape a Prometheus label value per the exposition format:
-/// backslash, double-quote, and newline are escaped.
+/// backslash, double-quote, newline, and carriage return are escaped.
+/// audit-5: `\r` was previously unescaped, producing non-compliant
+/// output for any label value containing a CR (latent today — current
+/// label values can't contain one — but a correctness gap as labels
+/// grow).
 fn escape_label(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -124,6 +128,7 @@ fn escape_label(value: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
             _ => out.push(ch),
         }
     }
@@ -134,6 +139,18 @@ fn escape_label(value: &str) -> String {
 mod tests {
     use super::*;
     use blit_core::generated::{ActiveTransfer, Counters, ModuleInfo, TransferRecord};
+
+    /// audit-5: every exposition-format metacharacter is escaped,
+    /// including `\r` (the gap this slice closes).
+    #[test]
+    fn escape_label_escapes_all_metacharacters() {
+        assert_eq!(escape_label("plain"), "plain");
+        assert_eq!(escape_label("a\\b"), "a\\\\b");
+        assert_eq!(escape_label("a\"b"), "a\\\"b");
+        assert_eq!(escape_label("a\nb"), "a\\nb");
+        assert_eq!(escape_label("a\rb"), "a\\rb");
+        assert_eq!(escape_label("a\r\nb"), "a\\r\\nb");
+    }
 
     /// Mirrors the DEFAULT daemon's `GetState` shape: `counters` is
     /// `Some(..)` even though this daemon ran without `--metrics`, so
