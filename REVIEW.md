@@ -56,6 +56,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | audit-1b-net-timeouts-keepalive | Robustness | Delegation DNS-resolve (10s) + dst→src connect (30s) timeouts via net_timeout::within; daemon HTTP/2 keepalive (30s/20s) reaps vanished subscribers — owner-decided over idle-close (audit-1 items 1/2/4) | `[x]` | `phase5/a1` | `1d88fea` |
 | audit-7-cargo-lock | Style | Track Cargo.lock for reproducible builds (4-binary workspace); remove from .gitignore (audit-7 item 10, owner-approved — supersedes the never-add rule for the lockfile only) | `[x]` | `phase5/a1` | `dfaecfe` |
 | rec-4-clear-recent-confirm | Feature | F2 `E` clear-recent now asks `clear recent? y/N` first (owner-requested); reuses F2CancelStatus confirm machinery via ConfirmingClearRecent variant | `[x]` | `phase5/a1` | `3673ee1` |
+| audit-2a-cli-connect-timeout | Robustness | blit_app::client::connect_with_timeout (tonic Endpoint::connect_timeout 30s) + swap all 10 admin BlitClient::connect sites incl jobs::query (bridge inherits it) (audit-2 part 1 of 2) | `[~]` | `phase5/a1` | `5ded6c9` |
 
 ## Open findings
 
