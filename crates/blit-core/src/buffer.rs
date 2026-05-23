@@ -174,6 +174,38 @@ pub struct BufferPool {
     bytes_through: AtomicU64,
 }
 
+/// audit-13: cache a returned buffer under a single lock acquisition,
+/// restoring its logical length to `buffer_size` WITHOUT re-zeroing the
+/// already-allocated bytes. Only buffers with enough capacity are cached,
+/// and the length is restored only when we're actually going to cache
+/// (so a full cache doesn't pay for the work). Callers must never rely on
+/// pool buffers being pre-zeroed — they're filled by a read and consumed
+/// as `[..bytes_read]`, so stale tail bytes are never observed.
+fn cache_returned_buffer(
+    cache: &Mutex<Vec<Vec<u8>>>,
+    pool_size: usize,
+    buffer_size: usize,
+    mut buffer: Vec<u8>,
+) {
+    if buffer.capacity() < buffer_size {
+        return; // too small to reuse; drop it
+    }
+    let mut guard = cache.lock();
+    if guard.len() >= pool_size {
+        return; // cache full; drop it
+    }
+    // Restore the logical length so `acquire()` hands out a full-size
+    // slice. `resize` zeroes only the grown delta (rare — only if a
+    // `take()`+`return_vec` shrank it); the common release path is already
+    // at `buffer_size`, so this is a no-op `truncate` with no zeroing.
+    if buffer.len() < buffer_size {
+        buffer.resize(buffer_size, 0);
+    } else {
+        buffer.truncate(buffer_size);
+    }
+    guard.push(buffer);
+}
+
 impl BufferPool {
     /// Create a new buffer pool.
     ///
@@ -293,26 +325,16 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool for reuse.
-    fn release(&self, mut buffer: Vec<u8>) {
+    fn release(&self, buffer: Vec<u8>) {
         self.in_use.fetch_sub(1, Ordering::Relaxed);
-
-        // Only cache if we haven't exceeded pool size
-        let should_cache = {
-            let cache = self.cache.lock();
-            cache.len() < self.pool_size
-        };
-
-        if should_cache && buffer.capacity() >= self.buffer_size {
-            // Reset length but keep capacity
-            buffer.clear();
-            buffer.resize(self.buffer_size, 0);
-
-            let mut cache = self.cache.lock();
-            if cache.len() < self.pool_size {
-                cache.push(buffer);
-            }
-        }
-        // Otherwise buffer is dropped and memory freed
+        // audit-13: cache under a SINGLE lock (was two — a pre-check then a
+        // re-check), and restore the logical length WITHOUT re-zeroing.
+        // Pooled buffers are always filled by a read and consumed as
+        // `[..bytes_read]` (see send_file_double_buffered), so the bytes
+        // beyond the read length are never observed — clearing + zeroing
+        // up to buffer_size on every release was pure wasted memory
+        // bandwidth on the hot path.
+        cache_returned_buffer(&self.cache, self.pool_size, self.buffer_size, buffer);
 
         // Release semaphore permit if we have a memory budget
         if let Some(ref sem) = self.memory_semaphore {
@@ -330,24 +352,9 @@ impl BufferPool {
     /// This is useful when a buffer was taken via `PoolBuffer::take()` and
     /// needs to be returned after processing. The buffer will only be cached
     /// if it has sufficient capacity and the pool has room.
-    pub fn return_vec(&self, mut buffer: Vec<u8>) {
-        // Only cache if we haven't exceeded pool size and buffer has right capacity
-        let should_cache = {
-            let cache = self.cache.lock();
-            cache.len() < self.pool_size
-        };
-
-        if should_cache && buffer.capacity() >= self.buffer_size {
-            // Reset length but keep capacity
-            buffer.clear();
-            buffer.resize(self.buffer_size, 0);
-
-            let mut cache = self.cache.lock();
-            if cache.len() < self.pool_size {
-                cache.push(buffer);
-            }
-        }
-        // Otherwise buffer is dropped and memory freed
+    pub fn return_vec(&self, buffer: Vec<u8>) {
+        // audit-13: same single-lock, no-redundant-zeroing path as release().
+        cache_returned_buffer(&self.cache, self.pool_size, self.buffer_size, buffer);
     }
 
     /// Get the buffer size for this pool
@@ -474,6 +481,34 @@ mod pool_tests {
         assert_eq!(pool.stats().cached, 0);
         assert_eq!(pool.stats().total_allocated, 1); // Same buffer reused
         drop(buf2);
+    }
+
+    /// audit-13: after dropping the per-release zeroing, a reused buffer
+    /// must still be handed back at full `buffer_size` length (the
+    /// contract `acquire()`/`as_mut_slice()` relies on), and carrying
+    /// dirty (non-zero) data is fine — no consumer assumes pool buffers
+    /// are pre-zeroed (they fill via read and slice to the written len).
+    #[tokio::test]
+    async fn reused_buffer_keeps_full_length_and_may_be_dirty() {
+        let pool = Arc::new(BufferPool::new(1024, 4, None));
+        {
+            let mut buf = pool.acquire().await;
+            for b in buf.as_mut_slice().iter_mut() {
+                *b = 0xAB; // dirty the whole buffer
+            }
+        } // drop → release → cached without re-zeroing
+
+        let buf = pool.acquire().await;
+        assert_eq!(
+            pool.stats().total_allocated,
+            1,
+            "the dirtied buffer was reused, not reallocated"
+        );
+        // The load-bearing contract: a full buffer_size slice is available
+        // so a reader can fill it.
+        assert_eq!(buf.as_slice().len(), 1024);
+        // Deliberately NOT asserting the contents are zeroed — dirty reuse
+        // is correct because consumers only read `[..bytes_read]`.
     }
 
     #[tokio::test]
