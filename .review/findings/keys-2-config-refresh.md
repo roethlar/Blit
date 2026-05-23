@@ -53,6 +53,31 @@ Refresh key only. The remaining global keys `key_action` classifies
 in later `keys-N` slices, each applying the same plain-press-vs-chord
 discipline.
 
+## Round 2 (commit `ead1adb`)
+
+**Reopen finding (Medium):** with two configurable single-char keys, a
+valid config could leave refresh silently unreachable. `key_action`
+dispatches quit before refresh, so `[keys] quit = "r"` with the default
+`refresh = "r"` (or `refresh = "q"` with the default quit) passed
+single-char validation, emitted no warning, but had no working refresh.
+
+**Fix — explicit collision policy (single source of truth in
+`KeysDefaults::resolved`):** quit takes precedence; a refresh that
+resolves to the same character as quit is **disabled**.
+- `resolved() -> (char, Option<char>)` — `refresh` is `None` on
+  collision (applies the policy for both `KeyMap` and the warning).
+- `KeyMap.refresh` is now `Option<KeyCode>`; `key_action` skips the
+  refresh check when `None`.
+- Startup warning names both keys so the operator can pick a distinct
+  refresh.
+
+**Tests (+2, 610 blit-tui):**
+- `config::keys_resolved_collision_policy` — distinct → both active;
+  `refresh == quit` → `None`; default-quit collision; multi-char refresh
+  falling back to `r` then colliding when quit is `r`.
+- `quit_refresh_collision_disables_refresh` — `quit="r"` →
+  `KeyMap.refresh` is `None`, plain `r` → `Quit` (never `Refresh`).
+
 ## Reviewer comments
 
-(empty — pending grade)
+(empty — pending round-2 grade)
