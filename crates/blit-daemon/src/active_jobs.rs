@@ -88,6 +88,7 @@
 use blit_core::generated::DaemonEvent;
 use blit_core::remote::transfer::ByteProgressSink;
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -174,12 +175,15 @@ impl ActiveJobKind {
 ///   (push / pull / pull_sync; the CLI is in the byte path).
 /// - `NotFound` → `Code::NotFound` — no active row matches
 ///   the requested transfer_id.
+/// - `Unauthorized` → `Code::PermissionDenied` — the caller is not
+///   the peer that started the transfer (audit-9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CancelOutcome {
     Cancelled,
     Unsupported,
     NotFound,
+    Unauthorized,
 }
 
 /// One row of the `ActiveJobs` table. Fields mirror the
@@ -458,6 +462,37 @@ impl ActiveJobs {
         match guard.get(transfer_id) {
             None => CancelOutcome::NotFound,
             Some(entry) if !entry.job.kind.supports_cancellation() => CancelOutcome::Unsupported,
+            Some(entry) => {
+                entry.cancellation.cancel();
+                CancelOutcome::Cancelled
+            }
+        }
+    }
+
+    /// Like [`cancel`], but authorizes the caller first (audit-9). Only
+    /// the peer that started the transfer may cancel it; otherwise any
+    /// client that can reach the daemon could cancel another operator's
+    /// `DelegatedPull`.
+    ///
+    /// Authorization is **host/IP-only**: the cancel RPC arrives over a
+    /// different connection than the one that started the transfer, so
+    /// the ephemeral source ports differ — only the host is stable.
+    /// Loopback callers are always allowed (single-host / Unix-socket
+    /// deployments), and a caller with no observable address (Unix
+    /// socket → `remote_addr()` is `None`) is treated as local and
+    /// allowed. See [`cancel_peer_authorized`].
+    pub fn cancel_authorized(
+        &self,
+        transfer_id: &str,
+        caller: Option<SocketAddr>,
+    ) -> CancelOutcome {
+        let guard = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.get(transfer_id) {
+            None => CancelOutcome::NotFound,
+            Some(entry) if !entry.job.kind.supports_cancellation() => CancelOutcome::Unsupported,
+            Some(entry) if !cancel_peer_authorized(caller, &entry.job.peer) => {
+                CancelOutcome::Unauthorized
+            }
             Some(entry) => {
                 entry.cancellation.cancel();
                 CancelOutcome::Cancelled
@@ -1068,6 +1103,34 @@ fn unix_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// audit-9: decide whether `caller` may cancel a transfer owned by
+/// `owner` (the `peer` string the row stored at registration, in
+/// `SocketAddr` form, or `"unknown"`).
+///
+/// Rules, in order:
+/// - No observable caller address → allow. tonic over a Unix socket
+///   reports `remote_addr() == None`; every UDS caller is local/trusted.
+/// - Loopback caller → allow (single-host deployments; the operator and
+///   the daemon share `127.0.0.1` / `::1`).
+/// - Otherwise the caller's **IP** must equal the owner's IP. The port
+///   is deliberately ignored — the cancel RPC and the transfer arrive on
+///   different connections with different ephemeral source ports.
+/// - An owner string that doesn't parse as a `SocketAddr` (e.g. it was
+///   `"unknown"` because the transfer was started over UDS) → deny any
+///   non-loopback caller (a remote client can't claim a local transfer).
+fn cancel_peer_authorized(caller: Option<SocketAddr>, owner: &str) -> bool {
+    let Some(caller) = caller else {
+        return true;
+    };
+    if caller.ip().is_loopback() {
+        return true;
+    }
+    match owner.parse::<SocketAddr>() {
+        Ok(owner_addr) => caller.ip() == owner_addr.ip(),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1642,6 +1705,102 @@ mod tests {
         // Cancelled while the row is alive, even though the
         // token is already in the cancelled state.
         assert_eq!(table.cancel(&id), CancelOutcome::Cancelled);
+    }
+
+    /// audit-9: a peer on a different host must not be able to cancel a
+    /// transfer it didn't start.
+    #[tokio::test]
+    async fn cancel_authorized_denies_a_different_host() {
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::DelegatedPull,
+            "10.0.0.1:5000".to_string(),
+            "mod".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        let token = guard.cancellation_token().clone();
+
+        let attacker: std::net::SocketAddr = "10.0.0.2:6000".parse().unwrap();
+        assert_eq!(
+            table.cancel_authorized(&id, Some(attacker)),
+            CancelOutcome::Unauthorized,
+            "a different-host caller must be denied"
+        );
+        assert!(
+            !token.is_cancelled(),
+            "an unauthorized cancel must NOT fire the token"
+        );
+    }
+
+    /// audit-9: the originating host can cancel even though the cancel
+    /// RPC arrives on a different connection (different source port).
+    #[tokio::test]
+    async fn cancel_authorized_allows_same_host_different_port() {
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::DelegatedPull,
+            "10.0.0.1:5000".to_string(),
+            "mod".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        let token = guard.cancellation_token().clone();
+
+        // Same IP, different ephemeral port — must be authorized.
+        let owner_new_conn: std::net::SocketAddr = "10.0.0.1:7777".parse().unwrap();
+        assert_eq!(
+            table.cancel_authorized(&id, Some(owner_new_conn)),
+            CancelOutcome::Cancelled,
+            "same-host caller must be authorized regardless of source port"
+        );
+        assert!(
+            token.is_cancelled(),
+            "authorized cancel must fire the token"
+        );
+    }
+
+    /// audit-9: loopback callers and address-less (Unix-socket) callers
+    /// are always authorized; an `"unknown"` owner denies a remote
+    /// caller; the supports-cancellation / not-found checks still take
+    /// precedence over authorization.
+    #[tokio::test]
+    async fn cancel_authorized_bypass_and_precedence() {
+        use super::cancel_peer_authorized;
+
+        let v4: std::net::SocketAddr = "10.0.0.1:5000".parse().unwrap();
+        let lo: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let lo6: std::net::SocketAddr = "[::1]:9".parse().unwrap();
+
+        // Loopback always allowed, even against a remote owner.
+        assert!(cancel_peer_authorized(Some(lo), "10.0.0.1:5000"));
+        assert!(cancel_peer_authorized(Some(lo6), "10.0.0.1:5000"));
+        // No observable address (Unix socket) → allowed.
+        assert!(cancel_peer_authorized(None, "10.0.0.1:5000"));
+        // Remote caller against an unparseable/"unknown" owner → denied.
+        assert!(!cancel_peer_authorized(Some(v4), "unknown"));
+        // Remote caller, matching host → allowed.
+        assert!(cancel_peer_authorized(Some(v4), "10.0.0.1:65000"));
+
+        // Precedence: NotFound and Unsupported are decided before authz.
+        let table = ActiveJobs::new();
+        let attacker: std::net::SocketAddr = "10.0.0.2:6000".parse().unwrap();
+        assert_eq!(
+            table.cancel_authorized("no-such-id", Some(attacker)),
+            CancelOutcome::NotFound
+        );
+        let push = table.register(
+            ActiveJobKind::Push,
+            "10.0.0.1:5000".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let push_id = push.transfer_id().to_string();
+        assert_eq!(
+            table.cancel_authorized(&push_id, Some(attacker)),
+            CancelOutcome::Unsupported,
+            "non-cancellable kinds report Unsupported before the authz check"
+        );
     }
 
     #[tokio::test]

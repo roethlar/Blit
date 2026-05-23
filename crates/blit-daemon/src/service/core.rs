@@ -1103,17 +1103,21 @@ impl Blit for BlitService {
         &self,
         request: Request<CancelJobRequest>,
     ) -> Result<Response<CancelJobResponse>, Status> {
+        // Capture the caller's address before consuming the request:
+        // audit-9 authorizes the cancel against the peer that started
+        // the transfer.
+        let caller = request.remote_addr();
         let req = request.into_inner();
         if req.transfer_id.trim().is_empty() {
             return Err(Status::invalid_argument(
                 "CancelJobRequest.transfer_id must not be empty",
             ));
         }
-        // `ActiveJobs::cancel` is synchronous and short — the
-        // critical section is one `HashMap::get` + (when the
-        // kind supports it) one `CancellationToken::cancel()`.
-        // No async work to do.
-        match self.active_jobs.cancel(&req.transfer_id) {
+        // `ActiveJobs::cancel_authorized` is synchronous and short — the
+        // critical section is one `HashMap::get` + an IP comparison +
+        // (when authorized and cancellable) one
+        // `CancellationToken::cancel()`. No async work to do.
+        match self.active_jobs.cancel_authorized(&req.transfer_id, caller) {
             CancelOutcome::Cancelled => Ok(Response::new(CancelJobResponse {
                 transfer_id: req.transfer_id,
             })),
@@ -1124,6 +1128,10 @@ impl Blit for BlitService {
             ))),
             CancelOutcome::NotFound => Err(Status::not_found(format!(
                 "no active transfer matches transfer_id '{}'",
+                req.transfer_id
+            ))),
+            CancelOutcome::Unauthorized => Err(Status::permission_denied(format!(
+                "transfer '{}' may only be cancelled by the peer that started it",
                 req.transfer_id
             ))),
         }
