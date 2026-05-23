@@ -517,6 +517,97 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod unicode_edge_cases {
+    //! audit-6 item 4: exotic-but-valid Unicode in wire paths. The
+    //! path-safety boundary is defined purely by ASCII structural
+    //! markers — `/` (0x2F) separators, the `..` / `.` / root / prefix
+    //! component shapes, and NUL. These tests lock in that Unicode
+    //! normalization forms, bidirectional-override marks, zero-width
+    //! joiners, and Unicode separator/dot lookalikes are all treated as
+    //! opaque bytes inside a single `Normal` component: preserved
+    //! verbatim, never folded, and never able to smuggle a traversal.
+    //!
+    //! Non-UTF-8 byte sequences cannot reach these helpers — the `&str`
+    //! signature excludes them by construction, and proto `string`
+    //! decode rejects invalid UTF-8 upstream before any wire path
+    //! arrives here. So there is no raw-bytes case to assert on.
+
+    use super::*;
+
+    #[test]
+    fn nfc_and_nfd_are_preserved_verbatim_and_distinct() {
+        // "café": NFC = single U+00E9; NFD = 'e' + U+0301 combining acute.
+        let nfc = "caf\u{00E9}/file.txt";
+        let nfd = "cafe\u{0301}/file.txt";
+        let nfc_out = validate_wire_path(nfc).unwrap();
+        let nfd_out = validate_wire_path(nfd).unwrap();
+        // Preserved byte-for-byte — the layer performs no normalization.
+        assert_eq!(nfc_out, PathBuf::from(nfc));
+        assert_eq!(nfd_out, PathBuf::from(nfd));
+        // And the two forms stay distinct (no NFD→NFC folding).
+        assert_ne!(nfc_out, nfd_out);
+    }
+
+    #[test]
+    fn bidi_override_is_an_opaque_component() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE — a display-spoofing mark, but
+        // not a path separator. Passes as a normal component, preserved
+        // verbatim; the spoofing risk is a UI concern, not containment.
+        let wire = "inv\u{202E}cod.exe";
+        assert_eq!(validate_wire_path(wire).unwrap(), PathBuf::from(wire));
+    }
+
+    #[test]
+    fn zero_width_joiner_and_space_are_opaque_components() {
+        let wire = "a\u{200D}b/c\u{200B}d.txt"; // ZWJ + zero-width space
+        assert_eq!(validate_wire_path(wire).unwrap(), PathBuf::from(wire));
+    }
+
+    #[test]
+    fn unicode_separator_lookalikes_do_not_split_components() {
+        // Fullwidth solidus (U+FF0F) and fraction slash (U+2044) are NOT
+        // ASCII `/` (0x2F), so they stay inside a single component and
+        // cannot create a nested path or traversal.
+        let wire = "a\u{FF0F}b\u{2044}c";
+        let out = validate_wire_path(wire).unwrap();
+        assert_eq!(out, PathBuf::from(wire));
+        assert_eq!(out.components().count(), 1);
+    }
+
+    #[test]
+    fn unicode_dot_lookalikes_are_not_parent_dir() {
+        // Fullwidth full stop (U+FF0E) is not ASCII `.` (0x2E), so the
+        // lookalike "．．" is a normal filename, never a `..` component.
+        let wire = "\u{FF0E}\u{FF0E}/file"; // visually "../file"
+        let out = validate_wire_path(wire).unwrap();
+        assert_eq!(out, PathBuf::from(wire));
+        let first = out.components().next().unwrap();
+        assert!(matches!(first, Component::Normal(_)));
+    }
+
+    #[test]
+    fn ascii_dotdot_with_combining_mark_is_normal_not_traversal() {
+        // A real `..` is exactly two 0x2E bytes as a whole component.
+        // Appending a combining mark yields a 3-codepoint normal
+        // filename — it must NOT be rejected as traversal, NOR collapse
+        // to a parent-dir component.
+        let wire = "..\u{0301}/file"; // ".." + combining acute, then /file
+        let out = validate_wire_path(wire).unwrap();
+        assert_eq!(out, PathBuf::from(wire));
+        let first = out.components().next().unwrap();
+        assert!(matches!(first, Component::Normal(_)));
+    }
+
+    #[test]
+    fn unicode_components_join_safely_under_root() {
+        let root = Path::new("/dest");
+        let wire = "caf\u{0301}/\u{65E5}\u{672C}\u{8A9E}/\u{202E}x.txt";
+        let joined = safe_join(root, wire).unwrap();
+        assert!(joined.starts_with("/dest"));
+    }
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 mod containment_tests {
