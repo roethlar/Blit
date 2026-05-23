@@ -280,5 +280,16 @@ mod fallback_tests {
             data,
             "the fallback copy must overwrite the stale dst with src content"
         );
+        // The load-bearing assertion: clonefile failed (EEXIST), so a
+        // true clone_succeeded proves the NEXT fast path (fcopyfile)
+        // handled the copy — not the buffered streaming tail (which sets
+        // clone_succeeded = false). Without this the test would also pass
+        // if fcopyfile were broken and the copy silently fell through to
+        // buffered, leaving the intended hop unpinned.
+        assert!(
+            outcome.clone_succeeded,
+            "after clonefile EEXIST, fcopyfile must handle the copy (clone_succeeded), \
+             not the buffered tail"
+        );
     }
 }
