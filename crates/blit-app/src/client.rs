@@ -4,17 +4,23 @@
 //! no connect deadline, so an unreachable daemon (slow DNS, hung TCP
 //! handshake, network partition) made admin verbs and transfer commands
 //! hang for the OS TCP timeout (60-127s). [`connect_with_timeout`]
-//! centralizes the connection with a bounded `connect_timeout`, matching
-//! the `feedback-server-await-timeouts` principle.
+//! centralizes the connection and bounds the whole `connect()` future
+//! (DNS resolution + TCP handshake) in an outer `tokio::time::timeout`,
+//! matching the `feedback-server-await-timeouts` principle. (An inner
+//! `Endpoint::connect_timeout` alone does NOT bound slow DNS — see the
+//! function docs.)
 
 use blit_core::generated::blit_client::BlitClient;
 use eyre::{Context, Result};
 use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
-/// Connect-timeout for control-plane gRPC connections. Bounds the TCP
-/// connect (and DNS, on tonic's connector) so an unreachable daemon
-/// fails predictably rather than hanging for the OS timeout.
+/// Connect deadline for control-plane gRPC connections. Used two ways in
+/// [`connect_with_timeout`]: as the outer `tokio::time::timeout` bounding
+/// the whole `connect()` future (DNS + TCP), and as the inner
+/// `Endpoint::connect_timeout` bounding just the post-resolution TCP
+/// phase. The outer bound is what makes an unreachable daemon (incl. slow
+/// DNS) fail predictably rather than hanging for the OS timeout.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Connect a [`BlitClient`] to `uri` with a bounded connect deadline.
