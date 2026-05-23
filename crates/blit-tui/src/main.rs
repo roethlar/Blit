@@ -802,6 +802,7 @@ async fn run_router(
                         now,
                         f1_trigger_prompt(&app.f1_trigger),
                         f1_push_status(&app.f1_push),
+                        accent_color,
                     ),
                     Screen::F2 => screens::f2::render_into(
                         frame,

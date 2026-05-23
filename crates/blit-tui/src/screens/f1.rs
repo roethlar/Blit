@@ -66,6 +66,9 @@ pub fn render_into(
     trigger: Option<TriggerPrompt>,
     // d-61: `Some` while a push is running / showing its outcome.
     push: Option<PushStatusDisplay>,
+    // e-11: `[theme] accent_color` for the daemon-list selection
+    // highlight (matches the tab strip / F2 / F3 / F4).
+    accent: Color,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -78,7 +81,7 @@ pub fn render_into(
         .split(area);
 
     render_header(frame, chunks[0], state);
-    render_table(frame, chunks[1], state);
+    render_table(frame, chunks[1], state, accent);
     render_detail(frame, chunks[2], state, now);
     // Footer line priority: the trigger modal (when open) >
     // the d-61 push status (when active) > the discovery footer.
@@ -249,7 +252,7 @@ fn render_header(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     frame.render_widget(para, area);
 }
 
-fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState, accent: Color) {
     let rows: Vec<Row> = state.rows().iter().map(daemon_to_row).collect();
     let widths = [
         Constraint::Length(20),
@@ -275,10 +278,14 @@ fn render_table(frame: &mut Frame, area: Rect, state: &DaemonsState) {
         // index AND maintains an offset for auto-scrolling
         // so the highlighted row stays in view even when
         // the daemon count exceeds the viewport height.
+        // e-11: the daemon-list selection highlight honors the
+        // `[theme] accent_color` with a contrasting foreground (white on
+        // dark accents), matching the tab strip (e-7) and F2/F3/F4
+        // (e-9/e-10).
         .row_highlight_style(
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(super::contrasting_fg(accent))
+                .bg(accent)
                 .add_modifier(Modifier::BOLD),
         );
     let mut table_state = TableState::default().with_selected(Some(state.selected_index()));
@@ -896,7 +903,15 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_into(frame, area, &state, now, None, None);
+                render_into(
+                    frame,
+                    area,
+                    &state,
+                    now,
+                    None,
+                    None,
+                    ratatui::style::Color::Cyan,
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -910,6 +925,43 @@ mod tests {
         assert!(
             rendered.contains(&target),
             "expected selected row '{target}' to be visible in viewport, got:\n{rendered}"
+        );
+    }
+
+    /// e-11: the daemon-list selection highlight uses the themed accent
+    /// background paired with a contrasting foreground (white on a dark
+    /// accent), matching F2/F3/F4 — not a black-on-dark hardcode.
+    #[test]
+    fn daemon_row_highlight_uses_accent_with_contrast() {
+        use crate::daemons::DaemonsState;
+        // A fresh state always has the selectable Local sentinel row at
+        // index 0, which is selected by default.
+        let state = DaemonsState::new();
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_table(frame, frame.area(), &state, Color::Red);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut found = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.bg == Color::Red {
+                    found = true;
+                    assert_eq!(
+                        cell.fg,
+                        Color::White,
+                        "dark accent must use a contrasting (white) foreground"
+                    );
+                }
+            }
+        }
+        assert!(
+            found,
+            "the selected daemon row paints the accent background"
         );
     }
 
