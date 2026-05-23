@@ -1,9 +1,9 @@
 # d-68-f1-remote-remote-copy: delegated copy from the F1 trigger
 
 **Severity**: Feature (TUI_DESIGN §1 "between any two endpoints")
-**Status**: In progress / pending review (round 2)
+**Status**: In progress / pending review (round 3)
 **Branch**: `phase5/a1`
-**Commit**: `96075cb` (R1 `1dcdc66`)
+**Commit**: `9531dde` (R2 `96075cb`, R1 `1dcdc66`)
 
 ## What
 
@@ -104,6 +104,27 @@ and branch on all three outcomes — `Ok(Remote)` delegates,
 destination: …")`. Two new tests: malformed remote-dest is rejected
 (no pull, no delegate); a genuine local dest still pulls. 564 tests.
 
+## Round 3 (fix)
+
+**Reviewer (Medium):** R2 delegated *any* `Ok(Remote)` dest, but a
+bare relative local dest (`backup`) parses as
+`RemotePath::Discovery` (`RemoteEndpoint::parse` treats bare
+`host` / `host:port` as discovery). So `nas:/photos/ → backup`
+stopped falling through to the remote→local pull and was rejected
+as "needs a module" — a regression of the pre-d-68 behavior, where
+`start_pull` accepts any nonblank local dest.
+
+**Fix (`9531dde`):** narrow the delegated branch with a guard —
+`Ok(Remote(dst)) if ensure_remote_destination_supported(&dst).is_ok()`
+(Module/Root only). A discovery parse now falls through to the pull
+alongside genuine local paths; `Err` still rejects. New test
+`plan_f1_trigger_remote_source_bare_dest_pulls_not_delegates`
+pins it. 565 tests.
+
+The three dest buckets for a remote source are now: remote
+module/root → delegate; discovery-or-local → pull; remote-shaped
+typo (`Err`) → reject.
+
 ## Reviewer comments
 
-(empty — pending round-2 grade)
+(empty — pending round-3 grade)
