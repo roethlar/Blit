@@ -338,6 +338,18 @@ impl DaemonsState {
         RemoteEndpoint::parse(&format!("{}:{}", addr, row.port)).ok()
     }
 
+    /// m2f-5: every DISCOVERED remote daemon's endpoint (skips the
+    /// Local sentinel row and any row whose address didn't resolve).
+    /// F2's multi-daemon fan-out subscribes to each of these so it
+    /// shows transfers from every daemon on the network.
+    pub fn remote_endpoints(&self) -> Vec<RemoteEndpoint> {
+        self.rows
+            .iter()
+            .filter(|row| !row.is_local())
+            .filter_map(Self::endpoint_for_row)
+            .collect()
+    }
+
     /// Replace the row set with a fresh discovery result.
     /// Preserves the cursor on the same `instance_name` if
     /// it's still present; otherwise falls back to
@@ -744,6 +756,19 @@ mod tests {
         let endpoint = DaemonsState::endpoint_for_row(&row).unwrap();
         assert_eq!(endpoint.host, "192.168.1.10");
         assert_eq!(endpoint.port, 9031);
+    }
+
+    /// m2f-5: `remote_endpoints` lists discovered daemons (resolved)
+    /// and skips the Local sentinel — the F2 fan-out's watch set.
+    #[test]
+    fn remote_endpoints_skips_local_and_resolves_discovered() {
+        let mut state = DaemonsState::new();
+        // Only the Local sentinel so far → nothing to fan out to.
+        assert!(state.remote_endpoints().is_empty());
+        state.replace_from_discovery(&[svc("alpha", &[])], Instant::now());
+        let eps = state.remote_endpoints();
+        assert_eq!(eps.len(), 1, "one discovered daemon; Local skipped");
+        assert_eq!(eps[0].host_port_display(), "192.168.1.10");
     }
 
     #[test]

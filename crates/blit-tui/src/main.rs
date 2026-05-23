@@ -599,10 +599,14 @@ async fn run_router(
     // unified loop's select! arm wires the resulting
     // event_rx + snapshot into `app`.
     let (f2_setup_tx, mut f2_setup_rx) = mpsc::channel::<F2SetupReply>(1);
-    if let Some(endpoint) = app.parsed_remote.clone() {
+    // m2f-5: F2 fans out to every watched daemon (launch parsed_remote
+    // + discovered). At startup discovery is still empty, so this is
+    // just parsed_remote when set.
+    let watched = f2_watched_endpoints(&app);
+    if !watched.is_empty() {
         app.transfers_setup_gen += 1;
         app.transfers_setup_pending = true;
-        spawn_f2_setup_task(endpoint, app.transfers_setup_gen, f2_setup_tx.clone());
+        spawn_f2_setup_task(watched, app.transfers_setup_gen, f2_setup_tx.clone());
     }
 
     // F4 initial profile fetch — kicked once so the operator
@@ -1145,19 +1149,26 @@ async fn run_router(
                     } else {
                         app.transfers_setup_pending = false;
                         match reply.payload {
-                            F2SetupPayload::Ready { event_rx, snapshot_result } => {
+                            F2SetupPayload::Ready { event_rx, snapshots } => {
                                 let mut rx = event_rx;
-                                // m2f-1: F2 watches a single daemon (parsed_remote);
-                                // tag its rows + events with that daemon so the
-                                // fan-out (m2f-2) can distinguish sources.
-                                let f2_daemon = f2_source_label(&app);
-                                match snapshot_result {
-                                    // Initial F2 hydration → full replace (fresh
-                                    // start; nothing else is being watched yet).
-                                    // m2f-4's per-daemon fan-out will switch this to
-                                    // merge_snapshot so each daemon hydrates additively.
-                                    Ok(snapshot) => app.transfers.replace_from_snapshot(&f2_daemon, snapshot, Instant::now()),
-                                    Err(err) => {
+                                // m2f-5: hydrate each watched daemon additively, so
+                                // every daemon's transfers coexist in the view. A
+                                // per-daemon GetState failure degrades only if NONE
+                                // succeeded (the streams may still be live).
+                                let now = Instant::now();
+                                let mut any_snapshot_ok = false;
+                                let mut last_snapshot_err: Option<String> = None;
+                                for (daemon, snap) in snapshots {
+                                    match snap {
+                                        Ok(snapshot) => {
+                                            app.transfers.merge_snapshot(&daemon, snapshot, now);
+                                            any_snapshot_ok = true;
+                                        }
+                                        Err(err) => last_snapshot_err = Some(err),
+                                    }
+                                }
+                                if !any_snapshot_ok {
+                                    if let Some(err) = last_snapshot_err {
                                         app.transfers_status = ConnectionStatus::Degraded(
                                             format!("initial GetState failed: {err}"),
                                         );
@@ -1413,7 +1424,10 @@ async fn handle_pane_action(
                     // stream against the daemon we just switched
                     // to, so its transfers track what we browse.
                     let gen = reset_f2_for_resubscribe(app, &endpoint, transfers_event_rx);
-                    spawn_f2_setup_task(endpoint, gen, f2_setup_tx.clone());
+                    // m2f-5: re-fan to all watched daemons (the reset
+                    // repointed parsed_remote to the selected one, so
+                    // it's included).
+                    spawn_f2_setup_task(f2_watched_endpoints(app), gen, f2_setup_tx.clone());
                 }
             }
             // d-58: `t` opens the trigger-transfer modal for the
@@ -1437,12 +1451,15 @@ async fn handle_pane_action(
                 {
                     // No live stream and no setup in flight
                     // — try to (re)open. Round-3 guard
-                    // closes the duplicate-setup race.
-                    if let Some(endpoint) = app.parsed_remote.clone() {
+                    // closes the duplicate-setup race. m2f-5: re-fan to
+                    // all watched daemons (picks up daemons discovered
+                    // since the last setup).
+                    let watched = f2_watched_endpoints(app);
+                    if !watched.is_empty() {
                         app.transfers_status = ConnectionStatus::Connecting;
                         app.transfers_setup_gen += 1;
                         app.transfers_setup_pending = true;
-                        spawn_f2_setup_task(endpoint, app.transfers_setup_gen, f2_setup_tx.clone());
+                        spawn_f2_setup_task(watched, app.transfers_setup_gen, f2_setup_tx.clone());
                     }
                 } else if transfers_event_rx.is_some() {
                     if let Some(endpoint) = app.parsed_remote.as_ref() {
@@ -1968,8 +1985,14 @@ struct F2SetupReply {
 enum F2SetupPayload {
     Ready {
         event_rx: mpsc::Receiver<F2Event>,
-        snapshot_result: Result<DaemonState, String>,
+        /// m2f-5: one entry per daemon whose Subscribe stream opened —
+        /// `(daemon identity, its initial GetState result)`. Each Ok
+        /// is merged additively so all watched daemons coexist in the
+        /// view.
+        snapshots: Vec<(String, Result<DaemonState, String>)>,
     },
+    /// No watched daemon could be subscribed (none reachable / none
+    /// to watch).
     Failed(String),
 }
 
@@ -1980,32 +2003,46 @@ enum F2SetupPayload {
 /// spawning. Running this off the router's await means a
 /// slow / unreachable remote does NOT block the TUI's
 /// first draw.
-fn spawn_f2_setup_task(endpoint: RemoteEndpoint, gen: u64, tx: mpsc::Sender<F2SetupReply>) {
+/// m2f-5: fan out F2's Subscribe to every watched daemon. Opens one
+/// stream per daemon into a SINGLE merged channel and fetches each
+/// daemon's initial `GetState`. A daemon whose subscribe fails is
+/// skipped (the others still show); the reply is `Failed` only when
+/// none could be reached. Per-daemon reconnect / degraded UI is a
+/// follow-up (m2f-6).
+fn spawn_f2_setup_task(daemons: Vec<RemoteEndpoint>, gen: u64, tx: mpsc::Sender<F2SetupReply>) {
     tokio::spawn(async move {
-        let event_rx = match open_subscribe_stream(&endpoint).await {
-            Ok(rx) => rx,
-            Err(err) => {
-                let _ = tx
-                    .send(F2SetupReply {
-                        gen,
-                        payload: F2SetupPayload::Failed(err),
-                    })
-                    .await;
-                return;
+        let (merged_tx, merged_rx) = mpsc::channel::<F2Event>(TUI_EVENT_BUFFER);
+        let mut snapshots = Vec::new();
+        let mut any_subscribed = false;
+        for endpoint in &daemons {
+            // Each daemon forwards into a clone of the shared sender.
+            if open_subscribe_stream(endpoint, merged_tx.clone())
+                .await
+                .is_ok()
+            {
+                any_subscribed = true;
+                let snap = jobs::query(endpoint, 0)
+                    .await
+                    .map_err(|err| format!("{err:#}"));
+                snapshots.push((endpoint.host_port_display(), snap));
             }
+        }
+        // Drop our handle so the forwarders' clones are the only
+        // senders — the merged receiver then closes once every
+        // watched stream ends.
+        drop(merged_tx);
+
+        let payload = if any_subscribed {
+            F2SetupPayload::Ready {
+                event_rx: merged_rx,
+                snapshots,
+            }
+        } else if daemons.is_empty() {
+            F2SetupPayload::Failed("no daemons discovered yet".to_string())
+        } else {
+            F2SetupPayload::Failed("no reachable daemons".to_string())
         };
-        let snapshot_result = jobs::query(&endpoint, 0)
-            .await
-            .map_err(|err| format!("{err:#}"));
-        let _ = tx
-            .send(F2SetupReply {
-                gen,
-                payload: F2SetupPayload::Ready {
-                    event_rx,
-                    snapshot_result,
-                },
-            })
-            .await;
+        let _ = tx.send(F2SetupReply { gen, payload }).await;
     });
 }
 
@@ -5419,19 +5456,34 @@ fn key_action(key: &KeyEvent) -> Option<UserAction> {
 /// lands in this buffer. Replaying onto the snapshot makes
 /// the state consistent before the main select loop takes
 /// over.
-/// m2f-1/m2f-2: stable identity for the daemon F2 is watching, used
-/// both as the `state::row_key` daemon component AND the row's
-/// display label. `host_port_display()` (host, plus `:port` when
-/// non-default) — NOT bare `host`: two daemon instances on the same
-/// host but different ports are valid here, so a host-only identity
-/// would collide their rows (m2f-2 round 2). F2 watches a single
-/// daemon (`parsed_remote`) today; m2f-3 fans out and each stream
-/// supplies its own identity.
-fn f2_source_label(app: &AppState) -> String {
-    app.parsed_remote
-        .as_ref()
-        .map(|e| e.host_port_display())
-        .unwrap_or_default()
+/// m2f-5: the set of daemons F2 watches — the launch `parsed_remote`
+/// (if any) plus every discovered remote daemon, deduped by
+/// `host_port_display()` identity (the same identity used as the
+/// `state::row_key` daemon component and the row label — host, plus
+/// `:port` when non-default, so same-host/different-port daemons stay
+/// distinct). The launch daemon comes first so it's watched
+/// immediately, before mDNS discovery settles.
+///
+/// Known edge: a daemon given as `parsed_remote` by hostname and also
+/// discovered by IP has two distinct identities, so it'd be watched
+/// twice (its rows appear under both labels). Identity reconciliation
+/// across mDNS-IP and user-hostname forms is a follow-up (m2f-6).
+fn f2_watched_endpoints(app: &AppState) -> Vec<RemoteEndpoint> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut endpoints: Vec<RemoteEndpoint> = Vec::new();
+    let candidates = app
+        .parsed_remote
+        .clone()
+        .into_iter()
+        .chain(app.daemons.remote_endpoints());
+    for ep in candidates {
+        let id = ep.host_port_display();
+        if !seen.contains(&id) {
+            seen.push(id);
+            endpoints.push(ep);
+        }
+    }
+    endpoints
 }
 
 fn drain_startup_events(
@@ -5542,9 +5594,16 @@ struct F2Event {
 /// can be confident that when this function returns OK, the
 /// daemon's broadcast is sending into the forwarder's
 /// receiver.
+/// m2f-5: open one daemon's Subscribe stream and forward its events
+/// into the SHARED merged channel (`merged_tx`), tagged with the
+/// daemon's stable identity. Returns `Ok` once the daemon's broadcast
+/// receiver is registered (so the caller knows this daemon is being
+/// watched). The fan-out calls this once per watched daemon, each
+/// pushing into the same merged receiver the event loop drains.
 async fn open_subscribe_stream(
     endpoint: &RemoteEndpoint,
-) -> Result<mpsc::Receiver<F2Event>, String> {
+    merged_tx: mpsc::Sender<F2Event>,
+) -> Result<(), String> {
     let stream = jobs::subscribe(endpoint, "", false)
         .await
         .map_err(|err| format!("subscribe: {err}"))?;
@@ -5552,17 +5611,16 @@ async fn open_subscribe_stream(
     // stable identity (host:port — matches the row_key daemon
     // component and the F2 header label).
     let daemon = endpoint.host_port_display();
-    let (tx, rx) = mpsc::channel::<F2Event>(TUI_EVENT_BUFFER);
     // Send Connected immediately — subscribe() has returned
     // OK so the daemon broadcast receiver is registered.
-    let _ = tx
+    let _ = merged_tx
         .send(F2Event {
             daemon: daemon.clone(),
             kind: EventOrError::Connected,
         })
         .await;
-    tokio::spawn(forward_subscribe_stream(stream, daemon, tx));
-    Ok(rx)
+    tokio::spawn(forward_subscribe_stream(stream, daemon, merged_tx));
+    Ok(())
 }
 
 /// Inner loop of the Subscribe forwarder task. Reads
@@ -7470,16 +7528,17 @@ mod tests {
     /// d-26 helper: build a fresh `AppState` for keystroke
     /// tests. Mirrors the boilerplate of
     /// `handle_verify_keystroke_returns_false_for_question_mark`.
-    /// m2f-2 round 2: the F2 source-daemon identity must include the
-    /// port (so two daemons on the same host stay distinct), not just
-    /// the host. `host_port_display` drops the default port.
+    /// m2f-5: the F2 watch set dedups daemons by their host:port
+    /// identity — parsed_remote first, then discovered — and includes
+    /// the port (so same-host/different-port daemons stay distinct).
     #[test]
-    fn f2_source_label_includes_non_default_port() {
+    fn f2_watched_endpoints_dedups_by_identity() {
         let mut app = make_test_app_state(Screen::F2);
         app.parsed_remote = Some(RemoteEndpoint::parse("nas:9444:/m/").expect("parse"));
-        assert_eq!(f2_source_label(&app), "nas:9444");
-        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/m/").expect("parse"));
-        assert_eq!(f2_source_label(&app), "nas", "default port dropped");
+        let watched = f2_watched_endpoints(&app);
+        // No discovery yet → just the launch daemon, port preserved.
+        assert_eq!(watched.len(), 1);
+        assert_eq!(watched[0].host_port_display(), "nas:9444");
     }
 
     fn make_test_app_state(screen: Screen) -> AppState {
@@ -9324,7 +9383,7 @@ mod tests {
         );
         // After a GetState snapshot lands, F2's footer
         // shows "last event Xs ago" → tick.
-        app.transfers.replace_from_snapshot(
+        app.transfers.merge_snapshot(
             "",
             blit_core::generated::DaemonState::default(),
             std::time::Instant::now(),

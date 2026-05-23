@@ -147,45 +147,15 @@ impl TransfersState {
         self.last_event_at
     }
 
-    /// Replace `active[]` and `recent[]` from a fresh
-    /// `GetState` snapshot. Called on initial connect and
-    /// whenever the stream errors and falls back to a
-    /// reconcile pass.
+    /// m2f-3/m2f-5: hydrate from ONE daemon's `GetState` snapshot
+    /// WITHOUT disturbing other daemons' rows — F2 fans out across
+    /// every watched daemon (m2f-5), each hydrating independently here
+    /// then mutating incrementally via `apply_event`. (Replaced the
+    /// old `replace_from_snapshot`, which cleared the whole view — no
+    /// good once more than one daemon is watched.)
     ///
-    /// d-13: records `fetched_at` as `last_event_at` so
-    /// F2's footer can show "last event Xs ago" against
-    /// the snapshot too (a stale stream that's been
-    /// reconciling on a timer should tick from the most
-    /// recent reconcile, not from the prior live event).
-    pub fn replace_from_snapshot(
-        &mut self,
-        source_daemon: &str,
-        state: DaemonState,
-        fetched_at: Instant,
-    ) {
-        self.active.clear();
-        for a in state.active {
-            let mut row: ActiveRow = a.into();
-            row.source_daemon = source_daemon.to_string();
-            let key = row_key(source_daemon, &row.transfer_id);
-            self.active.insert(key, row);
-        }
-        self.recent.clear();
-        // Wire ordering is oldest-first; the TUI renders
-        // newest-first, so insert in reverse.
-        for r in state.recent.into_iter().rev() {
-            let mut row: RecentRow = r.into();
-            row.source_daemon = source_daemon.to_string();
-            self.push_recent(row);
-        }
-        self.last_event_at = Some(fetched_at);
-    }
-
-    /// m2f-3: hydrate from ONE daemon's `GetState` snapshot WITHOUT
-    /// disturbing other daemons' rows — the additive counterpart to
-    /// [`replace_from_snapshot`] that the multi-daemon fan-out (m2f-4)
-    /// needs (each watched daemon hydrates independently, then its
-    /// Subscribe stream mutates incrementally via `apply_event`).
+    /// d-13: records `fetched_at` as `last_event_at` so F2's footer
+    /// can show "last event Xs ago" against the snapshot too.
     ///
     /// Replaces only `source_daemon`'s rows: drops its existing
     /// active + recent entries, then inserts the snapshot's. Rows from
@@ -528,10 +498,10 @@ mod tests {
     }
 
     #[test]
-    fn replace_from_snapshot_stamps_last_event_at() {
+    fn merge_snapshot_stamps_last_event_at() {
         let mut state = TransfersState::new();
         let stamp = Instant::now();
-        state.replace_from_snapshot("", DaemonState::default(), stamp);
+        state.merge_snapshot("", DaemonState::default(), stamp);
         assert_eq!(state.last_event_at(), Some(stamp));
     }
 
@@ -706,7 +676,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        state.replace_from_snapshot("skippy", snap, Instant::now());
+        state.merge_snapshot("skippy", snap, Instant::now());
         assert_eq!(state.active_rows()[0].source_daemon, "skippy");
         assert_eq!(
             state.recent_rows().next().expect("recent").source_daemon,
@@ -998,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_from_snapshot_populates_active_and_recent() {
+    fn merge_snapshot_populates_active_and_recent() {
         let mut state = TransfersState::new();
         let snapshot = DaemonState {
             version: String::new(),
@@ -1009,7 +979,7 @@ mod tests {
             counters: None,
             delegation_enabled: false,
         };
-        state.replace_from_snapshot("", snapshot, Instant::now());
+        state.merge_snapshot("", snapshot, Instant::now());
         assert_eq!(state.active_count(), 2);
         assert_eq!(state.recent_count(), 2);
     }
@@ -1017,7 +987,7 @@ mod tests {
     #[test]
     fn apply_event_progress_updates_row_in_place() {
         let mut state = TransfersState::new();
-        state.replace_from_snapshot(
+        state.merge_snapshot(
             "",
             DaemonState {
                 active: vec![make_active("t-1", 0)],
@@ -1069,7 +1039,7 @@ mod tests {
     #[test]
     fn apply_event_complete_moves_row_to_recent() {
         let mut state = TransfersState::new();
-        state.replace_from_snapshot(
+        state.merge_snapshot(
             "",
             DaemonState {
                 active: vec![make_active("t-1", 0)],
@@ -1102,7 +1072,7 @@ mod tests {
     #[test]
     fn apply_event_error_moves_row_to_recent_with_message() {
         let mut state = TransfersState::new();
-        state.replace_from_snapshot(
+        state.merge_snapshot(
             "",
             DaemonState {
                 active: vec![make_active("t-1", 0)],
@@ -1158,7 +1128,7 @@ mod tests {
     fn apply_event_started_does_not_clobber_snapshot_progress() {
         let mut state = TransfersState::new();
         // Snapshot has the transfer with 500 KB of progress.
-        state.replace_from_snapshot(
+        state.merge_snapshot(
             "",
             DaemonState {
                 active: vec![ActiveTransfer {
@@ -1204,7 +1174,7 @@ mod tests {
     fn buffered_events_dedupe_against_snapshot_recent() {
         let mut state = TransfersState::new();
         // Snapshot already has the transfer in recent[].
-        state.replace_from_snapshot(
+        state.merge_snapshot(
             "",
             DaemonState {
                 recent: vec![make_record("race-id", true)],
@@ -1265,7 +1235,7 @@ mod tests {
         let mut state = TransfersState::new();
         // Empty initial snapshot (the transfer wasn't yet
         // visible when GetState fired).
-        state.replace_from_snapshot("", DaemonState::default(), Instant::now());
+        state.merge_snapshot("", DaemonState::default(), Instant::now());
 
         // Apply buffered Started first.
         state.apply_event(
