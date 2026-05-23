@@ -95,6 +95,43 @@ mid-flight daemon. The two decision points were extracted into the
 helpers above so the sequence is unit-testable without driving the
 event loop.
 
+## Round 3 (commit `9204a4d`)
+
+**Reopen findings (round 2):**
+1. An *emptying* watch set didn't drop the live receiver.
+   `refan_f2_setup` returned early on `watched.is_empty()` *before*
+   `*transfers_event_rx = None`, so when the last daemon vanished
+   (mDNS-only / last-daemon case) its Subscribe stream stayed live and
+   the daemon remained watched until the stream happened to close.
+2. A *shrinking* watch set (`A+B → A`) stranded the removed daemon's
+   active rows. The fresh setup for the remaining daemon only merges
+   *its* snapshot, and `merge_snapshot` is per-daemon, so `B`'s
+   in-flight rows — which can never receive a Complete/Error now that
+   `B`'s stream is gone — lingered in the active table forever.
+
+**Fix:**
+- `TransfersState::retain_active_daemons(watched)` — drops active rows
+  whose `source_daemon` left the watched set; **keeps recent rows**
+  (finished transfers are history regardless of daemon presence);
+  clears the active cursor if it was anchored to a pruned row.
+- `refan_f2_setup` now reconciles via `retain_active_daemons` on every
+  call (so a shrink prunes the removed daemon), drops the receiver
+  unconditionally, and treats an empty watch set as a first-class
+  outcome — receiver dropped, `transfers_status → NoRemote` — instead
+  of returning before cleanup. (An empty set only occurs with no
+  `parsed_remote`, so `NoRemote` is exactly right.)
+
+**Tests:** 596 total (+3 over R2).
+- `state::retain_active_daemons_drops_unwatched_active_keeps_recent` —
+  prunes the unwatched daemon's active row, keeps its recent row, never
+  leaves the cursor on a pruned daemon.
+- `discovery_emptying_drops_receiver_and_clears_rows` — mDNS-only, one
+  daemon with a live receiver; discovery goes empty → receiver dropped,
+  active rows cleared, nothing watched, status `NoRemote`.
+- `discovery_shrink_prunes_removed_daemon_active_rows` — `A+B → A`: the
+  removed daemon's active row is pruned while a fresh setup for the
+  remaining daemon goes pending.
+
 ## Reviewer comments
 
-(empty — pending round-2 grade)
+(empty — pending round-3 grade)
