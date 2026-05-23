@@ -49,7 +49,6 @@
 
 use crate::endpoints::Endpoint;
 use blit_core::fs_enum::FileFilter;
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::delegated_pull_error::Phase as DelegatedPullPhase;
 use blit_core::generated::delegated_pull_progress::Payload as DelegatedPayload;
 use blit_core::generated::{
@@ -692,7 +691,7 @@ where
     };
 
     let uri = execution.dst.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
+    let mut client = crate::client::connect_with_timeout(uri.clone())
         .await
         .with_context(|| format!("connecting to destination {}", execution.dst_label))?;
 
@@ -837,7 +836,7 @@ pub async fn run_delegated_pull_until_started(
     };
 
     let uri = execution.dst.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
+    let mut client = crate::client::connect_with_timeout(uri.clone())
         .await
         .with_context(|| format!("connecting to destination {}", execution.dst_label))?;
 
