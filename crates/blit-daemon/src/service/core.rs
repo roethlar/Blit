@@ -759,25 +759,14 @@ impl Blit for BlitService {
             //   Some(false)  → handler returned failure (phased
             //                  error already sent to client over
             //                  handler_tx)
-            let outcome: Option<bool> = tokio::select! {
-                biased;
-                _ = tx.closed(), if !detach => {
-                    // Caller hung up and we're NOT detached.
-                    // Dropping handler_tx (which happens at end
-                    // of the select branch) and dropping the
-                    // outer task drops the handler future
-                    // implicitly via select cancellation.
-                    None
-                }
-                _ = cancel_token.cancelled() => {
-                    // `CancelJob` fired the token. Same
-                    // teardown path as a client hangup — the
-                    // handler future is dropped and the data
-                    // plane cleans up via the existing
-                    // cancellation chain.
-                    None
-                }
-                handler_ok = super::delegated_pull::handle_delegated_pull(
+            // audit-10: the handler branch is ordered FIRST in the
+            // `biased` select inside `resolve_delegated_pull_outcome`, so
+            // a handler that has run to completion wins even if the
+            // cancel token fires (or the client hangs up) at the same
+            // instant. A still-running (Pending) handler still yields to
+            // a hangup / `CancelJob`. See that helper for the rationale.
+            let outcome: Option<bool> = resolve_delegated_pull_outcome(
+                super::delegated_pull::handle_delegated_pull(
                     req,
                     modules,
                     default_root,
@@ -786,10 +775,12 @@ impl Blit for BlitService {
                     handler_tx,
                     transfer_id_for_started,
                     byte_progress,
-                ) => {
-                    Some(handler_ok)
-                }
-            };
+                ),
+                tx.closed(),
+                cancel_token.cancelled(),
+                detach,
+            )
+            .await;
             // Map the select outcome onto the ActiveJobs ring
             // shape:
             //   Some(true)  → ok, no error
@@ -1291,6 +1282,43 @@ fn peer_addr_string<T>(request: &Request<T>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Resolve a `DelegatedPull`'s terminal outcome from its three racing
+/// conditions, giving handler completion priority (audit-10).
+///
+/// The select is `biased` with the **handler branch first**: when the
+/// handler future is `Ready`, its result wins even if the cancel token
+/// has also just fired or the client just hung up. A handler that is
+/// still `Pending` yields to a client hangup (only when `!detach`) or a
+/// `CancelJob` cancel, both of which resolve to `None` so the caller
+/// records the cancellation.
+///
+/// Pre-audit-10 the cancel branch was evaluated before the handler, so a
+/// transfer that completed at the same instant `CancelJob` fired its
+/// token was mis-recorded as "cancelled via CancelJob" despite having
+/// actually succeeded. Ordering completion first makes a real result
+/// (success *or* failure) authoritative over a simultaneous cancel.
+///
+/// Returns `Some(true)`/`Some(false)` for handler success/failure, or
+/// `None` for a client hangup or cancel.
+async fn resolve_delegated_pull_outcome<H, C, K>(
+    handler: H,
+    tx_closed: C,
+    cancelled: K,
+    detach: bool,
+) -> Option<bool>
+where
+    H: std::future::Future<Output = bool>,
+    C: std::future::Future<Output = ()>,
+    K: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        biased;
+        handler_ok = handler => Some(handler_ok),
+        _ = tx_closed, if !detach => None,
+        _ = cancelled => None,
+    }
+}
+
 /// Translate a handler's `Result<_, Status>` into the
 /// `(ok, error_message)` pair the ActiveJobs guard expects.
 /// Used by `push`, `pull`, and `pull_sync` dispatchers.
@@ -1311,6 +1339,63 @@ mod tests {
 
     fn empty_service() -> BlitService {
         BlitService::with_modules(HashMap::new(), false)
+    }
+
+    /// audit-10: a handler that has completed must win the `biased`
+    /// select even when the cancel token (and the client-hangup signal)
+    /// have ALSO fired — otherwise a transfer that succeeded at the same
+    /// instant `CancelJob` fired gets mis-recorded as cancelled.
+    #[tokio::test]
+    async fn resolve_pull_handler_completion_wins_over_simultaneous_cancel() {
+        use std::future::ready;
+        // Handler ready(success); client hung up; cancel fired — all
+        // simultaneously. Handler-first ordering must yield Some(true).
+        let outcome =
+            resolve_delegated_pull_outcome(ready(true), ready(()), ready(()), false).await;
+        assert_eq!(outcome, Some(true), "ready success must win the race");
+
+        // The same holds for a handler that completed with failure: a
+        // real result beats a simultaneous cancel.
+        let outcome =
+            resolve_delegated_pull_outcome(ready(false), ready(()), ready(()), false).await;
+        assert_eq!(outcome, Some(false), "ready failure must win the race");
+    }
+
+    /// audit-10: a still-running (Pending) handler must still yield to a
+    /// `CancelJob` cancel — the fix must not make transfers
+    /// uncancellable.
+    #[tokio::test]
+    async fn resolve_pull_pending_handler_yields_to_cancel() {
+        use std::future::{pending, ready};
+        let outcome = resolve_delegated_pull_outcome(
+            pending::<bool>(), // handler still running
+            pending::<()>(),   // client still connected
+            ready(()),         // CancelJob fired
+            false,
+        )
+        .await;
+        assert_eq!(outcome, None, "a running handler must yield to cancel");
+    }
+
+    /// audit-10 / m-jobs-3: with `detach = true` the client-hangup branch
+    /// is disabled, so a closed tx must NOT terminate the pull.
+    #[tokio::test]
+    async fn resolve_pull_detach_disables_client_hangup() {
+        use std::future::{pending, ready};
+        let fut = resolve_delegated_pull_outcome(
+            pending::<bool>(), // handler still running
+            ready(()),         // client hung up...
+            pending::<()>(),   // ...but no cancel
+            true,              // detached
+        );
+        // tx_closed is ready but gated off by detach; nothing else is
+        // ready, so the outcome must not resolve.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), fut)
+                .await
+                .is_err(),
+            "detach=true must keep a client hangup from ending the pull"
+        );
     }
 
     #[tokio::test]
