@@ -86,13 +86,19 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
     let mut bytes_transferred = 0u64;
     let mut blocks_skipped = 0u64;
     let mut blocks_transferred = 0u64;
+    // audit-14: track the destination cursor so we only `seek` when it
+    // isn't already at the target offset. The source is read purely
+    // sequentially (offset advances by exactly this_block each iteration),
+    // so it never needs a seek at all. Both files are opened with their
+    // cursor at 0, matching `offset == 0` / `dst_cursor_pos == 0` on the
+    // first iteration.
+    let mut dst_cursor_pos = 0u64;
 
     while offset < src_len {
         let remaining = src_len - offset;
         let this_block = remaining.min(block_size as u64) as usize;
 
-        // Read source block and compute hash
-        src_file.seek(SeekFrom::Start(offset))?;
+        // Read source block and compute hash. No seek: src is sequential.
         src_file.read_exact(&mut src_buf[..this_block])?;
         let src_hash = hash_block(&src_buf[..this_block]);
 
@@ -101,9 +107,13 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
             let dst_available = (dst_len - offset).min(this_block as u64) as usize;
 
             if dst_available == this_block {
-                // Full block available, read and hash
-                dst_file.seek(SeekFrom::Start(offset))?;
+                // Full block available, read and hash (seek only if the
+                // dst cursor isn't already aligned to this offset).
+                if dst_cursor_pos != offset {
+                    dst_file.seek(SeekFrom::Start(offset))?;
+                }
                 dst_file.read_exact(&mut dst_buf[..this_block])?;
+                dst_cursor_pos = offset + this_block as u64;
                 let dst_hash = hash_block(&dst_buf[..this_block]);
                 src_hash != dst_hash
             } else {
@@ -116,8 +126,13 @@ pub fn resume_copy_file(src: &Path, dst: &Path, block_size: usize) -> Result<Res
         };
 
         if should_write {
-            dst_file.seek(SeekFrom::Start(offset))?;
+            // The preceding read_exact (or a jump past dst_len) may have
+            // left the cursor off `offset`; seek back only if so.
+            if dst_cursor_pos != offset {
+                dst_file.seek(SeekFrom::Start(offset))?;
+            }
             dst_file.write_all(&src_buf[..this_block])?;
+            dst_cursor_pos = offset + this_block as u64;
             bytes_transferred += this_block as u64;
             blocks_transferred += 1;
         } else {
