@@ -56,6 +56,18 @@ audit-5b2: graceful shutdown (race `tokio::signal::ctrl_c()` against the
 accept loop) + a `tokio::sync::Semaphore` bound (~64 permits) so a scrape
 storm can't spawn unbounded handler tasks. That completes audit-5.
 
+## Round 2 (commit `28e9956`)
+
+**Reopen finding:** the request-head-timeout branch still wrote its
+`408 Request Timeout` response via raw `stream.write_all` — an unbounded
+write on exactly the path the finding targets (a client that stopped
+reading is *why* the head timed out, so its 408 write can park the task
+just as easily).
+
+**Fix:** route the 408 write through `write_all_within(..., WRITE_TIMEOUT)`
+too (best-effort — errors ignored since the connection is closing). Now
+every response-write path in `handle_conn` is bounded.
+
 ## Reviewer comments
 
-(empty — pending review)
+(empty — pending round-2 grade)
