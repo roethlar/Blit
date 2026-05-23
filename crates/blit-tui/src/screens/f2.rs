@@ -16,10 +16,11 @@
 //! ┌── header (1 line) ──────────────────────────────────────────────┐
 //! │ blit-tui · F2 Transfers · <remote> · N active · N recent        │
 //! ├── active table (Min 5) ─────────────────────────────────────────┤
-//! │ id  kind  peer  module/path  bytes·NN%  throughput  age         │
+//! │ daemon  id  kind  peer  module/path  bytes·NN%  throughput  age  │
 //! │ ← d-21: j/k cursor highlights the selected row                  │
+//! │ ← m2f-6: daemon column labels each row's source daemon          │
 //! ├── recent table (Min 5) ─────────────────────────────────────────┤
-//! │ id  kind  peer  module/path  bytes  duration  throughput        │
+//! │ daemon  id  kind  peer  module/path  bytes  duration  throughput │
 //! │ ...                                                             │
 //! ├── footer (1 line) ──────────────────────────────────────────────┤
 //! │ status · [last event Xs ago] · [d-22 cancel fragment] ·         │
@@ -200,6 +201,8 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, no
         .map(|r| active_row_to_table_row(r, now_unix_ms))
         .collect();
     let widths = [
+        // m2f-6: daemon column (host[:port]).
+        Constraint::Length(16),
         Constraint::Length(20),
         Constraint::Length(14),
         Constraint::Length(20),
@@ -211,6 +214,7 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, no
         Constraint::Length(10),
     ];
     let header = Row::new(vec![
+        Cell::from("daemon"),
         Cell::from("transfer_id"),
         Cell::from("kind"),
         Cell::from("peer"),
@@ -242,6 +246,8 @@ fn render_active_table(frame: &mut Frame, area: Rect, state: &TransfersState, no
 fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
     let rows: Vec<Row> = state.recent_rows().map(recent_row_to_table_row).collect();
     let widths = [
+        // m2f-6: daemon column (host[:port]).
+        Constraint::Length(16),
         Constraint::Length(20),
         Constraint::Length(14),
         Constraint::Length(20),
@@ -251,6 +257,7 @@ fn render_recent_table(frame: &mut Frame, area: Rect, state: &TransfersState) {
         Constraint::Length(12),
     ];
     let header = Row::new(vec![
+        Cell::from("daemon"),
         Cell::from("transfer_id"),
         Cell::from("kind"),
         Cell::from("peer"),
@@ -392,6 +399,9 @@ fn format_since(now: Instant, then: Instant) -> String {
 
 fn active_row_to_table_row(row: &ActiveRow, now_unix_ms: u64) -> Row<'static> {
     Row::new(vec![
+        // m2f-6: which daemon's stream reported this transfer — the
+        // single-pane-of-glass label distinguishing rows by daemon.
+        Cell::from(row.source_daemon.clone()),
         Cell::from(row.transfer_id.clone()),
         Cell::from(kind_label(row.kind).to_string()),
         Cell::from(row.peer.clone()),
@@ -444,6 +454,8 @@ fn recent_row_to_table_row(row: &RecentRow) -> Row<'static> {
         Style::default().fg(Color::Red)
     };
     Row::new(vec![
+        // m2f-6: source daemon (see active table).
+        Cell::from(row.source_daemon.clone()),
         Cell::from(row.transfer_id.clone()),
         Cell::from(kind_label(row.kind).to_string()),
         Cell::from(row.peer.clone()),
@@ -575,6 +587,57 @@ fn format_ms(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// m2f-6: the F2 active table renders a `daemon` column showing
+    /// each row's source daemon — the single-pane-of-glass label that
+    /// distinguishes transfers from different daemons.
+    #[test]
+    fn active_table_renders_source_daemon_column() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut state = TransfersState::new();
+        state.merge_snapshot(
+            "skippy:9001",
+            blit_core::generated::DaemonState {
+                active: vec![blit_core::generated::ActiveTransfer {
+                    transfer_id: "t1".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Instant::now(),
+        );
+        let backend = TestBackend::new(120, 16);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_into(
+                    frame,
+                    frame.area(),
+                    &state,
+                    "skippy:9001",
+                    &ConnectionStatus::Live,
+                    &F2CancelDisplay::Hidden,
+                    Instant::now(),
+                );
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("daemon"),
+            "active table has a daemon header; got:\n{text}"
+        );
+        assert!(
+            text.contains("skippy:9001"),
+            "active row shows its source daemon; got:\n{text}"
+        );
+    }
 
     #[test]
     fn format_bytes_picks_correct_unit() {
