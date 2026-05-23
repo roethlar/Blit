@@ -105,6 +105,24 @@ impl KeysDefaults {
     pub fn refresh_char(&self) -> Option<char> {
         single_char(&self.refresh)
     }
+
+    /// Resolve the effective global bindings, applying the **collision
+    /// policy**. `key_action` dispatches quit before refresh, so a
+    /// refresh that resolves to the same character as quit would be
+    /// silently unreachable. Policy: **quit takes precedence; a
+    /// colliding refresh is DISABLED** (`None`) — the operator must pick
+    /// a distinct key (a startup warning flags it). Each char is the
+    /// configured value, or its default when not a single character.
+    /// Returns `(quit, refresh)` where `refresh` is `None` on collision.
+    pub fn resolved(&self) -> (char, Option<char>) {
+        let quit = self.quit_char().unwrap_or(Self::DEFAULT_QUIT);
+        let refresh = self.refresh_char().unwrap_or(Self::DEFAULT_REFRESH);
+        if refresh == quit {
+            (quit, None)
+        } else {
+            (quit, Some(refresh))
+        }
+    }
 }
 
 /// A config string that must be exactly one character → that `char`,
@@ -562,6 +580,27 @@ mod tests {
             ..KeysDefaults::default()
         };
         assert_eq!(multi.refresh_char(), None);
+    }
+
+    /// keys-2 R2: the quit/refresh collision policy — quit wins; a
+    /// refresh resolving to the same char is disabled (`None`).
+    #[test]
+    fn keys_resolved_collision_policy() {
+        let mk = |quit: &str, refresh: &str| KeysDefaults {
+            quit: quit.to_string(),
+            refresh: refresh.to_string(),
+        };
+        // Distinct → both active.
+        assert_eq!(mk("q", "r").resolved(), ('q', Some('r')));
+        // refresh == quit → refresh disabled.
+        assert_eq!(mk("r", "r").resolved(), ('r', None));
+        // refresh set to the (default) quit char → disabled.
+        assert_eq!(mk("q", "q").resolved(), ('q', None));
+        // Invalid (multi-char) refresh falls back to default 'r', which
+        // is distinct from quit 'q' → active.
+        assert_eq!(mk("q", "rr").resolved(), ('q', Some('r')));
+        // ...but if quit is 'r', the fallback 'r' collides → disabled.
+        assert_eq!(mk("r", "rr").resolved(), ('r', None));
     }
 
     /// e-8: `[daemon] default_remote` parses, and defaults to empty

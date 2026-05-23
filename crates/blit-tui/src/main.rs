@@ -459,6 +459,18 @@ async fn main() -> Result<()> {
             config::KeysDefaults::DEFAULT_REFRESH,
         ));
     }
+    // keys-2 R2: quit/refresh collision policy. When the effective
+    // refresh resolves to the same character as quit, quit wins and
+    // refresh is disabled — flag it so the operator can pick a distinct
+    // key rather than silently lose refresh.
+    if tui_config.keys.resolved().1.is_none() {
+        config_warnings.push(format!(
+            "tui.toml [keys] refresh = {:?} resolves to the same key as \
+             quit = {:?}; quit takes precedence and refresh is disabled \
+             — pick a distinct [keys] refresh",
+            tui_config.keys.refresh, tui_config.keys.quit,
+        ));
+    }
 
     let mut guard = TuiGuard::new().context("entering TUI")?;
     let result = run_router(guard.terminal_mut(), &args, tui_config).await;
@@ -5493,13 +5505,16 @@ fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
     // keys-2: the configurable refresh key. Plain press only (no
     // Ctrl/Alt) so it never shadows `Ctrl+R` reload — which is already
     // handled above, but the guard keeps the contract explicit. Default
-    // `r`; a remap (e.g. `F5`-style char) re-runs the pane fetch.
-    if key.code == keymap.refresh
-        && !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-    {
-        return Some(UserAction::Refresh);
+    // `r`. `None` when the configured refresh collided with quit (quit
+    // wins; keys-2 R2 collision policy) — then there's no refresh key.
+    if let Some(refresh) = keymap.refresh {
+        if key.code == refresh
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return Some(UserAction::Refresh);
+        }
     }
     match key.code {
         KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
@@ -5960,23 +5975,19 @@ struct KeyMap {
     /// The configurable quit character. `Esc` / `Ctrl+C` quit regardless.
     quit: KeyCode,
     /// The configurable refresh character (plain press; `Ctrl+R` reload
-    /// is separate).
-    refresh: KeyCode,
+    /// is separate). `None` when the configured refresh collided with
+    /// quit — quit takes precedence (see `KeysDefaults::resolved`), so
+    /// there's no usable refresh key until the operator picks a distinct
+    /// one.
+    refresh: Option<KeyCode>,
 }
 
 impl KeyMap {
     fn from_config(config: &config::TuiConfig) -> Self {
-        let quit = config
-            .keys
-            .quit_char()
-            .unwrap_or(config::KeysDefaults::DEFAULT_QUIT);
-        let refresh = config
-            .keys
-            .refresh_char()
-            .unwrap_or(config::KeysDefaults::DEFAULT_REFRESH);
+        let (quit, refresh) = config.keys.resolved();
         Self {
             quit: KeyCode::Char(quit),
-            refresh: KeyCode::Char(refresh),
+            refresh: refresh.map(KeyCode::Char),
         }
     }
 }
@@ -6205,6 +6216,27 @@ mod tests {
         assert!(matches!(
             key_action(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL), &custom),
             Some(UserAction::ReloadConfig)
+        ));
+    }
+
+    /// keys-2 R2: when the configured refresh collides with quit, quit
+    /// wins and there is no usable refresh key (KeyMap.refresh = None).
+    #[test]
+    fn quit_refresh_collision_disables_refresh() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.quit = "r".to_string(); // collides with default refresh "r"
+        let custom = KeyMap::from_config(&cfg);
+        assert!(custom.refresh.is_none(), "refresh disabled on collision");
+        // Plain 'r' → Quit (the precedence winner), never Refresh.
+        assert!(matches!(
+            key_action(
+                &KeyEvent {
+                    code: KeyCode::Char('r'),
+                    modifiers: KeyModifiers::empty(),
+                },
+                &custom
+            ),
+            Some(UserAction::Quit)
         ));
     }
 
