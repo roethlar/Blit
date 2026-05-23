@@ -105,9 +105,10 @@ impl From<TransferRecord> for RecentRow {
 /// the Subscribe stream mutate them incrementally.
 #[derive(Debug, Default)]
 pub struct TransfersState {
-    /// Live transfers, keyed by transfer_id. HashMap so
-    /// Progress events can update in place by id without
-    /// scanning.
+    /// Live transfers, keyed by the composite
+    /// `row_key(source_daemon, transfer_id)` (m2f-2 — `transfer_id`
+    /// isn't unique across daemons). HashMap so Progress events can
+    /// update in place by key without scanning.
     active: HashMap<String, ActiveRow>,
     /// Recently completed, newest-first. Bounded by
     /// [`TUI_RECENT_CAP`] — oldest entries drop on
@@ -128,7 +129,11 @@ pub struct TransfersState {
     /// terminates (id no longer present in `active`) and
     /// doesn't come back when an unrelated transfer
     /// starts later.
-    selected_active_id: Option<String>,
+    ///
+    /// m2f-2: holds the composite `row_key(daemon, transfer_id)`, not
+    /// the bare id — `transfer_id` isn't unique across daemons once
+    /// F2 fans out, so the cursor anchors on the (daemon, id) pair.
+    selected_active_key: Option<String>,
 }
 
 impl TransfersState {
@@ -162,7 +167,8 @@ impl TransfersState {
         for a in state.active {
             let mut row: ActiveRow = a.into();
             row.source_daemon = source_daemon.to_string();
-            self.active.insert(row.transfer_id.clone(), row);
+            let key = row_key(source_daemon, &row.transfer_id);
+            self.active.insert(key, row);
         }
         self.recent.clear();
         // Wire ordering is oldest-first; the TUI renders
@@ -209,7 +215,15 @@ impl TransfersState {
             None => None,
         };
         if let Some(id) = event_id {
-            if self.recent.iter().any(|r| r.transfer_id == id) {
+            // m2f-2: dedup is per-(daemon, id) — a recent transfer on
+            // daemon A must not suppress a same-id transfer on daemon
+            // B (`transfer_id` is `t<ms>-<n>`, unique only within a
+            // daemon, so cross-daemon collisions are possible).
+            if self
+                .recent
+                .iter()
+                .any(|r| r.transfer_id == id && r.source_daemon == source_daemon)
+            {
                 // Id is terminal — ignore further events
                 // for it. Returning false signals no state
                 // change (caller can avoid a redraw).
@@ -229,9 +243,9 @@ impl TransfersState {
                 // Returns true when the entry was newly
                 // inserted (state actually changed); false
                 // when the row was already present (no-op).
-                let id = s.transfer_id.clone();
-                let inserted = !self.active.contains_key(&id);
-                self.active.entry(id).or_insert_with(|| ActiveRow {
+                let key = row_key(source_daemon, &s.transfer_id);
+                let inserted = !self.active.contains_key(&key);
+                self.active.entry(key).or_insert_with(|| ActiveRow {
                     transfer_id: s.transfer_id,
                     kind: s.kind,
                     peer: s.peer,
@@ -246,7 +260,7 @@ impl TransfersState {
                 inserted
             }
             Some(daemon_event::Payload::TransferProgress(p)) => {
-                if let Some(row) = self.active.get_mut(&p.transfer_id) {
+                if let Some(row) = self.active.get_mut(&row_key(source_daemon, &p.transfer_id)) {
                     row.bytes_completed = p.bytes_completed;
                     row.bytes_total = p.bytes_total;
                     row.throughput_bps = p.throughput_bps;
@@ -256,7 +270,7 @@ impl TransfersState {
                 }
             }
             Some(daemon_event::Payload::TransferComplete(c)) => {
-                let removed = self.active.remove(&c.transfer_id);
+                let removed = self.active.remove(&row_key(source_daemon, &c.transfer_id));
                 let kind = removed.as_ref().map(|r| r.kind).unwrap_or(0);
                 let peer = removed.as_ref().map(|r| r.peer.clone()).unwrap_or_default();
                 let module = removed
@@ -284,7 +298,7 @@ impl TransfersState {
                 true
             }
             Some(daemon_event::Payload::TransferError(e)) => {
-                let removed = self.active.remove(&e.transfer_id);
+                let removed = self.active.remove(&row_key(source_daemon, &e.transfer_id));
                 let kind = removed.as_ref().map(|r| r.kind).unwrap_or(0);
                 let peer = removed.as_ref().map(|r| r.peer.clone()).unwrap_or_default();
                 let module = removed
@@ -337,8 +351,10 @@ impl TransfersState {
     /// or never seen) — the operator has to press j/k to
     /// re-anchor.
     pub fn selected_active_index(&self) -> Option<usize> {
-        let id = self.selected_active_id.as_ref()?;
-        self.active_rows().iter().position(|r| r.transfer_id == *id)
+        let key = self.selected_active_key.as_ref()?;
+        self.active_rows()
+            .iter()
+            .position(|r| row_key(&r.source_daemon, &r.transfer_id) == *key)
     }
 
     /// d-22: the transfer_id at the cursor — the target
@@ -349,12 +365,11 @@ impl TransfersState {
     /// the d-21 R2 fall-off contract means we never lie
     /// about which transfer is selected.
     pub fn selected_active_id(&self) -> Option<&str> {
-        let id = self.selected_active_id.as_ref()?;
-        if self.active.contains_key(id) {
-            Some(id.as_str())
-        } else {
-            None
-        }
+        let key = self.selected_active_key.as_ref()?;
+        // The cursor anchors on the composite key; callers want the
+        // bare transfer_id (CancelJob targets it). Look the row up and
+        // return its id — `None` when the cursor fell off (terminated).
+        self.active.get(key).map(|r| r.transfer_id.as_str())
     }
 
     /// d-21 R2: advance the cursor. If the previously
@@ -365,14 +380,17 @@ impl TransfersState {
     pub fn select_next_active(&mut self) {
         let rows = self.active_rows();
         if rows.is_empty() {
-            self.selected_active_id = None;
+            self.selected_active_key = None;
             return;
         }
         let next_idx = match self.selected_active_index() {
             None => 0,
             Some(idx) => (idx + 1).min(rows.len() - 1),
         };
-        self.selected_active_id = Some(rows[next_idx].transfer_id.clone());
+        self.selected_active_key = Some(row_key(
+            &rows[next_idx].source_daemon,
+            &rows[next_idx].transfer_id,
+        ));
     }
 
     /// d-21 R2: walk the cursor up. Same re-anchor
@@ -382,14 +400,17 @@ impl TransfersState {
     pub fn select_prev_active(&mut self) {
         let rows = self.active_rows();
         if rows.is_empty() {
-            self.selected_active_id = None;
+            self.selected_active_key = None;
             return;
         }
         let prev_idx = match self.selected_active_index() {
             None => 0,
             Some(idx) => idx.saturating_sub(1),
         };
-        self.selected_active_id = Some(rows[prev_idx].transfer_id.clone());
+        self.selected_active_key = Some(row_key(
+            &rows[prev_idx].source_daemon,
+            &rows[prev_idx].transfer_id,
+        ));
     }
 
     /// d-44: anchor the cursor on the first active row (`g`).
@@ -397,14 +418,18 @@ impl TransfersState {
     /// cursor unanchored rather than inventing a selection.
     pub fn select_first_active(&mut self) {
         let rows = self.active_rows();
-        self.selected_active_id = rows.first().map(|r| r.transfer_id.clone());
+        self.selected_active_key = rows
+            .first()
+            .map(|r| row_key(&r.source_daemon, &r.transfer_id));
     }
 
     /// d-44: anchor the cursor on the last active row (`G`).
     /// No-op when there are no active transfers.
     pub fn select_last_active(&mut self) {
         let rows = self.active_rows();
-        self.selected_active_id = rows.last().map(|r| r.transfer_id.clone());
+        self.selected_active_key = rows
+            .last()
+            .map(|r| row_key(&r.source_daemon, &r.transfer_id));
     }
 
     pub fn recent_count(&self) -> usize {
@@ -417,6 +442,15 @@ impl TransfersState {
             self.recent.pop_back();
         }
     }
+}
+
+/// m2f-2: the `active` map's key. `transfer_id` is `t<ms>-<n>`,
+/// unique only within a daemon, so once F2 fans out across daemons
+/// (m2f-2/m2f-3) two daemons can mint the same id. Keying by
+/// `(daemon, id)` keeps their rows distinct. The unit-separator can't
+/// appear in a host or id, so the join is unambiguous.
+fn row_key(source_daemon: &str, transfer_id: &str) -> String {
+    format!("{source_daemon}\u{1f}{transfer_id}")
 }
 
 #[cfg(test)]
@@ -516,6 +550,35 @@ mod tests {
             "nas",
             "Complete carries the source daemon to the recent row"
         );
+    }
+
+    /// m2f-2: two daemons can mint the same `transfer_id`
+    /// (`t<ms>-<n>` is unique only within a daemon), so the F2 view
+    /// must keep their rows distinct (composite `(daemon, id)` key) —
+    /// not collapse them — and completing one must not evict the
+    /// other.
+    #[test]
+    fn same_id_from_two_daemons_stays_distinct() {
+        let mut state = TransfersState::new();
+        state.apply_event("nas", started_event("t1"), Instant::now());
+        state.apply_event("skippy", started_event("t1"), Instant::now());
+        assert_eq!(state.active_count(), 2, "same id on two daemons → two rows");
+
+        let complete = DaemonEvent {
+            payload: Some(daemon_event::Payload::TransferComplete(TransferComplete {
+                transfer_id: "t1".to_string(),
+                duration_ms: 1,
+                bytes: 0,
+                files: 0,
+                tcp_fallback_used: false,
+            })),
+        };
+        // Completing t1 on nas must leave skippy's t1 untouched.
+        state.apply_event("nas", complete, Instant::now());
+        assert_eq!(state.active_count(), 1, "only nas's row left");
+        assert_eq!(state.active_rows()[0].source_daemon, "skippy");
+        // And nas's t1 in recent doesn't dedup-suppress skippy's t1.
+        assert_eq!(state.recent_count(), 1);
     }
 
     /// m2f-1: a snapshot tags every row with the daemon it came from.
