@@ -3,7 +3,7 @@
 **Severity**: Robustness
 **Status**: In progress / pending review
 **Branch**: `phase5/a1`
-**Commit**: `c003bb3`
+**Commit**: `2d7b6f7`
 
 ## What
 
@@ -97,6 +97,34 @@ subscribe-open timeout is integration-shaped (needs a hung daemon) — not
 unit-tested; the wrap is a standard `tokio::time::timeout`. Full
 workspace gate green.
 
+## Round 2 (commit `2d7b6f7`)
+
+**Reopen finding:** the forwarder leak and Subscribe-open were fixed, but
+`spawn_f2_setup_task` still awaited `jobs::query(endpoint, 0)` unbounded
+right after a successful subscribe. `jobs::query` bounds its connect
+(`connect_with_timeout`) but not the `GetState` RPC, so a daemon that
+opened Subscribe then stalled `GetState` would hang the setup task —
+`transfers_setup_pending` stuck true, later refans blocked, and the
+not-yet-delivered `merged_rx` (plus its freshly spawned forwarder) kept
+alive. Same setup-task/connection leak, moved to the snapshot fetch.
+
+**Fix:** extracted `fetch_snapshot_within(daemon, timeout, fetch)` which
+wraps the fetch in an OUTER `tokio::time::timeout`
+(`SNAPSHOT_FETCH_TIMEOUT = 30s`) and degrades a stall to an `Err`
+snapshot. The `snapshots` Vec already carries
+`Result<DaemonState, String>`, so a stalled daemon renders as an errored
+snapshot in the F2 view rather than hanging setup. The timeout is a
+parameter so the degrade path is unit-testable without a 30 s wait;
+generic over the fetch error type (`E: Display`) so tests use
+`std::future` stand-ins while production passes `jobs::query`
+(`eyre::Report`).
+
+**Tests (blit-tui, +2):**
+`fetch_snapshot_within_times_out_to_degraded_err` (pending fetch + 10 ms
+bound → `Err` containing "timed out"),
+`fetch_snapshot_within_passes_through_a_ready_ok`. Full workspace gate
+green.
+
 ## Reviewer comments
 
-(empty — pending review)
+(empty — pending round-2 grade)
