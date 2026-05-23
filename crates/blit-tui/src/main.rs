@@ -440,6 +440,17 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // keys-1: a [keys] quit value that isn't a single character falls
+    // back to the default. Same buffer-then-flush contract.
+    if tui_config.keys.quit_char().is_none() {
+        config_warnings.push(format!(
+            "tui.toml [keys] quit = {:?} is not a single character; \
+             using default {:?} (Esc / Ctrl+C always quit)",
+            tui_config.keys.quit,
+            config::KeysDefaults::DEFAULT_QUIT,
+        ));
+    }
+
     let mut guard = TuiGuard::new().context("entering TUI")?;
     let result = run_router(guard.terminal_mut(), &args, tui_config).await;
     drop(guard);
@@ -1071,7 +1082,7 @@ async fn run_router(
                 // (F-keys, Ctrl-c) or we're not in editing
                 // mode, fall through to the action
                 // dispatcher.
-                if let Some(action) = key_action(&key) {
+                if let Some(action) = key_action(&key, &KeyMap::from_config(&tui_config)) {
                     match action {
                         UserAction::Quit => return Ok(()),
                         UserAction::ToggleHelp => {
@@ -5426,8 +5437,8 @@ struct KeyEvent {
 /// `None` if the key is one we ignore. Pure function so
 /// tests can pin the keymap without spinning up an input
 /// task.
-fn key_action(key: &KeyEvent) -> Option<UserAction> {
-    if should_quit(key.code, key.modifiers) {
+fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
+    if is_quit(key.code, key.modifiers, keymap.quit) {
         return Some(UserAction::Quit);
     }
     // d-36: `Ctrl+R` reloads tui.toml. Checked before the
@@ -5922,10 +5933,34 @@ async fn forward_subscribe_stream(
     }
 }
 
-/// Quit predicate. `q` / `Esc` are the muscle-memory
-/// shortcuts; `Ctrl-C` is the safety net for a stuck UI.
-fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::Char('q') | KeyCode::Esc)
+/// keys-1: the operator-remappable key bindings, resolved from
+/// `[keys]` config. Currently just the quit key; later slices add more
+/// global keys (refresh, pane switch). Built once per keystroke from the
+/// (hot-reloadable) config, so a `Ctrl+R` remap takes effect live.
+struct KeyMap {
+    /// The configurable quit character. `Esc` / `Ctrl+C` quit regardless.
+    quit: KeyCode,
+}
+
+impl KeyMap {
+    fn from_config(config: &config::TuiConfig) -> Self {
+        let quit = config
+            .keys
+            .quit_char()
+            .unwrap_or(config::KeysDefaults::DEFAULT_QUIT);
+        Self {
+            quit: KeyCode::Char(quit),
+        }
+    }
+}
+
+/// Quit predicate. The configured quit key (`q` by default) is the
+/// muscle-memory shortcut; `Esc` is the secondary, and `Ctrl-C` is the
+/// safety net for a stuck UI — the latter two always quit so a bad
+/// `[keys] quit` value can never lock the operator in.
+fn is_quit(code: KeyCode, modifiers: KeyModifiers, quit: KeyCode) -> bool {
+    code == quit
+        || matches!(code, KeyCode::Esc)
         || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
 }
 
@@ -6025,19 +6060,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// keys-1: the default keymap (quit = `q`) recognises q / Esc /
+    /// Ctrl+C, and ignores unrelated keys.
     #[test]
-    fn should_quit_recognises_q_esc_ctrl_c() {
-        assert!(should_quit(KeyCode::Char('q'), KeyModifiers::empty()));
-        assert!(should_quit(KeyCode::Esc, KeyModifiers::empty()));
-        assert!(should_quit(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    fn is_quit_recognises_default_quit_esc_ctrl_c() {
+        let q = KeyCode::Char('q');
+        assert!(is_quit(KeyCode::Char('q'), KeyModifiers::empty(), q));
+        assert!(is_quit(KeyCode::Esc, KeyModifiers::empty(), q));
+        assert!(is_quit(KeyCode::Char('c'), KeyModifiers::CONTROL, q));
+        assert!(!is_quit(KeyCode::Char('a'), KeyModifiers::empty(), q));
+        assert!(!is_quit(KeyCode::Enter, KeyModifiers::empty(), q));
+        // Plain 'c' without Ctrl is not a quit shortcut.
+        assert!(!is_quit(KeyCode::Char('c'), KeyModifiers::empty(), q));
     }
 
+    /// keys-1: a remapped quit key is honoured, and Esc / Ctrl+C stay
+    /// as failsafes (the old `q` no longer quits once remapped).
     #[test]
-    fn should_quit_ignores_other_keys() {
-        assert!(!should_quit(KeyCode::Char('a'), KeyModifiers::empty()));
-        assert!(!should_quit(KeyCode::Enter, KeyModifiers::empty()));
-        // Plain 'c' without Ctrl is not a quit shortcut.
-        assert!(!should_quit(KeyCode::Char('c'), KeyModifiers::empty()));
+    fn is_quit_honours_remapped_key_and_failsafes() {
+        let x = KeyCode::Char('x');
+        assert!(is_quit(KeyCode::Char('x'), KeyModifiers::empty(), x));
+        // Failsafes unaffected by the remap.
+        assert!(is_quit(KeyCode::Esc, KeyModifiers::empty(), x));
+        assert!(is_quit(KeyCode::Char('c'), KeyModifiers::CONTROL, x));
+        // The old default no longer quits.
+        assert!(!is_quit(KeyCode::Char('q'), KeyModifiers::empty(), x));
+    }
+
+    /// keys-1: a remapped quit key flows from config through the
+    /// keymap into key_action. Uses inline `KeyEvent` (not the `k`
+    /// helper) and an explicit custom keymap.
+    #[test]
+    fn key_action_honours_remapped_quit() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.quit = "x".to_string();
+        let custom = KeyMap::from_config(&cfg);
+        let ev = |code| KeyEvent {
+            code,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('x')), &custom),
+            Some(UserAction::Quit)
+        ));
+        // Default 'q' is no longer quit under this keymap.
+        assert!(!matches!(
+            key_action(&ev(KeyCode::Char('q')), &custom),
+            Some(UserAction::Quit)
+        ));
     }
 
     fn k(code: KeyCode) -> KeyEvent {
@@ -6047,25 +6117,31 @@ mod tests {
         }
     }
 
+    /// Default keymap (quit = `q`) for the key_action tests below.
+    fn km() -> KeyMap {
+        KeyMap::from_config(&config::TuiConfig::default())
+    }
+
+    /// Test wrapper: classify a key under the DEFAULT keymap. Most
+    /// key_action tests don't care about remapping, so this keeps them
+    /// terse (and let keys-1 thread the keymap without touching them).
+    fn ka(key: &KeyEvent) -> Option<UserAction> {
+        key_action(key, &km())
+    }
+
     #[test]
     fn key_action_maps_quit_and_refresh() {
+        assert!(matches!(ka(&k(KeyCode::Char('q'))), Some(UserAction::Quit)));
+        assert!(matches!(ka(&k(KeyCode::Esc)), Some(UserAction::Quit)));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('q'))),
-            Some(UserAction::Quit)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Esc)),
-            Some(UserAction::Quit)
-        ));
-        assert!(matches!(
-            key_action(&KeyEvent {
+            ka(&KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
             }),
             Some(UserAction::Quit)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('r'))),
+            ka(&k(KeyCode::Char('r'))),
             Some(UserAction::Refresh)
         ));
     }
@@ -6074,7 +6150,7 @@ mod tests {
     /// corresponding pane. Verified across all four keys.
     #[test]
     fn key_action_maps_f_keys_to_navigate() {
-        let f = |n| key_action(&k(KeyCode::F(n)));
+        let f = |n| ka(&k(KeyCode::F(n)));
         assert!(matches!(f(1), Some(UserAction::Navigate(Screen::F1))));
         assert!(matches!(f(2), Some(UserAction::Navigate(Screen::F2))));
         assert!(matches!(f(3), Some(UserAction::Navigate(Screen::F3))));
@@ -6082,7 +6158,7 @@ mod tests {
         // map but so do 1-4 — terminals that drop F-keys
         // (mosh / certain SSH proxies / CI muxers) can
         // still navigate. Helper closure pins each.
-        let d = |c| key_action(&k(KeyCode::Char(c)));
+        let d = |c| ka(&k(KeyCode::Char(c)));
         assert!(
             matches!(d('1'), Some(UserAction::Navigate(Screen::F1))),
             "`1` must map to F1 navigation",
@@ -6098,7 +6174,7 @@ mod tests {
         // terminal escape sequences).
         for mods in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
             assert!(
-                key_action(&KeyEvent {
+                ka(&KeyEvent {
                     code: KeyCode::Char('1'),
                     modifiers: mods,
                 })
@@ -6130,24 +6206,15 @@ mod tests {
     /// full set lands in the right variant.
     #[test]
     fn key_action_maps_f3_navigation() {
+        assert!(matches!(ka(&k(KeyCode::Enter)), Some(UserAction::Descend)));
+        assert!(matches!(ka(&k(KeyCode::Right)), Some(UserAction::Descend)));
         assert!(matches!(
-            key_action(&k(KeyCode::Enter)),
+            ka(&k(KeyCode::Char('l'))),
             Some(UserAction::Descend)
         ));
+        assert!(matches!(ka(&k(KeyCode::Left)), Some(UserAction::Ascend)));
         assert!(matches!(
-            key_action(&k(KeyCode::Right)),
-            Some(UserAction::Descend)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Char('l'))),
-            Some(UserAction::Descend)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Left)),
-            Some(UserAction::Ascend)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Char('h'))),
+            ka(&k(KeyCode::Char('h'))),
             Some(UserAction::Ascend)
         ));
     }
@@ -6159,19 +6226,16 @@ mod tests {
     #[test]
     fn key_action_maps_arrow_and_vim_navigation() {
         assert!(matches!(
-            key_action(&k(KeyCode::Down)),
+            ka(&k(KeyCode::Down)),
+            Some(UserAction::SelectNext)
+        ));
+        assert!(matches!(ka(&k(KeyCode::Up)), Some(UserAction::SelectPrev)));
+        assert!(matches!(
+            ka(&k(KeyCode::Char('j'))),
             Some(UserAction::SelectNext)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Up)),
-            Some(UserAction::SelectPrev)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Char('j'))),
-            Some(UserAction::SelectNext)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Char('k'))),
+            ka(&k(KeyCode::Char('k'))),
             Some(UserAction::SelectPrev)
         ));
     }
@@ -6179,15 +6243,15 @@ mod tests {
     #[test]
     fn key_action_returns_none_for_unmapped_keys() {
         // `z` is unmapped (`a` became F3ToggleMarkAll in d-51).
-        assert!(key_action(&k(KeyCode::Char('z'))).is_none());
-        assert!(key_action(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
-        assert!(key_action(&k(KeyCode::Char('J'))).is_none()); // case-sensitive
-                                                               // `K` was unmapped before d-22; it now maps
-                                                               // to CancelSelectedTransfer for the F2 cancel
-                                                               // flow. Other capitals (C/M/V/H/O/Y/N) are
-                                                               // also mapped now via earlier slices.
-                                                               // Enter is now mapped (a1-4: F3 Descend) — it
-                                                               // *isn't* in this "unmapped" list anymore.
+        assert!(ka(&k(KeyCode::Char('z'))).is_none());
+        assert!(ka(&k(KeyCode::Char('R'))).is_none()); // case-sensitive
+        assert!(ka(&k(KeyCode::Char('J'))).is_none()); // case-sensitive
+                                                       // `K` was unmapped before d-22; it now maps
+                                                       // to CancelSelectedTransfer for the F2 cancel
+                                                       // flow. Other capitals (C/M/V/H/O/Y/N) are
+                                                       // also mapped now via earlier slices.
+                                                       // Enter is now mapped (a1-4: F3 Descend) — it
+                                                       // *isn't* in this "unmapped" list anymore.
     }
 
     // d-36: Ctrl+R config hot-reload.
@@ -6200,12 +6264,9 @@ mod tests {
             code: KeyCode::Char('r'),
             modifiers: KeyModifiers::CONTROL,
         };
+        assert!(matches!(ka(&ctrl_r), Some(UserAction::ReloadConfig)));
         assert!(matches!(
-            key_action(&ctrl_r),
-            Some(UserAction::ReloadConfig)
-        ));
-        assert!(matches!(
-            key_action(&k(KeyCode::Char('r'))),
+            ka(&k(KeyCode::Char('r'))),
             Some(UserAction::Refresh)
         ));
     }
@@ -6285,7 +6346,7 @@ mod tests {
     #[test]
     fn key_action_maps_cancel_selected_transfer() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('K'))),
+            ka(&k(KeyCode::Char('K'))),
             Some(UserAction::CancelSelectedTransfer)
         ));
     }
@@ -6419,7 +6480,7 @@ mod tests {
     #[test]
     fn key_action_maps_shift_x_to_cancel_all() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('X'))),
+            ka(&k(KeyCode::Char('X'))),
             Some(UserAction::CancelAllActiveTransfers)
         ));
     }
@@ -7246,7 +7307,7 @@ mod tests {
     #[test]
     fn key_action_maps_question_mark_to_toggle_help() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('?'))),
+            ka(&k(KeyCode::Char('?'))),
             Some(UserAction::ToggleHelp)
         ));
     }
@@ -7256,7 +7317,7 @@ mod tests {
     #[test]
     fn key_action_maps_slash_to_f3_filter_begin() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('/'))),
+            ka(&k(KeyCode::Char('/'))),
             Some(UserAction::F3FilterBegin)
         ));
     }
@@ -7294,11 +7355,11 @@ mod tests {
     #[test]
     fn key_action_maps_shift_p_to_batch_pull() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('P'))),
+            ka(&k(KeyCode::Char('P'))),
             Some(UserAction::F3BatchPullBegin)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('p'))),
+            ka(&k(KeyCode::Char('p'))),
             Some(UserAction::F3PullBegin)
         ));
     }
@@ -7307,7 +7368,7 @@ mod tests {
     #[test]
     fn key_action_maps_space_to_f3_toggle_mark() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char(' '))),
+            ka(&k(KeyCode::Char(' '))),
             Some(UserAction::F3ToggleMark)
         ));
     }
@@ -7316,7 +7377,7 @@ mod tests {
     #[test]
     fn key_action_maps_a_to_f3_toggle_mark_all() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('a'))),
+            ka(&k(KeyCode::Char('a'))),
             Some(UserAction::F3ToggleMarkAll)
         ));
     }
@@ -7326,7 +7387,7 @@ mod tests {
     #[test]
     fn key_action_maps_u_to_f3_du_begin() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('u'))),
+            ka(&k(KeyCode::Char('u'))),
             Some(UserAction::F3DuBegin)
         ));
     }
@@ -7335,12 +7396,12 @@ mod tests {
     #[test]
     fn key_action_maps_shift_d_to_f3_delete_begin() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('D'))),
+            ka(&k(KeyCode::Char('D'))),
             Some(UserAction::F3DeleteBegin)
         ));
         // Lowercase `d` stays ProfileDisable (F4), NOT delete.
         assert!(matches!(
-            key_action(&k(KeyCode::Char('d'))),
+            ka(&k(KeyCode::Char('d'))),
             Some(UserAction::ProfileDisable)
         ));
     }
@@ -7703,21 +7764,18 @@ mod tests {
     #[test]
     fn key_action_maps_jump_keys() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('g'))),
+            ka(&k(KeyCode::Char('g'))),
             Some(UserAction::SelectFirst)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Home)),
+            ka(&k(KeyCode::Home)),
             Some(UserAction::SelectFirst)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('G'))),
+            ka(&k(KeyCode::Char('G'))),
             Some(UserAction::SelectLast)
         ));
-        assert!(matches!(
-            key_action(&k(KeyCode::End)),
-            Some(UserAction::SelectLast)
-        ));
+        assert!(matches!(ka(&k(KeyCode::End)), Some(UserAction::SelectLast)));
     }
 
     // d-41: pure du-aggregate accumulator. With max_depth 0
@@ -8087,7 +8145,7 @@ mod tests {
     #[test]
     fn key_action_maps_p_to_f3_pull_begin() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('p'))),
+            ka(&k(KeyCode::Char('p'))),
             Some(UserAction::F3PullBegin)
         ));
     }
@@ -8178,12 +8236,12 @@ mod tests {
     #[test]
     fn key_action_maps_m_to_f3_mirror_begin() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('m'))),
+            ka(&k(KeyCode::Char('m'))),
             Some(UserAction::F3MirrorBegin)
         ));
         // `M` stays the F4 local mirror — case-distinct.
         assert!(matches!(
-            key_action(&k(KeyCode::Char('M'))),
+            ka(&k(KeyCode::Char('M'))),
             Some(UserAction::TransferMirror)
         ));
     }
@@ -8193,7 +8251,7 @@ mod tests {
     #[test]
     fn key_action_maps_t_to_f1_trigger_begin() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('t'))),
+            ka(&k(KeyCode::Char('t'))),
             Some(UserAction::F1TriggerBegin)
         ));
     }
@@ -9830,22 +9888,22 @@ mod tests {
     #[test]
     fn key_action_maps_transfer_triggers() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('C'))),
+            ka(&k(KeyCode::Char('C'))),
             Some(UserAction::TransferCopy)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('M'))),
+            ka(&k(KeyCode::Char('M'))),
             Some(UserAction::TransferMirror)
         ));
         // d-5: capital V triggers the F4 local move. d-57:
         // lowercase `v` is the F3 move (case-distinct, like
         // `m`/`M`).
         assert!(matches!(
-            key_action(&k(KeyCode::Char('V'))),
+            ka(&k(KeyCode::Char('V'))),
             Some(UserAction::TransferMove)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('v'))),
+            ka(&k(KeyCode::Char('v'))),
             Some(UserAction::F3MoveBegin)
         ));
     }
@@ -9856,11 +9914,11 @@ mod tests {
     #[test]
     fn key_action_maps_verify_checksum_toggle() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('H'))),
+            ka(&k(KeyCode::Char('H'))),
             Some(UserAction::ToggleVerifyChecksum)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('h'))),
+            ka(&k(KeyCode::Char('h'))),
             Some(UserAction::Ascend)
         ));
     }
@@ -9871,10 +9929,10 @@ mod tests {
     #[test]
     fn key_action_maps_verify_one_way_toggle() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('O'))),
+            ka(&k(KeyCode::Char('O'))),
             Some(UserAction::ToggleVerifyOneWay)
         ));
-        assert!(key_action(&k(KeyCode::Char('o'))).is_none());
+        assert!(ka(&k(KeyCode::Char('o'))).is_none());
     }
 
     /// d-5: V triggers the move confirm flow — a copy
@@ -9924,16 +9982,13 @@ mod tests {
     fn key_action_maps_transfer_confirm_keys() {
         for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
             assert!(
-                matches!(
-                    key_action(&k(code)),
-                    Some(UserAction::TransferMirrorConfirm)
-                ),
+                matches!(ka(&k(code)), Some(UserAction::TransferMirrorConfirm)),
                 "expected TransferMirrorConfirm for {code:?}",
             );
         }
         for code in [KeyCode::Char('n'), KeyCode::Char('N')] {
             assert!(
-                matches!(key_action(&k(code)), Some(UserAction::TransferCancel)),
+                matches!(ka(&k(code)), Some(UserAction::TransferCancel)),
                 "expected TransferCancel for {code:?}",
             );
         }
@@ -10029,25 +10084,25 @@ mod tests {
     #[test]
     fn key_action_maps_profile_lifecycle_keys() {
         assert!(matches!(
-            key_action(&k(KeyCode::Char('c'))),
+            ka(&k(KeyCode::Char('c'))),
             Some(UserAction::ProfileClear)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('d'))),
+            ka(&k(KeyCode::Char('d'))),
             Some(UserAction::ProfileDisable)
         ));
         assert!(matches!(
-            key_action(&k(KeyCode::Char('e'))),
+            ka(&k(KeyCode::Char('e'))),
             Some(UserAction::ProfileEnable)
         ));
         // Uppercase E remains unmapped. Uppercase C is
         // TransferCopy (d-4); uppercase D is F3DeleteBegin
         // (d-45) — both covered in their own tests. The
         // Profile keys themselves are lowercase-only.
-        assert!(key_action(&k(KeyCode::Char('E'))).is_none());
+        assert!(ka(&k(KeyCode::Char('E'))).is_none());
         // Ctrl-c remains Quit (not ProfileClear).
         assert!(matches!(
-            key_action(&KeyEvent {
+            ka(&KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
             }),

@@ -19,6 +19,9 @@
 //! [daemon]
 //! default_remote = ""           # e-8: fallback remote when no --remote flag (CLI flag wins)
 //!
+//! [keys]
+//! quit = "q"                    # keys-1: quit key (Esc + Ctrl+C always quit too)
+//!
 //! [verify]
 //! default_use_checksum = false  # `H` toggle's startup value
 //! default_one_way = false       # `O` toggle's startup value
@@ -63,6 +66,42 @@ pub struct TuiConfig {
     pub theme: ThemeDefaults,
     pub transfer: TransferDefaults,
     pub daemon: DaemonDefaults,
+    pub keys: KeysDefaults,
+}
+
+/// keys-1: operator key remapping. First slice covers the global quit
+/// key; later slices extend to refresh / navigation / pane keys.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct KeysDefaults {
+    /// The primary quit key — a single character (default `"q"`). `Esc`
+    /// and `Ctrl+C` always quit regardless, as failsafes, so a typo here
+    /// can never lock the operator in. A value that isn't exactly one
+    /// character is ignored (warn + fall back to `q`).
+    pub quit: String,
+}
+
+impl KeysDefaults {
+    pub const DEFAULT_QUIT: char = 'q';
+
+    /// The configured quit key as a single `char`, or `None` when the
+    /// value isn't exactly one character (caller warns + falls back to
+    /// [`Self::DEFAULT_QUIT`]).
+    pub fn quit_char(&self) -> Option<char> {
+        let mut chars = self.quit.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+impl Default for KeysDefaults {
+    fn default() -> Self {
+        Self {
+            quit: Self::DEFAULT_QUIT.to_string(),
+        }
+    }
 }
 
 /// e-8: launch-time daemon defaults.
@@ -450,6 +489,32 @@ mod tests {
         let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
         assert!(cfg.verify.default_use_checksum);
         assert!(cfg.verify.default_one_way);
+    }
+
+    /// keys-1: `[keys] quit` parses and defaults to "q"; `quit_char`
+    /// accepts a single char and rejects multi-char / empty values.
+    #[test]
+    fn keys_quit_parses_and_defaults() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.keys.quit, "q");
+        assert_eq!(cfg.keys.quit_char(), Some('q'));
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[keys]\nquit = \"x\"\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.keys.quit_char(), Some('x'));
+
+        // Multi-char / empty values are rejected by quit_char (caller
+        // warns + falls back).
+        let multi = KeysDefaults {
+            quit: "esc".to_string(),
+        };
+        assert_eq!(multi.quit_char(), None);
+        let empty = KeysDefaults {
+            quit: String::new(),
+        };
+        assert_eq!(empty.quit_char(), None);
     }
 
     /// e-8: `[daemon] default_remote` parses, and defaults to empty
