@@ -1080,7 +1080,23 @@ async fn run_router(
             update = disco_rx.recv() => {
                 match update {
                     Some(DiscoveryUpdate::Result(services)) => {
+                        let before = f2_watched_identities(&app);
                         app.daemons.replace_from_discovery(&services, Instant::now());
+                        // m2f-9: if this discovery update changed the
+                        // watched-daemon set and F2 is already live, auto
+                        // re-fan the merged Subscribe streams so a newly
+                        // discovered daemon's transfers appear (and a
+                        // vanished one's streams drop) without an explicit
+                        // `r`. Gated on an active subscription: if the
+                        // operator hasn't entered F2 yet, no streams exist
+                        // to refresh. refan_f2_setup itself no-ops while a
+                        // setup is pending, so a burst of updates can't
+                        // stack respawns.
+                        if transfers_event_rx.is_some()
+                            && f2_watched_identities(&app) != before
+                        {
+                            refan_f2_setup(&mut app, &mut transfers_event_rx, &f2_setup_tx);
+                        }
                     }
                     Some(DiscoveryUpdate::Error(msg)) => {
                         app.daemons.note_discovery_error(msg);
@@ -5509,6 +5525,18 @@ fn f2_watched_endpoints(app: &AppState) -> Vec<RemoteEndpoint> {
     endpoints
 }
 
+/// m2f-9: the identity set F2 currently watches, keyed by the same
+/// `host_port_display` `f2_watched_endpoints` dedups on. Comparing this
+/// across an mDNS discovery update tells the loop whether the watch set
+/// actually changed — so F2 can auto re-fan to pick up a newly
+/// discovered daemon (or drop a vanished one) without an explicit `r`.
+fn f2_watched_identities(app: &AppState) -> std::collections::BTreeSet<String> {
+    f2_watched_endpoints(app)
+        .iter()
+        .map(|ep| ep.host_port_display())
+        .collect()
+}
+
 /// m2f-5 R2: apply one F2 merged-stream signal. Returns `false` only
 /// when the merged receiver should be dropped — i.e. `None`, meaning
 /// every watched daemon's forwarder has closed (all senders gone). A
@@ -7622,6 +7650,57 @@ mod tests {
         // No discovery yet → just the launch daemon, port preserved.
         assert_eq!(watched.len(), 1);
         assert_eq!(watched[0].host_port_display(), "nas:9444");
+    }
+
+    /// m2f-9: the watched-identity set tracks discovery — a daemon
+    /// appearing changes the set (so the loop knows to auto re-fan), and
+    /// a re-report of the same daemons leaves it unchanged (so a steady
+    /// discovery feed doesn't churn live streams). Identities are keyed
+    /// by host:port, matching f2_watched_endpoints' dedup.
+    #[test]
+    fn f2_watched_identities_changes_when_a_daemon_appears() {
+        let mut app = make_test_app_state(Screen::F2);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
+        let before = f2_watched_identities(&app);
+        assert_eq!(
+            before,
+            ["nas".to_string()].into_iter().collect(),
+            "only the launch daemon before discovery"
+        );
+
+        let skippy = blit_core::mdns::MdnsDiscoveredService {
+            fullname: "skippy._blit._tcp.local.".to_string(),
+            instance_name: "skippy".to_string(),
+            hostname: "skippy.local.".to_string(),
+            // Non-default port so the identity visibly carries it.
+            port: 9050,
+            addresses: vec![std::net::Ipv4Addr::new(192, 168, 1, 50)],
+            properties: std::collections::HashMap::new(),
+        };
+        app.daemons
+            .replace_from_discovery(std::slice::from_ref(&skippy), Instant::now());
+        let after = f2_watched_identities(&app);
+        assert!(after.contains("nas"), "launch daemon retained");
+        // Discovered daemons resolve to their advertised <ip>:<port>.
+        assert!(
+            after.contains("192.168.1.50:9050"),
+            "discovered daemon added"
+        );
+        assert_ne!(
+            before, after,
+            "appearance changes the set → triggers re-fan"
+        );
+
+        // Re-reporting the same daemon leaves the set unchanged → no
+        // needless re-fan on a steady discovery feed.
+        let steady = f2_watched_identities(&app);
+        app.daemons
+            .replace_from_discovery(std::slice::from_ref(&skippy), Instant::now());
+        assert_eq!(
+            steady,
+            f2_watched_identities(&app),
+            "stable feed → no change"
+        );
     }
 
     /// m2f-7: a row's source-daemon identity round-trips to a
