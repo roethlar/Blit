@@ -119,3 +119,102 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<blit_core::generated::Fil
     }
     Ok(spec)
 }
+
+#[cfg(test)]
+mod tests {
+    //! audit-6 item 1: blit-app orchestration glue. `build` / `build_spec`
+    //! are pure filter-assembly helpers every transfer/check verb routes
+    //! through, so their semantics (glob propagation, size/age parsing,
+    //! reference-time capture, malformed-input rejection) are worth
+    //! pinning directly.
+    use super::*;
+
+    fn inputs<'a>(include: &'a [String], exclude: &'a [String]) -> FilterInputs<'a> {
+        FilterInputs {
+            include,
+            exclude,
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+        }
+    }
+
+    #[test]
+    fn build_empty_inputs_yields_unconstrained_filter() {
+        let f = build(&inputs(&[], &[])).unwrap();
+        assert!(f.include_files.is_empty());
+        assert!(f.exclude_files.is_empty());
+        assert_eq!(f.min_size, None);
+        assert_eq!(f.max_size, None);
+        assert_eq!(f.min_age, None);
+        assert_eq!(f.max_age, None);
+        assert!(
+            f.reference_time.is_none(),
+            "no age constraint ⇒ no reference_time captured"
+        );
+    }
+
+    #[test]
+    fn build_propagates_globs_and_sizes() {
+        let inc = vec!["*.rs".to_string()];
+        let exc = vec!["*.tmp".to_string()];
+        let mut i = inputs(&inc, &exc);
+        i.min_size = Some("10M");
+        i.max_size = Some("1G");
+        let f = build(&i).unwrap();
+        assert_eq!(f.include_files, inc);
+        assert_eq!(f.exclude_files, exc);
+        // Routes through blit-core's parse_size — cross-check the wiring.
+        assert_eq!(f.min_size, Some(parse_size("10M").unwrap()));
+        assert_eq!(f.max_size, Some(parse_size("1G").unwrap()));
+    }
+
+    #[test]
+    fn build_age_constraint_captures_reference_time() {
+        let mut i = inputs(&[], &[]);
+        i.max_age = Some("7d");
+        let f = build(&i).unwrap();
+        assert_eq!(f.max_age, Some(parse_duration("7d").unwrap()));
+        assert!(
+            f.reference_time.is_some(),
+            "an age constraint must capture reference_time once at build time"
+        );
+    }
+
+    #[test]
+    fn build_rejects_malformed_glob_with_pointer() {
+        let inc = vec!["a[".to_string()]; // unclosed character class
+        let err = build(&inputs(&inc, &[])).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid filter pattern"),
+            "expected a glob-pattern pointer, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_rejects_bad_size_with_flag_context() {
+        let mut i = inputs(&[], &[]);
+        i.min_size = Some("not-a-size");
+        let err = build(&i).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("--min-size"),
+            "expected the --min-size flag in the error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn build_spec_maps_age_to_seconds_and_propagates_globs() {
+        let inc = vec!["*.log".to_string()];
+        let mut i = inputs(&inc, &[]);
+        i.min_age = Some("1h");
+        let spec = build_spec(&i).unwrap();
+        assert_eq!(spec.include, inc);
+        assert_eq!(
+            spec.min_age_secs,
+            Some(parse_duration("1h").unwrap().as_secs())
+        );
+        assert_eq!(spec.max_age_secs, None);
+    }
+}
