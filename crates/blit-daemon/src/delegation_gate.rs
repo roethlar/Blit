@@ -560,6 +560,78 @@ mod tests {
         assert_eq!(err, GateDenial::InvalidPort(0));
     }
 
+    // ── DNS rebinding (audit-6f) ─────────────────────────────────────
+
+    /// audit-6 item 6: the gate's rebinding mitigation is "resolve once,
+    /// bind the validated IP." A malicious resolver that returns an
+    /// allowlisted IP on the first lookup and an internal/special-range
+    /// IP on a hypothetical second lookup must not be able to redirect
+    /// the connect — `validate_source` returns the FIRST, validated IP
+    /// and never consults the second answer.
+    #[tokio::test]
+    async fn validate_source_binds_first_resolution_against_rebind() {
+        let safe = ip4("203.0.113.10"); // public, authorized by the hostname entry
+        let rebind = ip4("169.254.169.254"); // link-local metadata endpoint
+        let resolver = ScriptedResolver::new(vec![vec![safe], vec![rebind]]);
+        let cfg = DelegationConfig {
+            allow_delegated_pull: true,
+            allowed_source_hosts: vec![parse_allow_entry("rebind.test").unwrap()],
+        };
+        let locator = LocatorView {
+            host: "rebind.test",
+            port: 9031,
+        };
+
+        let sa = validate_source(&cfg, &locator, &resolver).await.unwrap();
+        assert_eq!(
+            sa,
+            SocketAddr::new(safe, 9031),
+            "the gate must bind the first, validated resolution"
+        );
+
+        // The malicious second answer is still queued — proving the gate
+        // resolved exactly once. Had it re-resolved, this is the address
+        // it would have connected to.
+        let leftover = resolver.resolve("rebind.test", 9031).await.unwrap();
+        assert_eq!(
+            leftover,
+            vec![rebind],
+            "the second (malicious) resolution must remain unconsumed by the gate"
+        );
+    }
+
+    /// audit-6 item 6 (converse): the gate decides on the FIRST
+    /// resolution only. If the first answer is unauthorized (here a
+    /// special-range IP that a hostname entry cannot authorize), the gate
+    /// denies — even though a later resolution would have been fine. A
+    /// gate that re-resolved at connect time could be tricked the other
+    /// way; this locks in single-resolution semantics.
+    #[tokio::test]
+    async fn validate_source_decides_on_first_resolution_only() {
+        let first = ip4("169.254.169.254"); // special range; hostname entry can't authorize
+        let benign_second = ip4("203.0.113.10");
+        let resolver = ScriptedResolver::new(vec![vec![first], vec![benign_second]]);
+        let cfg = DelegationConfig {
+            allow_delegated_pull: true,
+            allowed_source_hosts: vec![parse_allow_entry("rebind.test").unwrap()],
+        };
+        let locator = LocatorView {
+            host: "rebind.test",
+            port: 9031,
+        };
+
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GateDenial::SpecialRangeNeedsIpAuth(_)),
+            "first resolution to a special range must be denied, got: {err:?}"
+        );
+        // The benign second answer was never consulted.
+        let leftover = resolver.resolve("rebind.test", 9031).await.unwrap();
+        assert_eq!(leftover, vec![benign_second]);
+    }
+
     #[tokio::test]
     async fn master_switch_on_with_empty_allowlist_accepts_any() {
         let cfg = DelegationConfig {
