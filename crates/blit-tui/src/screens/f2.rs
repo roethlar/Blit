@@ -244,9 +244,13 @@ fn render_active_table(
         // daemon's transfer to cancel, so the same colorblind/
         // palette accessibility rationale that made the tab strip
         // themable (e-7) applies here too.
+        // e-9 R2: the foreground uses the SAME `contrasting_fg`
+        // the tab strip uses (white on dark accents, black on
+        // light), so a dark `accent_color` (black/red/blue/...)
+        // doesn't render the selected row as black-on-dark.
         .row_highlight_style(
             Style::default()
-                .fg(Color::Black)
+                .fg(super::contrasting_fg(accent))
                 .bg(accent)
                 .add_modifier(Modifier::BOLD),
         );
@@ -690,10 +694,26 @@ mod tests {
             })
             .expect("draw");
         let buf = terminal.backend().buffer();
-        let has_accent_bg =
-            (0..buf.area.height).any(|y| (0..buf.area.width).any(|x| buf[(x, y)].bg == Color::Red));
+        // e-9 R2: a DARK accent (red) must paint the highlight AND pair
+        // it with a readable (white) foreground — black-on-red would be
+        // unreadable. Assert every accent-background cell uses the
+        // contrasting white fg, matching the tab strip's contrasting_fg.
+        let mut found_accent_cell = false;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if cell.bg == Color::Red {
+                    found_accent_cell = true;
+                    assert_eq!(
+                        cell.fg,
+                        Color::White,
+                        "dark accent must use a contrasting (white) foreground, not black"
+                    );
+                }
+            }
+        }
         assert!(
-            has_accent_bg,
+            found_accent_cell,
             "the selected row's highlight should paint the accent (red) background"
         );
         // And the default-cyan must NOT leak through when a custom accent
