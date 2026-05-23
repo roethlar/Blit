@@ -450,6 +450,15 @@ async fn main() -> Result<()> {
             config::KeysDefaults::DEFAULT_QUIT,
         ));
     }
+    // keys-2: same for the refresh key.
+    if tui_config.keys.refresh_char().is_none() {
+        config_warnings.push(format!(
+            "tui.toml [keys] refresh = {:?} is not a single character; \
+             using default {:?}",
+            tui_config.keys.refresh,
+            config::KeysDefaults::DEFAULT_REFRESH,
+        ));
+    }
 
     let mut guard = TuiGuard::new().context("entering TUI")?;
     let result = run_router(guard.terminal_mut(), &args, tui_config).await;
@@ -5481,8 +5490,18 @@ fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
             }
         }
     }
+    // keys-2: the configurable refresh key. Plain press only (no
+    // Ctrl/Alt) so it never shadows `Ctrl+R` reload — which is already
+    // handled above, but the guard keeps the contract explicit. Default
+    // `r`; a remap (e.g. `F5`-style char) re-runs the pane fetch.
+    if key.code == keymap.refresh
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return Some(UserAction::Refresh);
+    }
     match key.code {
-        KeyCode::Char('r') => Some(UserAction::Refresh),
         KeyCode::Down | KeyCode::Char('j') => Some(UserAction::SelectNext),
         KeyCode::Up | KeyCode::Char('k') => Some(UserAction::SelectPrev),
         // d-42: vim-style jump to first / last row. `g`
@@ -5933,13 +5952,16 @@ async fn forward_subscribe_stream(
     }
 }
 
-/// keys-1: the operator-remappable key bindings, resolved from
-/// `[keys]` config. Currently just the quit key; later slices add more
-/// global keys (refresh, pane switch). Built once per keystroke from the
+/// keys-1/keys-2: the operator-remappable global key bindings, resolved
+/// from `[keys]` config. Quit + refresh today; later slices add more
+/// (pane switch, per-screen). Built once per keystroke from the
 /// (hot-reloadable) config, so a `Ctrl+R` remap takes effect live.
 struct KeyMap {
     /// The configurable quit character. `Esc` / `Ctrl+C` quit regardless.
     quit: KeyCode,
+    /// The configurable refresh character (plain press; `Ctrl+R` reload
+    /// is separate).
+    refresh: KeyCode,
 }
 
 impl KeyMap {
@@ -5948,8 +5970,13 @@ impl KeyMap {
             .keys
             .quit_char()
             .unwrap_or(config::KeysDefaults::DEFAULT_QUIT);
+        let refresh = config
+            .keys
+            .refresh_char()
+            .unwrap_or(config::KeysDefaults::DEFAULT_REFRESH);
         Self {
             quit: KeyCode::Char(quit),
+            refresh: KeyCode::Char(refresh),
         }
     }
 }
@@ -6154,6 +6181,31 @@ mod tests {
         // Failsafes still fire under the remap.
         assert!(is_quit(KeyCode::Esc, KeyModifiers::empty(), r));
         assert!(is_quit(KeyCode::Char('c'), KeyModifiers::CONTROL, r));
+    }
+
+    /// keys-2: a remapped refresh key is honoured, the old default `r`
+    /// stops refreshing, and `Ctrl+R` config reload is unaffected.
+    #[test]
+    fn key_action_honours_remapped_refresh() {
+        let mut cfg = config::TuiConfig::default();
+        cfg.keys.refresh = "R".to_string();
+        let custom = KeyMap::from_config(&cfg);
+        let ev = |code, modifiers| KeyEvent { code, modifiers };
+        // Remapped 'R' → Refresh.
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('R'), KeyModifiers::empty()), &custom),
+            Some(UserAction::Refresh)
+        ));
+        // Old default 'r' no longer refreshes under this map.
+        assert!(!matches!(
+            key_action(&ev(KeyCode::Char('r'), KeyModifiers::empty()), &custom),
+            Some(UserAction::Refresh)
+        ));
+        // Ctrl+R is still config reload (refresh remap doesn't touch it).
+        assert!(matches!(
+            key_action(&ev(KeyCode::Char('r'), KeyModifiers::CONTROL), &custom),
+            Some(UserAction::ReloadConfig)
+        ));
     }
 
     fn k(code: KeyCode) -> KeyEvent {

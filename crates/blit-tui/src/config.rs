@@ -21,6 +21,7 @@
 //!
 //! [keys]
 //! quit = "q"                    # keys-1: quit key (Esc + Ctrl+C always quit too)
+//! refresh = "r"                 # keys-2: refresh key (Ctrl+R reload unaffected)
 //!
 //! [verify]
 //! default_use_checksum = false  # `H` toggle's startup value
@@ -69,8 +70,11 @@ pub struct TuiConfig {
     pub keys: KeysDefaults,
 }
 
-/// keys-1: operator key remapping. First slice covers the global quit
-/// key; later slices extend to refresh / navigation / pane keys.
+/// keys-1/keys-2: operator key remapping for the global keys. Covers
+/// quit (keys-1) and refresh (keys-2); later slices extend to
+/// navigation / pane-switch / per-screen keys. Each binding is a single
+/// character claimed only on a PLAIN press (no Ctrl/Alt) so it can't
+/// hijack a chord for that character.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeysDefaults {
@@ -79,20 +83,37 @@ pub struct KeysDefaults {
     /// can never lock the operator in. A value that isn't exactly one
     /// character is ignored (warn + fall back to `q`).
     pub quit: String,
+    /// The refresh key — a single character (default `"r"`). Re-runs the
+    /// active pane's fetch. A non-single-character value is ignored
+    /// (warn + fall back to `r`). `Ctrl+R` (config reload) is unaffected.
+    pub refresh: String,
 }
 
 impl KeysDefaults {
     pub const DEFAULT_QUIT: char = 'q';
+    pub const DEFAULT_REFRESH: char = 'r';
 
     /// The configured quit key as a single `char`, or `None` when the
     /// value isn't exactly one character (caller warns + falls back to
     /// [`Self::DEFAULT_QUIT`]).
     pub fn quit_char(&self) -> Option<char> {
-        let mut chars = self.quit.chars();
-        match (chars.next(), chars.next()) {
-            (Some(c), None) => Some(c),
-            _ => None,
-        }
+        single_char(&self.quit)
+    }
+
+    /// The configured refresh key as a single `char`, or `None` (caller
+    /// warns + falls back to [`Self::DEFAULT_REFRESH`]).
+    pub fn refresh_char(&self) -> Option<char> {
+        single_char(&self.refresh)
+    }
+}
+
+/// A config string that must be exactly one character → that `char`,
+/// else `None` (empty or multi-character).
+fn single_char(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
     }
 }
 
@@ -100,6 +121,7 @@ impl Default for KeysDefaults {
     fn default() -> Self {
         Self {
             quit: Self::DEFAULT_QUIT.to_string(),
+            refresh: Self::DEFAULT_REFRESH.to_string(),
         }
     }
 }
@@ -509,12 +531,37 @@ mod tests {
         // warns + falls back).
         let multi = KeysDefaults {
             quit: "esc".to_string(),
+            ..KeysDefaults::default()
         };
         assert_eq!(multi.quit_char(), None);
         let empty = KeysDefaults {
             quit: String::new(),
+            ..KeysDefaults::default()
         };
         assert_eq!(empty.quit_char(), None);
+    }
+
+    /// keys-2: `[keys] refresh` parses and defaults to "r"; rejects
+    /// multi-char / empty like quit.
+    #[test]
+    fn keys_refresh_parses_and_defaults() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.keys.refresh, "r");
+        assert_eq!(cfg.keys.refresh_char(), Some('r'));
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("tui.toml");
+        std::fs::write(&path, "[keys]\nrefresh = \"R\"\n").expect("write");
+        let cfg = load_from_path(&path, |msg| panic!("unexpected warn: {msg}"));
+        assert_eq!(cfg.keys.refresh_char(), Some('R'));
+        // quit keeps its default when only refresh is set.
+        assert_eq!(cfg.keys.quit_char(), Some('q'));
+
+        let multi = KeysDefaults {
+            refresh: "rr".to_string(),
+            ..KeysDefaults::default()
+        };
+        assert_eq!(multi.refresh_char(), None);
     }
 
     /// e-8: `[daemon] default_remote` parses, and defaults to empty
