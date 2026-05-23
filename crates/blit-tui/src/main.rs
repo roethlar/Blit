@@ -2335,6 +2335,39 @@ enum F2SetupPayload {
 /// skipped (the others still show); the reply is `Failed` only when
 /// none could be reached. Per-daemon reconnect / degraded UI is a
 /// follow-up (m2f-6).
+/// Bound for the initial per-daemon snapshot (`GetState`) fetch in the F2
+/// setup task. audit-8 round 2: see `fetch_snapshot_within`.
+const SNAPSHOT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fetch a daemon's startup snapshot under an OUTER timeout, degrading a
+/// stall to an `Err` snapshot rather than hanging the setup task (audit-8
+/// round 2). `jobs::query` bounds its connect via `connect_with_timeout`
+/// but not the `GetState` RPC itself, so without this a daemon that
+/// accepts the connection then stalls `GetState` would block
+/// `spawn_f2_setup_task` indefinitely.
+///
+/// The timeout is a parameter (not the const inline) so the degrade path
+/// is unit-testable without a 30 s wait. Generic over the error type so
+/// tests can drive it with `std::future` stand-ins; production passes
+/// `jobs::query(...)` whose error is `eyre::Report`.
+async fn fetch_snapshot_within<F, E>(
+    daemon: &str,
+    timeout: Duration,
+    fetch: F,
+) -> Result<DaemonState, String>
+where
+    F: std::future::Future<Output = Result<DaemonState, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(timeout, fetch).await {
+        Ok(Ok(state)) => Ok(state),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(_) => Err(format!(
+            "snapshot fetch from {daemon} timed out after {timeout:?}"
+        )),
+    }
+}
+
 fn spawn_f2_setup_task(daemons: Vec<RemoteEndpoint>, gen: u64, tx: mpsc::Sender<F2SetupReply>) {
     tokio::spawn(async move {
         let (merged_tx, merged_rx) = mpsc::channel::<F2Event>(TUI_EVENT_BUFFER);
@@ -2347,10 +2380,21 @@ fn spawn_f2_setup_task(daemons: Vec<RemoteEndpoint>, gen: u64, tx: mpsc::Sender<
                 .is_ok()
             {
                 any_subscribed = true;
-                let snap = jobs::query(endpoint, 0)
-                    .await
-                    .map_err(|err| format!("{err:#}"));
-                snapshots.push((endpoint.host_port_display(), snap));
+                // audit-8 round 2: bound the initial snapshot fetch too.
+                // `jobs::query`'s connect is bounded (connect_with_timeout)
+                // but the GetState RPC is not, so a daemon that opened
+                // Subscribe then stalled GetState would hang the whole
+                // setup task (and keep the not-yet-delivered merged_rx —
+                // and its forwarders — alive). A stalled fetch degrades to
+                // an Err snapshot instead of blocking.
+                let daemon = endpoint.host_port_display();
+                let snap = fetch_snapshot_within(
+                    &daemon,
+                    SNAPSHOT_FETCH_TIMEOUT,
+                    jobs::query(endpoint, 0),
+                )
+                .await;
+                snapshots.push((daemon, snap));
             }
         }
         // Drop our handle so the forwarders' clones are the only
@@ -6321,6 +6365,24 @@ mod tests {
             matches!(step, ForwardStep::Message(Ok(Some(_)))),
             "a ready message must be delivered while the receiver is live"
         );
+    }
+
+    /// audit-8 round 2: a stalled initial snapshot fetch must degrade to
+    /// an Err snapshot, not hang the setup task.
+    #[tokio::test]
+    async fn fetch_snapshot_within_times_out_to_degraded_err() {
+        let never = std::future::pending::<Result<DaemonState, eyre::Report>>();
+        let snap = fetch_snapshot_within("daemon:1", Duration::from_millis(10), never).await;
+        let err = snap.expect_err("a stalled GetState must degrade to Err, not hang");
+        assert!(err.contains("timed out"), "got: {err}");
+    }
+
+    /// audit-8 round 2: a snapshot that resolves in time passes through.
+    #[tokio::test]
+    async fn fetch_snapshot_within_passes_through_a_ready_ok() {
+        let ready = std::future::ready(Ok::<_, eyre::Report>(DaemonState::default()));
+        let snap = fetch_snapshot_within("daemon:1", Duration::from_secs(5), ready).await;
+        assert!(snap.is_ok(), "a ready snapshot must pass through");
     }
 
     /// d-3 round-2 regression: the TUI diagnostics dump
