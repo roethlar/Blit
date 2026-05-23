@@ -58,6 +58,24 @@ clients (`RemotePullClient`/`RemotePushClient`) have their own
 `connect` constructors in `blit-core`, so audit-2b may add the timeout
 there or wrap at the call sites.
 
+## Round 2 (commit `e60ae29`)
+
+**Reopen finding:** `Endpoint::connect_timeout` does not bound slow DNS.
+In tonic 0.14 / hyper-util, the name is resolved *before* the connect
+timeout is applied to the TCP connector, so the helper bounded only the
+post-resolution socket attempt — leaving the "slow DNS" case from the
+contract unbounded.
+
+**Fix:** wrap the whole `Endpoint::connect()` future (DNS + TCP) in an
+outer `tokio::time::timeout(CONNECT_TIMEOUT)`, mapping elapsed → a
+`connecting to {uri} timed out` error. `connect_timeout` is retained as
+the inner TCP-phase bound. Now slow DNS, a hung handshake, and a
+partition are all bounded at 30s, matching the finding contract.
+
+The same correction was applied pre-emptively to the blit-core
+`RemotePullClient::connect` / `RemotePushClient::connect` in audit-2b
+(which I was mid-writing with the same `connect_timeout`-only flaw).
+
 ## Reviewer comments
 
-(empty — pending review)
+(empty — pending round-2 grade)
