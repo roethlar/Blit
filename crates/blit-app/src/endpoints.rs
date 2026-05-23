@@ -52,6 +52,15 @@ pub fn parse_transfer_endpoint(input: &str) -> Result<Endpoint> {
         Ok(endpoint) => Ok(Endpoint::Remote(endpoint)),
         Err(err) => {
             let err_msg = err.to_string();
+            // `RemoteEndpoint::parse` bails "input appears to be a
+            // local path" when `check_local_path` recognizes a local
+            // path — including Windows drive paths (`C:/path`,
+            // `C:\path`) whose `:/` would otherwise trip the
+            // remote-shaped-typo guard below. Honor that lower-level
+            // classification: it's local, not a typo'd remote.
+            if err_msg.contains("appears to be a local path") {
+                return Ok(Endpoint::Local(PathBuf::from(input)));
+            }
             if err_msg.contains("forward slashes") {
                 return Err(err);
             }
@@ -185,5 +194,40 @@ pub fn rel_path_to_string(path: &Path) -> String {
             .map(|c| c.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// d-68 R4: a Windows drive path (`C:/...` or `C:\...`) is a
+    /// local destination even though it contains `:/`. The classifier
+    /// must honor `RemoteEndpoint::parse`'s lower-level "local path"
+    /// verdict rather than treating the `:/` as a remote-shaped typo.
+    #[test]
+    fn windows_drive_paths_are_local() {
+        for input in ["C:/tmp/out", "C:\\tmp\\out", "D:/data"] {
+            match parse_transfer_endpoint(input) {
+                Ok(Endpoint::Local(p)) => assert_eq!(p, PathBuf::from(input)),
+                other => panic!("{input:?}: expected Local, got {other:?}"),
+            }
+        }
+    }
+
+    /// The remote-shaped-typo guard still rejects a module path that's
+    /// missing its trailing slash — must NOT be swallowed as local.
+    #[test]
+    fn remote_shaped_typo_still_errors() {
+        assert!(parse_transfer_endpoint("skippy:/backup").is_err());
+    }
+
+    /// A genuine remote module dest still parses as remote.
+    #[test]
+    fn module_dest_is_remote() {
+        assert!(matches!(
+            parse_transfer_endpoint("skippy:/backup/"),
+            Ok(Endpoint::Remote(_))
+        ));
     }
 }

@@ -7847,6 +7847,27 @@ mod tests {
         assert!(!app.f1_push.is_running(), "must not delegate a bare dest");
     }
 
+    /// d-68 R4: a Windows drive local destination (`C:/tmp/out`)
+    /// contains `:/` but is a local path — it must reach the
+    /// remote→local pull, not be rejected as a remote-shaped typo.
+    #[tokio::test]
+    async fn plan_f1_trigger_remote_source_windows_local_dest_pulls() {
+        let mut app = make_test_app_state(Screen::F1);
+        let out = plan_f1_trigger(
+            &mut app,
+            "nas:/photos/",
+            "C:/tmp/out",
+            f3pull::PullKind::Copy,
+            false,
+        );
+        assert!(
+            matches!(out, TriggerOutcome::Launched),
+            "Windows local dest pulls"
+        );
+        assert!(app.f3_pull.is_running(), "remote→local pull engaged");
+        assert!(!app.f1_push.is_running(), "must not delegate");
+    }
+
     #[test]
     fn handle_f1_trigger_keystroke_tab_toggles_focus() {
         let mut app = app_with_trigger_modal();
