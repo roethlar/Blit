@@ -1,6 +1,7 @@
 mod active_jobs;
 mod delegation_gate;
 mod metrics;
+mod net_timeout;
 mod recents_store;
 mod runtime;
 mod service;
@@ -122,7 +123,20 @@ async fn main() -> Result<()> {
 
     println!("blitd v2 listening on {}", addr);
 
+    // audit-1: HTTP/2 keepalive. A subscriber (TUI F2 / `jobs watch`)
+    // that vanishes mid-stream — crash, network partition, killed laptop
+    // lid — would otherwise leave the daemon holding the gRPC stream +
+    // broadcast Receiver + spawned forwarder task forever, because TCP
+    // alone doesn't notice a silently-dead peer. Keepalive PINGs idle
+    // connections every 30s and reaps any that don't answer within 20s,
+    // reclaiming those resources. Crucially this leaves HEALTHY idle
+    // subscribers untouched (Subscribe is legitimately silent during
+    // quiet periods), so we get leak reclamation without the reconnect
+    // churn an app-level "no events for N seconds" close would cause
+    // (owner decision 2026-05-23).
     Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
         .add_service(BlitServer::new(service))
         .serve(addr)
         .await?;

@@ -259,10 +259,24 @@ pub(crate) trait HostResolver: Send + Sync {
 /// string; the returned IPs are what the gate validates.
 pub(crate) struct StdResolver;
 
+/// audit-1: bound DNS resolution in the delegation gate. A
+/// slow/black-holed resolver would otherwise stall the `DelegatedPull`
+/// handler for the OS resolver's own timeout (5-30s+). 10s is generous
+/// for a healthy resolver while bounding the worst case.
+const DNS_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[async_trait::async_trait]
 impl HostResolver for StdResolver {
     async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
-        let addrs = tokio::net::lookup_host((host, port)).await?;
+        let lookup = tokio::net::lookup_host((host, port));
+        let addrs = crate::net_timeout::within(DNS_RESOLVE_TIMEOUT, lookup)
+            .await
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("DNS resolution of '{host}' timed out after {DNS_RESOLVE_TIMEOUT:?}"),
+                )
+            })??;
         Ok(addrs.map(|sa| sa.ip()).collect())
     }
 }

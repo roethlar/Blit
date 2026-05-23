@@ -29,6 +29,11 @@ use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
 use crate::service::util::{resolve_contained_path, resolve_module};
 
+/// audit-1: deadline for the dst→src TCP connect. Bounds the OS SYN
+/// timeout (60-180s) against a firewalled/black-holed source; matches
+/// the data-plane accept timeout's 30s margin for slow networks.
+const SOURCE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Per-request capabilities advertised by *this destination daemon* on
 /// the spec it forwards to src. The CLI's value is overwritten — the
 /// CLI is not in the byte path and cannot speak for what dst supports.
@@ -267,17 +272,35 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         // variant rather than silently work with stale identity.
         path: RemotePath::Discovery,
     };
-    let mut pull_client = RemotePullClient::connect(endpoint).await.map_err(|err| {
-        err_progress(
-            Phase::ConnectSource as i32,
-            format!(
-                "connecting to source {}:{}: {}",
-                resolved.ip(),
-                resolved.port(),
-                err
-            ),
-        )
-    })?;
+    // audit-1: bound the TCP connect to the source daemon. A firewalled
+    // or black-holed source would otherwise block the handler for the OS
+    // TCP SYN timeout (60-180s on Linux), pinning the ActiveJobs row and
+    // resources. 30s matches the data-plane accept timeout.
+    let mut pull_client =
+        crate::net_timeout::within(SOURCE_CONNECT_TIMEOUT, RemotePullClient::connect(endpoint))
+            .await
+            .ok_or_else(|| {
+                err_progress(
+                    Phase::ConnectSource as i32,
+                    format!(
+                        "connecting to source {}:{} timed out after {:?}",
+                        resolved.ip(),
+                        resolved.port(),
+                        SOURCE_CONNECT_TIMEOUT
+                    ),
+                )
+            })?
+            .map_err(|err| {
+                err_progress(
+                    Phase::ConnectSource as i32,
+                    format!(
+                        "connecting to source {}:{}: {}",
+                        resolved.ip(),
+                        resolved.port(),
+                        err
+                    ),
+                )
+            })?;
 
     // Send the "started" progress event so CLI knows the dst→src
     // handshake is underway. The diagnostic source_data_plane_endpoint
