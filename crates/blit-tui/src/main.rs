@@ -298,6 +298,10 @@ enum F2CancelStatus {
     /// operator answers.
     Confirming {
         transfer_id: String,
+        /// m2f-7: the daemon owning `transfer_id`, captured at `K`
+        /// press (the cursor may move before `y`). CancelJob targets
+        /// this daemon, not `parsed_remote`.
+        daemon: String,
     },
     /// d-30: operator pressed `Shift+X` (batch cancel)
     /// while `[transfer] confirm_cancel = true` AND
@@ -1456,13 +1460,20 @@ async fn handle_pane_action(
             UserAction::CancelSelectedTransfer => {
                 if app.cancel_status.is_sending() || app.cancel_status.is_confirming() {
                     // Already mid-cycle — ignore.
-                } else if let (Some(id), Some(endpoint)) = (
+                } else if let (Some(id), Some(daemon)) = (
                     app.transfers.selected_active_id().map(|s| s.to_string()),
-                    app.parsed_remote.clone(),
+                    // m2f-7: cancel targets the SELECTED row's daemon, not
+                    // parsed_remote — F2 shows rows from every daemon.
+                    app.transfers
+                        .selected_active_daemon()
+                        .map(|s| s.to_string()),
                 ) {
                     if tui_config.transfer.confirm_cancel {
-                        app.cancel_status = F2CancelStatus::Confirming { transfer_id: id };
-                    } else {
+                        app.cancel_status = F2CancelStatus::Confirming {
+                            transfer_id: id,
+                            daemon,
+                        };
+                    } else if let Some(endpoint) = cancel_endpoint(&daemon) {
                         app.cancel_request_seq += 1;
                         let rid = app.cancel_request_seq;
                         app.cancel_status = F2CancelStatus::Sending {
@@ -1478,26 +1489,29 @@ async fn handle_pane_action(
             // d-30: `y` also promotes ConfirmingBatch →
             // BatchInitiated and spawns N RPCs.
             UserAction::TransferMirrorConfirm if app.cancel_status.is_confirming() => {
-                let Some(endpoint) = app.parsed_remote.clone() else {
-                    // No remote — abort the prompt rather
-                    // than silently sit on it.
-                    app.cancel_status = F2CancelStatus::Idle;
-                    return;
-                };
                 // d-30 R2: clone-out the variant payload
                 // before mutating `app.cancel_status` so
                 // the borrow doesn't outlive the match.
                 let confirmed = match &app.cancel_status {
-                    F2CancelStatus::Confirming { transfer_id } => {
-                        ConfirmedCancel::Single(transfer_id.clone())
-                    }
+                    F2CancelStatus::Confirming {
+                        transfer_id,
+                        daemon,
+                    } => ConfirmedCancel::Single {
+                        id: transfer_id.clone(),
+                        daemon: daemon.clone(),
+                    },
                     F2CancelStatus::ConfirmingBatch { transfer_ids } => {
                         ConfirmedCancel::Batch(transfer_ids.clone())
                     }
                     _ => return,
                 };
                 match confirmed {
-                    ConfirmedCancel::Single(id) => {
+                    // m2f-7: single cancel targets the captured row's daemon.
+                    ConfirmedCancel::Single { id, daemon } => {
+                        let Some(endpoint) = cancel_endpoint(&daemon) else {
+                            app.cancel_status = F2CancelStatus::Idle;
+                            return;
+                        };
                         app.cancel_request_seq += 1;
                         let rid = app.cancel_request_seq;
                         app.cancel_status = F2CancelStatus::Sending {
@@ -1507,6 +1521,13 @@ async fn handle_pane_action(
                         spawn_cancel_transfer(rid, endpoint, id, app.cancel_reply_tx.clone());
                     }
                     ConfirmedCancel::Batch(ids) => {
+                        // m2f-8: batch cancel still targets parsed_remote;
+                        // per-daemon batch is a follow-up (foreign ids are
+                        // NotFound-safe meanwhile).
+                        let Some(endpoint) = app.parsed_remote.clone() else {
+                            app.cancel_status = F2CancelStatus::Idle;
+                            return;
+                        };
                         let count = spawn_cancels_for_ids(
                             ids,
                             &endpoint,
@@ -2501,7 +2522,7 @@ fn cancel_status_to_display(
     use screens::f2::F2CancelDisplay;
     match status {
         F2CancelStatus::Idle => F2CancelDisplay::Hidden,
-        F2CancelStatus::Confirming { transfer_id } => F2CancelDisplay::ConfirmingCancel {
+        F2CancelStatus::Confirming { transfer_id, .. } => F2CancelDisplay::ConfirmingCancel {
             transfer_id: transfer_id.clone(),
         },
         F2CancelStatus::ConfirmingBatch { transfer_ids } => F2CancelDisplay::ConfirmingBatch {
@@ -4000,8 +4021,22 @@ fn min_opt(
 /// across the spawn. Single carries one id; Batch
 /// carries the frozen list captured at prompt creation.
 enum ConfirmedCancel {
-    Single(String),
+    /// m2f-7: single cancel carries the id + the daemon that owns it
+    /// (CancelJob targets that daemon).
+    Single {
+        id: String,
+        daemon: String,
+    },
     Batch(Vec<String>),
+}
+
+/// m2f-7: turn an F2 row's source-daemon identity (`host_port_display`)
+/// back into a connectable endpoint for CancelJob. The identity has no
+/// module path — only the control plane (host:port) matters for
+/// CancelJob — so `RemoteEndpoint::parse` of `host` / `host:port`
+/// yields a usable Discovery endpoint. `None` on a malformed identity.
+fn cancel_endpoint(daemon: &str) -> Option<RemoteEndpoint> {
+    RemoteEndpoint::parse(daemon).ok()
 }
 
 /// d-30 / d-30 R2: snapshot the current active-transfer
@@ -6048,6 +6083,7 @@ mod tests {
     fn f2_cancel_status_confirming_predicates() {
         let s = F2CancelStatus::Confirming {
             transfer_id: "t-1".to_string(),
+            daemon: "nas".to_string(),
         };
         assert!(s.is_confirming());
         assert!(!s.is_sending());
@@ -6097,6 +6133,7 @@ mod tests {
     fn cancel_status_to_display_renders_confirming() {
         let status = F2CancelStatus::Confirming {
             transfer_id: "t-1".to_string(),
+            daemon: "nas".to_string(),
         };
         let display =
             cancel_status_to_display(&status, Instant::now(), std::time::Duration::from_secs(60));
@@ -6115,6 +6152,7 @@ mod tests {
     fn cancel_status_remaining_ttl_confirming_returns_none() {
         let status = F2CancelStatus::Confirming {
             transfer_id: "t-1".to_string(),
+            daemon: "nas".to_string(),
         };
         let remaining = cancel_status_remaining_ttl(
             &status,
@@ -6132,6 +6170,7 @@ mod tests {
         let mut app = make_test_app_state(Screen::F2);
         app.cancel_status = F2CancelStatus::Confirming {
             transfer_id: "t-1".to_string(),
+            daemon: "nas".to_string(),
         };
         let esc = KeyEvent {
             code: KeyCode::Esc,
@@ -7204,6 +7243,7 @@ mod tests {
         // must not survive the switch.
         app.cancel_status = F2CancelStatus::Confirming {
             transfer_id: "old-daemon-job".to_string(),
+            daemon: "nas".to_string(),
         };
 
         let other = RemoteEndpoint::parse("skippy:/media/").expect("other");
@@ -7544,6 +7584,18 @@ mod tests {
         // No discovery yet → just the launch daemon, port preserved.
         assert_eq!(watched.len(), 1);
         assert_eq!(watched[0].host_port_display(), "nas:9444");
+    }
+
+    /// m2f-7: a row's source-daemon identity round-trips to a
+    /// connectable cancel endpoint — host:port preserved (so CancelJob
+    /// reaches the right daemon), default port handled.
+    #[test]
+    fn cancel_endpoint_round_trips_daemon_identity() {
+        let ep = cancel_endpoint("skippy:9001").expect("non-default port");
+        assert_eq!(ep.host_port_display(), "skippy:9001");
+        let ep = cancel_endpoint("nas").expect("default port");
+        assert_eq!(ep.host, "nas");
+        assert_eq!(ep.host_port_display(), "nas");
     }
 
     fn make_test_app_state(screen: Screen) -> AppState {

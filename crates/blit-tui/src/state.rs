@@ -371,6 +371,16 @@ impl TransfersState {
         self.active.get(key).map(|r| r.transfer_id.as_str())
     }
 
+    /// m2f-7: the source daemon of the cursor's transfer — CancelJob
+    /// must target THIS daemon, not the launch `parsed_remote`, now
+    /// that F2 shows rows from every daemon. `None` when the cursor
+    /// isn't anchored or fell off (same contract as
+    /// [`Self::selected_active_id`]).
+    pub fn selected_active_daemon(&self) -> Option<&str> {
+        let key = self.selected_active_key.as_ref()?;
+        self.active.get(key).map(|r| r.source_daemon.as_str())
+    }
+
     /// d-21 R2: advance the cursor. If the previously
     /// selected id is no longer present (transfer
     /// terminated), the next press re-anchors at index 0
@@ -658,6 +668,25 @@ mod tests {
             .map(|r| r.source_daemon.as_str())
             .collect();
         assert!(daemons.contains("nas") && daemons.contains("skippy"));
+    }
+
+    /// m2f-7: the cursor exposes its row's source daemon (CancelJob's
+    /// target) consistently with its transfer_id — both from the SAME
+    /// selected row, even with rows from different daemons.
+    #[test]
+    fn selected_active_daemon_matches_cursor_row() {
+        let mut state = TransfersState::new();
+        state.apply_event("nas", started_event("t1"), Instant::now());
+        state.apply_event("skippy:9001", started_event("t2"), Instant::now());
+        assert!(state.selected_active_daemon().is_none(), "no cursor yet");
+        state.select_first_active();
+        let daemon = state.selected_active_daemon().expect("daemon");
+        let id = state.selected_active_id().expect("id");
+        // The (daemon, id) pair belongs to one row, not a cross of two.
+        assert!(
+            (daemon == "nas" && id == "t1") || (daemon == "skippy:9001" && id == "t2"),
+            "selected daemon+id come from the same row: {daemon} / {id}"
+        );
     }
 
     /// m2f-1: a snapshot tags every row with the daemon it came from.
