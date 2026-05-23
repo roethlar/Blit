@@ -1109,31 +1109,11 @@ async fn run_router(
                     None => std::future::pending().await,
                 }
             }, if transfers_event_rx.is_some() => {
-                match event {
-                    // m2f-4: the event carries its source daemon, so a
-                    // row is tagged with the stream's daemon rather than
-                    // the (single) parsed_remote.
-                    Some(F2Event { kind: EventOrError::Connected, .. }) => {
-                        if matches!(app.transfers_status, ConnectionStatus::Connecting) {
-                            app.transfers_status = ConnectionStatus::Live;
-                        }
-                    }
-                    Some(F2Event { daemon, kind: EventOrError::Event(daemon_event) }) => {
-                        app.transfers.apply_event(&daemon, daemon_event, Instant::now());
-                        if matches!(app.transfers_status, ConnectionStatus::Connecting) {
-                            app.transfers_status = ConnectionStatus::Live;
-                        }
-                    }
-                    Some(F2Event { kind: EventOrError::Error(msg), .. }) => {
-                        app.transfers_status = ConnectionStatus::Degraded(msg);
-                        transfers_event_rx = None;
-                    }
-                    None => {
-                        app.transfers_status = ConnectionStatus::Degraded(
-                            "subscribe stream closed".to_string(),
-                        );
-                        transfers_event_rx = None;
-                    }
+                // m2f-5 R2: `None` (all merged senders closed) drops the
+                // receiver; a single daemon's Error keeps it alive so the
+                // other daemons' forwarders keep feeding F2.
+                if !apply_f2_event(&mut app, event) {
+                    transfers_event_rx = None;
                 }
             }
             // F2 setup task completion.
@@ -1447,32 +1427,12 @@ async fn handle_pane_action(
         },
         Screen::F2 => match action {
             UserAction::Refresh => {
-                if should_spawn_f2_setup(transfers_event_rx.is_some(), app.transfers_setup_pending)
-                {
-                    // No live stream and no setup in flight
-                    // — try to (re)open. Round-3 guard
-                    // closes the duplicate-setup race. m2f-5: re-fan to
-                    // all watched daemons (picks up daemons discovered
-                    // since the last setup).
-                    let watched = f2_watched_endpoints(app);
-                    if !watched.is_empty() {
-                        app.transfers_status = ConnectionStatus::Connecting;
-                        app.transfers_setup_gen += 1;
-                        app.transfers_setup_pending = true;
-                        spawn_f2_setup_task(watched, app.transfers_setup_gen, f2_setup_tx.clone());
-                    }
-                } else if transfers_event_rx.is_some() {
-                    if let Some(endpoint) = app.parsed_remote.as_ref() {
-                        refresh_via_get_state(
-                            endpoint,
-                            &mut app.transfers,
-                            &mut app.transfers_status,
-                        )
-                        .await;
-                    }
-                }
-                // else: setup is pending; refresh is a no-op
-                // until the in-flight task lands.
+                // m2f-5 R2: `r` re-fans the merged Subscribe setup to the
+                // CURRENT watched set — so it picks up daemons discovered
+                // since the last setup, even while a stream is live (a
+                // plain GetState refresh of parsed_remote would miss
+                // them). A no-op while a setup is already pending.
+                refan_f2_setup(app, transfers_event_rx, f2_setup_tx);
             }
             // d-21: cursor selection in the active table.
             // First press selects the newest row (index 0);
@@ -1964,14 +1924,36 @@ fn apply_lifecycle_outcome(
     }
 }
 
-/// Pure helper: decide whether the F2 refresh keystroke
-/// should spawn a fresh setup task. Returns `true` only
-/// when we lack a live Subscribe receiver AND no setup is
-/// already in flight. This is the round-3 fix for the F2
-/// overlap race: pressing `r` while the initial setup is
-/// still running must NOT spawn a duplicate.
-fn should_spawn_f2_setup(event_rx_present: bool, setup_pending: bool) -> bool {
-    !event_rx_present && !setup_pending
+/// m2f-5 R2: (re)start the merged F2 Subscribe setup against the
+/// CURRENT watched daemon set. The F2 `r` refresh and the initial
+/// open both go through here. Drops any live merged receiver (its
+/// forwarders then exit) and spawns a fresh fan-out, so a refresh
+/// picks up daemons discovered since the last setup. Returns whether
+/// a setup was spawned.
+///
+/// No-op (returns `false`) while a setup is already pending — the
+/// round-3 overlap-race guard: pressing `r` mid-setup must NOT spawn
+/// a duplicate. Also a no-op when there's nothing to watch.
+fn refan_f2_setup(
+    app: &mut AppState,
+    transfers_event_rx: &mut Option<mpsc::Receiver<F2Event>>,
+    f2_setup_tx: &mpsc::Sender<F2SetupReply>,
+) -> bool {
+    if app.transfers_setup_pending {
+        return false;
+    }
+    let watched = f2_watched_endpoints(app);
+    if watched.is_empty() {
+        return false;
+    }
+    // Drop the old merged stream — its per-daemon forwarders exit when
+    // the receiver is gone — then re-fan.
+    *transfers_event_rx = None;
+    app.transfers_status = ConnectionStatus::Connecting;
+    app.transfers_setup_gen += 1;
+    app.transfers_setup_pending = true;
+    spawn_f2_setup_task(watched, app.transfers_setup_gen, f2_setup_tx.clone());
+    true
 }
 
 /// Reply envelope from the F2 setup task. Carries a
@@ -5486,6 +5468,54 @@ fn f2_watched_endpoints(app: &AppState) -> Vec<RemoteEndpoint> {
     endpoints
 }
 
+/// m2f-5 R2: apply one F2 merged-stream signal. Returns `false` only
+/// when the merged receiver should be dropped — i.e. `None`, meaning
+/// every watched daemon's forwarder has closed (all senders gone). A
+/// single daemon's `Error` returns `true` (keep the receiver) so the
+/// other daemons' streams keep feeding F2; the whole-view status goes
+/// Degraded for now (per-daemon status is m2f-6). `None` arm reads
+/// `recv() == None`, the all-senders-closed condition.
+fn apply_f2_event(app: &mut AppState, event: Option<F2Event>) -> bool {
+    match event {
+        // m2f-4: the event carries its source daemon, so the row is
+        // tagged with the stream's daemon.
+        Some(F2Event {
+            kind: EventOrError::Connected,
+            ..
+        }) => {
+            if matches!(app.transfers_status, ConnectionStatus::Connecting) {
+                app.transfers_status = ConnectionStatus::Live;
+            }
+            true
+        }
+        Some(F2Event {
+            daemon,
+            kind: EventOrError::Event(daemon_event),
+        }) => {
+            app.transfers
+                .apply_event(&daemon, daemon_event, Instant::now());
+            if matches!(app.transfers_status, ConnectionStatus::Connecting) {
+                app.transfers_status = ConnectionStatus::Live;
+            }
+            true
+        }
+        Some(F2Event {
+            kind: EventOrError::Error(msg),
+            ..
+        }) => {
+            app.transfers_status = ConnectionStatus::Degraded(msg);
+            // Keep the merged receiver: only this one daemon's forwarder
+            // ended; the others are still sending.
+            true
+        }
+        None => {
+            app.transfers_status =
+                ConnectionStatus::Degraded("all subscribe streams closed".to_string());
+            false
+        }
+    }
+}
+
 fn drain_startup_events(
     rx: &mut mpsc::Receiver<F2Event>,
     state: &mut TransfersState,
@@ -5528,31 +5558,6 @@ fn drain_startup_events(
                 }
             },
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
-        }
-    }
-}
-
-/// Re-issue a `GetState` query and replace local state.
-/// Triggered by the 'r' keystroke; surfaces failures as
-/// Degraded status instead of aborting the loop.
-async fn refresh_via_get_state(
-    endpoint: &RemoteEndpoint,
-    state: &mut TransfersState,
-    status: &mut ConnectionStatus,
-) {
-    match jobs::query(endpoint, 0).await {
-        Ok(snapshot) => {
-            // m2f-3: use the host:port identity (matches f2_source_label /
-            // the live stream + reset label) — `endpoint.host` alone would
-            // tag refresh-hydrated rows differently from stream rows for a
-            // non-default-port daemon, so they'd never reconcile. And merge
-            // (not replace) so a refresh of one daemon leaves others intact
-            // once F2 fans out (m2f-4).
-            state.merge_snapshot(&endpoint.host_port_display(), snapshot, Instant::now());
-            *status = ConnectionStatus::Live;
-        }
-        Err(err) => {
-            *status = ConnectionStatus::Degraded(format!("refresh failed: {err}"));
         }
     }
 }
@@ -9656,23 +9661,94 @@ mod tests {
         ));
     }
 
-    /// a1-6b round 3: F2 refresh keystroke must not
-    /// spawn a duplicate setup task. The contract is "only
-    /// spawn when there's no live stream AND no setup
-    /// already in flight."
+    /// m2f-5 R2: F2 `r` re-fans even while a stream is LIVE — so it
+    /// picks up daemons discovered since the last setup. With a live
+    /// receiver + a discovered daemon, refresh schedules a new merged
+    /// setup (drops the old receiver, bumps the generation, sets
+    /// pending) rather than only querying parsed_remote. The a1-6b
+    /// round-3 overlap guard still holds: no respawn while pending.
+    #[tokio::test]
+    async fn refan_f2_setup_respawns_on_live_refresh_and_guards_pending() {
+        let (tx, _rx) = mpsc::channel::<F2SetupReply>(1);
+        let mut app = make_test_app_state(Screen::F2);
+        app.parsed_remote = Some(RemoteEndpoint::parse("nas:/home/").expect("launch"));
+        app.daemons.replace_from_discovery(
+            &[blit_core::mdns::MdnsDiscoveredService {
+                fullname: "skippy._blit._tcp.local.".to_string(),
+                instance_name: "skippy".to_string(),
+                hostname: "skippy.local.".to_string(),
+                port: 9031,
+                addresses: vec![std::net::Ipv4Addr::new(192, 168, 1, 50)],
+                properties: std::collections::HashMap::new(),
+            }],
+            Instant::now(),
+        );
+
+        // A live merged receiver is present.
+        let (_etx, erx) = mpsc::channel::<F2Event>(1);
+        let mut event_rx = Some(erx);
+        let gen_before = app.transfers_setup_gen;
+
+        assert!(
+            refan_f2_setup(&mut app, &mut event_rx, &tx),
+            "live stream + discovered daemon → re-fan"
+        );
+        assert!(event_rx.is_none(), "old merged receiver dropped");
+        assert!(app.transfers_setup_pending, "a new setup is pending");
+        assert_eq!(app.transfers_setup_gen, gen_before + 1, "generation bumped");
+
+        // Overlap guard: a second refresh while pending is a no-op.
+        assert!(
+            !refan_f2_setup(&mut app, &mut event_rx, &tx),
+            "no duplicate setup while one is pending"
+        );
+    }
+
+    /// m2f-5 R2: in the fan-out, one daemon's stream Error must NOT
+    /// drop the merged receiver — the other daemons keep feeding F2.
+    /// Only `None` (all senders closed) tears it down.
     #[test]
-    fn should_spawn_f2_setup_only_when_no_stream_and_no_pending() {
-        // Initial state — no stream, no pending — spawn.
-        assert!(should_spawn_f2_setup(false, false));
-        // Setup already in flight — don't spawn duplicate.
-        assert!(!should_spawn_f2_setup(false, true));
-        // Live stream — refresh path goes through
-        // refresh_via_get_state, not setup spawn.
-        assert!(!should_spawn_f2_setup(true, false));
-        // Both flags set: still don't spawn (defensive —
-        // shouldn't happen in practice, but a stale pending
-        // flag shouldn't override a live stream).
-        assert!(!should_spawn_f2_setup(true, true));
+    fn apply_f2_event_error_keeps_receiver_none_drops_it() {
+        let mut app = make_test_app_state(Screen::F2);
+
+        // One daemon's forwarder ends with an Error → keep the receiver.
+        assert!(apply_f2_event(
+            &mut app,
+            Some(F2Event {
+                daemon: "nas".to_string(),
+                kind: EventOrError::Error("nas stream: boom".to_string()),
+            })
+        ));
+
+        // A healthy event from ANOTHER daemon is still applied.
+        assert!(apply_f2_event(
+            &mut app,
+            Some(F2Event {
+                daemon: "skippy:9001".to_string(),
+                kind: EventOrError::Event(DaemonEvent {
+                    payload: Some(
+                        blit_core::generated::daemon_event::Payload::TransferStarted(
+                            blit_core::generated::TransferStarted {
+                                transfer_id: "t1".to_string(),
+                                kind: 0,
+                                peer: String::new(),
+                                module: String::new(),
+                                path: String::new(),
+                                start_unix_ms: 1,
+                            },
+                        ),
+                    ),
+                }),
+            })
+        ));
+        assert_eq!(
+            app.transfers.active_rows()[0].source_daemon,
+            "skippy:9001",
+            "other daemon's event applied despite the prior error"
+        );
+
+        // All senders closed (None) → drop the merged receiver.
+        assert!(!apply_f2_event(&mut app, None));
     }
 
     /// a1-4 round-2 regression: refresh while F3 has no
