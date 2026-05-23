@@ -33,11 +33,16 @@ mod f3du;
 mod f3pull;
 mod help;
 mod profile;
+mod progress_accum;
 mod screens;
 mod state;
 mod transfer;
 mod verify;
 
+use crate::progress_accum::{
+    accumulate_delegated_progress, accumulate_pull_progress, accumulate_push_progress,
+    du_total_from_entries, pull_throughput,
+};
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
 use blit_app::admin::{jobs, list_modules, ls};
@@ -3474,13 +3479,6 @@ async fn run_f3_du_total(remote: &RemoteEndpoint) -> eyre::Result<(u64, u64)> {
 /// daemon emits the root plus immediate children; the root
 /// subtree contains every child, so the max-byte entry is always
 /// the root total we want.
-fn du_total_from_entries(acc: Option<(u64, u64)>, bytes: u64, files: u64) -> Option<(u64, u64)> {
-    match acc {
-        Some((best_bytes, _)) if best_bytes >= bytes => acc,
-        _ => Some((bytes, files)),
-    }
-}
-
 /// d-35: spawn a remote→local PullSync for an F3
 /// transfer-from-cursor. Mirrors the F4 local-transfer
 /// spawn shape: run the operation on a tokio task, flatten
@@ -3504,40 +3502,6 @@ struct F3PullProgress {
     bytes_per_sec: u64,
 }
 
-/// d-37 round 2: fold one pull `ProgressEvent` into the
-/// running `(files, bytes)` totals using pull-receive
-/// semantics. Bytes come from `Payload` only; file count
-/// from `FileComplete` only.
-///
-/// The TCP data-plane path emits BOTH
-/// `Payload { files: 0, bytes: N }` and
-/// `FileComplete { bytes: N }` for the same completed
-/// file (`pipeline.rs` `execute_receive_pipeline`), so
-/// adding bytes from both would double-count and the
-/// footer would snap backward when the authoritative
-/// reply total lands. The direct-gRPC path emits
-/// `FileComplete { bytes: 0 }` (`pull.rs`
-/// `finalize_active_file`) with bytes carried by
-/// `Payload` — so counting bytes from `Payload` alone is
-/// correct on both paths, and counting one file per
-/// `FileComplete` is correct on both paths.
-fn accumulate_pull_progress(
-    files: &mut usize,
-    bytes: &mut u64,
-    event: &blit_core::remote::transfer::ProgressEvent,
-) {
-    use blit_core::remote::transfer::ProgressEvent;
-    match event {
-        ProgressEvent::Payload { bytes: b, .. } => {
-            *bytes = bytes.saturating_add(*b);
-        }
-        ProgressEvent::FileComplete { .. } => {
-            *files = files.saturating_add(1);
-        }
-        ProgressEvent::ManifestBatch { .. } => {}
-    }
-}
-
 /// d-63: live progress snapshot from a running F1 push, forwarded
 /// to the event loop. `bytes_per_sec` is the average throughput
 /// (0 until ~1s elapsed), reusing [`pull_throughput`].
@@ -3546,76 +3510,6 @@ struct F1PushProgress {
     files: u64,
     bytes: u64,
     bytes_per_sec: u64,
-}
-
-/// d-63: fold one push `ProgressEvent` into the running
-/// `(files, bytes)` totals using push-SEND semantics.
-///
-/// Unlike the pull (receive) path, the push send path reports
-/// bytes on `FileComplete` (`data_plane.rs` `send_payloads`:
-/// `report_file_complete(path, header.size)`) and emits NO
-/// `Payload` events — so bytes AND files both come from
-/// `FileComplete` here (whereas `accumulate_pull_progress` takes
-/// bytes from `Payload` to avoid the receive path's
-/// `Payload`+`FileComplete` double-count). Counting bytes from
-/// `Payload` here would report 0; counting `FileComplete` bytes is
-/// correct and never double-counts because push emits no
-/// `Payload`.
-fn accumulate_push_progress(
-    files: &mut u64,
-    bytes: &mut u64,
-    event: &blit_core::remote::transfer::ProgressEvent,
-) {
-    use blit_core::remote::transfer::ProgressEvent;
-    match event {
-        ProgressEvent::FileComplete { bytes: b, .. } => {
-            *files = files.saturating_add(1);
-            *bytes = bytes.saturating_add(*b);
-        }
-        // Push send emits no Payload events; ignore defensively so
-        // a future emitter change can't double-count.
-        ProgressEvent::Payload { .. } | ProgressEvent::ManifestBatch { .. } => {}
-    }
-}
-
-/// d-69: fold one delegated-pull `ProgressEvent` into the running
-/// `(files, bytes)` totals. The delegated path
-/// (`remote::report_bytes_progress`) reports cumulative deltas via
-/// `report_payload(file_delta, byte_delta)` — so a `Payload` carries
-/// BOTH the file and byte deltas (unlike the receive path, where
-/// `Payload.files` is unused and files come from `FileComplete`, and
-/// unlike push, where bytes ride `FileComplete`). It emits no
-/// `FileComplete`, so take both fields from `Payload` here.
-fn accumulate_delegated_progress(
-    files: &mut u64,
-    bytes: &mut u64,
-    event: &blit_core::remote::transfer::ProgressEvent,
-) {
-    use blit_core::remote::transfer::ProgressEvent;
-    match event {
-        ProgressEvent::Payload { files: f, bytes: b } => {
-            *files = files.saturating_add(*f as u64);
-            *bytes = bytes.saturating_add(*b);
-        }
-        ProgressEvent::FileComplete { .. } | ProgressEvent::ManifestBatch { .. } => {}
-    }
-}
-
-/// d-39: average pull throughput in bytes/sec.
-///
-/// Suppressed (returns 0) until at least one second has
-/// elapsed — `bytes / tiny_elapsed` produces meaningless
-/// multi-GiB/s spikes in the first moments of a transfer,
-/// and the footer reads better with no rate than a wrong
-/// one. After the warm-up it's a simple cumulative average
-/// (`bytes / elapsed`), matching the "is it moving" intent
-/// of the footer rather than an instantaneous rate.
-fn pull_throughput(bytes: u64, elapsed_secs: f64) -> u64 {
-    if elapsed_secs >= 1.0 {
-        (bytes as f64 / elapsed_secs) as u64
-    } else {
-        0
-    }
 }
 
 /// d-55 R2 / d-57: build the `PullSyncOptions` for an F3 pull.
