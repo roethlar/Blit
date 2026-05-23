@@ -34,7 +34,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | m2f-9-f2-discovery-refan | Feature | Auto re-fan F2 when the discovered-daemon set changes (multi-daemon F2 step 9, round 3) | `[x]` | `phase5/a1` | `9204a4d` |
 | e-8-config-default-remote | Feature | Fall back to `[daemon] default_remote` config when no --remote flag (Milestone E) | `[x]` | `phase5/a1` | `bf56a66` |
 | m2f-10-f2-per-daemon-health | Feature | Partial-degrade F2 banner when one daemon's stream drops (multi-daemon F2 step 10) | `[x]` | `phase5/a1` | `365be9a` |
-| e-9-theme-f2-row-highlight | Feature | F2 active-row highlight honors `[theme] accent_color` (Milestone E) | `[~]` | `phase5/a1` | `d1fa091` |
+| e-9-theme-f2-row-highlight | Feature | F2 active-row highlight honors `[theme] accent_color` (Milestone E) | `[ ]` | `phase5/a1` | `d1fa091` |
 
 ## Open findings
 
