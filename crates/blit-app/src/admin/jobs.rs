@@ -6,13 +6,12 @@
 //! wire `DaemonState` plus typed helpers; the CLI/TUI layer
 //! does its own formatting.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::{
     CancelJobRequest, ClearRecentRequest, DaemonEvent, DaemonState, GetStateRequest,
     SubscribeRequest,
 };
 use blit_core::remote::endpoint::RemoteEndpoint;
-use eyre::{Context, Result};
+use eyre::Result;
 use tonic::Code;
 
 /// Issue the `GetState` RPC against `remote`. `recent_limit = 0`
@@ -22,9 +21,7 @@ use tonic::Code;
 /// holds, no error.
 pub async fn query(remote: &RemoteEndpoint, recent_limit: u32) -> Result<DaemonState> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let response = client
         .get_state(GetStateRequest { recent_limit })
@@ -61,9 +58,7 @@ pub enum CancelJobOutcome {
 /// render.
 pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<CancelJobOutcome> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let result = client
         .cancel_job(CancelJobRequest {
@@ -111,9 +106,7 @@ pub async fn cancel(remote: &RemoteEndpoint, transfer_id: &str) -> Result<Cancel
 /// well-defined no-op that returns `0`.
 pub async fn clear_recent(remote: &RemoteEndpoint) -> Result<u32> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let response = client
         .clear_recent(ClearRecentRequest {})
@@ -151,9 +144,7 @@ pub async fn subscribe(
     replay_recent: bool,
 ) -> Result<tonic::Streaming<DaemonEvent>> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
     let response = client
         .subscribe(SubscribeRequest {
             event_mask: 0,

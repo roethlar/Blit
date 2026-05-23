@@ -6,10 +6,9 @@
 //! the smart-dispatch `blit list <bare-host>` path that also lands
 //! here.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::ListModulesRequest;
 use blit_core::remote::endpoint::RemoteEndpoint;
-use eyre::{Context, Result};
+use eyre::Result;
 use serde::Serialize;
 
 /// One row of the module list. Direct shape of the wire response
@@ -25,9 +24,7 @@ pub struct Module {
 /// modules. Caller handles formatting.
 pub async fn query(remote: &RemoteEndpoint) -> Result<Vec<Module>> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let response = client
         .list_modules(ListModulesRequest {})

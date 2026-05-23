@@ -4,10 +4,9 @@
 //! keeps the human / JSON formatting; this module just speaks gRPC
 //! and returns the structured response.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::FilesystemStatsRequest;
 use blit_core::remote::RemoteEndpoint;
-use eyre::{Context, Result};
+use eyre::Result;
 use serde::Serialize;
 
 /// Filesystem usage for a remote module. Deserialized as-is by the
@@ -26,9 +25,7 @@ pub struct FilesystemStats {
 /// Caller handles formatting; presenter-agnostic.
 pub async fn query(remote: &RemoteEndpoint, module: String) -> Result<FilesystemStats> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let response = client
         .filesystem_stats(FilesystemStatsRequest { module })

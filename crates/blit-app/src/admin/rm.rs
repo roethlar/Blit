@@ -5,10 +5,9 @@
 //! (presentation). The CLI's `move` verb also consumes the
 //! `delete_remote_path` helper for its source-side removal step.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::PurgeRequest;
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use eyre::{bail, Context, Result};
+use eyre::{bail, Result};
 use std::path::PathBuf;
 
 /// Issue a `Purge` RPC against `remote` for the given `module` and
@@ -20,9 +19,7 @@ pub async fn purge(
     paths_to_delete: Vec<String>,
 ) -> Result<u64> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let response = client
         .purge(PurgeRequest {

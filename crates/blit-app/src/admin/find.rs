@@ -5,10 +5,9 @@
 //! pattern as `du::stream` so a TUI can forward entries to its
 //! event loop while the CLI prints inline.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::FindRequest;
 use blit_core::remote::RemoteEndpoint;
-use eyre::{Context, Result};
+use eyre::Result;
 use serde::Serialize;
 
 /// Input parameters for a `find` call. Mirrors the wire shape but
@@ -40,9 +39,7 @@ where
     F: FnMut(FindEntry) -> Result<()>,
 {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let mut stream = client
         .find(FindRequest {

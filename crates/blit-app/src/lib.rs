@@ -15,6 +15,7 @@
 
 pub mod admin;
 pub mod check;
+pub mod client;
 pub mod diagnostics;
 pub mod display;
 pub mod endpoints;

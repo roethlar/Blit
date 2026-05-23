@@ -5,10 +5,9 @@
 //! channel forwarder while the CLI prints inline. Caller handles
 //! all formatting.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::DiskUsageRequest;
 use blit_core::remote::RemoteEndpoint;
-use eyre::{Context, Result};
+use eyre::Result;
 use serde::Serialize;
 
 /// One row of the streamed disk-usage report. JSON field names
@@ -37,9 +36,7 @@ where
     F: FnMut(DiskUsageEntry) -> Result<()>,
 {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
 
     let mut stream = client
         .disk_usage(DiskUsageRequest {

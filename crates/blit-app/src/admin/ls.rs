@@ -6,7 +6,6 @@
 //! it's a verb-routing decision; the same decision is made
 //! UI-side by the TUI's F1/F3 split.
 
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::ListRequest;
 use blit_core::remote::endpoint::RemoteEndpoint;
 use eyre::{Context, Result};
@@ -68,9 +67,7 @@ pub async fn list_remote(
     path: String,
 ) -> Result<Vec<DirEntry>> {
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = crate::client::connect_with_timeout(uri.clone()).await?;
     let response = client
         .list(ListRequest { module, path })
         .await
