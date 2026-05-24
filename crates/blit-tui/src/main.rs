@@ -31,6 +31,7 @@ mod diagnostics;
 mod display_f1;
 mod display_f2;
 mod display_f3;
+mod exec_plan;
 mod f1push;
 mod f1trigger;
 mod f3del;
@@ -50,6 +51,7 @@ use crate::del_request::{build_delete_request, del_wire_path, is_deletable_remot
 use crate::display_f1::{f1_push_status, f1_trigger_prompt};
 use crate::display_f2::{cancel_status_remaining_ttl, cancel_status_to_display};
 use crate::display_f3::{f3_del_to_display, f3_du_to_display, f3_pull_to_display};
+use crate::exec_plan::{build_delegated_execution, build_f1_push_execution, f3_pull_options};
 use crate::progress_accum::{
     accumulate_delegated_progress, accumulate_pull_progress, accumulate_push_progress,
     du_total_from_entries, pull_throughput,
@@ -3064,33 +3066,6 @@ struct F1PushProgress {
     bytes_per_sec: u64,
 }
 
-/// d-55 R2 / d-57: build the `PullSyncOptions` for an F3 pull.
-///
-/// `mirror_mode` MUST live here, on the options — the wire
-/// `TransferOperationSpec` is built from `options`
-/// (`RemotePullClient::build_spec_from_options`), so it's
-/// `options.mirror_mode` that tells the daemon to compute the
-/// delete list. The execution-level `PullSyncExecution.mirror_mode`
-/// is only the receive-side `track_paths` flag; setting it alone
-/// (d-55 round 1) left the daemon emitting `MirrorMode::Off`, so
-/// `apply_pull_mirror_purge` had no paths to delete and the
-/// "mirror" silently behaved like a plain pull. The CLI sets the
-/// options field (`blit-cli/src/transfers/remote.rs`); we match it.
-///
-/// d-57: a `Move` sets `require_complete_scan` so the daemon
-/// refuses a partial source scan — mirroring the CLI's move guard
-/// (`run_remote_pull_transfer_deferred(.., true)`). Deleting the
-/// remote source after an incomplete copy would lose the files
-/// that were skipped.
-fn f3_pull_options(kind: f3pull::PullKind) -> blit_core::remote::pull::PullSyncOptions {
-    use f3pull::PullKind;
-    blit_core::remote::pull::PullSyncOptions {
-        mirror_mode: kind == PullKind::Mirror,
-        require_complete_scan: kind == PullKind::Move,
-        ..blit_core::remote::pull::PullSyncOptions::default()
-    }
-}
-
 fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
@@ -3209,47 +3184,6 @@ fn spawn_f3_pull(
     });
 }
 
-/// d-61: spawn a local→remote COPY push for an F1 trigger.
-/// d-65 R2: build the `PushExecution` for an F1 trigger push.
-/// Extracted from `spawn_f1_push` so the mirror-safety options are
-/// unit-pinnable (the reviewer flagged the inline construction as
-/// untested). Mirror sets `mirror_mode` + `MirrorMode::All` — the
-/// daemon deletes destination entries absent from the source — AND
-/// `require_complete_scan`, so a partial local enumeration can never
-/// drive that purge (an under-scanned source would otherwise make
-/// valid remote files look extraneous). This matches the CLI's
-/// `require_complete_scan: mirror_mode` in
-/// `crates/blit-cli/src/transfers/remote.rs`. Copy/move push never
-/// delete at the dest, so they leave both off — an incomplete scan
-/// there only under-copies, which is safe and retryable.
-fn build_f1_push_execution(
-    local_source: std::path::PathBuf,
-    remote: RemoteEndpoint,
-    kind: f3pull::PullKind,
-) -> blit_app::transfers::remote::PushExecution {
-    use blit_app::endpoints::Endpoint;
-    use blit_app::transfers::remote::PushExecution;
-    use blit_core::fs_enum::FileFilter;
-    use blit_core::generated::MirrorMode;
-    let mirror = kind == f3pull::PullKind::Mirror;
-    let remote_label = remote.display();
-    PushExecution {
-        source: Endpoint::Local(local_source),
-        remote,
-        filter: FileFilter::default(),
-        mirror_mode: mirror,
-        mirror_kind: if mirror {
-            MirrorMode::All
-        } else {
-            MirrorMode::Off
-        },
-        force_grpc: false,
-        trace_data_plane: false,
-        require_complete_scan: mirror,
-        remote_label,
-    }
-}
-
 /// Runs `run_remote_push` on a task and flattens the outcome into
 /// an [`F1PushReply`] (generation-guarded by `request_id`). d-63:
 /// a progress forwarder accumulates push-send `ProgressEvent`s
@@ -3337,38 +3271,6 @@ fn remove_local_source(path: &std::path::Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(path)
     } else {
         std::fs::remove_file(path)
-    }
-}
-
-/// d-70: build the `DelegatedPullExecution` for an F1 remote→remote
-/// transfer. Extracted from `spawn_f1_delegated_pull` so the
-/// mirror option is unit-pinnable (cf. the d-65 push builder). The
-/// options come from `f3_pull_options(kind)`: copy → no flags;
-/// mirror → `mirror_mode` on, `require_complete_scan` OFF. The OFF is
-/// deliberate and matches the CLI's delegated path
-/// (`crates/blit-cli/src/transfers/mod.rs` passes
-/// `require_complete_scan = false` for delegated copy/mirror) — in a
-/// delegated transfer the *daemons* enumerate, not this client, so
-/// the d-65 client-side partial-scan guard doesn't apply. (Move,
-/// which the CLI scans-completely for, is rejected upstream.) Always
-/// attached (`detach: false`); detached/F2-visible delegation is a
-/// follow-up.
-fn build_delegated_execution(
-    src: RemoteEndpoint,
-    dst: RemoteEndpoint,
-    kind: f3pull::PullKind,
-) -> blit_app::transfers::remote::DelegatedPullExecution {
-    let dst_label = dst.display();
-    blit_app::transfers::remote::DelegatedPullExecution {
-        src,
-        dst,
-        options: f3_pull_options(kind),
-        trace_data_plane: false,
-        // The TUI doesn't surface a `--relay-via-cli` toggle yet, so
-        // don't suggest it in transport-error hints.
-        relay_fallback_suggestable: false,
-        dst_label,
-        detach: false,
     }
 }
 
