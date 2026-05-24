@@ -42,6 +42,7 @@ mod profile;
 mod progress_accum;
 mod screens;
 mod state;
+mod theme_color;
 mod tick_budget;
 mod transfer;
 mod verify;
@@ -56,6 +57,7 @@ use crate::progress_accum::{
     accumulate_delegated_progress, accumulate_pull_progress, accumulate_push_progress,
     du_total_from_entries, pull_throughput,
 };
+use crate::theme_color::{base_theme_style, raw_color_to_ratatui};
 use crate::tick_budget::{compute_tick_budget, min_opt};
 use blit_app::admin::list_modules::Module;
 use blit_app::admin::ls::DirEntry;
@@ -3758,54 +3760,6 @@ fn spawn_clear_recent(endpoint: blit_core::remote::RemoteEndpoint) {
     tokio::spawn(async move {
         let _ = blit_app::admin::jobs::clear_recent(&endpoint).await;
     });
-}
-
-/// dark-1: build the base frame style from the optional `[theme]`
-/// background / foreground colors. Returns `None` when BOTH are unset —
-/// so the caller skips painting a base layer and the terminal's own
-/// colors show through (the historical default). Pure, so the
-/// bg/fg → style mapping is unit-testable.
-fn base_theme_style(
-    bg: Option<ratatui::style::Color>,
-    fg: Option<ratatui::style::Color>,
-) -> Option<ratatui::style::Style> {
-    if bg.is_none() && fg.is_none() {
-        return None;
-    }
-    let mut style = ratatui::style::Style::default();
-    if let Some(bg) = bg {
-        style = style.bg(bg);
-    }
-    if let Some(fg) = fg {
-        style = style.fg(fg);
-    }
-    Some(style)
-}
-
-/// e-7: bridge from the config's `RawColor` (which lives
-/// in `config` to avoid leaking ratatui types into the
-/// schema layer) to the ratatui color used by the
-/// renderer.
-fn raw_color_to_ratatui(c: config::RawColor) -> ratatui::style::Color {
-    use ratatui::style::Color;
-    match c {
-        config::RawColor::Black => Color::Black,
-        config::RawColor::Red => Color::Red,
-        config::RawColor::Green => Color::Green,
-        config::RawColor::Yellow => Color::Yellow,
-        config::RawColor::Blue => Color::Blue,
-        config::RawColor::Magenta => Color::Magenta,
-        config::RawColor::Cyan => Color::Cyan,
-        config::RawColor::Gray => Color::Gray,
-        config::RawColor::DarkGray => Color::DarkGray,
-        config::RawColor::LightRed => Color::LightRed,
-        config::RawColor::LightGreen => Color::LightGreen,
-        config::RawColor::LightYellow => Color::LightYellow,
-        config::RawColor::LightBlue => Color::LightBlue,
-        config::RawColor::LightMagenta => Color::LightMagenta,
-        config::RawColor::LightCyan => Color::LightCyan,
-        config::RawColor::White => Color::White,
-    }
 }
 
 /// `true` when the event loop should arm the 500ms
