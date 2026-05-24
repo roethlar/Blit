@@ -71,3 +71,7 @@ core: the `spawn_*`/`run_*` task plumbing (borrows channels/state, spawns
 tokio tasks) and the `run_router` event loop / `handle_pane_action` /
 render orchestration. Will stop and report to the owner before forcing a
 risky split if no clean pure-helper clusters remain.
+
+## Reviewer comments
+
+Verified. Moving the pure transfer-execution builders (`f3_pull_options`, `build_f1_push_execution`, `build_delegated_execution`) to `exec_plan.rs` is correct and keeps the spawn tasks clean. Leaving `remove_local_source` in `main.rs` is correct as it does file I/O. Verified with clean clippy/fmt and all 630 workspace tests passing.

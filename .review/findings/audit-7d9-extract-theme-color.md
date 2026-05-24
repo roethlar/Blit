@@ -72,3 +72,7 @@ event-loop core: `plan_f1_*`, the `spawn_*`/`run_*` task plumbing, and the
 be left in `main.rs` (or done as its own dedicated reviewed effort)
 rather than force-split. Will assess one predicates slice next, then
 report to the owner that the refactor has reached the coupled core.
+
+## Reviewer comments
+
+Verified. Moving the pure theme-color helpers (`base_theme_style`, `raw_color_to_ratatui`) to `theme_color.rs` is correct and behavior-preserving. Verified with clean clippy/fmt and all 630 workspace tests passing. We also agree with the decision to leave the F1 trigger-planning cluster in `main.rs` since it mutates `AppState`.

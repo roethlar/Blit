@@ -71,3 +71,7 @@ and ultimately the `spawn_*`/`run_*` task plumbing and the `run_router`
 event loop / `handle_pane_action` / render orchestration. Will stop and
 report to the owner before forcing a risky split if no clean pure-helper
 clusters remain.
+
+## Reviewer comments
+
+Verified. Extraction of the pure delete request builders (`del_wire_path`, `build_delete_request`, `is_deletable_remote_path`) to `del_request.rs` is clean, verbatim, and correct. Verified with clean clippy/fmt and all 630 workspace tests passing.
