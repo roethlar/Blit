@@ -69,3 +69,7 @@ background-task plumbing (`spawn_*`/`run_*` + Reply structs,
 the `run_router` event loop / `handle_pane_action` / render orchestration
 — stopping before the genuinely AppState-coupled core if no clean
 pure-helper clusters remain.
+
+## Reviewer comments
+
+Verified. Moving the Ctrl+R config hot-reload helpers (`reload_tui_config`, `classify_reload`) to the new `config_reload` module is behavior-preserving and correct. Storing `classify_reload` as test-local in `mod tests` avoids binary compile warnings and is an elegant pattern. Verified with clean clippy/fmt and all 630 workspace tests passing.

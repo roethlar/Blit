@@ -63,3 +63,7 @@ background-task plumbing (`spawn_*`/`run_*` + Reply structs,
 (`plan_f1_trigger`/`plan_f1_delegated`/`TriggerOutcome`); the tick-budget
 pure helpers (`compute_tick_budget`/`min_opt`); and ultimately the
 `run_router` event loop / `handle_pane_action` / render orchestration.
+
+## Reviewer comments
+
+Verified. Moving the F2 cancel state→display mapping helpers (`cancel_status_to_display`, `cancel_status_remaining_ttl`) to a separate `display_f2` module is behavior-preserving and clean. `F2CancelStatus` staying in `main.rs` is appropriate since it is mutated there, and it is correctly referenced via the crate root. Verified with clean clippy/fmt and all 630 workspace tests passing.

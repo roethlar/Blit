@@ -59,3 +59,7 @@ background-task plumbing (`spawn_*`/`run_*` + Reply structs,
 the `run_router` event loop / `handle_pane_action` / render orchestration.
 Will stop and report to the owner before forcing a risky split if no clean
 pure-helper clusters remain.
+
+## Reviewer comments
+
+Verified. Moving the pure sleep-budget / tick-budget calculations (`compute_tick_budget`, `min_opt`) to the new `tick_budget` module is behavior-preserving and correct. Verified with clean clippy/fmt and all 630 workspace tests passing.
