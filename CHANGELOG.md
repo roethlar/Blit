@@ -2,7 +2,7 @@
 
 All notable changes to Blit are documented in this file.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-05-31
 
 ### Transfer Engine
 - Local copy, mirror, and move operations with async orchestrator
