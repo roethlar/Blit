@@ -50,6 +50,19 @@ impl Blit for SpyServer {
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
+    type SubscribeStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<Item = Result<blit_core::generated::DaemonEvent, Status>>
+                + Send,
+        >,
+    >;
+
+    async fn subscribe(
+        &self,
+        _: Request<blit_core::generated::SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        unimplemented!("test only exercises pull_sync")
+    }
 
     async fn push(
         &self,
@@ -142,6 +155,27 @@ impl Blit for SpyServer {
         &self,
         _: Request<DelegatedPullRequest>,
     ) -> Result<Response<Self::DelegatedPullStream>, Status> {
+        unimplemented!()
+    }
+
+    async fn get_state(
+        &self,
+        _: Request<blit_core::generated::GetStateRequest>,
+    ) -> Result<Response<blit_core::generated::DaemonState>, Status> {
+        unimplemented!()
+    }
+
+    async fn cancel_job(
+        &self,
+        _: Request<blit_core::generated::CancelJobRequest>,
+    ) -> Result<Response<blit_core::generated::CancelJobResponse>, Status> {
+        unimplemented!()
+    }
+
+    async fn clear_recent(
+        &self,
+        _: Request<blit_core::generated::ClearRecentRequest>,
+    ) -> Result<Response<blit_core::generated::ClearRecentResponse>, Status> {
         unimplemented!()
     }
 }
@@ -245,6 +279,7 @@ async fn pull_sync_with_spec_forwards_spec_unchanged_on_wire() {
             Vec::<FileHeader>::new(),
             spec_in.clone(),
             false,
+            None,
             None,
         )
         .await;
@@ -371,6 +406,7 @@ async fn pull_sync_with_spec_classifies_initial_rpc_rejection_as_negotiation() {
             Vec::<FileHeader>::new(),
             hand_built_spec(),
             false,
+            None,
             None,
         )
         .await

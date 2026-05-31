@@ -1,0 +1,31 @@
+[package]
+name = "blit-app"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+# Library only — Phase 5 A.0 extraction. Houses the orchestration glue
+# that `blit-cli` (and, in A.1+, `blit-tui`) calls into. No clap, no
+# indicatif, no stdout formatting — presentation lives in the
+# consuming crates.
+#
+# See docs/plan/TUI_DESIGN.md §7 for the full scope.
+
+[dependencies]
+blit-core = { path = "../blit-core" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.14"
+eyre = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.5"
+rayon = "1.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sysinfo = { version = "0.38", default-features = false, features = ["disk"] }
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
+
+[lints]
+workspace = true

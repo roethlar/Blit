@@ -1,12 +1,14 @@
 use crate::cli::RmArgs;
-use crate::util::{parse_endpoint_or_local, Endpoint};
-use blit_core::generated::blit_client::BlitClient;
-use blit_core::generated::PurgeRequest;
-use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use eyre::{bail, Context, Result};
+use blit_app::admin::rm;
+use blit_app::endpoints::{parse_endpoint_or_local, Endpoint};
+use eyre::{bail, Result};
 use serde::Serialize;
 use std::io::{self, Write};
 use std::path::Path;
+
+// Re-export the helper used by `crate::transfers::mod::run_move`
+// so existing call sites stay working without an import update.
+pub use blit_app::admin::rm::delete_remote_path;
 
 pub async fn run_rm(args: RmArgs) -> Result<()> {
     let remote = match parse_endpoint_or_local(&args.target) {
@@ -19,7 +21,7 @@ pub async fn run_rm(args: RmArgs) -> Result<()> {
         Endpoint::Remote(remote) => remote,
     };
 
-    let (module, rel_path) = extract_module_and_path(&remote)?;
+    let (module, rel_path) = rm::extract_module_and_path(&remote)?;
 
     if rel_path.as_os_str().is_empty() || rel_path == Path::new(".") {
         bail!(
@@ -55,19 +57,7 @@ pub async fn run_rm(args: RmArgs) -> Result<()> {
         }
     }
 
-    let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
-
-    let response = client
-        .purge(PurgeRequest {
-            module: module.clone(),
-            paths_to_delete: vec![rel_string.clone()],
-        })
-        .await
-        .map_err(|status| eyre::eyre!(status.message().to_string()))?
-        .into_inner();
+    let entries_deleted = rm::purge(&remote, module.clone(), vec![rel_string.clone()]).await?;
 
     if args.json {
         #[derive(Serialize)]
@@ -81,11 +71,11 @@ pub async fn run_rm(args: RmArgs) -> Result<()> {
             path: rel_string,
             host: remote.host.clone(),
             port: remote.port,
-            entries_deleted: response.files_deleted,
+            entries_deleted,
         };
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        match response.files_deleted {
+        match entries_deleted {
             0 => println!(
                 "No entries removed for {} on {}; path may already be absent.",
                 module_display, endpoint_display
@@ -99,34 +89,4 @@ pub async fn run_rm(args: RmArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Delete a remote path via the Purge RPC. Used by `blit rm` and `blit move`.
-pub async fn delete_remote_path(remote: &RemoteEndpoint, rel_path: &str) -> Result<u64> {
-    let (module, _) = extract_module_and_path(remote)?;
-    let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
-
-    let response = client
-        .purge(PurgeRequest {
-            module,
-            paths_to_delete: vec![rel_path.to_string()],
-        })
-        .await
-        .map_err(|status| eyre::eyre!(status.message().to_string()))?
-        .into_inner();
-
-    Ok(response.files_deleted)
-}
-
-fn extract_module_and_path(remote: &RemoteEndpoint) -> Result<(String, std::path::PathBuf)> {
-    match &remote.path {
-        RemotePath::Module { module, rel_path } => Ok((module.clone(), rel_path.clone())),
-        RemotePath::Root { rel_path } => Ok((String::new(), rel_path.clone())),
-        RemotePath::Discovery => {
-            bail!("remote removal requires module syntax (e.g., server:/module/path)")
-        }
-    }
 }

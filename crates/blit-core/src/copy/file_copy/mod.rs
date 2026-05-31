@@ -222,3 +222,74 @@ pub fn copy_file(
         }
     }
 }
+
+#[cfg(test)]
+mod fallback_tests {
+    //! audit-6 item 7: copy_file's fast-path → fallback chain. A truly
+    //! exhaustive "force every primitive down to the buffered streaming
+    //! tail" test would need a production injection seam (the chain is
+    //! inlined and cfg-gated per OS); see the note on the macOS test for
+    //! why the buffered tail isn't deterministically reachable here
+    //! without one. These cover end-to-end correctness plus a real
+    //! fallback transition with no production change.
+    use super::*;
+    use crate::buffer::BufferSizer;
+    use crate::logger::NoopLogger;
+
+    /// Whatever fast path applies on this platform, the copy must be
+    /// byte-identical and report the right size.
+    #[test]
+    fn copy_file_produces_byte_identical_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let data: Vec<u8> = (0u8..=255).cycle().take(100_000).collect();
+        std::fs::write(&src, &data).unwrap();
+
+        let outcome = copy_file(&src, &dst, &BufferSizer::default(), false, &NoopLogger).unwrap();
+        assert_eq!(outcome.bytes_copied, data.len() as u64);
+        assert_eq!(std::fs::read(&dst).unwrap(), data);
+    }
+
+    /// macOS: `clonefile(2)` returns `EEXIST` when the destination already
+    /// exists, so a pre-existing dst deterministically forces the FIRST
+    /// fast-path hop (clonefile) to fail. `fcopyfile` (opened with
+    /// truncate, not COPYFILE_EXCL) then overwrites and the copy must
+    /// still be byte-identical — exercising a genuine fallback transition
+    /// in the chain with no production seam.
+    ///
+    /// Forcing all the way to the buffered streaming tail would require
+    /// fcopyfile to ALSO fail, which has no benign deterministic trigger;
+    /// that tail needs a production injection seam to test directly
+    /// (flagged for a follow-up if full-chain coverage is wanted).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copy_file_falls_back_to_fcopyfile_when_clonefile_cannot_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dst = dir.path().join("dst.bin");
+        let data: Vec<u8> = (0u8..=200).cycle().take(50_000).collect();
+        std::fs::write(&src, &data).unwrap();
+        // Pre-create dst so clonefile hits EEXIST and the chain advances.
+        std::fs::write(&dst, b"stale pre-existing contents").unwrap();
+
+        let outcome = copy_file(&src, &dst, &BufferSizer::default(), false, &NoopLogger).unwrap();
+        assert_eq!(outcome.bytes_copied, data.len() as u64);
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            data,
+            "the fallback copy must overwrite the stale dst with src content"
+        );
+        // The load-bearing assertion: clonefile failed (EEXIST), so a
+        // true clone_succeeded proves the NEXT fast path (fcopyfile)
+        // handled the copy — not the buffered streaming tail (which sets
+        // clone_succeeded = false). Without this the test would also pass
+        // if fcopyfile were broken and the copy silently fell through to
+        // buffered, leaving the intended hop unpinned.
+        assert!(
+            outcome.clone_succeeded,
+            "after clonefile EEXIST, fcopyfile must handle the copy (clone_succeeded), \
+             not the buffered tail"
+        );
+    }
+}

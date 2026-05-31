@@ -1,45 +1,45 @@
 use crate::cli::{DiagnosticsDumpArgs, PerfArgs};
 use crate::context::AppContext;
-use crate::transfers::{
-    dest_is_container, format_remote_endpoint, parse_transfer_endpoint, resolve_destination,
-    source_is_contents, Endpoint,
-};
-use blit_core::fs_capability::cached_probe;
-use blit_core::perf_history;
-use blit_core::remote::RemotePath;
+use blit_app::diagnostics::dump::{endpoint_display, endpoint_snapshot, same_device};
+use blit_app::diagnostics::perf;
+use blit_app::endpoints::parse_transfer_endpoint;
+use blit_app::transfers::resolution::{dest_is_container, resolve_destination, source_is_contents};
 use chrono::{DateTime, Utc};
 use eyre::Result;
 use serde_json::{json, Value};
-use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()> {
     if args.enable {
-        perf_history::set_perf_history_enabled(true)?;
+        perf::set_enabled(true)?;
         ctx.perf_history_enabled = true;
         println!("Performance history enabled (persisted).");
     }
 
     if args.disable {
-        perf_history::set_perf_history_enabled(false)?;
+        perf::set_enabled(false)?;
         ctx.perf_history_enabled = false;
         println!("Performance history disabled (persisted).");
     }
 
     if args.clear {
-        match perf_history::clear_history()? {
+        match perf::clear()? {
             true => println!("Cleared performance history log."),
             false => println!("No performance history log to clear."),
         }
     }
 
-    // Refresh status from disk in case multiple toggles happened earlier.
-    if let Ok(enabled) = perf_history::perf_history_enabled() {
+    // Best-effort refresh of the cached enabled flag — matches
+    // pre-A.0 semantics. A malformed `settings.json` here doesn't
+    // block the rest of the verb: the startup warning already
+    // surfaced the parse error, and we fall back to whatever
+    // value AppContext loaded with.
+    if let Ok(enabled) = perf::read_enabled() {
         ctx.perf_history_enabled = enabled;
     }
 
-    let history_path = perf_history::config_dir()?.join("perf_local.jsonl");
-    let records = perf_history::read_recent_records(args.limit)?;
+    let history_path = perf::history_path()?;
+    let records = perf::read_records(args.limit)?;
 
     if args.json {
         let output = json!({
@@ -109,8 +109,8 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
         let millis = last.timestamp_epoch_ms.min(u64::MAX as u128) as u64;
         let timestamp = DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_millis(millis));
         let mode = match last.mode {
-            perf_history::TransferMode::Copy => "copy",
-            perf_history::TransferMode::Mirror => "mirror",
+            blit_core::perf_history::TransferMode::Copy => "copy",
+            blit_core::perf_history::TransferMode::Mirror => "mirror",
         };
         let fast_path_label = last.fast_path.as_deref().unwrap_or("streaming");
 
@@ -149,6 +149,14 @@ pub fn run_diagnostics_perf(ctx: &mut AppContext, args: &PerfArgs) -> Result<()>
 /// way to answer "what did blit see when you ran this?" — parse results,
 /// rsync destination resolution, filesystem caps, disk space — without
 /// reading source. One invocation → a single pasteable blob.
+///
+/// The per-endpoint snapshot helpers (`endpoint_snapshot`,
+/// `endpoint_display`, `same_device`) live in
+/// `blit_app::diagnostics::dump`; the rsync-resolution helpers
+/// (`source_is_contents`, `dest_is_container`,
+/// `resolve_destination`) live in `blit_app::transfers::resolution`.
+/// Both sets are imported directly at the top of this file; this
+/// function orchestrates them.
 pub fn run_diagnostics_dump(args: &DiagnosticsDumpArgs) -> Result<()> {
     let src_endpoint = parse_transfer_endpoint(&args.source)?;
     let raw_dst = parse_transfer_endpoint(&args.destination)?;
@@ -163,7 +171,7 @@ pub fn run_diagnostics_dump(args: &DiagnosticsDumpArgs) -> Result<()> {
     let pre_resolve_json = endpoint_display(&pre_resolve_dst);
     let resolved_display = endpoint_display(&resolved_dst);
 
-    let same_device = same_device(&src_endpoint, &resolved_dst);
+    let same_device_result = same_device(&src_endpoint, &resolved_dst);
 
     let output = json!({
         "blit_version": env!("CARGO_PKG_VERSION"),
@@ -177,7 +185,7 @@ pub fn run_diagnostics_dump(args: &DiagnosticsDumpArgs) -> Result<()> {
             "resolved_destination": resolved_display,
             "resolution_changed": pre_resolve_json != resolved_display,
         },
-        "same_device": same_device,
+        "same_device": same_device_result,
     });
 
     if args.json {
@@ -186,159 +194,6 @@ pub fn run_diagnostics_dump(args: &DiagnosticsDumpArgs) -> Result<()> {
         print_dump_human(&output);
     }
     Ok(())
-}
-
-fn endpoint_snapshot(raw: &str, endpoint: &Endpoint) -> Value {
-    match endpoint {
-        Endpoint::Local(path) => local_path_snapshot(raw, path),
-        Endpoint::Remote(remote) => {
-            let (kind, module, rel_path) = match &remote.path {
-                RemotePath::Module { module, rel_path } => (
-                    "module",
-                    Some(module.as_str().to_string()),
-                    Some(rel_path.display().to_string()),
-                ),
-                RemotePath::Root { rel_path } => {
-                    ("root", None, Some(rel_path.display().to_string()))
-                }
-                RemotePath::Discovery => ("discovery", None, None),
-            };
-            json!({
-                "raw": raw,
-                "kind": "remote",
-                "host": remote.host.to_string(),
-                "port": remote.port,
-                "path_kind": kind,
-                "module": module,
-                "rel_path": rel_path,
-                "display": format_remote_endpoint(remote),
-            })
-        }
-    }
-}
-
-fn local_path_snapshot(raw: &str, path: &Path) -> Value {
-    let abs_path = std::fs::canonicalize(path)
-        .ok()
-        .map(|p| p.display().to_string());
-    let metadata = std::fs::metadata(path).ok();
-    let exists = metadata.is_some();
-    let is_file = metadata.as_ref().map(|m| m.is_file()).unwrap_or(false);
-    let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-    let size = metadata.as_ref().filter(|m| m.is_file()).map(|m| m.len());
-
-    let caps = cached_probe(path);
-    let (fs_type, reflink, block_clone) = caps
-        .as_ref()
-        .map(|c| {
-            (
-                c.filesystem_type.clone(),
-                Some(c.reflink),
-                Some(c.block_clone_same_volume),
-            )
-        })
-        .unwrap_or((None, None, None));
-
-    let (free_bytes, total_bytes) = disk_free_total(path);
-
-    json!({
-        "raw": raw,
-        "kind": "local",
-        "input_path": path.display().to_string(),
-        "absolute_path": abs_path,
-        "exists": exists,
-        "is_file": is_file,
-        "is_dir": is_dir,
-        "size_bytes": size,
-        "filesystem_type": fs_type,
-        "reflink": reflink,
-        "block_clone_same_volume": block_clone,
-        "free_bytes": free_bytes,
-        "total_bytes": total_bytes,
-    })
-}
-
-fn endpoint_display(endpoint: &Endpoint) -> String {
-    match endpoint {
-        Endpoint::Local(p) => p.display().to_string(),
-        Endpoint::Remote(r) => format_remote_endpoint(r),
-    }
-}
-
-/// Returns (free_bytes, total_bytes) for the disk containing `path`, if
-/// we can match the path against one of sysinfo's mount points. Returns
-/// (None, None) if no match — better than a guess.
-fn disk_free_total(path: &Path) -> (Option<u64>, Option<u64>) {
-    // Walk up `path` until we find a prefix that matches a mount_point.
-    // sysinfo's list of disks is not sorted, so find the longest match.
-    let disks = sysinfo::Disks::new_with_refreshed_list();
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    // Windows canonicalize returns extended-length paths (\\?\C:\...) but
-    // sysinfo's mount_point is the bare drive (C:\). Strip the prefix so
-    // starts_with matches.
-    let canonical = strip_windows_extended_prefix(&canonical);
-    let mut best: Option<(&sysinfo::Disk, usize)> = None;
-    for disk in disks.iter() {
-        let mp = disk.mount_point();
-        if canonical.starts_with(mp) {
-            let len = mp.as_os_str().len();
-            if best.is_none_or(|(_, prev_len)| len > prev_len) {
-                best = Some((disk, len));
-            }
-        }
-    }
-    match best {
-        Some((disk, _)) => (Some(disk.available_space()), Some(disk.total_space())),
-        None => (None, None),
-    }
-}
-
-#[cfg(windows)]
-fn strip_windows_extended_prefix(path: &Path) -> std::path::PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix(r"\\?\") {
-        std::path::PathBuf::from(stripped)
-    } else {
-        path.to_path_buf()
-    }
-}
-
-#[cfg(not(windows))]
-fn strip_windows_extended_prefix(path: &Path) -> std::path::PathBuf {
-    path.to_path_buf()
-}
-
-/// Same-device check: the biggest single predictor of reflink eligibility
-/// and general zero-copy viability on Linux. Remote endpoints short-circuit
-/// to `false` (no shared-device semantics across the wire).
-fn same_device(src: &Endpoint, dst: &Endpoint) -> Option<bool> {
-    // Remote endpoints have no shared-device semantics across the wire,
-    // regardless of host platform.
-    let (Endpoint::Local(s), Endpoint::Local(d)) = (src, dst) else {
-        return Some(false);
-    };
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // Fall back to parent directory for dest because the resolved
-        // path may not exist yet on a fresh target.
-        let src_meta = std::fs::metadata(s).ok()?;
-        let dst_meta = std::fs::metadata(d)
-            .or_else(|_| {
-                d.parent().map_or_else(
-                    || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
-                    std::fs::metadata,
-                )
-            })
-            .ok()?;
-        Some(src_meta.dev() == dst_meta.dev())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (s, d);
-        None
-    }
 }
 
 fn print_dump_human(v: &Value) {

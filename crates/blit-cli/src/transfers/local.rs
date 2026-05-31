@@ -1,15 +1,11 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
-use eyre::{bail, Context, Result};
+use blit_app::display::format_bytes;
+use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
+use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::time::{Duration, Instant};
-
-use blit_core::orchestrator::{
-    LocalMirrorOptions, LocalMirrorSummary, TransferOrchestrator, TransferOutcome,
-};
-
-use crate::util::format_bytes;
 
 /// Convenience wrapper for callers that always want the summary
 /// printed inline. Most CLI paths (copy / mirror) want this; move
@@ -118,24 +114,8 @@ async fn run_local_transfer_inner(
         Some(pb)
     };
 
-    let src_clone = src_path.to_path_buf();
-    let dest_clone = dest_path.to_path_buf();
     let start = Instant::now();
-
-    let summary = tokio::task::spawn_blocking(move || {
-        let orchestrator = TransferOrchestrator::new();
-        orchestrator
-            .execute_local_mirror(&src_clone, &dest_clone, options)
-            .with_context(|| {
-                format!(
-                    "failed to {} from {} to {}",
-                    if mirror { "mirror" } else { "copy" },
-                    src_clone.display(),
-                    dest_clone.display()
-                )
-            })
-    })
-    .await??;
+    let summary = blit_app::transfers::local::run(src_path, dest_path, options).await?;
 
     if let Some(pb) = progress_bar {
         pb.finish_and_clear();

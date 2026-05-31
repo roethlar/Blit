@@ -298,9 +298,20 @@ pub struct RemotePushClient {
 impl RemotePushClient {
     pub async fn connect(endpoint: RemoteEndpoint) -> Result<Self> {
         let uri = endpoint.control_plane_uri();
-        let client = crate::generated::blit_client::BlitClient::connect(uri.clone())
+        // audit-2: bound the connect (30s). Plain `BlitClient::connect`
+        // has no deadline, so an unreachable destination daemon would
+        // hang a remote push for the OS TCP timeout (60-127s). The outer
+        // `tokio::time::timeout` is what bounds slow DNS too —
+        // `connect_timeout` alone only bounds the post-resolution TCP
+        // attempt (tonic/hyper-util resolve the name first).
+        let conn = tonic::transport::Endpoint::from_shared(uri.clone())
+            .map_err(|err| eyre::eyre!("invalid endpoint {}: {}", uri, err))?
+            .connect_timeout(std::time::Duration::from_secs(30));
+        let channel = tokio::time::timeout(std::time::Duration::from_secs(30), conn.connect())
             .await
+            .map_err(|_| eyre::eyre!("connecting to {} timed out", uri))?
             .map_err(|err| eyre::eyre!("failed to connect to {}: {}", uri, err))?;
+        let client = crate::generated::blit_client::BlitClient::new(channel);
 
         Ok(Self { endpoint, client })
     }

@@ -174,8 +174,7 @@ pub async fn execute_sink_pipeline_streaming(
 
 use crate::generated::FileHeader;
 use eyre::bail;
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::data_plane::{
     DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,
@@ -198,8 +197,8 @@ use super::data_plane::{
 /// which uses the same `receive_stream_double_buffered` helper as the
 /// daemon's push receiver and the client's pull receiver — one path,
 /// one optimization surface.
-pub async fn execute_receive_pipeline(
-    socket: &mut TcpStream,
+pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
+    socket: &mut R,
     sink: Arc<dyn TransferSink>,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<SinkOutcome> {
@@ -302,19 +301,19 @@ pub async fn execute_receive_pipeline(
     Ok(total)
 }
 
-async fn read_u32(socket: &mut TcpStream) -> Result<u32> {
+async fn read_u32<R: AsyncRead + Unpin>(socket: &mut R) -> Result<u32> {
     let mut buf = [0u8; 4];
     socket.read_exact(&mut buf).await.context("reading u32")?;
     Ok(u32::from_be_bytes(buf))
 }
 
-async fn read_u64(socket: &mut TcpStream) -> Result<u64> {
+async fn read_u64<R: AsyncRead + Unpin>(socket: &mut R) -> Result<u64> {
     let mut buf = [0u8; 8];
     socket.read_exact(&mut buf).await.context("reading u64")?;
     Ok(u64::from_be_bytes(buf))
 }
 
-async fn read_i64(socket: &mut TcpStream) -> Result<i64> {
+async fn read_i64<R: AsyncRead + Unpin>(socket: &mut R) -> Result<i64> {
     let mut buf = [0u8; 8];
     socket.read_exact(&mut buf).await.context("reading i64")?;
     Ok(i64::from_be_bytes(buf))
@@ -339,7 +338,7 @@ const MAX_WIRE_TAR_SHARD_BYTES: usize =
 /// with `crate::copy::MAX_BLOCK_SIZE`.
 const MAX_WIRE_BLOCK_BYTES: usize = 64 * 1024 * 1024;
 
-async fn read_string(socket: &mut TcpStream) -> Result<String> {
+async fn read_string<R: AsyncRead + Unpin>(socket: &mut R) -> Result<String> {
     let len = read_u32(socket).await? as usize;
     if len > MAX_WIRE_PATH_LEN {
         bail!(
@@ -356,7 +355,7 @@ async fn read_string(socket: &mut TcpStream) -> Result<String> {
     String::from_utf8(buf).context("invalid UTF-8 in data-plane string")
 }
 
-async fn read_file_header(socket: &mut TcpStream) -> Result<FileHeader> {
+async fn read_file_header<R: AsyncRead + Unpin>(socket: &mut R) -> Result<FileHeader> {
     let path = read_string(socket).await?;
     // Validate at the wire boundary — rejects ../, absolute paths,
     // Windows drive prefixes, UNC, NUL bytes. Sinks re-validate via
@@ -373,7 +372,9 @@ async fn read_file_header(socket: &mut TcpStream) -> Result<FileHeader> {
     })
 }
 
-async fn read_tar_shard(socket: &mut TcpStream) -> Result<(Vec<FileHeader>, Vec<u8>)> {
+async fn read_tar_shard<R: AsyncRead + Unpin>(
+    socket: &mut R,
+) -> Result<(Vec<FileHeader>, Vec<u8>)> {
     let count = read_u32(socket).await? as usize;
     if count > MAX_WIRE_TAR_SHARD_FILES {
         bail!(
@@ -913,6 +914,43 @@ mod tests {
             msg.contains("synthetic sink failure: disk full"),
             "expected pipeline error to include underlying sink message; got:\n{}",
             msg
+        );
+    }
+
+    /// audit-1c2: a receive that stalls (no bytes) must abort with the
+    /// StallGuard's TimedOut rather than blocking forever. A duplex whose
+    /// writer half is held open but never written keeps the first record-
+    /// tag read perpetually Pending; the StallGuard wrapping it trips
+    /// after the (short, test) idle window and the pipeline surfaces it.
+    #[tokio::test]
+    async fn receive_pipeline_aborts_on_stall() {
+        use crate::remote::transfer::stall_guard::StallGuard;
+        use std::path::PathBuf;
+
+        let tmp = tempdir().unwrap();
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            PathBuf::from("/nonexistent-src"),
+            tmp.path().to_path_buf(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        ));
+
+        // Writer half held open (bound to a name) but never written → the
+        // read side is perpetually Pending.
+        let (rx, _tx) = tokio::io::duplex(64);
+        let mut guarded = StallGuard::new(rx, std::time::Duration::from_millis(20));
+
+        let err = execute_receive_pipeline(&mut guarded, sink, None)
+            .await
+            .expect_err("a stalled receive must abort, not hang");
+        assert!(
+            format!("{err:#}").contains("stalled"),
+            "expected a StallGuard timeout in the error chain; got: {err:#}"
         );
     }
 }

@@ -41,6 +41,7 @@ pub(crate) async fn handle_pull_sync_stream(
     tx: PullSyncSender,
     force_grpc_override: bool,
     server_checksums_enabled: bool,
+    active_job: &crate::active_jobs::ActiveJobGuard,
 ) -> Result<(), Status> {
     // Phase 1: Receive the unified TransferOperationSpec and normalize
     // it at the wire boundary. NormalizedTransferOperation::from_spec
@@ -56,6 +57,12 @@ pub(crate) async fn handle_pull_sync_stream(
     };
     let spec = NormalizedTransferOperation::from_spec(raw_spec)
         .map_err(|e| Status::invalid_argument(format!("invalid TransferOperationSpec: {e:#}")))?;
+
+    // Populate the ActiveJobs row now that we know the
+    // endpoint (b-2-set-endpoint). Recorded verbatim from
+    // the wire; containment is verified below when joining
+    // onto the module root.
+    active_job.set_endpoint(spec.module.clone(), spec.source_path.clone());
 
     // Resolve module from spec
     let module = resolve_module(&modules, default_root.as_ref(), &spec.module).await?;
@@ -554,7 +561,7 @@ async fn stream_via_data_plane(
         .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
-    let token = generate_token();
+    let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
     // Single stream for the resume path (multi-stream support lives in pull.rs).
@@ -687,7 +694,7 @@ async fn stream_via_data_plane_resume(
         .local_addr()
         .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
         .port();
-    let token = generate_token();
+    let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
     // Send negotiation

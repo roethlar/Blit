@@ -1,11 +1,14 @@
+mod active_jobs;
 mod delegation_gate;
 mod metrics;
+mod net_timeout;
+mod recents_store;
 mod runtime;
 mod service;
 
 use crate::metrics::TransferMetrics;
 use crate::runtime::{load_runtime, DaemonArgs, DaemonRuntime};
-use crate::service::{BlitServer, BlitService};
+use crate::service::{spawn_progress_ticker, BlitServer, BlitService};
 use blit_core::mdns::{self, AdvertiseOptions, MdnsAdvertiser};
 use clap::Parser;
 use eyre::Result;
@@ -105,10 +108,35 @@ async fn main() -> Result<()> {
         metrics,
         delegation,
     );
+    // c-4: kick off the periodic `TransferProgress` emitter.
+    // The handle is owned by the runtime for the daemon's
+    // lifetime; on process exit tokio aborts in-flight tasks.
+    let _progress_ticker = spawn_progress_ticker(&service);
+
+    // rec-1: hydrate the recent-runs ring from disk and arm
+    // write-through persistence before serving, so `GetState.recent[]`
+    // survives daemon restarts. A store that can't be read degrades to
+    // an empty ring (handled in `recents_store::load`); only path
+    // resolution can fail here, which is fatal config breakage worth
+    // surfacing.
+    let _recents_writer = active_jobs::spawn_recents_writer(service.active_jobs.arm_persistence()?);
 
     println!("blitd v2 listening on {}", addr);
 
+    // audit-1: HTTP/2 keepalive. A subscriber (TUI F2 / `jobs watch`)
+    // that vanishes mid-stream — crash, network partition, killed laptop
+    // lid — would otherwise leave the daemon holding the gRPC stream +
+    // broadcast Receiver + spawned forwarder task forever, because TCP
+    // alone doesn't notice a silently-dead peer. Keepalive PINGs idle
+    // connections every 30s and reaps any that don't answer within 20s,
+    // reclaiming those resources. Crucially this leaves HEALTHY idle
+    // subscribers untouched (Subscribe is legitimately silent during
+    // quiet periods), so we get leak reclamation without the reconnect
+    // churn an app-level "no events for N seconds" close would cause
+    // (owner decision 2026-05-23).
     Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(30)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
         .add_service(BlitServer::new(service))
         .serve(addr)
         .await?;

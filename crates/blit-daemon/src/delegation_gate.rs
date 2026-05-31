@@ -77,6 +77,10 @@ pub(crate) enum GateDenial {
     MasterSwitchOff,
     /// The locator's host failed parsing or normalization.
     InvalidHost(String),
+    /// The locator's port is 0 — IANA-reserved and not connectable.
+    /// audit-1: rejected at the gate, before DNS resolution or any
+    /// outbound connection attempt.
+    InvalidPort(u16),
     /// DNS resolution of the host failed or returned no addresses.
     UnresolvableHost(String),
     /// One or more resolved addresses are not covered by any allowlist
@@ -104,6 +108,9 @@ impl GateDenial {
             }
             GateDenial::InvalidHost(host) => {
                 format!("invalid source host '{host}'")
+            }
+            GateDenial::InvalidPort(port) => {
+                format!("source port {port} is reserved and not connectable")
             }
             GateDenial::UnresolvableHost(host) => {
                 format!("could not resolve source host '{host}'")
@@ -252,10 +259,24 @@ pub(crate) trait HostResolver: Send + Sync {
 /// string; the returned IPs are what the gate validates.
 pub(crate) struct StdResolver;
 
+/// audit-1: bound DNS resolution in the delegation gate. A
+/// slow/black-holed resolver would otherwise stall the `DelegatedPull`
+/// handler for the OS resolver's own timeout (5-30s+). 10s is generous
+/// for a healthy resolver while bounding the worst case.
+const DNS_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[async_trait::async_trait]
 impl HostResolver for StdResolver {
     async fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<IpAddr>> {
-        let addrs = tokio::net::lookup_host((host, port)).await?;
+        let lookup = tokio::net::lookup_host((host, port));
+        let addrs = crate::net_timeout::within(DNS_RESOLVE_TIMEOUT, lookup)
+            .await
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("DNS resolution of '{host}' timed out after {DNS_RESOLVE_TIMEOUT:?}"),
+                )
+            })??;
         Ok(addrs.map(|sa| sa.ip()).collect())
     }
 }
@@ -275,6 +296,15 @@ pub(crate) async fn validate_source<R: HostResolver + ?Sized>(
 
     if locator.host.trim().is_empty() {
         return Err(GateDenial::InvalidHost(locator.host.to_string()));
+    }
+
+    // audit-1: reject the IANA-reserved port 0 at the gate, before any
+    // DNS resolution or outbound connection. Port 0 is never a valid
+    // delegation target — fail fast with a clear reason rather than
+    // letting it fall through to a resolve/connect that would error
+    // opaquely (or, on some stacks, bind an ephemeral port).
+    if locator.port == 0 {
+        return Err(GateDenial::InvalidPort(locator.port));
     }
 
     // Locator's host can be a literal IP (with or without brackets) or
@@ -507,6 +537,99 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, GateDenial::MasterSwitchOff);
+    }
+
+    /// audit-1: port 0 is rejected at the gate, before DNS. The resolver
+    /// has no scripted responses, so had the gate reached resolution it
+    /// would surface `UnresolvableHost` — asserting `InvalidPort` proves
+    /// the port-0 check fires first (no DNS, no outbound connect).
+    #[tokio::test]
+    async fn port_zero_rejected_before_dns() {
+        let cfg = DelegationConfig {
+            allow_delegated_pull: true, // past the master switch
+            allowed_source_hosts: vec![],
+        };
+        let resolver = ScriptedResolver::new(vec![]);
+        let locator = LocatorView {
+            host: "example.com",
+            port: 0,
+        };
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
+        assert_eq!(err, GateDenial::InvalidPort(0));
+    }
+
+    // ── DNS rebinding (audit-6f) ─────────────────────────────────────
+
+    /// audit-6 item 6: the gate's rebinding mitigation is "resolve once,
+    /// bind the validated IP." A malicious resolver that returns an
+    /// allowlisted IP on the first lookup and an internal/special-range
+    /// IP on a hypothetical second lookup must not be able to redirect
+    /// the connect — `validate_source` returns the FIRST, validated IP
+    /// and never consults the second answer.
+    #[tokio::test]
+    async fn validate_source_binds_first_resolution_against_rebind() {
+        let safe = ip4("203.0.113.10"); // public, authorized by the hostname entry
+        let rebind = ip4("169.254.169.254"); // link-local metadata endpoint
+        let resolver = ScriptedResolver::new(vec![vec![safe], vec![rebind]]);
+        let cfg = DelegationConfig {
+            allow_delegated_pull: true,
+            allowed_source_hosts: vec![parse_allow_entry("rebind.test").unwrap()],
+        };
+        let locator = LocatorView {
+            host: "rebind.test",
+            port: 9031,
+        };
+
+        let sa = validate_source(&cfg, &locator, &resolver).await.unwrap();
+        assert_eq!(
+            sa,
+            SocketAddr::new(safe, 9031),
+            "the gate must bind the first, validated resolution"
+        );
+
+        // The malicious second answer is still queued — proving the gate
+        // resolved exactly once. Had it re-resolved, this is the address
+        // it would have connected to.
+        let leftover = resolver.resolve("rebind.test", 9031).await.unwrap();
+        assert_eq!(
+            leftover,
+            vec![rebind],
+            "the second (malicious) resolution must remain unconsumed by the gate"
+        );
+    }
+
+    /// audit-6 item 6 (converse): the gate decides on the FIRST
+    /// resolution only. If the first answer is unauthorized (here a
+    /// special-range IP that a hostname entry cannot authorize), the gate
+    /// denies — even though a later resolution would have been fine. A
+    /// gate that re-resolved at connect time could be tricked the other
+    /// way; this locks in single-resolution semantics.
+    #[tokio::test]
+    async fn validate_source_decides_on_first_resolution_only() {
+        let first = ip4("169.254.169.254"); // special range; hostname entry can't authorize
+        let benign_second = ip4("203.0.113.10");
+        let resolver = ScriptedResolver::new(vec![vec![first], vec![benign_second]]);
+        let cfg = DelegationConfig {
+            allow_delegated_pull: true,
+            allowed_source_hosts: vec![parse_allow_entry("rebind.test").unwrap()],
+        };
+        let locator = LocatorView {
+            host: "rebind.test",
+            port: 9031,
+        };
+
+        let err = validate_source(&cfg, &locator, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GateDenial::SpecialRangeNeedsIpAuth(_)),
+            "first resolution to a special range must be denied, got: {err:?}"
+        );
+        // The benign second answer was never consulted.
+        let leftover = resolver.resolve("rebind.test", 9031).await.unwrap();
+        assert_eq!(leftover, vec![benign_second]);
     }
 
     #[tokio::test]

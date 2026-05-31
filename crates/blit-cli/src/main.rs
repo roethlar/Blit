@@ -6,23 +6,27 @@ mod df;
 mod diagnostics;
 mod du;
 mod find;
+mod jobs;
 mod list_modules;
 mod ls;
 mod profile;
 mod rm;
 mod scan;
 mod transfers;
-mod util;
 
 use crate::check::run_check;
 use crate::cli::{Cli, Commands, DiagnosticsCommand};
 use crate::context::AppContext;
 use crate::diagnostics::{run_diagnostics_dump, run_diagnostics_perf};
-use crate::transfers::{run_move, run_transfer, TransferKind};
+use crate::jobs::run_jobs;
+use crate::transfers::{run_move, run_transfer};
+use blit_app::transfers::dispatch::TransferKind;
+use blit_app::transfers::retry::run_with_retries;
 use blit_core::config;
 use clap::Parser;
 use eyre::Result;
 use std::process::ExitCode;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
@@ -39,9 +43,24 @@ async fn main() -> Result<ExitCode> {
     let mut ctx = AppContext::load();
 
     match command {
-        Commands::Copy(args) => run_transfer(&ctx, &args, TransferKind::Copy).await?,
-        Commands::Mirror(args) => run_transfer(&ctx, &args, TransferKind::Mirror).await?,
-        Commands::Move(args) => run_move(&ctx, &args).await?,
+        Commands::Copy(args) => {
+            let wait = Duration::from_secs(args.wait);
+            run_with_retries(args.retry, wait, |_n| {
+                run_transfer(&ctx, &args, TransferKind::Copy)
+            })
+            .await?
+        }
+        Commands::Mirror(args) => {
+            let wait = Duration::from_secs(args.wait);
+            run_with_retries(args.retry, wait, |_n| {
+                run_transfer(&ctx, &args, TransferKind::Mirror)
+            })
+            .await?
+        }
+        Commands::Move(args) => {
+            let wait = Duration::from_secs(args.wait);
+            run_with_retries(args.retry, wait, |_n| run_move(&ctx, &args)).await?
+        }
         Commands::Scan(args) => scan::run_scan(args).await?,
         Commands::ListModules(args) => list_modules::run_list_modules(args).await?,
         Commands::Ls(args) => ls::run_ls(args).await?,
@@ -59,6 +78,12 @@ async fn main() -> Result<ExitCode> {
             DiagnosticsCommand::Perf(args) => run_diagnostics_perf(&mut ctx, &args)?,
             DiagnosticsCommand::Dump(args) => run_diagnostics_dump(&args)?,
         },
+        // `jobs cancel` exits 0/1/2 (Cancelled / NotFound /
+        // Unsupported) per the §6.5 contract; `jobs list`
+        // always exits 0. The runner returns the right
+        // `ExitCode` for both; propagate it directly like
+        // `check`.
+        Commands::Jobs { command } => return run_jobs(command).await,
     }
 
     Ok(ExitCode::SUCCESS)

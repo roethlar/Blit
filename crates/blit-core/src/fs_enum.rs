@@ -53,11 +53,8 @@ pub struct FileFilter {
     /// Set by orchestrator when building the filter (calculated, not hardcoded).
     pub reference_time: Option<SystemTime>,
     pub files_from: Option<HashSet<PathBuf>>,
-    #[allow(dead_code)]
     compiled_includes: OnceCell<globset::GlobSet>,
-    #[allow(dead_code)]
     compiled_files: OnceCell<globset::GlobSet>,
-    #[allow(dead_code)]
     compiled_dirs: OnceCell<globset::GlobSet>,
 }
 

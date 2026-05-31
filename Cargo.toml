@@ -2,8 +2,11 @@
 resolver = "2"
 members = [
     "crates/blit-core",
+    "crates/blit-app",
     "crates/blit-cli",
     "crates/blit-daemon",
+    "crates/blit-tui",
+    "crates/blit-prometheus-bridge",
 ]
 
 [workspace.package]

@@ -111,6 +111,22 @@ impl RemoteEndpoint {
         }
     }
 
+    /// Render just the `host[:port]` portion of this endpoint
+    /// — drops the module / path suffix. Used by user-facing
+    /// hints that reference the host as an argument
+    /// (e.g. `blit jobs cancel <host> <id>`), where stitching
+    /// the full canonical path back together would be wrong.
+    /// Handles bracketed IPv6 via [`display_host`]; preserves
+    /// non-default ports.
+    pub fn host_port_display(&self) -> String {
+        let host = display_host(&self.host);
+        if self.port == Self::DEFAULT_PORT {
+            host
+        } else {
+            format!("{}:{}", host, self.port)
+        }
+    }
+
     /// Display helper used by CLI for canonical formatting.
     pub fn display(&self) -> String {
         let host = display_host(&self.host);
@@ -197,10 +213,8 @@ fn normalize_relative_path_buf(raw: &str) -> PathBuf {
 }
 
 fn rel_path_to_string(path: &Path) -> String {
-    path.iter()
-        .map(|component| component.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+    // Delegate to the canonical POSIX-form helper.
+    crate::path_posix::relative_path_to_posix(path)
 }
 
 fn display_host(host: &str) -> String {
@@ -381,5 +395,23 @@ mod tests {
             "error should mention forward slashes, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn host_port_display_drops_default_port() {
+        let ep = RemoteEndpoint::parse("server:/m/path").expect("parse");
+        assert_eq!(ep.host_port_display(), "server");
+    }
+
+    #[test]
+    fn host_port_display_preserves_non_default_port() {
+        let ep = RemoteEndpoint::parse("server:9444:/m/path").expect("parse");
+        assert_eq!(ep.host_port_display(), "server:9444");
+    }
+
+    #[test]
+    fn host_port_display_brackets_ipv6() {
+        let ep = RemoteEndpoint::parse("[::1]:9444:/m/path").expect("parse");
+        assert_eq!(ep.host_port_display(), "[::1]:9444");
     }
 }

@@ -41,10 +41,20 @@ pub(crate) async fn bind_data_plane_listener() -> Result<TcpListener, Status> {
         .map_err(|err| Status::internal(format!("failed to bind data plane socket: {}", err)))
 }
 
-pub(crate) fn generate_token() -> Vec<u8> {
+/// Generate a random data-plane handshake token.
+///
+/// audit-3b: the OS cryptographic RNG is effectively always available,
+/// but `try_fill_bytes` is fallible (a sandboxed / fd-exhausted
+/// container can deny it). Pre-fix this `expect`ed and panicked the
+/// spawned data-plane task, leaving the control-plane stream hung
+/// waiting for a handshake that would never arrive. Now it returns a
+/// `Status::Internal` the handler propagates as a clean RPC error.
+pub(crate) fn generate_token() -> Result<Vec<u8>, Status> {
     let mut buf = vec![0u8; TOKEN_LEN];
-    SysRng.try_fill_bytes(&mut buf).expect("system RNG failed");
-    buf
+    SysRng
+        .try_fill_bytes(&mut buf)
+        .map_err(|err| Status::internal(format!("system RNG unavailable: {err}")))?;
+    Ok(buf)
 }
 
 /// Bounded wait for the first data-plane accept. R46-F7: pre-fix the
@@ -810,6 +820,21 @@ mod tests {
     use std::path::Path;
     use tar::{Builder, EntryType, Header};
     use tempfile::tempdir;
+
+    /// audit-3b: `generate_token` returns `Ok` with a full-length token
+    /// under normal conditions (the OS RNG path), and successive tokens
+    /// differ. The failure arm (`Status::Internal`) is unreachable
+    /// without injecting a failing RNG — out of proportion to the fix,
+    /// which is purely "propagate instead of panic" — so it isn't
+    /// fabricated here; the type signature is what callers rely on.
+    #[test]
+    fn generate_token_returns_full_length_random_token() {
+        let a = generate_token().expect("OS RNG available in test env");
+        let b = generate_token().expect("OS RNG available in test env");
+        assert_eq!(a.len(), TOKEN_LEN);
+        assert_eq!(b.len(), TOKEN_LEN);
+        assert_ne!(a, b, "successive tokens must differ");
+    }
 
     #[test]
     fn apply_tar_shard_handles_long_paths() {

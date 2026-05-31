@@ -29,6 +29,11 @@ use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
 use crate::service::util::{resolve_contained_path, resolve_module};
 
+/// audit-1: deadline for the dst→src TCP connect. Bounds the OS SYN
+/// timeout (60-180s) against a firewalled/black-holed source; matches
+/// the data-plane accept timeout's 30s margin for slow networks.
+const SOURCE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Per-request capabilities advertised by *this destination daemon* on
 /// the spec it forwards to src. The CLI's value is overwritten — the
 /// CLI is not in the byte path and cannot speak for what dst supports.
@@ -117,6 +122,8 @@ pub(crate) async fn handle_delegated_pull(
     delegation: Arc<crate::delegation_gate::DelegationConfig>,
     metrics: Arc<TransferMetrics>,
     tx: mpsc::Sender<Result<DelegatedPullProgress, Status>>,
+    transfer_id: String,
+    byte_progress: blit_core::remote::transfer::ByteProgressSink,
 ) -> bool {
     let resolver = StdResolver;
     let result = run_delegated_pull(
@@ -125,8 +132,10 @@ pub(crate) async fn handle_delegated_pull(
         default_root,
         delegation,
         metrics,
+        transfer_id,
         &tx,
         &resolver,
+        &byte_progress,
     )
     .await;
 
@@ -151,8 +160,10 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     default_root: Option<RootExport>,
     delegation: Arc<crate::delegation_gate::DelegationConfig>,
     metrics: Arc<TransferMetrics>,
+    transfer_id: String,
     tx: &mpsc::Sender<Result<DelegatedPullProgress, Status>>,
     resolver: &R,
+    byte_progress: &blit_core::remote::transfer::ByteProgressSink,
 ) -> Result<(), DelegatedPullProgress> {
     use blit_core::generated::delegated_pull_error::Phase;
 
@@ -261,17 +272,35 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         // variant rather than silently work with stale identity.
         path: RemotePath::Discovery,
     };
-    let mut pull_client = RemotePullClient::connect(endpoint).await.map_err(|err| {
-        err_progress(
-            Phase::ConnectSource as i32,
-            format!(
-                "connecting to source {}:{}: {}",
-                resolved.ip(),
-                resolved.port(),
-                err
-            ),
-        )
-    })?;
+    // audit-1: bound the TCP connect to the source daemon. A firewalled
+    // or black-holed source would otherwise block the handler for the OS
+    // TCP SYN timeout (60-180s on Linux), pinning the ActiveJobs row and
+    // resources. 30s matches the data-plane accept timeout.
+    let mut pull_client =
+        crate::net_timeout::within(SOURCE_CONNECT_TIMEOUT, RemotePullClient::connect(endpoint))
+            .await
+            .ok_or_else(|| {
+                err_progress(
+                    Phase::ConnectSource as i32,
+                    format!(
+                        "connecting to source {}:{} timed out after {:?}",
+                        resolved.ip(),
+                        resolved.port(),
+                        SOURCE_CONNECT_TIMEOUT
+                    ),
+                )
+            })?
+            .map_err(|err| {
+                err_progress(
+                    Phase::ConnectSource as i32,
+                    format!(
+                        "connecting to source {}:{}: {}",
+                        resolved.ip(),
+                        resolved.port(),
+                        err
+                    ),
+                )
+            })?;
 
     // Send the "started" progress event so CLI knows the dst→src
     // handshake is underway. The diagnostic source_data_plane_endpoint
@@ -284,6 +313,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             payload: Some(ProgressPayload::Started(DelegatedPullStarted {
                 source_data_plane_endpoint: format!("tcp:{}:{}", resolved.ip(), resolved.port()),
                 stream_count: 0,
+                transfer_id: transfer_id.clone(),
             })),
         }))
         .await;
@@ -326,6 +356,7 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             spec,
             /* track_paths = */ false,
             None,
+            Some(byte_progress),
         )
         .await
         .map_err(|err| {
@@ -400,8 +431,10 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
 /// destination tree. Every path is routed through
 /// `safe_join_contained` (R5-F1 lexical check + R46-F3 canonical
 /// containment) before the unlink. R58-F3 closed the symmetry gap:
-/// the CLI's `delete_listed_paths` upgraded to `safe_join_contained`
-/// in R46-F3, but this daemon-side delegated path was still on bare
+/// the non-delegated `blit_app::transfers::remote::delete_listed_paths`
+/// upgraded to `safe_join_contained` in R46-F3 (the helper lived in
+/// `blit-cli` at the time of that fix; Phase 5 A.0 moved it to
+/// `blit-app`), but this daemon-side delegated path was still on bare
 /// `safe_join`. With `dest_root/link → /outside` a peer-controlled
 /// delete-list entry like `link/victim` would have removed an
 /// outside file.
@@ -458,7 +491,7 @@ async fn apply_delete_list(
 
     // Prune empty directories deepest-first. Failures here are
     // ignored (dir not empty / dir doesn't exist) — same posture as
-    // the CLI's `delete_listed_paths`.
+    // `blit_app::transfers::remote::delete_listed_paths`.
     let mut dirs: Vec<_> = candidate_parents.into_iter().collect();
     dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for dir in dirs {
@@ -494,8 +527,9 @@ fn build_summary(
 }
 
 /// Walk the destination tree and emit a manifest the source can use
-/// to decide which files need transfer. Mirror of the CLI's
-/// `enumerate_local_manifest` (`crates/blit-cli/src/transfers/remote.rs`)
+/// to decide which files need transfer. Mirror of
+/// `blit_app::transfers::remote::enumerate_local_manifest` (which was
+/// the CLI-side helper pre-Phase 5 A.0, now a shared library helper)
 /// but lives on the daemon side because the destination owns this
 /// view in the delegated path. Sequential walk; for a 0.1.0 release
 /// targeting modest module sizes this is fine. Parallelize later if
@@ -918,6 +952,7 @@ mod tests {
                 ..Default::default()
             }),
             trace_data_plane: false,
+            detach: false,
         };
         let modules = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
             String,
@@ -927,7 +962,17 @@ mod tests {
         let metrics = TransferMetrics::disabled();
         let (tx, _rx) = mpsc::channel(8);
 
-        let ok = handle_delegated_pull(req, modules, None, delegation, metrics, tx).await;
+        let ok = handle_delegated_pull(
+            req,
+            modules,
+            None,
+            delegation,
+            metrics,
+            tx,
+            "t-test".to_string(),
+            blit_core::remote::transfer::ByteProgressSink::new(),
+        )
+        .await;
         assert!(
             !ok,
             "handler with blank source locator must return false so caller can inc_error"

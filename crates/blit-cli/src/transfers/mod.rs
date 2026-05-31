@@ -3,52 +3,44 @@ mod local;
 mod remote;
 mod remote_remote_direct;
 
-pub use endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
+// Endpoint types come from `blit_app::endpoints` directly. The
+// `transfers/endpoints.rs` shim now contains only the two
+// clap-arg adapter wrappers (`ensure_remote_pull_supported` /
+// `ensure_remote_push_supported`) — every other consumer
+// imports from `blit_app::endpoints` directly.
+use blit_app::endpoints::{format_remote_endpoint, parse_transfer_endpoint, Endpoint};
 
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
-use eyre::{bail, eyre, Context, Result};
-use std::ffi::OsString;
+use eyre::{bail, Context, Result};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::time::SystemTime;
 
 use crate::rm::delete_remote_path;
-use blit_core::fs_enum::{parse_duration, parse_size, FileFilter};
+use blit_app::transfers::dispatch::{select_transfer_route, TransferKind, TransferRoute};
+use blit_app::transfers::filter::{self, FilterInputs};
+use blit_app::transfers::resolution::resolve_destination;
+use blit_core::fs_enum::FileFilter;
 use blit_core::remote::RemotePath;
 
-/// Common shape of the filter inputs across commands. Both `TransferArgs`
-/// (copy/mirror/move) and `CheckArgs` (check) populate this. The single
-/// `build_filter_from_inputs` helper consumes it so all commands route
-/// through identical filter semantics.
-pub(crate) struct FilterInputs<'a> {
-    pub include: &'a [String],
-    pub exclude: &'a [String],
-    pub files_from: Option<&'a PathBuf>,
-    pub min_size: Option<&'a str>,
-    pub max_size: Option<&'a str>,
-    pub min_age: Option<&'a str>,
-    pub max_age: Option<&'a str>,
-}
-
-impl<'a> FilterInputs<'a> {
-    pub fn from_transfer(args: &'a TransferArgs) -> Self {
-        Self {
-            include: &args.include,
-            exclude: &args.exclude,
-            files_from: args.files_from.as_ref(),
-            min_size: args.min_size.as_deref(),
-            max_size: args.max_size.as_deref(),
-            min_age: args.min_age.as_deref(),
-            max_age: args.max_age.as_deref(),
-        }
+/// Build a `FilterInputs` view over a `TransferArgs`. Lives here
+/// because the orphan rule prevents `impl From<&TransferArgs>` on
+/// `FilterInputs` (the struct moved to `blit-app::transfers::filter`,
+/// `TransferArgs` stays in `blit-cli`). Inlined wrapper keeps the
+/// `build_filter` / `build_filter_spec` call sites readable.
+fn filter_inputs(args: &TransferArgs) -> FilterInputs<'_> {
+    FilterInputs {
+        include: &args.include,
+        exclude: &args.exclude,
+        files_from: args.files_from.as_ref(),
+        min_size: args.min_size.as_deref(),
+        max_size: args.max_size.as_deref(),
+        min_age: args.min_age.as_deref(),
+        max_age: args.max_age.as_deref(),
     }
 }
-use endpoints::{
-    ensure_remote_destination_supported, ensure_remote_pull_supported,
-    ensure_remote_push_supported, ensure_remote_source_supported,
-};
+use blit_app::endpoints::{ensure_remote_destination_supported, ensure_remote_source_supported};
+use endpoints::{ensure_remote_pull_supported, ensure_remote_push_supported};
 use local::run_local_transfer;
 use remote::{run_remote_pull_transfer, run_remote_push_transfer};
 use remote_remote_direct::run_remote_to_remote_direct;
@@ -79,235 +71,16 @@ fn collapse_slashes(s: &str) -> String {
     out
 }
 
-/// Returns true if the raw CLI source string specifies "copy contents" mode,
-/// matching rsync's DOTDIR_NAME classification from `flist.c:send_file_list`.
-///
-/// Rsync treats these source forms as "copy the contents of this directory":
-///   - ends with `/`     (e.g. `src/`)
-///   - ends with `/.`    (e.g. `src/.`)
-///   - is exactly `.`
-///
-/// On Windows, `\` and `\.` are also recognized as trailing separators.
-/// On Unix, `\` is a literal filename character and is NOT recognized.
-pub(crate) fn source_is_contents(raw_source: &str) -> bool {
-    let s = raw_source.trim_end_matches([' ', '\t']);
-    if s.is_empty() {
-        return false;
-    }
-    let bytes = s.as_bytes();
-    let last = bytes[bytes.len() - 1];
-
-    // Trailing directory separator
-    if last == b'/' {
-        return true;
-    }
-    #[cfg(windows)]
-    if last == b'\\' {
-        return true;
-    }
-
-    // Trailing "/." or just "." — rsync flist.c:2296
-    if last == b'.' {
-        if bytes.len() == 1 {
-            return true; // source is exactly "."
-        }
-        let second_last = bytes[bytes.len() - 2];
-        if second_last == b'/' {
-            return true;
-        }
-        #[cfg(windows)]
-        if second_last == b'\\' {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Extract the source's final path component (basename) as an OsString,
-/// regardless of whether the source is local or remote. Returns None for
-/// empty, root, or "." basenames (which would be meaningless to append).
-fn source_basename(src: &Endpoint) -> Option<OsString> {
-    let basename = match src {
-        Endpoint::Local(p) => p.file_name().map(|s| s.to_os_string()),
-        Endpoint::Remote(r) => match &r.path {
-            RemotePath::Module { rel_path, .. } | RemotePath::Root { rel_path } => {
-                rel_path.file_name().map(|s| s.to_os_string())
-            }
-            RemotePath::Discovery => None,
-        },
-    };
-    match basename {
-        Some(b) if !b.is_empty() && b != "." => Some(b),
-        _ => None,
-    }
-}
-
-/// Returns true if the destination should be treated as a container
-/// (i.e. the source should be placed INSIDE it, not as it).
-///
-/// Matches rsync's `main.c:get_local_name`: a dest is a container if it
-/// has a trailing slash, or if it already exists as a directory.
-pub(crate) fn dest_is_container(raw_dest: &str, dst: &Endpoint) -> bool {
-    let s = raw_dest.trim_end_matches([' ', '\t']);
-    // Trailing "/" or "/." counts as container ("put into here").
-    if s.ends_with('/') || s.ends_with("/.") {
-        return true;
-    }
-    #[cfg(windows)]
-    if s.ends_with('\\') || s.ends_with("\\.") {
-        return true;
-    }
-    // Existing directory (local only — remote requires an RPC we don't want here).
-    if let Endpoint::Local(p) = dst {
-        if p.is_dir() {
-            return true;
-        }
-    }
-    false
-}
-
-/// Apply rsync-style destination semantics to compute the final target path.
-///
-/// Matches the union of rsync `flist.c:send_file_list` (source slash) and
-/// `main.c:get_local_name` (dest container detection):
-///
-///   - If source is "contents" form (`src/`, `src/.`, `.`) → dest used as-is.
-///   - Else if dest is a container (trailing slash, or existing local dir) →
-///     append source's basename to dest.
-///   - Else → dest used as-is (the user named an exact target path / rename).
-///
-/// Examples:
-///   blit copy /a/src  /b/dst/    ->  /b/dst/src/...     (nest under dst)
-///   blit copy /a/src/ /b/dst/    ->  /b/dst/<contents>  (merge)
-///   blit copy /a/src  /b/newdst  ->  /b/newdst/...      (dst becomes src copy)
-///   blit copy /a/f.txt /b/dst/   ->  /b/dst/f.txt       (into dir)
-///   blit copy /a/f.txt /b/renamed.txt -> /b/renamed.txt (rename)
-pub(crate) fn resolve_destination(
-    raw_source: &str,
-    raw_dest: &str,
-    src: &Endpoint,
-    dst: Endpoint,
-) -> Endpoint {
-    if source_is_contents(raw_source) {
-        return dst;
-    }
-    if !dest_is_container(raw_dest, &dst) {
-        return dst;
-    }
-    let Some(basename) = source_basename(src) else {
-        return dst;
-    };
-    match dst {
-        Endpoint::Local(p) => Endpoint::Local(p.join(&basename)),
-        Endpoint::Remote(mut r) => {
-            r.path = match r.path {
-                RemotePath::Module { module, rel_path } => RemotePath::Module {
-                    module,
-                    rel_path: rel_path.join(&basename),
-                },
-                RemotePath::Root { rel_path } => RemotePath::Root {
-                    rel_path: rel_path.join(&basename),
-                },
-                other => other,
-            };
-            Endpoint::Remote(r)
-        }
-    }
-}
-
-/// Build a `FileFilter` from a transfer command's args. Convenience wrapper
-/// around `build_filter_from_inputs`.
+/// Build a `FileFilter` from a transfer command's args. Thin
+/// clap-side wrapper around `blit_app::transfers::filter::build`.
 pub(crate) fn build_filter(args: &TransferArgs) -> Result<FileFilter> {
-    build_filter_from_inputs(&FilterInputs::from_transfer(args))
+    filter::build(&filter_inputs(args))
 }
 
-/// Build the wire-side `FilterSpec` proto message from CLI args.
-/// Used by the remote pull path so the daemon enforces the same
-/// filter the CLI would have applied locally. `--files-from` is
-/// read here and shipped expanded so the daemon doesn't have to
-/// reach back into the client's filesystem.
+/// Build the wire-side `FilterSpec` proto from CLI args. Thin
+/// wrapper around `blit_app::transfers::filter::build_spec`.
 pub(crate) fn build_filter_spec(args: &TransferArgs) -> Result<blit_core::generated::FilterSpec> {
-    use blit_core::generated::FilterSpec;
-    let mut spec = FilterSpec {
-        include: args.include.clone(),
-        exclude: args.exclude.clone(),
-        min_size: None,
-        max_size: None,
-        min_age_secs: None,
-        max_age_secs: None,
-        files_from: Vec::new(),
-    };
-    if let Some(s) = args.min_size.as_deref() {
-        spec.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
-    }
-    if let Some(s) = args.max_size.as_deref() {
-        spec.max_size = Some(parse_size(s).with_context(|| format!("--max-size {s}"))?);
-    }
-    if let Some(s) = args.min_age.as_deref() {
-        spec.min_age_secs = Some(
-            parse_duration(s)
-                .with_context(|| format!("--min-age {s}"))?
-                .as_secs(),
-        );
-    }
-    if let Some(s) = args.max_age.as_deref() {
-        spec.max_age_secs = Some(
-            parse_duration(s)
-                .with_context(|| format!("--max-age {s}"))?
-                .as_secs(),
-        );
-    }
-    if let Some(path) = args.files_from.as_ref() {
-        let entries = FileFilter::load_files_from(path)?;
-        spec.files_from = entries
-            .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-    }
-    Ok(spec)
-}
-
-/// Build a `FileFilter` from filter inputs. Single helper used by all
-/// commands (copy/mirror/move/check) so filter behavior is identical
-/// regardless of which CLI verb invoked it. The orchestrator-side
-/// helper — not the leaf code — is what calculates the filter.
-pub(crate) fn build_filter_from_inputs(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
-    let mut filter = FileFilter::default();
-    filter.include_files = inputs.include.to_vec();
-    filter.exclude_files = inputs.exclude.to_vec();
-    if let Some(s) = inputs.min_size {
-        filter.min_size = Some(parse_size(s).with_context(|| format!("--min-size {s}"))?);
-    }
-    if let Some(s) = inputs.max_size {
-        filter.max_size = Some(parse_size(s).with_context(|| format!("--max-size {s}"))?);
-    }
-    if let Some(s) = inputs.min_age {
-        filter.min_age = Some(parse_duration(s).with_context(|| format!("--min-age {s}"))?);
-    }
-    if let Some(s) = inputs.max_age {
-        filter.max_age = Some(parse_duration(s).with_context(|| format!("--max-age {s}"))?);
-    }
-    if filter.min_age.is_some() || filter.max_age.is_some() {
-        // Captured once per command invocation — calculated by orchestrator-side
-        // helper, not by leaf code each time `allows_entry` is called.
-        filter.reference_time = Some(SystemTime::now());
-    }
-    if let Some(path) = inputs.files_from {
-        filter.files_from = Some(FileFilter::load_files_from(path)?);
-    }
-    // R58-F12: validate glob patterns at CLI filter-construction
-    // time. The runtime build_globset silently drops invalid
-    // patterns (which is OK as a defense-in-depth fallback for
-    // corrupted profiles), but at the CLI layer we want to
-    // reject malformed globs up front with a pointer to the bad
-    // pattern. Operation-spec normalization already validates on
-    // the remote-pull path; this closes the symmetry gap for
-    // local / push paths.
-    filter
-        .validate_globs()
-        .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
-    Ok(filter)
+    filter::build_spec(&filter_inputs(args))
 }
 
 /// Prompt for confirmation of a destructive operation. Returns true if the user confirms.
@@ -323,12 +96,6 @@ fn confirm_destructive_operation(message: &str, skip_prompt: bool) -> Result<boo
     io::stdin().read_line(&mut input)?;
     let decision = input.trim().to_ascii_lowercase();
     Ok(decision == "y" || decision == "yes")
-}
-
-#[derive(Copy, Clone)]
-pub enum TransferKind {
-    Copy,
-    Mirror,
 }
 
 pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferKind) -> Result<()> {
@@ -362,7 +129,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
     // proper plumbing of null semantics through mirror-delete
     // and the remote paths is a post-release item.
     if args.null {
-        if matches!(mode, TransferKind::Mirror) {
+        if mode.is_mirror() {
             bail!(
                 "--null is not supported with `blit mirror`: the \
                  null sink discards writes, but mirror's \
@@ -387,8 +154,31 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
+    // `--detach` is only honored on daemon-to-daemon
+    // delegated transfers. The CLI gates it up-front so a
+    // misuse fails before any RPCs fire — clearer than
+    // letting the daemon emit a phased error mid-stream.
+    if args.detach {
+        match (&src_endpoint, &dst_endpoint) {
+            (Endpoint::Local(_), _) | (_, Endpoint::Local(_)) => bail!(
+                "--detach is only supported for remote→remote transfers \
+                 (the CLI is in the byte path for any local endpoint, so \
+                 disconnecting would drop the bytes)"
+            ),
+            (Endpoint::Remote(_), Endpoint::Remote(_)) if args.relay_via_cli => bail!(
+                "--detach is incompatible with --relay-via-cli: the relay \
+                 path puts the CLI in the byte path, so detach would drop \
+                 the bytes. Drop --relay-via-cli to use the daemon-to-daemon \
+                 delegated path (which is the default for remote→remote)."
+            ),
+            (Endpoint::Remote(_), Endpoint::Remote(_)) => {
+                // Delegated remote→remote — detach is valid.
+            }
+        }
+    }
+
     // For mirror operations, prompt unless --yes or --dry-run
-    if matches!(mode, TransferKind::Mirror) && !args.dry_run {
+    if mode.is_mirror() && !args.dry_run {
         let prompt = format!(
             "Mirror will delete extraneous files at destination '{}'. Continue?",
             dst_display
@@ -412,70 +202,42 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
-    match (src_endpoint, dst_endpoint) {
-        (Endpoint::Local(src_path), Endpoint::Local(dst_path)) => {
-            if !src_path.exists() {
-                bail!("source path does not exist: {}", src_path.display());
+    match select_transfer_route(src_endpoint, dst_endpoint, mode, args.relay_via_cli) {
+        TransferRoute::LocalToLocal { src, dst, mirror } => {
+            if !src.exists() {
+                bail!("source path does not exist: {}", src.display());
             }
-            run_local_transfer(
-                ctx,
-                args,
-                &src_path,
-                &dst_path,
-                matches!(mode, TransferKind::Mirror),
-            )
-            .await
-            .map(|_| ())
+            run_local_transfer(ctx, args, &src, &dst, mirror)
+                .await
+                .map(|_| ())
         }
-        (Endpoint::Local(src_path), Endpoint::Remote(remote)) => {
-            if !src_path.exists() {
-                bail!("source path does not exist: {}", src_path.display());
+        TransferRoute::LocalToRemote { src, dst, mirror } => {
+            if !src.exists() {
+                bail!("source path does not exist: {}", src.display());
             }
             ensure_remote_push_supported(args)?;
-            ensure_remote_destination_supported(&remote)?;
-            run_remote_push_transfer(
-                args,
-                Endpoint::Local(src_path),
-                remote,
-                matches!(mode, TransferKind::Mirror),
-            )
-            .await
+            ensure_remote_destination_supported(&dst)?;
+            run_remote_push_transfer(args, Endpoint::Local(src), dst, mirror).await
         }
-        (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
+        TransferRoute::RemoteToLocal { src, dst, mirror } => {
             ensure_remote_pull_supported(args)?;
-            ensure_remote_source_supported(&remote)?;
+            ensure_remote_source_supported(&src)?;
             run_remote_pull_transfer(
-                args,
-                remote,
-                &dst_path,
-                matches!(mode, TransferKind::Mirror),
-                false, // not a move — source survives
+                args, src, &dst, mirror, false, // not a move — source survives
             )
             .await
         }
-        (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
+        TransferRoute::RemoteToRemoteRelay { src, dst, mirror } => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            if args.relay_via_cli {
-                ensure_remote_push_supported(args)?;
-                run_remote_push_transfer(
-                    args,
-                    Endpoint::Remote(src),
-                    dst,
-                    matches!(mode, TransferKind::Mirror),
-                )
-                .await
-            } else {
-                ensure_remote_pull_supported(args)?;
-                run_remote_to_remote_direct(
-                    args,
-                    src,
-                    dst,
-                    matches!(mode, TransferKind::Mirror),
-                    false, // not a move
-                )
-                .await
-            }
+            ensure_remote_push_supported(args)?;
+            run_remote_push_transfer(args, Endpoint::Remote(src), dst, mirror).await
+        }
+        TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
+            ensure_remote_source_supported(&src)?;
+            ensure_remote_destination_supported(&dst)?;
+            ensure_remote_pull_supported(args)?;
+            run_remote_to_remote_direct(args, src, dst, mirror, false /* not a move */).await
         }
     }
 }
@@ -488,6 +250,23 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 
     if args.dry_run {
         bail!("move does not support --dry-run");
+    }
+
+    if args.detach {
+        // `blit move` runs a source-delete step after the
+        // transfer completes. With --detach the CLI exits as
+        // soon as the daemon's Started event arrives, so the
+        // delete step would never fire — either leaving the
+        // source around forever (silent move-becomes-copy) or
+        // racing the still-running transfer with rm. Refuse
+        // up front.
+        bail!(
+            "move does not support --detach: the source-delete step \
+             needs the CLI to await transfer completion, so detaching \
+             would silently turn a move into a copy. Use \
+             `blit copy --detach SRC DST` and `blit rm SRC` once you've \
+             confirmed the transfer completed via `blit jobs list`."
+        );
     }
 
     // R49-F1 (data-loss): reject `--exclude` / `--include` /
@@ -842,7 +621,6 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -879,7 +657,10 @@ mod tests {
             trace_data_plane: false,
             force_grpc: false,
             relay_via_cli: false,
+            detach: false,
             resume: false,
+            retry: 0,
+            wait: 5,
             null: false,
             json: false,
             exclude: vec![],
@@ -925,7 +706,10 @@ mod tests {
             trace_data_plane: false,
             force_grpc: false,
             relay_via_cli: false,
+            detach: false,
             resume: false,
+            retry: 0,
+            wait: 5,
             null: false,
             json: false,
             exclude: vec![],
@@ -943,217 +727,101 @@ mod tests {
         Ok(())
     }
 
-    // rsync-compat: "copy contents" detection matches flist.c:send_file_list
-    #[test]
-    fn source_is_contents_trailing_slash() {
-        assert!(source_is_contents("src/"));
-        assert!(source_is_contents("/a/b/src/"));
-        assert!(source_is_contents("src///"));
+    // rsync-resolution unit tests moved alongside the
+    // implementation to `blit_app::transfers::resolution`. The CLI
+    // module's tests retain only the end-to-end dispatcher tests
+    // above (`copy_local_transfers_file`,
+    // `copy_local_dry_run_creates_no_files`).
+
+    /// Build a minimal `TransferArgs` for the gate-rejection
+    /// tests below. Source / destination are stringy and never
+    /// touched by the path we're exercising — the bail happens
+    /// before any RPC fires.
+    fn detach_args(
+        source: &str,
+        destination: &str,
+        detach: bool,
+        relay_via_cli: bool,
+    ) -> TransferArgs {
+        TransferArgs {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            dry_run: false,
+            checksum: false,
+            size_only: false,
+            ignore_times: false,
+            ignore_existing: false,
+            force: false,
+            verbose: false,
+            progress: false,
+            yes: true,
+            workers: None,
+            trace_data_plane: false,
+            force_grpc: false,
+            relay_via_cli,
+            detach,
+            resume: false,
+            retry: 0,
+            wait: 5,
+            null: false,
+            json: false,
+            exclude: vec![],
+            include: vec![],
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+            delete_scope: "subset".into(),
+        }
+    }
+
+    fn ctx() -> AppContext {
+        AppContext {
+            perf_history_enabled: false,
+        }
     }
 
     #[test]
-    fn source_is_contents_trailing_dot_slash() {
-        assert!(source_is_contents("src/."));
-        assert!(source_is_contents("/a/b/src/."));
-    }
-
-    #[test]
-    fn source_is_contents_just_dot() {
-        assert!(source_is_contents("."));
-    }
-
-    #[test]
-    fn source_is_contents_no_trailing() {
-        assert!(!source_is_contents("src"));
-        assert!(!source_is_contents("/a/b/src"));
-        assert!(!source_is_contents(""));
-        assert!(!source_is_contents("src.txt"));
-        // second-to-last char is not a slash, so trailing '.' is part of filename
-        assert!(!source_is_contents("foo.bar"));
-    }
-
-    #[test]
-    fn source_is_contents_trims_whitespace() {
-        assert!(source_is_contents("src/  "));
-        assert!(source_is_contents("src/.\t"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn source_is_contents_windows_backslash() {
-        assert!(source_is_contents("src\\"));
-        assert!(source_is_contents("src\\."));
-        assert!(source_is_contents("C:\\path\\"));
-    }
-
-    // resolve_destination: core rsync-style semantics
-    //
-    // Rules (applied identically to local→local, local→remote, remote→local,
-    // remote→remote, since resolution happens at the top-level dispatch):
-    //   source contents form (SRC/, SRC/., .) → dest as-is (merge)
-    //   dest trailing slash OR existing local dir → append source basename (nest)
-    //   else → dest as-is (rename / exact target)
-
-    #[test]
-    fn resolve_destination_existing_dir_appends_basename() {
+    fn detach_rejected_for_local_to_local() {
         let tmp = tempdir().unwrap();
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Local(tmp.path().to_path_buf());
-        let dst_raw = tmp.path().to_string_lossy().into_owned();
-        let resolved = resolve_destination("/a/GameDir", &dst_raw, &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, tmp.path().join("GameDir")),
-            _ => panic!("expected local endpoint"),
-        }
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        let ctx = ctx();
+        let args = detach_args(src.to_str().unwrap(), dst.to_str().unwrap(), true, false);
+        let err = runtime()
+            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
+            .expect_err("local→local must reject --detach");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--detach is only supported for remote→remote"),
+            "got: {msg}"
+        );
     }
 
     #[test]
-    fn resolve_destination_trailing_slash_on_dest_appends_basename() {
-        // Dest doesn't exist, but has trailing slash → still a container.
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Local(PathBuf::from("/b/new_dst"));
-        let resolved = resolve_destination("/a/GameDir", "/b/new_dst/", &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/b/new_dst/GameDir")),
-            _ => panic!("expected local endpoint"),
-        }
+    fn detach_rejected_with_relay_via_cli() {
+        let ctx = ctx();
+        let args = detach_args("host-a:/m/", "host-b:/m/", true, true);
+        let err = runtime()
+            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
+            .expect_err("--relay-via-cli + --detach must bail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--detach is incompatible with --relay-via-cli"),
+            "got: {msg}"
+        );
     }
 
     #[test]
-    fn resolve_destination_nonexistent_no_slash_uses_dest_as_target() {
-        // rsync: `rsync src newdst` where newdst doesn't exist → newdst becomes src copy
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Local(PathBuf::from("/definitely/does/not/exist/newdst"));
-        let resolved =
-            resolve_destination("/a/GameDir", "/definitely/does/not/exist/newdst", &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/definitely/does/not/exist/newdst")),
-            _ => panic!("expected local endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_source_trailing_slash_keeps_dest() {
-        let tmp = tempdir().unwrap();
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Local(tmp.path().to_path_buf());
-        let dst_before = tmp.path().to_path_buf();
-        let dst_raw = tmp.path().to_string_lossy().into_owned();
-        let resolved = resolve_destination("/a/GameDir/", &dst_raw, &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, dst_before),
-            _ => panic!("expected local endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_source_dot_slash_keeps_dest() {
-        let tmp = tempdir().unwrap();
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Local(tmp.path().to_path_buf());
-        let dst_before = tmp.path().to_path_buf();
-        let dst_raw = tmp.path().to_string_lossy().into_owned();
-        let resolved = resolve_destination("/a/GameDir/.", &dst_raw, &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, dst_before),
-            _ => panic!("expected local endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_file_to_existing_dir_appends_filename() {
-        let tmp = tempdir().unwrap();
-        let src = Endpoint::Local(PathBuf::from("/a/file.txt"));
-        let dst = Endpoint::Local(tmp.path().to_path_buf());
-        let dst_raw = tmp.path().to_string_lossy().into_owned();
-        let resolved = resolve_destination("/a/file.txt", &dst_raw, &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, tmp.path().join("file.txt")),
-            _ => panic!("expected local endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_file_to_exact_path_is_rename() {
-        // Dest doesn't exist, no trailing slash → exact rename.
-        let src = Endpoint::Local(PathBuf::from("/a/file.txt"));
-        let dst = Endpoint::Local(PathBuf::from("/b/renamed.txt"));
-        let resolved = resolve_destination("/a/file.txt", "/b/renamed.txt", &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, PathBuf::from("/b/renamed.txt")),
-            _ => panic!("expected local endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_remote_dest_with_trailing_slash_appends() {
-        // Remote dest with trailing slash is a container (same rule as local).
-        use blit_core::remote::{RemoteEndpoint, RemotePath};
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Remote(RemoteEndpoint {
-            host: "h".into(),
-            port: 9031,
-            path: RemotePath::Module {
-                module: "m".into(),
-                rel_path: PathBuf::from("common"),
-            },
-        });
-        let resolved = resolve_destination("/a/GameDir", "h:/m/common/", &src, dst);
-        match resolved {
-            Endpoint::Remote(r) => match r.path {
-                RemotePath::Module { rel_path, .. } => {
-                    assert_eq!(rel_path, PathBuf::from("common/GameDir"))
-                }
-                _ => panic!("expected module path"),
-            },
-            _ => panic!("expected remote endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_remote_dest_no_slash_preserves_target() {
-        // No trailing slash + remote dest (can't stat) → treat as exact target.
-        use blit_core::remote::{RemoteEndpoint, RemotePath};
-        let src = Endpoint::Local(PathBuf::from("/a/GameDir"));
-        let dst = Endpoint::Remote(RemoteEndpoint {
-            host: "h".into(),
-            port: 9031,
-            path: RemotePath::Module {
-                module: "m".into(),
-                rel_path: PathBuf::from("common/target"),
-            },
-        });
-        let resolved = resolve_destination("/a/GameDir", "h:/m/common/target", &src, dst);
-        match resolved {
-            Endpoint::Remote(r) => match r.path {
-                RemotePath::Module { rel_path, .. } => {
-                    // No trailing slash on dest, can't stat remote → preserve target
-                    assert_eq!(rel_path, PathBuf::from("common/target"))
-                }
-                _ => panic!("expected module path"),
-            },
-            _ => panic!("expected remote endpoint"),
-        }
-    }
-
-    #[test]
-    fn resolve_destination_remote_source_appends_basename_on_container() {
-        use blit_core::remote::{RemoteEndpoint, RemotePath};
-        let tmp = tempdir().unwrap();
-        let src = Endpoint::Remote(RemoteEndpoint {
-            host: "h".into(),
-            port: 9031,
-            path: RemotePath::Module {
-                module: "m".into(),
-                rel_path: PathBuf::from("Games/DOOM"),
-            },
-        });
-        let dst = Endpoint::Local(tmp.path().to_path_buf());
-        let dst_raw = tmp.path().to_string_lossy().into_owned();
-        let resolved = resolve_destination("h:/m/Games/DOOM", &dst_raw, &src, dst);
-        match resolved {
-            Endpoint::Local(p) => assert_eq!(p, tmp.path().join("DOOM")),
-            _ => panic!("expected local endpoint"),
-        }
+    fn detach_rejected_on_blit_move() {
+        let ctx = ctx();
+        let args = detach_args("host-a:/m/", "host-b:/m/", true, false);
+        let err = runtime()
+            .block_on(run_move(&ctx, &args))
+            .expect_err("move + --detach must bail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("move does not support --detach"), "got: {msg}");
     }
 }

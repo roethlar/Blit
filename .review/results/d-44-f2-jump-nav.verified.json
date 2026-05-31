@@ -1,0 +1,16 @@
+{
+  "id": "d-44-f2-jump-nav",
+  "sha": "8a416575ee70c626938fac6cc12525a26e13bcbb",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T18:31:55Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "F2 SelectFirst/SelectLast re-anchor selected_active_id to the first/last active row in the same ordering rendered by the active table.",
+    "Empty active lists leave the cursor unanchored rather than preserving a stale selection."
+  ]
+}

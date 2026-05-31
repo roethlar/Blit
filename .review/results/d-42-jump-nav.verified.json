@@ -1,0 +1,16 @@
+{
+  "id": "d-42-jump-nav",
+  "sha": "4ee9d24e949959c6fc6343970fd5c7b28aa248b1",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T18:22:36Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "F1 and F3 wire SelectFirst/SelectLast only in their pane dispatch arms.",
+    "F3 select_first/select_last use the existing filter-aware row matching."
+  ]
+}

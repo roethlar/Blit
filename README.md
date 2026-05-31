@@ -71,8 +71,8 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 ### Building & Testing
 
 ```sh
-git clone https://github.com/your_org/blit.git
-cd blit
+git clone https://github.com/roethlar/Blit.git
+cd Blit
 cargo build                # Compile the full workspace
 cargo test                 # Run all tests
 

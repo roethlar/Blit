@@ -1,11 +1,29 @@
 use crate::cli::{Cli, CompletionArgs, CompletionKind, RemoteCompletionArgs, ShellCompletionArgs};
-use crate::util::{
-    append_completion_prefix, module_and_rel_path, parse_endpoint_or_local, Endpoint,
+use blit_app::endpoints::{
+    module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
 };
-use blit_core::generated::blit_client::BlitClient;
 use blit_core::generated::CompletionRequest;
 use clap::CommandFactory;
-use eyre::{bail, Context, Result};
+use eyre::{bail, Result};
+use std::path::Path;
+
+/// Build a path-completion prefix string. Reads the base path
+/// as the wire-string form (forward-slash joined components),
+/// adds a trailing `/` when the base is non-empty and not
+/// already slash-terminated, then appends the leaf prefix. Lives
+/// here because it's only useful for shell-completion prefix
+/// construction; `rel_path_to_string` itself lives in
+/// `blit_app::endpoints` since it's a generic helper.
+fn append_completion_prefix(base: &Path, extra: Option<&str>) -> String {
+    let mut prefix = rel_path_to_string(base);
+    if !prefix.is_empty() && !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+    if let Some(extra) = extra {
+        prefix.push_str(extra);
+    }
+    prefix
+}
 
 pub async fn run_completions(args: CompletionArgs) -> Result<()> {
     match args.kind {
@@ -53,9 +71,7 @@ async fn run_remote_completions(args: RemoteCompletionArgs) -> Result<()> {
     let prefix = append_completion_prefix(&rel_path, args.prefix.as_deref());
 
     let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
+    let mut client = blit_app::client::connect_with_timeout(uri).await?;
 
     let response = client
         .complete_path(CompletionRequest {

@@ -36,6 +36,7 @@ pub(crate) async fn handle_push_stream(
     mut stream: Streaming<ClientPushRequest>,
     tx: PushSender,
     force_grpc_data: bool,
+    active_job: &crate::active_jobs::ActiveJobGuard,
 ) -> Result<(), Status> {
     let mut module: Option<ModuleConfig> = None;
     let mut files_to_upload: Vec<FileHeader> = Vec::new();
@@ -64,6 +65,13 @@ pub(crate) async fn handle_push_stream(
                 if module.is_some() {
                     return Err(Status::invalid_argument("duplicate push header received"));
                 }
+                // Populate the ActiveJobs row now that we know
+                // the endpoint (b-2-set-endpoint). The wire
+                // `destination_path` is what the user supplied;
+                // we record it verbatim — containment is
+                // verified below when joining onto the module
+                // root.
+                active_job.set_endpoint(header.module.clone(), header.destination_path.clone());
                 let mut config =
                     resolve_module(&modules, default_root.as_ref(), &header.module).await?;
                 if config.read_only {
@@ -198,7 +206,7 @@ pub(crate) async fn handle_push_stream(
                                 })?
                                 .port();
 
-                            let token = generate_token();
+                            let token = generate_token()?;
                             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
                             let module_for_transfer = module_ref.clone();
@@ -274,7 +282,7 @@ pub(crate) async fn handle_push_stream(
                 .local_addr()
                 .map_err(|err| Status::internal(format!("querying listener addr: {}", err)))?
                 .port();
-            let token = generate_token();
+            let token = generate_token()?;
             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
             let upload_rx = upload_rx_opt.take().expect("upload receiver already taken");
             let module_for_transfer = module.clone();

@@ -1,23 +1,27 @@
 use crate::cli::TransferArgs;
-use eyre::{eyre, Context, Result};
-use std::path::{Path, PathBuf};
+use eyre::Result;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use blit_core::generated::FileHeader;
+use blit_app::transfers::remote::{
+    apply_pull_mirror_purge, run_pull_sync, run_remote_push, LocalPurgeStats, PullExecutionOutcome,
+    PullSyncExecution, PushExecution,
+};
 use blit_core::remote::pull::PullSyncOptions;
-use blit_core::remote::transfer::source::{
-    FilteredSource, FsTransferSource, RemoteTransferSource, TransferSource,
-};
 use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
-use blit_core::remote::{
-    RemoteEndpoint, RemotePullClient, RemotePullReport, RemotePushClient, RemotePushReport,
-};
-use std::sync::Arc;
+use blit_core::remote::{RemoteEndpoint, RemotePullReport, RemotePushReport};
 
-use super::endpoints::{format_remote_endpoint, Endpoint};
+use blit_app::endpoints::{format_remote_endpoint, Endpoint};
+
+/// CLI-facing alias for the library's pull-outcome struct.
+/// Field shape unchanged across the A.0 move — this preserves
+/// the public name `DeferredPullState` that `transfers::mod`
+/// already imports while letting the orchestration body live
+/// in `blit-app`.
+pub type DeferredPullState = PullExecutionOutcome;
 
 /// Spawn the per-transfer progress monitor. `suppress_final_line=true`
 /// lets move callers gate the post-transfer "[progress] final: …"
@@ -203,10 +207,6 @@ async fn run_remote_push_transfer_inner(
     mirror_mode: bool,
     defer_output: bool,
 ) -> Result<DeferredPushState> {
-    let mut client = RemotePushClient::connect(remote.clone())
-        .await
-        .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
-
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
         show_progress,
@@ -220,25 +220,6 @@ async fn run_remote_push_transfer_inner(
     // remote/transfer/source.rs) applies it identically to local→remote,
     // remote→remote, and local→local — full src/dst combination parity.
     let filter = super::build_filter(args)?;
-    let inner: Arc<dyn TransferSource> = match source {
-        Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
-        Endpoint::Remote(endpoint) => {
-            let client = RemotePullClient::connect(endpoint.clone())
-                .await
-                .with_context(|| {
-                    format!("connecting to source {}", endpoint.control_plane_uri())
-                })?;
-            // Use the relative path from the endpoint as the root
-            let root = match &endpoint.path {
-                blit_core::remote::RemotePath::Module { rel_path, .. } => rel_path.clone(),
-                blit_core::remote::RemotePath::Root { rel_path } => rel_path.clone(),
-                blit_core::remote::RemotePath::Discovery => PathBuf::from("."),
-            };
-            Arc::new(RemoteTransferSource::new(client, root))
-        }
-    };
-    let transfer_source: Arc<dyn TransferSource> =
-        Arc::new(FilteredSource::new(inner, filter.clone()));
 
     // R59 #1 F2: translate the user's --delete-scope flag to the wire
     // MirrorMode enum. Default to FilteredSubset so `push --include …
@@ -255,39 +236,35 @@ async fn run_remote_push_transfer_inner(
     } else {
         blit_core::generated::MirrorMode::Off
     };
-    let require_complete_scan = mirror_mode;
 
-    let push_result = client
-        .push(
-            transfer_source.clone(),
-            &filter,
-            mirror_mode,
-            mirror_kind,
-            args.force_grpc,
-            require_complete_scan,
-            progress_handle.as_ref(),
-            args.trace_data_plane,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "negotiating push manifest for {} -> {}",
-                transfer_source.root().display(),
-                format_remote_endpoint(&remote)
-            )
-        });
+    let execution = PushExecution {
+        source,
+        remote: remote.clone(),
+        filter,
+        mirror_mode,
+        mirror_kind,
+        force_grpc: args.force_grpc,
+        trace_data_plane: args.trace_data_plane,
+        require_complete_scan: mirror_mode,
+        remote_label: format_remote_endpoint(&remote),
+    };
+
+    // Push has no caller-side destructive step (mirror-delete is
+    // daemon-side and surfaces via the report), so unlike the pull
+    // lifecycle there is no need to drop the progress handle
+    // *before* a follow-up library call — the monitor's lifetime
+    // already matches the RPC.
+    let outcome = run_remote_push(execution, progress_handle.as_ref()).await;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
 
-    let report = push_result?;
-    let destination = format_remote_endpoint(&remote);
-
+    let outcome = outcome?;
     let state = DeferredPushState {
-        report,
-        destination,
+        report: outcome.report,
+        destination: outcome.destination,
         show_progress,
     };
     if !defer_output {
@@ -340,12 +317,11 @@ pub async fn run_remote_pull_transfer_deferred(
     .await
 }
 
-/// Captured pull-transfer state for deferred-output callers (move).
-pub struct DeferredPullState {
-    pub report: blit_core::remote::pull::RemotePullReport,
-    pub actual_dest: PathBuf,
-    pub mirror_purge_stats: Option<LocalPurgeStats>,
-}
+// `DeferredPullState` is now a type alias for
+// `blit_app::transfers::remote::PullExecutionOutcome` (see the
+// top of this file). Same field shape, same callers — the
+// orchestration body that builds it lives in `blit-app` after
+// this A.0 sub-slice.
 
 pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState) {
     if args.json {
@@ -382,17 +358,6 @@ async fn run_remote_pull_transfer_inner(
     // have produced for an equivalent push.
     let filter_spec = super::build_filter_spec(args)?;
 
-    let mut client = RemotePullClient::connect(remote.clone())
-        .await
-        .with_context(|| format!("connecting to {}", remote.control_plane_uri()))?;
-
-    // Destination is already resolved by the caller (see transfers::resolve_destination).
-    let actual_dest = dest_root.to_path_buf();
-
-    // Enumerate local files to build manifest
-    // Compute checksums if --checksum mode is requested
-    let local_manifest = enumerate_local_manifest(&actual_dest, args.checksum).await?;
-
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
         show_progress,
@@ -401,71 +366,59 @@ async fn run_remote_pull_transfer_inner(
         defer_output, // R53-F1: suppress final progress line on move
     );
 
-    // Build comparison options from CLI args
-    let pull_opts = PullSyncOptions {
-        force_grpc: args.force_grpc,
+    let execution = PullSyncExecution {
+        remote: remote.clone(),
+        dest_root: dest_root.to_path_buf(),
+        options: PullSyncOptions {
+            force_grpc: args.force_grpc,
+            mirror_mode,
+            delete_all_scope: args.delete_scope_all(),
+            filter: Some(filter_spec),
+            size_only: args.size_only,
+            ignore_times: args.ignore_times,
+            ignore_existing: args.ignore_existing,
+            force: args.force,
+            checksum: args.checksum,
+            resume: args.resume,
+            block_size: 0, // Use default (1 MiB)
+            // R49-F2: move arms set this true so the daemon refuses
+            // partial source scans before we delete the remote source.
+            require_complete_scan,
+        },
+        compute_checksums: args.checksum,
         mirror_mode,
-        delete_all_scope: args.delete_scope_all(),
-        filter: Some(filter_spec),
-        size_only: args.size_only,
-        ignore_times: args.ignore_times,
-        ignore_existing: args.ignore_existing,
-        force: args.force,
-        checksum: args.checksum,
-        resume: args.resume,
-        block_size: 0, // Use default (1 MiB)
-        // R49-F2: move arms set this true so the daemon refuses
-        // partial source scans before we delete the remote source.
-        require_complete_scan,
+        remote_label: format_remote_endpoint(&remote),
     };
 
-    // Use PullSync - sends local manifest to server, server compares and only sends what's needed
-    let report = client
-        .pull_sync(
-            &actual_dest,
-            local_manifest,
-            &pull_opts,
-            mirror_mode, // track_paths for mirror mode deletion
-            progress_handle.as_ref(),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "pulling from {} into {}",
-                format_remote_endpoint(&remote),
-                actual_dest.display()
-            )
-        })?;
+    // Lifecycle (round-2 fix for a0-pull-execution):
+    //
+    //   1. PullSync RPC with progress monitor live.
+    //   2. Tear down progress channel + drain monitor task.
+    //   3. Apply mirror-purge in the now-quiet state.
+    //   4. Print summary (or defer to the move caller).
+    //
+    // Round-1 bundled steps 1 and 3 into a single library call,
+    // which kept the monitor alive through purge and let stale
+    // [progress] ticks emit during destructive cleanup. The
+    // library now exposes the two halves separately so the CLI
+    // (and TUI) can place the lifecycle boundary at step 2.
+    //
+    // R53-F1 (`suppress_final_line`) and R46-F6 (purge stats in
+    // the same JSON document as the report) both still hold —
+    // R46-F6 is about ordering relative to *printing*, which
+    // still happens at the very end below.
+    let sync_outcome = run_pull_sync(execution, progress_handle.as_ref()).await?;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
 
-    // R46-F6: run mirror purge BEFORE emitting final JSON/human
-    // output, so deletion counts and failures show up in the
-    // structured summary. Pre-fix, the success line was already on
-    // stdout when purge ran; in JSON mode the purge's println!
-    // appended non-JSON text after the JSON document, and a purge
-    // failure surfaced too late for downstream tools that had
-    // already parsed the success state.
-    let mirror_purge_stats = if mirror_mode {
-        if let Some(ref delete_paths) = report.paths_to_delete {
-            if !delete_paths.is_empty() {
-                Some(delete_listed_paths(&actual_dest, delete_paths).await?)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let mirror_purge_stats = apply_pull_mirror_purge(&sync_outcome, mirror_mode).await?;
 
-    let state = DeferredPullState {
-        report,
-        actual_dest,
+    let state = PullExecutionOutcome {
+        report: sync_outcome.report,
+        actual_dest: sync_outcome.actual_dest,
         mirror_purge_stats,
     };
 
@@ -480,183 +433,16 @@ async fn run_remote_pull_transfer_inner(
     Ok(state)
 }
 
-/// Enumerate local files to build a manifest for comparison with remote.
-/// When `compute_checksums` is true, computes Blake3 checksums for each file.
-async fn enumerate_local_manifest(root: &Path, compute_checksums: bool) -> Result<Vec<FileHeader>> {
-    use blit_core::checksum::{hash_file, ChecksumType};
-    use rayon::prelude::*;
-    use walkdir::WalkDir;
-
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let root_path = root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        // First, collect all file entries
-        let entries: Vec<_> = WalkDir::new(&root_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .collect();
-
-        // Process files in parallel when computing checksums
-        let manifest: Vec<FileHeader> = if compute_checksums {
-            entries
-                .into_par_iter()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    let rel = path.strip_prefix(&root_path).ok()?;
-                    let relative_path = rel
-                        .iter()
-                        .map(|c| c.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join("/");
-
-                    let meta = std::fs::metadata(path).ok()?;
-                    let mtime_seconds = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-
-                    // Compute Blake3 checksum
-                    let checksum = hash_file(path, ChecksumType::Blake3).ok()?;
-
-                    Some(FileHeader {
-                        relative_path,
-                        size: meta.len(),
-                        mtime_seconds,
-                        permissions: 0,
-                        checksum,
-                    })
-                })
-                .collect()
-        } else {
-            // No checksums - use sequential iteration (faster for metadata-only)
-            entries
-                .into_iter()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    let rel = path.strip_prefix(&root_path).ok()?;
-                    let relative_path = rel
-                        .iter()
-                        .map(|c| c.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join("/");
-
-                    let meta = std::fs::metadata(path).ok()?;
-                    let mtime_seconds = meta
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-
-                    Some(FileHeader {
-                        relative_path,
-                        size: meta.len(),
-                        mtime_seconds,
-                        permissions: 0,
-                        checksum: vec![],
-                    })
-                })
-                .collect()
-        };
-
-        Ok(manifest)
-    })
-    .await
-    .map_err(|err| eyre!("manifest enumeration task failed: {}", err))?
-}
-
-#[derive(Debug)]
-pub struct LocalPurgeStats {
-    files_deleted: u64,
-    dirs_deleted: u64,
-}
-
-/// Apply a delete list provided by the daemon. Each wire string is
-/// routed through `path_safety::safe_join` before any filesystem op
-/// runs, so `..`, absolute paths, Windows drive prefixes, UNC paths,
-/// and the like are rejected uniformly with the rest of the receive
-/// pipeline. The prior lexical `starts_with` check (R5-F1 of
-/// `docs/reviews/followup_review_2026-05-02.md`) was insufficient:
-/// `dest_root.join("../victim")` produces `dest_root/../victim`
-/// which still starts with `dest_root` lexically and would have
-/// passed. Empty parent directories under `dest_root` are pruned
-/// bottom-up after the file deletions.
-async fn delete_listed_paths(
-    dest_root: &Path,
-    relative_paths: &[String],
-) -> Result<LocalPurgeStats> {
-    use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
-    use std::collections::BTreeSet;
-    let mut stats = LocalPurgeStats {
-        files_deleted: 0,
-        dirs_deleted: 0,
-    };
-    let mut candidate_parents: BTreeSet<PathBuf> = BTreeSet::new();
-
-    // R46-F3: capture canonical destination root once. If it can't
-    // be canonicalized (extremely unusual), fail closed — we
-    // refuse to apply a delete list rather than fall back to
-    // lexical-only on the destructive side. Lexical-only would
-    // expose mirror-purge to escape via pre-existing dest
-    // symlinks, and unlike the write side a delete failure here
-    // means data loss.
-    let canonical = canonical_dest_root(dest_root).map_err(|e| {
-        eyre!(
-            "cannot canonicalize destination '{}' for mirror-purge containment: {:#}",
-            dest_root.display(),
-            e
-        )
-    })?;
-
-    for rel in relative_paths {
-        let target = safe_join_contained(&canonical, dest_root, rel).map_err(|e| {
-            eyre!(
-                "daemon delete list contained unsafe path '{}': {:#}",
-                rel,
-                e
-            )
-        })?;
-        // safe_join("") returns dest_root itself; we never delete the
-        // destination root.
-        if target == dest_root {
-            eyre::bail!("daemon delete list referenced the destination root itself");
-        }
-        match tokio::fs::remove_file(&target).await {
-            Ok(()) => {
-                stats.files_deleted += 1;
-                let mut p = target.parent();
-                while let Some(parent) = p {
-                    if parent == dest_root {
-                        break;
-                    }
-                    candidate_parents.insert(parent.to_path_buf());
-                    p = parent.parent();
-                }
-            }
-            // Already gone is fine; daemon's view may lag behind.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(eyre!("failed to delete {}: {}", target.display(), e));
-            }
-        }
-    }
-
-    // Prune empty directories deepest-first.
-    let mut dirs: Vec<_> = candidate_parents.into_iter().collect();
-    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for dir in dirs {
-        if tokio::fs::remove_dir(&dir).await.is_ok() {
-            stats.dirs_deleted += 1;
-        }
-    }
-    Ok(stats)
-}
+// `enumerate_local_manifest`, `delete_listed_paths`,
+// `LocalPurgeStats`, and the pull-execution orchestration
+// (`PullSyncExecution` / `PullSyncOutcome` /
+// `PullExecutionOutcome` plus `run_pull_sync` and
+// `apply_pull_mirror_purge`) all live in
+// `blit_app::transfers::remote`. CLI imports them at the top of
+// this file; the inner function above is now a thin wrapper that
+// handles clap arg → primitive input translation, the
+// progress-monitor lifecycle (drop/await between pull_sync and
+// purge), and presentation.
 
 fn print_pull_json(
     report: &RemotePullReport,
@@ -784,65 +570,8 @@ pub fn describe_push_result(
     println!("Destination: {}", destination);
 }
 
-#[cfg(unix)]
-#[cfg(test)]
-mod delete_list_safety_tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn rejects_parent_traversal() {
-        let tmp = tempdir().unwrap();
-        let dest = tmp.path().join("dest");
-        let outside = tmp.path().join("outside");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::write(tmp.path().join("victim.txt"), b"keep me").unwrap();
-        std::fs::write(outside.parent().unwrap().join("victim.txt"), b"keep me").unwrap();
-
-        let bad = vec!["../victim.txt".to_string()];
-        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
-        assert!(
-            err.to_string().contains("unsafe path"),
-            "expected unsafe-path error, got: {err}"
-        );
-        // The sibling file the daemon was trying to reach must still exist.
-        assert!(tmp.path().join("victim.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn rejects_absolute_path() {
-        let tmp = tempdir().unwrap();
-        let dest = tmp.path().join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::write(tmp.path().join("victim.txt"), b"keep me").unwrap();
-
-        let bad = vec!["/etc/passwd".to_string(), "/tmp/victim.txt".to_string()];
-        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
-        assert!(err.to_string().contains("unsafe path"));
-        assert!(tmp.path().join("victim.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn deletes_in_scope_paths() {
-        let tmp = tempdir().unwrap();
-        let dest = tmp.path().join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-        std::fs::write(dest.join("ok.txt"), b"goodbye").unwrap();
-
-        let good = vec!["ok.txt".to_string()];
-        let stats = delete_listed_paths(&dest, &good).await.unwrap();
-        assert_eq!(stats.files_deleted, 1);
-        assert!(!dest.join("ok.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn rejects_root_self_reference() {
-        let tmp = tempdir().unwrap();
-        let dest = tmp.path().join("dest");
-        std::fs::create_dir_all(&dest).unwrap();
-        // Empty string normalizes to dest_root via safe_join.
-        let bad = vec!["".to_string()];
-        let err = delete_listed_paths(&dest, &bad).await.unwrap_err();
-        assert!(err.to_string().contains("destination root"));
-    }
-}
+// R46-F3 safety tests for delete_listed_paths moved alongside
+// the implementation in blit_app::transfers::remote::tests.
+// The CLI now relies on those library-local tests; this
+// module's test surface is reserved for CLI-entry-point
+// behavior.

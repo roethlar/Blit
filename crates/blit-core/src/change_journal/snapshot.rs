@@ -171,6 +171,26 @@ mod windows {
     use windows::Win32::System::Ioctl::{FSCTL_QUERY_USN_JOURNAL, USN_JOURNAL_DATA_V1};
     use windows::Win32::System::IO::DeviceIoControl;
 
+    /// audit-4: RAII guard for a raw `HANDLE` from `CreateFileW`.
+    /// `capture_snapshot` previously closed the handle only on the
+    /// success path, so a `GetFileInformationByHandle` failure (the `?`)
+    /// returned early and leaked the handle — deterministic on any
+    /// filesystem that transiently rejects that call. Closing in `Drop`
+    /// means every exit path (success, the `?` error, the early
+    /// `Ok(None)`) releases it. Close errors during cleanup aren't
+    /// actionable (the handle is going away regardless), so they're
+    /// dropped — matching the finding's "scope guard that calls
+    /// CloseHandle" option.
+    struct OwnedHandle(HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
     pub(super) fn capture_snapshot(path: &Path) -> Result<Option<WindowsSnapshot>> {
         use windows::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION;
 
@@ -192,22 +212,28 @@ mod windows {
                 path.display()
             ));
         }
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide_path.as_ptr()),
-                FILE_GENERIC_READ.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                Some(HANDLE::default()),
-            )
-        }
-        .map_err(|err| eyre!("CreateFileW {} failed: {err}", path.display()))?;
+        // audit-4: own the handle in an RAII guard so every exit path
+        // below (including the GetFileInformationByHandle `?` error)
+        // closes it. Previously only the success path called
+        // CloseHandle, leaking the handle on that error.
+        let handle = OwnedHandle(
+            unsafe {
+                CreateFileW(
+                    PCWSTR(wide_path.as_ptr()),
+                    FILE_GENERIC_READ.0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    None,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    Some(HANDLE::default()),
+                )
+            }
+            .map_err(|err| eyre!("CreateFileW {} failed: {err}", path.display()))?,
+        );
 
         let mut volume_info = BY_HANDLE_FILE_INFORMATION::default();
         unsafe {
-            GetFileInformationByHandle(handle, &mut volume_info).map_err(|err| {
+            GetFileInformationByHandle(handle.0, &mut volume_info).map_err(|err| {
                 eyre!(
                     "GetFileInformationByHandle {} failed: {err}",
                     path.display()
@@ -219,7 +245,7 @@ mod windows {
         let mut bytes_returned = 0u32;
         let io_result = unsafe {
             DeviceIoControl(
-                handle,
+                handle.0,
                 FSCTL_QUERY_USN_JOURNAL,
                 None,
                 0,
@@ -229,11 +255,8 @@ mod windows {
                 None,
             )
         };
-
-        unsafe {
-            CloseHandle(handle)
-                .map_err(|err| eyre!("CloseHandle {} failed: {err}", path.display()))?;
-        }
+        // `handle` (OwnedHandle) closes on drop at the end of this
+        // function — and on any early return above.
 
         if io_result.is_err() {
             return Ok(None);

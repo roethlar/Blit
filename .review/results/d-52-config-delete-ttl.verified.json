@@ -1,0 +1,16 @@
+{
+  "id": "d-52-config-delete-ttl",
+  "sha": "b629be114e3ab2ee97048bad2fad1e94b0fbcdda",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T21:17:02Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "`delete_status_ttl_ms` is defaulted and clamped consistently with the existing transfer TTL settings.",
+    "The router reads the clamped delete TTL each frame, so Ctrl+R config reloads retune the batch-delete terminal outcome without restarting."
+  ]
+}

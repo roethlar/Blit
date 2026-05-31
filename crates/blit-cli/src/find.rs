@@ -1,17 +1,9 @@
 use crate::cli::FindArgs;
-use crate::util::{module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint};
-use blit_core::generated::blit_client::BlitClient;
-use blit_core::generated::FindRequest;
-use eyre::{bail, Context, Result};
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct FindJsonRow {
-    path: String,
-    is_dir: bool,
-    size: u64,
-    mtime_seconds: i64,
-}
+use blit_app::admin::find::{self, FindEntry, FindParams};
+use blit_app::endpoints::{
+    module_and_rel_path, parse_endpoint_or_local, rel_path_to_string, Endpoint,
+};
+use eyre::{bail, Result};
 
 pub async fn run_find(args: FindArgs) -> Result<()> {
     let remote = match parse_endpoint_or_local(&args.target) {
@@ -35,10 +27,10 @@ pub async fn run_find(args: FindArgs) -> Result<()> {
     } else {
         true
     };
-    let start_path = rel_path_to_string(&rel_path);
-    let request = FindRequest {
-        module: module.clone(),
-        start_path,
+
+    let params = FindParams {
+        module,
+        start_path: rel_path_to_string(&rel_path),
         pattern: args.pattern.unwrap_or_default(),
         case_sensitive: !args.case_insensitive,
         include_files,
@@ -46,47 +38,27 @@ pub async fn run_find(args: FindArgs) -> Result<()> {
         max_results: args.limit.unwrap_or(0),
     };
 
-    let uri = remote.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to {}", uri))?;
-
-    let mut stream = client
-        .find(request)
-        .await
-        .map_err(|status| eyre::eyre!(status.message().to_string()))?
-        .into_inner();
-
     if args.json {
-        let mut rows = Vec::new();
-        while let Some(entry) = stream
-            .message()
-            .await
-            .map_err(|status| eyre::eyre!(status.message().to_string()))?
-        {
-            rows.push(FindJsonRow {
-                path: entry.relative_path,
-                is_dir: entry.is_dir,
-                size: entry.size,
-                mtime_seconds: entry.mtime_seconds,
-            });
-        }
+        let mut rows: Vec<FindEntry> = Vec::new();
+        find::stream(&remote, params, |entry| {
+            rows.push(entry);
+            Ok(())
+        })
+        .await?;
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else {
         println!("{:<48} {:>12} {:<5}", "PATH", "BYTES", "TYPE");
-        while let Some(entry) = stream
-            .message()
-            .await
-            .map_err(|status| eyre::eyre!(status.message().to_string()))?
-        {
+        find::stream(&remote, params, |entry| {
             let ty = if entry.is_dir { "dir" } else { "file" };
             let size = if entry.is_dir {
                 "-".to_string()
             } else {
                 entry.size.to_string()
             };
-            println!("{:<48} {:>12} {:<5}", entry.relative_path, size, ty);
-        }
+            println!("{:<48} {:>12} {:<5}", entry.path, size, ty);
+            Ok(())
+        })
+        .await?;
     }
 
     Ok(())

@@ -46,6 +46,65 @@ service Blit {
   // (gate ordering, allowlist semantics, client_capabilities
   // override boundary).
   rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
+
+  // Daemon-state snapshot for the TUI's F1 (Daemons) and F2
+  // (Transfers) panes, plus `blit jobs list <remote>`. Always
+  // available regardless of `--metrics`; see §6.4 of
+  // docs/plan/TUI_DESIGN.md. Counters read from the
+  // TransferMetrics atomics (so they're zero when the flag is
+  // off), but active[] / recent[] always populate from the
+  // always-on ActiveJobs table introduced in milestone B.
+  rpc GetState(GetStateRequest) returns (DaemonState);
+
+  // Cancel a daemon-side in-flight transfer by transfer_id.
+  // M-Jobs of docs/plan/TUI_DESIGN.md §6.5. Only delegated
+  // remote→remote pulls support cancellation today —
+  // push / pull / pull_sync have the CLI in the byte path,
+  // so a client-side cancel already drops the handler future
+  // and `CancelJob` from another client wouldn't have a
+  // meaningful semantic.
+  //
+  // Status semantics:
+  //   OK                    → the cancellation token was fired;
+  //                           the handler will tear down on its
+  //                           next .await resolve.
+  //   NOT_FOUND             → no active transfer matches the
+  //                           requested transfer_id (already
+  //                           completed, or never existed).
+  //   FAILED_PRECONDITION   → the transfer exists but its kind
+  //                           doesn't honor cancellation today.
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+
+  // Clear the daemon's recent-transfers list (GetState.recent[]).
+  // Wipes the in-memory recent-runs ring AND its persisted backing
+  // store (recents.jsonl). It deliberately does NOT touch the
+  // planner/predictor's historical telemetry (perf_local.jsonl) —
+  // that is a separate store and the operator clearing their recents
+  // view must never degrade prediction quality. rec-2 of the
+  // recent-persistence feature.
+  //
+  // Status semantics:
+  //   OK → recents cleared. ClearRecentResponse.cleared carries the
+  //        number of entries removed from the in-memory ring.
+  rpc ClearRecent(ClearRecentRequest) returns (ClearRecentResponse);
+
+  // Server-streaming subscription to live daemon events. Used by the
+  // TUI's F2 (Transfers) pane and by future `blit jobs watch` callers
+  // that want a push stream rather than `GetState` polling.
+  //
+  // c-2-subscribe-skeleton lands the wire surface with a single event
+  // variant (TransferStarted) and the daemon-side broadcast channel.
+  // Subsequent C sub-slices fan more variants into the oneof
+  // (TransferProgress, TransferComplete, TransferError,
+  // ModuleListChanged, DaemonHeartbeat) and add `transfer_id_filter`
+  // / `replay_recent` request fields. The field numbers in
+  // `DaemonEvent.payload` are stable; new variants append.
+  //
+  // Slow consumers receive a `gRPC Status::Aborted` on the stream
+  // (the daemon's broadcast channel dropped events while they fell
+  // behind). TUI consumers handle this by re-subscribing and
+  // refreshing snapshot state via `GetState`.
+  rpc Subscribe(SubscribeRequest) returns (stream DaemonEvent);
 }
 
 // Removed: `BlitAuth` service stub (2026-05-13). Original design
@@ -558,6 +617,29 @@ message DelegatedPullRequest {
 
   // Diagnostics-only.
   bool trace_data_plane = 31;
+
+  // Detach the transfer from the calling client.
+  //
+  // When false (the historical behavior), the destination
+  // daemon races the transfer against `tx.closed()` so a CLI
+  // disconnect drops the in-flight pull future and the data
+  // plane tears down (R30-F2).
+  //
+  // When true, the `tx.closed()` race disarms: the
+  // destination daemon owns the transfer through completion,
+  // failure, or `CancelJob(transfer_id)`. The CLI is free to
+  // exit immediately after the daemon's `Started` event
+  // arrives — useful for long-running remote→remote
+  // transfers that should outlive the operator's shell
+  // session.
+  //
+  // Only valid on `DelegatedPull` (the daemon-to-daemon byte
+  // path). Push / pull / pull_sync put the CLI in the byte
+  // path — detach is meaningless there because the CLI
+  // disconnecting drops the bytes. The CLI rejects `--detach`
+  // for those routes; the daemon-side flag is therefore
+  // unused on non-delegated kinds.
+  bool detach = 32;
 }
 
 message RemoteSourceLocator {
@@ -593,6 +675,12 @@ message DelegatedPullStarted {
   // assertion in tests is the CLI-side byte counter.
   string source_data_plane_endpoint = 1;
   uint32 stream_count = 2;
+  // Daemon-assigned transfer id (from the ActiveJobs table).
+  // Stable for the lifetime of the transfer; used by
+  // `blit jobs cancel <remote> <transfer_id>` and by
+  // `--detach` callers that exit after the Started event.
+  // Empty when the daemon is older than m-jobs-3.
+  string transfer_id = 3;
 }
 
 message BytesProgress {
@@ -630,4 +718,277 @@ message DelegatedPullError {
     APPLY = 5;               // dst-side apply failure (containment, disk, perms)
   }
   Phase phase = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// GetState — daemon snapshot. See §6.3 of docs/plan/TUI_DESIGN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message GetStateRequest {
+  // Maximum number of recent[] entries to return. 0 = use the
+  // daemon's default (50). Ignored if larger than what the daemon
+  // is tracking; the response simply contains all rows the ring
+  // currently holds.
+  uint32 recent_limit = 1;
+}
+
+message DaemonState {
+  // Daemon's own version (CARGO_PKG_VERSION), e.g. "0.1.0".
+  string version = 1;
+  // Seconds since the daemon process started serving RPCs.
+  uint64 uptime_seconds = 2;
+  // Currently-exported modules. Reuses the existing ModuleInfo
+  // message so clients that already render ListModules output can
+  // reuse the same rendering pipeline.
+  repeated ModuleInfo modules = 3;
+  // Live transfers — populated from the always-on ActiveJobs table.
+  // Not gated on `--metrics`; an operator can always ask the daemon
+  // what it's doing right now.
+  repeated ActiveTransfer active = 4;
+  // Recent completed transfers, oldest-first. Bounded by the
+  // daemon's recent-runs ring depth (default 50, configurable via
+  // GetStateRequest.recent_limit). Drained when the ring fills.
+  repeated TransferRecord recent = 5;
+  // Counter snapshot. Reads from the TransferMetrics atomics —
+  // when `--metrics` is off the atomics never incremented, so all
+  // fields are zero. active[] and recent[] are independent of this
+  // and remain populated.
+  Counters counters = 6;
+  // Mirrors the mDNS TXT advertisement: whether the daemon will
+  // accept inbound DelegatedPull requests.
+  bool delegation_enabled = 7;
+}
+
+// What kind of transfer an ActiveTransfer or TransferRecord row
+// represents. Defined at top level (not nested under
+// TransferStarted) so milestone C's Subscribe events can share the
+// same enum without a cycle.
+enum TransferKind {
+  TRANSFER_KIND_UNSPECIFIED = 0;
+  TRANSFER_KIND_PUSH = 1;
+  TRANSFER_KIND_PULL = 2;
+  TRANSFER_KIND_PULL_SYNC = 3;
+  TRANSFER_KIND_DELEGATED_PULL = 4;
+}
+
+message ActiveTransfer {
+  string transfer_id = 1;
+  TransferKind kind = 2;
+  // `<ip>:<port>` of the connecting peer, or "unknown" when the
+  // transport didn't surface one (in-process tests).
+  string peer = 3;
+  string module = 4;
+  // Module-relative path the transfer targets. Empty until the
+  // streaming RPCs (push / pull_sync) parse their first stream
+  // frame; populated immediately for pull / delegated_pull.
+  string path = 5;
+  uint64 start_unix_ms = 6;
+  // Byte-level progress fields. Always zero in milestone B —
+  // milestone C feeds them from the write-loop instrumentation.
+  uint64 bytes_completed = 7;
+  uint64 bytes_total = 8;
+}
+
+message TransferRecord {
+  string transfer_id = 1;
+  TransferKind kind = 2;
+  string peer = 3;
+  string module = 4;
+  string path = 5;
+  uint64 start_unix_ms = 6;
+  // `drop_unix_ms - start_unix_ms`, saturating at zero so a
+  // backwards clock jump can't underflow.
+  uint64 duration_ms = 7;
+  // Byte-level totals. Zero in milestone B — milestone C fills
+  // them from the write-loop instrumentation.
+  uint64 bytes = 8;
+  uint64 files = 9;
+  bool ok = 10;
+  // Empty when ok=true. Otherwise the handler's Status::message()
+  // for the failure, or a short "cancelled before outcome
+  // recorded" marker when the spawn task didn't reach the
+  // outcome-capture call.
+  string error_message = 11;
+}
+
+message Counters {
+  uint64 push_operations_total = 1;
+  uint64 pull_operations_total = 2;
+  uint64 purge_operations_total = 3;
+  uint64 active_transfers = 4;
+  uint64 transfer_errors_total = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CancelJob — fire the cancellation token of an active transfer.
+// See §6.5 of docs/plan/TUI_DESIGN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message CancelJobRequest {
+  string transfer_id = 1;
+}
+
+message CancelJobResponse {
+  // The transfer_id that was cancelled. Echoed back for the
+  // CLI's confirmation message. Empty body otherwise — the
+  // cancellation outcome (cancelled / unsupported / not found)
+  // is encoded in the gRPC Status, not the response.
+  string transfer_id = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// ClearRecent — wipe GetState.recent[] (in-memory ring + recents.jsonl).
+// Never touches the planner's perf_local.jsonl. rec-2 of
+// recent-persistence.
+// ─────────────────────────────────────────────────────────────────────
+
+message ClearRecentRequest {}
+
+message ClearRecentResponse {
+  // Number of recent entries removed from the in-memory ring.
+  uint32 cleared = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Subscribe — server-streaming live daemon events.
+// See §6.2 of docs/plan/TUI_DESIGN.md.
+// ─────────────────────────────────────────────────────────────────────
+
+message SubscribeRequest {
+  // Reserved for the event-category bitfield in a future slice
+  // (TRANSFERS=1, ERRORS=2, MODULES=4, HEARTBEAT=8). Today
+  // c-4 + c-2 + c-3 only emit transfer-family events, so the
+  // mask has nothing to filter; field is parsed and ignored.
+  // Locking the tag here keeps the wire shape stable.
+  uint32 event_mask = 1;
+
+  // c-5b: when true AND `transfer_id_filter` is non-empty,
+  // the daemon replays the per-job event ring for the
+  // targeted transfer (up to JOB_EVENT_RING_CAP recent events)
+  // before forwarding live broadcast events. Lets a TUI that
+  // connects mid-transfer pick up the bytes-completed history
+  // without missing the early progress.
+  //
+  // No-op when `transfer_id_filter` is empty (no specific
+  // ring to drain). No-op when set on its own (the row may
+  // not exist yet); same row-not-found behavior as filter
+  // alone.
+  bool replay_recent = 2;
+
+  // c-5a: when set, the daemon only forwards events whose
+  // `transfer_id` matches this string. Empty means "every
+  // transfer-related event" (the c-2/c-3/c-4 behavior).
+  //
+  // Filtering is applied daemon-side so a subscriber tracking
+  // a single transfer doesn't pay the wire/CPU cost of every
+  // other transfer's events. ModuleListChanged / DaemonHeartbeat
+  // (future variants) are not transfer-scoped — they always
+  // flow regardless of this filter.
+  string transfer_id_filter = 3;
+}
+
+// One frame on the Subscribe stream. New event variants are added by
+// appending to the oneof — field numbers are part of the wire
+// contract. c-2-subscribe-skeleton ships only TransferStarted; future
+// slices in milestone C add TransferProgress, TransferComplete,
+// TransferError, ModuleListChanged, DaemonHeartbeat.
+message DaemonEvent {
+  oneof payload {
+    TransferStarted  transfer_started  = 1;
+    TransferProgress transfer_progress = 2;
+    TransferComplete transfer_complete = 3;
+    TransferError    transfer_error    = 4;
+    // 5..6 reserved for ModuleListChanged, DaemonHeartbeat
+    // (later C sub-slices).
+  }
+  reserved 5, 6;
+}
+
+// Fired when the daemon registers a new active transfer in its
+// `ActiveJobs` table (the same registration that surfaces it in
+// `GetState.active[]`). Streaming RPCs (push, pull_sync) fire this
+// with empty `module`/`path` because those values arrive in the first
+// stream frame, not at dispatch time — subscribers can reconcile via
+// a follow-up GetState query if they need the populated endpoint
+// before the transfer completes.
+message TransferStarted {
+  string transfer_id = 1;
+  TransferKind kind = 2;
+  // `<ip>:<port>` of the connecting peer, or "unknown" when the
+  // transport didn't surface one (in-process tests).
+  string peer = 3;
+  // Module name on the daemon. Empty for streaming RPCs at
+  // registration time — populated by GetState.active[] once the
+  // first stream frame parses.
+  string module = 4;
+  // Module-relative path. Same "empty until first frame" caveat
+  // as `module`.
+  string path = 5;
+  // Unix milliseconds at which the active row was registered.
+  uint64 start_unix_ms = 6;
+}
+
+// Periodic chunk-granular progress for an in-flight transfer. The
+// daemon fires one TransferProgress per active row per tick (default
+// 10 Hz, see DEFAULT_PROGRESS_TICK_MS in service/core.rs) so a
+// subscribed TUI can render a live byte-level progress bar without
+// polling GetState.
+//
+// The bytes/files totals are absolute (cumulative since
+// TransferStarted), not deltas — consumers that want per-tick rates
+// subtract the previous observation. `throughput_bps` is the
+// daemon-computed instantaneous rate over the most recent tick
+// interval; a smoothed EWMA is a follow-up slice once we have an
+// operator pain signal to justify the extra state.
+message TransferProgress {
+  string transfer_id = 1;
+  // Cumulative bytes that landed on disk (same source as
+  // GetState.active[].bytes_completed).
+  uint64 bytes_completed = 2;
+  // Total bytes expected, when known. 0 until a future C
+  // sub-slice wires it from the manifest stage.
+  uint64 bytes_total = 3;
+  // Files completed; 0 until the files-counter slice wires it.
+  uint64 files_completed = 4;
+  // Total files expected; 0 until the manifest stage wires it.
+  uint64 files_total = 5;
+  // Instantaneous bytes-per-second over the most recent tick.
+  // Future slice may replace with an EWMA so subscribers see
+  // smoothed values; field name + semantic are forward-stable.
+  uint64 throughput_bps = 6;
+}
+
+// Fired when a transfer drains successfully (`ActiveJobGuard`
+// dropped with `record_outcome(ok=true, ...)`). Carries the
+// terminal byte/file totals and the wall-clock duration. Pairs
+// with `TransferStarted` to bracket a transfer's lifetime on the
+// event stream.
+message TransferComplete {
+  string transfer_id = 1;
+  // Cumulative bytes that landed on disk. Sourced from the
+  // per-row atomic that c-1a/c-1b wired (the same value
+  // `TransferRecord.bytes` carries at GetState.recent[]).
+  uint64 bytes = 2;
+  // Files completed. Always zero until a future C sub-slice
+  // wires the files counter; field reserved here so subscribers
+  // don't need a proto roll to render it.
+  uint64 files = 3;
+  uint64 duration_ms = 4;
+  // True when the transfer fell back to the gRPC control plane
+  // because the data plane couldn't be reserved. Always false
+  // in this slice — a future C sub-slice plumbs the bit through
+  // from the handler's result.
+  bool tcp_fallback_used = 5;
+}
+
+// Fired when a transfer drains in a failure state
+// (`ActiveJobGuard` dropped with `record_outcome(ok=false, ...)`
+// or with no outcome recorded, e.g. spawn-task cancellation).
+message TransferError {
+  string transfer_id = 1;
+  // Handler's failure message. Empty when the outcome was
+  // recorded with no message; "cancelled before outcome
+  // recorded" when the spawn task didn't reach the
+  // record_outcome call.
+  string message = 2;
 }

@@ -72,7 +72,7 @@ use crate::generated::{
     PeerCapabilities, PullChunk, PullRequest, PullSummary, ResumeSettings, TransferOperationSpec,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
-use crate::remote::transfer::progress::RemoteTransferProgress;
+use crate::remote::transfer::progress::{ByteProgressSink, RemoteTransferProgress};
 
 /// Phase-bearing pull-sync error used by delegation callers to preserve the
 /// source-refusal vs mid-transfer distinction across the `eyre::Report`
@@ -229,9 +229,20 @@ pub struct RemotePullClient {
 impl RemotePullClient {
     pub async fn connect(endpoint: RemoteEndpoint) -> Result<Self> {
         let uri = endpoint.control_plane_uri();
-        let client = BlitClient::connect(uri.clone())
+        // audit-2: bound the connect (30s). Plain `BlitClient::connect`
+        // has no deadline, so an unreachable source daemon would hang a
+        // delegated/remote pull for the OS TCP timeout (60-127s). The
+        // outer `tokio::time::timeout` is what bounds slow DNS too —
+        // `connect_timeout` alone only bounds the post-resolution TCP
+        // attempt (tonic/hyper-util resolve the name first).
+        let conn = tonic::transport::Endpoint::from_shared(uri.clone())
+            .map_err(|err| eyre!("invalid endpoint {}: {}", uri, err))?
+            .connect_timeout(std::time::Duration::from_secs(30));
+        let channel = tokio::time::timeout(std::time::Duration::from_secs(30), conn.connect())
             .await
+            .map_err(|_| eyre!("connecting to {} timed out", uri))?
             .map_err(|err| eyre!("failed to connect to {}: {}", uri, err))?;
+        let client = BlitClient::new(channel);
 
         Ok(Self { endpoint, client })
     }
@@ -352,11 +363,17 @@ impl RemotePullClient {
                     }
                     // Spawn data plane as background task so we can continue processing
                     // ManifestBatch messages on the control plane.
+                    // `pull` is CLI-only — no daemon-side ActiveJobs
+                    // row to feed a byte sink for, so pass None.
+                    // `pull_sync_with_spec`'s site below is the one
+                    // that threads through the daemon's per-row
+                    // counter for delegated_pull.
                     data_plane_handle = Some(AbortOnDrop::new(self.spawn_data_plane_receiver(
                         neg,
                         dest_root,
                         track_paths,
                         progress,
+                        None,
                     )?));
                 }
                 Some(pull_chunk::Payload::Summary(summary)) => {
@@ -410,6 +427,7 @@ impl RemotePullClient {
         dest_root: &Path,
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
+        byte_progress: Option<&ByteProgressSink>,
     ) -> Result<JoinHandle<Result<DataPlaneResult>>> {
         if negotiation.tcp_port == 0 {
             bail!("server provided zero data-plane port for pull");
@@ -424,6 +442,7 @@ impl RemotePullClient {
         let stream_count = negotiation.stream_count.max(1) as usize;
         let dest_root = dest_root.to_path_buf();
         let progress = progress.cloned();
+        let byte_progress = byte_progress.cloned();
 
         Ok(tokio::spawn(async move {
             receive_data_plane_streams_owned(
@@ -434,6 +453,7 @@ impl RemotePullClient {
                 dest_root,
                 track_paths,
                 progress,
+                byte_progress,
             )
             .await
         }))
@@ -595,7 +615,11 @@ impl RemotePullClient {
         progress: Option<&RemotePullProgress>,
     ) -> Result<RemotePullReport> {
         let spec = Self::build_spec_from_options(&self.endpoint, options)?;
-        self.pull_sync_with_spec(dest_root, local_manifest, spec, track_paths, progress)
+        // CLI-side `pull_sync` has no daemon-side byte counter
+        // to feed. Callers that need byte-level reports (e.g.
+        // the dst-daemon handler for delegated_pull) reach
+        // through `pull_sync_with_spec` directly with a sink.
+        self.pull_sync_with_spec(dest_root, local_manifest, spec, track_paths, progress, None)
             .await
     }
 
@@ -619,6 +643,7 @@ impl RemotePullClient {
         spec: TransferOperationSpec,
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
+        byte_progress: Option<&ByteProgressSink>,
     ) -> Result<RemotePullReport> {
         use tokio_stream::wrappers::ReceiverStream;
 
@@ -889,6 +914,7 @@ impl RemotePullClient {
                         dest_root,
                         track_paths,
                         progress,
+                        byte_progress,
                     )?));
                 }
                 Some(server_pull_message::Payload::Summary(summary)) => {
@@ -1538,6 +1564,7 @@ async fn receive_data_plane_streams_owned(
     dest_root: PathBuf,
     track_paths: bool,
     progress: Option<RemotePullProgress>,
+    byte_progress: Option<ByteProgressSink>,
 ) -> Result<DataPlaneResult> {
     let mut result = DataPlaneResult {
         files_transferred: 0,
@@ -1554,6 +1581,7 @@ async fn receive_data_plane_streams_owned(
             &dest_root,
             track_paths,
             progress.as_ref(),
+            byte_progress.as_ref(),
             &mut stats,
         )
         .await?;
@@ -1579,6 +1607,12 @@ async fn receive_data_plane_streams_owned(
         let token_clone = Arc::clone(&token);
         let dest_root_clone = dest_root.clone();
         let progress_clone = progress.clone();
+        // Each parallel worker reports against the SAME atomic —
+        // clones share the Arc inside `ByteProgressSink`. N
+        // workers running concurrently produce N×bigger reported
+        // numbers per snapshot, which is exactly correct: total
+        // bytes landed across all streams.
+        let byte_progress_clone = byte_progress.clone();
         handles.push(AbortOnDrop::new(tokio::spawn(async move {
             let mut stats = PullWorkerStats::new();
             receive_data_plane_stream_inner(
@@ -1588,6 +1622,7 @@ async fn receive_data_plane_streams_owned(
                 &dest_root_clone,
                 track_paths,
                 progress_clone.as_ref(),
+                byte_progress_clone.as_ref(),
                 &mut stats,
             )
             .await?;
@@ -1627,6 +1662,7 @@ async fn receive_data_plane_stream_inner(
     dest_root: &Path,
     track_paths: bool,
     progress: Option<&RemotePullProgress>,
+    byte_progress: Option<&ByteProgressSink>,
     stats: &mut PullWorkerStats,
 ) -> Result<()> {
     let addr = format!("{}:{}", host, port);
@@ -1644,6 +1680,7 @@ async fn receive_data_plane_stream_inner(
     // execute_receive_pipeline parse records + dispatch to the sink.
     use crate::remote::transfer::pipeline::execute_receive_pipeline;
     use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
+    use crate::remote::transfer::stall_guard::{StallGuard, PULL_STALL_TIMEOUT};
     use std::sync::Arc;
 
     let config = FsSinkConfig {
@@ -1664,8 +1701,22 @@ async fn receive_data_plane_stream_inner(
     } else {
         None
     };
+    // c-1b: attach the byte-progress sink so chunk-granularity
+    // writes report into the daemon's per-row atomic. When the
+    // caller is CLI-side this is None and behavior is unchanged.
+    if let Some(bp) = byte_progress {
+        sink = sink.with_byte_progress(bp.clone());
+    }
     let sink: Arc<dyn TransferSink> = Arc::new(sink);
 
+    // audit-1c: wrap the receive socket in a StallGuard so a transfer that
+    // goes silent (no bytes for PULL_STALL_TIMEOUT) fails fast with a
+    // clean TimedOut instead of pinning resources forever. This is an
+    // idle timeout (re-armed on every read), NOT a total deadline, so a
+    // steadily-progressing large transfer is never aborted. Applied to
+    // every data-plane pull (owner scope: all pulls). The gRPC-fallback
+    // receive path is separately bounded by HTTP/2 keepalive (audit-1b).
+    let mut stream = StallGuard::new(stream, PULL_STALL_TIMEOUT);
     let outcome = execute_receive_pipeline(&mut stream, sink, progress).await?;
 
     // Fold the unified outcome into pull's existing stats shape.

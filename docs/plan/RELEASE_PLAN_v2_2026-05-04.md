@@ -19,7 +19,7 @@ snapshot. Bird's-eye view:
 | 2.3 | `blit list` smart-dispatch | ✅ Closed `4d07177` |
 | 2.4 | `find --pattern` glob | ✅ Closed `090f5cd` (R41 followup `e8f6aec` for `literal_separator`) |
 | 2.5 | Shell completions | ✅ Closed `0139a71` (Option A — `clap_complete` generation) |
-| 2.6 | Live remote benchmark capture | ⏳ **Pending** — hardware-bound (two-daemon network) |
+| 2.6 | Live remote benchmark capture | ✅ Deferred to 0.1.1 (2026-05-31, hardware-bound; doesn't block 0.1.0) |
 | 2.7 | `POST_REVIEW_FIXES` Round 1 | ✅ Closed `96cbb10` (R42 `3d953d9`, R43 `8fd928e`) |
 | 2.8 | Predictor wire-or-delete | ✅ Wired (Option: wire) — phase 1 `ebcbb45`, phase 2 `da6ced2`, R44 `f83a208`, R45 `8351878` |
 | 3.1 | Daemon `TransferMetrics` decision | ✅ Closed (D5 modified by owner — `--metrics` now emits per-RPC summary lines, no longer dormant) |
@@ -353,6 +353,15 @@ Pick before release. README claim is the release-blocking surface,
 not the Phase 3.4.4 plan-doc reference.
 
 ### 2.6 Live remote benchmark capture
+
+**Status (2026-05-31):** ✅ Deferred to 0.1.1 (owner sign-off,
+2026-05-31). Hardware-bound: needs a two-daemon network on real
+fabric. The benchmark playbook in `docs/plan/BENCHMARK_10GBE_PLAN.md`
+is current (binary names refreshed to `blit`). Defer rationale:
+0.1.0 ships with documented "performance claims to be verified" and
+a clear path to 0.1.1 once the benchmark numbers land. No code in
+0.1.0 depends on the benchmark numbers; the perf-history /
+auto-tuning paths have unit + integration test coverage.
 
 **Status (2026-05-07):** ⏳ **PENDING — last open P0.** Hardware-bound;
 needs the two-daemon network. The benchmark playbook in

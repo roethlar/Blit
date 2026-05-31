@@ -611,6 +611,13 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
     >;
+    type SubscribeStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<blit_core::generated::DaemonEvent, tonic::Status>,
+                > + Send,
+        >,
+    >;
 
     async fn push(
         &self,
@@ -630,6 +637,13 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
     ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
+
+    async fn subscribe(
+        &self,
+        _: tonic::Request<blit_core::generated::SubscribeRequest>,
+    ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -688,6 +702,27 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     ) -> Result<tonic::Response<Self::DelegatedPullStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
+
+    async fn get_state(
+        &self,
+        _: tonic::Request<blit_core::generated::GetStateRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DaemonState>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
+
+    async fn cancel_job(
+        &self,
+        _: tonic::Request<blit_core::generated::CancelJobRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::CancelJobResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
+
+    async fn clear_recent(
+        &self,
+        _: tonic::Request<blit_core::generated::ClearRecentRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::ClearRecentResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("stale daemon"))
+    }
 }
 
 struct RejectingPullSyncBlit;
@@ -711,6 +746,13 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
     >;
     type DelegatedPullStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::DelegatedPullProgress, tonic::Status>,
+    >;
+    type SubscribeStream = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<blit_core::generated::DaemonEvent, tonic::Status>,
+                > + Send,
+        >,
     >;
 
     async fn push(
@@ -740,6 +782,15 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         ))
     }
 
+    async fn subscribe(
+        &self,
+        _: tonic::Request<blit_core::generated::SubscribeRequest>,
+    ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
+        ))
+    }
+
     async fn list(
         &self,
         _: tonic::Request<blit_core::generated::ListRequest>,
@@ -807,6 +858,33 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         &self,
         _: tonic::Request<blit_core::generated::DelegatedPullRequest>,
     ) -> Result<tonic::Response<Self::DelegatedPullStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
+        ))
+    }
+
+    async fn get_state(
+        &self,
+        _: tonic::Request<blit_core::generated::GetStateRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::DaemonState>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
+        ))
+    }
+
+    async fn cancel_job(
+        &self,
+        _: tonic::Request<blit_core::generated::CancelJobRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::CancelJobResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "test only exercises pull_sync",
+        ))
+    }
+
+    async fn clear_recent(
+        &self,
+        _: tonic::Request<blit_core::generated::ClearRecentRequest>,
+    ) -> Result<tonic::Response<blit_core::generated::ClearRecentResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

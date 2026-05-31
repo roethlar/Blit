@@ -79,6 +79,71 @@ pub enum Commands {
         #[command(subcommand)]
         command: DiagnosticsCommand,
     },
+    /// Inspect transfer jobs on a remote daemon
+    Jobs {
+        #[command(subcommand)]
+        command: JobsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JobsCommand {
+    /// List active and recent transfers on a remote daemon
+    List(JobsListArgs),
+    /// Cancel an active transfer on a remote daemon
+    Cancel(JobsCancelArgs),
+    /// Watch an active transfer until it completes
+    Watch(JobsWatchArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsListArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Maximum number of recent transfers to return. 0 means
+    /// the daemon's default (50).
+    #[arg(long, default_value_t = 0)]
+    pub recent_limit: u32,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsWatchArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Transfer id to watch — typically obtained from
+    /// `blit jobs list <remote>` or the `--detach` output.
+    pub transfer_id: String,
+    /// Poll interval in milliseconds. Default 1000ms. A future
+    /// milestone-C `Subscribe` RPC will replace polling with a
+    /// streaming subscription; until then this flag controls
+    /// the GetState polling cadence.
+    #[arg(long, default_value_t = 1000)]
+    pub interval_ms: u64,
+    /// Maximum wall-clock seconds to watch before giving up.
+    /// 0 = wait forever. Useful for scripts that don't want
+    /// to hang on a stuck transfer.
+    #[arg(long, default_value_t = 0)]
+    pub timeout_secs: u64,
+    /// Output as JSON-Lines (one object per poll, plus a
+    /// final outcome line). Default is a human-readable
+    /// updating ticker.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct JobsCancelArgs {
+    /// Remote host (e.g. server or server:port)
+    pub remote: String,
+    /// Transfer id to cancel — typically obtained from
+    /// `blit jobs list <remote>`.
+    pub transfer_id: String,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -186,11 +251,25 @@ pub struct TransferArgs {
     /// Resume interrupted transfers using block-level comparison
     #[arg(long, help_heading = "Reliability")]
     pub resume: bool,
-    // R58-F8: removed --retries flag. It was defined and stored
-    // into LocalMirrorOptions but never consumed by transfer
-    // code — a dead-code knob that lied to operators about
-    // having a retry budget. Re-add once we wire it to actual
-    // retry behavior in the transfer pipelines.
+    /// Retry the transfer up to N times on a transient failure (network
+    /// drop, stall timeout). 0 (default) disables retries. Because
+    /// transfers are resumable, each retry continues rather than
+    /// restarts.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Reliability"
+    )]
+    pub retry: u32,
+    /// Seconds to wait between retries (see --retry).
+    #[arg(
+        long,
+        value_name = "SECS",
+        default_value_t = 5,
+        help_heading = "Reliability"
+    )]
+    pub wait: u64,
 
     // -- Filtering: restrict which files are eligible for transfer.
     // Filters apply identically to all source/destination combinations
@@ -232,6 +311,28 @@ pub struct TransferArgs {
     /// source but the CLI can reach both daemons, or for benchmarking.
     #[arg(long, help_heading = "Performance / debug")]
     pub relay_via_cli: bool,
+    /// Fire-and-forget: hand the transfer to the destination
+    /// daemon and exit as soon as it starts.
+    ///
+    /// The CLI awaits the daemon's `Started` event (which
+    /// includes the daemon-assigned `transfer_id`), prints
+    /// it plus a `blit jobs cancel` hint, and returns. The
+    /// destination daemon completes the transfer regardless
+    /// of CLI connection state. Useful for long remote→remote
+    /// transfers that should outlive the operator's shell.
+    ///
+    /// Only valid for remote→remote transfers that use the
+    /// daemon-to-daemon delegated byte path (no `--relay-via-cli`,
+    /// not a `blit move`).
+    ///
+    /// Rejected with a clear error for:
+    /// - local-source or local-destination transfers (CLI is in
+    ///   the byte path)
+    /// - `--relay-via-cli` (CLI is in the byte path)
+    /// - `blit move` (the source-delete step needs the CLI to
+    ///   await transfer completion)
+    #[arg(long)]
+    pub detach: bool,
     /// Discard all writes — local copy only (read+pipeline benchmark).
     ///
     /// Reads and prepares all source data normally but does not write to
@@ -510,6 +611,27 @@ mod tests {
         // them to run so a misconfigured arg/conflict surfaces here
         // rather than the first time a real user hits the bad path.
         Cli::command().debug_assert();
+    }
+
+    /// retry-wait: the `--retry`/`--wait` flags parse, default to no
+    /// retries / 5s, and accept explicit values.
+    #[test]
+    fn retry_wait_flags_parse_and_default() {
+        let cli = Cli::try_parse_from(["blit", "copy", "src", "dst"]).expect("parse defaults");
+        let Commands::Copy(args) = cli.command else {
+            panic!("expected Copy");
+        };
+        assert_eq!(args.retry, 0, "retry defaults to 0 (no retries)");
+        assert_eq!(args.wait, 5, "wait defaults to 5s");
+
+        let cli =
+            Cli::try_parse_from(["blit", "copy", "--retry", "3", "--wait", "10", "src", "dst"])
+                .expect("parse explicit");
+        let Commands::Copy(args) = cli.command else {
+            panic!("expected Copy");
+        };
+        assert_eq!(args.retry, 3);
+        assert_eq!(args.wait, 10);
     }
 
     #[test]

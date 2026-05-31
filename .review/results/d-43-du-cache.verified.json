@@ -1,0 +1,16 @@
+{
+  "id": "d-43-du-cache",
+  "sha": "617733b88824a15b643593badcc4cd355ee16cb5",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T18:26:28Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "Accepted du results populate a per-path cache keyed by the canonical cursor spec.",
+    "Cache hits transition to Done and skip spawning a DiskUsage RPC while preserving request-id generation for future fetches."
+  ]
+}

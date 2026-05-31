@@ -1,0 +1,16 @@
+{
+  "id": "d-49-f3-multiselect",
+  "sha": "8ad34eab796ce610e86be2dc4ad8ad2fede63f29",
+  "verdict": "verified",
+  "reviewed_at": "2026-05-20T20:33:29Z",
+  "reviewer": "reviewer",
+  "validation": [
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets -- -D warnings",
+    "cargo test --workspace"
+  ],
+  "notes": [
+    "F3 space toggles marks on visible cursor rows, marked rows render with a leading marker and count in the footer, and marks clear on actual row-set/view replacement.",
+    "Round 2 splits filter-only clearing from view-state reset so Esc/cancel from filter edit preserves marks in the same view."
+  ]
+}

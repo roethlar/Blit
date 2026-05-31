@@ -174,6 +174,38 @@ pub struct BufferPool {
     bytes_through: AtomicU64,
 }
 
+/// audit-13: cache a returned buffer under a single lock acquisition,
+/// restoring its logical length to `buffer_size` WITHOUT re-zeroing the
+/// already-allocated bytes. Only buffers with enough capacity are cached,
+/// and the length is restored only when we're actually going to cache
+/// (so a full cache doesn't pay for the work). Callers must never rely on
+/// pool buffers being pre-zeroed — they're filled by a read and consumed
+/// as `[..bytes_read]`, so stale tail bytes are never observed.
+fn cache_returned_buffer(
+    cache: &Mutex<Vec<Vec<u8>>>,
+    pool_size: usize,
+    buffer_size: usize,
+    mut buffer: Vec<u8>,
+) {
+    if buffer.capacity() < buffer_size {
+        return; // too small to reuse; drop it
+    }
+    let mut guard = cache.lock();
+    if guard.len() >= pool_size {
+        return; // cache full; drop it
+    }
+    // Restore the logical length so `acquire()` hands out a full-size
+    // slice. `resize` zeroes only the grown delta (rare — only if a
+    // `take()`+`return_vec` shrank it); the common release path is already
+    // at `buffer_size`, so this is a no-op `truncate` with no zeroing.
+    if buffer.len() < buffer_size {
+        buffer.resize(buffer_size, 0);
+    } else {
+        buffer.truncate(buffer_size);
+    }
+    guard.push(buffer);
+}
+
 impl BufferPool {
     /// Create a new buffer pool.
     ///
@@ -205,17 +237,23 @@ impl BufferPool {
     /// Returns a buffer from the cache if available, otherwise allocates a new one.
     /// If a memory budget is set and exceeded, this will wait until memory is released.
     pub async fn acquire(self: &Arc<Self>) -> PoolBuffer {
-        // If we have a memory budget, acquire a permit first
-        if let Some(ref sem) = self.memory_semaphore {
-            // This will wait if we've exceeded the memory budget
-            let permit = sem
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore closed unexpectedly");
-            // We need to forget the permit since we'll release it manually in PoolBuffer::drop
-            std::mem::forget(permit);
-        }
+        // If we have a memory budget, acquire a permit (waits if the
+        // budget is exhausted). Keep it OWNED in a local through the
+        // allocation below — `std::mem::forget` (transfer to manual
+        // release via PoolBuffer::drop) happens only after the
+        // possibly-panicking `vec!`. If the allocation panics (capacity
+        // overflow / OOM unwind), the local permit drops during unwind
+        // and the semaphore is restored instead of leaking a permit
+        // forever (audit-12).
+        let permit = match self.memory_semaphore {
+            Some(ref sem) => Some(
+                sem.clone()
+                    .acquire_owned()
+                    .await
+                    .expect("semaphore closed unexpectedly"),
+            ),
+            None => None,
+        };
 
         // Try to get a buffer from the cache
         let buffer = {
@@ -234,6 +272,11 @@ impl BufferPool {
 
         self.in_use.fetch_add(1, Ordering::Relaxed);
 
+        // Allocation succeeded: hand the permit to manual management.
+        if let Some(permit) = permit {
+            std::mem::forget(permit);
+        }
+
         PoolBuffer {
             data: Some(data),
             pool: Arc::clone(self),
@@ -243,13 +286,17 @@ impl BufferPool {
     /// Try to acquire a buffer without waiting.
     /// Returns None if memory budget is exceeded or no buffers available.
     pub fn try_acquire(self: &Arc<Self>) -> Option<PoolBuffer> {
-        // If we have a memory budget, try to acquire a permit
-        if let Some(ref sem) = self.memory_semaphore {
-            match sem.clone().try_acquire_owned() {
-                Ok(permit) => std::mem::forget(permit),
+        // If we have a memory budget, try to acquire a permit. Keep it
+        // owned through the allocation; `forget` only after the
+        // possibly-panicking `vec!` so an unwind restores the semaphore
+        // rather than leaking the permit (audit-12).
+        let permit = match self.memory_semaphore {
+            Some(ref sem) => match sem.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
                 Err(_) => return None,
-            }
-        }
+            },
+            None => None,
+        };
 
         let buffer = {
             let mut cache = self.cache.lock();
@@ -266,6 +313,11 @@ impl BufferPool {
 
         self.in_use.fetch_add(1, Ordering::Relaxed);
 
+        // Allocation succeeded: hand the permit to manual management.
+        if let Some(permit) = permit {
+            std::mem::forget(permit);
+        }
+
         Some(PoolBuffer {
             data: Some(data),
             pool: Arc::clone(self),
@@ -273,26 +325,16 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool for reuse.
-    fn release(&self, mut buffer: Vec<u8>) {
+    fn release(&self, buffer: Vec<u8>) {
         self.in_use.fetch_sub(1, Ordering::Relaxed);
-
-        // Only cache if we haven't exceeded pool size
-        let should_cache = {
-            let cache = self.cache.lock();
-            cache.len() < self.pool_size
-        };
-
-        if should_cache && buffer.capacity() >= self.buffer_size {
-            // Reset length but keep capacity
-            buffer.clear();
-            buffer.resize(self.buffer_size, 0);
-
-            let mut cache = self.cache.lock();
-            if cache.len() < self.pool_size {
-                cache.push(buffer);
-            }
-        }
-        // Otherwise buffer is dropped and memory freed
+        // audit-13: cache under a SINGLE lock (was two — a pre-check then a
+        // re-check), and restore the logical length WITHOUT re-zeroing.
+        // Pooled buffers are always filled by a read and consumed as
+        // `[..bytes_read]` (see send_file_double_buffered), so the bytes
+        // beyond the read length are never observed — clearing + zeroing
+        // up to buffer_size on every release was pure wasted memory
+        // bandwidth on the hot path.
+        cache_returned_buffer(&self.cache, self.pool_size, self.buffer_size, buffer);
 
         // Release semaphore permit if we have a memory budget
         if let Some(ref sem) = self.memory_semaphore {
@@ -310,24 +352,9 @@ impl BufferPool {
     /// This is useful when a buffer was taken via `PoolBuffer::take()` and
     /// needs to be returned after processing. The buffer will only be cached
     /// if it has sufficient capacity and the pool has room.
-    pub fn return_vec(&self, mut buffer: Vec<u8>) {
-        // Only cache if we haven't exceeded pool size and buffer has right capacity
-        let should_cache = {
-            let cache = self.cache.lock();
-            cache.len() < self.pool_size
-        };
-
-        if should_cache && buffer.capacity() >= self.buffer_size {
-            // Reset length but keep capacity
-            buffer.clear();
-            buffer.resize(self.buffer_size, 0);
-
-            let mut cache = self.cache.lock();
-            if cache.len() < self.pool_size {
-                cache.push(buffer);
-            }
-        }
-        // Otherwise buffer is dropped and memory freed
+    pub fn return_vec(&self, buffer: Vec<u8>) {
+        // audit-13: same single-lock, no-redundant-zeroing path as release().
+        cache_returned_buffer(&self.cache, self.pool_size, self.buffer_size, buffer);
     }
 
     /// Get the buffer size for this pool
@@ -456,6 +483,34 @@ mod pool_tests {
         drop(buf2);
     }
 
+    /// audit-13: after dropping the per-release zeroing, a reused buffer
+    /// must still be handed back at full `buffer_size` length (the
+    /// contract `acquire()`/`as_mut_slice()` relies on), and carrying
+    /// dirty (non-zero) data is fine — no consumer assumes pool buffers
+    /// are pre-zeroed (they fill via read and slice to the written len).
+    #[tokio::test]
+    async fn reused_buffer_keeps_full_length_and_may_be_dirty() {
+        let pool = Arc::new(BufferPool::new(1024, 4, None));
+        {
+            let mut buf = pool.acquire().await;
+            for b in buf.as_mut_slice().iter_mut() {
+                *b = 0xAB; // dirty the whole buffer
+            }
+        } // drop → release → cached without re-zeroing
+
+        let buf = pool.acquire().await;
+        assert_eq!(
+            pool.stats().total_allocated,
+            1,
+            "the dirtied buffer was reused, not reallocated"
+        );
+        // The load-bearing contract: a full buffer_size slice is available
+        // so a reader can fill it.
+        assert_eq!(buf.as_slice().len(), 1024);
+        // Deliberately NOT asserting the contents are zeroed — dirty reuse
+        // is correct because consumers only read `[..bytes_read]`.
+    }
+
     #[tokio::test]
     async fn test_buffer_pool_memory_budget() {
         // Pool with budget for only 2 buffers
@@ -477,6 +532,47 @@ mod pool_tests {
 
         drop(buf2);
         drop(buf3);
+    }
+
+    /// audit-12: if the buffer allocation panics, the memory-budget
+    /// permit must be released by stack unwinding, not leaked. A leaked
+    /// permit permanently shrinks the pool and can starve all future
+    /// acquirers.
+    ///
+    /// `buffer_size = usize::MAX` makes `vec![0u8; usize::MAX]` panic with
+    /// "capacity overflow" (size exceeds isize::MAX) — an unwinding panic,
+    /// not an allocator abort — which is exactly the path the fix
+    /// protects. With `budget = 1024` the semaphore has exactly 1 permit.
+    #[test]
+    fn try_acquire_releases_permit_when_allocation_panics() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let pool = Arc::new(BufferPool::new(usize::MAX, 4, Some(1024)));
+
+        // Silence the default panic hook for the two intentional panics.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        // First acquire takes the lone permit, then panics in `vec!`.
+        let first = catch_unwind(AssertUnwindSafe(|| pool.try_acquire()));
+        // Second acquire discriminates the bug from the fix:
+        //   - permit leaked  → try_acquire_owned fails → returns None
+        //     (no panic) → catch_unwind is Ok(None).
+        //   - permit restored → reaches `vec!` again → panics →
+        //     catch_unwind is Err.
+        let second = catch_unwind(AssertUnwindSafe(|| pool.try_acquire()));
+
+        std::panic::set_hook(prev);
+
+        assert!(
+            first.is_err(),
+            "allocating usize::MAX bytes must panic (capacity overflow)"
+        );
+        assert!(
+            second.is_err(),
+            "second acquire must reach the allocation — proving the permit \
+             was released by unwind, not leaked"
+        );
     }
 
     #[tokio::test]

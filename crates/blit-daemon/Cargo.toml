@@ -8,12 +8,14 @@ license.workspace = true
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 blit-core = { path = "../blit-core" }
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+tokio-util = "0.7"
 eyre = "0.6"
 base64 = "0.22"
 rand = "0.10"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 toml = "1.1"
 sysinfo = { version = "0.38", default-features = false, features = ["disk"] }
 tar = "0.4"

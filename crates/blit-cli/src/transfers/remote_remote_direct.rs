@@ -1,22 +1,22 @@
 use crate::cli::TransferArgs;
-use eyre::{bail, eyre, Context, Result};
-use std::path::Path;
+use eyre::Result;
 
-#[cfg(test)]
-use std::path::PathBuf;
-
-use blit_core::generated::blit_client::BlitClient;
-use blit_core::generated::delegated_pull_error::Phase as DelegatedPullPhase;
-use blit_core::generated::delegated_pull_progress::Payload as DelegatedPayload;
-use blit_core::generated::{
-    BytesProgress, DelegatedPullRequest, DelegatedPullSummary, RemoteSourceLocator,
+use blit_app::transfers::remote::{
+    run_delegated_pull, run_delegated_pull_until_started, DelegatedPullExecution,
+    DelegatedPullOutcome,
 };
+use blit_core::generated::DelegatedPullSummary;
 use blit_core::remote::pull::PullSyncOptions;
-use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient};
-use tonic::Code;
+use blit_core::remote::RemoteEndpoint;
 
-use super::endpoints::format_remote_endpoint;
 use super::remote::spawn_progress_monitor_with_options;
+use blit_app::endpoints::format_remote_endpoint;
+
+/// CLI-facing alias for the library's delegated-pull outcome.
+/// Field shape unchanged across the A.0 move; preserves the
+/// public name `DeferredDelegatedState` that `transfers::mod`
+/// already imports.
+pub type DeferredDelegatedState = DelegatedPullOutcome;
 
 pub async fn run_remote_to_remote_direct(
     args: &TransferArgs,
@@ -66,11 +66,11 @@ pub async fn run_remote_to_remote_direct_deferred(
     .await
 }
 
-pub struct DeferredDelegatedState {
-    pub summary: blit_core::generated::DelegatedPullSummary,
-    pub src: RemoteEndpoint,
-    pub dst: RemoteEndpoint,
-}
+// `DeferredDelegatedState` is now a type alias for
+// `blit_app::transfers::remote::DelegatedPullOutcome` (see the
+// top of this file). Same field shape, same callers — the
+// orchestration body that builds it lives in `blit-app` after
+// this A.0 sub-slice.
 
 pub fn print_deferred_delegated_result(args: &TransferArgs, state: &DeferredDelegatedState) {
     if args.json {
@@ -90,7 +90,7 @@ async fn run_remote_to_remote_direct_inner(
     relay_fallback_suggestable: bool,
 ) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
-    let pull_opts = PullSyncOptions {
+    let options = PullSyncOptions {
         force_grpc: args.force_grpc,
         mirror_mode,
         delete_all_scope: args.delete_scope_all(),
@@ -106,55 +106,6 @@ async fn run_remote_to_remote_direct_inner(
         // partial source scans before we delete the source.
         require_complete_scan,
     };
-    let spec = RemotePullClient::build_spec_from_options(&src, &pull_opts)?;
-    let (dst_module, dst_destination_path) = destination_spec_fields(&dst)?;
-
-    let request = DelegatedPullRequest {
-        dst_module,
-        dst_destination_path,
-        src: Some(RemoteSourceLocator {
-            host: src.host.clone(),
-            port: src.port as u32,
-        }),
-        spec: Some(spec),
-        trace_data_plane: args.trace_data_plane,
-    };
-
-    let uri = dst.control_plane_uri();
-    let mut client = BlitClient::connect(uri.clone())
-        .await
-        .with_context(|| format!("connecting to destination {}", format_remote_endpoint(&dst)))?;
-
-    let response = client.delegated_pull(request).await.map_err(|status| {
-        let relay_hint = if relay_fallback_suggestable {
-            " or pass --relay-via-cli"
-        } else {
-            ""
-        };
-        let relay_clause = if relay_fallback_suggestable {
-            "; pass --relay-via-cli to route through the CLI host"
-        } else {
-            ""
-        };
-        if status.code() == Code::Unimplemented {
-            eyre!(
-                "destination daemon does not implement DelegatedPull; upgrade the destination \
-                 daemon{relay_hint}"
-            )
-        } else if status.code() == Code::Unavailable {
-            eyre!(
-                "destination daemon is unavailable for delegated pull ({}){}",
-                status.message(),
-                relay_clause
-            )
-        } else {
-            eyre!(
-                "delegated remote-to-remote transfer failed: {}",
-                status.message()
-            )
-        }
-    })?;
-    let mut stream = response.into_inner();
 
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
@@ -163,165 +114,122 @@ async fn run_remote_to_remote_direct_inner(
         args.json,
         defer_output, // R53-F1: suppress final progress line on move
     );
-    let mut summary: Option<DelegatedPullSummary> = None;
-    let mut failure: Option<eyre::Report> = None;
-    let mut bytes_progress_state = DelegatedBytesProgressState::default();
 
-    loop {
-        let message = match stream.message().await {
-            Ok(Some(message)) => message,
-            Ok(None) => break,
-            Err(status) => {
-                failure = Some(if status.code() == Code::Unavailable {
-                    let relay_clause = if relay_fallback_suggestable {
-                        "; pass --relay-via-cli to route through the CLI host"
-                    } else {
-                        ""
-                    };
-                    eyre!(
-                        "delegation stream lost ({}){}",
-                        status.message(),
-                        relay_clause
-                    )
-                } else {
-                    eyre!("delegation stream failed: {}", status.message())
-                });
-                break;
-            }
-        };
-        // clippy::collapsible_match wants the verbose-gated branch as a
-        // match guard. We keep the inner `if` because the alternative
-        // requires a second `Some(DelegatedPayload::Started(_)) => {}`
-        // fallthrough arm, which is uglier than the explicit gate.
-        #[allow(clippy::collapsible_match)]
-        match message.payload {
-            Some(DelegatedPayload::Started(started)) => {
-                if args.verbose && !args.json {
-                    eprintln!(
-                        "[delegation] destination pulling from {} ({} stream(s))",
-                        started.source_data_plane_endpoint, started.stream_count
-                    );
-                }
-            }
-            Some(DelegatedPayload::ManifestBatch(batch)) => {
-                if let Some(progress) = progress_handle.as_ref() {
-                    progress.report_manifest_batch(batch.file_count as usize);
-                }
-            }
-            Some(DelegatedPayload::BytesProgress(bytes)) => {
-                report_bytes_progress(progress_handle.as_ref(), &mut bytes_progress_state, &bytes);
-            }
-            Some(DelegatedPayload::Summary(done)) => {
-                summary = Some(done);
-                break;
-            }
-            Some(DelegatedPayload::Error(error)) => {
-                failure = Some(map_delegated_error(
-                    error.phase,
-                    &error.upstream_message,
-                    relay_fallback_suggestable,
-                ));
-                break;
-            }
-            None => {}
+    let dst_label = format_remote_endpoint(&dst);
+    let execution = DelegatedPullExecution {
+        src,
+        dst,
+        options,
+        trace_data_plane: args.trace_data_plane,
+        relay_fallback_suggestable,
+        dst_label,
+        // `--detach` is only honored on remote→remote
+        // delegated pulls (this code path). `run_transfer`
+        // rejects the flag on push / pull / pull_sync routes
+        // upstream, so we don't need to gate it here — but
+        // the daemon also refuses to honor it on those
+        // RPCs, so a misbehaving caller can't escape the
+        // CLI in-byte-path guarantee.
+        detach: args.detach,
+    };
+
+    // --detach exit-after-Started path. Opens the stream
+    // just long enough to learn the daemon-assigned
+    // transfer_id (which arrives on the Started event after
+    // m-jobs-3) and then drops the receiver. The daemon's
+    // tx.closed race is disarmed by `detach=true`, so the
+    // transfer continues. We synthesize a zero-summary
+    // outcome so the existing callers (`run_remote_to_remote_direct`
+    // which discards it; `_deferred` which is rejected up
+    // front for detach via run_move's gate) see a stable
+    // shape.
+    if args.detach {
+        // Tear down the progress monitor before printing —
+        // same posture as the non-detach success path, so
+        // any in-flight `[progress]` line doesn't get
+        // interleaved with the detach output.
+        drop(progress_handle);
+        if let Some(task) = progress_task {
+            let _ = task.await;
         }
+
+        let dst_for_state = execution.dst.clone();
+        // The cancel/status hint references the destination
+        // host as the argument to `blit jobs`. Derive it
+        // from the parsed `RemoteEndpoint` rather than the
+        // raw CLI input — string-splitting `args.destination`
+        // breaks `host:port:/module/path` (port dropped) and
+        // bracketed IPv6 (`[::1]:9031:/m/p` truncates to
+        // just `[`). `host_port_display` handles both via
+        // the same helper `RemoteEndpoint::display` already
+        // uses.
+        let dst_host_hint = dst_for_state.host_port_display();
+
+        let (started, _dst) = run_delegated_pull_until_started(execution).await?;
+        let transfer_id = started.transfer_id.clone();
+        let summary = DelegatedPullSummary {
+            files_transferred: 0,
+            bytes_transferred: 0,
+            bytes_zero_copy: 0,
+            tcp_fallback_used: false,
+            entries_deleted: 0,
+            source_peer_observed: started.source_data_plane_endpoint.clone(),
+        };
+        let state = DeferredDelegatedState {
+            summary,
+            src: dst_for_state.clone(), // source endpoint not surfaced on Started
+            dst: dst_for_state,
+        };
+        if args.json {
+            print_detach_json(&transfer_id);
+        } else {
+            print_detach_human(&transfer_id, &dst_host_hint);
+        }
+        return Ok(state);
     }
+
+    // CLI-side presentation hook for the destination's `Started`
+    // event. M-C's `AppProgressEvent` reshape will replace the
+    // callback with a stream variant that both CLI and TUI
+    // handle uniformly; the closure is the stopgap.
+    let verbose_human = args.verbose && !args.json;
+    let outcome = run_delegated_pull(execution, progress_handle.as_ref(), |started| {
+        if verbose_human {
+            eprintln!(
+                "[delegation] destination pulling from {} ({} stream(s))",
+                started.source_data_plane_endpoint, started.stream_count
+            );
+        }
+    })
+    .await;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
-    if let Some(error) = failure {
-        return Err(error);
-    }
 
-    let summary = summary.ok_or_else(|| eyre!("delegation ended before summary"))?;
-    let state = DeferredDelegatedState { summary, src, dst };
+    let state = outcome?;
     if !defer_output {
         print_deferred_delegated_result(args, &state);
     }
     Ok(state)
 }
 
-fn report_bytes_progress(
-    progress: Option<&blit_core::remote::transfer::RemoteTransferProgress>,
-    state: &mut DelegatedBytesProgressState,
-    bytes: &BytesProgress,
-) {
-    if let Some(progress) = progress {
-        let file_delta = bytes
-            .files_completed
-            .saturating_sub(state.files_completed)
-            .try_into()
-            .unwrap_or(usize::MAX);
-        let byte_delta = bytes.bytes_completed.saturating_sub(state.bytes_completed);
-        state.files_completed = state.files_completed.max(bytes.files_completed);
-        state.bytes_completed = state.bytes_completed.max(bytes.bytes_completed);
-        if file_delta > 0 || byte_delta > 0 {
-            progress.report_payload(file_delta, byte_delta);
-        }
-    }
+fn print_detach_human(transfer_id: &str, dst_host_hint: &str) {
+    eprintln!(
+        "Detached transfer {transfer_id}; daemon owns it to completion or cancel.\n  cancel: blit jobs cancel {dst_host_hint} {transfer_id}\n  status: blit jobs list {dst_host_hint}"
+    );
 }
 
-#[derive(Default)]
-struct DelegatedBytesProgressState {
-    files_completed: u64,
-    bytes_completed: u64,
-}
-
-fn map_delegated_error(
-    phase: i32,
-    message: &str,
-    relay_fallback_suggestable: bool,
-) -> eyre::Report {
-    let phase = DelegatedPullPhase::try_from(phase).unwrap_or(DelegatedPullPhase::Unknown);
-    let relay_clause = if relay_fallback_suggestable {
-        ". Pass --relay-via-cli to route through the CLI host"
-    } else {
-        ""
-    };
-    let relay_clause_semi = if relay_fallback_suggestable {
-        "; pass --relay-via-cli to route through the CLI host"
-    } else {
-        ""
-    };
-    match phase {
-        DelegatedPullPhase::DelegationRejected => {
-            eyre!("delegation rejected by destination daemon: {message}{relay_clause}")
-        }
-        DelegatedPullPhase::ConnectSource => {
-            eyre!("destination daemon cannot reach source ({message}){relay_clause_semi}")
-        }
-        DelegatedPullPhase::Negotiate => eyre!("source refused delegated pull: {message}"),
-        DelegatedPullPhase::Transfer => eyre!("delegated transfer failed: {message}"),
-        DelegatedPullPhase::Apply => {
-            eyre!("destination failed to apply delegated transfer: {message}")
-        }
-        DelegatedPullPhase::Unknown => eyre!("delegated transfer failed: {message}"),
-    }
-}
-
-fn destination_spec_fields(dst: &RemoteEndpoint) -> Result<(String, String)> {
-    match &dst.path {
-        RemotePath::Module { module, rel_path } => {
-            Ok((module.clone(), normalize_for_request(rel_path)))
-        }
-        RemotePath::Root { rel_path } => Ok((String::new(), normalize_for_request(rel_path))),
-        RemotePath::Discovery => bail!(
-            "remote destination must include a module or root (e.g., server:/module/ or server://path)"
-        ),
-    }
-}
-
-fn normalize_for_request(path: &Path) -> String {
-    if path.as_os_str().is_empty() {
-        ".".to_string()
-    } else {
-        path.iter()
-            .map(|component| component.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
-    }
+fn print_detach_json(transfer_id: &str) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "outcome": "detached",
+            "transfer_id": transfer_id,
+        }))
+        .unwrap_or_default()
+    );
 }
 
 fn print_delegated_json(
@@ -370,108 +278,8 @@ fn describe_delegated_result(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
-    use tokio::sync::mpsc;
-
-    fn endpoint(path: RemotePath) -> RemoteEndpoint {
-        RemoteEndpoint {
-            host: "localhost".to_string(),
-            port: 9031,
-            path,
-        }
-    }
-
-    #[test]
-    fn destination_fields_for_module_root_use_dot_path() {
-        let dst = endpoint(RemotePath::Module {
-            module: "mod".to_string(),
-            rel_path: PathBuf::new(),
-        });
-        let (module, path) = destination_spec_fields(&dst).unwrap();
-        assert_eq!(module, "mod");
-        assert_eq!(path, ".");
-    }
-
-    #[test]
-    fn destination_fields_for_subpath_normalize_forward_slashes() {
-        let dst = endpoint(RemotePath::Module {
-            module: "mod".to_string(),
-            rel_path: PathBuf::from("a").join("b"),
-        });
-        let (module, path) = destination_spec_fields(&dst).unwrap();
-        assert_eq!(module, "mod");
-        assert_eq!(path, "a/b");
-    }
-
-    #[test]
-    fn bytes_progress_reports_cumulative_values_as_deltas() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let progress = RemoteTransferProgress::new(tx);
-        let mut state = DelegatedBytesProgressState::default();
-
-        report_bytes_progress(
-            Some(&progress),
-            &mut state,
-            &BytesProgress {
-                files_completed: 1,
-                files_total: 3,
-                bytes_completed: 1024,
-                bytes_total: 4096,
-            },
-        );
-        report_bytes_progress(
-            Some(&progress),
-            &mut state,
-            &BytesProgress {
-                files_completed: 2,
-                files_total: 3,
-                bytes_completed: 4096,
-                bytes_total: 4096,
-            },
-        );
-
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ProgressEvent::Payload {
-                files: 1,
-                bytes: 1024
-            }
-        ));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ProgressEvent::Payload {
-                files: 1,
-                bytes: 3072
-            }
-        ));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn bytes_progress_duplicate_cumulative_update_is_not_counted_twice() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let progress = RemoteTransferProgress::new(tx);
-        let mut state = DelegatedBytesProgressState::default();
-        let update = BytesProgress {
-            files_completed: 1,
-            files_total: 1,
-            bytes_completed: 2048,
-            bytes_total: 2048,
-        };
-
-        report_bytes_progress(Some(&progress), &mut state, &update);
-        report_bytes_progress(Some(&progress), &mut state, &update);
-
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ProgressEvent::Payload {
-                files: 1,
-                bytes: 2048
-            }
-        ));
-        assert!(rx.try_recv().is_err());
-    }
-}
+// Unit tests for `destination_spec_fields`,
+// `report_bytes_progress`, and `DelegatedBytesProgressState`
+// moved to `blit_app::transfers::remote::tests` alongside the
+// implementations — see the a0-remote-helpers round-1 reopen
+// for the test-locality precedent.
