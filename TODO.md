@@ -100,6 +100,12 @@ explicitly-deferred logging epic (F15).
       and transfer modules. Gate noisy data-plane logs. Explicitly
       deferred per `docs/plan/PROJECT_STATE_ASSESSMENT.md`.
 
+### New audit findings (2026-05-23)
+
+- [x] **audit-13** Double-locking and redundant memory zeroing in `BufferPool` release/return paths.
+- [x] **audit-14** Redundant `seek` system calls in sequential block-level resume copies.
+- [x] **audit-15** Missing request/idle timeouts on tonic gRPC server control plane.
+
 ### Deferred design calls
 
 These are intentionally not next-actionable. Don't pick them up
