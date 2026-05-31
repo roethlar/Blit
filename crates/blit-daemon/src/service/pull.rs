@@ -471,7 +471,7 @@ pub(crate) async fn collect_pull_entries_with_checksums(
                         let physical = requested_clone.join(&entry.relative_path);
                         let wire = entry.relative_path.clone();
                         let mut header = build_file_header(&module_root, &physical, true)?;
-                        header.relative_path = wire.to_string_lossy().replace('\\', "/");
+                        header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
                         Ok(PullEntry {
                             header,
                             relative_path: physical,
@@ -485,7 +485,7 @@ pub(crate) async fn collect_pull_entries_with_checksums(
                         let physical = requested_clone.join(&entry.relative_path);
                         let wire = entry.relative_path.clone();
                         let mut header = build_file_header(&module_root, &physical, false)?;
-                        header.relative_path = wire.to_string_lossy().replace('\\', "/");
+                        header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
                         Ok(PullEntry {
                             header,
                             relative_path: physical,
@@ -807,7 +807,7 @@ fn enumerate_to_channel(
                 let wire = entry.relative_path.clone();
                 let mut header = build_file_header(&module_root, &physical, false)
                     .map_err(|e| eyre::eyre!("{}", e.message()))?;
-                header.relative_path = wire.to_string_lossy().replace('\\', "/");
+                header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
                 let size = header.size;
                 total_files += 1;
                 total_bytes += size;

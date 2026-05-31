@@ -926,7 +926,7 @@ fn apply_mirror_deletions(
             if parent.as_os_str().is_empty() {
                 break;
             }
-            let parent_str = parent.to_string_lossy().replace('\\', "/");
+            let parent_str = crate::path_posix::relative_path_to_posix(parent);
             // Insert and keep walking up; if already present every
             // shallower ancestor is too, so we could break — but
             // the walk is cheap and the eager form is simpler to
@@ -940,7 +940,7 @@ fn apply_mirror_deletions(
     let mut dirs_to_delete = Vec::new();
 
     for entry in &dest_entries {
-        let rel = entry.relative_path.to_string_lossy().replace('\\', "/");
+        let rel = crate::path_posix::relative_path_to_posix(&entry.relative_path);
         let absent_at_source = match entry.kind {
             EntryKind::Directory => !source_dirs.contains(&rel),
             _ => !source_paths.contains(&rel),

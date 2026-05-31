@@ -185,16 +185,10 @@ pub fn module_and_rel_path(remote: &RemoteEndpoint) -> Result<(String, PathBuf)>
 /// Render a relative `Path` as a forward-slashed string suitable
 /// for the wire `path` / `start_path` fields. Empty or `.` paths
 /// produce an empty string (the daemon-side convention for "the
-/// module root"). Uses `to_string_lossy` for non-UTF8 components.
+/// module root"). Delegates to the single canonical helper in
+/// `blit_core::path_posix` so the conversion is consistent everywhere.
 pub fn rel_path_to_string(path: &Path) -> String {
-    if path.as_os_str().is_empty() || path == Path::new(".") {
-        String::new()
-    } else {
-        path.components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
-    }
+    blit_core::path_posix::relative_path_to_posix(path)
 }
 
 #[cfg(test)]

@@ -212,15 +212,10 @@ pub fn payload_file_count(payloads: &[TransferPayload]) -> usize {
 }
 
 fn normalize_relative_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        raw.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
-        raw.to_string()
-    }
+    // Canonical POSIX form — see `crate::path_posix` for why a
+    // component-walk is correct on every platform and the historical
+    // string `replace('\\', "/")` was destructive on POSIX.
+    crate::path_posix::relative_path_to_posix(path)
 }
 
 pub fn prepared_payload_stream(

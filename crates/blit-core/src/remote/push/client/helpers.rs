@@ -50,15 +50,10 @@ pub fn map_status(status: Status) -> eyre::Report {
 }
 
 pub fn normalize_relative_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        raw.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
-        raw.into_owned()
-    }
+    // Canonical POSIX form — see `blit_core::path_posix` for why a
+    // component-walk is correct on every platform and the historical
+    // string `replace('\\', "/")` was destructive on POSIX.
+    crate::path_posix::relative_path_to_posix(path)
 }
 
 pub fn unix_seconds(metadata: &std::fs::Metadata) -> i64 {

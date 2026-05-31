@@ -151,15 +151,10 @@ pub(crate) fn permissions_mode(meta: &fs::Metadata) -> u32 {
 }
 
 pub(crate) fn normalize_relative_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    #[cfg(windows)]
-    {
-        raw.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
-        raw.into_owned()
-    }
+    // Canonical POSIX form — see `blit_core::path_posix` for why a
+    // component-walk is correct on every platform and the historical
+    // string `replace('\\', "/")` was destructive on POSIX.
+    blit_core::path_posix::relative_path_to_posix(path)
 }
 
 pub(crate) fn pathbuf_to_display(path: &Path) -> String {

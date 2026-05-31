@@ -252,7 +252,11 @@ pub(crate) fn split_completion_prefix(raw: &str) -> Result<(PathBuf, String, Str
         return Ok((PathBuf::from("."), String::new(), String::new()));
     }
 
-    let normalized = trimmed.replace('\\', "/");
+    // Route user-typed input through the canonical helper so a literal
+    // `\` in a POSIX filename (legal on macOS/Linux) is preserved, while
+    // a Windows-native `Folder\file` is correctly split on the native
+    // separator. Plain string `replace` would conflate the two.
+    let normalized = blit_core::path_posix::relative_str_to_posix(trimmed);
     let (dir_part, leaf_part) = match normalized.rsplit_once('/') {
         Some((dir, leaf)) => (dir.to_string(), leaf.to_string()),
         None => (String::new(), normalized),

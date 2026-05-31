@@ -37,10 +37,7 @@ struct CasefoldKey(String);
 #[cfg(windows)]
 impl CasefoldKey {
     fn new(path: &Path) -> Self {
-        let normalized = path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
+        let normalized = crate::path_posix::relative_path_to_posix(path).to_ascii_lowercase();
         CasefoldKey(normalized)
     }
 }

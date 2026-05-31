@@ -213,10 +213,8 @@ fn normalize_relative_path_buf(raw: &str) -> PathBuf {
 }
 
 fn rel_path_to_string(path: &Path) -> String {
-    path.iter()
-        .map(|component| component.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+    // Delegate to the canonical POSIX-form helper.
+    crate::path_posix::relative_path_to_posix(path)
 }
 
 fn display_host(host: &str) -> String {

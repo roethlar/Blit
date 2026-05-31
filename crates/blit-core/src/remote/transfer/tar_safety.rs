@@ -130,7 +130,12 @@ pub fn safe_extract_tar_shard(
         }
 
         let raw_path = entry.path().context("tar shard path")?;
-        let rel_string = raw_path.to_string_lossy().replace('\\', "/");
+        // Route through the canonical helper instead of a blanket
+        // `replace('\\', "/")` — the latter destroys literal `\` chars
+        // that POSIX legally allows in filenames (e.g. macOS Logic Pro
+        // plug-in presets named "1\4 Single.pst"), which would then
+        // miss the lookup against the manifest and fail this shard.
+        let rel_string = crate::path_posix::relative_path_to_posix(&raw_path);
 
         let header = expected.remove(&rel_string).ok_or_else(|| {
             eyre!("tar shard produced unexpected entry '{rel_string}' (not in manifest)")
