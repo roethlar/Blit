@@ -246,40 +246,56 @@ need careful state-machine design.
 
 ---
 
-## 6. Decisions (locked, both reviewers concurred 2026-05-31)
+## 6. Open decisions — need owner sign-off
 
-The original v1 of this doc listed six items as "needs owner sign-off."
-Both reviewers (chat-review + `TUI_REWORK_REVIEW.md`) endorsed all six
-default proposals. They are now locked in below; the implementation
-follows these without re-asking.
+The six items below are operator-level UX choices, not architectural
+ones. Each has a default proposal plus what two AI reviewers
+informally suggested. **None are binding until the owner picks.**
+Implementation can't start M3a/M3b without decisions 1, 3, 5, and 6
+at minimum.
 
-1. **Picker invocation key.** ✅ **Unify to `t` for all transfer
-   triggers across F1 and F3.** Keep `p`/`m`/`v` as aliases for one
-   release (deprecation hint in `?` overlay), then remove. Each
-   alias maps to "open trigger with kind pre-set to copy / mirror /
-   move respectively."
+1. **Picker invocation key.** Today F3 uses `p`/`m`/`v` for
+   pull/mirror/move with implicit kind selection. Post-rework, do we
+   keep `p`/`m`/`v` (each invokes a picker pre-set to that kind), or
+   unify to `t` everywhere (picker plus a kind-cycle) and let
+   `p`/`m`/`v` die?
+   - Default proposal: unify to `t`, keep `p`/`m`/`v` as aliases for
+     one release for muscle-memory, then remove.
+   - Reviewer suggestion: same.
 
-2. **Local browser start directory.** ✅ **`tui.toml [local] start_dir`,
-   default `$HOME`.** Persisted last-visited dir is a follow-up
-   enhancement after M2 ships; not in the critical path.
+2. **Local browser start directory.** `$HOME`, `$PWD` at TUI launch,
+   `/`, or persisted-last-visited?
+   - Default proposal: `tui.toml [local] start_dir`, default `$HOME`.
+   - Reviewer suggestion: same; persisted-last-visited is a follow-up.
 
-3. **Type-it-anyway escape hatch.** ✅ **Include in M6.** Inside any
-   picker, `:` opens a single-line literal-path input with shell-style
-   completion. Power-user feature, not the primary flow.
+3. **Type-it-anyway escape hatch.** Some operators want to paste a
+   path. Inside the picker, a key (proposed: `:`) opens a single-line
+   literal-path input with completion. Stays as power-user, not
+   primary.
+   - Default proposal: include in M6.
+   - Reviewer suggestion: same.
 
-4. **Fan-out execution model.** ✅ **Serial, with a visible queue in
-   the F1 footer** (`Pushing 2/5 · nas-c:/backup/`). Avoids local
-   uplink thrashing and simplifies error handling. `[fanout] parallel
-   = N` config flag deferred.
+4. **Fan-out execution model.** When N daemons are marked, do we
+   launch N pushes serially or parallelize? Parallel saturates the
+   uplink and risks the local source being the bottleneck.
+   - Default proposal: serial with a visible queue in the F1 footer
+     (`Pushing 2/5 · nas-c:/backup/`); `[fanout] parallel = N`
+     config flag deferred.
+   - Reviewer suggestion: same.
 
-5. **Per-daemon destinations in fan-out.** ✅ **Shared path by default.**
-   The 95% workflow ("same module + path on every box"). Tab in the
-   batch-trigger modal cycles to per-daemon override for the
-   remaining 5%.
+5. **Per-daemon destinations in fan-out.** When multi-targeting, do
+   all destinations share one path or does the operator pick
+   per-daemon?
+   - Default proposal: shared path by default (95% case); Tab in the
+     batch-trigger modal cycles to per-daemon override.
+   - Reviewer suggestion: same.
 
-6. **F3 picker visual treatment.** ✅ **All three signals together** —
-   accent border + title suffix `· picker (file)` / `· picker (directory)` +
-   status bar line "PICK MODE · Enter descends · `.` picks this directory · Esc cancels".
+6. **F3 picker visual treatment.** Border accent? Title suffix?
+   Status-bar mode indicator?
+   - Default proposal: all three — accent border + title suffix
+     `· picker (file)` / `· picker (directory)` + status-bar line
+     "PICK MODE · Enter descends · `.` picks this directory · Esc cancels".
+   - Reviewer suggestion: same.
 
 ---
 
@@ -363,4 +379,4 @@ refinements. Both rounds folded into this revision:
 | Chat review | Low | TODO.md still pointed agents at superseded `TUI_DESIGN.md` for Phase 5 work | `TODO.md` Phase 5 section flipped to ✅ SHIPPED status with a new Phase 6 section pointing at this doc as the active plan |
 | `TUI_REWORK_REVIEW.md` | Refinement | `LocalDaemon` should translate `std::fs::Metadata` into `DirEntry`-shape for display consistency | §4.1 augmented with explicit metadata-translation requirement |
 | `TUI_REWORK_REVIEW.md` | Refinement | Picker continuation channel needs cleanup-on-cancel hardening | §7 risks augmented with explicit continuation-channel hygiene note |
-| `TUI_REWORK_REVIEW.md` | Endorsement | All six open decisions endorsed | §6 locked all six with both reviewers concurring |
+| `TUI_REWORK_REVIEW.md` | Endorsement | All six open-decision defaults endorsed | §6 still **open, awaiting owner sign-off** — reviewer concurrence is logged as informational input but not binding (round-1 misstep: an earlier revision of this doc incorrectly marked the six items as "locked" based on AI reviewer concurrence; reverted) |
