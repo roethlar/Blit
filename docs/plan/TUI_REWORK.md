@@ -139,6 +139,14 @@ existing F3 browse pipeline consumes.
 that implements the same listing interface against the local FS, plus
 ~50 LoC plumbing in `browse.rs` to route by endpoint kind.
 
+**Metadata translation (review 2 refinement):** the local adapter
+must translate `std::fs::Metadata` (size, mtime, mode, file_type,
+symlink target) into the same `DirEntry` shape the daemon-side listing
+RPC returns, so `crates/blit-tui/src/display_f3.rs` and the existing
+F3 row renderer get formatting consistency for free. No new display
+branches; "Local" rows look exactly like remote rows except for the
+host column.
+
 ### 4.2 New: F3 picker mode
 F3 gains a single-shot picker invocation. Caller (the trigger flow)
 passes:
@@ -147,10 +155,27 @@ passes:
 - A "what kind of picker" hint (file? directory? either?)
 - A continuation (`Sender<PathPicked>`)
 
-In picker mode F3 visually signals it's modal (border accent or title
-suffix `· picker`), absorbs `Enter` as "confirm" instead of "descend"
-when the cursor is on the right kind of entry, and `Esc` as cancel.
-All other browse keys (filter, ascend, etc.) work normally.
+Picker mode keymap — explicit, no ambiguity (review round-1 fix):
+
+| Key | Behavior |
+|---|---|
+| `Enter` | **Always descend / open the highlighted entry.** Never "confirm." On a directory, descend into it. On a file in **file-picker** mode, return that file as the selection (this is the only case where Enter is terminal). On a file in **directory-picker** mode, Enter is a no-op (with a footer hint). |
+| `.` (period) | **Pick the directory currently being viewed** (i.e., the picker's cwd). This is the *only* way to choose a directory destination — there is no Enter-on-empty-cursor magic. The mnemonic matches `cd .` (this here). Only fires in directory-picker mode. |
+| `Esc` | Cancel the picker; return `None` to the caller; restore the previous pane state. The continuation channel is drained + dropped (see §7 risks). |
+| `←` / `h` / `Backspace` | Ascend one level. |
+| `/` | Open the existing filter input (already in F3 Browse). |
+| pane-switch keys (`1`/`2`/`3`/`4`, `F1`..`F4`) | **Disabled in picker mode** — the picker is modal; switching panes mid-pick would orphan the continuation. Status-bar shows "PICK MODE · pane switch disabled · Esc to cancel". |
+
+Visual signals: accent border, title suffix `· picker (file)` or
+`· picker (directory)` to match what the caller asked for, and a
+status-bar line stating exactly which keys do what
+("Enter descends · `.` picks this directory · Esc cancels").
+
+The Enter-always-descends rule means **a directory-picker user always
+navigates *into* the directory they want, then presses `.` to choose
+it** — never "select-while-pointing-at-the-row." This removes the
+ambiguity Review 1 flagged where Enter could mean either descend or
+confirm depending on cursor position.
 
 **Existing relevant code:**
 - `crates/blit-tui/src/f3pull.rs` — current pull state machine (will
@@ -195,14 +220,25 @@ usable.
 |---|---|---|---|
 | **M1** | F3 picker mode (just the mode + the path-return plumbing; no new caller wiring yet) | Internal: foundation for M3 | Low — pure addition, no behavior change for existing users |
 | **M2** | `LocalDaemon` pseudo-target + Local row descends in F1 | **Local↔Local** in any subsequent flow; the Local row stops being a dead end | Medium — new code path, but isolated to a new module |
-| **M3** | F1 trigger modal: replace text fields with picker invocations | All four W1–W4 workflows lose their typing | High — changes the trigger UX every user sees; needs careful default-fallback |
+| **M3a** | F1 trigger modal: replace both text fields with picker invocations | Workflows W2, W3, W4 lose source/destination typing | High — changes the most-visible trigger UX |
+| **M3b** | F3 pull destination prompt: replace the existing free-text local-dest input (`p`/`m`/`v` flow) with a picker invocation | Workflow W1 loses its typed local-destination step | Medium — touches `f3pull.rs::F3PullStatus::EnteringDest` and `handle_f3_pull_keystroke` |
 | **M4** | Multi-daemon Space-mark + batch trigger in F1 | W3 (local → N remotes) becomes one operation | Medium — touches F1 state + plan_f1_trigger fan-out |
 | **M5** | Source pre-fill on F3 / Local row selection + `t` | Removes the source-pick step entirely when the operator just navigated to it | Low — purely additive |
 | **M6** | Polish: keep type-it-anyway escape hatch as a secondary entry in the picker (`/` filter + `:` to enter a literal path) | Power users who want to paste a path | Low |
 
-**Suggested order:** M1 → M2 → M3 → M5 → M4 → M6. M3 is the gating
-change for any real usability win; M5 is small, high-value, and can
-ride alongside M3.
+**Acceptance criterion gating M3a + M3b together (review round-1 fix):**
+After both M3a and M3b ship, **no normal-flow trigger or pull path
+reachable from the default keymap accepts a free-text path field.**
+Verified by code grep: zero remaining `*::push_char` on a path-bearing
+state in `f1trigger.rs` or `f3pull.rs`, and the existing
+`handle_f1_trigger_keystroke` / `handle_f3_pull_keystroke` text-input
+handlers either are removed or only run inside the M6 escape-hatch
+input. M3a alone is not sufficient to call the rework "done for the
+common case" — W1 (the single-most-common pull workflow) needs M3b too.
+
+**Suggested order:** M1 → M2 → M3a → M3b → M5 → M4 → M6. M3a and M3b
+together are the gating change for the typing-elimination promise; M5
+is small, high-value, and can ride alongside either M3 slice.
 
 **Total estimate:** ~2500–3500 LoC net new + ~1000 LoC modified across
 4–5 weeks of focused work. Most of M1/M2 are mechanical; M3 and M4
@@ -210,42 +246,40 @@ need careful state-machine design.
 
 ---
 
-## 6. Open decisions (need owner sign-off)
+## 6. Decisions (locked, both reviewers concurred 2026-05-31)
 
-1. **Picker invocation key.** Today F3 uses `p`/`m`/`v` for
-   pull/mirror/move with implicit kind selection. Post-rework, do we
-   keep `p`/`m`/`v` (each invokes a picker pre-set to that kind), or
-   unify to `t` everywhere (picker plus a kind-cycle) and let `p`/`m`/`v`
-   die? Default proposal: **unify to `t`**, keep `p`/`m`/`v` as
-   aliases for one release for muscle-memory.
+The original v1 of this doc listed six items as "needs owner sign-off."
+Both reviewers (chat-review + `TUI_REWORK_REVIEW.md`) endorsed all six
+default proposals. They are now locked in below; the implementation
+follows these without re-asking.
 
-2. **Local browser start directory.** `$HOME`, `$PWD` at TUI launch,
-   `/`, or persisted-last-visited? Default proposal: persisted in
-   `tui.toml` under `[local] start_dir`, default `$HOME`.
+1. **Picker invocation key.** ✅ **Unify to `t` for all transfer
+   triggers across F1 and F3.** Keep `p`/`m`/`v` as aliases for one
+   release (deprecation hint in `?` overlay), then remove. Each
+   alias maps to "open trigger with kind pre-set to copy / mirror /
+   move respectively."
 
-3. **Type-it-anyway escape hatch.** Some operators want to paste a
-   path. Inside the picker, a key (proposed: `:`) opens a one-line
-   input that accepts a literal path and jumps the picker cursor to
-   it (with completion). This stays as a power-user feature, not the
-   primary path. Default proposal: **yes, include it in M6**.
+2. **Local browser start directory.** ✅ **`tui.toml [local] start_dir`,
+   default `$HOME`.** Persisted last-visited dir is a follow-up
+   enhancement after M2 ships; not in the critical path.
 
-4. **Fan-out execution model.** When N daemons are marked and the
-   transfer is committed, do we launch N pushes serially (current
-   `F1Push` serializes) or parallelize? Parallel saturates the
-   uplink and risks the local source being slowest. Default
-   proposal: **serial with a visible queue in the F1 footer**, with
-   a future `--parallel` config flag deferred to a later milestone.
+3. **Type-it-anyway escape hatch.** ✅ **Include in M6.** Inside any
+   picker, `:` opens a single-line literal-path input with shell-style
+   completion. Power-user feature, not the primary flow.
 
-5. **Per-daemon destinations in fan-out.** When multi-targeting, do
-   all destinations share one path (e.g., `:/backup/photos`) or does
-   the operator pick per-daemon? Default proposal: **shared path
-   across daemons**, with a Tab-key cycle if the operator wants
-   per-daemon override. The shared case is the 95%.
+4. **Fan-out execution model.** ✅ **Serial, with a visible queue in
+   the F1 footer** (`Pushing 2/5 · nas-c:/backup/`). Avoids local
+   uplink thrashing and simplifies error handling. `[fanout] parallel
+   = N` config flag deferred.
 
-6. **F3 picker visual treatment.** Border accent color? Title
-   suffix? Status-bar mode indicator? Default proposal: **all
-   three** — accent border + title `· picker` + status bar
-   "PICK A LOCATION · Enter to confirm · Esc to cancel".
+5. **Per-daemon destinations in fan-out.** ✅ **Shared path by default.**
+   The 95% workflow ("same module + path on every box"). Tab in the
+   batch-trigger modal cycles to per-daemon override for the
+   remaining 5%.
+
+6. **F3 picker visual treatment.** ✅ **All three signals together** —
+   accent border + title suffix `· picker (file)` / `· picker (directory)` +
+   status bar line "PICK MODE · Enter descends · `.` picks this directory · Esc cancels".
 
 ---
 
@@ -278,6 +312,19 @@ need careful state-machine design.
   `blit-tui`, promote to `blit-app` if/when a second consumer
   appears.
 
+- **Picker continuation channel hygiene (review 2 refinement).** The
+  picker invocation passes a `tokio::sync::oneshot::Sender<PathPicked>`
+  to a transient picker pane. Any termination path — `Esc`, pane
+  switch (which is disabled in picker mode but a defense-in-depth
+  panic-handler restore could still fire), TUI quit (`q`), or a panic
+  inside the picker render — must drop that sender so the awaiting
+  caller receives `Err(RecvError)` and falls back to its cancel path
+  cleanly. The picker pane itself must reset all transient state
+  (filter buffer, cursor history) before returning control to the
+  prior pane, so a re-opened picker starts from its configured
+  `start_dir` (decision 2) rather than wherever the last picker ran
+  ended.
+
 ---
 
 ## 8. Out of scope for this rework
@@ -300,3 +347,20 @@ Owner reviews this doc. If the direction is right:
 
 If the direction is wrong: pin which principles or workflows don't
 match the actual intent and we iterate the doc before any code.
+
+---
+
+## Review log
+
+**Round 1 (2026-05-31):** chat reviewer requested changes, second
+reviewer (`TUI_REWORK_REVIEW.md`) signed off on the direction with
+refinements. Both rounds folded into this revision:
+
+| Source | Severity | Issue | Resolution |
+|---|---|---|---|
+| Chat review | Medium | Picker `Enter` ambiguous: descend vs confirm on a directory | §4.2 rewritten with explicit keymap table — Enter **always** descends; `.` picks the currently-viewed directory; status-bar line makes it explicit |
+| Chat review | Medium | M3 overclaimed "all W1–W4 lose typing" while only touching F1 modal — F3 pull dest left typed | M3 split into M3a (F1 trigger pickers) + M3b (F3 pull dest picker); explicit acceptance criterion gating both ("zero remaining `push_char` on a path-bearing state") |
+| Chat review | Low | TODO.md still pointed agents at superseded `TUI_DESIGN.md` for Phase 5 work | `TODO.md` Phase 5 section flipped to ✅ SHIPPED status with a new Phase 6 section pointing at this doc as the active plan |
+| `TUI_REWORK_REVIEW.md` | Refinement | `LocalDaemon` should translate `std::fs::Metadata` into `DirEntry`-shape for display consistency | §4.1 augmented with explicit metadata-translation requirement |
+| `TUI_REWORK_REVIEW.md` | Refinement | Picker continuation channel needs cleanup-on-cancel hardening | §7 risks augmented with explicit continuation-channel hygiene note |
+| `TUI_REWORK_REVIEW.md` | Endorsement | All six open decisions endorsed | §6 locked all six with both reviewers concurring |
