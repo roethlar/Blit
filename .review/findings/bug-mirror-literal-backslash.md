@@ -105,3 +105,56 @@ a fixture containing a literal-`\` filename would be ideal but is out
 of scope for this slice (the existing transfer-test fixtures are large
 and not parameterized). The unit-level pin is sufficient to prevent
 the destructive `replace` pattern from re-introducing.
+
+## Round 1 — Reopened by GPT review
+
+> Medium: `crates/blit-daemon/src/service/admin.rs:259` now canonicalizes
+> completion input with `relative_str_to_posix`, which uses
+> `Path::components()`. That drops trailing slashes. So a completion
+> prefix like `sub/` becomes `sub`; `rsplit_once('/')` no longer sees a
+> directory prefix, and `split_completion_prefix` searches module root
+> for entries starting with `sub` instead of listing inside `sub/`.
+> This regresses remote completions for directory prefixes. The fix
+> should preserve "user typed trailing slash means complete inside that
+> directory" while still avoiding destructive backslash replacement.
+>
+> Gates at `4dac1a4`: fmt / clippy / test all green.
+
+Verified: reproduced with a minimal `Path::new("sub/").components()`
+print — yields a single `Normal("sub")` component, so canonical output
+is `"sub"`. `is_separator('/')` is true on POSIX and `is_separator('\')`
+is false; that's the right primitive for restoring the trailing-slash
+UX semantic without re-introducing the destructive backslash replace.
+
+## Round 2 — Fix (commit `5a034dd`)
+
+`relative_str_to_posix` now preserves trailing-separator semantics for
+user input, while `relative_path_to_posix` (the wire/manifest canonical
+form) is unchanged.
+
+The new behavior detects whether the raw `&str` input ended with a
+platform path separator via `std::path::is_separator` (POSIX: only `/`;
+Windows: `\` or `/`) and re-attaches a trailing `/` after canonical
+component-join when it did.
+
+Behavior matrix on POSIX:
+
+| Input | Output | Notes |
+|---|---|---|
+| `"sub/"` | `"sub/"` | trailing slash preserved (the regression fix) |
+| `"sub"` | `"sub"` | no trailing slash invented |
+| `"sub\"` | `"sub\"` | literal trailing `\` preserved (POSIX-legal char, NOT a separator) |
+| `"Folder/sub/"` | `"Folder/sub/"` | |
+| `"1\4 Single.pst"` | `"1\4 Single.pst"` | the original bug, still fixed |
+
+On Windows, native trailing `\` correctly converts to `/`
+(`is_separator('\')` is `true`).
+
+Four new regression tests in `path_posix::tests` pin both halves of
+the contract (preserve trailing `/`, do NOT invent one). All 10
+`path_posix` tests + full workspace test suite green at `5a034dd`.
+
+`relative_path_to_posix` (the public wire/manifest helper) is
+deliberately left unchanged — manifest paths and tar entry names
+should not carry trailing separators; the trailing-slash semantic is
+strictly a user-input UX convention.
