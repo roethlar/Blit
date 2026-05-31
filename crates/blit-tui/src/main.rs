@@ -4731,35 +4731,83 @@ fn spawn_discovery_task(
 /// independently consume a keystroke when the select arm
 /// preferred the Subscribe stream. With a single owner,
 /// keystrokes always reach the main loop in order.
+///
+/// **Kind filter:** earlier versions matched on
+/// `KeyEventKind::Press` only. That was too narrow: depending on
+/// terminal + crossterm version + autorepeat behavior, some
+/// keystrokes can be reported with `KeyEventKind::Repeat`
+/// (autorepeat) instead of `Press`. We now accept anything that
+/// isn't a `Release` — a key-up doesn't carry user intent and
+/// would double-fire any matched action.
+///
+/// **Diagnostic trace:** set `BLIT_TUI_INPUT_TRACE=1` to write
+/// every raw crossterm event (including its `kind`) to
+/// `/tmp/blit-tui-input.log` as a JSON line. Useful for
+/// diagnosing terminals that drop events or report them with
+/// unexpected `kind` values.
 fn spawn_input_task(tx: mpsc::Sender<KeyEvent>) {
-    tokio::task::spawn_blocking(move || loop {
-        match event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS)) {
-            Ok(true) => match event::read() {
-                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                    let local = KeyEvent {
-                        code: key.code,
-                        modifiers: key.modifiers,
-                    };
-                    if tx.blocking_send(local).is_err() {
-                        // Receiver dropped — TUI exiting.
+    let trace_log = std::env::var_os("BLIT_TUI_INPUT_TRACE").map(|_| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/blit-tui-input.log")
+    });
+    tokio::task::spawn_blocking(move || {
+        let mut trace = trace_log.and_then(|r| r.ok());
+        let mut log_event = |line: String| {
+            if let Some(f) = trace.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, "{line}");
+                let _ = f.flush();
+            }
+        };
+        log_event("# input task started".to_string());
+        loop {
+            match event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS)) {
+                Ok(true) => match event::read() {
+                    Ok(Event::Key(key)) => {
+                        log_event(format!(
+                            r#"{{"kind":"{:?}","code":"{:?}","modifiers":"{:?}"}}"#,
+                            key.kind, key.code, key.modifiers
+                        ));
+                        // Accept Press + Repeat (real user intent);
+                        // skip Release (would double-fire).
+                        if key.kind == KeyEventKind::Release {
+                            continue;
+                        }
+                        let local = KeyEvent {
+                            code: key.code,
+                            modifiers: key.modifiers,
+                        };
+                        if tx.blocking_send(local).is_err() {
+                            // Receiver dropped — TUI exiting.
+                            log_event("# input task: receiver dropped, exiting".to_string());
+                            return;
+                        }
+                    }
+                    Ok(other) => {
+                        log_event(format!(r#"{{"non_key":"{:?}"}}"#, other));
+                        // Non-key event (resize, mouse, …) —
+                        // ignored for now.
+                    }
+                    Err(err) => {
+                        log_event(format!(r#"{{"read_error":"{err}"}}"#));
+                        return;
+                    }
+                },
+                Ok(false) => {
+                    // poll timeout; check whether the receiver
+                    // is still alive so we don't loop forever
+                    // after a TUI quit during quiet input.
+                    if tx.is_closed() {
                         return;
                     }
                 }
-                Ok(_) => {
-                    // Non-key event (resize, mouse, …) —
-                    // ignored for now.
-                }
-                Err(_) => return,
-            },
-            Ok(false) => {
-                // poll timeout; check whether the receiver
-                // is still alive so we don't loop forever
-                // after a TUI quit during quiet input.
-                if tx.is_closed() {
+                Err(err) => {
+                    log_event(format!(r#"{{"poll_error":"{err}"}}"#));
                     return;
                 }
             }
-            Err(_) => return,
         }
     });
 }
