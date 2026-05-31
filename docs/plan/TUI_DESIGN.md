@@ -12,6 +12,15 @@
 > dormant, and (c) the Phase 5 scope expansion: TUI must mirror
 > **every** CLI verb in addition to the discovery / file-browser
 > work originally scoped here.
+>
+> **Rework note (2026-05-31):** the trigger-modal text inputs
+> described in §6 and the F3 free-text pull destination prompt
+> violate the rework principle that "path inputs are Pick, not Type."
+> See [`TUI_REWORK.md`](./TUI_REWORK.md) for the post-0.1.0 design
+> that replaces typed path fields with a navigable picker, adds a
+> Local-filesystem pseudo-daemon, and unblocks Local↔Local +
+> multi-destination fan-out. The shipped 0.1.0 TUI is the baseline
+> that rework builds on.
 
 ## 1. Purpose
 
