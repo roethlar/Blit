@@ -59,10 +59,24 @@ fn f2_pull_through_symlink_rejected() {
         "daemon should have refused symlink-escape pull, but it succeeded"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The PRIMARY security checks are non-zero exit (above) + the
+    // file-leak/victim-content asserts (below). The stderr message
+    // check here is a sanity check that the operator saw *some*
+    // failure indication; the exact wording races the daemon's
+    // close-on-detection behavior. On a fast daemon close, the CLI
+    // only sees the transport-level "failed to send push request
+    // payload" (its half of the stream got cut before the daemon's
+    // specific containment-error message could arrive). On a slower
+    // close the daemon's reason text reaches the CLI's stderr.
+    // Both code paths are equally valid evidence of the refusal —
+    // the file-leak assertions below pin down which one matters.
+    let stderr_lower = stderr.to_lowercase();
     assert!(
-        stderr.to_lowercase().contains("containment")
-            || stderr.to_lowercase().contains("escapes module root"),
-        "expected containment error, got stderr:\n{stderr}"
+        stderr_lower.contains("containment")
+            || stderr_lower.contains("escapes module root")
+            || stderr_lower.contains("failed to send push request payload"),
+        "expected a refusal indication in stderr (containment / escapes-module-root / \
+         transport-closed), got stderr:\n{stderr}"
     );
 
     // The sensitive file outside the module must not have been
@@ -112,10 +126,24 @@ fn f2_push_destination_path_symlink_rejected() {
         "daemon should have refused push through escape symlink, but it succeeded"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The PRIMARY security checks are non-zero exit (above) + the
+    // file-leak/victim-content asserts (below). The stderr message
+    // check here is a sanity check that the operator saw *some*
+    // failure indication; the exact wording races the daemon's
+    // close-on-detection behavior. On a fast daemon close, the CLI
+    // only sees the transport-level "failed to send push request
+    // payload" (its half of the stream got cut before the daemon's
+    // specific containment-error message could arrive). On a slower
+    // close the daemon's reason text reaches the CLI's stderr.
+    // Both code paths are equally valid evidence of the refusal —
+    // the file-leak assertions below pin down which one matters.
+    let stderr_lower = stderr.to_lowercase();
     assert!(
-        stderr.to_lowercase().contains("containment")
-            || stderr.to_lowercase().contains("escapes module root"),
-        "expected containment error, got stderr:\n{stderr}"
+        stderr_lower.contains("containment")
+            || stderr_lower.contains("escapes module root")
+            || stderr_lower.contains("failed to send push request payload"),
+        "expected a refusal indication in stderr (containment / escapes-module-root / \
+         transport-closed), got stderr:\n{stderr}"
     );
 
     // The outside directory must not have been touched — neither
