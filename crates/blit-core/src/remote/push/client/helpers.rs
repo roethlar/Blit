@@ -92,6 +92,7 @@ pub fn spawn_manifest_task(
     root: PathBuf,
     filter: FileFilter,
     unreadable: Arc<Mutex<Vec<String>>>,
+    log_progress: bool,
 ) -> (mpsc::Receiver<FileHeader>, task::JoinHandle<Result<u64>>) {
     let (manifest_tx, manifest_rx) = mpsc::channel::<FileHeader>(64);
     let handle = task::spawn_blocking(move || -> Result<u64> {
@@ -144,12 +145,18 @@ pub fn spawn_manifest_task(
                     .blocking_send(header)
                     .map_err(|_| eyre!("failed to queue manifest entry"))?;
                 enumerated += 1;
-                if last_log.elapsed() >= Duration::from_secs(1) {
+                if log_progress && last_log.elapsed() >= Duration::from_secs(1) {
                     // R46-F4: write progress to stderr, not stdout.
                     // The CLI's `--json` modes treat stdout as the
                     // exclusive structured-output channel; writing
                     // human progress here corrupts the JSON that
                     // downstream tools parse.
+                    //
+                    // Live-progress fix: `log_progress` is false when a
+                    // CLI render thread owns the terminal (it shows the
+                    // scanned count from the shared progress handle
+                    // instead), so this out-of-band line can't scroll
+                    // the spinner. Loud by default for every other caller.
                     eprintln!("Enumerated {} entries… (streaming manifest)", enumerated);
                     last_log = Instant::now();
                 }
@@ -168,12 +175,15 @@ pub fn spawn_manifest_task(
             );
         }
         // R46-F4: completion line also goes to stderr so it doesn't
-        // appear inside `--json` stdout output.
-        eprintln!(
-            "Manifest enumeration complete in {:.2?} ({} entries)",
-            start.elapsed(),
-            enumerated
-        );
+        // appear inside `--json` stdout output. Suppressed when a CLI
+        // render thread owns the terminal (see `log_progress` above).
+        if log_progress {
+            eprintln!(
+                "Manifest enumeration complete in {:.2?} ({} entries)",
+                start.elapsed(),
+                enumerated
+            );
+        }
         Ok(enumerated)
     });
 

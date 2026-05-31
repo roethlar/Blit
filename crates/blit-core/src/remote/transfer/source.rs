@@ -48,11 +48,31 @@ pub trait TransferSource: Send + Sync {
 
 pub struct FsTransferSource {
     root: PathBuf,
+    /// Whether the manifest scan emits its own out-of-band stderr
+    /// progress lines ("Enumerated N entries…" / "Manifest
+    /// enumeration complete"). Loud by default to preserve existing
+    /// remote/daemon behavior; the local CLI sets it false (via
+    /// [`quiet`](Self::quiet)) when a render thread owns the terminal,
+    /// so those lines don't scroll the progress spinner.
+    log_progress: bool,
 }
 
 impl FsTransferSource {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            log_progress: true,
+        }
+    }
+
+    /// Construct a source whose manifest scan stays silent on stderr.
+    /// Used by the local mirror path when the CLI renders progress
+    /// itself from the shared `TransferProgress` handle.
+    pub fn quiet(root: PathBuf) -> Self {
+        Self {
+            root,
+            log_progress: false,
+        }
     }
 }
 
@@ -71,6 +91,7 @@ impl TransferSource for FsTransferSource {
             self.root.clone(),
             filter.unwrap_or_default(),
             unreadable_paths,
+            self.log_progress,
         )
     }
 

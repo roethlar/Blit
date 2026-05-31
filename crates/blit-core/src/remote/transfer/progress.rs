@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -65,6 +65,160 @@ impl Default for ByteProgressSink {
     }
 }
 
+/// Coarse lifecycle phase of a local transfer, used to switch the
+/// CLI's progress display between a scan spinner and a byte bar.
+/// Stored as a `u8` atomic on [`TransferProgress`] so the render
+/// thread can read it lock-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Phase {
+    /// Walking the source tree, counting entries; total unknown.
+    Enumerating = 0,
+    /// Diffing + planning; total being computed.
+    Planning = 1,
+    /// Copying bytes to the destination; total known.
+    Transferring = 2,
+    /// Mirror cleanup (deleting extraneous destination entries).
+    Deleting = 3,
+    /// All work finished; render thread should clear and exit.
+    Done = 4,
+}
+
+impl Phase {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Phase::Planning,
+            2 => Phase::Transferring,
+            3 => Phase::Deleting,
+            4 => Phase::Done,
+            _ => Phase::Enumerating,
+        }
+    }
+}
+
+/// Lock-free, shareable progress handle for a single local transfer.
+///
+/// The orchestrator and its copy workers only ever *write* to this
+/// via `Relaxed` atomic adds/stores — there is no lock, no syscall,
+/// and no allocation on the hot path. A single CLI-owned render
+/// thread *reads* it via [`snapshot`](Self::snapshot) on a timer and
+/// is the sole writer to the terminal. This split is what keeps the
+/// progress display free of any measurable transfer-throughput cost
+/// while also fixing the scrolling spinner (one terminal writer).
+///
+/// Cloning is a cheap `Arc` bump; every clone observes the same
+/// counters. The byte-done counter is exposed to the existing
+/// [`FsTransferSink`](crate::remote::transfer::FsTransferSink)
+/// byte-reporting path via [`byte_sink`](Self::byte_sink), so no
+/// changes to the sink write loops are required.
+#[derive(Clone, Debug)]
+pub struct TransferProgress {
+    phase: Arc<AtomicU8>,
+    scanned_files: Arc<AtomicU64>,
+    scanned_bytes: Arc<AtomicU64>,
+    total_files: Arc<AtomicU64>,
+    total_bytes: Arc<AtomicU64>,
+    done_files: Arc<AtomicU64>,
+    done_bytes: Arc<AtomicU64>,
+}
+
+/// A plain `Copy` point-in-time view of [`TransferProgress`], taken
+/// by the render thread each tick. Decoupled from the atomics so the
+/// render code never holds a reference into the shared handle.
+#[derive(Clone, Copy, Debug)]
+pub struct TransferProgressSnapshot {
+    pub phase: Phase,
+    pub scanned_files: u64,
+    pub scanned_bytes: u64,
+    pub total_files: u64,
+    pub total_bytes: u64,
+    pub done_files: u64,
+    pub done_bytes: u64,
+}
+
+impl TransferProgress {
+    pub fn new() -> Self {
+        Self {
+            phase: Arc::new(AtomicU8::new(Phase::Enumerating as u8)),
+            scanned_files: Arc::new(AtomicU64::new(0)),
+            scanned_bytes: Arc::new(AtomicU64::new(0)),
+            total_files: Arc::new(AtomicU64::new(0)),
+            total_bytes: Arc::new(AtomicU64::new(0)),
+            done_files: Arc::new(AtomicU64::new(0)),
+            done_bytes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Set the lifecycle phase. Called by the orchestrator at phase
+    /// boundaries (cheap, infrequent).
+    pub fn set_phase(&self, phase: Phase) {
+        self.phase.store(phase as u8, Ordering::Relaxed);
+    }
+
+    /// Add to the live scanned counters. Called once per discovered
+    /// header in the orchestrator's collect loop — not in the
+    /// filesystem walker, so the walk itself pays nothing.
+    pub fn add_scanned(&self, files: u64, bytes: u64) {
+        self.scanned_files.fetch_add(files, Ordering::Relaxed);
+        self.scanned_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Record the known denominators once planning has determined
+    /// how many files / bytes the transfer will actually move.
+    pub fn set_totals(&self, files: u64, bytes: u64) {
+        self.total_files.store(files, Ordering::Relaxed);
+        self.total_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Add to the live completed counters. `done_bytes` is normally
+    /// driven through [`byte_sink`](Self::byte_sink) by the sink's
+    /// existing per-payload report; `done_files` is bumped alongside.
+    pub fn add_done(&self, files: u64, bytes: u64) {
+        self.done_files.fetch_add(files, Ordering::Relaxed);
+        self.done_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// A [`ByteProgressSink`] that reports into this handle's
+    /// `done_bytes` counter. Lets the orchestrator wire live byte
+    /// progress through `FsTransferSink::with_byte_progress` without
+    /// any new code in the sink write path — the sink's existing
+    /// `bp.report(bytes_written)` call lands on `done_bytes`.
+    pub fn byte_sink(&self) -> ByteProgressSink {
+        ByteProgressSink::from_counter(self.done_bytes.clone())
+    }
+
+    /// The raw `done_files` counter, for the sink to `fetch_add` into
+    /// per payload alongside its existing byte report. Mirrors the
+    /// `byte_sink` bridge so live file progress needs no bespoke type
+    /// in the sink. Non-CLI callers never wire this, so the sink's
+    /// counter stays `None` and the add is skipped.
+    pub fn done_files_counter(&self) -> Arc<AtomicU64> {
+        self.done_files.clone()
+    }
+
+    /// Take a consistent-enough snapshot for rendering. The loads are
+    /// `Relaxed` and independent, so fields may be momentarily skewed
+    /// across a tick; that's acceptable for a progress display and
+    /// avoids any synchronization cost on the writers.
+    pub fn snapshot(&self) -> TransferProgressSnapshot {
+        TransferProgressSnapshot {
+            phase: Phase::from_u8(self.phase.load(Ordering::Relaxed)),
+            scanned_files: self.scanned_files.load(Ordering::Relaxed),
+            scanned_bytes: self.scanned_bytes.load(Ordering::Relaxed),
+            total_files: self.total_files.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes.load(Ordering::Relaxed),
+            done_files: self.done_files.load(Ordering::Relaxed),
+            done_bytes: self.done_bytes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Default for TransferProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +251,50 @@ mod tests {
         let sink = ByteProgressSink::from_counter(Arc::clone(&counter));
         sink.report(4096);
         assert_eq!(counter.load(Ordering::Relaxed), 4096);
+    }
+
+    #[test]
+    fn transfer_progress_tracks_phase_and_counters() {
+        let prog = TransferProgress::new();
+        assert_eq!(prog.snapshot().phase, Phase::Enumerating);
+
+        prog.add_scanned(3, 300);
+        prog.add_scanned(2, 200);
+        prog.set_phase(Phase::Transferring);
+        prog.set_totals(5, 500);
+        prog.add_done(1, 100);
+
+        let snap = prog.snapshot();
+        assert_eq!(snap.phase, Phase::Transferring);
+        assert_eq!(snap.scanned_files, 5);
+        assert_eq!(snap.scanned_bytes, 500);
+        assert_eq!(snap.total_files, 5);
+        assert_eq!(snap.total_bytes, 500);
+        assert_eq!(snap.done_files, 1);
+        assert_eq!(snap.done_bytes, 100);
+    }
+
+    #[test]
+    fn byte_sink_feeds_done_bytes() {
+        // The bridge the orchestrator uses: the sink's existing
+        // `report` lands on the handle's done_bytes counter, so
+        // wiring it needs no change to the sink write loop.
+        let prog = TransferProgress::new();
+        let sink = prog.byte_sink();
+        sink.report(2048);
+        sink.report(1024);
+        assert_eq!(prog.snapshot().done_bytes, 3072);
+    }
+
+    #[test]
+    fn clones_share_counters() {
+        let prog = TransferProgress::new();
+        let clone = prog.clone();
+        prog.add_done(1, 10);
+        clone.add_done(2, 20);
+        let snap = prog.snapshot();
+        assert_eq!(snap.done_files, 3);
+        assert_eq!(snap.done_bytes, 30);
     }
 }
 

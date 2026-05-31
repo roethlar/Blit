@@ -220,7 +220,10 @@ impl TransferOrchestrator {
                             }
                         }
 
-                        if options.verbose {
+                        // Suppress under `-p` (progress handle present)
+                        // so these journal-probe lines don't scroll the
+                        // CLI progress bar; still shown for plain `-v`.
+                        if options.verbose && options.progress_handle.is_none() {
                             log_probe("src", &src_probe);
                             if let Some(probe) = dest_probe.as_ref() {
                                 log_probe("dest", probe);
@@ -531,23 +534,47 @@ impl TransferOrchestrator {
             }
         };
 
+        // Live-progress handle (CLI-only; `None` for every other
+        // caller, in which case all the `prog`-guarded calls below
+        // compile to nothing observable on the hot path).
+        let prog = options.progress_handle.clone();
+
         // 1. Scan source via FsTransferSource, wrapped in FilteredSource so
         //    the user filter applies through the universal pipeline chokepoint
         //    (identical to push/pull/remote-remote behavior — full parity).
-        let inner: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root_buf.clone()));
+        if let Some(p) = &prog {
+            p.set_phase(crate::remote::transfer::Phase::Enumerating);
+        }
+        // When the CLI renders progress, silence the scan's own
+        // out-of-band stderr lines so they can't scroll the spinner;
+        // the render thread shows the scanned count from `prog`.
+        let inner: Arc<dyn TransferSource> = if prog.is_some() {
+            Arc::new(FsTransferSource::quiet(src_root_buf.clone()))
+        } else {
+            Arc::new(FsTransferSource::new(src_root_buf.clone()))
+        };
         let source: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(inner, filter));
         let unreadable = Arc::new(Mutex::new(Vec::new()));
         let (mut header_rx, scan_handle) = source.scan(None, unreadable.clone());
 
-        // 2. Collect all headers
+        // 2. Collect all headers. This loop already visits every
+        //    discovered header, so bumping the live scanned counters
+        //    here costs the filesystem walker nothing — the per-entry
+        //    add is a Relaxed atomic on the collector side only.
         let mut all_headers = Vec::new();
         while let Some(h) = header_rx.recv().await {
+            if let Some(p) = &prog {
+                p.add_scanned(1, h.size);
+            }
             all_headers.push(h);
         }
         let _total_scanned = scan_handle
             .await
             .context("scan task panicked")?
             .context("scan failed")?;
+        if let Some(p) = &prog {
+            p.set_phase(crate::remote::transfer::Phase::Planning);
+        }
 
         // 3. Diff + plan via the shared DiffPlanner stage. Combines
         //    the comparison-filter and payload-planning steps that
@@ -573,11 +600,36 @@ impl TransferOrchestrator {
         .await
         .context("diff_planner task panicked")??;
 
+        // Now that planning is done, the transfer denominators are
+        // known. Publish them and flip to the Transferring phase so
+        // the CLI switches from a scan spinner to a byte bar. Totals
+        // are derived from the planned payload set (files via
+        // `payload_file_count`, bytes by summing header sizes across
+        // File + TarShard payloads).
+        if let Some(p) = &prog {
+            use crate::remote::transfer::payload::{payload_file_count, TransferPayload};
+            let planned_files = payload_file_count(&planned.payloads) as u64;
+            let planned_bytes: u64 = planned
+                .payloads
+                .iter()
+                .map(|payload| match payload {
+                    TransferPayload::File(header) => header.size,
+                    TransferPayload::TarShard { headers } => {
+                        headers.iter().map(|h| h.size).sum()
+                    }
+                    TransferPayload::FileBlock { .. }
+                    | TransferPayload::FileBlockComplete { .. } => 0,
+                })
+                .sum();
+            p.set_totals(planned_files, planned_bytes);
+            p.set_phase(crate::remote::transfer::Phase::Transferring);
+        }
+
         // 5. Create sink and execute unified pipeline
         let sink: Arc<dyn TransferSink> = if copy_config.null_sink {
             Arc::new(NullSink::new())
         } else {
-            Arc::new(FsTransferSink::new(
+            let mut fs_sink = FsTransferSink::new(
                 src_root_buf.clone(),
                 dest_root_buf.clone(),
                 FsSinkConfig {
@@ -594,7 +646,17 @@ impl TransferOrchestrator {
                     // mtime+size matched.
                     compare_mode,
                 },
-            ))
+            );
+            // Live byte progress: the sink's existing per-payload
+            // `bp.report(bytes_written)` now lands on the handle's
+            // `done_bytes` counter. No new code runs in the sink's
+            // write loop — only the `Option` becomes `Some`.
+            if let Some(p) = &prog {
+                fs_sink = fs_sink
+                    .with_byte_progress(p.byte_sink())
+                    .with_files_progress(p.done_files_counter());
+            }
+            Arc::new(fs_sink)
         };
 
         // Boundary between planner and transfer phases. `planning_start`
@@ -694,7 +756,11 @@ impl TransferOrchestrator {
                 fallback_depth: total_pred.fallback_depth,
             })
         });
-        if options.verbose {
+        // `prog.is_none()`: when the CLI render thread owns the
+        // terminal these one-shot verbose lines would scroll the bar,
+        // so they're suppressed under `-p`. The same numbers remain
+        // available in the final summary / `blit profile --json`.
+        if options.verbose && prog.is_none() {
             if let Some(est) = predictor_estimate.as_ref() {
                 eprintln!(
                     "Predictor estimate: planner ~{} ms, transfer ~{} ms, \
@@ -783,6 +849,9 @@ impl TransferOrchestrator {
                 );
             }
 
+            if let Some(p) = &prog {
+                p.set_phase(crate::remote::transfer::Phase::Deleting);
+            }
             let source_paths: HashSet<String> = all_headers
                 .iter()
                 .map(|h| h.relative_path.clone())
@@ -803,7 +872,7 @@ impl TransferOrchestrator {
             persist_journal_checkpoints(tracker, journal_tokens.as_mut_slice(), options.verbose);
         }
 
-        if options.verbose {
+        if options.verbose && prog.is_none() {
             eprintln!(
                 "Planning enumerated {} file(s), {} bytes",
                 scanned_files, scanned_bytes
@@ -863,6 +932,10 @@ impl TransferOrchestrator {
             if !options.null_sink {
                 update_predictor(&mut predictor, &record, options.verbose);
             }
+        }
+
+        if let Some(p) = &prog {
+            p.set_phase(crate::remote::transfer::Phase::Done);
         }
 
         Ok(summary)

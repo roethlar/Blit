@@ -2,9 +2,13 @@ use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use blit_app::display::format_bytes;
 use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
+use blit_core::remote::transfer::{Phase, TransferProgress};
 use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Convenience wrapper for callers that always want the summary
@@ -82,7 +86,7 @@ async fn run_local_transfer_inner(
         bail!("source path does not exist: {}", src_path.display());
     }
 
-    let options = build_local_options(ctx, args, mirror)?;
+    let mut options = build_local_options(ctx, args, mirror)?;
     let dry_run = options.dry_run;
     let null_sink = options.null_sink;
     let json_output = args.json;
@@ -95,32 +99,34 @@ async fn run_local_transfer_inner(
         );
     }
 
-    let progress_bar = if !args.effective_progress() {
-        None
+    // Live progress: install a shared handle the orchestrator writes
+    // to (phase + scanned/total/done counters via lock-free atomics)
+    // and spawn the single render thread that owns the terminal. The
+    // orchestrator also goes quiet on its own stderr progress lines
+    // while this handle is present, so nothing scrolls the bar.
+    let render = if args.effective_progress() {
+        let handle = TransferProgress::new();
+        options.progress_handle = Some(handle.clone());
+        Some(spawn_progress_render(
+            handle,
+            mirror,
+            src_path.display().to_string(),
+            dest_path.display().to_string(),
+        ))
     } else {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::with_template("{spinner} {msg}")
-                .unwrap()
-                .tick_strings(&["-", "\\", "|", "/"]),
-        );
-        pb.enable_steady_tick(Duration::from_millis(120));
-        pb.set_message(format!(
-            "{} {} → {}",
-            if mirror { "Mirroring" } else { "Copying" },
-            src_path.display(),
-            dest_path.display()
-        ));
-        Some(pb)
+        None
     };
 
     let start = Instant::now();
-    let summary = blit_app::transfers::local::run(src_path, dest_path, options).await?;
+    let result = blit_app::transfers::local::run(src_path, dest_path, options).await;
 
-    if let Some(pb) = progress_bar {
-        pb.finish_and_clear();
+    // Tear the bar down before propagating any error or printing the
+    // summary, on both the success and failure paths.
+    if let Some(render) = render {
+        render.finish();
     }
 
+    let summary = result?;
     let elapsed = start.elapsed();
     if !defer_output {
         if json_output {
@@ -133,6 +139,101 @@ async fn run_local_transfer_inner(
     }
 
     Ok(summary)
+}
+
+/// Handle to the single progress-render thread for a local transfer.
+struct ProgressRender {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+impl ProgressRender {
+    /// Stop the render thread and wait for it to clear the bar. Called
+    /// after the transfer future resolves (success OR error) so the
+    /// terminal is always left clean before the summary prints.
+    fn finish(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
+    }
+}
+
+/// Spawn the one OS thread that owns the terminal during a local
+/// transfer.
+///
+/// Deliberately a `std::thread`, NOT a tokio task: it must never run
+/// on a runtime worker, so it cannot steal CPU from the copy pipeline
+/// (the "zero throughput impact" requirement). It samples the shared
+/// [`TransferProgress`] handle every ~100 ms — only `Relaxed` atomic
+/// loads, no locks — and is the SOLE writer to stderr while the
+/// transfer runs. That single-writer property is what lets the
+/// spinner animate in place instead of being scrolled by out-of-band
+/// log lines.
+fn spawn_progress_render(
+    progress: TransferProgress,
+    mirror: bool,
+    src: String,
+    dst: String,
+) -> ProgressRender {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let verb = if mirror { "Mirroring" } else { "Copying" };
+    let handle = std::thread::spawn(move || {
+        let pb = ProgressBar::new_spinner();
+        let spinner_style = ProgressStyle::with_template("{spinner} {msg}")
+            .unwrap()
+            .tick_strings(&["-", "\\", "|", "/"]);
+        let bar_style = ProgressStyle::with_template(
+            "{spinner} [{bar:32}] {bytes}/{total_bytes} ({percent}%) · \
+             {binary_bytes_per_sec} · ETA {eta} · {msg}",
+        )
+        .unwrap()
+        .progress_chars("=> ")
+        .tick_strings(&["-", "\\", "|", "/"]);
+        pb.set_style(spinner_style.clone());
+        pb.set_message(format!("{verb} {src} → {dst}"));
+
+        // Tracks whether we've switched from the scan spinner to the
+        // determinate byte bar, so the style swap happens exactly once.
+        let mut bar_mode = false;
+        loop {
+            let snap = progress.snapshot();
+            match snap.phase {
+                Phase::Enumerating | Phase::Planning => {
+                    pb.set_message(format!(
+                        "{verb} {src} → {dst} · {} scanned ({})",
+                        snap.scanned_files,
+                        format_bytes(snap.scanned_bytes)
+                    ));
+                }
+                Phase::Transferring => {
+                    if !bar_mode {
+                        pb.set_style(bar_style.clone());
+                        bar_mode = true;
+                    }
+                    // total_bytes can be 0 for a metadata-only run;
+                    // max(1) keeps the bar/percent well-defined.
+                    pb.set_length(snap.total_bytes.max(1));
+                    pb.set_position(snap.done_bytes);
+                    pb.set_message(format!("{}/{} files", snap.done_files, snap.total_files));
+                }
+                Phase::Deleting => {
+                    if bar_mode {
+                        pb.set_style(spinner_style.clone());
+                        bar_mode = false;
+                    }
+                    pb.set_message("Deleting extraneous entries…".to_string());
+                }
+                Phase::Done => break,
+            }
+            pb.tick();
+            if stop_thread.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        pb.finish_and_clear();
+    });
+    ProgressRender { stop, handle }
 }
 
 fn build_local_options(

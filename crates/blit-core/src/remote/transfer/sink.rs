@@ -4,6 +4,7 @@
 //! Implementations handle the actual write: local filesystem, TCP data plane, etc.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -138,6 +139,13 @@ pub struct FsTransferSink {
     /// [`FsTransferSink::with_byte_progress`] from
     /// `ActiveJobGuard::bytes_counter()`.
     byte_progress: Option<ByteProgressSink>,
+    /// Optional live completed-files counter. Bumped by
+    /// `outcome.files_written` after each successful `write_payload`,
+    /// alongside the `byte_progress` byte report. Wired only by the
+    /// local CLI progress path via [`FsTransferSink::with_files_progress`];
+    /// `None` everywhere else (the daemon tracks bytes only), so the
+    /// add is skipped.
+    files_progress: Option<Arc<AtomicU64>>,
 }
 
 impl FsTransferSink {
@@ -158,6 +166,7 @@ impl FsTransferSink {
             config,
             path_tracker: None,
             byte_progress: None,
+            files_progress: None,
         }
     }
 
@@ -177,6 +186,16 @@ impl FsTransferSink {
     /// tracks live progress; CLI-side callers omit it.
     pub fn with_byte_progress(mut self, sink: ByteProgressSink) -> Self {
         self.byte_progress = Some(sink);
+        self
+    }
+
+    /// Attach a live completed-files counter. Bumped by
+    /// `outcome.files_written` after each successful payload write.
+    /// Used by the local CLI progress bar so the `done/total files`
+    /// figure advances during the run; pairs with
+    /// [`with_byte_progress`](Self::with_byte_progress).
+    pub fn with_files_progress(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.files_progress = Some(counter);
         self
     }
 
@@ -309,6 +328,12 @@ impl TransferSink for FsTransferSink {
         // `write_file_stream`'s dry-run branch.
         if let Some(bp) = &self.byte_progress {
             bp.report(outcome.bytes_written);
+        }
+        // Live completed-files counter (local CLI progress). Same
+        // Relaxed-atomic discipline as the byte report above; skipped
+        // when no counter is wired (daemon / non-CLI callers).
+        if let Some(fp) = &self.files_progress {
+            fp.fetch_add(outcome.files_written as u64, Ordering::Relaxed);
         }
         Ok(outcome)
     }

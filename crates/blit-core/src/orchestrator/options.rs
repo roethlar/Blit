@@ -1,4 +1,5 @@
 use crate::fs_enum::FileFilter;
+use crate::remote::transfer::TransferProgress;
 
 /// Scope of mirror deletions. Matches the wire-side `MirrorMode` enum
 /// (FilteredSubset / All) plus a `false`/`true` flag form. R58-F6:
@@ -77,6 +78,14 @@ pub struct LocalMirrorOptions {
     pub resume: bool,
     /// Discard writes (NullSink). Measures source read + pipeline throughput.
     pub null_sink: bool,
+    /// Optional live-progress handle. When `Some`, the orchestrator
+    /// publishes phase transitions, scanned counts, planned totals,
+    /// and (via the sink's existing byte report) completed bytes into
+    /// it. A CLI-owned render thread samples it to drive the progress
+    /// bar. `None` (the default, and all non-CLI callers) adds zero
+    /// work to the transfer path. Named `progress_handle` to avoid
+    /// colliding with the existing `progress: bool` flag above.
+    pub progress_handle: Option<TransferProgress>,
 }
 
 impl Default for LocalMirrorOptions {
@@ -101,6 +110,7 @@ impl Default for LocalMirrorOptions {
             debug_mode: false,
             resume: false,
             null_sink: false,
+            progress_handle: None,
         }
     }
 }

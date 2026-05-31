@@ -20,7 +20,10 @@ pub use payload::{
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
 pub use pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
-pub use progress::{ByteProgressSink, ProgressEvent, RemoteTransferProgress};
+pub use progress::{
+    ByteProgressSink, Phase, ProgressEvent, RemoteTransferProgress, TransferProgress,
+    TransferProgressSnapshot,
+};
 pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
     NullSink, SinkOutcome, TransferSink,
