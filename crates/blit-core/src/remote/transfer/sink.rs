@@ -16,7 +16,7 @@ use crate::copy::{copy_file, resume_copy_file};
 use crate::generated::{ComparisonMode, FileHeader};
 use crate::logger::NoopLogger;
 use crate::remote::transfer::payload::PreparedPayload;
-use crate::remote::transfer::progress::ByteProgressSink;
+use crate::remote::transfer::progress::{ByteProgressSink, NoProbe, Probe};
 use crate::remote::transfer::source::TransferSource;
 
 // Re-export for consumers.
@@ -746,15 +746,15 @@ async fn write_file_block_complete(
 ///
 /// Each instance wraps a single TCP stream (DataPlaneSession). For multi-stream
 /// transfers, the pipeline executor creates multiple DataPlaneSink instances.
-pub struct DataPlaneSink {
-    session: tokio::sync::Mutex<DataPlaneSession>,
+pub struct DataPlaneSink<P: Probe = NoProbe> {
+    session: tokio::sync::Mutex<DataPlaneSession<P>>,
     source: Arc<dyn TransferSource>,
     dst_root: PathBuf,
 }
 
-impl DataPlaneSink {
+impl<P: Probe> DataPlaneSink<P> {
     pub fn new(
-        session: DataPlaneSession,
+        session: DataPlaneSession<P>,
         source: Arc<dyn TransferSource>,
         dst_root: PathBuf,
     ) -> Self {
@@ -767,7 +767,7 @@ impl DataPlaneSink {
 }
 
 #[async_trait]
-impl TransferSink for DataPlaneSink {
+impl<P: Probe> TransferSink for DataPlaneSink<P> {
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         let mut session = self.session.lock().await;
         match payload {
