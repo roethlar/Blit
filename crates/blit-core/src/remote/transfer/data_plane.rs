@@ -8,6 +8,7 @@ use crate::buffer::BufferPool;
 use crate::generated::FileHeader;
 
 use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
+use super::progress::{NoProbe, Probe};
 use crate::remote::transfer::source::TransferSource;
 use std::sync::Arc;
 
@@ -18,13 +19,24 @@ pub const DATA_PLANE_RECORD_BLOCK: u8 = 2;
 pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 
-pub struct DataPlaneSession {
+/// A single data-plane TCP stream and its send loop.
+///
+/// Generic over a [`Probe`] so the byte-copy hot path can carry
+/// per-stream telemetry under adaptive mode at **zero cost** when the
+/// probe is [`NoProbe`] (the default): the instrumented branches are
+/// gated on `P::ACTIVE`, a compile-time constant, so they fold away
+/// entirely for `DataPlaneSession<NoProbe>`. Existing callers name the
+/// bare type and get the `NoProbe` default; the adaptive controller
+/// constructs `DataPlaneSession<LiveProbe>` via
+/// [`from_stream_with_probe`](DataPlaneSession::from_stream_with_probe).
+pub struct DataPlaneSession<P: Probe = NoProbe> {
     stream: TcpStream,
     pool: Arc<BufferPool>,
     trace: bool,
     chunk_bytes: usize,
     payload_prefetch: usize,
     bytes_sent: u64,
+    probe: P,
 }
 
 macro_rules! trace_client {
@@ -35,8 +47,10 @@ macro_rules! trace_client {
     };
 }
 
-impl DataPlaneSession {
+impl DataPlaneSession<NoProbe> {
     /// Create a session from an existing stream with buffer pooling.
+    /// Produces the un-instrumented `NoProbe` variant — the default for
+    /// every non-adaptive caller.
     pub async fn from_stream(
         stream: TcpStream,
         trace: bool,
@@ -44,16 +58,8 @@ impl DataPlaneSession {
         payload_prefetch: usize,
         pool: Arc<BufferPool>,
     ) -> Self {
-        let payload_prefetch = payload_prefetch.max(1);
-        let chunk_bytes = chunk_bytes.max(64 * 1024);
-        Self {
-            stream,
-            pool,
-            trace,
-            chunk_bytes,
-            payload_prefetch,
-            bytes_sent: 0,
-        }
+        Self::from_stream_with_probe(stream, trace, chunk_bytes, payload_prefetch, pool, NoProbe)
+            .await
     }
 
     /// Connect to a data plane endpoint with buffer pooling.
@@ -112,6 +118,33 @@ impl DataPlaneSession {
             .context("writing negotiation token")?;
 
         Ok(Self::from_stream(stream, trace, chunk_bytes, payload_prefetch, pool).await)
+    }
+}
+
+impl<P: Probe> DataPlaneSession<P> {
+    /// Create a session carrying an arbitrary [`Probe`]. The generic
+    /// primitive behind [`from_stream`](DataPlaneSession::from_stream);
+    /// the adaptive controller calls this with a `LiveProbe` to enable
+    /// per-stream telemetry.
+    pub async fn from_stream_with_probe(
+        stream: TcpStream,
+        trace: bool,
+        chunk_bytes: usize,
+        payload_prefetch: usize,
+        pool: Arc<BufferPool>,
+        probe: P,
+    ) -> Self {
+        let payload_prefetch = payload_prefetch.max(1);
+        let chunk_bytes = chunk_bytes.max(64 * 1024);
+        Self {
+            stream,
+            pool,
+            trace,
+            chunk_bytes,
+            payload_prefetch,
+            bytes_sent: 0,
+            probe,
+        }
     }
 
     pub async fn send_payloads(
@@ -292,6 +325,15 @@ impl DataPlaneSession {
 
         // Main loop: write buf_a while reading into buf_b
         while remaining > 0 {
+            // Per-stream telemetry: time the overlapped write+read step
+            // as a backpressure proxy. Gated on the compile-time
+            // `P::ACTIVE` constant so `DataPlaneSession<NoProbe>` reads
+            // no clock and folds this to nothing.
+            let step_start = if P::ACTIVE {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             // Overlap: write from buf_a, read into buf_b concurrently
             let (write_result, read_result) = tokio::join!(
                 self.stream.write_all(&buf_a.as_slice()[..bytes_a]),
@@ -299,6 +341,12 @@ impl DataPlaneSession {
             );
 
             write_result.with_context(|| format!("sending {}", rel))?;
+            if P::ACTIVE {
+                if let Some(t) = step_start {
+                    self.probe.note_write_blocked(t.elapsed().as_nanos() as u64);
+                }
+            }
+            self.probe.record_bytes(bytes_a as u64);
             crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes_a as u64);
 
             let bytes_b = read_result.with_context(|| format!("reading {}", rel))?;
@@ -321,12 +369,25 @@ impl DataPlaneSession {
             bytes_a = bytes_b;
         }
 
-        // Final write: send the last chunk in buf_a
+        // Final write: send the last chunk in buf_a. This is a pure
+        // write (no overlapped read), so the timing is cleanly
+        // attributable to socket-write backpressure.
         if bytes_a > 0 {
+            let tail_start = if P::ACTIVE {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             self.stream
                 .write_all(&buf_a.as_slice()[..bytes_a])
                 .await
                 .with_context(|| format!("sending {}", rel))?;
+            if P::ACTIVE {
+                if let Some(t) = tail_start {
+                    self.probe.note_write_blocked(t.elapsed().as_nanos() as u64);
+                }
+            }
+            self.probe.record_bytes(bytes_a as u64);
             crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes_a as u64);
         }
 
@@ -399,6 +460,7 @@ impl DataPlaneSession {
                 .write_all(chunk)
                 .await
                 .context("writing tar shard payload")?;
+            self.probe.record_bytes(chunk.len() as u64);
             crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(chunk.len() as u64);
         }
         trace_client!(

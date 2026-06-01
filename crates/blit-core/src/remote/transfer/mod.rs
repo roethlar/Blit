@@ -8,6 +8,7 @@ pub mod sink;
 pub mod source;
 pub mod stall_guard;
 pub mod tar_safety;
+pub mod tcp_info;
 
 pub use data_plane::{
     receive_stream_double_buffered, DataPlaneSession, CONTROL_PLANE_CHUNK_SIZE,
@@ -21,9 +22,11 @@ pub use payload::{
 };
 pub use pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
 pub use progress::{
-    ByteProgressSink, Phase, ProgressEvent, RemoteTransferProgress, TransferProgress,
-    TransferProgressSnapshot,
+    ByteProgressSink, LiveProbe, NoProbe, Phase, Probe, ProgressEvent, RemoteTransferProgress,
+    StreamId, StreamProbe, StreamState, StreamTelemetry, StreamTelemetrySnapshot,
+    TransferProgress, TransferProgressSnapshot,
 };
+pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};
 pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
     NullSink, SinkOutcome, TransferSink,
