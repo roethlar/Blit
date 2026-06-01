@@ -386,6 +386,7 @@ impl RemotePushClient {
                 filter: Some(wire_filter),
                 mirror_kind: mirror_kind as i32,
                 require_complete_scan,
+                supports_adaptive_streams: true,
             }),
         )
         .await?;
@@ -700,6 +701,14 @@ impl RemotePushClient {
                                 }
                                 Some(ServerPayload::Summary(push_summary)) => {
                                     summary = Some(push_summary);
+                                }
+                                Some(ServerPayload::DataPlaneResizeAck(_ack)) => {
+                                    // PR3 (adaptive streams): the push client is
+                                    // the controller and only sends a resize
+                                    // ADD request after which the daemon acks
+                                    // here. The controller that consumes this
+                                    // ack lands in a later stage; until then no
+                                    // request is sent so this is inert.
                                 }
                                 None => {}
                             }

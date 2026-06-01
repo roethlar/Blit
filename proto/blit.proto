@@ -124,6 +124,50 @@ message DataTransferNegotiation {
   bool tcp_fallback = 3; // true when the server could not reserve the preferred data-plane.
   uint32 stream_count = 4; // number of parallel TCP streams negotiated for the data plane
   reserved 5 to 10; // RDMA fields (QP numbers, GID, etc.) for Phase 3.5
+
+  // Adaptive stream concurrency (PR3). The daemon is authoritative:
+  // `adaptive_enabled` is the single source of truth both ends read
+  // before dialing any data socket. It gates the handshake framing
+  // (epoch/sub_token suffix), the DataPlaneResize messages, and the
+  // controller. The daemon sets it true only when the peer advertised
+  // support, the daemon supports it, tcp_port != 0, !tcp_fallback, and
+  // min < max.
+  uint32 min_stream_count = 11; // controller floor (>=1)
+  uint32 max_stream_count = 12; // controller ceiling (negotiated, not per-side clamp)
+  bool adaptive_enabled = 13;
+  // 16 random bytes that every initial (epoch 0) data socket must echo
+  // after the one_time_token when adaptive_enabled is true. Empty and
+  // ignored when adaptive_enabled is false (fallback handshake unchanged).
+  bytes epoch0_sub_token = 14;
+}
+
+// Adaptive resize op (PR3). Carried on the transfer control streams.
+enum DataPlaneResizeOp {
+  DATA_PLANE_RESIZE_OP_UNSPECIFIED = 0;
+  DATA_PLANE_RESIZE_OP_ADD = 1;
+  DATA_PLANE_RESIZE_OP_REMOVE = 2;
+}
+
+// Controller → peer request to grow/shrink the live data-plane stream
+// set. `epoch` is a monotonic resize id (0 is reserved for the initial
+// streams); `target_stream_count` is the absolute desired live count
+// (idempotent). For ADD, `sub_token` is the 16-byte credential the new
+// data socket must present after the one_time_token; the daemon registers
+// it before the dialer dials. For REMOVE, sub_token is empty.
+message DataPlaneResize {
+  DataPlaneResizeOp op = 1;
+  uint32 epoch = 2;
+  uint32 target_stream_count = 3;
+  bytes sub_token = 4;
+}
+
+// Ack of a DataPlaneResize. `accepted` is false if the peer could not
+// honor it (e.g. registration refused, dial failed); `effective_stream_count`
+// is the live count the acking side now believes is in effect.
+message DataPlaneResizeAck {
+  uint32 epoch = 1;
+  uint32 effective_stream_count = 2;
+  bool accepted = 3;
 }
 
 // Push Operation
@@ -137,6 +181,11 @@ message ClientPushRequest {
     TarShardHeader tar_shard_header = 6;
     TarShardChunk tar_shard_chunk = 7;
     TarShardComplete tar_shard_complete = 8;
+    // PR3: push client is the controller+dialer. It sends a pre-dial
+    // ADD request so the daemon can register (epoch, sub_token) and arm
+    // its accept loop; REMOVE is accounting-only (the daemon's receiver
+    // retires on socket EOF after RECORD_END).
+    DataPlaneResize data_plane_resize = 9;
   }
 }
 
@@ -146,6 +195,9 @@ message ServerPushResponse {
     FileList files_to_upload = 2; // The "NeedList"
     PushSummary summary = 3;
     DataTransferNegotiation negotiation = 4; // Negotiation event before summary
+    // PR3: daemon confirms it registered the epoch and armed accept
+    // (ADD) so the client may now dial.
+    DataPlaneResizeAck data_plane_resize_ack = 5;
   }
 }
 
@@ -183,6 +235,13 @@ message PushHeader {
   // mirror_kind: required for mirror correctness, also useful
   // for move-like pushes once those exist.
   bool require_complete_scan = 7;
+
+  // Adaptive stream concurrency (PR3): the push client advertises that
+  // it can drive mid-transfer stream resize. Push opens with PushHeader
+  // (no PeerCapabilities), so the flag lives here; the daemon folds it
+  // into DataTransferNegotiation.adaptive_enabled. Older clients leave
+  // it false and run at the fixed negotiated count.
+  bool supports_adaptive_streams = 8;
 }
 
 message FileHeader {
@@ -276,6 +335,11 @@ message ClientPullMessage {
     FileHeader local_file = 2;           // Client's local file metadata
     ManifestComplete manifest_done = 3;  // Signals end of client manifest
     BlockHashList block_hashes = 4;      // Client's block hashes for resume mode
+    // PR3: pull client is the dialer but NOT the controller (the daemon
+    // sends data). It acks the daemon's resize command here, on the
+    // outbound half — a different stream direction than the inbound
+    // ServerPullMessage carrying the command, so no head-of-line block.
+    DataPlaneResizeAck data_plane_resize_ack = 5;
   }
 }
 
@@ -327,6 +391,10 @@ message ServerPullMessage {
     TarShardHeader tar_shard_header = 13;
     TarShardChunk tar_shard_chunk = 14;
     TarShardComplete tar_shard_complete = 15;
+    // PR3: daemon is the sender/controller on pull. It registers the
+    // epoch locally, then sends this command so the client dials the
+    // new socket (ADD) or retires a receive worker (REMOVE).
+    DataPlaneResize data_plane_resize = 16;
   }
 }
 
@@ -581,6 +649,11 @@ message PeerCapabilities {
   // this to true; older receivers that didn't honor filter rules
   // will not.
   bool supports_filter_spec = 4;
+  // Adaptive stream concurrency (PR3): pull / delegated-pull byte
+  // recipient can drive mid-transfer stream resize. The daemon folds
+  // this into DataTransferNegotiation.adaptive_enabled. Older receivers
+  // leave it false and run at the fixed negotiated count.
+  bool supports_adaptive_streams = 5;
 }
 
 // ─────────────────────────────────────────────────────────────────────

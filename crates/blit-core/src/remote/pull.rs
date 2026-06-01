@@ -595,6 +595,7 @@ impl RemotePullClient {
                 supports_tar_shards: true,
                 supports_data_plane_tcp: true,
                 supports_filter_spec: true,
+                supports_adaptive_streams: true,
             }),
             force_grpc: options.force_grpc,
             ignore_existing: options.ignore_existing,
@@ -916,6 +917,24 @@ impl RemotePullClient {
                         progress,
                         byte_progress,
                     )?));
+                }
+                Some(server_pull_message::Payload::DataPlaneResize(resize)) => {
+                    // PR3 (adaptive streams): handled by the controller
+                    // wiring in a later stage. Until the controller is
+                    // active no daemon issues these, so observing one now
+                    // is unexpected — ack as not-accepted so a forward
+                    // peer doesn't wait forever, and keep transferring.
+                    let _ = tx
+                        .send(ClientPullMessage {
+                            payload: Some(client_pull_message::Payload::DataPlaneResizeAck(
+                                crate::generated::DataPlaneResizeAck {
+                                    epoch: resize.epoch,
+                                    effective_stream_count: 0,
+                                    accepted: false,
+                                },
+                            )),
+                        })
+                        .await;
                 }
                 Some(server_pull_message::Payload::Summary(summary)) => {
                     files_to_delete = summary.entries_deleted;
