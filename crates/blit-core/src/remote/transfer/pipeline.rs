@@ -59,14 +59,21 @@ pub async fn execute_sink_pipeline(
 
 /// Execute a transfer pipeline with payloads arriving on a channel.
 ///
-/// Distributes payloads round-robin across `sinks` as they arrive. Each sink
-/// runs as a separate tokio task: it reads payloads from its dedicated queue,
-/// prepares them via `source.prepare_payload()`, writes them via
-/// `sink.write_payload()`, and finally calls `sink.finish()`. Errors from any
-/// worker propagate up.
+/// Payloads are distributed across `sinks` through a single shared
+/// **work-stealing** queue (a bounded `flume` MPMC channel): each sink
+/// runs as a tokio task that pulls the next available payload via
+/// `recv_async().await`, so a slow sink can never head-of-line-block the
+/// others (the failure mode of the previous round-robin per-sink
+/// channels). A forwarder task moves payloads from the incoming
+/// `payload_rx` onto the shared queue; dropping its sender on
+/// end-of-stream lets every worker observe `Disconnected` once the queue
+/// drains, at which point it calls `sink.finish()`. Errors from any
+/// worker propagate up (first error wins).
 ///
-/// `prefetch` controls the per-sink channel capacity — effectively the
-/// preparation-in-flight limit per sink.
+/// `prefetch` controls the per-sink preparation-in-flight limit; the
+/// shared queue is bounded at `prefetch * sinks.len()` so total
+/// in-flight capacity matches the previous per-sink-channel design
+/// (back-pressure preserved).
 pub async fn execute_sink_pipeline_streaming(
     source: Arc<dyn TransferSource>,
     sinks: Vec<Arc<dyn TransferSink>>,
@@ -81,21 +88,22 @@ pub async fn execute_sink_pipeline_streaming(
     }
 
     let sink_count = sinks.len();
-    let per_sink_capacity = prefetch.max(1);
+    let capacity = prefetch.max(1) * sink_count;
     let total = Arc::new(std::sync::Mutex::new(SinkOutcome::default()));
 
-    // Per-sink payload channels; dispatcher forwards round-robin to these.
-    let mut sink_senders: Vec<mpsc::Sender<TransferPayload>> = Vec::with_capacity(sink_count);
+    // Single shared work queue. Each worker owns exactly one sink but
+    // pulls payloads from the common queue, so work is stolen by
+    // whichever sink is free rather than pre-assigned round-robin.
+    let (work_tx, work_rx) = flume::bounded::<TransferPayload>(capacity);
     let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(sink_count);
 
     for sink in sinks {
-        let (tx, mut rx) = mpsc::channel::<TransferPayload>(per_sink_capacity);
-        sink_senders.push(tx);
+        let work_rx = work_rx.clone();
         let source_clone = source.clone();
         let progress_clone = progress.cloned();
         let total_clone = total.clone();
         sink_handles.push(tokio::spawn(async move {
-            while let Some(payload) = rx.recv().await {
+            while let Ok(payload) = work_rx.recv_async().await {
                 let prepared = source_clone
                     .prepare_payload(payload)
                     .await
@@ -128,24 +136,30 @@ pub async fn execute_sink_pipeline_streaming(
         }));
     }
 
-    // Dispatcher: pull from the incoming channel, round-robin to sinks.
-    // Uses async send (which applies backpressure) — if one sink is slower,
-    // the dispatcher naturally blocks on that sink until it drains.
-    let dispatcher = tokio::spawn(async move {
-        let mut next = 0usize;
+    // Drop our own receiver handle so the channel closes once the
+    // forwarder drops its sender and the workers' clones drain — without
+    // this, `recv_async` would never see `Disconnected`.
+    drop(work_rx);
+
+    // Forwarder: move payloads from the incoming channel onto the shared
+    // work queue. `send_async` applies back-pressure (bounded queue); if
+    // every worker has gone away (e.g. all sinks errored) the send fails
+    // and we stop. Dropping `work_tx` on end-of-stream signals the
+    // workers.
+    let forwarder = tokio::spawn(async move {
         while let Some(payload) = payload_rx.recv().await {
-            let idx = next % sink_count;
-            next = next.wrapping_add(1);
-            if sink_senders[idx].send(payload).await.is_err() {
-                // Sink worker dropped its receiver — treat as shutdown.
+            if work_tx.send_async(payload).await.is_err() {
+                // All workers dropped their receivers — nothing left to
+                // feed; treat as shutdown.
                 return;
             }
         }
-        // Drop senders so sink workers see end-of-stream and finish().
-        drop(sink_senders);
+        // Dropping work_tx closes the queue → workers see Disconnected
+        // after draining and run finish().
+        drop(work_tx);
     });
 
-    // Wait for all sinks to finish and aggregate errors.
+    // Wait for all sinks to finish and aggregate errors (first wins).
     let mut first_err: Option<eyre::Report> = None;
     for h in sink_handles {
         match h.await {
@@ -158,7 +172,7 @@ pub async fn execute_sink_pipeline_streaming(
             Err(_) => {}
         }
     }
-    let _ = dispatcher.await;
+    let _ = forwarder.await;
 
     if let Some(err) = first_err {
         return Err(err);
@@ -951,6 +965,115 @@ mod tests {
         assert!(
             format!("{err:#}").contains("stalled"),
             "expected a StallGuard timeout in the error chain; got: {err:#}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod workqueue_tests {
+    //! PR2: the shared work-queue must let a fast sink steal work a slow
+    //! sink would otherwise have been assigned under the old round-robin
+    //! dispatcher. Without work-stealing, N payloads split evenly across
+    //! sinks and one slow sink bottlenecks the whole transfer; with it,
+    //! the fast sink absorbs the bulk.
+    use super::*;
+    use crate::remote::transfer::sink::{SinkOutcome, TransferSink};
+    use crate::remote::transfer::source::FsTransferSource;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    /// Counts payloads it writes; optionally sleeps per payload to model
+    /// a slow stream. Ignores the payload bytes — timing is governed
+    /// purely by the configured delay, isolating the dispatch behaviour.
+    struct CountingSink {
+        delay: Duration,
+        count: Arc<AtomicU64>,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for CountingSink {
+        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.count.fetch_add(1, Ordering::Relaxed);
+            Ok(SinkOutcome {
+                files_written: 1,
+                bytes_written: 0,
+            })
+        }
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fast_sink_steals_work_from_slow_sink() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let n = 40usize;
+        for i in 0..n {
+            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan_handle.await.unwrap().unwrap();
+        // Feed each file as its OWN payload (not via plan_transfer_payloads,
+        // which bundles tiny files into a single tar shard — that would
+        // leave only one payload and nothing to steal).
+        assert_eq!(headers.len(), n, "expected one header per file");
+
+        let fast_count = Arc::new(AtomicU64::new(0));
+        let slow_count = Arc::new(AtomicU64::new(0));
+        let fast: Arc<dyn TransferSink> = Arc::new(CountingSink {
+            delay: Duration::ZERO,
+            count: Arc::clone(&fast_count),
+            root: PathBuf::from("/fast"),
+        });
+        let slow: Arc<dyn TransferSink> = Arc::new(CountingSink {
+            delay: Duration::from_millis(20),
+            count: Arc::clone(&slow_count),
+            root: PathBuf::from("/slow"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(4);
+        let feeder = tokio::spawn(async move {
+            for h in headers {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = execute_sink_pipeline_streaming(source, vec![fast, slow], rx, 2, None)
+            .await
+            .expect("pipeline ok");
+        let _ = feeder.await;
+
+        let fast_n = fast_count.load(Ordering::Relaxed);
+        let slow_n = slow_count.load(Ordering::Relaxed);
+        assert_eq!(outcome.files_written, n, "every payload written once");
+        assert_eq!(
+            fast_n + slow_n,
+            n as u64,
+            "every payload accounted to exactly one sink"
+        );
+        // Round-robin would force ~20/20 and the slow sink would gate the
+        // whole transfer. Work-stealing lets the zero-delay sink take the
+        // overwhelming majority while the slow sink sits in its sleeps.
+        assert!(
+            fast_n > slow_n * 3,
+            "fast sink should steal the bulk of the work: fast={fast_n} slow={slow_n}"
         );
     }
 }
