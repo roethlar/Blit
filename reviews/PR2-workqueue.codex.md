@@ -1,3 +1,297 @@
+OpenAI Codex v0.136.0
+--------
+workdir: C:\Users\michael\Dev\blit_v2
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e85ed-767d-7330-a9ad-37aa04c810e4
+--------
+user
+You are reviewing ONE commit of a phased, pre-approved Rust refactor. EVERYTHING you need is in THIS message. Do NOT run any shell commands, do NOT call tools, do NOT read files, do NOT modify anything — just read the diff and full file below and write your review as text.
+
+PROJECT: blit, a high-performance Rust file-transfer tool (CLI + daemon; gRPC control plane + TCP data plane; targets 10-25 Gbps).
+
+SETTLED DECISIONS — do not relitigate, do not raise as findings:
+- Slice PR2 of an adaptive-stream-concurrency effort. PR1 added per-stream telemetry; PR2 (this commit) replaces the round-robin per-sink dispatch in execute_sink_pipeline_streaming with a shared work-stealing MPMC queue using flume (already a workspace dependency); PR3+ add a resize protocol and an AIMD controller. Do NOT suggest controller/resize/congestion logic — deliberately later slices.
+- HARD INVARIANT: zero added cost on the byte-copy hot path (workers do only lock-free Relaxed atomic adds; sampling runs off-thread). Flag violations; do not propose adding work to the per-chunk loop.
+- The public signature of execute_sink_pipeline_streaming is intentionally unchanged.
+
+JUDGE ONLY this commit's diff for REAL issues:
+1. Correctness: payload loss/duplication, back-pressure preserved, first-error-wins propagation, worker/forwarder shutdown & channel-close ordering, deadlock/panic risk.
+2. Does it actually deliver work-stealing (a slow sink cannot head-of-line block others) with byte-identical transfer semantics?
+3. Real bugs only — no scope creep, no speculative features, no style nits, nothing assigned to a later slice.
+
+OUTPUT FORMAT: a one-line verdict (ship / fix-then-ship / block), then findings ranked by severity, each with file:line and a concrete fix. If it is correct and in-scope, say so plainly instead of inventing concerns.
+
+===== COMMIT DIFF: git show af66ff5 =====
+commit af66ff507cc842411e0af105febd7bc1fc3bad91
+Author: Claude <noreply@anthropic.com>
+Date:   Mon Jun 1 04:30:16 2026 +0000
+
+    feat(transfer): shared work-stealing pipeline queue (adaptive PR2)
+    
+    Replaces the round-robin per-sink mpsc channels in
+    execute_sink_pipeline_streaming with a single bounded flume MPMC work
+    queue. Each sink still owns one tokio worker, but workers pull the next
+    available payload via recv_async() rather than receiving a pre-assigned
+    share — so a slow sink can no longer head-of-line-block the others
+    (roadmap Priority 3, "true parallel dispatch with work-stealing").
+    
+    - Public signature unchanged; push (MultiStreamSender) and daemon pull
+      callers are untouched.
+    - A forwarder task moves payloads from the incoming channel onto the
+      shared queue; dropping its sender on end-of-stream lets every worker
+      observe Disconnected after draining and run finish(). All-workers-gone
+      is detected via send_async error.
+    - Back-pressure preserved: the queue is bounded at prefetch * sink_count,
+      matching the previous total per-sink in-flight capacity.
+    - First-error-wins aggregation retained; the
+      pipeline_streaming_surfaces_underlying_sink_error and multi-sink
+      regression tests still pass.
+    - New test fast_sink_steals_work_from_slow_sink proves the work-stealing
+      property a round-robin dispatcher could never satisfy (a zero-delay
+      sink absorbs >3x the work of a 20ms-per-payload sink).
+    
+    No new dependency (flume already in the tree). Verified: blit-core 317
+    pass, daemon 153 pass, and the remote_parity / remote_remote /
+    remote_push_single_file integration suites stay green (byte-identical
+    transfers across the rewrite).
+    
+    https://claude.ai/code/session_01RoMGEDwefAjC789v6NbLLN
+
+diff --git a/crates/blit-core/src/remote/transfer/pipeline.rs b/crates/blit-core/src/remote/transfer/pipeline.rs
+index 1d03c1b..14da5c8 100644
+--- a/crates/blit-core/src/remote/transfer/pipeline.rs
++++ b/crates/blit-core/src/remote/transfer/pipeline.rs
+@@ -59,14 +59,21 @@ pub async fn execute_sink_pipeline(
+ 
+ /// Execute a transfer pipeline with payloads arriving on a channel.
+ ///
+-/// Distributes payloads round-robin across `sinks` as they arrive. Each sink
+-/// runs as a separate tokio task: it reads payloads from its dedicated queue,
+-/// prepares them via `source.prepare_payload()`, writes them via
+-/// `sink.write_payload()`, and finally calls `sink.finish()`. Errors from any
+-/// worker propagate up.
++/// Payloads are distributed across `sinks` through a single shared
++/// **work-stealing** queue (a bounded `flume` MPMC channel): each sink
++/// runs as a tokio task that pulls the next available payload via
++/// `recv_async().await`, so a slow sink can never head-of-line-block the
++/// others (the failure mode of the previous round-robin per-sink
++/// channels). A forwarder task moves payloads from the incoming
++/// `payload_rx` onto the shared queue; dropping its sender on
++/// end-of-stream lets every worker observe `Disconnected` once the queue
++/// drains, at which point it calls `sink.finish()`. Errors from any
++/// worker propagate up (first error wins).
+ ///
+-/// `prefetch` controls the per-sink channel capacity — effectively the
+-/// preparation-in-flight limit per sink.
++/// `prefetch` controls the per-sink preparation-in-flight limit; the
++/// shared queue is bounded at `prefetch * sinks.len()` so total
++/// in-flight capacity matches the previous per-sink-channel design
++/// (back-pressure preserved).
+ pub async fn execute_sink_pipeline_streaming(
+     source: Arc<dyn TransferSource>,
+     sinks: Vec<Arc<dyn TransferSink>>,
+@@ -81,21 +88,22 @@ pub async fn execute_sink_pipeline_streaming(
+     }
+ 
+     let sink_count = sinks.len();
+-    let per_sink_capacity = prefetch.max(1);
++    let capacity = prefetch.max(1) * sink_count;
+     let total = Arc::new(std::sync::Mutex::new(SinkOutcome::default()));
+ 
+-    // Per-sink payload channels; dispatcher forwards round-robin to these.
+-    let mut sink_senders: Vec<mpsc::Sender<TransferPayload>> = Vec::with_capacity(sink_count);
++    // Single shared work queue. Each worker owns exactly one sink but
++    // pulls payloads from the common queue, so work is stolen by
++    // whichever sink is free rather than pre-assigned round-robin.
++    let (work_tx, work_rx) = flume::bounded::<TransferPayload>(capacity);
+     let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(sink_count);
+ 
+     for sink in sinks {
+-        let (tx, mut rx) = mpsc::channel::<TransferPayload>(per_sink_capacity);
+-        sink_senders.push(tx);
++        let work_rx = work_rx.clone();
+         let source_clone = source.clone();
+         let progress_clone = progress.cloned();
+         let total_clone = total.clone();
+         sink_handles.push(tokio::spawn(async move {
+-            while let Some(payload) = rx.recv().await {
++            while let Ok(payload) = work_rx.recv_async().await {
+                 let prepared = source_clone
+                     .prepare_payload(payload)
+                     .await
+@@ -128,24 +136,30 @@ pub async fn execute_sink_pipeline_streaming(
+         }));
+     }
+ 
+-    // Dispatcher: pull from the incoming channel, round-robin to sinks.
+-    // Uses async send (which applies backpressure) — if one sink is slower,
+-    // the dispatcher naturally blocks on that sink until it drains.
+-    let dispatcher = tokio::spawn(async move {
+-        let mut next = 0usize;
++    // Drop our own receiver handle so the channel closes once the
++    // forwarder drops its sender and the workers' clones drain — without
++    // this, `recv_async` would never see `Disconnected`.
++    drop(work_rx);
++
++    // Forwarder: move payloads from the incoming channel onto the shared
++    // work queue. `send_async` applies back-pressure (bounded queue); if
++    // every worker has gone away (e.g. all sinks errored) the send fails
++    // and we stop. Dropping `work_tx` on end-of-stream signals the
++    // workers.
++    let forwarder = tokio::spawn(async move {
+         while let Some(payload) = payload_rx.recv().await {
+-            let idx = next % sink_count;
+-            next = next.wrapping_add(1);
+-            if sink_senders[idx].send(payload).await.is_err() {
+-                // Sink worker dropped its receiver — treat as shutdown.
++            if work_tx.send_async(payload).await.is_err() {
++                // All workers dropped their receivers — nothing left to
++                // feed; treat as shutdown.
+                 return;
+             }
+         }
+-        // Drop senders so sink workers see end-of-stream and finish().
+-        drop(sink_senders);
++        // Dropping work_tx closes the queue → workers see Disconnected
++        // after draining and run finish().
++        drop(work_tx);
+     });
+ 
+-    // Wait for all sinks to finish and aggregate errors.
++    // Wait for all sinks to finish and aggregate errors (first wins).
+     let mut first_err: Option<eyre::Report> = None;
+     for h in sink_handles {
+         match h.await {
+@@ -158,7 +172,7 @@ pub async fn execute_sink_pipeline_streaming(
+             Err(_) => {}
+         }
+     }
+-    let _ = dispatcher.await;
++    let _ = forwarder.await;
+ 
+     if let Some(err) = first_err {
+         return Err(err);
+@@ -954,3 +968,112 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod workqueue_tests {
++    //! PR2: the shared work-queue must let a fast sink steal work a slow
++    //! sink would otherwise have been assigned under the old round-robin
++    //! dispatcher. Without work-stealing, N payloads split evenly across
++    //! sinks and one slow sink bottlenecks the whole transfer; with it,
++    //! the fast sink absorbs the bulk.
++    use super::*;
++    use crate::remote::transfer::sink::{SinkOutcome, TransferSink};
++    use crate::remote::transfer::source::FsTransferSource;
++    use std::path::{Path, PathBuf};
++    use std::sync::atomic::{AtomicU64, Ordering};
++    use std::sync::{Arc, Mutex};
++    use std::time::Duration;
++    use tempfile::tempdir;
++
++    /// Counts payloads it writes; optionally sleeps per payload to model
++    /// a slow stream. Ignores the payload bytes — timing is governed
++    /// purely by the configured delay, isolating the dispatch behaviour.
++    struct CountingSink {
++        delay: Duration,
++        count: Arc<AtomicU64>,
++        root: PathBuf,
++    }
++
++    #[async_trait::async_trait]
++    impl TransferSink for CountingSink {
++        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
++            if !self.delay.is_zero() {
++                tokio::time::sleep(self.delay).await;
++            }
++            self.count.fetch_add(1, Ordering::Relaxed);
++            Ok(SinkOutcome {
++                files_written: 1,
++                bytes_written: 0,
++            })
++        }
++        fn root(&self) -> &Path {
++            &self.root
++        }
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++    async fn fast_sink_steals_work_from_slow_sink() {
++        let tmp = tempdir().unwrap();
++        let src = tmp.path().join("src");
++        std::fs::create_dir_all(&src).unwrap();
++        let n = 40usize;
++        for i in 0..n {
++            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
++        }
++
++        let source = Arc::new(FsTransferSource::new(src.clone()));
++        let unreadable = Arc::new(Mutex::new(Vec::new()));
++        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
++        let mut headers = Vec::new();
++        while let Some(h) = header_rx.recv().await {
++            headers.push(h);
++        }
++        let _ = scan_handle.await.unwrap().unwrap();
++        // Feed each file as its OWN payload (not via plan_transfer_payloads,
++        // which bundles tiny files into a single tar shard — that would
++        // leave only one payload and nothing to steal).
++        assert_eq!(headers.len(), n, "expected one header per file");
++
++        let fast_count = Arc::new(AtomicU64::new(0));
++        let slow_count = Arc::new(AtomicU64::new(0));
++        let fast: Arc<dyn TransferSink> = Arc::new(CountingSink {
++            delay: Duration::ZERO,
++            count: Arc::clone(&fast_count),
++            root: PathBuf::from("/fast"),
++        });
++        let slow: Arc<dyn TransferSink> = Arc::new(CountingSink {
++            delay: Duration::from_millis(20),
++            count: Arc::clone(&slow_count),
++            root: PathBuf::from("/slow"),
++        });
++
++        let (tx, rx) = mpsc::channel::<TransferPayload>(4);
++        let feeder = tokio::spawn(async move {
++            for h in headers {
++                if tx.send(TransferPayload::File(h)).await.is_err() {
++                    break;
++                }
++            }
++        });
++        let outcome = execute_sink_pipeline_streaming(source, vec![fast, slow], rx, 2, None)
++            .await
++            .expect("pipeline ok");
++        let _ = feeder.await;
++
++        let fast_n = fast_count.load(Ordering::Relaxed);
++        let slow_n = slow_count.load(Ordering::Relaxed);
++        assert_eq!(outcome.files_written, n, "every payload written once");
++        assert_eq!(
++            fast_n + slow_n,
++            n as u64,
++            "every payload accounted to exactly one sink"
++        );
++        // Round-robin would force ~20/20 and the slow sink would gate the
++        // whole transfer. Work-stealing lets the zero-delay sink take the
++        // overwhelming majority while the slow sink sits in its sleeps.
++        assert!(
++            fast_n > slow_n * 3,
++            "fast sink should steal the bulk of the work: fast={fast_n} slow={slow_n}"
++        );
++    }
++}
+
+
+===== FULL CURRENT FILE: crates/blit-core/src/remote/transfer/pipeline.rs (post-commit, for surrounding context) =====
 //! Unified transfer pipeline: source → prepare → sink(s).
 //!
 //! All transfer paths (local→local, local→remote push, remote→local pull,
@@ -97,64 +391,42 @@ pub async fn execute_sink_pipeline_streaming(
     let (work_tx, work_rx) = flume::bounded::<TransferPayload>(capacity);
     let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(sink_count);
 
-    // Cancellation flag set by the first worker that errors. Without it,
-    // one sink failing only drops that worker's `work_rx` clone; as long
-    // as any other worker is alive `send_async` keeps succeeding, so the
-    // forwarder would keep draining `payload_rx` and queueing payloads
-    // that can never complete — delaying first-error-wins propagation
-    // (Codex review, PR2). With it, the forwarder stops at the next
-    // payload boundary and closes the queue so the survivors drain and
-    // finish promptly.
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
     for sink in sinks {
         let work_rx = work_rx.clone();
         let source_clone = source.clone();
         let progress_clone = progress.cloned();
         let total_clone = total.clone();
-        let cancelled_worker = cancelled.clone();
         sink_handles.push(tokio::spawn(async move {
-            // Wrap the body so any early-return error trips the shared
-            // cancel flag before the `?` unwinds the task.
-            let run = async {
-                while let Ok(payload) = work_rx.recv_async().await {
-                    let prepared = source_clone
-                        .prepare_payload(payload)
-                        .await
-                        .context("preparing payload")?;
-                    let files: Vec<(String, u64)> = match &prepared {
-                        PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
-                        PreparedPayload::TarShard { headers, .. } => headers
-                            .iter()
-                            .map(|h| (h.relative_path.clone(), h.size))
-                            .collect(),
-                        // Resume-block payloads patch existing files; no
-                        // file-completion event from one-block-at-a-time.
-                        PreparedPayload::FileBlock { .. }
-                        | PreparedPayload::FileBlockComplete { .. } => Vec::new(),
-                    };
-                    let outcome = sink
-                        .write_payload(prepared)
-                        .await
-                        .context("writing payload")?;
-                    if let Some(p) = &progress_clone {
-                        for (name, size) in &files {
-                            p.report_file_complete(name.clone(), *size);
-                        }
+            while let Ok(payload) = work_rx.recv_async().await {
+                let prepared = source_clone
+                    .prepare_payload(payload)
+                    .await
+                    .context("preparing payload")?;
+                let files: Vec<(String, u64)> = match &prepared {
+                    PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
+                    PreparedPayload::TarShard { headers, .. } => headers
+                        .iter()
+                        .map(|h| (h.relative_path.clone(), h.size))
+                        .collect(),
+                    // Resume-block payloads patch existing files; no
+                    // file-completion event from one-block-at-a-time.
+                    PreparedPayload::FileBlock { .. }
+                    | PreparedPayload::FileBlockComplete { .. } => Vec::new(),
+                };
+                let outcome = sink
+                    .write_payload(prepared)
+                    .await
+                    .context("writing payload")?;
+                if let Some(p) = &progress_clone {
+                    for (name, size) in &files {
+                        p.report_file_complete(name.clone(), *size);
                     }
-                    let mut t = total_clone.lock().unwrap();
-                    t.merge(&outcome);
                 }
-                sink.finish().await?;
-                Ok::<(), eyre::Report>(())
+                let mut t = total_clone.lock().unwrap();
+                t.merge(&outcome);
             }
-            .await;
-            if run.is_err() {
-                // Signal the forwarder (and implicitly the other workers,
-                // once the queue closes) to stop feeding new work.
-                cancelled_worker.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            run
+            sink.finish().await?;
+            Ok::<(), eyre::Report>(())
         }));
     }
 
@@ -166,19 +438,10 @@ pub async fn execute_sink_pipeline_streaming(
     // Forwarder: move payloads from the incoming channel onto the shared
     // work queue. `send_async` applies back-pressure (bounded queue); if
     // every worker has gone away (e.g. all sinks errored) the send fails
-    // and we stop. It also bails as soon as a worker sets `cancelled`, so
-    // a single sink error halts intake promptly instead of waiting for
-    // every worker to drop. Dropping `work_tx` on end-of-stream (or on
-    // cancel) signals the workers.
-    let cancelled_fwd = cancelled.clone();
+    // and we stop. Dropping `work_tx` on end-of-stream signals the
+    // workers.
     let forwarder = tokio::spawn(async move {
         while let Some(payload) = payload_rx.recv().await {
-            if cancelled_fwd.load(std::sync::atomic::Ordering::Relaxed) {
-                // A worker errored — stop draining the producer and let
-                // the queue close so survivors finish and the error
-                // surfaces without delay.
-                return;
-            }
             if work_tx.send_async(payload).await.is_err() {
                 // All workers dropped their receivers — nothing left to
                 // feed; treat as shutdown.
@@ -1107,76 +1370,25 @@ mod workqueue_tests {
             "fast sink should steal the bulk of the work: fast={fast_n} slow={slow_n}"
         );
     }
-
-    /// Codex-review (PR2) regression: when the only sink errors, the
-    /// forwarder must stop draining the producer promptly rather than
-    /// continuing to pull every remaining payload. We feed a large
-    /// payload set through a single always-failing sink and assert that
-    /// (a) the pipeline surfaces the error, and (b) the forwarder
-    /// consumed far fewer than all payloads before halting — proving the
-    /// cancel flag short-circuits intake instead of draining to the end.
-    struct ErrSink {
-        root: PathBuf,
-    }
-
-    #[async_trait::async_trait]
-    impl TransferSink for ErrSink {
-        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
-            eyre::bail!("synthetic immediate failure")
-        }
-        fn root(&self) -> &Path {
-            &self.root
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn forwarder_stops_promptly_on_worker_error() {
-        let tmp = tempdir().unwrap();
-        let src = tmp.path().join("src");
-        std::fs::create_dir_all(&src).unwrap();
-        let n = 200usize;
-        for i in 0..n {
-            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
-        }
-        let source = Arc::new(FsTransferSource::new(src.clone()));
-        let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
-        let mut headers = Vec::new();
-        while let Some(h) = header_rx.recv().await {
-            headers.push(h);
-        }
-        let _ = scan_handle.await.unwrap().unwrap();
-        assert_eq!(headers.len(), n);
-
-        let sink: Arc<dyn TransferSink> = Arc::new(ErrSink {
-            root: PathBuf::from("/err"),
-        });
-
-        // Count how many payloads the forwarder actually pulled from the
-        // producer. With prefetch=1 and a single sink, the bounded queue
-        // holds 1; once the sink errors and trips `cancelled`, the
-        // forwarder must stop, so `sent` stays a tiny constant rather
-        // than reaching n.
-        let sent = Arc::new(AtomicU64::new(0));
-        let (tx, rx) = mpsc::channel::<TransferPayload>(1);
-        let sent_feeder = sent.clone();
-        let feeder = tokio::spawn(async move {
-            for h in headers {
-                if tx.send(TransferPayload::File(h)).await.is_err() {
-                    break;
-                }
-                sent_feeder.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        let result = execute_sink_pipeline_streaming(source, vec![sink], rx, 1, None).await;
-        let _ = feeder.await;
-
-        assert!(result.is_err(), "pipeline must surface the sink error");
-        let pulled = sent.load(Ordering::Relaxed);
-        assert!(
-            pulled < (n as u64) / 2,
-            "forwarder should halt soon after the error, not drain all {n} payloads; pulled={pulled}"
-        );
-    }
 }
+
+
+codex
+fix-then-ship
+
+Findings:
+
+High: [crates/blit-core/src/remote/transfer/pipeline.rs:102](crates/blit-core/src/remote/transfer/pipeline.rs:102)  
+A single sink error no longer shuts down the forwarder or closes `payload_rx` while any other worker is still alive. After one worker returns `Err`, its `work_rx` clone drops, but `flume::send_async` keeps succeeding as long as another worker remains. That means the pipeline can keep accepting and processing later payloads instead of closing promptly and surfacing first-error-wins. In an unbounded or long-lived producer path, this can delay error propagation indefinitely. Concrete fix: when the first worker fails, close the shared queue / receiver side and stop the forwarder, or add a shared cancellation token/error flag that workers set on error and the forwarder checks so it stops draining `payload_rx` and drops `work_tx`.
+
+No payload loss/duplication issue is apparent for the all-success path. The shared bounded `flume` queue does deliver actual work-stealing and preserves total queue capacity as `prefetch * sink_count`.
+tokens used
+21,755
+fix-then-ship
+
+Findings:
+
+High: [crates/blit-core/src/remote/transfer/pipeline.rs:102](crates/blit-core/src/remote/transfer/pipeline.rs:102)  
+A single sink error no longer shuts down the forwarder or closes `payload_rx` while any other worker is still alive. After one worker returns `Err`, its `work_rx` clone drops, but `flume::send_async` keeps succeeding as long as another worker remains. That means the pipeline can keep accepting and processing later payloads instead of closing promptly and surfacing first-error-wins. In an unbounded or long-lived producer path, this can delay error propagation indefinitely. Concrete fix: when the first worker fails, close the shared queue / receiver side and stop the forwarder, or add a shared cancellation token/error flag that workers set on error and the forwarder checks so it stops draining `payload_rx` and drops `work_tx`.
+
+No payload loss/duplication issue is apparent for the all-success path. The shared bounded `flume` queue does deliver actual work-stealing and preserves total queue capacity as `prefetch * sink_count`.
