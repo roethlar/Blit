@@ -48,6 +48,10 @@ pub struct Cli {
     /// assert byte-path isolation; not intended for operator use.
     /// Replaces the pre-0.1.1 `BLIT_TEST_COUNTER_FILE` env var
     /// (audit-l39: env vars are out for app + diagnostic config).
+    ///
+    /// `hide_short_help = true` hides this flag from the short `-h`
+    /// summary; it still appears in the full `--help` output so it's
+    /// discoverable for troubleshooting.
     #[arg(long, global = true, value_name = "PATH", hide_short_help = true)]
     pub diagnostics_counter_file: Option<PathBuf>,
 

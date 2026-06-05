@@ -17,10 +17,14 @@
 #   allow_delegated_pull = true
 #   allowed_source_hosts = ["server-a.lan"]
 #
-# The script uses BLIT_TEST_COUNTER_FILE, the same env-gated instrumentation
-# used by integration tests, to record CLI outbound data-plane payload bytes.
-# Direct runs should report 0. Relay runs should report roughly payload-sized
-# byte counts.
+# The script uses the global `blit --diagnostics-counter-file PATH` CLI flag,
+# the same diagnostics-only instrumentation used by the integration tests, to
+# record CLI outbound data-plane payload bytes. Direct runs should report 0.
+# Relay runs should report roughly payload-sized byte counts.
+#
+# (audit-l39, 2026-06-04: this replaced the pre-0.1.1 BLIT_TEST_COUNTER_FILE
+# env var — env vars are out for app + diagnostic config. The flag is
+# hidden from `-h` short help but still discoverable in `--help`.)
 
 set -euo pipefail
 

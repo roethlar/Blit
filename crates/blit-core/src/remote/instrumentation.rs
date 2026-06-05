@@ -11,8 +11,10 @@
 //! integration tests (`crates/blit-cli/tests/remote_remote.rs`) and
 //! the operator bench script (`scripts/bench_remote_remote.sh`) now
 //! pass `--diagnostics-counter-file PATH` explicitly. The CLI flag
-//! is marked `hide_short_help = true` so it doesn't pollute the
-//! ordinary `--help` output — diagnostics only.
+//! is marked `hide_short_help = true` so it's hidden from the short
+//! `-h` summary (de-emphasized for operators who don't need it) but
+//! still appears in the full `--help` output where troubleshooting
+//! flags belong — diagnostics-discoverable, not advertised.
 
 use std::fs::OpenOptions;
 use std::io::Write;

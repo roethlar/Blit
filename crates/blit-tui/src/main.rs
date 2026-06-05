@@ -4921,12 +4921,13 @@ fn spawn_discovery_task(
 /// **Diagnostic trace:** pass `--trace-input PATH` to write every
 /// raw crossterm event (including its `kind`) to `PATH` as a JSON
 /// line. Useful for diagnosing terminals that drop events or report
-/// them with unexpected `kind` values. The flag is hidden from short
-/// `--help` by design — it's a diagnostics-only knob, not an
-/// operator setting. (audit-l39: replaced the pre-0.1.1
-/// `BLIT_TUI_INPUT_TRACE=1` env var that wrote to a hardcoded
-/// `/tmp/blit-tui-input.log`; env vars are out for app + diagnostic
-/// config.)
+/// them with unexpected `kind` values. The flag is hidden from the
+/// short `-h` summary (`hide_short_help = true`) but still appears
+/// in the full `--help` output — discoverable for troubleshooting
+/// without polluting the everyday operator help. (audit-l39:
+/// replaced the pre-0.1.1 `BLIT_TUI_INPUT_TRACE=1` env var that
+/// wrote to a hardcoded `/tmp/blit-tui-input.log`; env vars are
+/// out for app + diagnostic config.)
 fn spawn_input_task(tx: mpsc::Sender<KeyEvent>, trace_path: Option<std::path::PathBuf>) {
     let trace_log = trace_path.map(|path| {
         std::fs::OpenOptions::new()
