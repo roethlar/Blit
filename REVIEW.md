@@ -18,6 +18,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | audit-m28-tui-sot-sweep | Docs | TUI source-of-truth sweep (round 2: audit INDEX + R3 updated to record 2026-06-04 owner ratification of H10b + resolution of L39/M27/M28) | `[x]` | `master` | `15fabbf` |
 | audit-l39-m27-env-var-purge | Convention | Owner-directed env-var purge (round 2: bench-script prose + Clap `hide_short_help` doc corrections in 3 sites) | `[x]` | `master` | `ec06a95` |
 | audit-h11-f1-confirm-detail-err | Data-loss UI | F1 confirm-detail no longer silently classifies a parse-Err move source as "local source"; extracted testable `move_delete_target_phrase` helper with explicit Local/Remote/Err arms + `debug_assert!` on Err per `feedback_endpoint_parse_err` | `[~]` | `master` | `28c19a8` |
+| audit-h3b-pull-data-plane-write-stall | Robustness | New `StallGuardWriter<W>` AsyncWrite adapter wired inside `DataPlaneSession`; daemon pull-data-plane write progress now trips after `TRANSFER_STALL_TIMEOUT` of TCP write backpressure instead of pinning the worker for 15+ min. Audit chain wording also corrected (h3 framing was receive-side; actual gap is write-side) | `[~]` | `master` | `c14db51` |
 | d-62-f1-trigger-error | Feature | Inline validation feedback in the F1 trigger modal (round 2) | `[x]` | `phase5/a1` | `0b47a72` |
 | d-63-f1-push-progress | Feature | Live byte/file footer for the F1 push (round 2) | `[x]` | `phase5/a1` | `aba54f8` |
 | d-64-f1-push-ttl | Feature | Auto-hide the F1 push outcome footer (round 2) | `[x]` | `phase5/a1` | `2f67e96` |
