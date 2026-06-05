@@ -106,29 +106,43 @@ that reflex destroys the session. Combined with the dual-pane action bar being r
 **Remediation**: Wire Esc to a per-screen back action; reserve quit to `q` or `Ctrl-C`. Add
 a regression test pinning Esc behavior on each screen.
 
-### H3. Stall guard covers ONE of FOUR receive paths — daemon push-receive, daemon pull-data-plane accepts, and CLI gRPC-fallback pulls all silent on stuck peers
+### H3. Stall guard misses three of four data-plane paths — daemon push-receive, daemon pull-data-plane write progress, and CLI gRPC-fallback pulls all silent on stuck peers
 
-**Source**: R1+GPT (R1 #9 + GPT-12)
+**Source**: R1+GPT (R1 #9 + GPT-12). Wording revised 2026-06-05 per h3b
+implementation review: R1's original "daemon-side pull-data-plane accepts"
+phrasing was imprecise — the accept and token-read phases on those paths are
+already bounded by `PULL_ACCEPT_TIMEOUT` / `PULL_TOKEN_TIMEOUT`. The missing
+guard on the daemon pull side is **write progress after token acceptance**,
+because the daemon is the sender on a pull and the stall surface is TCP write
+backpressure from a slow/wedged reader, not a stuck receive.
 **Class**: inconsistency (timeouts) — DoS-class hardening gap
 **Where**:
 - Covered by guard: `crates/blit-core/src/remote/pull.rs:1712-1720` (CLI pull-receive TCP
-  wraps in StallGuard) [R1+GPT]
+  wraps in `StallGuard`) [R1+GPT]
 - **Missing** on: `crates/blit-daemon/src/service/push/data_plane.rs:213-242` (daemon
-  push-receive socket) [R1 #9]
-- **Missing** on: `crates/blit-daemon/src/service/pull.rs:702-757` and
-  `pull_sync.rs:600-755` (daemon-side pull-data-plane accepts) [R1 #9]
+  push-receive socket) [R1 #9] — closed by **audit-h3a** (master `dd51a1c`).
+- **Missing** on: `crates/blit-daemon/src/service/pull.rs:743` and
+  `pull_sync.rs:641, 765` (daemon pull-data-plane **write progress after token
+  acceptance** — the daemon writes to the puller and a stalled reader fills
+  the kernel send buffer indefinitely) [R1 #9] — closed by **audit-h3b** via
+  a write-side `StallGuardWriter` wired inside `DataPlaneSession`.
 - **Missing** on: `crates/blit-core/src/remote/pull.rs:752` (CLI gRPC-fallback pull awaits
-  messages without idle deadline) [GPT-12]
+  messages without idle deadline) [GPT-12] — pending audit-h3c.
 **Plan/canonical**: Owner decision `audit-1c` (memory `feedback_port_cli_safety_guards`):
-"no-bytes-for-30 s, scoped to all pulls." By symmetry, all long-lived receive paths need it.
+"no-bytes-for-30 s." Extended 2026-06-05 by owner to apply symmetrically to
+write progress on sender paths (audit-h3b).
 **Why this matters**: Three independent attack/failure surfaces — a hostile push client
-pinning a daemon worker, a stuck peer parking the daemon's pull accept, and a silent gRPC
-fallback going unbounded. The reviewed claim that "all pulls abort on no-byte stalls" is
-materially false; the guard sits on one path.
-**Remediation**: Hoist a single `TRANSFER_STALL_TIMEOUT` constant. Wrap every
-`execute_receive_pipeline(..)` / `DataPlaneSession::from_stream(..)` / gRPC fallback
-`stream.message().await` in `StallGuard(_, TRANSFER_STALL_TIMEOUT)`. Add regression tests
-mirroring `pipeline.rs::receive_pipeline_aborts_on_stall` for each path.
+pinning a daemon push worker (h3a), a slow/wedged puller pinning a daemon pull
+worker via TCP write backpressure (h3b), and a silent gRPC fallback going
+unbounded (h3c). The reviewed claim that "all pulls abort on no-byte stalls"
+covered only the CLI receive side; daemon-side coverage shipped piecewise
+across h3a/h3b.
+**Remediation status**: `TRANSFER_STALL_TIMEOUT` constant hoisted (audit-h3a).
+Daemon push-receive wrapped in `StallGuard` (audit-h3a). Daemon pull-data-plane
+write progress guarded by `StallGuardWriter` inside `DataPlaneSession`
+(audit-h3b). gRPC-fallback path (audit-h3c) still pending — it sits below
+`tonic::Streaming<T>` rather than `AsyncRead`/`AsyncWrite` and needs a
+different mechanism (per-message `tokio::time::timeout` or a `Stream` adapter).
 
 ### H4. TUI dual-pane action bar is render-only — Copy/Mirror/Move/Delete/Verify do nothing
 

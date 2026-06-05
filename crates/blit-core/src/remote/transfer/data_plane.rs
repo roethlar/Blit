@@ -8,6 +8,7 @@ use crate::buffer::BufferPool;
 use crate::generated::FileHeader;
 
 use super::payload::{prepared_payload_stream, PreparedPayload, TransferPayload};
+use super::stall_guard::{StallGuardWriter, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::source::TransferSource;
 use std::sync::Arc;
 
@@ -19,7 +20,15 @@ pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 
 pub struct DataPlaneSession {
-    stream: TcpStream,
+    // audit-h3b: writes go through StallGuardWriter so a stalled
+    // reader (TCP backpressure from a slow / wedged peer) trips after
+    // TRANSFER_STALL_TIMEOUT of no observable write progress instead
+    // of pinning the worker for OS-level TCP retransmit exhaustion
+    // (15+ minutes). All existing `self.stream.write_all/.flush`
+    // call sites in this file (~30 sites) compose against the
+    // AsyncWrite impl of StallGuardWriter, so no per-site change
+    // was needed.
+    stream: StallGuardWriter<TcpStream>,
     pool: Arc<BufferPool>,
     trace: bool,
     chunk_bytes: usize,
@@ -37,6 +46,15 @@ macro_rules! trace_client {
 
 impl DataPlaneSession {
     /// Create a session from an existing stream with buffer pooling.
+    ///
+    /// audit-h3b: the stream is wrapped in [`StallGuardWriter`] so a
+    /// stalled peer (slow / wedged reader causing TCP backpressure)
+    /// trips after [`TRANSFER_STALL_TIMEOUT`] of no observable write
+    /// progress instead of pinning the worker for OS-level TCP
+    /// retransmit exhaustion. All three production call sites
+    /// (`daemon/service/pull.rs` regular pull,
+    /// `daemon/service/pull_sync.rs` regular pull-sync, same file's
+    /// resume mode) inherit the guard without code changes.
     pub async fn from_stream(
         stream: TcpStream,
         trace: bool,
@@ -47,7 +65,7 @@ impl DataPlaneSession {
         let payload_prefetch = payload_prefetch.max(1);
         let chunk_bytes = chunk_bytes.max(64 * 1024);
         Self {
-            stream,
+            stream: StallGuardWriter::new(stream, TRANSFER_STALL_TIMEOUT),
             pool,
             trace,
             chunk_bytes,
