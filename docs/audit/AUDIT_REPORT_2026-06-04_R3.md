@@ -235,25 +235,36 @@ written*) is the right pattern and stays. R3 adds one more:
 - Dual-pane M1-M2 plan-mandated infrastructure landed *but the user-facing affordances
   (action bar, path bars, `/` search) are unwired — see H4, H23, H5*.
 
+## Resolved owner decisions (2026-06-04)
+
+The following R3 decisions were resolved during the 2026-06-04 audit session.
+Implementing slices are on master.
+
+1. **R3-L39 — RESOLVED**: env vars are out for app + diagnostic config. No
+   carve-out. Diagnostics get CLI flags, sparingly added, marked diagnostics-
+   only. `BLIT_TUI_INPUT_TRACE` and `BLIT_TEST_COUNTER_FILE` purged in
+   `audit-l39-m27-env-var-purge` (master `7c3ffd5`).
+2. **R3-H10b — RATIFIED, not yet implemented**: `greenfield_v6 §1.1`
+   (streaming planner + 1 s heartbeat + 10 s stall detector) is canonical.
+   Owner directive 2026-06-04: "blit needs to start moving bits instantly and
+   tune parameters as the transfer progresses … yes, that's a giant gap we
+   need to close." Implementation is a multi-slice piece queued for after
+   Round 1 hardening closes. R3-H10a (reliability-bug subpart — outer
+   `scan_handle.await` timeout) is independent and fixed regardless.
+3. **R3-M28 — RESOLVED, IMPLEMENTED**: doc-SoT sweep landed as a single
+   commit on master (`e8a5280`). `docs/plan/README.md` names TUI_REWORK as
+   active + audit INDEX as open-finding source. `TUI_DESIGN.md` banner'd
+   SUPERSEDED. `ARCHITECTURE.md §"blit-tui"` rewritten to lead with
+   dual-pane M1–M6.
+4. **R3-M27 — RESOLVED**: both `BLIT_FORCE_GRPC_DATA` and
+   `BLIT_DISABLE_LOCAL_TELEMETRY` struck from `greenfield_v6.md §1.2/§1.3`.
+   Replaced with "no env-var form" prohibition; any future locked-down
+   override or telemetry opt-out will be a CLI flag (sparingly added,
+   diagnostics-only).
+
 ## Outstanding owner decisions (only)
 
-Carrying forward from R2, plus R3 additions:
-
-1. **R3-L39** — Is the "no env vars for config" rule absolute, or does it carve out
-   diagnostic/test? Affects implementation of `BLIT_TUI_INPUT_TRACE` /
-   `BLIT_TEST_COUNTER_FILE`.
-2. **R3-H10b** (the plan-claim subpart of R3-H10) — Is `greenfield_plan_v6.md` §1.1
-   (streaming planner + heartbeat + 10s stall detector) still canonical? If yes, build
-   it. If no, update §1.1 to match the shipped synchronous orchestrator + 30s pull stall
-   guard. R3-H10a (the reliability-bug subpart) is fixed unconditionally and does not
-   wait on this decision.
-3. **R3-M28** — Are you OK with a one-PR sweep of `docs/plan/README.md` +
-   `TUI_DESIGN.md` header + `ARCHITECTURE.md` §"TUI", landing before any other Round-2
-   code work? (Strong recommendation: yes.)
-4. **R3-M27** — `BLIT_FORCE_GRPC_DATA` and `BLIT_DISABLE_LOCAL_TELEMETRY` — implement
-   the documented behavior, or strike from the plan? Either is consistent.
-
-R2's owner decisions remain open: the TUI_REWORK §6 locked-decisions that AI reviewers
+R2's still-open: the TUI_REWORK §6 locked-decisions that AI reviewers
 endorsed but you haven't ratified.
 
 ## What R3 does NOT change

@@ -42,17 +42,35 @@ recommendations" — Round 1 (data-loss/DoS) unchanged from R2; Round 2 (TUI rew
 with R3-M28 doc-SoT sweep, then H4 → H5 → R3-H23 → H2 → H6 → H7 → H8 → M2 → M3 → M4 →
 M25.
 
+## Resolved owner decisions (2026-06-04 session)
+
+The following R3 owner decisions were resolved during the 2026-06-04 audit
+session and the slices implementing them are committed to master.
+
+1. **R3-L39** — env vars are out for app + diagnostic config. No carve-out.
+   Diagnostics get CLI flags, sparingly added, marked diagnostics-only.
+   Implemented in `audit-l39-m27-env-var-purge` (master `7c3ffd5`).
+2. **R3-H10b** (plan-claim subpart of R3-H10) — `greenfield_v6.md` §1.1
+   (streaming planner + 1 s heartbeat + 10 s stall detector) **is canonical**.
+   Owner directive: "blit needs to start moving bits instantly and tune
+   parameters as the transfer progresses … yes, that's a giant gap we need to
+   close." Implementation is a multi-slice piece queued for after Round 1
+   hardening closes; tracking as a follow-up under R3-H10b (RATIFIED, not
+   implemented). R3-H10a (reliability-bug subpart — outer `scan_handle.await`
+   timeout) is independent and fixed regardless.
+3. **R3-M28** — doc-SoT sweep landed as a single commit on master
+   (`e8a5280`). `docs/plan/README.md` names TUI_REWORK as active +
+   audit INDEX as open-finding source. TUI_DESIGN.md banner'd SUPERSEDED.
+   ARCHITECTURE.md §"blit-tui" rewritten to lead with dual-pane M1–M6.
+4. **R3-M27** — both `BLIT_FORCE_GRPC_DATA` and `BLIT_DISABLE_LOCAL_TELEMETRY`
+   struck from `greenfield_v6.md` §1.2/§1.3. Replaced with "no env-var form"
+   prohibition; any future locked-down override or telemetry opt-out will be a
+   CLI flag (sparingly added, diagnostics-only). Implemented in
+   `audit-l39-m27-env-var-purge` (master `7c3ffd5`).
+
 ## Open owner decisions (R3 final section)
 
-1. R3-L39 — env-var carve-out for diagnostics: absolute rule or carved?
-2. R3-H10b (plan-claim subpart of R3-H10) — is `greenfield_v6.md` §1.1 still canonical?
-   (Gated on R3-M28 first.) R3-H10a (reliability-bug subpart) is fixed regardless.
-3. R3-M28 — OK to land doc-SoT sweep as a single PR before Round 2 code work? (Strong
-   recommendation: yes.)
-4. R3-M27 — implement `BLIT_FORCE_GRPC_DATA` / `BLIT_DISABLE_LOCAL_TELEMETRY`, or strike
-   from `greenfield_v6.md` §1.2/§1.3?
-
-Plus R2's still-open: TUI_REWORK §6 owner-level decisions that AI reviewers endorsed but
+R2's still-open: TUI_REWORK §6 owner-level decisions that AI reviewers endorsed but
 owner has not ratified.
 
 ## When to write an R4
