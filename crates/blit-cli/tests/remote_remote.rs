@@ -287,10 +287,11 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     let mut cmd = Command::new(cli_bin);
     cmd.arg("--config-dir")
         .arg(&config_dir)
+        .arg("--diagnostics-counter-file")
+        .arg(&counter)
         .arg("copy")
         .arg(src_remote)
-        .arg(dst_remote)
-        .env("BLIT_TEST_COUNTER_FILE", &counter);
+        .arg(dst_remote);
 
     let output = run_with_timeout(cmd, Duration::from_secs(20));
     assert!(
@@ -351,11 +352,14 @@ fn run_blit(
 ) -> std::process::Output {
     let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("--config-dir").arg(&ctx.config_dir);
+    // audit-l39: --diagnostics-counter-file replaced the pre-0.1.1
+    // BLIT_TEST_COUNTER_FILE env var. Both flags are global, so they
+    // must appear before the subcommand.
+    if let Some(path) = counter {
+        cmd.arg("--diagnostics-counter-file").arg(path);
+    }
     for arg in args {
         cmd.arg(arg);
-    }
-    if let Some(path) = counter {
-        cmd.env("BLIT_TEST_COUNTER_FILE", path);
     }
     run_with_timeout(cmd, Duration::from_secs(60))
 }

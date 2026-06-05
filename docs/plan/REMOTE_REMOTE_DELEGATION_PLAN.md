@@ -897,11 +897,14 @@ operator-controlled escape, not a fallback automaton.
 
 Implementation note: Phase 2 coverage lives in the existing
 `crates/blit-cli/tests/remote_remote.rs` integration target rather than
-three separate files, so the dual-daemon fixture and env-gated byte
-counter are shared. The load-bearing observables are:
+three separate files, so the dual-daemon fixture and diagnostics counter
+file are shared. The load-bearing observables are:
 
-- `BLIT_TEST_COUNTER_FILE` records CLI outbound data-plane payload bytes
-  from `DataPlaneSession`; direct delegation must record zero.
+- `--diagnostics-counter-file PATH` (global CLI flag) records CLI
+  outbound data-plane payload bytes from `DataPlaneSession`; direct
+  delegation must record zero. (audit-l39, 2026-06-04: this replaced
+  the pre-0.1.1 `BLIT_TEST_COUNTER_FILE` env var — env vars are out
+  for app + diagnostic config.)
 - The same file records `RemoteTransferSource::new`; direct delegation
   must not construct the relay primitive.
 - The explicit `--relay-via-cli` counterpart asserts both observables

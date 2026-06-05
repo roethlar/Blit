@@ -158,13 +158,13 @@ message PurgeResponse { /* ... */ }
 2. **Hybrid Remote Transport** — Remote push/pull mirror the v1 data-path performance by keeping:
    - gRPC control plane for manifests, negotiations, progress, and purge/list operations.
    - Raw TCP data plane negotiated via one-time, cryptographically strong token for bulk transfers (zero-copy on Linux via `sendfile`, `copy_file_range`, `splice`).
-   - Automatic fallback to gRPC-streamed data when the negotiated TCP port cannot be reached (firewall/NAT); surface as a warning and continue, with an advanced `--force-grpc-data`/`BLIT_FORCE_GRPC_DATA=1` override for locked-down environments.
+   - Automatic fallback to gRPC-streamed data when the negotiated TCP port cannot be reached (firewall/NAT); surface as a warning and continue. If a deterministic override is ever needed for locked-down environments it will be a CLI flag (e.g. `--force-grpc-data`, marked diagnostics-only and sparingly added). **No env-var form** — env vars are not used for app or diagnostic configuration (audit-l39, 2026-06-04).
    - Planned RDMA/RoCEv2 extension point in Phase 3.5 for 25/100 GbE environments.
 
 3. **Telemetry & Diagnostics** — All metrics stay on-device:
    - Capped JSONL log (`~/.config/blit/perf_local.jsonl`) storing workload signature, planner/copy durations, stall events.
    - `blit diagnostics perf` surfaces recent runs for troubleshooting.
-   - `BLIT_DISABLE_LOCAL_TELEMETRY=1` opt-out for debugging.
+   - If a local-telemetry opt-out is ever needed for debugging it will be a CLI flag (e.g. `--no-local-telemetry`, sparingly added, diagnostics-only). **No env-var form** — env vars are not used for app or diagnostic configuration (audit-l39, 2026-06-04).
 
 4. **Inviolable Principles** — Every code change must respect:
    - **FAST**: Start copying immediately, minimise perceived latency.

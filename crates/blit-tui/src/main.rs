@@ -31,6 +31,7 @@ mod diagnostics;
 mod display_f1;
 mod display_f2;
 mod display_f3;
+mod dual_pane;
 mod exec_plan;
 mod f1push;
 mod f1trigger;
@@ -87,9 +88,9 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-/// CLI flags. `--remote` is consumed by the F2 Transfers
-/// pane (a1-2). `--screen` selects which pane the TUI
-/// opens; a1-6 will replace this with in-app F-key routing.
+/// CLI flags. `--remote` seeds the dual-pane browser's
+/// remote side and still feeds the legacy F2/F3 panes when
+/// opened explicitly.
 #[derive(Parser, Debug)]
 #[command(name = "blit-tui", about = "Operator TUI for Blit", version)]
 struct Args {
@@ -98,14 +99,21 @@ struct Args {
     #[arg(long)]
     remote: Option<String>,
 
-    /// Initial pane to open. With a1-6 routing in place,
-    /// the operator can switch panes via F1..F4 keys at
-    /// any time — this flag just picks the starting pane.
-    /// Defaults to F1 (Daemons) since that's the natural
-    /// entry point: scan the LAN, pick a daemon, then
-    /// drill into F2/F3/F4 from there.
-    #[arg(long, value_enum, default_value_t = ScreenArg::F1)]
+    /// Initial screen. Defaults to the Phase 6 dual-pane
+    /// transfer UI; the old F-key panes remain addressable
+    /// while their useful pieces are folded into the new shell.
+    #[arg(long, value_enum, default_value_t = ScreenArg::Dual)]
     screen: ScreenArg,
+
+    /// Diagnostics only: write every raw crossterm key event (including
+    /// its `kind`) to this file as a JSON line. Useful for diagnosing
+    /// terminals that drop events or report them with unexpected
+    /// `kind` values. Replaces the pre-0.1.1
+    /// `BLIT_TUI_INPUT_TRACE=1` env var that wrote to a hardcoded
+    /// `/tmp/blit-tui-input.log` (audit-l39: env vars are out for app
+    /// + diagnostic config).
+    #[arg(long, value_name = "PATH", hide_short_help = true)]
+    trace_input: Option<std::path::PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -114,6 +122,8 @@ enum ScreenArg {
     F2,
     F3,
     F4,
+    /// Phase 6 dual-pane transfer UI.
+    Dual,
 }
 
 /// In-app pane identifier. Distinct from `ScreenArg`
@@ -128,6 +138,7 @@ pub enum Screen {
     F2,
     F3,
     F4,
+    Dual,
 }
 
 impl From<ScreenArg> for Screen {
@@ -137,6 +148,7 @@ impl From<ScreenArg> for Screen {
             ScreenArg::F2 => Screen::F2,
             ScreenArg::F3 => Screen::F3,
             ScreenArg::F4 => Screen::F4,
+            ScreenArg::Dual => Screen::Dual,
         }
     }
 }
@@ -161,6 +173,14 @@ impl From<ScreenArg> for Screen {
 struct AppState {
     /// Active pane. Changes via F-key navigation.
     current_screen: Screen,
+    /// Phase 6 dual-pane transfer UI state. This is the
+    /// default product shell; the older F-key panes are migration
+    /// sources, not the normal entry point.
+    dual_pane: dual_pane::DualPaneState,
+    /// Sender into the Phase 6 local browse provider. M2 uses a
+    /// spawn_blocking worker so large local directories do not
+    /// block terminal redraw.
+    dual_pane_fetch_tx: mpsc::Sender<DualPaneFetchReply>,
     /// Shared remote endpoint (parsed once at startup). This is
     /// the F2 transfers target — its Subscribe stream stays bound
     /// to the launch remote for the session.
@@ -646,7 +666,7 @@ async fn run_router(
     // a1-6 round 2: the input task is owned by the router
     // for the whole TUI lifetime.
     let (key_tx, mut key_rx) = mpsc::channel::<KeyEvent>(16);
-    spawn_input_task(key_tx);
+    spawn_input_task(key_tx, args.trace_input.clone());
 
     // a1-6b: parse remote up-front so every pane sees the
     // same endpoint (or None) without re-parsing. Round 2:
@@ -693,6 +713,8 @@ async fn run_router(
 
     // F3 browse fetcher reply channel.
     let (browse_fetch_tx, mut browse_fetch_rx) = mpsc::channel::<BrowseFetchReply>(8);
+    // Phase 6 dual-pane local browse provider replies.
+    let (dual_pane_fetch_tx, mut dual_pane_fetch_rx) = mpsc::channel::<DualPaneFetchReply>(8);
 
     // F4 profile fetcher reply channel.
     let (profile_reply_tx, mut profile_reply_rx) = mpsc::channel::<ProfileReply>(4);
@@ -730,6 +752,11 @@ async fn run_router(
 
     let mut app = AppState {
         current_screen: args.screen.into(),
+        dual_pane: dual_pane::DualPaneState::for_launch(
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            parsed_remote.clone(),
+        ),
+        dual_pane_fetch_tx: dual_pane_fetch_tx.clone(),
         parsed_remote: parsed_remote.clone(),
         browse_target: parsed_remote.clone(),
         remote_label,
@@ -853,6 +880,9 @@ async fn run_router(
                 app.browse_last_fetched_view = Some(app.browse.view().clone());
             }
         }
+        if matches!(app.current_screen, Screen::Dual) {
+            maybe_kick_dual_pane_fetch(&mut app);
+        }
 
         let now = Instant::now();
         // d-36: drop an expired reload banner so
@@ -928,25 +958,32 @@ async fn run_router(
                         frame.area(),
                     );
                 }
-                let (tab_area, body_area) = screens::split_for_tabs(frame.area());
-                // e-2 R2: daemons = discovered remotes
-                // (excludes the synthetic Local row), and
-                // active/recent fold the F4 local transfer
-                // state into the daemon-stream counts.
-                let counts = screens::TabStripCounts {
-                    daemons: app.daemons.discovered_count(),
-                    active_transfers: app.transfers.active_count() + app.transfer.count_active(),
-                    recent_transfers: app.transfers.recent_count() + app.transfer.count_recent(),
+                let body_area = if app.current_screen == Screen::Dual {
+                    frame.area()
+                } else {
+                    let (tab_area, body_area) = screens::split_for_tabs(frame.area());
+                    // e-2 R2: daemons = discovered remotes
+                    // (excludes the synthetic Local row), and
+                    // active/recent fold the F4 local transfer
+                    // state into the daemon-stream counts.
+                    let counts = screens::TabStripCounts {
+                        daemons: app.daemons.discovered_count(),
+                        active_transfers: app.transfers.active_count()
+                            + app.transfer.count_active(),
+                        recent_transfers: app.transfers.recent_count()
+                            + app.transfer.count_recent(),
+                    };
+                    screens::render_tab_strip(
+                        frame,
+                        tab_area,
+                        app.current_screen,
+                        counts,
+                        tui_config.tab_strip.show_counts,
+                        accent_color,
+                        reload_banner.as_ref().map(|(m, c)| (m.as_str(), *c)),
+                    );
+                    body_area
                 };
-                screens::render_tab_strip(
-                    frame,
-                    tab_area,
-                    app.current_screen,
-                    counts,
-                    tui_config.tab_strip.show_counts,
-                    accent_color,
-                    reload_banner.as_ref().map(|(m, c)| (m.as_str(), *c)),
-                );
                 // d-34: derive the F3 pull-source spec
                 // through the real `RemoteEndpoint` so the
                 // preview round-trips (bracketed IPv6,
@@ -1016,6 +1053,12 @@ async fn run_router(
                         &app.diagnostics,
                         &app.transfer,
                         now,
+                        accent_color,
+                    ),
+                    Screen::Dual => screens::dual_pane::render_into(
+                        frame,
+                        body_area,
+                        &app.dual_pane,
                         accent_color,
                     ),
                 }
@@ -1424,6 +1467,12 @@ async fn run_router(
             reply = browse_fetch_rx.recv() => {
                 if let Some(reply) = reply {
                     apply_browse_reply(&mut app.browse, reply);
+                }
+            }
+            // Phase 6 dual-pane local browse replies.
+            reply = dual_pane_fetch_rx.recv() => {
+                if let Some(reply) = reply {
+                    apply_dual_pane_fetch_reply(&mut app.dual_pane, reply);
                 }
             }
             // F4 profile-fetch replies.
@@ -2177,6 +2226,22 @@ async fn handle_pane_action(
             }
             _ => {}
         },
+        Screen::Dual => match action {
+            UserAction::Refresh => app.dual_pane.active_pane_mut().refresh(),
+            UserAction::SelectNext => app.dual_pane.active_pane_mut().select_next(),
+            UserAction::SelectPrev => app.dual_pane.active_pane_mut().select_prev(),
+            UserAction::SelectFirst => app.dual_pane.active_pane_mut().select_first(),
+            UserAction::SelectLast => app.dual_pane.active_pane_mut().select_last(),
+            UserAction::Descend => {
+                app.dual_pane.active_pane_mut().open_selected();
+            }
+            UserAction::Ascend => {
+                app.dual_pane.active_pane_mut().ascend();
+            }
+            UserAction::DualSwitchPane => app.dual_pane.switch_active(),
+            UserAction::F3ToggleMark => app.dual_pane.active_pane_mut().toggle_mark(),
+            _ => {}
+        },
     }
 }
 
@@ -2853,6 +2918,118 @@ enum BrowseFetchPayload {
         entries: Vec<DirEntry>,
     },
     Error(String),
+}
+
+fn maybe_kick_dual_pane_fetch(app: &mut AppState) {
+    let places = dual_pane_places(app);
+    for pane_id in [dual_pane::PaneId::Left, dual_pane::PaneId::Right] {
+        if app
+            .dual_pane
+            .populate_places_if_needed(pane_id, places.clone())
+        {
+            continue;
+        }
+        if let Some(request) = app.dual_pane.pane_mut(pane_id).begin_fetch() {
+            spawn_dual_pane_fetch(request, app.dual_pane_fetch_tx.clone());
+        }
+    }
+}
+
+fn dual_pane_places(app: &AppState) -> Vec<dual_pane::Location> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut places = Vec::new();
+    let mut push = |location: dual_pane::Location| {
+        if seen.insert(location.display()) {
+            places.push(location);
+        }
+    };
+
+    if let Ok(cwd) = std::env::current_dir() {
+        push(dual_pane::Location::Local(cwd));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        push(dual_pane::Location::Local(home));
+    }
+    push(dual_pane::Location::Local(std::path::PathBuf::from(
+        std::path::MAIN_SEPARATOR.to_string(),
+    )));
+    if let Some(endpoint) = app.parsed_remote.clone() {
+        push(dual_pane::Location::Remote(endpoint));
+    }
+    if let Some(endpoint) = app.browse_target.clone() {
+        push(dual_pane::Location::Remote(endpoint));
+    }
+    for endpoint in app.daemons.remote_endpoints() {
+        push(dual_pane::Location::Remote(endpoint));
+    }
+
+    places
+}
+
+fn spawn_dual_pane_fetch(
+    request: dual_pane::PaneFetchRequest,
+    tx: mpsc::Sender<DualPaneFetchReply>,
+) {
+    tokio::spawn(async move {
+        let (pane_id, request_id, result) = match request {
+            dual_pane::PaneFetchRequest::Local {
+                pane_id,
+                request_id,
+                path,
+            } => {
+                let result = tokio::task::spawn_blocking(move || {
+                    dual_pane::list_local_entries(&path).map_err(|err| format!("{err:#}"))
+                })
+                .await
+                .map_err(|err| format!("local browse task failed: {err:#}"))
+                .and_then(|result| result);
+                (pane_id, request_id, result)
+            }
+            dual_pane::PaneFetchRequest::RemoteModules {
+                pane_id,
+                request_id,
+                endpoint,
+            } => {
+                let result = match list_modules::query(&endpoint).await {
+                    Ok(modules) => Ok(dual_pane::entries_from_remote_modules(modules)),
+                    Err(err) => Err(format!("{err:#}")),
+                };
+                (pane_id, request_id, result)
+            }
+            dual_pane::PaneFetchRequest::RemoteListing {
+                pane_id,
+                request_id,
+                endpoint,
+                module,
+                path,
+            } => {
+                let result = match ls::list_remote(&endpoint, module, path).await {
+                    Ok(entries) => Ok(dual_pane::entries_from_remote_listing(&endpoint, entries)),
+                    Err(err) => Err(format!("{err:#}")),
+                };
+                (pane_id, request_id, result)
+            }
+        };
+        let _ = tx
+            .send(DualPaneFetchReply {
+                pane_id,
+                request_id,
+                result,
+            })
+            .await;
+    });
+}
+
+fn apply_dual_pane_fetch_reply(state: &mut dual_pane::DualPaneState, reply: DualPaneFetchReply) {
+    state
+        .pane_mut(reply.pane_id)
+        .apply_fetch_result(reply.request_id, reply.result);
+}
+
+struct DualPaneFetchReply {
+    pane_id: dual_pane::PaneId,
+    request_id: u64,
+    result: Result<Vec<dual_pane::BrowserEntry>, String>,
 }
 
 /// One-shot profile reader. `profile::query` is sync; wrap
@@ -3822,6 +3999,7 @@ fn needs_live_tick(app: &AppState) -> bool {
             app.profile.status(),
             profile::ProfileFetchStatus::Loaded { .. }
         ),
+        Screen::Dual => false,
     }
 }
 
@@ -4740,17 +4918,21 @@ fn spawn_discovery_task(
 /// isn't a `Release` — a key-up doesn't carry user intent and
 /// would double-fire any matched action.
 ///
-/// **Diagnostic trace:** set `BLIT_TUI_INPUT_TRACE=1` to write
-/// every raw crossterm event (including its `kind`) to
-/// `/tmp/blit-tui-input.log` as a JSON line. Useful for
-/// diagnosing terminals that drop events or report them with
-/// unexpected `kind` values.
-fn spawn_input_task(tx: mpsc::Sender<KeyEvent>) {
-    let trace_log = std::env::var_os("BLIT_TUI_INPUT_TRACE").map(|_| {
+/// **Diagnostic trace:** pass `--trace-input PATH` to write every
+/// raw crossterm event (including its `kind`) to `PATH` as a JSON
+/// line. Useful for diagnosing terminals that drop events or report
+/// them with unexpected `kind` values. The flag is hidden from short
+/// `--help` by design — it's a diagnostics-only knob, not an
+/// operator setting. (audit-l39: replaced the pre-0.1.1
+/// `BLIT_TUI_INPUT_TRACE=1` env var that wrote to a hardcoded
+/// `/tmp/blit-tui-input.log`; env vars are out for app + diagnostic
+/// config.)
+fn spawn_input_task(tx: mpsc::Sender<KeyEvent>, trace_path: Option<std::path::PathBuf>) {
+    let trace_log = trace_path.map(|path| {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/tmp/blit-tui-input.log")
+            .open(path)
     });
     tokio::task::spawn_blocking(move || {
         let mut trace = trace_log.and_then(|r| r.ok());
@@ -4842,6 +5024,10 @@ enum UserAction {
     /// router so the top-level can switch which pane is
     /// active.
     Navigate(Screen),
+    /// Phase 6 dual-pane shell: `Tab` switches active side.
+    /// Existing F4 Verify focus handling intercepts Tab before
+    /// this action is dispatched there.
+    DualSwitchPane,
     /// F4: `c` clears the perf-history file.
     ProfileClear,
     /// F4: `d` disables history recording (new transfers
@@ -5051,6 +5237,7 @@ fn key_action(key: &KeyEvent, keymap: &KeyMap) -> Option<UserAction> {
         }
     }
     match key.code {
+        KeyCode::Tab => Some(UserAction::DualSwitchPane),
         // keys-4: the arrow / Home / End keys always move the cursor —
         // the non-remappable failsafe for the configurable j/k/g/G
         // aliases handled in the movement block above. d-42: Home/End
@@ -6164,7 +6351,7 @@ mod tests {
         assert!(f(12).is_none());
     }
 
-    /// a1-6: ScreenArg → Screen mapping covers all four
+    /// a1-6 / phase6-m1: ScreenArg → Screen mapping covers all
     /// variants. Pins the CLI-to-router translation so a
     /// future ScreenArg variant can't silently default.
     #[test]
@@ -6173,6 +6360,14 @@ mod tests {
         assert_eq!(Screen::from(ScreenArg::F2), Screen::F2);
         assert_eq!(Screen::from(ScreenArg::F3), Screen::F3);
         assert_eq!(Screen::from(ScreenArg::F4), Screen::F4);
+        assert_eq!(Screen::from(ScreenArg::Dual), Screen::Dual);
+    }
+
+    #[test]
+    fn args_default_to_dual_pane_shell() {
+        let args = Args::parse_from(["blit-tui"]);
+
+        assert_eq!(Screen::from(args.screen), Screen::Dual);
     }
 
     /// a1-4: F3 navigation keys. Enter / → / 'l' descend
@@ -8004,6 +8199,11 @@ mod tests {
     fn make_test_app_state(screen: Screen) -> AppState {
         AppState {
             current_screen: screen,
+            dual_pane: dual_pane::DualPaneState::new(
+                dual_pane::Location::local("/left"),
+                dual_pane::Location::local("/right"),
+            ),
+            dual_pane_fetch_tx: mpsc::channel::<DualPaneFetchReply>(1).0,
             parsed_remote: None,
             browse_target: None,
             remote_label: String::new(),
@@ -9526,6 +9726,11 @@ mod tests {
         // (returns false), and the source field stays empty.
         let mut app = AppState {
             current_screen: Screen::F4,
+            dual_pane: dual_pane::DualPaneState::new(
+                dual_pane::Location::local("/left"),
+                dual_pane::Location::local("/right"),
+            ),
+            dual_pane_fetch_tx: mpsc::channel::<DualPaneFetchReply>(1).0,
             parsed_remote: None,
             browse_target: None,
             remote_label: String::new(),
@@ -9594,6 +9799,11 @@ mod tests {
     fn esc_cancels_confirm_priority_matrix() {
         let mut app = AppState {
             current_screen: Screen::F4,
+            dual_pane: dual_pane::DualPaneState::new(
+                dual_pane::Location::local("/left"),
+                dual_pane::Location::local("/right"),
+            ),
+            dual_pane_fetch_tx: mpsc::channel::<DualPaneFetchReply>(1).0,
             parsed_remote: None,
             browse_target: None,
             remote_label: String::new(),
@@ -9713,6 +9923,11 @@ mod tests {
     fn needs_live_tick_only_during_active_runs() {
         let mut app = AppState {
             current_screen: Screen::F4,
+            dual_pane: dual_pane::DualPaneState::new(
+                dual_pane::Location::local("/left"),
+                dual_pane::Location::local("/right"),
+            ),
+            dual_pane_fetch_tx: mpsc::channel::<DualPaneFetchReply>(1).0,
             parsed_remote: None,
             browse_target: None,
             remote_label: String::new(),
@@ -9791,6 +10006,11 @@ mod tests {
     fn needs_live_tick_covers_per_pane_freshness_footers() {
         let mut app = AppState {
             current_screen: Screen::F1,
+            dual_pane: dual_pane::DualPaneState::new(
+                dual_pane::Location::local("/left"),
+                dual_pane::Location::local("/right"),
+            ),
+            dual_pane_fetch_tx: mpsc::channel::<DualPaneFetchReply>(1).0,
             parsed_remote: None,
             browse_target: None,
             remote_label: String::new(),

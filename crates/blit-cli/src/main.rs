@@ -33,11 +33,18 @@ async fn main() -> Result<ExitCode> {
     color_eyre::install()?;
     let Cli {
         config_dir,
+        diagnostics_counter_file,
         command,
     } = Cli::parse();
 
     if let Some(dir) = config_dir.as_ref() {
         config::set_config_dir(dir);
+    }
+
+    // audit-l39: pre-0.1.1 this was BLIT_TEST_COUNTER_FILE. Env vars
+    // are out for app + diagnostic config; install via the CLI flag.
+    if let Some(path) = diagnostics_counter_file {
+        blit_core::remote::instrumentation::set_counter_path(path);
     }
 
     let mut ctx = AppContext::load();

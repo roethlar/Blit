@@ -78,7 +78,10 @@ run_copy() {
     local start
     local end
     start=$(now_ms)
-    BLIT_TEST_COUNTER_FILE="$counter" "$BLIT" copy "$src" "$dst" "$@"
+    # audit-l39: pre-0.1.1 this used BLIT_TEST_COUNTER_FILE env var.
+    # Env vars are out for app + diagnostic config; --diagnostics-counter-file
+    # is the global CLI flag and must precede the subcommand.
+    "$BLIT" --diagnostics-counter-file "$counter" copy "$src" "$dst" "$@"
     end=$(now_ms)
 
     local ms=$((end - start))

@@ -41,6 +41,16 @@ pub struct Cli {
     /// Override the configuration directory for this invocation
     #[arg(long, global = true, value_name = "PATH")]
     pub config_dir: Option<PathBuf>,
+
+    /// Diagnostics only: write internal byte-path counters to this
+    /// file (one `<event> <value>` line per record). Used by the
+    /// integration tests and `scripts/bench_remote_remote.sh` to
+    /// assert byte-path isolation; not intended for operator use.
+    /// Replaces the pre-0.1.1 `BLIT_TEST_COUNTER_FILE` env var
+    /// (audit-l39: env vars are out for app + diagnostic config).
+    #[arg(long, global = true, value_name = "PATH", hide_short_help = true)]
+    pub diagnostics_counter_file: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }

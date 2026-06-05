@@ -1,21 +1,40 @@
-//! Test instrumentation hooks for remote byte-path assertions.
+//! Diagnostics instrumentation hooks for remote byte-path assertions.
 //!
-//! These hooks are inert unless `BLIT_TEST_COUNTER_FILE` is set. They are
-//! intentionally env-gated instead of `cfg(test)` because CLI integration tests
-//! execute the compiled `blit` binary as a child process.
+//! These hooks are inert unless a counter file path has been installed
+//! via [`set_counter_path`]. The path is installed by the `blit` CLI
+//! from the global `--diagnostics-counter-file <PATH>` flag at startup,
+//! before any RPC fires.
+//!
+//! audit-l39 (2026-06-04): pre-0.1.1 this module read the
+//! `BLIT_TEST_COUNTER_FILE` env var instead of the CLI flag. Env vars
+//! are out for app + diagnostic config per owner directive; the
+//! integration tests (`crates/blit-cli/tests/remote_remote.rs`) and
+//! the operator bench script (`scripts/bench_remote_remote.sh`) now
+//! pass `--diagnostics-counter-file PATH` explicitly. The CLI flag
+//! is marked `hide_short_help = true` so it doesn't pollute the
+//! ordinary `--help` output — diagnostics only.
 
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
-const COUNTER_FILE_ENV: &str = "BLIT_TEST_COUNTER_FILE";
+/// CLI-installed diagnostics counter file path. Set once at startup
+/// by `blit-cli`'s main when `--diagnostics-counter-file` is supplied;
+/// `None` otherwise (and `record` is a no-op).
+static COUNTER_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Install the diagnostics counter file path. Called by the CLI from
+/// `main` after parsing `Cli`. A second call is silently ignored — the
+/// path is installed once per process.
+pub fn set_counter_path(path: PathBuf) {
+    let _ = COUNTER_PATH.set(path);
+}
 
 fn record(event: &str, value: u64) {
-    let Ok(path) = std::env::var(COUNTER_FILE_ENV) else {
+    let Some(path) = COUNTER_PATH.get() else {
         return;
     };
-    if path.is_empty() {
-        return;
-    }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{event} {value}");
     }
