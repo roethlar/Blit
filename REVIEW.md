@@ -14,6 +14,7 @@ See `.review/findings/<id>.md` for per-finding details.
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
 | audit-h1-mirror-relay-incomplete-scan | Data-loss | Reject `mirror --relay-via-cli` for remote→remote (the relay scanner discards `unreadable_paths`, letting mirror purge run on an incomplete source view); symmetric with `move --relay-via-cli` R50-F1/R51-F2 | `[~]` | `fix/audit-h1-mirror-relay-incomplete-scan` | `c6b3a3a` |
+| audit-h3a-push-receive-stall | Robustness | StallGuard on the daemon push-receive socket (`TRANSFER_STALL_TIMEOUT` hoist) — closes one of three remaining stall-guard gaps from R3 H3; symmetric with audit-1c CLI pull-receive | `[~]` | `fix/audit-h1-mirror-relay-incomplete-scan` (linear sequence) | `dd51a1c` |
 | d-62-f1-trigger-error | Feature | Inline validation feedback in the F1 trigger modal (round 2) | `[x]` | `phase5/a1` | `0b47a72` |
 | d-63-f1-push-progress | Feature | Live byte/file footer for the F1 push (round 2) | `[x]` | `phase5/a1` | `aba54f8` |
 | d-64-f1-push-ttl | Feature | Auto-hide the F1 push outcome footer (round 2) | `[x]` | `phase5/a1` | `2f67e96` |
