@@ -159,11 +159,20 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for StallGuardWriter<W> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(0)) => {
+                // Per the doc contract above, "no progress" means zero
+                // bytes accepted. A 0-byte poll_write does NOT reset
+                // the deadline — otherwise a peer that accepts zero
+                // bytes per poll would never trip the guard. The
+                // caller (write_all loop) will keep polling; if real
+                // progress doesn't show up within the window the
+                // Pending arm below trips. (h3b round 2: GPT review
+                // flagged Ok(0) as a doc/code mismatch.)
+                Poll::Ready(Ok(0))
+            }
             Poll::Ready(Ok(n)) => {
-                // Any successful write — even 0 bytes — counts as the
-                // inner stream telling us "I'm responsive." Reset the
-                // idle deadline so a steadily-progressing transfer
-                // is never aborted.
+                // n > 0: real progress. Reset the idle deadline so a
+                // steadily-progressing transfer is never aborted.
                 this.deadline.as_mut().reset(Instant::now() + this.timeout);
                 Poll::Ready(Ok(n))
             }

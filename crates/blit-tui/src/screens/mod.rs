@@ -3,6 +3,7 @@
 //! a1-5 added F4 (Profile); a1-6 adds the tab strip used
 //! by all panes.
 
+pub mod dual_pane;
 pub mod f1;
 pub mod f2;
 pub mod f3;
