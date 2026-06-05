@@ -230,6 +230,37 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         TransferRoute::RemoteToRemoteRelay { src, dst, mirror } => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
+            // audit-h1 (data-loss): refuse `mirror --relay-via-cli`
+            // for remote→remote. The relay path goes through
+            // `RemoteTransferSource::scan` in
+            // crates/blit-core/src/remote/transfer/source.rs, which
+            // ignores the `unreadable_paths` channel — so the push
+            // handshake at crates/blit-core/src/remote/push/client/mod.rs
+            // (`send_manifest_complete`) derives scan_complete=true
+            // even when the source daemon had unreadable subtrees.
+            // The destination then runs mirror's purge step,
+            // deleting destination-only files that may correspond
+            // to the missing source entries. Symmetric with the
+            // `move --relay-via-cli` reject-gate in `run_move`
+            // below (R50-F1 / R51-F2). Copy is still allowed: copy
+            // doesn't run a destination-purge step, so an
+            // incomplete source scan loses no data on the
+            // destination side. Restoring relay-mirror needs
+            // unreadable_paths plumbed through the relay's source
+            // scan; tracked as a follow-up.
+            if mirror {
+                bail!(
+                    "mirror does not support --relay-via-cli with remote \
+                     endpoints: the legacy relay path does not verify \
+                     that the source-side scan was complete, so an \
+                     unreadable subtree on the source daemon would let \
+                     mirror's destination-purge step delete destination-\
+                     only files that may correspond to the unreadable \
+                     source entries. Drop --relay-via-cli to use the \
+                     direct delegated path, which enforces the \
+                     complete-scan gate."
+                );
+            }
             ensure_remote_push_supported(args)?;
             run_remote_push_transfer(args, Endpoint::Remote(src), dst, mirror).await
         }
@@ -823,5 +854,56 @@ mod tests {
             .expect_err("move + --detach must bail");
         let msg = format!("{err:#}");
         assert!(msg.contains("move does not support --detach"), "got: {msg}");
+    }
+
+    /// audit-h1 regression: `blit mirror --relay-via-cli` between two
+    /// remote endpoints must refuse. The relay path's source scanner
+    /// (`RemoteTransferSource::scan`) discards `unreadable_paths`,
+    /// so the push handshake derives `scan_complete=true` even when
+    /// the source daemon had unreadable subtrees, and mirror's
+    /// destination-purge step would then delete destination-only
+    /// files that may correspond to the missing source entries.
+    ///
+    /// Symmetric with `detach_rejected_on_blit_move`'s
+    /// `move --relay-via-cli` rejection at line 568 of this file.
+    /// The bail fires before any RPC, so this test needs no live
+    /// daemon — the `host-a` / `host-b` endpoints are never
+    /// touched.
+    #[test]
+    fn mirror_rejected_with_relay_via_cli_for_remote_to_remote() {
+        let ctx = ctx();
+        let args = detach_args("host-a:/m/", "host-b:/m/", false, true);
+        let err = runtime()
+            .block_on(run_transfer(&ctx, &args, TransferKind::Mirror))
+            .expect_err("mirror + --relay-via-cli + remote→remote must bail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("mirror does not support --relay-via-cli with remote endpoints"),
+            "got: {msg}"
+        );
+    }
+
+    /// audit-h1 negative: `blit copy --relay-via-cli` between two
+    /// remote endpoints must NOT hit the mirror reject-gate. Copy
+    /// has no destination-purge step, so an incomplete source scan
+    /// loses no data on the destination side; the audit-h1 gate
+    /// only applies to mirror.
+    ///
+    /// The error this raises is downstream (no daemon listening),
+    /// but the key assertion is that the audit-h1 mirror-relay
+    /// message does NOT appear — i.e., the copy path is not
+    /// regressing into a generic relay-rejection.
+    #[test]
+    fn copy_relay_via_cli_does_not_trip_mirror_gate() {
+        let ctx = ctx();
+        let args = detach_args("host-a:/m/", "host-b:/m/", false, true);
+        let err = runtime()
+            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
+            .expect_err("no daemon listening — should fail on connect, not on the mirror gate");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("mirror does not support --relay-via-cli"),
+            "copy must not be rejected by the mirror-only audit-h1 gate; got: {msg}"
+        );
     }
 }
