@@ -32,8 +32,13 @@
 //!   the missing guard is daemon pull-data-plane **write progress
 //!   after token acceptance**, addressed here by wiring this writer
 //!   inside `DataPlaneSession`.
-//! - The gRPC-fallback receive (h3c) is separately scoped because it
-//!   sits below `Streaming<T>` rather than `AsyncRead`/`AsyncWrite`.
+//! - audit-h3c is the gRPC-fallback class, re-scoped 2026-06-05 to a
+//!   two-slice contract because message-granular timeouts can't be
+//!   reused from `StallGuard`'s byte-level model. **Slice 1 shipped**
+//!   (structural frame cap + unified receive helper at
+//!   `crates/blit-core/src/remote/transfer/grpc_fallback.rs`); **slice
+//!   2 pending** (dynamic progress watchdog + retryable `TimedOut`
+//!   error). See that module for details.
 
 use std::future::Future;
 use std::io;

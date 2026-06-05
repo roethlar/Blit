@@ -140,9 +140,23 @@ across h3a/h3b.
 **Remediation status**: `TRANSFER_STALL_TIMEOUT` constant hoisted (audit-h3a).
 Daemon push-receive wrapped in `StallGuard` (audit-h3a). Daemon pull-data-plane
 write progress guarded by `StallGuardWriter` inside `DataPlaneSession`
-(audit-h3b). gRPC-fallback path (audit-h3c) still pending — it sits below
-`tonic::Streaming<T>` rather than `AsyncRead`/`AsyncWrite` and needs a
-different mechanism (per-message `tokio::time::timeout` or a `Stream` adapter).
+(audit-h3b). gRPC-fallback path (audit-h3c) — re-scoped 2026-06-05 from "wrap
+pull.rs:752 in tokio::time::timeout" to a two-slice H3 Liveness Contract because
+message-granular timeout against TCP-sized chunks would break legitimate slow
+healthy transfers, and hardcoded constants contradict the project's
+adapt-to-conditions principle. Status:
+
+- **audit-h3c slice 1 — SHIPPED on master**. Structural frame contract:
+  gRPC fallback chunks capped at 1 MiB (`GRPC_FALLBACK_CHUNK_BYTES` in
+  `crates/blit-core/src/remote/transfer/grpc_fallback.rs`) separately from
+  TCP tuning, so fallback messages arrive at observable cadence on slow
+  links. Three CLI-side pull receive sites (`pull.rs:316`, `:484`, `:752`)
+  routed through `recv_fallback_message` — the single chokepoint slice 2
+  will wrap.
+- **audit-h3c slice 2 — pending**. Dynamic progress-cadence watchdog on the
+  unified helper + `io::ErrorKind::TimedOut` plumbing so retry-classifier
+  fires consistently. TODOs at the three call sites document the
+  error-chain conversion slice 2 must change.
 
 ### H4. TUI dual-pane action bar is render-only — Copy/Mirror/Move/Delete/Verify do nothing
 

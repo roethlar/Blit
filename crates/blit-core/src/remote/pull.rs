@@ -72,6 +72,7 @@ use crate::generated::{
     PeerCapabilities, PullChunk, PullRequest, PullSummary, ResumeSettings, TransferOperationSpec,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
+use crate::remote::transfer::grpc_fallback::recv_fallback_message;
 use crate::remote::transfer::progress::{ByteProgressSink, RemoteTransferProgress};
 
 /// Phase-bearing pull-sync error used by delegation callers to preserve the
@@ -313,8 +314,20 @@ impl RemotePullClient {
         // task is cancelled if this future is dropped mid-flight.
         let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
 
-        while let Some(chunk) = stream
-            .message()
+        // audit-h3c slice 1: route gRPC fallback receive through the
+        // helper so slice 2's progress watchdog has a single chokepoint.
+        // No behavior change today — `recv_fallback_message` is a
+        // pass-through.
+        //
+        // TODO(audit-h3c-2): the `map_err` below strips tonic::Status
+        // to a String, dropping the std::io::Error chain that slice 2's
+        // watchdog will attach when it surfaces a TimedOut. Without
+        // preserving the chain, `blit_app::transfers::retry::is_retryable`
+        // will not classify a stall as retryable and `--retry/--wait`
+        // will not fire. Slice 2 must replace this conversion with one
+        // that preserves the io::Error in the eyre chain (e.g.
+        // `eyre::Report::new(status).wrap_err(...)`).
+        while let Some(chunk) = recv_fallback_message(&mut stream)
             .await
             .map_err(|status| eyre!(status.message().to_string()))?
         {
@@ -481,8 +494,15 @@ impl RemotePullClient {
             .into_inner();
 
         let mut headers = Vec::new();
-        while let Some(chunk) = stream
-            .message()
+        // audit-h3c slice 1: same helper as the bulk-data loop at :316,
+        // for the same reason — single chokepoint for slice 2's
+        // watchdog. Metadata-only pull, but a stalled peer would hang
+        // this scan indefinitely just like the data path.
+        //
+        // TODO(audit-h3c-2): same error-chain-stripping concern as the
+        // :316 site above — slice 2 must preserve the io::Error chain
+        // through this map_err for the retry classifier to fire.
+        while let Some(chunk) = recv_fallback_message(&mut stream)
             .await
             .map_err(|status| eyre!(status.message().to_string()))?
         {
@@ -749,13 +769,34 @@ impl RemotePullClient {
         let mut files_to_delete = 0u64;
         let mut negotiation_complete = false;
 
-        while let Some(msg) = response_stream.message().await.map_err(|status| {
-            if negotiation_complete {
-                PullSyncError::transfer(status)
-            } else {
-                PullSyncError::negotiation(status)
-            }
-        })? {
+        // audit-h3c slice 1: route the pull_sync_with_spec fallback
+        // receive through the helper. This is the load-bearing site
+        // GPT-12 / R3 H3 originally named for h3c; the bulk control +
+        // data messages all flow through here. Slice 2 will install the
+        // dynamic progress watchdog inside `recv_fallback_message` and
+        // every site (this one plus :316, :484) inherits it
+        // automatically.
+        //
+        // TODO(audit-h3c-2): the map_err below routes through
+        // `PullSyncError::transfer` / `negotiation`, both of which
+        // format the tonic::Status to a String (see PullSyncError's
+        // format_status). Slice 2 must change those constructors (or
+        // add new ones) so the io::Error from a watchdog-surfaced
+        // TimedOut survives in the eyre chain — otherwise
+        // `blit_app::transfers::retry::is_retryable` won't classify
+        // h3c-2 stalls as retryable, and `--retry/--wait` will silently
+        // stop working on this code path.
+        while let Some(msg) =
+            recv_fallback_message(&mut response_stream)
+                .await
+                .map_err(|status| {
+                    if negotiation_complete {
+                        PullSyncError::transfer(status)
+                    } else {
+                        PullSyncError::negotiation(status)
+                    }
+                })?
+        {
             negotiation_complete = true;
             match msg.payload {
                 Some(server_pull_message::Payload::Ack(_)) => {

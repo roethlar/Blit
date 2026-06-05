@@ -955,9 +955,23 @@ impl TransferSink for GrpcFallbackSink {
         };
         use tokio::io::AsyncReadExt;
 
-        let chunk_size = self
-            .chunk_bytes
-            .max(super::data_plane::CONTROL_PLANE_CHUNK_SIZE);
+        // audit-h3c slice 1: cap the chunk size at the gRPC fallback
+        // ceiling so emitted FileData / TarShardChunk messages stay
+        // observable in size even when TCP tuning (16-64 MiB for big
+        // transfers) would otherwise blow them up to message sizes the
+        // receive side can't measure progress against. See
+        // grpc_fallback.rs for the full rationale and constant.
+        //
+        // The `.max(CONTROL_PLANE_CHUNK_SIZE)` keeps the protobuf
+        // control-plane minimum; `clamp_fallback_chunk_size` enforces
+        // the gRPC fallback ceiling. Today both constants are 1 MiB
+        // so this collapses to GRPC_FALLBACK_CHUNK_BYTES regardless of
+        // `self.chunk_bytes`; the two-bound shape is intentional
+        // defense if either constant changes later.
+        let chunk_size = super::grpc_fallback::clamp_fallback_chunk_size(
+            self.chunk_bytes
+                .max(super::data_plane::CONTROL_PLANE_CHUNK_SIZE),
+        );
 
         match payload {
             PreparedPayload::File(header) => {
@@ -1119,9 +1133,16 @@ impl TransferSink for GrpcServerStreamingSink {
         };
         use tokio::io::AsyncReadExt;
 
-        let chunk_size = self
-            .chunk_bytes
-            .max(super::data_plane::CONTROL_PLANE_CHUNK_SIZE);
+        // audit-h3c slice 1: cap the chunk size at the gRPC fallback
+        // ceiling. Mirror of the cap in GrpcFallbackSink above — same
+        // rationale (observable message-level cadence on slow links).
+        // See grpc_fallback.rs for the full rationale; same two-bound
+        // shape (`.max(CONTROL_PLANE_CHUNK_SIZE)` floor + clamp ceiling)
+        // collapsing to a constant 1 MiB today.
+        let chunk_size = super::grpc_fallback::clamp_fallback_chunk_size(
+            self.chunk_bytes
+                .max(super::data_plane::CONTROL_PLANE_CHUNK_SIZE),
+        );
 
         match payload {
             PreparedPayload::File(header) => {
@@ -1588,6 +1609,243 @@ mod tests {
             ),
             "expected FileData"
         );
+    }
+
+    /// audit-h3c slice 1: a `GrpcFallbackSink` constructed with a
+    /// TCP-sized chunk_bytes (64 MiB — the largest currently-emitted
+    /// tuning value) must still emit `FileData` messages capped at the
+    /// gRPC fallback ceiling. Without the cap a single 64 MiB file
+    /// would arrive as one message and slice-2's watchdog would have
+    /// nothing to measure cadence against on a slow link.
+    #[tokio::test]
+    async fn grpc_fallback_sink_caps_file_data_at_grpc_ceiling() {
+        use crate::remote::transfer::grpc_fallback::GRPC_FALLBACK_CHUNK_BYTES;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // 3 MiB file — large enough to require multiple frames at the
+        // 1 MiB ceiling.
+        let file_size = 3 * 1024 * 1024;
+        std::fs::write(src.join("big.bin"), vec![0xAAu8; file_size]).unwrap();
+
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(src));
+        // Pass a 64 MiB chunk_bytes — the TCP tuning's largest value.
+        // Without the slice-1 cap, the sink would emit one 64 MiB
+        // (well, file-size-truncated to 3 MiB) FileData. With the cap,
+        // it should emit three 1 MiB FileData messages.
+        let sink =
+            GrpcFallbackSink::new(source, tx, 64 * 1024 * 1024, PathBuf::from("remote:/test/"));
+
+        let header = make_file_header("big.bin", file_size as u64);
+        let outcome = sink
+            .write_payload(PreparedPayload::File(header))
+            .await
+            .unwrap();
+        assert_eq!(outcome.bytes_written, file_size as u64);
+
+        // Drop the sink so the tx half closes and rx hits EOF cleanly.
+        // Round-2 fix: bounded drain by EOF, not by `rx.is_empty()` —
+        // a future spawned-emitter refactor could see momentary
+        // empty-channel and exit the loop early under the prior shape.
+        drop(sink);
+
+        // Drain. Expect: 1 FileManifest + N FileData where every FileData
+        // payload is ≤ GRPC_FALLBACK_CHUNK_BYTES.
+        let _manifest = rx.recv().await.unwrap();
+        let mut data_frames = 0usize;
+        let mut total_bytes = 0usize;
+        while let Some(msg) = rx.recv().await {
+            match msg.payload {
+                Some(crate::generated::client_push_request::Payload::FileData(d)) => {
+                    assert!(
+                        d.content.len() <= GRPC_FALLBACK_CHUNK_BYTES,
+                        "audit-h3c slice 1: gRPC fallback FileData must be capped at \
+                         {GRPC_FALLBACK_CHUNK_BYTES} bytes, got {}",
+                        d.content.len()
+                    );
+                    data_frames += 1;
+                    total_bytes += d.content.len();
+                }
+                other => panic!("unexpected payload variant after FileManifest: {other:?}"),
+            }
+        }
+        assert_eq!(total_bytes, file_size);
+        let expected_frames = file_size.div_ceil(GRPC_FALLBACK_CHUNK_BYTES);
+        assert_eq!(
+            data_frames, expected_frames,
+            "audit-h3c slice 1: 3 MiB at 1 MiB ceiling must split into exactly \
+             {expected_frames} frames; got {data_frames}"
+        );
+    }
+
+    /// audit-h3c slice 1: same cap on the daemon-side sink. Mirror of
+    /// `grpc_fallback_sink_caps_file_data_at_grpc_ceiling` but on the
+    /// server-streaming side that emits to a pull client.
+    #[tokio::test]
+    async fn grpc_server_streaming_sink_caps_file_data_at_grpc_ceiling() {
+        use crate::remote::transfer::grpc_fallback::GRPC_FALLBACK_CHUNK_BYTES;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file_size = 3 * 1024 * 1024;
+        std::fs::write(src.join("big.bin"), vec![0xBBu8; file_size]).unwrap();
+
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(src));
+        let sink =
+            GrpcServerStreamingSink::new(source, tx, 64 * 1024 * 1024, PathBuf::from("/srv/test"));
+
+        let header = make_file_header("big.bin", file_size as u64);
+        sink.write_payload(PreparedPayload::File(header))
+            .await
+            .unwrap();
+        drop(sink);
+
+        let _header = rx.recv().await.unwrap();
+        let mut data_frames = 0usize;
+        let mut total_bytes = 0usize;
+        while let Some(msg) = rx.recv().await {
+            match msg.unwrap().payload {
+                Some(crate::generated::server_pull_message::Payload::FileData(d)) => {
+                    assert!(
+                        d.content.len() <= GRPC_FALLBACK_CHUNK_BYTES,
+                        "audit-h3c slice 1: server-streaming FileData must be capped at \
+                         {GRPC_FALLBACK_CHUNK_BYTES} bytes, got {}",
+                        d.content.len()
+                    );
+                    data_frames += 1;
+                    total_bytes += d.content.len();
+                }
+                other => panic!("unexpected payload variant after FileHeader: {other:?}"),
+            }
+        }
+        assert_eq!(total_bytes, file_size);
+        let expected_frames = file_size.div_ceil(GRPC_FALLBACK_CHUNK_BYTES);
+        assert_eq!(
+            data_frames, expected_frames,
+            "audit-h3c slice 1: server-streaming 3 MiB at 1 MiB ceiling must split into \
+             exactly {expected_frames} frames; got {data_frames}"
+        );
+    }
+
+    /// audit-h3c slice 1 round 2: the TarShardChunk emission path
+    /// uses the same `data.chunks(chunk_size)` shape as FileData, so
+    /// it must respect the same cap. A future refactor that splits
+    /// out one branch could drop the cap on the other; this test
+    /// pins that the tar-shard path is also capped.
+    #[tokio::test]
+    async fn grpc_fallback_sink_caps_tar_shard_chunks_at_grpc_ceiling() {
+        use crate::remote::transfer::grpc_fallback::GRPC_FALLBACK_CHUNK_BYTES;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(src));
+        let sink =
+            GrpcFallbackSink::new(source, tx, 64 * 1024 * 1024, PathBuf::from("remote:/test/"));
+
+        // 3 MiB synthetic tar-shard payload — content shape doesn't
+        // matter for the cap assertion. One dummy header is enough;
+        // sink doesn't inspect the data contents, only chunks it.
+        let shard_size = 3 * 1024 * 1024;
+        let header = make_file_header("dummy.bin", shard_size as u64);
+        let outcome = sink
+            .write_payload(PreparedPayload::TarShard {
+                headers: vec![header],
+                data: vec![0xCCu8; shard_size],
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.bytes_written, shard_size as u64);
+        drop(sink);
+
+        let _shard_header = rx.recv().await.unwrap();
+        let mut chunk_frames = 0usize;
+        let mut total_bytes = 0usize;
+        let mut saw_complete = false;
+        while let Some(msg) = rx.recv().await {
+            match msg.payload {
+                Some(crate::generated::client_push_request::Payload::TarShardChunk(c)) => {
+                    assert!(
+                        c.content.len() <= GRPC_FALLBACK_CHUNK_BYTES,
+                        "audit-h3c slice 1: TarShardChunk must be capped at \
+                         {GRPC_FALLBACK_CHUNK_BYTES} bytes, got {}",
+                        c.content.len()
+                    );
+                    chunk_frames += 1;
+                    total_bytes += c.content.len();
+                }
+                Some(crate::generated::client_push_request::Payload::TarShardComplete(_)) => {
+                    saw_complete = true;
+                }
+                other => panic!("unexpected payload variant after TarShardHeader: {other:?}"),
+            }
+        }
+        assert_eq!(total_bytes, shard_size);
+        assert!(saw_complete, "TarShardComplete must close the shard");
+        let expected_frames = shard_size.div_ceil(GRPC_FALLBACK_CHUNK_BYTES);
+        assert_eq!(
+            chunk_frames, expected_frames,
+            "3 MiB tar-shard at 1 MiB ceiling must split into exactly \
+             {expected_frames} chunks; got {chunk_frames}"
+        );
+    }
+
+    /// audit-h3c slice 1 round 2: server-streaming mirror of the tar-shard
+    /// cap test above.
+    #[tokio::test]
+    async fn grpc_server_streaming_sink_caps_tar_shard_chunks_at_grpc_ceiling() {
+        use crate::remote::transfer::grpc_fallback::GRPC_FALLBACK_CHUNK_BYTES;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let source = Arc::new(crate::remote::transfer::source::FsTransferSource::new(src));
+        let sink =
+            GrpcServerStreamingSink::new(source, tx, 64 * 1024 * 1024, PathBuf::from("/srv/test"));
+
+        let shard_size = 3 * 1024 * 1024;
+        let header = make_file_header("dummy.bin", shard_size as u64);
+        sink.write_payload(PreparedPayload::TarShard {
+            headers: vec![header],
+            data: vec![0xDDu8; shard_size],
+        })
+        .await
+        .unwrap();
+        drop(sink);
+
+        let _shard_header = rx.recv().await.unwrap();
+        let mut chunk_frames = 0usize;
+        let mut total_bytes = 0usize;
+        let mut saw_complete = false;
+        while let Some(msg) = rx.recv().await {
+            match msg.unwrap().payload {
+                Some(crate::generated::server_pull_message::Payload::TarShardChunk(c)) => {
+                    assert!(
+                        c.content.len() <= GRPC_FALLBACK_CHUNK_BYTES,
+                        "audit-h3c slice 1: server-streaming TarShardChunk must be \
+                         capped at {GRPC_FALLBACK_CHUNK_BYTES} bytes, got {}",
+                        c.content.len()
+                    );
+                    chunk_frames += 1;
+                    total_bytes += c.content.len();
+                }
+                Some(crate::generated::server_pull_message::Payload::TarShardComplete(_)) => {
+                    saw_complete = true;
+                }
+                other => panic!("unexpected payload variant after TarShardHeader: {other:?}"),
+            }
+        }
+        assert_eq!(total_bytes, shard_size);
+        assert!(saw_complete);
+        let expected_frames = shard_size.div_ceil(GRPC_FALLBACK_CHUNK_BYTES);
+        assert_eq!(chunk_frames, expected_frames);
     }
 
     #[tokio::test]

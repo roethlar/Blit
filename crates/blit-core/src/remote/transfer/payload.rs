@@ -240,7 +240,15 @@ pub async fn transfer_payloads_via_control_plane(
     chunk_bytes: usize,
     payload_prefetch: usize,
 ) -> Result<()> {
-    let chunk_size = chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE);
+    // audit-h3c slice 1: clamp at the gRPC fallback ceiling for the
+    // same reason GrpcFallbackSink / GrpcServerStreamingSink do — this
+    // function emits FileData / TarShardChunk over the same gRPC
+    // control plane and must produce frames at observable cadence.
+    // No live caller today (grep returns zero matches), but the
+    // function is `pub` and re-exported, so any future caller would
+    // silently bypass the cap without this line.
+    let chunk_size =
+        super::grpc_fallback::clamp_fallback_chunk_size(chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE));
     let mut buffer = vec![0u8; chunk_size];
     let mut prepared_stream = prepared_payload_stream(payloads, source.clone(), payload_prefetch);
 
