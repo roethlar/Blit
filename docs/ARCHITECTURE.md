@@ -139,15 +139,23 @@ bridge consumes `admin::jobs` for its scrape (`GetState`).
 
 ### blit-tui
 
-Terminal UI (ratatui + crossterm) producing the `blit-tui` binary. Panes
-F1–F4 (F1 trigger/daemons, F2 transfers, F3 browse, F4
-profile/verify/diagnostics). It is a read-mostly
-control surface over the daemon: it `Subscribe`s to each discovered
-daemon's `DaemonEvent` stream and renders live transfer state from
-`GetState`, can launch transfers/`CancelJob`/`ClearRecent`, and supports
-configurable keybindings and theming via `[keys]` / `[theme]` config.
-Daemon discovery is mDNS; multi-daemon F2 merges per-daemon Subscribe
-streams into one event channel.
+Terminal UI (ratatui + crossterm) producing the `blit-tui` binary. The
+active model is the **Phase 6 dual-pane Pick-not-Type design**
+(`docs/plan/TUI_REWORK.md`, M1–M6): active pane = source, inactive
+pane = destination, visible action bar (Copy / Mirror / Move / Delete
+/ Verify), editable path bars, `/` search, and a fan-out batch table
+for multi-daemon transfers. The v0.1.0 release shipped the original
+F1–F4 model (trigger / transfers / browse / profile-verify-diagnostics);
+`TUI_DESIGN.md` describes that baseline and is superseded by the
+rework plan.
+
+The TUI is a read-mostly control surface over the daemon: it
+`Subscribe`s to each discovered daemon's `DaemonEvent` stream and
+renders live transfer state from `GetState`, can launch transfers /
+`CancelJob` / `ClearRecent`, and supports configurable keybindings
+and theming via `[keys]` / `[theme]` config. Daemon discovery is mDNS;
+multi-daemon transfer monitoring merges per-daemon Subscribe streams
+into one event channel.
 
 ### blit-prometheus-bridge
 
