@@ -1,5 +1,5 @@
-//! audit-1c: a `StallGuard<R>` `AsyncRead` adapter that turns a *stalled*
-//! transfer — no bytes received for `timeout` — into a clean
+//! audit-1c / audit-h3: a `StallGuard<R>` `AsyncRead` adapter that turns
+//! a *stalled* transfer — no bytes received for `timeout` — into a clean
 //! `io::ErrorKind::TimedOut`, while leaving a steadily-progressing
 //! transfer untouched.
 //!
@@ -12,7 +12,14 @@
 //! it is an **idle** timeout (re-armed on every read that makes progress)
 //! NOT a total-duration deadline, so a legitimate large transfer that
 //! keeps making progress is never aborted. (Owner decision, memory
-//! `audit-owner-decisions`: no-bytes-for-30s, scoped to all pulls.)
+//! `audit-owner-decisions`: no-bytes-for-30s.)
+//!
+//! Scope: audit-1c shipped this guard on the CLI pull-receive TCP path.
+//! audit-h3 (R2/R3 finding H3) extends it to the symmetric receive paths
+//! audit-1c missed — daemon push-receive (h3a, this slice) and daemon
+//! pull-data-plane accepts (h3b). The gRPC-fallback receive (h3c) is
+//! separately scoped because it sits below `Streaming<T>` rather than
+//! `AsyncRead`.
 
 use std::future::Future;
 use std::io;
@@ -23,10 +30,20 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::time::{Instant, Sleep};
 
-/// Idle/stall timeout applied to a pull's receive path: if no bytes
+/// Idle/stall timeout applied to a transfer's receive path: if no bytes
 /// arrive for this long, the transfer is aborted with `TimedOut` rather
-/// than pinning resources forever. Owner-decided 30s, all pulls.
-pub const PULL_STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// than pinning resources forever. Owner-decided 30s, every receive path.
+///
+/// Applied by:
+/// - CLI pull-receive TCP (`remote::pull` — audit-1c)
+/// - Daemon push-receive TCP (`daemon::service::push::data_plane` —
+///   audit-h3a)
+/// - Daemon pull-data-plane accepts
+///   (`daemon::service::{pull, pull_sync}` — audit-h3b)
+///
+/// The gRPC-fallback receive paths sit below `tonic::Streaming<T>` rather
+/// than an `AsyncRead` and are covered separately (audit-h3c).
+pub const TRANSFER_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Wraps an `AsyncRead` so a read that makes no progress within `timeout`
 /// resolves to `io::ErrorKind::TimedOut`. The deadline is re-armed on

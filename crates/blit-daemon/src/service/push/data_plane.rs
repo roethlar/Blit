@@ -4,13 +4,17 @@ use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
 };
+use blit_core::remote::transfer::pipeline::execute_receive_pipeline;
+use blit_core::remote::transfer::sink::{SinkOutcome, TransferSink};
+use blit_core::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use blit_core::remote::transfer::tar_safety;
+use eyre::Result;
 use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
 use tokio::task::JoinSet;
@@ -203,12 +207,19 @@ async fn handle_data_plane_stream(
     let _ = cache; // headers come off the wire; cache no longer needed
 
     // Route the inbound wire through the unified receive pipeline:
-    //   socket → execute_receive_pipeline → FsTransferSink → disk
+    //   socket → StallGuard → execute_receive_pipeline → FsTransferSink → disk
     // Same call shape as the client's pull-receive side. Tar shards get
     // extracted inline by FsTransferSink (parallelism across streams
     // already comes from N concurrent invocations of this function).
-    use blit_core::remote::transfer::pipeline::execute_receive_pipeline;
-    use blit_core::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
+    //
+    // audit-h3a (R2/R3 finding H3): symmetric to the audit-1c CLI
+    // pull-receive guard. Before this slice the push-receive socket had
+    // no idle deadline at all — a hostile or wedged push client that
+    // accepted the data plane, sent the token, then went silent would
+    // pin this worker indefinitely (DATA_PLANE_TOKEN_TIMEOUT above only
+    // bounds the token read). StallGuard turns that into a clean
+    // TimedOut after TRANSFER_STALL_TIMEOUT of no progress.
+    use blit_core::remote::transfer::sink::{FsSinkConfig, FsTransferSink};
 
     let config = FsSinkConfig {
         preserve_times: true,
@@ -222,7 +233,7 @@ async fn handle_data_plane_stream(
         module.path.clone(),
         config,
     ));
-    let outcome = execute_receive_pipeline(&mut socket, sink, None)
+    let outcome = receive_push_data_plane(socket, sink)
         .await
         .map_err(|err| Status::internal(format!("data plane receive: {err:#}")))?;
 
@@ -814,9 +825,27 @@ fn apply_tar_shard_sync(
     Ok((stats, return_buffer))
 }
 
+/// audit-h3a: wrap the push-receive socket in a `StallGuard` so a peer
+/// that accepts the data plane and then stops sending bytes is reaped
+/// by `TRANSFER_STALL_TIMEOUT` rather than holding the receive worker
+/// open forever. Symmetric with the CLI pull-receive guard in
+/// `blit_core::remote::pull` (audit-1c).
+///
+/// Extracted from `handle_data_plane_stream` so the wiring is unit-
+/// testable without spinning up a TcpListener + token handshake — see
+/// `receive_push_data_plane_aborts_on_stall` in the tests module.
+async fn receive_push_data_plane<R: AsyncRead + Unpin + Send>(
+    socket: R,
+    sink: Arc<dyn TransferSink>,
+) -> Result<SinkOutcome> {
+    let mut guarded = StallGuard::new(socket, TRANSFER_STALL_TIMEOUT);
+    execute_receive_pipeline(&mut guarded, sink, None).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blit_core::remote::transfer::sink::{FsSinkConfig, FsTransferSink};
     use std::path::Path;
     use tar::{Builder, EntryType, Header};
     use tempfile::tempdir;
@@ -834,6 +863,55 @@ mod tests {
         assert_eq!(a.len(), TOKEN_LEN);
         assert_eq!(b.len(), TOKEN_LEN);
         assert_ne!(a, b, "successive tokens must differ");
+    }
+
+    /// audit-h3a: a push-receive socket whose peer stops sending bytes
+    /// after the token must abort with the StallGuard's TimedOut, not
+    /// block the worker forever. The wire-level guard is unit-tested
+    /// in `blit_core::remote::transfer::stall_guard::tests` and the
+    /// pipeline integration is covered by
+    /// `pipeline::receive_pipeline_aborts_on_stall`; this test pins
+    /// that `receive_push_data_plane` itself actually composes the two
+    /// with the production `TRANSFER_STALL_TIMEOUT` — so a future
+    /// refactor that removes the StallGuard wrap from the daemon's
+    /// push-receive helper is caught here instead of regressing the
+    /// DoS surface silently.
+    ///
+    /// Virtual-time pause lets the test exercise the real 30 s timeout
+    /// without waiting 30 wall-clock seconds.
+    #[tokio::test(start_paused = true)]
+    async fn receive_push_data_plane_aborts_on_stall() {
+        let tmp = tempdir().expect("dest tempdir");
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            PathBuf::from("/nonexistent-src"),
+            tmp.path().to_path_buf(),
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: blit_core::generated::ComparisonMode::SizeMtime,
+            },
+        ));
+
+        // Writer half held open but never written — the read side is
+        // perpetually Pending until the StallGuard fires.
+        let (rx, _tx) = tokio::io::duplex(64);
+        let receive = tokio::spawn(receive_push_data_plane(rx, sink));
+
+        // Advance virtual time past the production idle window. The
+        // StallGuard's sleep wakes; poll_read returns TimedOut;
+        // execute_receive_pipeline surfaces it as an Err.
+        tokio::time::advance(TRANSFER_STALL_TIMEOUT + Duration::from_secs(1)).await;
+
+        let err = receive
+            .await
+            .expect("receive task panicked")
+            .expect_err("a stalled push-receive must abort, not hang");
+        assert!(
+            format!("{err:#}").contains("stalled"),
+            "expected a StallGuard timeout in the error chain; got: {err:#}"
+        );
     }
 
     #[test]

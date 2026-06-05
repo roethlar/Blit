@@ -1680,7 +1680,7 @@ async fn receive_data_plane_stream_inner(
     // execute_receive_pipeline parse records + dispatch to the sink.
     use crate::remote::transfer::pipeline::execute_receive_pipeline;
     use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
-    use crate::remote::transfer::stall_guard::{StallGuard, PULL_STALL_TIMEOUT};
+    use crate::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
     use std::sync::Arc;
 
     let config = FsSinkConfig {
@@ -1710,13 +1710,17 @@ async fn receive_data_plane_stream_inner(
     let sink: Arc<dyn TransferSink> = Arc::new(sink);
 
     // audit-1c: wrap the receive socket in a StallGuard so a transfer that
-    // goes silent (no bytes for PULL_STALL_TIMEOUT) fails fast with a
+    // goes silent (no bytes for TRANSFER_STALL_TIMEOUT) fails fast with a
     // clean TimedOut instead of pinning resources forever. This is an
     // idle timeout (re-armed on every read), NOT a total deadline, so a
     // steadily-progressing large transfer is never aborted. Applied to
-    // every data-plane pull (owner scope: all pulls). The gRPC-fallback
-    // receive path is separately bounded by HTTP/2 keepalive (audit-1b).
-    let mut stream = StallGuard::new(stream, PULL_STALL_TIMEOUT);
+    // every data-plane pull (owner scope: all pulls).
+    //
+    // audit-h3: the gRPC-fallback receive path is NOT covered here —
+    // HTTP/2 keepalive (audit-1b) reaps a vanished peer but does not
+    // catch a peer that holds the stream open and stops sending mid-
+    // record. Covered separately under audit-h3c.
+    let mut stream = StallGuard::new(stream, TRANSFER_STALL_TIMEOUT);
     let outcome = execute_receive_pipeline(&mut stream, sink, progress).await?;
 
     // Fold the unified outcome into pull's existing stats shape.

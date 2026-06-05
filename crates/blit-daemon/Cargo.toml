@@ -31,6 +31,10 @@ globset = "0.4.18"
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` enables tokio::time::pause / advance, used by
+# `receive_push_data_plane_aborts_on_stall` (audit-h3a) to exercise
+# the production 30 s TRANSFER_STALL_TIMEOUT without wall-clock waits.
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [lints]
 workspace = true
