@@ -45,16 +45,46 @@ pub(crate) fn f1_trigger_prompt(
             // which.
             confirm_detail: confirming.then(|| match kind {
                 f3pull::PullKind::Mirror => "deletes extraneous at dest",
-                f3pull::PullKind::Move => {
-                    use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
-                    match parse_transfer_endpoint(source) {
-                        Ok(Endpoint::Remote(_)) => "deletes the remote source",
-                        _ => "deletes the local source",
-                    }
-                }
+                f3pull::PullKind::Move => move_delete_target_phrase(source),
                 f3pull::PullKind::Copy => "",
             }),
         }),
+    }
+}
+
+/// audit-h11: classify a move source for the F1 confirm-detail
+/// renderer. Returns the human-facing phrase describing what the
+/// confirmed move would delete.
+///
+/// Per `feedback_endpoint_parse_err` the 4-bucket classification
+/// of endpoints is module/root=remote, bare-discovery & local=local,
+/// **Err must reject**. The original implementation folded `Err(_)`
+/// into a catch-all that printed "deletes the local source" —
+/// silently lying about the deletion target when the source string
+/// failed to parse.
+///
+/// Invariant: by the time this helper runs, `plan_f1_trigger` at
+/// `main.rs:3588` has already rejected unparseable sources via
+/// `TriggerOutcome::Rejected`. The state machine never reaches the
+/// confirming state with an `Err` source. The `Err` arm here is a
+/// future-proof guard against a refactor that loosens that gate —
+/// `debug_assert!(false, …)` panics loudly in debug builds; release
+/// builds degrade to a non-lying "(parse error)" phrase rather than
+/// misclassifying the deletion target.
+fn move_delete_target_phrase(source: &str) -> &'static str {
+    use blit_app::endpoints::{parse_transfer_endpoint, Endpoint};
+    match parse_transfer_endpoint(source) {
+        Ok(Endpoint::Remote(_)) => "deletes the remote source",
+        Ok(Endpoint::Local(_)) => "deletes the local source",
+        Err(_) => {
+            debug_assert!(
+                false,
+                "audit-h11: confirm_detail reached with unparseable \
+                 source '{source}' — plan_f1_trigger at main.rs:3588 \
+                 should have rejected before this state",
+            );
+            "deletes the source (parse error — refusing to classify)"
+        }
     }
 }
 
@@ -133,5 +163,59 @@ fn push_past_verb(kind: f3pull::PullKind, delegated: bool) -> &'static str {
         (_, f3pull::PullKind::Mirror) => "mirrored",
         (_, f3pull::PullKind::Move) => "moved",
         (false, f3pull::PullKind::Copy) => "pushed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// audit-h11: a remote `host:/module/` source classifies as
+    /// remote (the move would delete the remote source).
+    #[test]
+    fn move_delete_target_phrase_classifies_remote_source() {
+        assert_eq!(
+            move_delete_target_phrase("host-a:/m/"),
+            "deletes the remote source"
+        );
+    }
+
+    /// audit-h11: a remote `host://root-path` source classifies
+    /// as remote.
+    #[test]
+    fn move_delete_target_phrase_classifies_root_remote_source() {
+        assert_eq!(
+            move_delete_target_phrase("host-a://root/sub"),
+            "deletes the remote source"
+        );
+    }
+
+    /// audit-h11: a plain filesystem path classifies as local.
+    #[test]
+    fn move_delete_target_phrase_classifies_local_source() {
+        assert_eq!(
+            move_delete_target_phrase("/Users/x/src"),
+            "deletes the local source"
+        );
+    }
+
+    /// audit-h11: pinning the load-bearing property — the helper
+    /// returns DIFFERENT phrases for Local vs Remote (no silent
+    /// fold to "local source"). Pre-fix, `_ => "deletes the local
+    /// source"` meant a remote source that failed to parse, or any
+    /// future Endpoint variant added without updating this match,
+    /// would have been misclassified as local.
+    #[test]
+    fn move_delete_target_phrase_local_and_remote_differ() {
+        let local = move_delete_target_phrase("/tmp/src");
+        let remote = move_delete_target_phrase("host-a:/m/");
+        assert_ne!(
+            local, remote,
+            "audit-h11: local and remote sources must produce \
+             distinct phrases — a fold would have made these \
+             identical and silently lied about a remote-source move"
+        );
+        assert!(local.contains("local"));
+        assert!(remote.contains("remote"));
     }
 }
