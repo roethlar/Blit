@@ -1,5 +1,7 @@
 # Blit v2 Development Workflow
 
+**Status**: Historical
+
 This document outlines the high-level, phased plan for completing `blit-v2`. It serves as the strategic map for the project.
 
 ## Phase 2: Streaming Orchestrator & Local Operations

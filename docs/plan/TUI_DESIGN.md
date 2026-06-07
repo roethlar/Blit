@@ -1,5 +1,7 @@
 # Blit TUI Design — Phase 5 Plan (SUPERSEDED)
 
+**Status**: Superseded
+
 > ⚠️ **SUPERSEDED 2026-05-31** by [`TUI_REWORK.md`](./TUI_REWORK.md) for
 > active TUI planning. This document describes the Phase 5 F1–F4 TUI
 > shipped in v0.1.0 and is retained for historical context only. The

@@ -1,5 +1,7 @@
 # Remote→Remote Direct Transfer Plan
 
+**Status**: Historical
+
 **Status:** Phase 3 cleanup/harness in workspace, 2026-05-03 (Phase 1 committed as `15991ed`; Phase 2 CLI dispatch + no-fallback tests implemented; live benchmark results still TBD)
 **Owner:** mcoelho
 **Supersedes:** the "Remote→remote re-evaluation" entry in `TODO.md`'s Deferred design calls.

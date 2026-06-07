@@ -1,5 +1,7 @@
 # Pipeline Unification: One pipeline, three roles
 
+**Status**: Historical
+
 **Status:** Planning. Drafted 2026-05-01 in response to GPT-5.5's review of
 the universal-filter work and ensuing architectural discussion.
 **Supersedes** the implicit "push and pull are different" model.

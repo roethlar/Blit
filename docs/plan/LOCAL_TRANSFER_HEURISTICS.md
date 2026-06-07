@@ -1,5 +1,7 @@
 # Local Transfer Heuristics
 
+**Status**: Historical
+
 **Goal:** Deliver the fastest possible local `copy`/`mirror` experience across *all* workloads while preserving the SIMPLE and RELIABLE guarantees. This document captures the full design we intend to implement in Phase 2 for Blit v2. There is no staged rollout—every mechanism described here will ship together once complete.
 
 ---

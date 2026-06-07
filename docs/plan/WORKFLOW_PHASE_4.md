@@ -8,7 +8,7 @@
 
 **Goal**: Prepare Blit v2 for delivery – installers/packages, service documentation, cross-platform integration tests, and final polish on configuration/discovery.  
 **Prerequisites**: Phase 3 gate complete.  
-**Status**: In progress. Repo-level production hardening review saved at `docs/reviews/codebase_review_2026-05-01.md`; packaging, benchmark capture, and hardening follow-ups remain.
+**Status**: Shipped (was: In progress. Repo-level production hardening review saved at `docs/reviews/codebase_review_2026-05-01.md`; packaging, benchmark capture, and hardening follow-ups remain.)
 
 ---
 

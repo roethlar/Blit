@@ -1,5 +1,7 @@
 # Remote Transfer Parity Refactor
 
+**Status**: Shipped
+
 ## Goal
 
 Achieve “absolute parity” across every transfer direction (local→remote, remote→local, local→local) so that:

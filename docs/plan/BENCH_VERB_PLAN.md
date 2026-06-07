@@ -1,5 +1,7 @@
 # `blit bench` — benchmarking verb (deferred to 0.2.0)
 
+**Status**: Historical
+
 **Status:** Draft. Not in 0.1.0 scope. Captured here so it doesn't
 get lost; ties to `RELEASE_PLAN_v2_2026-05-04.md` §2.6 (live
 remote benchmark capture).

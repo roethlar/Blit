@@ -3,7 +3,7 @@
 **Goal**: Confirm Blit v2 meets the plan v6 local-performance targets (≥95 % of baseline workloads) before proceeding to remote work.
 **Duration**: 1-2 days
 **Prerequisites**: Phase 2 complete; predictor/telemetry updates integrated
-**Status**: In progress
+**Status**: Shipped (was: In progress)
 **Type**: QUALITY GATE (mandatory)
 
 ---

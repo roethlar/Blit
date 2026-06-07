@@ -9,7 +9,7 @@
 
 **Goal**: Deliver the remote feature set defined in plan v6 – hybrid transport for `blit copy/mirror/move`, canonical remote syntax, mDNS discovery, and the admin verbs (originally scoped as `blit-utils`, now shipped as `blit` subcommands) backed by daemon RPCs.  
 **Prerequisites**: Phase 2 gate passed (streaming orchestrator stable) and Phase 2.5 benchmarks meeting targets.  
-**Status**: In progress.  
+**Status**: Shipped (was: In progress.  )
 **Critical Path**: Hybrid transport completion, CLI/daemon/utility alignment, admin RPC implementation.
 
 ---

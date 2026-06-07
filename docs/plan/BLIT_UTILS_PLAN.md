@@ -1,5 +1,7 @@
 # blit-utils Command Plan
 
+**Status**: Historical
+
 > **Superseded.** The admin utilities listed below shipped as
 > subcommands of the `blit` binary, not as a separate `blit-utils`
 > artifact. Concretely: `blit scan`, `blit list-modules`,

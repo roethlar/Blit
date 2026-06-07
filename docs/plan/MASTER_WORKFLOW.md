@@ -1,5 +1,7 @@
 # Blit v2 Master Workflow
 
+**Status**: Active
+
 **Project**: Blit v2 – feature-complete hybrid transport implementation  
 **Plan Reference**: [greenfield_plan_v6.md](./greenfield_plan_v6.md)  
 **Live Status**: See [PROJECT_STATE_ASSESSMENT.md](./PROJECT_STATE_ASSESSMENT.md) for current percentages, blockers, and ownership

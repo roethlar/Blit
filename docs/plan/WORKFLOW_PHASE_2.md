@@ -2,7 +2,7 @@
 
 **Goal**: Deliver the local transfer pipeline defined in plan v6 (streaming planner, adaptive predictor, local performance history, and progress UX) while keeping FAST/SIMPLE/RELIABLE/PRIVATE principles intact.
 **Prerequisites**: Phase 0 & 1 complete (workspace, ported modules, gRPC scaffolding).
-**Status**: In progress (streaming planner + fast-path routing in place)
+**Status**: Shipped (was: In progress (streaming planner + fast-path routing in place))
 **Critical Path**: Adaptive predictor/performance history, CLI progress UX.
 
 ## Success Criteria

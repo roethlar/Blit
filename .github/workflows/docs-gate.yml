@@ -1,0 +1,67 @@
+name: Docs Gate
+
+# Enforces AGENTS.md §5 docs hygiene:
+#   1. state-sync — a change touching crates/** or proto/** must also touch
+#      docs/STATE.md, unless a commit message in the range contains
+#      "[state: skip]" (reserved for mechanical changes).
+#   2. doc-lint — scripts/agent/check-docs.sh (STATE.md present/fresh/capped,
+#      every docs/plan/*.md carries a valid **Status** header).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  state-sync:
+    name: STATE.md sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Code changes must touch docs/STATE.md
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -u
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin "$BASE_REF" >/dev/null 2>&1 || true
+            BASE="$(git merge-base "origin/$BASE_REF" HEAD)"
+          else
+            BASE="$BEFORE_SHA"
+            # New branch or force-push: fall back to the parent commit.
+            if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "$BASE" 2>/dev/null; then
+              BASE="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+            fi
+          fi
+
+          CHANGED="$(git diff --name-only "$BASE" HEAD)"
+          echo "Changed files since $BASE:"
+          echo "$CHANGED"
+
+          CODE_TOUCHED="$(printf '%s\n' "$CHANGED" | grep -E '^(crates/|proto/)' || true)"
+          STATE_TOUCHED="$(printf '%s\n' "$CHANGED" | grep -x 'docs/STATE.md' || true)"
+          SKIP="$(git log --format=%B "$BASE"..HEAD | grep -F '[state: skip]' || true)"
+
+          if [ -n "$CODE_TOUCHED" ] && [ -z "$STATE_TOUCHED" ] && [ -z "$SKIP" ]; then
+            echo
+            echo "::error::Code under crates/ or proto/ changed but docs/STATE.md did not."
+            echo "Run the 'handoff' procedure (docs/agent/PROTOCOL.md) and amend, or add"
+            echo "'[state: skip]' to the commit message for purely mechanical changes."
+            exit 1
+          fi
+          echo "state-sync: OK"
+
+  doc-lint:
+    name: Doc lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check-docs.sh
+        run: bash scripts/agent/check-docs.sh

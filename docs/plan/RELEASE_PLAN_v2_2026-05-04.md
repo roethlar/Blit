@@ -1,5 +1,7 @@
 # Blit v2 Release Plan v2.1 — 2026-05-04
 
+**Status**: Shipped
+
 **Status:** Authoritative for the 0.1.0 release. Supersedes
 `PROJECT_STATE_ASSESSMENT.md` (dated 2026-04-07, materially stale).
 

@@ -1,7 +1,7 @@
 # **Blit v2: Final Implementation Plan (v4 - Hybrid Transport)**
 
 **Version**: 4.0 (Final)
-**Status**: Proposed
+**Status**: Active (was: Proposed)
 **Strategy**: A greenfield Cargo Workspace using a hybrid transport model: gRPC for control and a raw TCP data plane for maximum performance.
 
 > **Implementation note (post-phase, 2026-05-13):** this plan

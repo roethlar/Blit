@@ -1,6 +1,6 @@
 # TUI Rework — From Typing to Navigation
 
-**Status**: Design doc, awaiting owner sign-off before code changes
+**Status**: Active (was: Design doc, awaiting owner sign-off before code changes)
 **Created**: 2026-05-31
 **Supersedes**: portions of `TUI_DESIGN.md` §6 (trigger modal text inputs)
 and the F3 free-text destination prompt.

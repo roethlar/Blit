@@ -1,5 +1,7 @@
 # Post-review fixes — work plan
 
+**Status**: Historical
+
 Synthesized from three external code reviews (DeepSeek pass + two
 gpt/claude reviewers) cross-checked against the whitepaper. Items
 already done are marked with their commit; pending items grouped by

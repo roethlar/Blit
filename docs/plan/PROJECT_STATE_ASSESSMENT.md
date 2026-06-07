@@ -177,4 +177,4 @@ When continuing development on Windows, these are the most relevant files:
 ---
 
 **Project**: Blit v2
-**Status**: Feature-complete, pending benchmark validation
+**Status**: Historical (was: Feature-complete, pending benchmark validation)

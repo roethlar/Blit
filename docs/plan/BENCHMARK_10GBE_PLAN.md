@@ -1,5 +1,7 @@
 # 10GbE Benchmark Test Plan
 
+**Status**: Historical
+
 ## Prerequisites
 
 ### Binaries

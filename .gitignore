@@ -20,8 +20,11 @@ agentcomms/**
 *~
 .DS_Store
 
-# Claude Code specific
-.claude/
+# Claude Code specific — commit only settings.json + commands/; ignore everything
+# else under .claude/ (personal settings.local.json AND the stale worktrees/ checkout).
+.claude/*
+!.claude/settings.json
+!.claude/commands/
 
 # Debug and test artifacts
 *.log

@@ -1,5 +1,7 @@
 # Plan: Unified receive pipeline
 
+**Status**: Historical
+
 ## Goal
 
 Make the receive side of every transfer go through the same sink
