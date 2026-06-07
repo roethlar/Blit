@@ -1,13 +1,4 @@
-# Blit Workspace
-
-![Rust](https://img.shields.io/badge/Rust-2021-brightgreen?logo=rust)
-![Build](https://img.shields.io/badge/build-passing-green)
-![Tests](https://img.shields.io/badge/tests-passing-blue)
-![Windows Supported](https://img.shields.io/badge/Windows-Supported-blue?logo=windows)
-![Linux Supported](https://img.shields.io/badge/Linux-Supported-brightgreen?logo=linux)
-![License: MIT](https://img.shields.io/badge/license-MIT-blue)
-
----
+# Blit 
 
 Blit delivers a high-performance, extensible file enumeration, planning, transfer, and orchestration platform for robust local and remote backups, file migration, and cross-platform syncing. With both CLI and daemon interfaces, async-aware planning, and strong Windows support, Blit is designed for speed and reliability—whether run interactively or as part of automated workflows.
 
