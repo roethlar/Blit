@@ -130,15 +130,15 @@ These rules are absolute. They exist because an unapproved `git merge -s ours`
 octopus (commit `c793df2`) was pushed to `origin/master` without the owner's
 consent (see `docs/DECISIONS.md` D-2026-06-07-1).
 
+- **NO AGENT-CREATED BRANCHES**: Agents are strictly forbidden from creating git branches by their own decision. All work must be performed on the main branch (e.g., `master`) or the active branch already checked out by the owner.
+- **OWNER IS THE GATE FOR ALL GIT OPERATIONS**: Absolutely no git operations (commit, push, merge, rebase, reset, branch creation, branch deletion) may be executed without explicit owner approval. The owner is the sole gatekeeper for git history.
 - **Never, without the owner approving that exact action in the current
   session:** `push`, `push --force` / `--force-with-lease`, `reset --hard`,
   rebase or any history rewrite, `commit --amend` on pushed commits, or the
   deletion of any branch, tag, or ref (local or remote).
-- **Branch deletion is by explicit name only.** Never delete by `--merged`,
-  pattern, or "looks stale". The owner names the branch; you delete that branch.
+- **Branch deletion is by explicit name only.** The owner names the branch; you delete that branch.
 - **Before any push:** list the exact local refs, remote refs, and destination
-  remotes, then stop and wait for approval. Spell out every ref — no "and the
-  rest".
+  remotes, then stop and wait for approval.
 - **`--merged` / `--no-merged` are unreliable in this repo.** The `-s ours`
   octopus made `eafb187` (adaptive-streams-pr3) and `d9d4ec7`
   (adaptive-streams-pr3-resizable, does-not-build) *parents* of `master`, so
@@ -146,9 +146,7 @@ consent (see `docs/DECISIONS.md` D-2026-06-07-1).
   `git merge` of those branches **no-ops without landing any code**. Landing
   adaptive work means cherry-pick or rebase onto new commits, never a merge
   (see D-2026-06-07-2).
-- Working-tree edits, local commits on a non-default branch, and read-only
-  inspection (`status`/`log`/`diff`/`show`) need no special approval; the gate
-  is on anything that publishes, rewrites, or destroys.
+- Working-tree edits, local commits, and read-only inspection (`status`/`log`/`diff`/`show`) need no special approval; the gate is on anything that publishes, rewrites, or destroys.
 
 ## 9. Checkpoints
 
