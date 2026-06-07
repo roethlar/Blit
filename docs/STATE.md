@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-06-07 (agent-kit install + branch reconciliation) at commit `c793df2` (tree identical to `600023a`)
+Last updated: 2026-06-07 (rule codification + merge) at commit `ca940a2`
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -8,13 +8,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **Agent-protocol kit install** (this session). Kit unzipped; `.gitignore`
-  fixed; plan-doc status headers migrated; AGENTS.md §8 Git-safety added;
-  DECISIONS.md D-2026-06-07-1/-2 recorded. Pending owner approval: the first
-  commit and the named branch deletions listed under "Blocked".
-- Repository note: `master` HEAD is `c793df2`, a `git merge -s ours` octopus
-  whose tree equals `600023a`; the workspace builds. See DECISIONS.md
-  D-2026-06-07-1 and AGENTS.md §8 (the `--merged` / no-op-`merge` trap).
+- **Agent-protocol kit install** (completed). Merged branch and codified branchless rules in AGENTS.md.
+- Repository note: `master` HEAD is `ca940a2`. The temporary `chore/agent-kit-install` branch has been merged and deleted.
 
 ## Queue (ordered)
 
@@ -45,8 +40,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Blocked / waiting
 
 - **Owner approval for git operations** (AGENTS.md §8), exact actions pending:
-  - Commit the kit + reconciliation docs on a non-default branch (proposed
-    `chore/agent-kit-install`). No push to `origin/master` is proposed.
   - Stale branches pending deletion **by explicit name** (each verified ahead=0
     vs `master`, i.e. fully contained): `phase5/a1` and `phase5/blit-app-extract`,
     which exist **only** on the remotes (`origin` + `gitea`) — no local refs.
@@ -65,6 +58,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-06-07** @ `ca940a2` — Merged agent-kit into master, deleted the branch, and codified branchless rules in AGENTS.md per owner command. Verified workspace builds and doc checks pass.
 - **2026-06-07** @ `c793df2` — Installed the agent-protocol kit and reconciled
   the branch mess: documented the `-s ours` octopus trap (DECISIONS.md
   D-2026-06-07-1/-2, AGENTS.md §8), migrated plan-doc status headers, fixed
