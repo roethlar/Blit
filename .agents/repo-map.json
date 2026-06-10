@@ -1,0 +1,60 @@
+{
+  "validated_against": {
+    "commit": "0edf20d38e35f4ac8ea0383c7e46aee767d8e8b8",
+    "date": "2026-06-10"
+  },
+  "projects": [
+    {
+      "name": "blit",
+      "type": "rust-cargo-workspace",
+      "path": ".",
+      "members": [
+        "crates/blit-core",
+        "crates/blit-cli",
+        "crates/blit-daemon",
+        "crates/blit-app",
+        "crates/blit-tui",
+        "crates/blit-prometheus-bridge"
+      ],
+      "notes": "proto/blit.proto holds the gRPC definitions; blit-core's build script vendors protoc. tests/ holds workspace-level integration tests."
+    }
+  ],
+  "verification": {
+    "status": "confirmed",
+    "commands": [
+      "cargo fmt --all -- --check",
+      "cargo clippy --workspace --all-targets -- -D warnings",
+      "cargo test --workspace",
+      "bash scripts/agent/check-docs.sh"
+    ],
+    "policy": {
+      "code_changes": "Run the full validation suite (fmt, clippy, test) before claiming completion or writing a review sentinel. Test count never drops versus the prior baseline unless the removal is called out in the finding doc.",
+      "docs_only": "Code verification is not required, but scripts/agent/check-docs.sh must pass before pushing docs changes.",
+      "manual_behavior": "Windows parity: after touching platform-specific code (win_fs, planners), run scripts/windows/run-blit-tests.ps1, or state clearly that it was not run.",
+      "ci_gate": "A push touching crates/** or proto/** must also touch docs/STATE.md unless a commit message contains [state: skip] (docs-gate.yml)."
+    }
+  },
+  "fact_bearing_paths": [
+    "docs/STATE.md",
+    "docs/DECISIONS.md",
+    "REVIEW.md",
+    ".review/",
+    "docs/agent/PROTOCOL.md",
+    "docs/plan/"
+  ],
+  "guidance_paths": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "docs/agent/PROTOCOL.md",
+    ".agents/state.md",
+    ".agents/decisions.md",
+    ".agents/repo-map.json",
+    ".agents/artifact-manifest.json"
+  ],
+  "notes": [
+    "State lives canonically in docs/STATE.md and decisions in docs/DECISIONS.md; .agents/state.md and .agents/decisions.md are pointer stubs only (AGENTS.md section 10 update rule). CI and hook scripts are wired to the docs/ paths.",
+    "DEVLOG.md is an append-only journal: write to it, never read it for current state. TODO.md is backlog-only.",
+    "Verification commands confirmed against AGENTS.md section 5, .review/README.md, and the CI workflows; not executed during the bootstrap run itself (docs-only change)."
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "validated_against": {
+    "commit": "0edf20d38e35f4ac8ea0383c7e46aee767d8e8b8",
+    "date": "2026-06-10"
+  },
+  "artifacts": [
+    {
+      "path": "AGENTS.md",
+      "purpose": "Canonical agent contract for all harnesses (prime directives, precedence, triggers, validation, git safety, bootstrap handoff)",
+      "custody": "tracked"
+    },
+    {
+      "path": "CLAUDE.md",
+      "purpose": "Claude Code shim importing AGENTS.md plus harness-specific notes (hooks, slash commands)",
+      "custody": "tracked"
+    },
+    {
+      "path": "GEMINI.md",
+      "purpose": "Gemini/Antigravity shim pointing at AGENTS.md",
+      "custody": "tracked"
+    },
+    {
+      "path": "docs/STATE.md",
+      "purpose": "Canonical current state: active work, queue, blockers, open questions, handoff log (cap 200 lines, 3 handoffs)",
+      "custody": "tracked"
+    },
+    {
+      "path": "docs/DECISIONS.md",
+      "purpose": "Canonical append-only ledger of settled decisions and supersessions",
+      "custody": "tracked"
+    },
+    {
+      "path": "docs/agent/PROTOCOL.md",
+      "purpose": "Executable procedures behind the trigger vocabulary (catchup, plan, decision, handoff, drift, slice)",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/state.md",
+      "purpose": "Pointer stub to docs/STATE.md for tools expecting the standard layout; holds no content",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/decisions.md",
+      "purpose": "Pointer stub to docs/DECISIONS.md; holds no content",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/repo-map.json",
+      "purpose": "Machine-readable map: workspace layout, verification commands and policy, canonical fact-bearing paths",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/artifact-manifest.json",
+      "purpose": "This inventory of durable agent-facing artifacts",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/governance-inventory.md",
+      "purpose": "Record of the 2026-06-10 bootstrap migration: every governance artifact, verdict, destination",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/harvest.md",
+      "purpose": "Harvest report of incident-earned rules generalizable to other repos (no dropbox configured)",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/skills/",
+      "purpose": "Antigravity workspace skills mirroring catchup/handoff triggers",
+      "custody": "tracked"
+    },
+    {
+      "path": "REVIEW.md",
+      "purpose": "Human-readable status index of the two-agent review loop",
+      "custody": "tracked"
+    },
+    {
+      "path": ".review/",
+      "purpose": "Structured coder/reviewer handoff channel: findings, ready sentinels, verdicts, wait scripts (committed audit trail)",
+      "custody": "tracked"
+    },
+    {
+      "path": "DEVLOG.md",
+      "purpose": "Append-only journal, newest first; write-only with respect to current state",
+      "custody": "tracked"
+    },
+    {
+      "path": "TODO.md",
+      "purpose": "Long-horizon backlog; actionable queue lives in docs/STATE.md and REVIEW.md",
+      "custody": "tracked"
+    },
+    {
+      "path": ".claude/commands/",
+      "purpose": "Claude Code slash-command wrappers resolving to PROTOCOL.md procedures",
+      "custody": "tracked"
+    },
+    {
+      "path": ".claude/settings.json",
+      "purpose": "Claude Code hooks: SessionStart context injection, PreCompact preservation hints",
+      "custody": "tracked"
+    },
+    {
+      "path": "scripts/agent/",
+      "purpose": "Hook scripts and doc lint (context.sh, catchup.sh, precompact.sh, check-docs.sh)",
+      "custody": "tracked"
+    },
+    {
+      "path": ".github/workflows/docs-gate.yml",
+      "purpose": "CI enforcement: code changes must touch docs/STATE.md; doc lint must pass",
+      "custody": "tracked"
+    }
+  ]
+}
