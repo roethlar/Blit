@@ -14,17 +14,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   4 MiB decode default; client channels lack HTTP/2 keepalive (the real H3
   hang); fallback throughput is h2 flow-control-window-bound; the clamp
   collapses to a constant (sinks' `chunk_bytes` now inert).
-- **Planning a repo-wide design-coherence review** (owner-directed this
-  session). Three phases: A concept-ownership map → B dimension reviews,
-  adversarially verified → C synthesis into `docs/audit/` + `.review/findings/`
-  candidates. Plan doc to be written to `docs/plan/` before any execution.
+- **Design-coherence review: Phase A COMPLETE** (2026-06-11). Map delivered at
+  `docs/audit/DESIGN_MAP_2026-06-11.md` (17 agents, evidence-backed): 8 of 9
+  concepts have no owner; headline findings cross-validated (unbounded client
+  awaits, untuned pull-direction TCP, inert --retry on gRPC paths, dead
+  adaptive tuning, 4 bug-class items flagged for immediate filing). **At the
+  Phase A checkpoint: owner go/no-go for Phase B** (dimension reviews) and a
+  decision on filing the 4 bug-class candidates now.
 
 ## Queue (ordered)
 
 1. **Repo design-coherence review** — `docs/plan/DESIGN_COHERENCE_REVIEW.md`
-   **Active** (D-2026-06-11-1; Phase A only). Phase A workflow running this
-   session; output map lands in `docs/audit/`. Phase B needs a fresh owner
-   go/no-go at the Phase A checkpoint.
+   **Active** (D-2026-06-11-1). Phase A done → map in
+   `docs/audit/DESIGN_MAP_2026-06-11.md`. Awaiting owner: Phase B go/no-go,
+   and whether to file the map's 4 bug-class candidates as findings now.
 2. **audit-h3c slice 2 (re-scoped, pending review findings + plan doc):**
    transport-policy first — single shared client channel builder with HTTP/2
    keepalive, explicit `max_decoding_message_size`, adaptive flow-control
