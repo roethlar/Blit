@@ -14,13 +14,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   4 MiB decode default; client channels lack HTTP/2 keepalive (the real H3
   hang); fallback throughput is h2 flow-control-window-bound; the clamp
   collapses to a constant (sinks' `chunk_bytes` now inert).
-- **Design-coherence review: Phase A COMPLETE** (2026-06-11). Map delivered at
-  `docs/audit/DESIGN_MAP_2026-06-11.md` (17 agents, evidence-backed): 8 of 9
-  concepts have no owner; headline findings cross-validated (unbounded client
-  awaits, untuned pull-direction TCP, inert --retry on gRPC paths, dead
-  adaptive tuning, 4 bug-class items flagged for immediate filing). **At the
-  Phase A checkpoint: owner go/no-go for Phase B** (dimension reviews) and a
-  decision on filing the 4 bug-class candidates now.
+- **Design-coherence review: Phases A + B COMPLETE** (2026-06-11). Map at
+  `docs/audit/DESIGN_MAP_2026-06-11.md`; verified findings at
+  `docs/audit/DESIGN_FINDINGS_2026-06-11_PHASE_B.md` — 70 confirmed
+  (4 high / 40 medium / 26 low after adversarial severity correction),
+  6 refuted-and-recorded. Three bug-class findings already filed as `[ ]`
+  Open (design-1/2/3 in REVIEW.md). **At the Phase B checkpoint: owner
+  go/no-go for Phase C** (synthesis: dedup the 70 into ranked slices,
+  candidate finding docs, queue proposal — owner ratifies each individually
+  per D-2026-06-11-1).
 
 ## Queue (ordered)
 
