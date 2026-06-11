@@ -21,8 +21,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Repo design-coherence review** — write plan doc, owner ratifies, run
-   Phase A first. Output feeds the existing `.review/` loop.
+1. **Repo design-coherence review** — `docs/plan/DESIGN_COHERENCE_REVIEW.md`
+   **Active** (D-2026-06-11-1; Phase A only). Phase A workflow running this
+   session; output map lands in `docs/audit/`. Phase B needs a fresh owner
+   go/no-go at the Phase A checkpoint.
 2. **audit-h3c slice 2 (re-scoped, pending review findings + plan doc):**
    transport-policy first — single shared client channel builder with HTTP/2
    keepalive, explicit `max_decoding_message_size`, adaptive flow-control
@@ -48,6 +50,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 - Findings: `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` (read R2 + R3 delta;
   R3 overrides R2 on conflicts)
+- Plan: `docs/plan/DESIGN_COHERENCE_REVIEW.md` (**Active**, D-2026-06-11-1 —
+  the current active plan; Phase A authorized)
 - Plan: `docs/plan/TUI_REWORK.md` (Phase 6; gated on Round 1 completion)
 - Review loop: `REVIEW.md` + `.review/README.md`
 
