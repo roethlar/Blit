@@ -104,6 +104,10 @@ pull client path, and `transfer_payloads_via_control_plane`.
   generations coexist, the diff unification stalled at step 3a, and
   `PROJECT_STATE_ASSESSMENT.md` — **and AGENTS.md §4/§6** — name modules
   (`transfer_engine`, `TransferOrchestrator`) that do not exist in the tree.
+  **Erratum #2 (2026-06-11, Phase B `drift-agents-md-ghost-identifiers`)**:
+  half wrong — `TransferOrchestrator` DOES exist (`orchestrator/orchestrator.rs:116`,
+  re-exported and used by blit-app). `transfer_engine` and `PLAN_OPTIONS` are
+  the real ghosts in AGENTS.md §6 (the live symbol is `struct PlanOptions`).
 - Every performance-parity claim in Shipped docs points at gitignored, absent
   artifacts; the 10GbE benchmark table is all-TBD.
 
