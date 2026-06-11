@@ -72,6 +72,14 @@ symptom.**
    (concepts 1, 3, 7): no `max_decoding_message_size` anywhere; safety rests on
    scattered 1 MiB literals; the 500-entry manifest batches can legally exceed
    4 MiB on long-path trees and abort with an opaque tonic error.
+   **Erratum (2026-06-11, post-verification)**: the manifest-batch mechanism is
+   wrong as stated — `ENUM_BATCH_SIZE=500` batches an *internal channel*; the
+   legacy Pull path sends one header per `PullChunk` (`service/pull.rs:583`),
+   and the push need-list batcher is byte-capped at 512 KiB
+   (`push/control.rs:25-26`). The undeclared-invariant point stands (no
+   explicit decode limits anywhere; residual open question: tar-shard manifest
+   messages), but no verified path packs >4 MiB into one message today. Phase B
+   verifiers: trust mechanisms only after reading the code, never the map alone.
 
 ### Strata and dead weight
 
@@ -101,10 +109,13 @@ pull client path, and `transfer_payloads_via_control_plane`.
 
 ### Bug-class findings that should not wait for Phase B
 
-Some findings above are arguably Round-1 audit material today: the CLI pull
-byte double-count (5), the >4 MiB manifest-batch abort (8), the orphaned daemon
-data planes (6), and the unbounded data-plane connects (2). Owner may want these
-filed as `.review/findings/` candidates immediately.
+**Disposition (2026-06-11, owner delegated)**: each candidate was re-verified
+by hand before filing. Three confirmed and filed as `[ ]` Open findings —
+`design-1-cli-pull-byte-double-count` (Medium), `design-2-orphaned-daemon-data-planes`
+(High), `design-3-unbounded-data-plane-connects` (Medium). The fourth (the
+>4 MiB manifest-batch abort) was **refuted in mechanism** — see the erratum
+under headline 8 — and is left to Phase B as the narrower "no explicit decode
+limits + tar-shard manifest sizing" question.
 
 ---
 ## Part 1 — Concept ownership
