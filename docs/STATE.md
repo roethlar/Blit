@@ -71,16 +71,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-06-11** @ `5b5ff5b` — Full session: h3c slice 1 verified; design-
+  coherence review executed end-to-end (Phases A/B/C, ~9.3M agent tokens,
+  3 docs in `docs/audit/`); design-1/2/3 filed; owner ratified all 38 slices
+  (D-2026-06-11-2). Pushed through `ab0d8a0`; commits `7d53107`, `6e8dfc4`,
+  `55b1fca`, `5b5ff5b` are LOCAL-ONLY pending push approval. First action next
+  session: `catchup`, then pick `w5-1-log-backend` per the `slice` procedure.
 - **2026-06-11** @ `1be16bc` — audit-h3c slice 1 graded and accepted (owner
   verdict; validation re-run green, test-fn count flat at 344). Assessment
   facts recorded in DEVLOG 2026-06-11. Owner directed: plan a repo-wide
   design-coherence review next; slice-2 re-scope waits on its findings.
-  First action next session if interrupted: read the repo-review plan doc in
-  `docs/plan/` (may not exist yet — then re-read DEVLOG 2026-06-11 + this Now).
 - **2026-06-07** @ `ca940a2` — Merged agent-kit into master, deleted the branch, and codified branchless rules in AGENTS.md per owner command. Verified workspace builds and doc checks pass.
-- **2026-06-07** @ `c793df2` — Installed the agent-protocol kit and reconciled
-  the branch mess: documented the `-s ours` octopus trap (DECISIONS.md
-  D-2026-06-07-1/-2, AGENTS.md §8), migrated plan-doc status headers, fixed
-  `.gitignore`. Tree == `600023a`, builds. Awaiting owner approval for the first
-  commit + named branch deletions; SETUP.md content still needed. First action
-  next session: `catchup`, then check the audit-h3c slice 1 verdict.
