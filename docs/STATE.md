@@ -8,55 +8,45 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **audit-h3c slice 1 verified** (2026-06-11, owner accept, verdict in
-  `.review/results/`). The review assessment found 4 facts feeding the slice-2
-  re-scope — see DEVLOG 2026-06-11 entry: 1 MiB cap is correctness vs tonic's
-  4 MiB decode default; client channels lack HTTP/2 keepalive (the real H3
-  hang); fallback throughput is h2 flow-control-window-bound; the clamp
-  collapses to a constant (sinks' `chunk_bytes` now inert).
-- **Design-coherence review: ALL THREE PHASES COMPLETE** (2026-06-11).
-  Deliverables: map `docs/audit/DESIGN_MAP_2026-06-11.md` (2 errata applied),
-  verified findings `docs/audit/DESIGN_FINDINGS_2026-06-11_PHASE_B.md`
-  (70 confirmed / 6 refuted), synthesis
-  `docs/audit/AUDIT_REPORT_2026-06-11_DESIGN.md` — 10 workstreams / 33 slices
-  with a proposed queue order. **Awaiting owner ratification by slice ID**
-  (D-2026-06-11-1: nothing enters REVIEW.md unratified) plus three embedded
-  decisions: W2.4 delete deprecated Pull RPC, W8.1 zero_copy delete-or-plan,
-  W2.3 multi-stream-pull plan doc go-ahead.
+- **Design-review queue ratified in full** (D-2026-06-11-2). All 38 new slices
+  entered in `REVIEW.md` ("Design-review queue" section, execution order).
+  Embedded decisions taken: Pull RPC deleted after w2-3 harvest; `zero_copy.rs`
+  excluded from deletion → FAST evaluation slice `w8-1b`; multi-stream-pull
+  plan doc authorized. `DESIGN_COHERENCE_REVIEW.md` → **Shipped**.
+- **Next coder action**: pick `w5-1-log-backend` (topmost `[ ]` in the
+  design-review queue) per the `slice` procedure.
 
 ## Queue (ordered)
 
-1. **Repo design-coherence review** — `docs/plan/DESIGN_COHERENCE_REVIEW.md`
-   **Active** (D-2026-06-11-1). Phase A done → map in
-   `docs/audit/DESIGN_MAP_2026-06-11.md`. Awaiting owner: Phase B go/no-go,
-   and whether to file the map's 4 bug-class candidates as findings now.
-2. **audit-h3c slice 2 (re-scoped, pending review findings + plan doc):**
-   transport-policy first — single shared client channel builder with HTTP/2
-   keepalive, explicit `max_decoding_message_size`, adaptive flow-control
-   windows; error-chain preservation (tonic Status → eyre, retry classifier);
-   delete inert sink `chunk_bytes` params; then re-evaluate whether a cadence
-   watchdog is still needed (wedged-but-alive peers only). Held until the
-   review's transport findings are in, so the re-scope is designed once.
-3. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase the stack up
+1. **Execute the design-review queue** — `REVIEW.md` "Design-review queue"
+   section is the authoritative order (w5-1 first). The former queued
+   "audit-h3c slice 2" transport work is now slice family W1 inside it
+   (W1.1 bundle lands with w1-2/design-3 at position 6-9; the cadence-watchdog
+   re-evaluation happens after W1 lands).
+2. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase the stack up
    to `eafb187` (live-progress → PR1 telemetry → PR2 work-queue → PR2 review
    fix), excluding `d9d4ec7` (does-not-build WIP). Resolve the `data_plane.rs`
    StallGuard-vs-`Probe` conflict by hand. Write a `docs/plan/` doc first
-   (no code before `**Status**: Active`). Held until the coherence map exists
-   (agent-proposed sequencing; owner has not ratified this hold explicitly).
-4. Finish audit **Round 1** (data-loss / DoS class) per
-   `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` — R3 order governs.
-5. **Round 2 — Phase 6 TUI rework** (`docs/plan/TUI_REWORK.md`):
+   (no code before `**Status**: Active`). NOTE: interacts with w2-3/w3-1
+   (data_plane churn) — sequence consciously when reached.
+3. Finish audit **Round 1** (data-loss / DoS class) per
+   `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` — R3 order governs. Several
+   Round-1-class items are now covered by design-review slices (w4-1, w4-3,
+   design-2/3); cross-check before starting.
+4. **Round 2 — Phase 6 TUI rework** (`docs/plan/TUI_REWORK.md`):
    H4 → H5 → R3-H23 → H2 → H6 → H7 → H8 → M2 → M3 → M4 → M25.
    (R3-M28 source-of-truth sweep completed 2026-06-04.)
-6. `greenfield_plan_v6.md` §1.1 streaming planner + 1 s heartbeat + 10 s stall
+5. `greenfield_plan_v6.md` §1.1 streaming planner + 1 s heartbeat + 10 s stall
    detector — owner-ratified, not yet built (H10b); queued after Round 1 closes.
+   (w2-1 deletes the dead warmup machinery; H10b is the real adaptive design.)
 
 ## Authoritative docs right now
 
 - Findings: `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` (read R2 + R3 delta;
   R3 overrides R2 on conflicts)
-- Plan: `docs/plan/DESIGN_COHERENCE_REVIEW.md` (**Active**, D-2026-06-11-1 —
-  the current active plan; Phase A authorized)
+- Design queue: `REVIEW.md` "Design-review queue" section (ratified
+  D-2026-06-11-2) + the three `docs/audit/` 2026-06-11 deliverables
+  (`DESIGN_MAP`, `DESIGN_FINDINGS…PHASE_B`, `AUDIT_REPORT…DESIGN`)
 - Plan: `docs/plan/TUI_REWORK.md` (Phase 6; gated on Round 1 completion)
 - Review loop: `REVIEW.md` + `.review/README.md`
 

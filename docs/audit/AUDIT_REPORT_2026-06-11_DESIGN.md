@@ -8,7 +8,9 @@
 ## How the 70 findings collapse
 
 The 70 confirmed findings (plus 3 filed, plus the queued transport slice) reduce
-to **10 workstreams / 33 slices**. The compression is real, not cosmetic: e.g.
+to **10 workstreams / 39 slice IDs** (38 new + the already-queued W1.1; W10's
+four land as one batch row). *(Corrected 2026-06-11 from an initial miscount of
+33.)* The compression is real, not cosmetic: e.g.
 the dead contradictory retry classifier was confirmed under four dimensions
 (boundaries, duplication, errors, deadcode) and is **one** deletion slice; the
 buffer-formula, tuning-ladder, and pull-discards-tuning findings are three

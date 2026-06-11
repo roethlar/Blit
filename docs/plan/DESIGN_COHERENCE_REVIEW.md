@@ -1,9 +1,11 @@
 # Repo-wide design-coherence review
 
-**Status**: Active
+**Status**: Shipped
 **Created**: 2026-06-11
 **Supersedes**: nothing
-**Decision ref**: D-2026-06-11-1
+**Decision ref**: D-2026-06-11-1 (activation, Phase A); D-2026-06-11-2 (full
+ratification of the Phase C queue — program complete, all three phases
+delivered 2026-06-11)
 
 ## Goal
 

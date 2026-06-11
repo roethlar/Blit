@@ -9,6 +9,52 @@ See `.review/findings/<id>.md` for per-finding details.
 - `[~]` In progress / pending review — sentinel in `.review/ready/`
 - `[x]` Verified — verdict in `.review/results/<id>.verified.json`
 
+## Design-review queue (ratified D-2026-06-11-2, in execution order)
+
+Source: `docs/audit/AUDIT_REPORT_2026-06-11_DESIGN.md` (slice specs) +
+`docs/audit/DESIGN_FINDINGS_2026-06-11_PHASE_B.md` (per-finding evidence).
+Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
+**Status: Active** before code.
+
+| ID | Severity | Title | Status | Branch | Commit |
+|----|----------|-------|--------|--------|--------|
+| w5-1-log-backend | Medium | Install stderr log backend (warn) in all 4 binaries + one prefix convention; today every log::warn/error is discarded | `[ ]` | — | — |
+| w4-2-delete-push-upload-channel | Medium | Delete the 262,144-slot push upload channel (drain-and-discard; wedges gRPC-fallback pushes >262k files) | `[ ]` | — | — |
+| w5-2-retry-classifier-consolidation | Medium | Delete dead contradictory blit-core/errors.rs; move is_retryable into blit-core with contract test | `[ ]` | — | — |
+| w4-1-abortondrop-family | High | Hoist AbortOnDrop; fix all 5 detach-on-drop sites (incorporates design-2; JoinSet for per-stream workers) | `[ ]` | — | — |
+| w9-5-jobs-lifecycle-e2e | Medium | jobs/detach lifecycle e2e tests (Subscribe, watch fallback, cancel exit codes) — net before W4.3 | `[ ]` | — | — |
+| w4-3-daemon-disconnect-racing | Medium | Daemon handlers race tx.closed()+cancel token (hoist delegated_pull's select); fix false active_jobs comment | `[ ]` | — | — |
+| w1-2-data-socket-policy-helper | Medium | Shared configure_data_socket (NODELAY/keepalive/tuned buffers) for pull connect + 3 daemon accepts (coordinates design-3) | `[ ]` | — | — |
+| w1-3-tcp-keepalive-honesty | Medium | Configure real TcpKeepalive timing or fix both overselling comments; daemon copy logs failure | `[ ]` | — | — |
+| w1-4-accept-token-constants | Low | One shared accept(30s)/token(15s) constant pair replacing 4 local declarations | `[ ]` | — | — |
+| w2-1-delete-warmup-machinery | Medium | Delete dead auto_tune warmup branches + analyze_warmup_result (honest static table) | `[ ]` | — | — |
+| w2-2-stream-ladder-owner | Medium | Single stream-count/chunk owner in determine_remote_tuning (takes file_count); delete 2 daemon ladders + transfer_plan ladder | `[ ]` | — | — |
+| w2-3-multistream-pull-plan | High | Multi-stream pull-sync: write plan doc (authorized D-2026-06-11-2), harvest deprecated Pull's pattern, implement | `[ ]` | — | — |
+| w2-4-delete-pull-rpc | High | Delete deprecated Pull RPC after w2-3 harvest (owner-decided, wire-breaking OK); port scan_remote_files | `[ ]` | — | — |
+| w3-1-memory-aware-buffer-pool | High | BufferPool::for_data_plane(tuning, streams) with available-memory cap; replaces 3 pasted formula sites | `[ ]` | — | — |
+| w6-1-progress-event-contract | Medium | Define ProgressEvent semantics in blit-core; normalize producers; shared accumulator (incorporates design-1) | `[ ]` | — | — |
+| w6-2-progress-residue-verify | Medium | Verify-then-fix map §1.6 residue: delegated zero progress, daemon counters 0 for 3/4 kinds, no denominators | `[ ]` | — | — |
+| w4-4-blocking-work-off-runtime | Medium | spawn_blocking the per-entry stat/canonicalize batch + single-file checksum hashing | `[ ]` | — | — |
+| w9-1-ungate-windows-tests | High | Remove blanket #[cfg(unix)] from remote transfer tests with nothing unix-specific | `[ ]` | — | — |
+| w9-2-revive-root-tests | Medium | Relocate dead workspace-root tests/ into blit-core/tests (MirrorPlanner coverage); delete connection.rs; fix AGENTS.md §4 | `[ ]` | — | — |
+| w9-3-test-harness-builder | Medium | TestContext::builder() consolidating 5 harness clones + 5 cli_bin copies; OnceLock daemon build; fake-server keepalive parity | `[ ]` | — | — |
+| w9-4-readonly-enforcement-tests | Medium | Tests for all 3 read-only-module gates (push, purge, delegated pull) — zero coverage today | `[ ]` | — | — |
+| w7-1-mirror-executor-consolidation | Medium | One mirror/purge deletion executor + parallel enumerate_local_manifest in blit-core (R58-F3 class closure) | `[ ]` | — | — |
+| w7-2-filter-spec-chokepoint | Medium | filter_from_spec pub; push handler uses validated chokepoint (mirror-purge filter currently unvalidated) | `[ ]` | — | — |
+| w7-3-wire-metadata-helpers | Medium | Wire metadata + path helpers into blit-core; one mtime error convention; delete per-crate twins | `[ ]` | — | — |
+| w7-4-hash-reader-helper | Medium | checksum::hash_reader owning the 256 KiB loop; daemon build_file_header calls it | `[ ]` | — | — |
+| w7-5-presenter-formatting | Medium | format_bps in blit_app::display (binary units); switch jobs.rs + 5 TUI copies | `[ ]` | — | — |
+| w7-6-default-port-pub | Low | RemoteEndpoint::DEFAULT_PORT pub; delete 9031 literals | `[ ]` | — | — |
+| w8-1-foundation-deadcode-sweep | Medium | Delete tar_stream, delete.rs, copy/parallel+stats, chunked_copy_file, fs_enum leftovers (~800 lines). zero_copy EXCLUDED → w8-1b | `[ ]` | — | — |
+| w8-1b-zero-copy-fast-eval | Medium | Evaluate wiring splice/zero_copy into the receive pipeline (owner: FAST potential); outcome = plan doc or deletion | `[ ]` | — | — |
+| w8-2-delete-control-plane-payload | Medium | Delete transfer_payloads_via_control_plane (zero-caller duplicate); sequence with W1.1 chunk_bytes deletion | `[ ]` | — | — |
+| w8-3-deadcode-hygiene-sweep | Low | --interval-ms flag, blit-cli unused deps, blit-app stubs, stale #[allow(dead_code)] sweep | `[ ]` | — | — |
+| w5-3-daemon-status-helpers | Medium | internal_err({:#}) + io_to_status helpers; sweep ~69 chain-amputating + 116 Status::internal sites | `[ ]` | — | — |
+| w5-4-mpsc-sendfail-vocabulary | Medium | One honest mpsc send-failure vocabulary; prefer joining the exited task's real error | `[ ]` | — | — |
+| w5-5-logger-trait-cleanup | Low | Logger trait permanently-noop error channel cleanup | `[ ]` | — | — |
+| w9-6-test-misc | Low | Harness stderr capture; tuning-tier unit tests | `[ ]` | — | — |
+| w10-docs-batch | Medium | Docs batch: AGENTS.md ghost names, WORKFLOW_PHASE_2 re-status, --resume/--retry help scoping (help+manpage+README), comment-truth sweep | `[ ]` | — | — |
+
 ## Currently pending review
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
