@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-06-07 (rule codification + merge) at commit `ca940a2`
+Last updated: 2026-06-11 (h3c slice 1 verified; repo design-coherence review being planned) at commit `1be16bc`
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -8,26 +8,40 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **Agent-protocol kit install** (completed). Merged branch and codified branchless rules in AGENTS.md.
-- Repository note: `master` HEAD is `ca940a2`. The temporary `chore/agent-kit-install` branch has been merged and deleted.
+- **audit-h3c slice 1 verified** (2026-06-11, owner accept, verdict in
+  `.review/results/`). The review assessment found 4 facts feeding the slice-2
+  re-scope — see DEVLOG 2026-06-11 entry: 1 MiB cap is correctness vs tonic's
+  4 MiB decode default; client channels lack HTTP/2 keepalive (the real H3
+  hang); fallback throughput is h2 flow-control-window-bound; the clamp
+  collapses to a constant (sinks' `chunk_bytes` now inert).
+- **Planning a repo-wide design-coherence review** (owner-directed this
+  session). Three phases: A concept-ownership map → B dimension reviews,
+  adversarially verified → C synthesis into `docs/audit/` + `.review/findings/`
+  candidates. Plan doc to be written to `docs/plan/` before any execution.
 
 ## Queue (ordered)
 
-1. **Resume audit-h3c.** Slice 1 (`bf4cc82`) is `[~]` pending reviewer verdict
-   (`.review/ready/`); on the verdict, do **audit-h3c slice 2** — dynamic
-   progress watchdog wrapping `recv_fallback_message` (the chokepoint slice 1
-   created).
-2. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase the stack up
+1. **Repo design-coherence review** — write plan doc, owner ratifies, run
+   Phase A first. Output feeds the existing `.review/` loop.
+2. **audit-h3c slice 2 (re-scoped, pending review findings + plan doc):**
+   transport-policy first — single shared client channel builder with HTTP/2
+   keepalive, explicit `max_decoding_message_size`, adaptive flow-control
+   windows; error-chain preservation (tonic Status → eyre, retry classifier);
+   delete inert sink `chunk_bytes` params; then re-evaluate whether a cadence
+   watchdog is still needed (wedged-but-alive peers only). Held until the
+   review's transport findings are in, so the re-scope is designed once.
+3. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase the stack up
    to `eafb187` (live-progress → PR1 telemetry → PR2 work-queue → PR2 review
    fix), excluding `d9d4ec7` (does-not-build WIP). Resolve the `data_plane.rs`
    StallGuard-vs-`Probe` conflict by hand. Write a `docs/plan/` doc first
-   (no code before `**Status**: Active`).
-3. Finish audit **Round 1** (data-loss / DoS class) per
+   (no code before `**Status**: Active`). Held until the coherence map exists
+   (agent-proposed sequencing; owner has not ratified this hold explicitly).
+4. Finish audit **Round 1** (data-loss / DoS class) per
    `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` — R3 order governs.
-4. **Round 2 — Phase 6 TUI rework** (`docs/plan/TUI_REWORK.md`):
+5. **Round 2 — Phase 6 TUI rework** (`docs/plan/TUI_REWORK.md`):
    H4 → H5 → R3-H23 → H2 → H6 → H7 → H8 → M2 → M3 → M4 → M25.
    (R3-M28 source-of-truth sweep completed 2026-06-04.)
-5. `greenfield_plan_v6.md` §1.1 streaming planner + 1 s heartbeat + 10 s stall
+6. `greenfield_plan_v6.md` §1.1 streaming planner + 1 s heartbeat + 10 s stall
    detector — owner-ratified, not yet built (H10b); queued after Round 1 closes.
 
 ## Authoritative docs right now
@@ -58,6 +72,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-06-11** @ `1be16bc` — audit-h3c slice 1 graded and accepted (owner
+  verdict; validation re-run green, test-fn count flat at 344). Assessment
+  facts recorded in DEVLOG 2026-06-11. Owner directed: plan a repo-wide
+  design-coherence review next; slice-2 re-scope waits on its findings.
+  First action next session if interrupted: read the repo-review plan doc in
+  `docs/plan/` (may not exist yet — then re-read DEVLOG 2026-06-11 + this Now).
 - **2026-06-07** @ `ca940a2` — Merged agent-kit into master, deleted the branch, and codified branchless rules in AGENTS.md per owner command. Verified workspace builds and doc checks pass.
 - **2026-06-07** @ `c793df2` — Installed the agent-protocol kit and reconciled
   the branch mess: documented the `-s ours` octopus trap (DECISIONS.md
@@ -65,6 +85,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `.gitignore`. Tree == `600023a`, builds. Awaiting owner approval for the first
   commit + named branch deletions; SETUP.md content still needed. First action
   next session: `catchup`, then check the audit-h3c slice 1 verdict.
-- **2026-06-06** @ `600023a` — Agent-protocol kit authored against master.
-  Prior state imported from `docs/plan/README.md`, the 2026-06-04 audit index,
-  and `REVIEW.md`.
