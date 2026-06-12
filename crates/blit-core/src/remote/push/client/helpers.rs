@@ -48,6 +48,29 @@ pub fn map_status(status: Status) -> eyre::Report {
     eyre!(status.message().to_string())
 }
 
+/// design-5: a failed request-stream send means the RPC already died —
+/// the authoritative reason is the daemon's terminal Status, which the
+/// response task delivers on `response_rx`. Racing the two, the send
+/// failure often fires first and used to mask the real error ("failed
+/// to send push request payload" instead of "module 'test' is
+/// read-only"). Prefer the server's error when it arrives promptly;
+/// fall back to the bare send error otherwise.
+pub async fn prefer_server_error(
+    response_rx: &mut mpsc::Receiver<Result<ServerPushResponse, eyre::Report>>,
+    send_err: eyre::Report,
+) -> eyre::Report {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match tokio::time::timeout_at(deadline, response_rx.recv()).await {
+            // Drain any buffered non-terminal messages on the way to
+            // the terminal error the daemon closed the RPC with.
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(server_err))) => return server_err.wrap_err("push rejected by daemon"),
+            Ok(None) | Err(_) => return send_err,
+        }
+    }
+}
+
 pub fn normalize_relative_path(path: &Path) -> String {
     // Canonical POSIX form — see `blit_core::path_posix` for why a
     // component-walk is correct on every platform and the historical

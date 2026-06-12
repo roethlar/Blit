@@ -66,6 +66,43 @@ fn push_to_read_only_module_is_rejected_and_module_untouched() {
     );
 }
 
+/// design-5: with many files the client is mid-manifest-send when the
+/// daemon's rejection lands, so the request-stream send fails before
+/// the response is read — and pre-fix the user saw "failed to send
+/// push request payload" instead of the read-only reason. This was the
+/// first failure the w9-1/w9-4 ungating surfaced on CI (macOS and
+/// Windows lost the race; local single-file runs won it). The client
+/// now harvests the daemon's terminal status on send failure.
+#[test]
+fn push_rejection_reason_survives_midmanifest_send_failure() {
+    let ctx = TestContext::new_read_only();
+
+    let src_dir = ctx.workspace.join("src");
+    fs::create_dir_all(&src_dir).expect("src dir");
+    for i in 0..500 {
+        fs::write(src_dir.join(format!("f{i}.txt")), b"x").expect("write src");
+    }
+
+    let dest = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let src_arg = format!("{}/", src_dir.display());
+    let mut cmd = Command::new(&ctx.cli_bin);
+    cmd.arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("copy")
+        .arg(&src_arg)
+        .arg(&dest);
+    let output = run_with_timeout(cmd, Duration::from_secs(60));
+
+    assert_read_only_rejection(&output, "many-file push");
+    assert!(
+        fs::read_dir(&ctx.module_dir)
+            .expect("module dir readable")
+            .next()
+            .is_none(),
+        "read-only module must stay untouched after a rejected many-file push"
+    );
+}
+
 #[test]
 fn purge_on_read_only_module_is_rejected_and_file_survives() {
     let ctx = TestContext::new_read_only();

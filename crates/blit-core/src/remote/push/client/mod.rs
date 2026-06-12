@@ -6,7 +6,7 @@ pub use types::{RemotePushProgress, RemotePushReport, TransferMode};
 
 use self::helpers::{
     decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
-    send_manifest_complete, send_payload, spawn_response_task,
+    prefer_server_error, send_manifest_complete, send_payload, spawn_response_task,
 };
 use crate::auto_tune::TuningParams;
 use crate::buffer::BufferPool;
@@ -376,7 +376,7 @@ impl RemotePushClient {
                 })
                 .unwrap_or_default(),
         };
-        send_payload(
+        if let Err(send_err) = send_payload(
             &tx,
             ClientPayload::Header(crate::generated::PushHeader {
                 module,
@@ -388,7 +388,10 @@ impl RemotePushClient {
                 require_complete_scan,
             }),
         )
-        .await?;
+        .await
+        {
+            return Err(prefer_server_error(&mut response_rx, send_err).await);
+        }
 
         let unreadable_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -755,7 +758,18 @@ impl RemotePushClient {
 
                             manifest_total_bytes =
                                 manifest_total_bytes.saturating_add(header.size);
-                            send_payload(&tx, ClientPayload::FileManifest(header.clone())).await?;
+                            // design-5: if the daemon already rejected the
+                            // push (e.g. read-only module), this send loses
+                            // a race with the terminal status — surface the
+                            // daemon's reason, not the transport symptom.
+                            if let Err(send_err) =
+                                send_payload(&tx, ClientPayload::FileManifest(header.clone()))
+                                    .await
+                            {
+                                return Err(
+                                    prefer_server_error(&mut response_rx, send_err).await
+                                );
+                            }
                             manifest_lookup.insert(rel.clone(), header);
 
                             match transfer_mode {
@@ -881,7 +895,13 @@ impl RemotePushClient {
                                 .lock()
                                 .map(|g| g.is_empty())
                                 .unwrap_or(false);
-                            send_manifest_complete(&tx, scan_complete).await?;
+                            if let Err(send_err) =
+                                send_manifest_complete(&tx, scan_complete).await
+                            {
+                                return Err(
+                                    prefer_server_error(&mut response_rx, send_err).await
+                                );
+                            }
                         }
                     }
                 }
