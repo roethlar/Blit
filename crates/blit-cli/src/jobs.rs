@@ -333,7 +333,7 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                         let merged = active_snapshot.to_finished_error(&e);
                         print_watch_json(&WatchSnapshot::Finished(merged));
                     } else {
-                        eprintln!("[failed] transfer '{}' error: {}", e.transfer_id, e.message);
+                        eprintln!("blit: transfer '{}' failed: {}", e.transfer_id, e.message);
                     }
                     return Ok(ExitCode::from(1));
                 }
@@ -349,7 +349,7 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                 // gets a terminal answer rather than a stream
                 // failure.
                 eprintln!(
-                    "[stream-error] subscribe failed ({}); reconciling via GetState...",
+                    "blit: subscribe stream failed ({}); reconciling via GetState...",
                     status.message()
                 );
                 return reconcile_via_get_state(&args, &remote).await;
@@ -358,7 +358,7 @@ async fn run_jobs_watch(args: JobsWatchArgs) -> Result<ExitCode> {
                 // Daemon closed the stream — likely shutting
                 // down. Same fallback.
                 eprintln!(
-                    "[stream-end] daemon closed the subscribe stream; \
+                    "blit: daemon closed the subscribe stream; \
                      reconciling via GetState..."
                 );
                 return reconcile_via_get_state(&args, &remote).await;
@@ -598,7 +598,7 @@ fn print_cancel_human(remote: &RemoteEndpoint, outcome: &CancelJobOutcome) {
             transfer_id,
             message,
         } => {
-            eprintln!("Cannot cancel transfer '{transfer_id}': {message}");
+            eprintln!("blit: cannot cancel transfer '{transfer_id}': {message}");
         }
     }
 }

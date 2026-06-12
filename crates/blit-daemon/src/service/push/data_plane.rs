@@ -122,7 +122,10 @@ pub(crate) async fn accept_data_connection_stream(
             TcpStream::from_std(std_back)
                 .map_err(|err| Status::internal(format!("re-wrapping socket: {err}")))?
         };
-        eprintln!("[data-plane] accepted connection {} from {}", idx, addr);
+        eprintln!(
+            "blitd: push data plane: accepted connection {} from {}",
+            idx, addr
+        );
         let expected_token = expected_token.clone();
         let module_clone = module.clone();
         let files_clone = Arc::clone(&files);
@@ -150,7 +153,7 @@ pub(crate) async fn accept_data_connection_stream(
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     let gbps = (final_stats.bytes_transferred as f64 * 8.0) / elapsed / 1e9;
     eprintln!(
-        "[data-plane] aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
+        "blitd: push data plane: aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
         gbps, final_stats.bytes_transferred, elapsed
     );
 
@@ -185,11 +188,11 @@ async fn handle_data_plane_stream(
         }
     }
     if token_buf != expected_token {
-        eprintln!("[data-plane] invalid token");
+        log::warn!("push data plane: invalid token");
         return Err(Status::permission_denied("invalid data plane token"));
     }
     eprintln!(
-        "[data-plane] token accepted (module='{}', root={})",
+        "blitd: push data plane: token accepted (module='{}', root={})",
         module.name,
         module.path.display()
     );
@@ -747,14 +750,14 @@ fn convert_join_result(
     match join_result {
         Ok(Ok(result)) => Ok(result),
         Ok(Err(status)) => {
-            eprintln!(
-                "[data-plane] tar shard worker returned error: {}",
+            log::error!(
+                "push data plane: tar shard worker returned error: {}",
                 status.message()
             );
             Err(status)
         }
         Err(err) => {
-            eprintln!("[data-plane] tar shard worker panicked: {}", err);
+            log::error!("push data plane: tar shard worker panicked: {}", err);
             Err(Status::internal(format!(
                 "tar shard worker panicked: {}",
                 err

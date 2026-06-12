@@ -20,6 +20,7 @@ pub mod path_safety;
 pub mod perf_history;
 pub mod perf_predictor;
 pub mod remote;
+pub mod stderr_log;
 pub mod tar_stream;
 pub mod transfer_plan;
 #[cfg(windows)]

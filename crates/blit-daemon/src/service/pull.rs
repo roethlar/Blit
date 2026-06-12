@@ -736,7 +736,7 @@ async fn accept_and_wrap_sinks(
             }
         }
         if token_buf != expected_token {
-            eprintln!("[pull-data-plane] invalid token");
+            log::warn!("pull data plane: invalid token");
             return Err(Status::permission_denied("invalid pull data plane token"));
         }
 

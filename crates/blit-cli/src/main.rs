@@ -30,6 +30,9 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
+    // w5-1: without a backend every log::warn!/error! in blit-core is
+    // silently discarded. Stderr, warn level, `blit: <level>: <msg>`.
+    blit_core::stderr_log::init("blit");
     color_eyre::install()?;
     let Cli {
         config_dir,

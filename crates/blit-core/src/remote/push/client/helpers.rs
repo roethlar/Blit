@@ -1,6 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
 use eyre::{bail, eyre, Result};
-use owo_colors::OwoColorize;
 use std::collections::{HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -181,10 +180,7 @@ pub fn spawn_manifest_task(
 }
 
 pub fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &str) {
-    eprintln!(
-        "{}",
-        format!("[push] skipping '{}' ({})", rel, reason).red()
-    );
+    log::warn!("push skipping '{}' ({})", rel, reason);
     if let Ok(mut guard) = list.lock() {
         guard.push(format!("{} ({})", rel, reason));
     }

@@ -462,6 +462,12 @@ static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    // w5-1: without a backend every log::warn!/error! in blit-core is
+    // silently discarded. Stderr, warn level, `blit-tui: <level>: <msg>`.
+    // Known tradeoff: a warn emitted while the alternate screen is up
+    // can smudge the frame until the next redraw; invisible security
+    // warnings are worse (errors-log-facade-has-no-backend).
+    blit_core::stderr_log::init("blit-tui");
     let args = Args::parse();
 
     install_panic_hook();
@@ -621,7 +627,7 @@ async fn main() -> Result<()> {
     // Drain accumulated warnings now that the terminal
     // is back to its normal state.
     for warning in config_warnings {
-        eprintln!("[blit-tui] {warning}");
+        eprintln!("blit-tui: {warning}");
     }
     result
 }

@@ -425,7 +425,7 @@ impl RemotePullClient {
                 report.downloaded_paths.extend(dp_result.downloaded_paths);
             }
             if report.summary.is_none() {
-                eprintln!("[pull] data plane completed without summary payload");
+                log::warn!("pull data plane completed without summary payload");
             }
         }
 

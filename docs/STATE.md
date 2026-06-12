@@ -15,6 +15,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   plan doc authorized. `DESIGN_COHERENCE_REVIEW.md` → **Shipped**.
 - **Next coder action**: pick `w5-1-log-backend` (topmost `[ ]` in the
   design-review queue) per the `slice` procedure.
+- **Session authorization 2026-06-11 (this session only, owner verbatim: "work
+  on as much as you can. commit every slice as it lands. if anything gets
+  questionable, stop.")**: coder works the design-review queue on `master`
+  (no agent-created branches), one local commit per slice as it lands, never
+  push, faster-mode WIP (multiple pending sentinels allowed iff files-changed
+  disjoint), stop on anything questionable or any embedded owner decision.
+  Per AGENTS.md §9 this approval does NOT carry into the next session.
 
 ## Queue (ordered)
 

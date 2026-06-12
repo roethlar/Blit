@@ -462,7 +462,11 @@ impl RemotePushClient {
                                             batch_bytes =
                                                 batch_bytes.saturating_add(header.size);
                                         }
-                                        eprintln!("[push] need-list includes {}", rel);
+                                        // w5-1: was an unconditional per-file
+                                        // eprintln — stderr spam proportional
+                                        // to file count. Debug-level now;
+                                        // visible with BLIT_LOG=debug.
+                                        log::debug!("push need-list includes {}", rel);
                                     }
                                     pending_queue.extend(rels.drain(..));
                                     transfer_size_hint =
@@ -541,15 +545,17 @@ impl RemotePushClient {
                                             for payload in &planned.payloads {
                                                 match payload {
                                                     TransferPayload::File(header) => {
-                                                        eprintln!(
-                                                            "[push] enqueue {} for TCP stream",
+                                                        // w5-1: was unconditional per-file
+                                                        // eprintln; BLIT_LOG=debug shows it.
+                                                        log::debug!(
+                                                            "push enqueue {} for TCP stream",
                                                             header.relative_path
                                                         );
                                                     }
                                                     TransferPayload::TarShard { headers } => {
                                                         for header in headers {
-                                                            eprintln!(
-                                                                "[push] enqueue {} via tar shard",
+                                                            log::debug!(
+                                                                "push enqueue {} via tar shard",
                                                                 header.relative_path
                                                             );
                                                         }
@@ -678,8 +684,8 @@ impl RemotePushClient {
                                                 &mut requested_files,
                                             );
                                             if skipped > 0 {
-                                                eprintln!(
-                                                    "[push] daemon did not request {} payload file(s); skipping",
+                                                log::debug!(
+                                                    "push: daemon did not request {} payload file(s); skipping",
                                                     skipped
                                                 );
                                             }
@@ -794,23 +800,25 @@ impl RemotePushClient {
                                                 &mut requested_files,
                                             );
                                             if skipped > 0 {
-                                                eprintln!(
-                                                    "[push] daemon did not request {} payload file(s); skipping",
+                                                log::debug!(
+                                                    "push: daemon did not request {} payload file(s); skipping",
                                                     skipped
                                                 );
                                             }
                                             for payload in &planned.payloads {
                                                 match payload {
                                                     TransferPayload::File(header) => {
-                                                        eprintln!(
-                                                            "[push] enqueue {} for TCP stream",
+                                                        // w5-1: was unconditional per-file
+                                                        // eprintln; BLIT_LOG=debug shows it.
+                                                        log::debug!(
+                                                            "push enqueue {} for TCP stream",
                                                             header.relative_path
                                                         );
                                                     }
                                                     TransferPayload::TarShard { headers } => {
                                                         for header in headers {
-                                                            eprintln!(
-                                                                "[push] enqueue {} via tar shard",
+                                                            log::debug!(
+                                                                "push enqueue {} via tar shard",
                                                                 header.relative_path
                                                             );
                                                         }

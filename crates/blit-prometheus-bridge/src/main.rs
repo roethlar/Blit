@@ -57,6 +57,10 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // w5-1: without a backend every log::warn!/error! in blit-core is
+    // silently discarded. Stderr, warn level,
+    // `blit-prometheus-bridge: <level>: <msg>`.
+    blit_core::stderr_log::init("blit-prometheus-bridge");
     let args = Args::parse();
     let remote = RemoteEndpoint::parse(&args.remote)
         .with_context(|| format!("parsing remote endpoint '{}'", args.remote))?;

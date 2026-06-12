@@ -829,7 +829,7 @@ impl RecentsWriter {
             while self.rx.try_recv().is_ok() {}
             let records = self.active_jobs.recent();
             if let Err(e) = crate::recents_store::write_atomic(&self.path, &records) {
-                eprintln!("[blitd] failed to persist recents to {:?}: {e}", self.path);
+                log::warn!("failed to persist recents to {:?}: {e}", self.path);
             }
         }
     }

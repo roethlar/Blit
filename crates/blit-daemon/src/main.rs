@@ -17,6 +17,9 @@ use tonic::transport::Server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // w5-1: without a backend every log::warn!/error! in blit-core is
+    // silently discarded. Stderr, warn level, `blitd: <level>: <msg>`.
+    blit_core::stderr_log::init("blitd");
     let args = DaemonArgs::parse();
     let runtime = load_runtime(&args)?;
     let DaemonRuntime {
@@ -32,7 +35,7 @@ async fn main() -> Result<()> {
     } = runtime;
 
     for warning in &warnings {
-        eprintln!("[warn] {warning}");
+        log::warn!("{warning}");
     }
 
     let addr: SocketAddr = format!("{}:{}", bind_host, port).parse()?;
@@ -41,7 +44,7 @@ async fn main() -> Result<()> {
     }
     if let Some(root) = &default_root {
         eprintln!(
-            "[info] default root export: {}{}",
+            "blitd: default root export: {}{}",
             root.path.display(),
             if root.read_only { " (read-only)" } else { "" }
         );
@@ -51,7 +54,7 @@ async fn main() -> Result<()> {
     let mdns_guard: Option<MdnsAdvertiser> = if mdns.disabled {
         if let Some(name) = &mdns.name {
             eprintln!(
-                "[info] mDNS advertising disabled; instance name '{}' ignored",
+                "blitd: mDNS advertising disabled; instance name '{}' ignored",
                 name
             );
         }
@@ -69,14 +72,14 @@ async fn main() -> Result<()> {
         }) {
             Ok(handle) => {
                 eprintln!(
-                    "[info] mDNS advertising '{}' on port {}",
+                    "blitd: mDNS advertising '{}' on port {}",
                     handle.instance_name(),
                     port
                 );
                 Some(handle)
             }
             Err(err) => {
-                eprintln!("[warn] failed to advertise mDNS service: {err:?}");
+                log::warn!("failed to advertise mDNS service: {err:?}");
                 None
             }
         }
@@ -88,7 +91,7 @@ async fn main() -> Result<()> {
     // — operator-facing visibility under systemd or foreground without
     // needing the (future) TUI. See `metrics::TransferMetrics::log_completion`.
     let metrics = if args.metrics {
-        eprintln!("[info] internal RPC metrics enabled; per-RPC summary lines on stderr");
+        eprintln!("blitd: internal RPC metrics enabled; per-RPC summary lines on stderr");
         TransferMetrics::enabled()
     } else {
         TransferMetrics::disabled()
@@ -96,7 +99,7 @@ async fn main() -> Result<()> {
 
     if delegation.allow_delegated_pull {
         eprintln!(
-            "[info] delegated pull enabled ({} allowlist entries)",
+            "blitd: delegated pull enabled ({} allowlist entries)",
             delegation.allowed_source_hosts.len()
         );
     }

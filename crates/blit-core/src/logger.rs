@@ -35,13 +35,13 @@ impl TextLogger {
         match self.file.lock() {
             Ok(mut f) => {
                 if let Err(e) = writeln!(f, "[{}] {}", Utc::now().to_rfc3339(), s) {
-                    eprintln!("logger write error: {}", e);
+                    log::error!("logger write error: {}", e);
                 }
             }
             Err(poison) => {
                 let mut f = poison.into_inner();
                 if let Err(e) = writeln!(f, "[{}] {}", Utc::now().to_rfc3339(), s) {
-                    eprintln!("logger write error (poisoned): {}", e);
+                    log::error!("logger write error (poisoned): {}", e);
                 }
             }
         }

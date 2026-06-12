@@ -159,7 +159,10 @@ pub(crate) async fn handle_push_stream(
                         // Receiver dropped — TCP data plane is done; the
                         // gRPC fallback path doesn't open this stream.
                     }
-                    eprintln!("[push-server] queued {}", sanitized);
+                    // w5-1: was an unconditional per-file eprintln — stderr
+                    // spam proportional to file count. Debug-level now;
+                    // visible with BLIT_LOG=debug.
+                    log::debug!("push server queued {}", sanitized);
                     let flushed = need_list_sender.push(sanitized).await?;
                     files_to_upload.push(file);
                     if flushed && data_plane_handle.is_none() {
