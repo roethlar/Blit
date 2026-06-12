@@ -60,7 +60,8 @@ pub async fn run_scan(args: ScanArgs) -> Result<()> {
         } else {
             service.hostname.trim_end_matches('.').to_string()
         };
-        let endpoint = if service.port == 9031 {
+        let endpoint = if service.port == blit_core::remote::endpoint::RemoteEndpoint::DEFAULT_PORT
+        {
             format!("{}://", host)
         } else {
             format!("{}:{}://", host, service.port)

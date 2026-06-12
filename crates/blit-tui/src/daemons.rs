@@ -332,7 +332,8 @@ impl DaemonsState {
             // Default daemon port; if no local daemon is
             // running the GetState fetch will fail and the
             // detail block surfaces "no local daemon".
-            return RemoteEndpoint::parse("127.0.0.1:9031").ok();
+            return RemoteEndpoint::parse(&format!("127.0.0.1:{}", RemoteEndpoint::DEFAULT_PORT))
+                .ok();
         }
         let addr = row.addresses.first()?;
         RemoteEndpoint::parse(&format!("{}:{}", addr, row.port)).ok()

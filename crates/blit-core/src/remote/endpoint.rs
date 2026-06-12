@@ -22,7 +22,10 @@ pub struct RemoteEndpoint {
 }
 
 impl RemoteEndpoint {
-    const DEFAULT_PORT: u16 = 9031;
+    /// The one statement of blit's default daemon port (w7-6): the
+    /// daemon's bind default, `blit scan`'s display elision, and the
+    /// TUI's local-row fallback all reference this constant.
+    pub const DEFAULT_PORT: u16 = 9031;
 
     pub fn parse(raw: &str) -> Result<Self> {
         let trimmed = raw.trim();

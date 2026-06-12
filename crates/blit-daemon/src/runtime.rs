@@ -198,7 +198,10 @@ pub(crate) fn load_runtime(args: &DaemonArgs) -> Result<DaemonRuntime> {
         .clone()
         .or_else(|| raw.daemon.bind.clone())
         .unwrap_or_else(|| "0.0.0.0".to_string());
-    let port = args.port.or(raw.daemon.port).unwrap_or(9031);
+    let port = args
+        .port
+        .or(raw.daemon.port)
+        .unwrap_or(blit_core::remote::endpoint::RemoteEndpoint::DEFAULT_PORT);
 
     let motd = raw.daemon.motd.clone();
     let mdns_disabled = if args.no_mdns {
