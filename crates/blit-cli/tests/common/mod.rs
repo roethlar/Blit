@@ -53,7 +53,21 @@ pub struct TestContext {
 }
 
 impl TestContext {
+    #[allow(dead_code)] // each test binary uses one of the two constructors
     pub fn new() -> Self {
+        Self::with_read_only(false)
+    }
+
+    /// w9-4: same daemon + module, but the module is exported
+    /// `read_only: true` so tests can exercise the three write gates
+    /// (push, purge, delegated pull). Before this knob existed no
+    /// test config in the workspace could express a read-only module.
+    #[allow(dead_code)] // not every test binary uses the read-only harness
+    pub fn new_read_only() -> Self {
+        Self::with_read_only(true)
+    }
+
+    fn with_read_only(read_only: bool) -> Self {
         let work = tempdir().expect("tempdir");
         let workspace = work.path().to_path_buf();
 
@@ -75,7 +89,7 @@ impl TestContext {
                 name: "test".into(),
                 path: module_dir.clone(),
                 comment: None,
-                read_only: false,
+                read_only,
             }],
         };
 
