@@ -27,7 +27,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | w1-2-data-socket-policy-helper | Medium | Shared configure_data_socket (NODELAY/keepalive/tuned buffers) for pull connect + 3 daemon accepts (coordinates design-3) | `[ ]` | — | — |
 | w1-3-tcp-keepalive-honesty | Medium | Configure real TcpKeepalive timing or fix both overselling comments; daemon copy logs failure | `[ ]` | — | — |
 | w1-4-accept-token-constants | Low | One shared accept(30s)/token(15s) constant pair replacing 4 local declarations | `[ ]` | — | — |
-| w2-1-delete-warmup-machinery | Medium | Delete dead auto_tune warmup branches + analyze_warmup_result (honest static table) | `[ ]` | — | — |
+| w2-1-delete-warmup-machinery | Medium | Delete dead auto_tune warmup branches + analyze_warmup_result (honest static table) | `[~]` | master | `2a8a490` |
 | w2-2-stream-ladder-owner | Medium | Single stream-count/chunk owner in determine_remote_tuning (takes file_count); delete 2 daemon ladders + transfer_plan ladder | `[ ]` | — | — |
 | w2-3-multistream-pull-plan | High | Multi-stream pull-sync: write plan doc (authorized D-2026-06-11-2), harvest deprecated Pull's pattern, implement | `[ ]` | — | — |
 | w2-4-delete-pull-rpc | High | Delete deprecated Pull RPC after w2-3 harvest (owner-decided, wire-breaking OK); port scan_remote_files | `[ ]` | — | — |
