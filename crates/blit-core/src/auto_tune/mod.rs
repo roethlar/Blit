@@ -1,9 +1,17 @@
-//! Auto-tuning and adaptive defaults for network transfers
+//! Transfer tuning tables and history-derived planning thresholds.
 //!
-//! Provides warmup probes and heuristics for chunk sizing, stream counts,
-//! and buffer allocation based on network characteristics.
+//! w2-1: this module previously advertised "warmup probes and
+//! heuristics" — runtime bandwidth adaptation that was never wired
+//! up: `analyze_warmup_result` had zero callers, `determine_tuning`'s
+//! only production caller passed `warmup_result = None`, and the
+//! caller overwrote most of what the None branch returned. That
+//! machinery is deleted; remote sizing is honestly static
+//! (`remote::tuning::determine_remote_tuning`, keyed on the byte
+//! estimate). A real warmup probe is H10b-class future work behind
+//! its own plan doc.
 
-/// Tuning parameters determined by warmup and workload analysis
+/// Tuning parameters for remote transfers. Produced by the static
+/// size-keyed table in `remote::tuning::determine_remote_tuning`.
 #[derive(Debug, Clone)]
 pub struct TuningParams {
     /// Chunk size in bytes for network I/O
@@ -12,88 +20,10 @@ pub struct TuningParams {
     pub initial_streams: usize,
     /// Maximum parallel streams
     pub max_streams: usize,
-    /// Detected bandwidth (if warmup succeeded)
-    pub warmup_gbps: Option<f64>,
     /// TCP buffer size (SO_SNDBUF/SO_RCVBUF)
     pub tcp_buffer_size: Option<usize>,
     /// Number of payloads to prefetch
     pub prefetch_count: Option<usize>,
-}
-
-/// Analyze warmup results and determine optimal chunk size
-///
-/// Helper for interpreting warmup probe bandwidth measurements.
-pub fn analyze_warmup_result(gbps: f64) -> usize {
-    if gbps >= 6.0 {
-        32 * 1024 * 1024 // High bandwidth
-    } else {
-        16 * 1024 * 1024 // Standard
-    }
-}
-
-/// Determine tuning parameters based on plan and optional warmup
-pub fn determine_tuning(
-    default_chunk_bytes: usize,
-    warmup_result: Option<(f64, usize)>,
-) -> TuningParams {
-    let (warmup_gbps, chunk_bytes) = match warmup_result {
-        Some((gbps, chunk)) => (Some(gbps), chunk),
-        None => (None, default_chunk_bytes),
-    };
-
-    // Initial streams based on detected bandwidth
-    let initial_streams = if let Some(gbps) = warmup_gbps {
-        if gbps > 8.0 {
-            6 // 10GbE or better
-        } else if gbps > 3.0 {
-            4 // Multi-gigabit
-        } else {
-            2 // Gigabit
-        }
-    } else {
-        2
-    };
-
-    let (tcp_buffer_size, prefetch_count) = if let Some(gbps) = warmup_gbps {
-        if gbps > 8.0 {
-            (Some(8 * 1024 * 1024), Some(32)) // 10GbE
-        } else if gbps > 3.0 {
-            (Some(4 * 1024 * 1024), Some(16)) // Multi-gig
-        } else {
-            (Some(1024 * 1024), Some(8)) // Gigabit
-        }
-    } else {
-        (None, None)
-    };
-
-    TuningParams {
-        chunk_bytes,
-        initial_streams,
-        max_streams: 8,
-        warmup_gbps,
-        tcp_buffer_size,
-        prefetch_count,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tuning_with_high_bandwidth() {
-        let params = determine_tuning(16 * 1024 * 1024, Some((9.5, 32 * 1024 * 1024)));
-        assert_eq!(params.chunk_bytes, 32 * 1024 * 1024);
-        assert_eq!(params.initial_streams, 6);
-        assert_eq!(params.max_streams, 8);
-    }
-
-    #[test]
-    fn test_tuning_fallback() {
-        let params = determine_tuning(16 * 1024 * 1024, None);
-        assert_eq!(params.chunk_bytes, 16 * 1024 * 1024);
-        assert_eq!(params.initial_streams, 2);
-    }
 }
 
 /// Local plan tuning derived from historical performance records.
