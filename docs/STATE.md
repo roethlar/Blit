@@ -30,9 +30,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Owner gates**: ratify (or reject) a design-4 fix slice; flip
-   `docs/plan/MULTISTREAM_PULL.md` Draft → Active (w2-3); push approval for
-   the local-only commits when desired.
+1. **design-4 fix slice — RATIFIED** (owner, 2026-06-12: "yes, fix that").
+   Coder is on it this session: verify mechanism first (hypothesis: the
+   mid-manifest early-flush fallback negotiation), then minimal fix +
+   regression test promotion.
+2. **Owner gates remaining**: flip `docs/plan/MULTISTREAM_PULL.md`
+   Draft → Active (w2-3); push approval for the local-only commits.
 2. **Execute the rest of the design-review queue** — `REVIEW.md` order
    governs. Highest open ratified row is w4-1 (AbortOnDrop family, High);
    next visible rows include w4-3 and W1 socket-policy/timeout constants.

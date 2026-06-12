@@ -156,39 +156,29 @@ pub(crate) async fn handle_push_stream(
                     log::debug!("push server queued {}", sanitized);
                     let flushed = need_list_sender.push(sanitized).await?;
                     files_to_upload.push(file);
-                    if flushed && data_plane_handle.is_none() {
-                        if force_grpc_effective {
-                            fallback_used = true;
-                            send_control_message(
-                                &tx,
-                                server_push_response::Payload::Negotiation(
-                                    DataTransferNegotiation {
-                                        tcp_port: 0,
-                                        one_time_token: String::new(),
-                                        tcp_fallback: true,
-                                        stream_count: 0,
-                                    },
-                                ),
-                            )
-                            .await?;
-                        } else {
+                    // design-4: in forced-gRPC mode the early-flush branch
+                    // must NOT announce the fallback negotiation here. The
+                    // client reacts to Negotiation(tcp_fallback) by
+                    // immediately streaming FileData on this same request
+                    // stream — but this loop is still reading the manifest,
+                    // and its FileData arm is a hard failed_precondition.
+                    // That broke every forced-gRPC push of ≥128 files
+                    // (FILE_LIST_EARLY_FLUSH_ENTRIES) and was timing-flaky
+                    // near ~100. The post-manifest execute_grpc_fallback
+                    // sends the one canonical fallback negotiation — the
+                    // path every working small push already takes. Early
+                    // negotiation only ever helped the TCP path (it starts
+                    // the data plane for pipelining), so it is now TCP-only.
+                    if flushed && data_plane_handle.is_none() && !force_grpc_effective {
+                        {
                             let listener = match bind_data_plane_listener().await {
                                 Ok(l) => l,
                                 Err(_) => {
+                                    // Bind failed: flip to fallback mode but
+                                    // stay quiet — announcing mid-manifest
+                                    // would trip the same design-4 wedge.
                                     fallback_used = true;
                                     force_grpc_effective = true;
-                                    send_control_message(
-                                        &tx,
-                                        server_push_response::Payload::Negotiation(
-                                            DataTransferNegotiation {
-                                                tcp_port: 0,
-                                                one_time_token: String::new(),
-                                                tcp_fallback: true,
-                                                stream_count: 0,
-                                            },
-                                        ),
-                                    )
-                                    .await?;
                                     continue;
                                 }
                             };

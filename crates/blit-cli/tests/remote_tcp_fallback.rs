@@ -373,28 +373,29 @@ fn walkdir_count_files(root: &std::path::Path) -> usize {
     count
 }
 
-/// 50 files: multi-file fallback coverage inside the zone that works
-/// today. Counts ≥ FILE_LIST_EARLY_FLUSH_ENTRIES (128) fail
-/// deterministically — and ~100 fails flakily — for a PRE-EXISTING
-/// reason unrelated to w4-2: the mid-manifest early-flush negotiation
-/// breaks the forced-gRPC push (filed as design-4; verified present
-/// before the w4-2 deletion via stash-bisect at 5/10/20/50/80 pass,
-/// 100 flaky, 128+ hard-fail).
+/// design-4 regression: 2000 files is well past the old failure cliff
+/// (≥128 = FILE_LIST_EARLY_FLUSH_ENTRIES failed deterministically,
+/// ~100 was timing-flaky). Pre-fix, both sides raced the daemon's
+/// manifest loop: the daemon announced Negotiation(tcp_fallback) on
+/// the mid-manifest early flush, and a force_grpc client started
+/// streaming FileData on the first need-list batch without any
+/// negotiation at all — either way the daemon's manifest loop
+/// rejected the premature FileData and tore down the push. Fixed by
+/// deferring the daemon's announcement to execute_grpc_fallback and
+/// gating the client's fallback sends on fallback_negotiated.
 #[test]
 fn forced_grpc_push_many_files_completes() {
-    let landed = forced_grpc_mirror_file_count(50, Duration::from_secs(120));
-    assert_eq!(landed, 50, "every file must land via the gRPC fallback");
+    let landed = forced_grpc_mirror_file_count(2_000, Duration::from_secs(120));
+    assert_eq!(landed, 2_000, "every file must land via the gRPC fallback");
 }
 
 /// The exact pre-w4-2 wedge: >262,144 needs-upload entries in
-/// gRPC-fallback mode. Ignored by default — generates ~270k files,
-/// runs for minutes, and currently CANNOT pass: design-4 (mid-manifest
-/// fallback negotiation) kills forced-gRPC pushes at ~128 entries,
-/// long before the old 262,145-entry wedge point. This is the
-/// acceptance test for design-4 + w4-2 together. Run manually:
+/// gRPC-fallback mode. With design-4 fixed this is expected to pass;
+/// it stays ignored only for runtime (~270k files, multi-minute).
+/// Joint acceptance test for design-4 + w4-2. Run manually:
 ///   cargo test -p blit-cli --test remote_tcp_fallback -- --ignored
 #[test]
-#[ignore = "blocked on design-4; also ~270k files / multi-minute runtime"]
+#[ignore = "~270k files / multi-minute runtime; run manually"]
 fn forced_grpc_push_overflows_old_upload_channel_capacity() {
     let landed = forced_grpc_mirror_file_count(270_000, Duration::from_secs(1800));
     assert_eq!(

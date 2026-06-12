@@ -416,6 +416,17 @@ impl RemotePushClient {
         } else {
             TransferMode::Undecided
         };
+        // design-4: the daemon's wire contract rejects FileData while its
+        // manifest loop is still running ("data payload received before
+        // negotiation"). Even in forced-gRPC mode the client must therefore
+        // hold its fallback payloads until the daemon announces
+        // Negotiation(tcp_fallback) — which the daemon only sends after it
+        // has seen ManifestComplete. Pre-fix, force_grpc initialized
+        // Fallback mode and the first mid-manifest need-list batch
+        // triggered FileData sends that raced the daemon's manifest loop:
+        // every forced-gRPC push of ≥128 files (one early need-list flush)
+        // died, and ~100 files was a coin flip.
+        let mut fallback_negotiated = false;
 
         let mut manifest_done = false;
         // Track whether we received new need-list entries this iteration.
@@ -486,7 +497,12 @@ impl RemotePushClient {
 
                                     match transfer_mode {
                                         TransferMode::Fallback => {
-                                            if need_list_received {
+                                            // design-4: hold payloads until the
+                                            // daemon's fallback negotiation;
+                                            // until then entries just accumulate
+                                            // in pending_queue (drained by the
+                                            // Negotiation arm).
+                                            if fallback_negotiated && need_list_received {
                                                 let size_hint = effective_size_hint(
                                                     transfer_size_hint,
                                                     manifest_total_bytes,
@@ -587,6 +603,11 @@ impl RemotePushClient {
                                     if neg.tcp_fallback {
                                         fallback_used = true;
                                         transfer_mode = TransferMode::Fallback;
+                                        // design-4: only now may fallback
+                                        // payloads flow — the daemon is past
+                                        // its manifest loop and ready to
+                                        // receive FileData.
+                                        fallback_negotiated = true;
 
                                             if need_list_received {
                                                 let size_hint = effective_size_hint(
@@ -739,7 +760,10 @@ impl RemotePushClient {
 
                             match transfer_mode {
                                 TransferMode::Fallback => {
-                                    if need_list_received {
+                                    // design-4: never interleave FileData
+                                    // between our own manifest sends — wait
+                                    // for the daemon's fallback negotiation.
+                                    if fallback_negotiated && need_list_received {
                                         let size_hint = effective_size_hint(
                                             transfer_size_hint,
                                             manifest_total_bytes,
