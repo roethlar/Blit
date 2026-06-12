@@ -41,7 +41,6 @@ fn pick_unused_port() -> u16 {
         .port()
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_push_falls_back_to_grpc_when_forced() {
     let work = tempdir().expect("tempdir");

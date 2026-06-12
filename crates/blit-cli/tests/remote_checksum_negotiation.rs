@@ -204,7 +204,6 @@ fn spawn_daemon_harness(work: &tempfile::TempDir, extra_daemon_args: &[&str]) ->
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn pull_checksum_rejected_when_daemon_disables_checksums() {
     // R15-F1 regression. Daemon advertises checksums disabled
@@ -250,7 +249,6 @@ fn pull_checksum_rejected_when_daemon_disables_checksums() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn pull_checksum_succeeds_when_daemon_enables_checksums() {
     // Companion: same setup minus `--no-server-checksums`. The

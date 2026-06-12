@@ -11,7 +11,6 @@ use std::time::Duration;
 mod common;
 use common::{run_with_timeout, TestContext};
 
-#[cfg(unix)]
 #[test]
 fn push_single_file_to_container_dir() {
     let ctx = TestContext::new();
@@ -46,7 +45,6 @@ fn push_single_file_to_container_dir() {
     assert_eq!(bytes, b"hello world");
 }
 
-#[cfg(unix)]
 #[test]
 fn push_single_file_rename() {
     // `blit copy FILE server:/mod/new.txt` (no trailing slash on dest)

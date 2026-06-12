@@ -41,7 +41,6 @@ fn pick_unused_port() -> u16 {
         .port()
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_pull_mirror_purges_extraneous_local_files() {
     let work = tempdir().expect("tempdir");
@@ -337,7 +336,6 @@ fn cli_bin() -> PathBuf {
     bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" })
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_pull_mirror_filtered_subset_preserves_out_of_scope_files() {
     // Closes F4: the daemon's filtered source manifest doesn't
@@ -399,7 +397,6 @@ fn remote_pull_mirror_filtered_subset_preserves_out_of_scope_files() {
     assert!(!dest_dir.join("server.tmp").exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_pull_mirror_delete_scope_all_purges_out_of_scope() {
     // `--delete-scope all` switches to MirrorMode::All — every dest

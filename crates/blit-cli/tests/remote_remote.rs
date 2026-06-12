@@ -179,7 +179,6 @@ impl DualDaemonContext {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_to_remote_copy_delegates_directly_without_cli_byte_path() {
     let ctx = DualDaemonContext::new(true);
@@ -209,7 +208,6 @@ fn remote_to_remote_copy_delegates_directly_without_cli_byte_path() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_to_remote_gate_reject_does_not_fall_back_to_relay() {
     let ctx = DualDaemonContext::new(false);
@@ -237,7 +235,6 @@ fn remote_to_remote_gate_reject_does_not_fall_back_to_relay() {
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
-#[cfg(unix)]
 #[test]
 fn remote_to_remote_explicit_relay_uses_legacy_cli_byte_path() {
     let ctx = DualDaemonContext::new(false);
@@ -272,7 +269,6 @@ fn remote_to_remote_explicit_relay_uses_legacy_cli_byte_path() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     let work = tempdir().expect("tempdir");
@@ -309,7 +305,6 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
-#[cfg(unix)]
 #[test]
 fn source_refuses_destination_negotiation_does_not_fall_back_to_relay() {
     let ctx = DualDaemonContext::new(true);

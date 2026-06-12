@@ -6,7 +6,6 @@ mod common;
 use common::{run_with_timeout, TestContext};
 
 /// Push with nested directory structure preserves hierarchy.
-#[cfg(unix)]
 #[test]
 fn test_push_nested_directories() {
     let ctx = TestContext::new();
@@ -52,7 +51,6 @@ fn test_push_nested_directories() {
 }
 
 /// Copy does NOT delete extraneous destination files (unlike mirror).
-#[cfg(unix)]
 #[test]
 fn test_copy_does_not_delete_extraneous() {
     let ctx = TestContext::new();
@@ -94,7 +92,6 @@ fn test_copy_does_not_delete_extraneous() {
 }
 
 /// Pull with nested directories preserves structure locally.
-#[cfg(unix)]
 #[test]
 fn test_pull_nested_directories() {
     let ctx = TestContext::new();
@@ -132,7 +129,6 @@ fn test_pull_nested_directories() {
 }
 
 /// Push many small files exercises tar shard batching.
-#[cfg(unix)]
 #[test]
 fn test_push_many_small_files() {
     let ctx = TestContext::new();
@@ -177,7 +173,6 @@ fn test_push_many_small_files() {
 }
 
 /// Push empty source directory should succeed without errors.
-#[cfg(unix)]
 #[test]
 fn test_push_empty_directory() {
     let ctx = TestContext::new();
@@ -203,7 +198,6 @@ fn test_push_empty_directory() {
 }
 
 /// Pull empty module should succeed without errors.
-#[cfg(unix)]
 #[test]
 fn test_pull_empty_module() {
     let ctx = TestContext::new();

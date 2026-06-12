@@ -5,7 +5,6 @@ use std::time::Duration;
 mod common;
 use common::{run_with_timeout, TestContext};
 
-#[cfg(unix)]
 #[test]
 fn test_push_tcp_negotiation() {
     let ctx = TestContext::new();
@@ -42,7 +41,6 @@ fn test_push_tcp_negotiation() {
     assert_eq!(bytes, b"push-tcp-test");
 }
 
-#[cfg(unix)]
 #[test]
 fn test_pull_tcp_negotiation() {
     let ctx = TestContext::new();
@@ -87,7 +85,6 @@ fn test_pull_tcp_negotiation() {
     assert_eq!(bytes, b"pull-tcp-test");
 }
 
-#[cfg(unix)]
 #[test]
 fn test_pull_grpc_fallback() {
     let ctx = TestContext::new();
@@ -128,7 +125,6 @@ fn test_pull_grpc_fallback() {
     assert_eq!(bytes, b"pull-grpc-test");
 }
 
-#[cfg(unix)]
 #[test]
 fn test_push_grpc_fallback() {
     let ctx = TestContext::new();
@@ -165,7 +161,6 @@ fn test_push_grpc_fallback() {
     assert_eq!(bytes, b"push-grpc-test");
 }
 
-#[cfg(unix)]
 #[test]
 fn test_pull_grpc_fallback_many_small_files() {
     // Step 4C parity: many small files on the gRPC pull fallback path.

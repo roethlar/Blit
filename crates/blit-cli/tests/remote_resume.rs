@@ -8,7 +8,6 @@ use common::{run_with_timeout, TestContext};
 /// Test that --resume mode works for remote pull with partial files.
 /// Creates a partial local file, runs pull with --resume, verifies only
 /// the differing blocks are transferred.
-#[cfg(unix)]
 #[test]
 fn test_pull_resume_partial_file() {
     let ctx = TestContext::new();
@@ -50,7 +49,6 @@ fn test_pull_resume_partial_file() {
 }
 
 /// Test that --resume mode with identical files transfers zero blocks.
-#[cfg(unix)]
 #[test]
 fn test_pull_resume_identical_file() {
     let ctx = TestContext::new();
@@ -86,7 +84,6 @@ fn test_pull_resume_identical_file() {
 }
 
 /// Test that --resume with --force-grpc also works (fallback path).
-#[cfg(unix)]
 #[test]
 fn test_pull_resume_grpc_fallback() {
     let ctx = TestContext::new();
