@@ -13,8 +13,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   Embedded decisions taken: Pull RPC deleted after w2-3 harvest; `zero_copy.rs`
   excluded from deletion → FAST evaluation slice `w8-1b`; multi-stream-pull
   plan doc authorized. `DESIGN_COHERENCE_REVIEW.md` → **Shipped**.
-- **Next coder action**: pick `w5-1-log-backend` (topmost `[ ]` in the
-  design-review queue) per the `slice` procedure.
+- **Autonomous coder session in progress (2026-06-11/12)**: slices completed
+  and sentineled on `master` (pending review, all local-only): w5-1-log-backend
+  (`56bda09`+`7145202`), w9-5-jobs-lifecycle-e2e (`ad773d8`),
+  w2-1-delete-warmup-machinery (`2a8a490`), w9-1-ungate-windows-tests
+  (`9324559`), w9-2-revive-root-tests (`461525d`). Queue rows w4-2, w5-2,
+  w4-1, w4-3, w1-2/3/4, w2-2 are SKIPPED-not-stale: their files overlap a
+  pending sentinel (faster-mode WIP requires disjoint files); they unblock
+  as sentinels are graded.
 - **Session authorization 2026-06-11 (this session only, owner verbatim: "work
   on as much as you can. commit every slice as it lands. if anything gets
   questionable, stop.")**: coder works the design-review queue on `master`
