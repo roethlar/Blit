@@ -139,15 +139,23 @@ pub fn strong_checksum(
     }
 }
 
-/// Hash a whole file with the given algorithm.
-pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
+/// Buffer size for streaming hashing — the one place this decision
+/// lives (w7-4: it was restated at five sites, including a 256 KiB
+/// stack array in the daemon's `build_file_header`).
+const HASH_READ_BUF_BYTES: usize = 256 * 1024;
+
+/// Hash everything `reader` yields with the given algorithm, owning
+/// the read loop and buffer size. `hash_file`, `partial_hash_first_last`'s
+/// small-file branch, and the daemon's `build_file_header` (which has an
+/// already-open `File` that `hash_file`'s path signature can't accept)
+/// all route through here.
+pub fn hash_reader(reader: &mut dyn Read, ty: ChecksumType) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; HASH_READ_BUF_BYTES];
     match ty {
         ChecksumType::Blake3 => {
             let mut hasher = blake3::Hasher::new();
-            let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-            let mut buf = vec![0u8; 256 * 1024];
             loop {
-                let n = f.read(&mut buf)?;
+                let n = reader.read(&mut buf)?;
                 if n == 0 {
                     break;
                 }
@@ -156,11 +164,9 @@ pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
             Ok(hasher.finalize().as_bytes().to_vec())
         }
         ChecksumType::XxHash3 => {
-            let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-            let mut buf = vec![0u8; 256 * 1024];
             let mut state = xxhash_rust::xxh3::Xxh3::new();
             loop {
-                let n = f.read(&mut buf)?;
+                let n = reader.read(&mut buf)?;
                 if n == 0 {
                     break;
                 }
@@ -169,11 +175,9 @@ pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
             Ok(state.digest().to_be_bytes().to_vec())
         }
         ChecksumType::Md5 => {
-            let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
             let mut ctx = md5::Context::new();
-            let mut buf = vec![0u8; 256 * 1024];
             loop {
-                let n = f.read(&mut buf)?;
+                let n = reader.read(&mut buf)?;
                 if n == 0 {
                     break;
                 }
@@ -184,40 +188,64 @@ pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
     }
 }
 
+/// Hash a whole file with the given algorithm.
+pub fn hash_file(path: &Path, ty: ChecksumType) -> Result<Vec<u8>> {
+    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    hash_reader(&mut f, ty)
+}
+
 /// Compute a partial hash consisting of the first and last `bytes` of the file using BLAKE3.
 /// If the file is smaller than 2*bytes, the whole file is hashed.
 pub fn partial_hash_first_last(path: &Path, bytes: usize) -> Result<Vec<u8>> {
     let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let len = f.metadata()?.len();
-    let mut hasher = blake3::Hasher::new();
     if len as usize <= bytes * 2 {
-        let mut buf = vec![0u8; 256 * 1024];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-    } else {
-        let mut first = vec![0u8; bytes];
-        f.read_exact(&mut first)?;
-        hasher.update(b"FIRST");
-        hasher.update(&first);
-
-        f.seek(SeekFrom::End(-(bytes as i64)))?;
-        let mut last = vec![0u8; bytes];
-        f.read_exact(&mut last)?;
-        hasher.update(b"LAST");
-        hasher.update(&last);
-        hasher.update(&len.to_le_bytes());
+        // Whole-file Blake3 — identical to hash_reader's Blake3 arm.
+        return hash_reader(&mut f, ChecksumType::Blake3);
     }
+    let mut hasher = blake3::Hasher::new();
+    let mut first = vec![0u8; bytes];
+    f.read_exact(&mut first)?;
+    hasher.update(b"FIRST");
+    hasher.update(&first);
+
+    f.seek(SeekFrom::End(-(bytes as i64)))?;
+    let mut last = vec![0u8; bytes];
+    f.read_exact(&mut last)?;
+    hasher.update(b"LAST");
+    hasher.update(&last);
+    hasher.update(&len.to_le_bytes());
     Ok(hasher.finalize().as_bytes().to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// w7-4: hash_file is now a thin wrapper over hash_reader; pin
+    /// the equivalence for every algorithm (and against hash_data,
+    /// which uses the non-streaming implementations) so the shared
+    /// loop can never silently diverge from the one-shot paths.
+    #[test]
+    fn hash_reader_matches_hash_file_and_hash_data() {
+        let tmp = tempfile::NamedTempFile::new().expect("tmp file");
+        // Larger than one 256 KiB read so the loop iterates.
+        let data: Vec<u8> = (0..600_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(tmp.path(), &data).expect("write");
+
+        for ty in [
+            ChecksumType::Blake3,
+            ChecksumType::XxHash3,
+            ChecksumType::Md5,
+        ] {
+            let via_file = hash_file(tmp.path(), ty).expect("hash_file");
+            let mut f = File::open(tmp.path()).expect("open");
+            let via_reader = hash_reader(&mut f, ty).expect("hash_reader");
+            assert_eq!(via_file, via_reader, "{ty:?} file vs reader");
+            let via_data = strong_checksum(&data, ty, true).expect("strong_checksum");
+            assert_eq!(via_reader, via_data, "{ty:?} reader vs data");
+        }
+    }
 
     #[test]
     fn test_rolling_checksum_basic() {

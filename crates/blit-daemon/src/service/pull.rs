@@ -506,32 +506,21 @@ fn build_file_header(
     relative: &Path,
     compute_checksum: bool,
 ) -> Result<FileHeader, Status> {
-    use std::io::Read;
-
     let abs_path = base.join(relative);
 
     if compute_checksum {
         // Open file once for both metadata and hashing
-        let file = std::fs::File::open(&abs_path)
+        let mut file = std::fs::File::open(&abs_path)
             .map_err(|err| Status::internal(format!("open {}: {}", abs_path.display(), err)))?;
         let metadata = file
             .metadata()
             .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
 
-        // Compute Blake3 hash using the already-open file
-        let mut hasher = blake3::Hasher::new();
-        let mut reader = std::io::BufReader::new(file);
-        let mut buf = [0u8; 256 * 1024];
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|err| Status::internal(format!("read {}: {}", abs_path.display(), err)))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        let checksum = hasher.finalize().as_bytes().to_vec();
+        // w7-4: hash via the shared read loop in blit-core (this was
+        // the fifth hand-rolled copy, with a 256 KiB stack array).
+        let checksum =
+            blit_core::checksum::hash_reader(&mut file, blit_core::checksum::ChecksumType::Blake3)
+                .map_err(|err| Status::internal(format!("hash {}: {err:#}", abs_path.display())))?;
 
         Ok(FileHeader {
             relative_path: normalize_relative_path(relative),
