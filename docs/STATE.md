@@ -26,12 +26,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    governs. Highest open ratified row is w4-1 (AbortOnDrop family, High);
    next visible rows include w4-3 and W1 socket-policy/timeout constants.
    Use `slice` only after a fresh owner authorization.
-3. **10 GbE benchmark session** (owner; macOS/Windows/Linux/TrueNAS matrix,
-   all transfer paths) — doubles as the zero-copy revisit-gate measurement
-   (D-2026-06-12-1) and w2-3's sign-off measure.
-4. **Land adaptive-streams** (D-2026-06-07-2) — after w2-3 per
+3. **Land adaptive-streams** (D-2026-06-07-2) — after w2-3 per
    MULTISTREAM_PULL.md sequencing; then w3-1. Then audit Round 1, TUI
    rework (Round 2), H10b streaming planner.
+4. **10 GbE benchmark session — DEFERRED by owner (2026-06-12: rig
+   assembly is real work; benchmarking pre-multi-stream is churn)**.
+   Runs AFTER w2-2 → w2-3 → adaptive-streams land — the natural
+   measurement point. It remains the zero-copy revisit gate
+   (D-2026-06-12-1) and w2-3's sign-off measure; capture before/after
+   baselines at that session, not earlier.
 
 ## Authoritative docs right now
 
@@ -46,8 +49,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: w2-3 Active flip; next push approval (all commits after `bf63a6e` are local-only; current pre-handoff HEAD is `b5cbb38`).
-- **10 GbE session** hardware/time (owner, possibly today).
+- **Owner**: w2-3 Active flip; push approval for the Windows test-tuning
+  commit (`439a2a7`, local-only — Windows CI red until it lands);
+  re-authorization for coder work (w4-1 next).
 
 ## Open questions
 
