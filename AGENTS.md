@@ -81,7 +81,10 @@ Antigravity exposes `catchup`/`handoff` as workspace skills in `.agents/skills/`
 - `crates/blit-app/`, `crates/blit-tui/` — TUI application layers (Phase 5/6 work).
 - `crates/blit-prometheus-bridge/` — metrics bridge.
 - `proto/blit.proto` — gRPC definitions; `blit-core`'s build script vendors protoc.
-- `tests/` — workspace-level integration tests; `scripts/` — helper tooling.
+- Integration tests live per-crate (`crates/blit-cli/tests/`,
+  `crates/blit-core/tests/`); the root `Cargo.toml` is a virtual workspace, so a
+  root-level `tests/` dir would never be compiled (w9-2 relocated the old one).
+  `scripts/` — helper tooling.
 
 ## 5. Build, test, validation
 

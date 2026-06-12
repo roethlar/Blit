@@ -1,8 +1,8 @@
-use eyre::Result;
 use blit_core::checksum::ChecksumType;
 use blit_core::enumeration::{EntryKind, FileEnumerator};
 use blit_core::fs_enum::{self, CopyJob, FileEntry};
 use blit_core::mirror_planner::{MirrorPlanner, RemoteEntryState};
+use eyre::Result;
 use filetime::{set_file_mtime, FileTime};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -281,7 +281,8 @@ fn planner_skips_fetch_when_dest_matches_remote() -> Result<()> {
     fs::write(&dest_path, b"hello world")?;
     let metadata = fs::metadata(&dest_path)?;
     let mtime = metadata
-        .modified()?        .duration_since(UNIX_EPOCH)
+        .modified()?
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
@@ -323,7 +324,8 @@ fn planner_checksum_fetch_logic() -> Result<()> {
     fs::write(&dest_path, b"checksum data")?;
     let metadata = fs::metadata(&dest_path)?;
     let mtime = metadata
-        .modified()?        .duration_since(UNIX_EPOCH)
+        .modified()?
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
@@ -336,7 +338,10 @@ fn planner_checksum_fetch_logic() -> Result<()> {
     assert!(planner.should_fetch_remote_file(&dest_path, &remote_mismatch));
 
     let mut remote_match = remote_mismatch;
-    remote_match.hash = Some(blit_core::checksum::hash_file(&dest_path, ChecksumType::Blake3)?);
+    remote_match.hash = Some(blit_core::checksum::hash_file(
+        &dest_path,
+        ChecksumType::Blake3,
+    )?);
     assert!(!planner.should_fetch_remote_file(&dest_path, &remote_match));
     Ok(())
 }
@@ -347,7 +352,7 @@ fn normalize_path(path: &std::path::Path) -> String {
     {
         replaced.to_ascii_lowercase()
     }
-    #[cfg(not(windows))] 
+    #[cfg(not(windows))]
     {
         replaced
     }
@@ -457,8 +462,7 @@ fn planner_mirror_parity_across_modes() -> Result<()> {
     let source_entries = enumerator.enumerate_local(&src_root)?;
 
     let mut dest_filter = fs_enum::FileFilter::default();
-    let dest_file_entries =
-        fs_enum::enumerate_directory_filtered(&dest_root, &mut dest_filter)?;
+    let dest_file_entries = fs_enum::enumerate_directory_filtered(&dest_root, &mut dest_filter)?;
     let mut remote_states: HashMap<String, RemoteEntryState> = HashMap::new();
     let mut dest_rel_paths: HashMap<String, std::path::PathBuf> = HashMap::new();
     for entry in &dest_file_entries {
@@ -468,7 +472,8 @@ fn planner_mirror_parity_across_modes() -> Result<()> {
         let rel = entry.path.strip_prefix(&dest_root).unwrap().to_path_buf();
         let md = fs::metadata(&entry.path)?;
         let mtime = md
-            .modified()?            .duration_since(UNIX_EPOCH)
+            .modified()?
+            .duration_since(UNIX_EPOCH)
             .ok()
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);

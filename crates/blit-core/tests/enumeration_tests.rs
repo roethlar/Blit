@@ -1,6 +1,6 @@
-use eyre::Result;
 use blit_core::enumeration::{EntryKind, FileEnumerator};
 use blit_core::fs_enum::FileFilter;
+use eyre::Result;
 
 #[test]
 fn enumerator_returns_directories_and_files() -> Result<()> {

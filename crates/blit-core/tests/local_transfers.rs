@@ -4,10 +4,16 @@ use blit_core::perf_history;
 use eyre::Result;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tempfile::tempdir;
 
+/// Both tests mutate process-global state (the config-dir override
+/// and the perf-history file inside it); they must not interleave.
+static SERIAL: Mutex<()> = Mutex::new(());
+
 struct ConfigDirGuard {
-    temp: tempfile::TempDir,
+    // RAII holder: the tempdir must outlive the override.
+    _temp: tempfile::TempDir,
     prev: Option<PathBuf>,
 }
 
@@ -16,7 +22,7 @@ impl ConfigDirGuard {
         let temp = tempdir()?;
         let prev = config::config_dir_override();
         config::set_config_dir(temp.path());
-        Ok(Self { temp, prev })
+        Ok(Self { _temp: temp, prev })
     }
 }
 
@@ -32,6 +38,7 @@ impl Drop for ConfigDirGuard {
 
 #[test]
 fn tiny_manifest_records_fast_path() -> Result<()> {
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = ConfigDirGuard::new()?;
     perf_history::set_perf_history_enabled(true)?;
     let _ = perf_history::clear_history()?;
@@ -45,9 +52,11 @@ fn tiny_manifest_records_fast_path() -> Result<()> {
     fs::write(src.join("b.txt"), b"two")?;
     fs::write(src.join("c.txt"), b"three")?;
 
-    let mut options = LocalMirrorOptions::default();
-    options.progress = false;
-    options.perf_history = true;
+    let options = LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        ..Default::default()
+    };
 
     let orchestrator = TransferOrchestrator::new();
     let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
@@ -61,6 +70,7 @@ fn tiny_manifest_records_fast_path() -> Result<()> {
 
 #[test]
 fn larger_manifest_records_streaming_path() -> Result<()> {
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = ConfigDirGuard::new()?;
     perf_history::set_perf_history_enabled(true)?;
     let _ = perf_history::clear_history()?;
@@ -70,18 +80,23 @@ fn larger_manifest_records_streaming_path() -> Result<()> {
     let dest = tmp.path().join("dest");
     fs::create_dir_all(&src)?;
     fs::create_dir_all(&dest)?;
-    for idx in 0..32 {
+    // Must exceed the fast-path tiny budget (TINY_FILE_LIMIT = 256
+    // in orchestrator/fast_path.rs) so the streaming planner runs.
+    // The original 32-file version predates that threshold.
+    for idx in 0..300 {
         let file = src.join(format!("file-{idx}.txt"));
         fs::write(file, format!("payload-{idx}"))?;
     }
 
-    let mut options = LocalMirrorOptions::default();
-    options.progress = false;
-    options.perf_history = true;
+    let options = LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        ..Default::default()
+    };
 
     let orchestrator = TransferOrchestrator::new();
     let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
-    assert_eq!(summary.copied_files, 32);
+    assert_eq!(summary.copied_files, 300);
 
     let records = perf_history::read_recent_records(0)?;
     let last = records.last().expect("expected perf history record");

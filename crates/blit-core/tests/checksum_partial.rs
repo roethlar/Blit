@@ -37,13 +37,13 @@ fn file_needs_copy_partial_short_circuit() -> Result<()> {
     fs::write(&a, &data)?;
     fs::write(&b, &data)?;
     // Expect no copy when using Blake3 (full match)
-    assert_eq!(needs(&a, &b, Some(ChecksumType::Blake3))?, false);
+    assert!(!needs(&a, &b, Some(ChecksumType::Blake3))?);
 
     // Modify last byte => partial hash should detect and ask to copy
     let mut d2 = data.clone();
     let last = d2.len() - 1;
     d2[last] ^= 0xFF;
     fs::write(&b, &d2)?;
-    assert_eq!(needs(&a, &b, Some(ChecksumType::Blake3))?, true);
+    assert!(needs(&a, &b, Some(ChecksumType::Blake3))?);
     Ok(())
 }
