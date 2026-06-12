@@ -23,6 +23,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   the handoff entry below; per AGENTS.md §9 it does NOT carry into the next
   session.
 
+- **Session authorization 2026-06-12 (this session only, owner: "Continue
+  with 1" — re-grant of the prior night's shape)**: coder works the
+  unblocked design-review queue on `master` (no branches), one local commit
+  per slice, never push, faster-mode WIP iff files-changed disjoint across
+  pending sentinels, stop on anything questionable or owner-embedded
+  decisions. Does not carry into the next session (AGENTS.md §9).
+
 ## Queue (ordered)
 
 1. **Execute the rest of the design-review queue** — `REVIEW.md`

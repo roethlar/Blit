@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tonic::{Status, Streaming};
 
@@ -81,13 +81,10 @@ pub(crate) async fn accept_data_connection_stream(
     listener: TcpListener,
     expected_token: Vec<u8>,
     module: ModuleConfig,
-    files: mpsc::Receiver<FileHeader>,
     stream_count: u32,
 ) -> Result<TransferStats, Status> {
     let start = Instant::now();
     let streams = stream_count.max(1) as usize;
-    let files = Arc::new(AsyncMutex::new(files));
-    let cache = Arc::new(AsyncMutex::new(HashMap::new()));
     let mut handles = Vec::with_capacity(streams);
 
     for idx in 0..streams {
@@ -128,17 +125,8 @@ pub(crate) async fn accept_data_connection_stream(
         );
         let expected_token = expected_token.clone();
         let module_clone = module.clone();
-        let files_clone = Arc::clone(&files);
-        let cache_clone = Arc::clone(&cache);
         handles.push(tokio::spawn(async move {
-            handle_data_plane_stream(
-                socket,
-                expected_token,
-                module_clone,
-                files_clone,
-                cache_clone,
-            )
-            .await
+            handle_data_plane_stream(socket, expected_token, module_clone).await
         }));
     }
 
@@ -164,8 +152,6 @@ async fn handle_data_plane_stream(
     mut socket: TcpStream,
     expected_token: Vec<u8>,
     module: ModuleConfig,
-    files: Arc<AsyncMutex<mpsc::Receiver<FileHeader>>>,
-    cache: Arc<AsyncMutex<HashMap<String, FileHeader>>>,
 ) -> Result<TransferStats, Status> {
     let start = Instant::now();
     let mut token_buf = vec![0u8; expected_token.len()];
@@ -197,18 +183,6 @@ async fn handle_data_plane_stream(
         module.path.display()
     );
 
-    // Drain the manifest channel concurrently so the gRPC control loop
-    // doesn't back-pressure when the data plane no longer consumes per-
-    // record headers (we get full headers off the wire now).
-    let drain_handle = {
-        let files = Arc::clone(&files);
-        tokio::spawn(async move {
-            let mut guard = files.lock().await;
-            while guard.recv().await.is_some() {}
-        })
-    };
-    let _ = cache; // headers come off the wire; cache no longer needed
-
     // Route the inbound wire through the unified receive pipeline:
     //   socket → StallGuard → execute_receive_pipeline → FsTransferSink → disk
     // Same call shape as the client's pull-receive side. Tar shards get
@@ -239,8 +213,6 @@ async fn handle_data_plane_stream(
     let outcome = receive_push_data_plane(socket, sink)
         .await
         .map_err(|err| Status::internal(format!("data plane receive: {err:#}")))?;
-
-    drain_handle.abort();
 
     let stats = TransferStats {
         files_transferred: outcome.files_written as u64,

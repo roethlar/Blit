@@ -19,7 +19,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tonic::{Status, Streaming};
 
 const FILE_LIST_BATCH_MAX_ENTRIES: usize = 16 * 1024;
@@ -28,7 +28,6 @@ const FILE_LIST_BATCH_MAX_DELAY: Duration = Duration::from_millis(25);
 const FILE_LIST_EARLY_FLUSH_ENTRIES: usize = 128;
 const FILE_LIST_EARLY_FLUSH_BYTES: usize = 64 * 1024;
 const FILE_LIST_EARLY_FLUSH_DELAY: Duration = Duration::from_millis(5);
-const FILE_UPLOAD_CHANNEL_CAPACITY: usize = FILE_LIST_BATCH_MAX_ENTRIES * 16;
 
 pub(crate) async fn handle_push_stream(
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
@@ -52,8 +51,6 @@ pub(crate) async fn handle_push_stream(
     let mut purge_filter = blit_core::fs_enum::FileFilter::default();
     let mut scan_complete = false;
     let mut need_list_sender = FileListBatcher::new(tx.clone());
-    let (upload_tx, upload_rx) = mpsc::channel::<FileHeader>(FILE_UPLOAD_CHANNEL_CAPACITY);
-    let mut upload_rx_opt = Some(upload_rx);
     let mut data_plane_handle: Option<tokio::task::JoinHandle<Result<TransferStats, Status>>> =
         None;
     let mut force_grpc_effective = force_grpc_data;
@@ -147,18 +144,12 @@ pub(crate) async fn handle_push_stream(
 
                 if file_requires_upload(module_ref, &rel, &file)? {
                     file.relative_path = sanitized.clone();
-                    // Post-Phase-5, the TCP data plane receiver no longer
-                    // consumes upload_tx (manifest metadata is now on the
-                    // wire inline). Only the gRPC fallback path uses this
-                    // queue. Tolerate a closed receiver — the data plane
-                    // having shut down cleanly (END seen, all bytes
-                    // received) is not a failure mode that should reject
-                    // late manifest entries.
-                    if let Err(err) = upload_tx.send(file.clone()).await {
-                        let _ = err;
-                        // Receiver dropped — TCP data plane is done; the
-                        // gRPC fallback path doesn't open this stream.
-                    }
+                    // w4-2: the 262,144-slot upload channel that used to sit
+                    // here is gone. Headers travel on the wire post-Phase-5;
+                    // the TCP receiver drained it into the void, and in gRPC
+                    // fallback nothing read it at all — so manifest entry
+                    // #262,145 wedged daemon and client forever with no
+                    // timeout in scope.
                     // w5-1: was an unconditional per-file eprintln — stderr
                     // spam proportional to file count. Debug-level now;
                     // visible with BLIT_LOG=debug.
@@ -214,15 +205,11 @@ pub(crate) async fn handle_push_stream(
 
                             let module_for_transfer = module_ref.clone();
 
-                            let upload_rx =
-                                upload_rx_opt.take().expect("upload receiver already taken");
-
                             let stream_target = desired_streams(&files_to_upload);
                             let transfer_task = tokio::spawn(accept_data_connection_stream(
                                 listener,
                                 token.clone(),
                                 module_for_transfer,
-                                upload_rx,
                                 stream_target,
                             ));
 
@@ -266,7 +253,6 @@ pub(crate) async fn handle_push_stream(
         ));
     }
 
-    drop(upload_tx);
     need_list_sender.finish().await?;
 
     let force_grpc_effective = force_grpc_effective || force_grpc_client;
@@ -287,14 +273,12 @@ pub(crate) async fn handle_push_stream(
                 .port();
             let token = generate_token()?;
             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
-            let upload_rx = upload_rx_opt.take().expect("upload receiver already taken");
             let module_for_transfer = module.clone();
             let stream_target = desired_streams(&files_to_upload);
             let transfer_task = tokio::spawn(accept_data_connection_stream(
                 listener,
                 token.clone(),
                 module_for_transfer,
-                upload_rx,
                 stream_target,
             ));
             send_control_message(

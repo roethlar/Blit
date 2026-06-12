@@ -240,3 +240,165 @@ impl Drop for ChildGuard {
         }
     }
 }
+
+// ---------------------------------------------------------------
+// w4-2 regression net: the daemon used to queue every needs-upload
+// manifest entry into a 262,144-slot channel that nothing read in
+// gRPC-fallback mode, so manifest entry #262,145 wedged daemon and
+// client forever with no timeout in scope
+// (async-push-upload-channel-fallback-wedge). The channel is deleted;
+// these tests pin that many-file forced-gRPC pushes complete.
+// ---------------------------------------------------------------
+
+/// Spawn a daemon, mirror `file_count` generated files with
+/// --force-grpc, assert success, and return how many landed.
+fn forced_grpc_mirror_file_count(file_count: usize, timeout: Duration) -> usize {
+    let work = tempdir().expect("tempdir");
+    let workspace = work.path();
+
+    let module_dir = workspace.join("module");
+    fs::create_dir_all(&module_dir).expect("module dir");
+    let src_dir = workspace.join("src");
+    fs::create_dir_all(&src_dir).expect("src dir");
+    for idx in 0..file_count {
+        // Shard into subdirs so no single directory holds 262k entries.
+        let sub = src_dir.join(format!("d{}", idx / 1024));
+        if idx % 1024 == 0 {
+            fs::create_dir_all(&sub).expect("shard dir");
+        }
+        fs::write(sub.join(format!("f{idx}.txt")), b"x").expect("write src file");
+    }
+
+    let config_dir = workspace.join("cli-config");
+    fs::create_dir_all(&config_dir).expect("cli config");
+
+    let port = pick_unused_port();
+    let config = DaemonConfig {
+        daemon: DaemonSection {
+            bind: "127.0.0.1".into(),
+            port,
+            no_mdns: true,
+        },
+        modules: vec![ModuleSection {
+            name: "test".into(),
+            path: module_dir.clone(),
+            comment: None,
+            read_only: false,
+        }],
+    };
+    let config_path = workspace.join("blitd.toml");
+    fs::write(
+        &config_path,
+        toml::to_string(&config).expect("serialize config"),
+    )
+    .expect("write config");
+
+    let exe_path = std::env::current_exe().expect("current_exe");
+    let bin_dir = exe_path
+        .parent()
+        .expect("deps dir")
+        .parent()
+        .expect("bin dir")
+        .to_path_buf();
+    let cli_bin = bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" });
+    let daemon_bin = bin_dir.join(if cfg!(windows) {
+        "blit-daemon.exe"
+    } else {
+        "blit-daemon"
+    });
+
+    let daemon_child = Command::new(&daemon_bin)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--force-grpc-data")
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let mut daemon = ChildGuard::new(daemon_child);
+
+    let mut ready = false;
+    for _ in 0..50 {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(ready, "daemon failed to listen on {port}");
+
+    let dest_remote = format!("127.0.0.1:{port}:/test/");
+    let src_arg = format!("{}/", src_dir.display());
+    let mut cli_cmd = Command::new(&cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("mirror")
+        .arg("--yes")
+        .arg("--force-grpc")
+        .arg(&src_arg)
+        .arg(&dest_remote);
+    let output = run_with_timeout(cli_cmd, timeout);
+    daemon.terminate();
+
+    assert!(
+        output.status.success(),
+        "forced-gRPC mirror of {file_count} files failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    walkdir_count_files(&module_dir)
+}
+
+fn walkdir_count_files(root: &std::path::Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read module dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// 50 files: multi-file fallback coverage inside the zone that works
+/// today. Counts ≥ FILE_LIST_EARLY_FLUSH_ENTRIES (128) fail
+/// deterministically — and ~100 fails flakily — for a PRE-EXISTING
+/// reason unrelated to w4-2: the mid-manifest early-flush negotiation
+/// breaks the forced-gRPC push (filed as design-4; verified present
+/// before the w4-2 deletion via stash-bisect at 5/10/20/50/80 pass,
+/// 100 flaky, 128+ hard-fail).
+#[test]
+fn forced_grpc_push_many_files_completes() {
+    let landed = forced_grpc_mirror_file_count(50, Duration::from_secs(120));
+    assert_eq!(landed, 50, "every file must land via the gRPC fallback");
+}
+
+/// The exact pre-w4-2 wedge: >262,144 needs-upload entries in
+/// gRPC-fallback mode. Ignored by default — generates ~270k files,
+/// runs for minutes, and currently CANNOT pass: design-4 (mid-manifest
+/// fallback negotiation) kills forced-gRPC pushes at ~128 entries,
+/// long before the old 262,145-entry wedge point. This is the
+/// acceptance test for design-4 + w4-2 together. Run manually:
+///   cargo test -p blit-cli --test remote_tcp_fallback -- --ignored
+#[test]
+#[ignore = "blocked on design-4; also ~270k files / multi-minute runtime"]
+fn forced_grpc_push_overflows_old_upload_channel_capacity() {
+    let landed = forced_grpc_mirror_file_count(270_000, Duration::from_secs(1800));
+    assert_eq!(
+        landed, 270_000,
+        "pre-w4-2 this hung forever at entry 262,145"
+    );
+}
