@@ -178,8 +178,12 @@ Per-sentinel steps:
 
 ## Identity
 
-- **Coder**: `claude-coder` (the agent running the
-  implementation session, currently driving from `claude.ai/code`).
-- **Reviewer**: `claude-reviewer` (the agent running the
-  parallel review session). Identifies itself in
-  `.review/results/<id>.verified.json` as `reviewer`.
+- **Coder** and **Reviewer** are roles, not fixed names. Any model may
+  fill either role; the same model must not grade its own slice.
+- The `reviewer` field in `.review/results/<id>.verified.json` records
+  **which model actually performed the review** — `claude-reviewer`,
+  `grok-reviewer`, `gpt-reviewer`, `owner`, etc. Sign honestly; the
+  field exists for the audit trail, not as a magic trigger.
+  (2026-06-12: seven w* verdicts originally signed `claude-reviewer`
+  were corrected to `grok-reviewer` — the owner had a Grok session
+  adopt the name because this section used to hardcode it.)
