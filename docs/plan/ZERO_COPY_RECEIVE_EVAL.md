@@ -1,9 +1,9 @@
 # zero_copy.rs FAST evaluation — splice in the receive pipeline
 
-**Status**: Draft
+**Status**: Active (verdict ratified — outcome is deletion, executed in w8-1)
 **Created**: 2026-06-12
 **Supersedes**: nothing
-**Decision ref**: pending (w8-1b verdict; queue ratified D-2026-06-11-2)
+**Decision ref**: D-2026-06-12-1 (owner agreed 2026-06-12: delete)
 
 ## Goal
 
