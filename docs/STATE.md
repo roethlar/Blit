@@ -1,7 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-06-12 (autonomous coder session: 7 design-review slices
-sentineled) at commit `0af904e`
+Last updated: 2026-06-12 (claude-reviewer: 7 design-review sentinels graded) at commit `88fdcdb`
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -9,65 +8,60 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **7 design-review slices await review** — sentinels in `.review/ready/`,
-  all on `master`, ALL COMMITS LOCAL-ONLY (push needs owner approval,
-  AGENTS.md §8): w5-1-log-backend (`56bda09`+`7145202`),
-  w9-5-jobs-lifecycle-e2e (`ad773d8`), w2-1-delete-warmup-machinery
-  (`2a8a490`), w9-1-ungate-windows-tests (`9324559`), w9-2-revive-root-tests
-  (`461525d`), w9-4-readonly-enforcement-tests (`4d67210`),
-  w8-1b-zero-copy-fast-eval (`6189d82`, analysis-only —
-  `docs/plan/ZERO_COPY_RECEIVE_EVAL.md` Draft recommends deletion; owner
-  verdict is the gate). Suite 1331 → 1368, validation green per slice.
-- **Why the coder stopped**: every remaining `[ ]` queue row either shares
-  files with a pending sentinel (the session's owner-granted faster-mode WIP
-  requires fully disjoint files), needs the owner (w2-3 plan interview,
-  w8-1b/w8-1 verdict), or depends on an unlanded slice (w2-4, w6-2).
-  Skip map: w4-2/w4-1/w4-3/w1-x/w5-3/w5-4/w7-1/w7-2/w7-4/w8-2/w8-3 overlap
-  w5-1's footprint; w2-2 overlaps w2-1; w9-3/w9-6 overlap
-  w9-4's common/mod.rs + w2-1's tuning.rs; w10 overlaps w9-2's AGENTS.md.
-  Grading any sentinel unblocks its skip set.
+- **7 design-review sentinels graded and accepted** (claude-reviewer per
+  `.review/README.md` loop): w2-1, w5-1, w8-1b, w9-1, w9-2, w9-4, w9-5.
+  All 7 `.review/ready/*.json` cleared; 7 `.verified.json` written; all
+  corresponding rows in REVIEW.md flipped `[~]` → `[x]`. Validation
+  re-run green for each (fmt/clippy/test --workspace); diffs matched
+  findings exactly (no reopens). Commits local-only on master.
+- **Unblocked**: the 7 verdicts unblock their skip sets in the design-review
+  queue (w4-2 delete-push-upload-channel is first; w4-1, w5-2, others per
+  overlap map). w8-1b analysis accepted (plan doc delivered; owner D-2026-06-12-1
+  already ratified delete, now unblocked for w8-1 execution). w5-1 (lib.rs)
+  graded, which was a cross-slice blocker.
 - The 2026-06-11 session-authorization note (owner verbatim + scope) is in
   the handoff entry below; per AGENTS.md §9 it does NOT carry into the next
   session.
 
 ## Queue (ordered)
 
-1. **Review/grade the 7 pending sentinels** — reviewer loop per
-   `.review/README.md` (`.review/reviewer-wait.sh` fires immediately; 7
-   sentinels present). Each verdict unblocks overlap-skipped coder slices.
-2. **Execute the rest of the design-review queue** — `REVIEW.md`
-   "Design-review queue" order governs; next unblocked-after-grading rows
-   are w4-2 (push upload channel), w5-2 (dead classifier), w4-1
-   (AbortOnDrop family). w2-3 needs an owner plan interview first
-   (multi-stream pull, authorized D-2026-06-11-2).
-3. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase up to
+1. **Execute the rest of the design-review queue** — `REVIEW.md`
+   "Design-review queue" order governs. The 7 sentinels (w5-1, w9-5, w2-1,
+   w9-1, w9-2, w9-4, w8-1b) were graded+accepted by claude-reviewer
+   2026-06-12; all rows `[x]`, ready/ empty. Next unblocked rows:
+   w4-2 (push upload channel), w5-2 (dead classifier), w4-1 (AbortOnDrop
+   family). w2-3 needs an owner plan interview first (multi-stream pull,
+   authorized D-2026-06-11-2).
+2. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase up to
    `eafb187`, excluding `d9d4ec7`. Plan doc first. Interacts with
    w2-3/w3-1 data_plane churn — sequence consciously.
-4. Finish audit **Round 1** per `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md`
+3. Finish audit **Round 1** per `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md`
    (cross-check: several Round-1 items are now design-review slices).
-5. **Round 2 — Phase 6 TUI rework** (`docs/plan/TUI_REWORK.md`).
-6. `greenfield_plan_v6.md` §1.1 streaming planner + heartbeat + stall
+4. **Round 2 — Phase 6 TUI rework** (`docs/plan/TUI_REWORK.md`).
+5. `greenfield_plan_v6.md` §1.1 streaming planner + heartbeat + stall
    detector (H10b) — queued after Round 1. (w2-1 deleted the dead warmup
    machinery; H10b is the real adaptive design and also the revisit-gate
    context for `ZERO_COPY_RECEIVE_EVAL.md`.)
 
 ## Authoritative docs right now
 
-- Design queue: `REVIEW.md` "Design-review queue" (7 rows now `[~]`) +
-  the three `docs/audit/` 2026-06-11 deliverables
-- Review loop: `REVIEW.md` + `.review/README.md` (+ 7 finding docs in
-  `.review/findings/w*.md`)
-- New: `docs/plan/ZERO_COPY_RECEIVE_EVAL.md` (Draft — w8-1b verdict doc)
+- Design queue: `REVIEW.md` "Design-review queue" (7 w* rows now `[x]`;
+  graded by claude-reviewer) + the three `docs/audit/` 2026-06-11 deliverables
+- Review loop: `REVIEW.md` + `.review/README.md` (verdicts in
+  `.review/results/w*.verified.json`; 7 findings in `.review/findings/w*.md`)
+- New: `docs/plan/ZERO_COPY_RECEIVE_EVAL.md` (owner-ratified delete via
+  D-2026-06-12-1; w8-1b slice delivered the analysis)
 - Findings: `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` (R3 governs)
 - Plan: `docs/plan/TUI_REWORK.md` (gated on Round 1)
 
 ## Blocked / waiting
 
-- **Owner approval to push**: 22 local-only commits on `master`
-  (`7d53107..0af904e` — 4 pre-session + 18 from the 2026-06-12 coder
-  session). Before any push: list exact refs and wait (AGENTS.md §8).
-- **Owner verdicts**: the 7 sentinels; the w8-1b delete-vs-implement call;
-  the w2-3 plan interview.
+- **Owner approval to push**: local-only commits on `master` (coder slices
+  + 7 claude-reviewer verdict commits + handoff records). Before any push:
+  list exact local refs vs origin/gitea and wait for explicit owner
+  approval (AGENTS.md §8). No agent may push.
+- **Owner verdicts / next gates**: w2-3 plan interview (multi-stream pull);
+  w8-1 delete of zero_copy (per D-2026-06-12-1 on the w8-1b eval doc).
 - Stale remote branches pending deletion **by explicit name** (verified
   ahead=0): `phase5/a1`, `phase5/blit-app-extract` (remote-only refs on
   `origin` + `gitea`; deletion is a remote `push --delete`).
@@ -84,6 +78,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-06-12** @ `88fdcdb` — claude-reviewer persona session per
+  `.review/README.md`. Woke via reviewer-wait.sh; graded all 7 design-review
+  sentinels on master (w2-1-delete-warmup-machinery, w5-1-log-backend,
+  w8-1b-zero-copy-fast-eval, w9-1-ungate-windows-tests, w9-2-revive-root-tests,
+  w9-4-readonly-enforcement-tests, w9-5-jobs-lifecycle-e2e). All accepted
+  (re-ran validation per slice; diffs + findings + commit messages aligned;
+  no reopens or code changes by reviewer). Wrote 7 *.verified.json (reviewer:
+  "claude-reviewer"), flipped REVIEW.md rows `[~]`→`[x]`, git-rm'd ready/
+  sentinels. 7 local commits. ready/ now empty (NO_READY confirmed).
+  Unblocks overlap-skipped coder rows (w4-2 first). **Exact first action
+  next session**: owner may authorize coder on unblocked design-review
+  slices (w4-2 etc.) or Windows parity (`scripts/windows/run-blit-tests.ps1`);
+  any push still requires explicit owner gate (list refs first).
 - **2026-06-12** @ `0af904e` — Autonomous overnight coder session under
   owner grant ("work on as much as you can. commit every slice as it
   lands. if anything gets questionable, stop." — master only, no branches,
@@ -101,6 +108,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   3 docs in `docs/audit/`); design-1/2/3 filed; owner ratified all 38
   slices (D-2026-06-11-2). Commits `7d53107`,`6e8dfc4`,`55b1fca`,`5b5ff5b`
   LOCAL-ONLY pending push approval.
-- **2026-06-11** @ `1be16bc` — audit-h3c slice 1 graded and accepted (owner
-  verdict; validation green, test-fn count flat at 344). Owner directed:
-  design-coherence review next; slice-2 re-scope waits on findings.
