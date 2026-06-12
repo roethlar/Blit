@@ -1,7 +1,7 @@
 # w5-1-log-backend — stderr log backend (warn) in all 4 binaries + one prefix convention
 
 **Branch**: `master` (owner-authorized branchless session 2026-06-11; AGENTS.md §8 forbids agent-created branches)
-**Commit**: `56bda09`
+**Commit**: `56bda09` + follow-up `7145202` (sentinel refreshed; review range is `1adbe0c..7145202` minus the `d517935` bookkeeping commit)
 **Source findings**: errors-log-facade-has-no-backend (reviewer: high), errors-stderr-prefix-babel (reviewer: medium) — `docs/audit/DESIGN_FINDINGS_2026-06-11_PHASE_B.md`
 
 ## What
@@ -64,6 +64,20 @@ retry.rs already used), with log-facade lines rendered as
 prefix convention; unset/garbage `BLIT_LOG` defaults to warn; overrides
 parse case-insensitively (off/error/debug/trace). Suite total grew
 1331 → 1334; nothing removed.
+
+## Follow-up commit (7145202)
+
+The first sweep's grep missed multi-line `eprintln!` calls whose format
+string starts on a continuation line. Converged in the follow-up: cli
+perf-history warning + daemon stat warning → `log::warn!` (blit-cli
+gains `log = "0.4"`); daemon pull accepted/aggregate + push
+stream-complete/buffer-pool lines → `blitd: `; cli debug worker-limiter
++ verbose delegation lines → `blit: `. Deliberately left: the
+jobs-watch ticker vocabulary (`[active]/[progress]/[done]/[not-found]/
+[timeout]` — coherent single-command status output) and the client-side
+throughput info lines (`[data-plane-client] aggregate`,
+`[pull-data-plane] stream` — pair with the trace-gated family under
+remote_parity.rs's prefix contract).
 
 ## Known gaps
 
