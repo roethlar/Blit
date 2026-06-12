@@ -322,7 +322,7 @@ impl RemotePullClient {
         // TODO(audit-h3c-2): the `map_err` below strips tonic::Status
         // to a String, dropping the std::io::Error chain that slice 2's
         // watchdog will attach when it surfaces a TimedOut. Without
-        // preserving the chain, `blit_app::transfers::retry::is_retryable`
+        // preserving the chain, `crate::remote::retry::is_retryable`
         // will not classify a stall as retryable and `--retry/--wait`
         // will not fire. Slice 2 must replace this conversion with one
         // that preserves the io::Error in the eyre chain (e.g.
@@ -783,7 +783,7 @@ impl RemotePullClient {
         // format_status). Slice 2 must change those constructors (or
         // add new ones) so the io::Error from a watchdog-surfaced
         // TimedOut survives in the eyre chain — otherwise
-        // `blit_app::transfers::retry::is_retryable` won't classify
+        // `crate::remote::retry::is_retryable` won't classify
         // h3c-2 stalls as retryable, and `--retry/--wait` will silently
         // stop working on this code path.
         while let Some(msg) =

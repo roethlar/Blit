@@ -2,6 +2,7 @@ pub mod endpoint;
 pub mod instrumentation;
 pub mod pull;
 pub mod push;
+pub mod retry;
 pub mod transfer;
 pub mod tuning;
 

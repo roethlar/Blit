@@ -10,40 +10,14 @@
 //! fast, retryable failure this loop catches.
 
 use std::future::Future;
-use std::io;
 use std::time::Duration;
 
 use eyre::Result;
 
-/// Decide whether a failed transfer is worth retrying. Conservative: only
-/// transient transport-level failures are retryable. A fatal error
-/// (path-safety rejection, gate denial, auth, invalid argument — all
-/// surfaced as plain `eyre` messages with no transient I/O source) is
-/// NOT retried, so we never loop forever on a deterministic failure.
-///
-/// Retryable = the error chain contains a `std::io::Error` whose kind is
-/// a transient transport condition, which is exactly what a mid-transfer
-/// network drop or the audit-1c `StallGuard` timeout surfaces.
-pub fn is_retryable(err: &eyre::Report) -> bool {
-    err.chain().any(|cause| {
-        cause
-            .downcast_ref::<io::Error>()
-            .is_some_and(|io_err| is_retryable_io_kind(io_err.kind()))
-    })
-}
-
-fn is_retryable_io_kind(kind: io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        io::ErrorKind::TimedOut
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::BrokenPipe
-            | io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::NotConnected
-    )
-}
+// w5-2: the classifier moved to blit-core (single owner of retry
+// policy, next to the transfer code that produces the errors). The
+// re-export keeps this module's public API stable.
+pub use blit_core::remote::retry::is_retryable;
 
 /// Run `attempt` (a fresh transfer attempt; `attempt_no` is 0 on the
 /// first try) with up to `retries` retries spaced by `wait`. Retries fire
@@ -80,6 +54,7 @@ where
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::io;
 
     fn io_err(kind: io::ErrorKind) -> eyre::Report {
         // Wrap in a context layer so the io::Error is a *source* in the
