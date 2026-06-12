@@ -91,7 +91,7 @@ async fn run_local_transfer_inner(
     let workers = options.workers;
     if debug_mode {
         eprintln!(
-            "[DEBUG] Worker limiter active – FAST planner auto-tuning capped to {workers} thread(s)."
+            "blit: debug: worker limiter active – FAST planner auto-tuning capped to {workers} thread(s)."
         );
     }
 

@@ -277,6 +277,7 @@ dependencies = [
  "eyre",
  "filetime",
  "indicatif",
+ "log",
  "rayon",
  "serde",
  "serde_json",

@@ -10,8 +10,8 @@ impl AppContext {
         let perf_history_enabled = match perf_history::perf_history_enabled() {
             Ok(enabled) => enabled,
             Err(err) => {
-                eprintln!(
-                    "[warn] failed to read performance history settings (defaulting to enabled): {err:?}"
+                log::warn!(
+                    "failed to read performance history settings (defaulting to enabled): {err:?}"
                 );
                 true
             }

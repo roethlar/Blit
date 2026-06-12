@@ -295,8 +295,8 @@ pub(crate) fn list_completions(
         let metadata = match entry.metadata() {
             Ok(meta) => meta,
             Err(err) => {
-                eprintln!(
-                    "[warn] failed to stat completion candidate {}: {}",
+                log::warn!(
+                    "failed to stat completion candidate {}: {}",
                     entry.path().display(),
                     err
                 );

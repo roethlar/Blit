@@ -251,7 +251,7 @@ async fn handle_data_plane_stream(
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     let gbps = (stats.bytes_transferred as f64 * 8.0) / elapsed / 1e9;
     eprintln!(
-        "[data-plane] stream complete: files={}, bytes={} ({:.2} Gbps)",
+        "blitd: push data plane: stream complete: files={}, bytes={} ({:.2} Gbps)",
         stats.files_transferred, stats.bytes_transferred, gbps
     );
     Ok(stats)
@@ -725,7 +725,7 @@ impl TarShardExecutor {
         let pool_stats = self.buffer_pool.stats();
         if pool_stats.total_allocated > 0 {
             eprintln!(
-                "[data-plane] buffer pool: {} allocated, {} cached, {} bytes through",
+                "blitd: push data plane: buffer pool: {} allocated, {} cached, {} bytes through",
                 pool_stats.total_allocated, pool_stats.cached, pool_stats.bytes_through
             );
         }

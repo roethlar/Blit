@@ -196,7 +196,7 @@ async fn run_remote_to_remote_direct_inner(
     let outcome = run_delegated_pull(execution, progress_handle.as_ref(), |started| {
         if verbose_human {
             eprintln!(
-                "[delegation] destination pulling from {} ({} stream(s))",
+                "blit: delegation: destination pulling from {} ({} stream(s))",
                 started.source_data_plane_endpoint, started.stream_count
             );
         }

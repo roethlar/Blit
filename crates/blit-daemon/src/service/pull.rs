@@ -659,7 +659,7 @@ async fn accept_pull_data_connection(
     if total_bytes > 0 {
         let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
         eprintln!(
-            "[pull-data-plane] aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
+            "blitd: pull data plane: aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
             gbps, total_bytes, elapsed
         );
     }
@@ -715,7 +715,7 @@ async fn accept_and_wrap_sinks(
                 }
             };
         eprintln!(
-            "[pull-data-plane] accepted connection {} from {}",
+            "blitd: pull data plane: accepted connection {} from {}",
             idx, addr
         );
 
@@ -900,7 +900,7 @@ async fn accept_pull_data_connection_streaming(
     if total_bytes > 0 {
         let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
         eprintln!(
-            "[pull-data-plane] aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
+            "blitd: pull data plane: aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
             gbps, total_bytes, elapsed
         );
     }
