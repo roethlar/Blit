@@ -30,8 +30,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    w9-1, w9-2, w9-4, w8-1b) were graded+accepted by claude-reviewer
    2026-06-12; all rows `[x]`, ready/ empty. Next unblocked rows:
    w4-2 (push upload channel), w5-2 (dead classifier), w4-1 (AbortOnDrop
-   family). w2-3 needs an owner plan interview first (multi-stream pull,
-   authorized D-2026-06-11-2).
+   family). w2-3's plan doc now exists (`docs/plan/MULTISTREAM_PULL.md`,
+   Draft — owner ratification pending; sequencing inside: w2-2 → w2-3 →
+   adaptive-streams cherry-pick → w2-4 → w3-1).
 2. **Land adaptive-streams** (D-2026-06-07-2) — cherry-pick/rebase up to
    `eafb187`, excluding `d9d4ec7`. Plan doc first. Interacts with
    w2-3/w3-1 data_plane churn — sequence consciously.
@@ -56,15 +57,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner approval to push**: local-only commits on `master` (coder slices
-  + 7 claude-reviewer verdict commits + handoff records). Before any push:
-  list exact local refs vs origin/gitea and wait for explicit owner
-  approval (AGENTS.md §8). No agent may push.
-- **Owner verdicts / next gates**: w2-3 plan interview (multi-stream pull);
-  w8-1 delete of zero_copy (per D-2026-06-12-1 on the w8-1b eval doc).
-- Stale remote branches pending deletion **by explicit name** (verified
-  ahead=0): `phase5/a1`, `phase5/blit-app-extract` (remote-only refs on
-  `origin` + `gitea`; deletion is a remote `push --delete`).
+- **w2-3 plan ratification**: `docs/plan/MULTISTREAM_PULL.md` is Draft
+  (interview parameters owner-delegated 2026-06-12, "your call"); no w2-3
+  code until the owner flips it Active. w8-1 (incl. zero_copy delete per
+  D-2026-06-12-1) is unblocked and coder-ready.
+- **10 GbE benchmark session** (owner, possibly later today 2026-06-12):
+  macOS/Windows/Linux/TrueNAS matrix over 10 GbE, all transfer paths —
+  doubles as the D-2026-06-12-1 revisit-gate measurement (zero-copy) and
+  the w2-3 sign-off measure. `docs/plan/BENCHMARK_10GBE_PLAN.md` is the
+  existing doc to follow/refresh.
+- RESOLVED 2026-06-12: owner approved push (master `1adbe0c..bf63a6e` →
+  origin + gitea, fast-forward, verified) and named both stale branches;
+  `phase5/a1` + `phase5/blit-app-extract` deleted from origin + gitea
+  (containment re-verified ahead=0 before deletion; ls-remote confirms gone).
 
 ## Open questions
 
