@@ -35,7 +35,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | w6-1-progress-event-contract | Medium | Define ProgressEvent semantics in blit-core; normalize producers; shared accumulator (incorporates design-1) | `[ ]` | — | — |
 | w6-2-progress-residue-verify | Medium | Verify-then-fix map §1.6 residue: delegated zero progress, daemon counters 0 for 3/4 kinds, no denominators | `[ ]` | — | — |
 | w4-4-blocking-work-off-runtime | Medium | spawn_blocking the per-entry stat/canonicalize batch + single-file checksum hashing | `[ ]` | — | — |
-| w9-1-ungate-windows-tests | High | Remove blanket #[cfg(unix)] from remote transfer tests with nothing unix-specific | `[ ]` | — | — |
+| w9-1-ungate-windows-tests | High | Remove blanket #[cfg(unix)] from remote transfer tests with nothing unix-specific | `[~]` | master | `9324559` |
 | w9-2-revive-root-tests | Medium | Relocate dead workspace-root tests/ into blit-core/tests (MirrorPlanner coverage); delete connection.rs; fix AGENTS.md §4 | `[ ]` | — | — |
 | w9-3-test-harness-builder | Medium | TestContext::builder() consolidating 5 harness clones + 5 cli_bin copies; OnceLock daemon build; fake-server keepalive parity | `[ ]` | — | — |
 | w9-4-readonly-enforcement-tests | Medium | Tests for all 3 read-only-module gates (push, purge, delegated pull) — zero coverage today | `[ ]` | — | — |
