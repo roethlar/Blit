@@ -20,7 +20,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 |----|----------|-------|--------|--------|--------|
 | w5-1-log-backend | Medium | Install stderr log backend (warn) in all 4 binaries + one prefix convention; today every log::warn/error is discarded | `[x]` | master | `56bda09`+`7145202` |
 | w4-2-delete-push-upload-channel | Medium | Delete the 262,144-slot push upload channel (drain-and-discard; wedges gRPC-fallback pushes >262k files) | `[~]` | master | `03bcb1d` |
-| w5-2-retry-classifier-consolidation | Medium | Delete dead contradictory blit-core/errors.rs; move is_retryable into blit-core with contract test | `[ ]` | — | — |
+| w5-2-retry-classifier-consolidation | Medium | Delete dead contradictory blit-core/errors.rs; move is_retryable into blit-core with contract test | `[~]` | master | `9c960dc` |
 | w4-1-abortondrop-family | High | Hoist AbortOnDrop; fix all 5 detach-on-drop sites (incorporates design-2; JoinSet for per-stream workers) | `[ ]` | — | — |
 | w9-5-jobs-lifecycle-e2e | Medium | jobs/detach lifecycle e2e tests (Subscribe, watch fallback, cancel exit codes) — net before W4.3 | `[x]` | master | `ad773d8` |
 | w4-3-daemon-disconnect-racing | Medium | Daemon handlers race tx.closed()+cancel token (hoist delegated_pull's select); fix false active_jobs comment | `[ ]` | — | — |
