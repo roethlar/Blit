@@ -55,6 +55,31 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
+- **UNRESOLVED CONFLICT — transfer-core architecture (owner, 2026-06-14;
+  deferred to "when Claude Fable is available again", owner's call).** This
+  session diagnosed that the transfer core is fragmented: local copy runs
+  through a sequencer-only `TransferOrchestrator` while remote push/pull
+  bypass it and hand-wire tuning+pipeline; stream count comes from three
+  duplicate static size→streams tables (`remote/tuning.rs`,
+  `push/control.rs::desired_streams`, `pull.rs::pull_stream_count`); the
+  "tuning" layer is a static lookup with dead adaptive code behind it
+  (`auto_tune` — documented zero-caller dead code; real adaptation is the
+  unbuilt "H10b"/adaptive-streams work). Owner's direction: **stop the
+  incremental cleanup and redesign the transfer subsystem from the ground
+  up** to two hard requirements — (1) the transfer is **tuned live**
+  (adaptive, not a static table), and (2) the engine is **src/dst agnostic**
+  (one engine for local↔local, push, pull, and delegated daemon↔daemon;
+  where the human issues the command is irrelevant to how bits move) —
+  governed by Blit's three design goals: **FAST** (fastest in every
+  scenario), **SIMPLE** (for the human to operate and understand),
+  **RELIABLE** (works in every situation). This **moots the premise** of the
+  queued incremental work (w2-2 ladder consolidation, w2-3 multi-stream pull
+  / `MULTISTREAM_PULL.md`, w2-4 deprecated-Pull deletion, adaptive-streams
+  cherry-pick) — those may survive as implementation detail or be discarded,
+  to be decided at resolution. **No plan written** (owner declined a plan
+  doc this session). Resolve when Claude Fable is available again: revisit
+  whether to author a ground-up redesign plan vs. resume the incremental
+  queue.
 - `docs/agent/SETUP.md` content — owner must supply (other machine);
   `.review/README.md` lines 8/101 still point at unreadable paths.
 - Disposition of adaptive-streams branch refs after landing (D-2026-06-07-2).
