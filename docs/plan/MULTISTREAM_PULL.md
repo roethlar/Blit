@@ -1,10 +1,13 @@
 # Multi-stream pull-sync (w2-3)
 
-**Status**: Draft
+**Status**: Superseded
 **Created**: 2026-06-12
-**Supersedes**: nothing
-**Decision ref**: pending (doc authorized by D-2026-06-11-2; interview
-parameters delegated to the agent by the owner 2026-06-12 — "your call")
+**Superseded by**: `docs/plan/UNIFIED_TRANSFER_ENGINE.md` (D-2026-06-20-1).
+The goal — pull gains multi-stream — survives as slice `ue-1d` there, now
+via the unified src/dst-agnostic sequencer instead of a path-specific hack.
+Kept as reference; do not execute this plan as written.
+**Decision ref**: D-2026-06-11-2 (authorized the doc); D-2026-06-20-1
+(superseded it — convergence plan absorbs the goal).
 
 ## Goal
 
