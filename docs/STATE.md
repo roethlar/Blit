@@ -22,15 +22,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `d9d4ec7` excluded.
 - **Plan review IN PROGRESS — CODING FROZEN** (D-2026-06-20-4):
   `docs/plan/UNIFIED_TRANSFER_ENGINE.md` remains the original Active
-  plan, but `docs/plan/UNIFIED_TRANSFER_ENGINE_REV2.md` is now the Draft
-  review candidate. Owner asked to roll review findings into rev2 and
-  freeze all unified-transfer-engine coding pending the owner's final
-  plan decision. Rev2 keeps convergence and the four bound parameters
-  from D-2026-06-20-2, but tightens slice shape: streaming initial
-  planning gets its own slice, local fast paths become engine-owned
-  strategies, work-stealing is treated as observable behavior, proto
-  capacity/resize compatibility is designed before dependent code, and
-  pull parity waits for multistream PullSync.
+  plan. `docs/plan/UNIFIED_TRANSFER_ENGINE_REV2.md` is the Draft review
+  candidate; `docs/plan/UNIFIED_TRANSFER_ENGINE_REV3.md` (2026-06-20) is
+  a further-drafted candidate = rev2 + restored Risks section + restored
+  "C-ready by construction" acceptance criterion + corrected
+  static-ladder references (two tables, not three) + explicit slice
+  dependencies + labeled agent recommendations on the open questions.
+  Owner asked to roll review findings into rev2 and freeze all
+  unified-transfer-engine coding pending the owner's final plan
+  decision. The candidates keep convergence and the four bound
+  parameters from D-2026-06-20-2, but tighten slice shape: streaming
+  initial planning gets its own slice, local fast paths become
+  engine-owned strategies, work-stealing is treated as observable
+  behavior, proto capacity/resize compatibility is designed before
+  dependent code, and pull parity waits for multistream PullSync.
 - **Reviewer grading complete** (2026-06-12): design-4 + design-5 accepted
   (`a841691`, `b5cbb38`); `REVIEW.md` rows `[x]`; ready queue empty.
   Validation: fmt + clippy green; `cargo test --workspace` 1370 passed, 0
@@ -71,9 +76,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   convergence engine; **Active but parked by D-2026-06-20-4**.
   Supersedes `MULTISTREAM_PULL.md` (now Superseded; goal absorbed as
   `ue-1d`).
-- Draft review candidate: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV2.md` —
-  incorporates the 2026-06-20 plan-review findings; not implementation
-  authority until owner final decision.
+- Draft review candidates: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV2.md`
+  and `docs/plan/UNIFIED_TRANSFER_ENGINE_REV3.md` (rev3 = rev2 + restored
+  Risks/C-ready criterion + corrected ladder refs + slice dependencies +
+  agent recommendations); not implementation authority until owner final
+  decision.
 - Design queue: `REVIEW.md` (13 design-queue rows `[x]`, 0 rows `[~]`) + the three
   `docs/audit/` 2026-06-11 deliverables
 - Review loop: `REVIEW.md` + `.review/README.md` + `.review/findings/` +
@@ -104,11 +111,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   1s-start stand alone.
 - **Engine type** — deferred to agent (recommends new `TransferEngine` +
   local adapter); ratified at `ue-1c`, owner may override.
-- `UNIFIED_TRANSFER_ENGINE_REV2.md` final-decision questions: does rev2
-  replace/amend the original plan; are RELIABLE exceptions allowed for
-  first-byte timing; does deprecated `Pull` deletion stay in this plan or
-  move later; should D-2026-06-20-1 be cleaned up to remove superseded
-  warmup/size-gate wording.
+- `UNIFIED_TRANSFER_ENGINE` plan-review decisions (2026-06-20, owner;
+  candidate is now `REV3.md` = REV2 + restored Risks/C-ready criterion +
+  corrected ladder refs + slice deps):
+  - **(RESOLVED)** First-byte-within-~1s is a hard invariant for every
+    mode except the modes where moving any byte before full knowledge
+    would be unsafe (mirror/delete, resume, checksum-refusal). Novel vs
+    known workload is a tuning-strategy choice (start-something-and-tune
+    vs replay-optimal-last-run via the in-tree `perf_history`/
+    `perf_predictor`), not an exception. Both meet 1s.
+  - **(RESOLVED)** Deprecated `Pull` deletion stays in-plan as
+    `ue-r2-1h`, gated on `ue-r2-1g` + `ue-r2-1b` compat tests.
+  - **(OPEN)** Does REV3 replace `UNIFIED_TRANSFER_ENGINE.md`, or stay a
+    review branch? Owner: no flip yet — planning review in progress;
+    REV3 stays Draft, v1 stays Active-but-parked.
+  - **(OPEN)** Edit D-2026-06-20-1 now to strip superseded
+    warmup/size-gate wording, or let later decisions stand? Owner: not
+    sure.
 - `docs/agent/SETUP.md` content — owner must supply (other machine);
   `.review/README.md` lines 8/101 still point at unreadable paths.
 - Disposition of adaptive-streams branch refs after `ue-1a` lands
