@@ -10,6 +10,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **`ue-r2-1a` COMPLETE** (first REV4 slice; code→GPT-review→fix loop
+  validated end-to-end). Salvaged the adaptive substrate via cherry-pick
+  over the `-s ours` octopus trap (D-2026-06-07-2): PR1 zero-cost `Probe`
+  telemetry (`e569eea`), PR2 work-stealing `flume` queue (`3844a15`), PR2
+  forwarder-halt fix (`ec561f2`); hand-resolved the `data_plane.rs`
+  StallGuard-vs-`Probe` conflict; work-stealing behaviour tests
+  (`771a632`); codex/GPT-5.5 review → fix-then-ship, 4 findings all
+  accepted + fixed (`90ed43d`). Validation: fmt/clippy clean, `cargo test
+  --workspace` 1378 / 0 / 2 (baseline 1370). Carried to `ue-r2-1e`: PR1
+  `write_blocked_nanos` timing accuracy (telemetry not consumed until the
+  dial). Hard-abort-on-drop of workers stays `w4-1`. All on master,
+  **unpushed** (`515fb76..90ed43d`; full unpushed stack from `origin` is
+  `b663091..90ed43d`).
 - **Transfer-core architecture conflict RESOLVED** (D-2026-06-20-1):
   convergence, not ground-up redesign. One src/dst-agnostic sequencer owns
   all four paths (local↔local, push, pull, daemon↔daemon); one live dial
@@ -57,17 +70,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Begin `ue-r2-1a` (salvage substrate)** — the code→review→fix loop
-   is established (D-2026-06-20-6); awaiting the owner's single "go" to
-   start coding. Once given, the loop runs autonomously per
-   `GPT_REVIEW_LOOP.md` (no further per-slice gates): `ue-r2-1a` =
-   cherry-pick adaptive PR1+PR2 up to `eafb187`, resolve the
-   `data_plane.rs` StallGuard-vs-`Probe` conflict, add work-stealing
-   behavior tests. Also pending separately: push approval for the Windows
+1. **`ue-r2-1b` (wire dial contract)** — next REV4 slice: define the
+   capacity-profile + peer-capability + resize proto shape
+   (`receiver_capacity = 11`, `DataPlaneResize`/`Ack`) with old/new compat
+   tests, before any code depends on the fields. Paused here after
+   `ue-r2-1a` for an owner checkpoint (push the `b663091..90ed43d` stack /
+   confirm cadence); per D-2026-06-20-6 the loop may otherwise continue
+   autonomously. Also pending separately: push approval for the Windows
    test-tuning commit (`439a2a7`, local-only — Windows CI red until it
    lands).
-2. **Then** execute the rest of the REV4 slice list in order —
-   `ue-r2-1b` → `1c` → `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
+2. **Then** the rest of the REV4 slice list in order —
+   `1c` → `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is w4-1
@@ -185,4 +198,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   first action next session**: owner decides whether rev2 replaces/amends
   the original Active plan or requests another revision; push approval for
   `439a2a7` still pending separately.
-- **2026-06-12** @ `b5cbb38` — gemini-reviewer session: graded and accepted both pending sentinels (design-4 and design-5); verdicts committed, `REVIEW.md` rows `[x]`, ready/ queue empty. In-flight: none. **Exact first action next session**: owner decides the remaining gates (w2-3 Active flip, push approval).
