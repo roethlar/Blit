@@ -5,7 +5,9 @@ gate. `REVIEW.md` at the repo root is the human-readable status
 index; this directory is the structured handoff channel.
 
 For the workflow's design rationale (and onboarding any new agent
-into the contract) see `docs/agent/SETUP.md`.
+into the contract) see this contract plus `AGENTS.md`. (The portable
+two-agent setup playbook is maintained in the governance system, not
+in-repo.)
 
 ## Layout
 

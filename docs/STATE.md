@@ -148,10 +148,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   - **(OPEN)** Edit D-2026-06-20-1 now to strip superseded
     warmup/size-gate wording, or let later decisions stand? Owner: not
     sure.
-- **(RESOLVED 2026-06-20)** `docs/agent/SETUP.md` — owner supplied the
-  content; installed (no local paths) with a Blit banner reconciling it to
-  §8 (master-only) + the GPT-review variant; `.review/README.md` lines
-  8/101 repo-relativized. Remaining: historical audit/finding docs
+- **(RESOLVED 2026-06-20)** SETUP.md — the generic two-agent guide
+  predates this governance; owner is folding it into the governance as a
+  playbook (re-applied on governance setup), so it is **not** kept in-repo
+  (removed). `.review/README.md` lines 8/101 repo-relativized and the
+  dangling SETUP pointer removed. Remaining: historical audit/finding docs
   (`audit-13/14/15`, `drift-*`) still embed `/Users/...` in recorded
   evidence — left as-is pending an owner call on whether to scrub.
 - Disposition of adaptive-streams branch refs after `ue-1a` lands

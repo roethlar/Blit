@@ -6,6 +6,8 @@
 **Applies to**: unified transfer engine slices (`ue-r2-*`, plan
 `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`). All other work keeps using
 the async two-agent loop in `.review/README.md`.
+**Precedence**: where this loop conflicts with `AGENTS.md`,
+`docs/STATE.md`, or `docs/DECISIONS.md`, governance wins (AGENTS.md §1).
 
 ## Shape
 
@@ -100,8 +102,7 @@ validation and review.
   interactive login). Reviews run read-only sandboxed.
 - The `superpowers@openai-curated` codex plugin injects a skill framework
   that derails focused reviews — disable it per-invocation as shown.
-- The async two-agent loop is documented in `.review/README.md` +
-  `docs/agent/SETUP.md`; this synchronous loop reuses only their
-  `findings/` + `results/` records.
+- The async two-agent loop is documented in `.review/README.md`; this
+  synchronous loop reuses only its `findings/` + `results/` records.
 - Branch model: AGENTS.md §8 (work on `master`, no agent branches) governs
   over `.review/README.md`'s "branch per finding."
