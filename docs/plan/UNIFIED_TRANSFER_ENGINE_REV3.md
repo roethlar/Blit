@@ -1,9 +1,11 @@
 # Unified Transfer Engine REV3 - review candidate
 
-**Status**: Draft
+**Status**: Superseded
+**Superseded-by**: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
+(D-2026-06-20-5). REV4 = this doc with its code-reality section corrected
+(the "two static tables, not three" claim here was wrong — all three
+ladders are live). Do not implement from this doc.
 **Created**: 2026-06-20
-**Review state**: ongoing plan review; coding is frozen pending the
-owner's final plan decision (D-2026-06-20-4).
 **Based on**: `docs/plan/UNIFIED_TRANSFER_ENGINE.md` (Active, parked)
 plus the 2026-06-20 plan review findings. REV3 = REV2 with the Risks
 section and the "C-ready by construction" acceptance criterion restored

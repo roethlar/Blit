@@ -1,9 +1,10 @@
 # Unified Transfer Engine REV2 - review candidate
 
-**Status**: Draft
+**Status**: Superseded
+**Superseded-by**: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
+(D-2026-06-20-5). Intermediate review candidate; its tightenings were
+carried into REV4. Do not implement from this doc.
 **Created**: 2026-06-20
-**Review state**: ongoing plan review; coding is frozen pending the
-owner's final plan decision (D-2026-06-20-4).
 **Based on**: `docs/plan/UNIFIED_TRANSFER_ENGINE.md` (Active, parked)
 plus the 2026-06-20 plan review findings.
 **Decision refs**: D-2026-06-20-1 (convergence direction),

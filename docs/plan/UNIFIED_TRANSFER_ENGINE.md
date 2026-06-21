@@ -1,9 +1,13 @@
 # Unified Transfer Engine — one src/dst-agnostic sequencer, live dials
 
-**Status**: Active
+**Status**: Superseded
+**Superseded-by**: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
+(owner: "rev4 replaces v1" — D-2026-06-20-5, 2026-06-20). REV4 carries
+this doc's lineage/absorption notes forward. Kept for history; do not
+implement from this doc.
 **Created**: 2026-06-20
 **Activated**: 2026-06-20 (owner approved the four bound parameters;
-D-2026-06-20-2)
+D-2026-06-20-2) — superseded 2026-06-20 (D-2026-06-20-5)
 **Supersedes**: the "ground-up redesign" framing of the 2026-06-14 open
 question (resolved as *convergence*, not rebuild — D-2026-06-20-1).
 Continues the lineage of `PIPELINE_UNIFICATION.md` and
