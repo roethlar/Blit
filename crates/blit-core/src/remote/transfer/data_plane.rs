@@ -535,6 +535,7 @@ impl<P: Probe> DataPlaneSession<P> {
             .await
             .context("writing block content")?;
         crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(content.len() as u64);
+        self.probe.record_bytes(content.len() as u64);
 
         self.bytes_sent += content.len() as u64;
         Ok(())

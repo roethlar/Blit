@@ -117,7 +117,19 @@ pub async fn execute_sink_pipeline_streaming(
             // Wrap the body so any early-return error trips the shared
             // cancel flag before the `?` unwinds the task.
             let run = async {
-                while let Ok(payload) = work_rx.recv_async().await {
+                loop {
+                    // Stop pulling queued work once a sibling worker has
+                    // errored: first-error-wins should surface without the
+                    // survivors draining the rest of the bounded queue.
+                    // Interrupting an in-flight prepare/write (true prompt
+                    // cancellation) is the AbortOnDrop family, w4-1.
+                    if cancelled_worker.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let payload = match work_rx.recv_async().await {
+                        Ok(p) => p,
+                        Err(_) => break, // queue closed and drained
+                    };
                     let prepared = source_clone
                         .prepare_payload(payload)
                         .await
@@ -1180,24 +1192,32 @@ mod workqueue_tests {
         );
     }
 
-    /// Reports each payload's real byte size so the executor's byte and
-    /// file aggregation can be checked end to end without touching disk.
+    /// Reports each payload's real byte size and records the relative
+    /// paths it wrote, so the executor's byte/file aggregation *and*
+    /// exactly-once delivery can be checked end to end without disk.
     struct ByteSink {
         bytes: Arc<AtomicU64>,
+        paths: Arc<Mutex<Vec<String>>>,
         root: PathBuf,
     }
 
     #[async_trait::async_trait]
     impl TransferSink for ByteSink {
         async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+            let mut names: Vec<String> = Vec::new();
             let (files, bytes): (usize, u64) = match &payload {
-                PreparedPayload::File(h) => (1, h.size),
+                PreparedPayload::File(h) => {
+                    names.push(h.relative_path.clone());
+                    (1, h.size)
+                }
                 PreparedPayload::TarShard { headers, .. } => {
+                    names.extend(headers.iter().map(|h| h.relative_path.clone()));
                     (headers.len(), headers.iter().map(|h| h.size).sum())
                 }
                 _ => (0, 0),
             };
             self.bytes.fetch_add(bytes, Ordering::Relaxed);
+            self.paths.lock().unwrap().extend(names);
             Ok(SinkOutcome {
                 files_written: files,
                 bytes_written: bytes,
@@ -1238,12 +1258,15 @@ mod workqueue_tests {
 
         let bytes_a = Arc::new(AtomicU64::new(0));
         let bytes_b = Arc::new(AtomicU64::new(0));
+        let paths = Arc::new(Mutex::new(Vec::new()));
         let a: Arc<dyn TransferSink> = Arc::new(ByteSink {
             bytes: Arc::clone(&bytes_a),
+            paths: Arc::clone(&paths),
             root: PathBuf::from("/a"),
         });
         let b: Arc<dyn TransferSink> = Arc::new(ByteSink {
             bytes: Arc::clone(&bytes_b),
+            paths: Arc::clone(&paths),
             root: PathBuf::from("/b"),
         });
 
@@ -1267,6 +1290,14 @@ mod workqueue_tests {
             expected_bytes,
             "every byte accounted to exactly one sink, none double-counted"
         );
+        // Exactly-once delivery: a balanced duplicate+drop that happened to
+        // preserve the byte/file sums would still surface as a repeated or
+        // missing path here.
+        let mut got = paths.lock().unwrap().clone();
+        got.sort();
+        assert_eq!(got.len(), n, "exactly n payloads delivered (no drop/dup)");
+        got.dedup();
+        assert_eq!(got.len(), n, "no file delivered to more than one sink");
     }
 
     /// REV4 ue-r2-1a (cancellation): when the producer stops feeding and
@@ -1332,5 +1363,65 @@ mod workqueue_tests {
             "only the fed payloads are written"
         );
         assert_eq!(count.load(Ordering::Relaxed), 5);
+    }
+
+    /// REV4 ue-r2-1a (cancellation under back-pressure): with the shared
+    /// queue under load, one failing sink must surface its error and stop
+    /// the surviving slow sink from draining the rest of the queue. This
+    /// pins the worker-side `cancelled` re-check — without it the survivor
+    /// would process every already-queued payload before first-error-wins
+    /// took effect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_sink_error_bounds_survivor_work_under_backpressure() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let n = 200usize;
+        for i in 0..n {
+            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan_handle.await.unwrap().unwrap();
+        assert_eq!(headers.len(), n);
+
+        let survivor = Arc::new(AtomicU64::new(0));
+        let err: Arc<dyn TransferSink> = Arc::new(ErrSink {
+            root: PathBuf::from("/err"),
+        });
+        let slow: Arc<dyn TransferSink> = Arc::new(CountingSink {
+            delay: Duration::from_millis(5),
+            count: Arc::clone(&survivor),
+            root: PathBuf::from("/slow"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(4);
+        let feeder = tokio::spawn(async move {
+            for h in headers {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            execute_sink_pipeline_streaming(source, vec![err, slow], rx, 2, None),
+        )
+        .await
+        .expect("pipeline must not hang after the failing sink trips cancel");
+        let _ = feeder.await;
+
+        assert!(result.is_err(), "the sink error must win");
+        let processed = survivor.load(Ordering::Relaxed);
+        assert!(
+            processed < (n as u64) / 2,
+            "survivor should stop pulling queued work once cancel is set, \
+             not drain all {n}; processed={processed}"
+        );
     }
 }
