@@ -97,42 +97,64 @@ pub async fn execute_sink_pipeline_streaming(
     let (work_tx, work_rx) = flume::bounded::<TransferPayload>(capacity);
     let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(sink_count);
 
+    // Cancellation flag set by the first worker that errors. Without it,
+    // one sink failing only drops that worker's `work_rx` clone; as long
+    // as any other worker is alive `send_async` keeps succeeding, so the
+    // forwarder would keep draining `payload_rx` and queueing payloads
+    // that can never complete — delaying first-error-wins propagation
+    // (Codex review, PR2). With it, the forwarder stops at the next
+    // payload boundary and closes the queue so the survivors drain and
+    // finish promptly.
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     for sink in sinks {
         let work_rx = work_rx.clone();
         let source_clone = source.clone();
         let progress_clone = progress.cloned();
         let total_clone = total.clone();
+        let cancelled_worker = cancelled.clone();
         sink_handles.push(tokio::spawn(async move {
-            while let Ok(payload) = work_rx.recv_async().await {
-                let prepared = source_clone
-                    .prepare_payload(payload)
-                    .await
-                    .context("preparing payload")?;
-                let files: Vec<(String, u64)> = match &prepared {
-                    PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
-                    PreparedPayload::TarShard { headers, .. } => headers
-                        .iter()
-                        .map(|h| (h.relative_path.clone(), h.size))
-                        .collect(),
-                    // Resume-block payloads patch existing files; no
-                    // file-completion event from one-block-at-a-time.
-                    PreparedPayload::FileBlock { .. }
-                    | PreparedPayload::FileBlockComplete { .. } => Vec::new(),
-                };
-                let outcome = sink
-                    .write_payload(prepared)
-                    .await
-                    .context("writing payload")?;
-                if let Some(p) = &progress_clone {
-                    for (name, size) in &files {
-                        p.report_file_complete(name.clone(), *size);
+            // Wrap the body so any early-return error trips the shared
+            // cancel flag before the `?` unwinds the task.
+            let run = async {
+                while let Ok(payload) = work_rx.recv_async().await {
+                    let prepared = source_clone
+                        .prepare_payload(payload)
+                        .await
+                        .context("preparing payload")?;
+                    let files: Vec<(String, u64)> = match &prepared {
+                        PreparedPayload::File(h) => vec![(h.relative_path.clone(), h.size)],
+                        PreparedPayload::TarShard { headers, .. } => headers
+                            .iter()
+                            .map(|h| (h.relative_path.clone(), h.size))
+                            .collect(),
+                        // Resume-block payloads patch existing files; no
+                        // file-completion event from one-block-at-a-time.
+                        PreparedPayload::FileBlock { .. }
+                        | PreparedPayload::FileBlockComplete { .. } => Vec::new(),
+                    };
+                    let outcome = sink
+                        .write_payload(prepared)
+                        .await
+                        .context("writing payload")?;
+                    if let Some(p) = &progress_clone {
+                        for (name, size) in &files {
+                            p.report_file_complete(name.clone(), *size);
+                        }
                     }
+                    let mut t = total_clone.lock().unwrap();
+                    t.merge(&outcome);
                 }
-                let mut t = total_clone.lock().unwrap();
-                t.merge(&outcome);
+                sink.finish().await?;
+                Ok::<(), eyre::Report>(())
             }
-            sink.finish().await?;
-            Ok::<(), eyre::Report>(())
+            .await;
+            if run.is_err() {
+                // Signal the forwarder (and implicitly the other workers,
+                // once the queue closes) to stop feeding new work.
+                cancelled_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            run
         }));
     }
 
@@ -144,10 +166,19 @@ pub async fn execute_sink_pipeline_streaming(
     // Forwarder: move payloads from the incoming channel onto the shared
     // work queue. `send_async` applies back-pressure (bounded queue); if
     // every worker has gone away (e.g. all sinks errored) the send fails
-    // and we stop. Dropping `work_tx` on end-of-stream signals the
-    // workers.
+    // and we stop. It also bails as soon as a worker sets `cancelled`, so
+    // a single sink error halts intake promptly instead of waiting for
+    // every worker to drop. Dropping `work_tx` on end-of-stream (or on
+    // cancel) signals the workers.
+    let cancelled_fwd = cancelled.clone();
     let forwarder = tokio::spawn(async move {
         while let Some(payload) = payload_rx.recv().await {
+            if cancelled_fwd.load(std::sync::atomic::Ordering::Relaxed) {
+                // A worker errored — stop draining the producer and let
+                // the queue close so survivors finish and the error
+                // surfaces without delay.
+                return;
+            }
             if work_tx.send_async(payload).await.is_err() {
                 // All workers dropped their receivers — nothing left to
                 // feed; treat as shutdown.
@@ -1074,6 +1105,78 @@ mod workqueue_tests {
         assert!(
             fast_n > slow_n * 3,
             "fast sink should steal the bulk of the work: fast={fast_n} slow={slow_n}"
+        );
+    }
+
+    /// Codex-review (PR2) regression: when the only sink errors, the
+    /// forwarder must stop draining the producer promptly rather than
+    /// continuing to pull every remaining payload. We feed a large
+    /// payload set through a single always-failing sink and assert that
+    /// (a) the pipeline surfaces the error, and (b) the forwarder
+    /// consumed far fewer than all payloads before halting — proving the
+    /// cancel flag short-circuits intake instead of draining to the end.
+    struct ErrSink {
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for ErrSink {
+        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+            eyre::bail!("synthetic immediate failure")
+        }
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forwarder_stops_promptly_on_worker_error() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let n = 200usize;
+        for i in 0..n {
+            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan_handle.await.unwrap().unwrap();
+        assert_eq!(headers.len(), n);
+
+        let sink: Arc<dyn TransferSink> = Arc::new(ErrSink {
+            root: PathBuf::from("/err"),
+        });
+
+        // Count how many payloads the forwarder actually pulled from the
+        // producer. With prefetch=1 and a single sink, the bounded queue
+        // holds 1; once the sink errors and trips `cancelled`, the
+        // forwarder must stop, so `sent` stays a tiny constant rather
+        // than reaching n.
+        let sent = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = mpsc::channel::<TransferPayload>(1);
+        let sent_feeder = sent.clone();
+        let feeder = tokio::spawn(async move {
+            for h in headers {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+                sent_feeder.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let result = execute_sink_pipeline_streaming(source, vec![sink], rx, 1, None).await;
+        let _ = feeder.await;
+
+        assert!(result.is_err(), "pipeline must surface the sink error");
+        let pulled = sent.load(Ordering::Relaxed);
+        assert!(
+            pulled < (n as u64) / 2,
+            "forwarder should halt soon after the error, not drain all {n} payloads; pulled={pulled}"
         );
     }
 }
