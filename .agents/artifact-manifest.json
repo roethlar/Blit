@@ -1,7 +1,7 @@
 {
   "validated_against": {
-    "commit": "0edf20d38e35f4ac8ea0383c7e46aee767d8e8b8",
-    "date": "2026-06-10"
+    "commit": "fc9239e8f5db1c84ab46d7f3a7ad62413adaffb5",
+    "date": "2026-06-20"
   },
   "artifacts": [
     {
@@ -32,6 +32,11 @@
     {
       "path": "docs/agent/PROTOCOL.md",
       "purpose": "Executable procedures behind the trigger vocabulary (catchup, plan, decision, handoff, drift, slice)",
+      "custody": "tracked"
+    },
+    {
+      "path": "docs/agent/GPT_REVIEW_LOOP.md",
+      "purpose": "Active process doc (D-2026-06-20-6): the code->GPT-review->fix loop governing ue-r2-* convergence slices",
       "custody": "tracked"
     },
     {
@@ -101,7 +106,7 @@
     },
     {
       "path": "scripts/agent/",
-      "purpose": "Hook scripts and doc lint (context.sh, catchup.sh, precompact.sh, check-docs.sh)",
+      "purpose": "Hook scripts, doc lint, and migration helpers (context.sh, catchup.sh, precompact.sh, check-docs.sh, migrate-status-headers.sh)",
       "custody": "tracked"
     },
     {
