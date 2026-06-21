@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-06-20 (owner: "rev4 replaces v1" — `REV4` flipped to
-**Active**, v1/REV2/REV3 Superseded; D-2026-06-20-5) at commit `09268eb`
-(doc edits uncommitted in working tree)
+Last updated: 2026-06-20 (code→review→fix loop established, D-2026-06-20-6;
+REV4 Active, D-2026-06-20-5) at commit `b663091` (loop-setup docs
+uncommitted in working tree)
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -44,26 +44,31 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   engine-owned strategies, work-stealing is treated as observable
   behavior, proto capacity/resize compatibility is designed before
   dependent code, and pull parity waits for multistream PullSync.
-- **Reviewer grading complete** (2026-06-12): design-4 + design-5 accepted
-  (`a841691`, `b5cbb38`); `REVIEW.md` rows `[x]`; ready queue empty.
-  Validation: fmt + clippy green; `cargo test --workspace` 1370 passed, 0
-  failed, 1 ignored. No coder/reviewer work in flight; 2026-06-12
-  authorizations were single-session and do not carry forward.
+- **Code→review→fix loop established** (D-2026-06-20-6;
+  `docs/agent/GPT_REVIEW_LOOP.md` Active): for `ue-r2-*` slices Claude
+  codes+commits each slice, GPT-5.5 (`codex`, confirmed headless here via
+  the local `headroom` proxy) reviews the commit, Claude adjudicates
+  findings against source/tests, fixes accepted ones, proceeds.
+  Per-slice commits to `master` are **ungated** (no branches, never
+  push); per-slice code acceptance is owner-delegated (not a gate — the
+  owner is not a developer). Async `.review/` sentinels dropped for this
+  loop; `findings/`+`results/` records reused. Owner gates remaining:
+  push, 10 GbE sign-off. Baseline: `cargo test --workspace` 1370 passed.
 
 ## Queue (ordered)
 
-1. **Owner authorization to begin `ue-r2-1a` (salvage substrate)** —
-   REV4 is Active (D-2026-06-20-5), but per AGENTS.md §9 the plan
-   decision does not authorize coding. Next step is a fresh owner
-   go-ahead to run `slice` and start `ue-r2-1a` (cherry-pick adaptive
-   PR1+PR2 up to `eafb187`, resolve the `data_plane.rs`
-   StallGuard-vs-`Probe` conflict). Also pending: push approval for the
-   Windows test-tuning commit (`439a2a7`, local-only — Windows CI red
-   until it lands).
-2. **After owner authorization**: execute the REV4 slice list in order —
-   `ue-r2-1a` → `1b` → `1c` → `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
-   (deps in REV4 §"Slice dependencies"). Use `slice` per `.review/` only
-   after a fresh owner authorization.
+1. **Begin `ue-r2-1a` (salvage substrate)** — the code→review→fix loop
+   is established (D-2026-06-20-6); awaiting the owner's single "go" to
+   start coding. Once given, the loop runs autonomously per
+   `GPT_REVIEW_LOOP.md` (no further per-slice gates): `ue-r2-1a` =
+   cherry-pick adaptive PR1+PR2 up to `eafb187`, resolve the
+   `data_plane.rs` StallGuard-vs-`Probe` conflict, add work-stealing
+   behavior tests. Also pending separately: push approval for the Windows
+   test-tuning commit (`439a2a7`, local-only — Windows CI red until it
+   lands).
+2. **Then** execute the rest of the REV4 slice list in order —
+   `ue-r2-1b` → `1c` → `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
+   (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is w4-1
    (AbortOnDrop family, High); next include w4-3 and W1 socket-policy /
@@ -90,6 +95,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   tables, not three" ladder claim was wrong — all three ladders are
   live), pull single-stream re-scoped to PullSync, strategy names fixed,
   every symbol grounded with `file:line`.
+- Code→review→fix loop: `docs/agent/GPT_REVIEW_LOOP.md` (Active,
+  D-2026-06-20-6) — governs `ue-r2-*` slices (codex/GPT-5.5 reviews each
+  commit); the `.review/README.md` async two-agent loop still governs all
+  other work.
 - Design queue: `REVIEW.md` (13 design-queue rows `[x]`, 0 rows `[~]`) + the three
   `docs/audit/` 2026-06-11 deliverables
 - Review loop: `REVIEW.md` + `.review/README.md` + `.review/findings/` +
@@ -101,14 +110,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - Findings: `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` (R3 governs)
 - Decisions: D-2026-06-20-1 (convergence direction), D-2026-06-20-5
   (REV4 replaces v1 as Active; v1/REV2/REV3 Superseded; plan-decision
-  freeze lifted)
+  freeze lifted), D-2026-06-20-6 (code→review→fix loop; ungated per-slice
+  commits; per-slice code acceptance owner-delegated)
 
 ## Blocked / waiting
 
-- **Owner**: (1) fresh per-slice authorization to begin `ue-r2-1a` —
-  REV4 is Active, but AGENTS.md §9 means the plan decision alone does not
-  greenlight coding; (2) push approval for the Windows test-tuning commit
-  (`439a2a7`, local-only — Windows CI red until it lands).
+- **Owner**: (1) single "go" to start coding `ue-r2-1a` — process is
+  established (D-2026-06-20-6); once given, the loop runs autonomously
+  with no further per-slice gates; (2) push approval for the Windows
+  test-tuning commit (`439a2a7`, local-only — Windows CI red until it
+  lands).
 
 ## Open questions
 

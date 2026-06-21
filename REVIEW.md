@@ -9,6 +9,28 @@ See `.review/findings/<id>.md` for per-finding details.
 - `[~]` In progress / pending review — sentinel in `.review/ready/`
 - `[x]` Verified — verdict in `.review/results/<id>.verified.json`
 
+## Unified transfer engine (REV4) — code→GPT-review→fix loop
+
+Plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md` (Active). Loop:
+`docs/agent/GPT_REVIEW_LOOP.md` (D-2026-06-20-6). These rows do **not** use
+the async `.review/` sentinel; status here means: `[ ]` not started ·
+`[~]` coded+committed, GPT review/adjudication in flight · `[x]` reviewed,
+accepted findings fixed, validation green. Records per slice:
+`.review/findings/<id>.md`, `.review/results/<id>.codex.md`,
+`.review/results/<id>.gpt-verdict.md`. Order/deps: REV4 §"Slice dependencies".
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| ue-r2-1a | Salvage adaptive PR1+PR2 substrate; resolve StallGuard-vs-`Probe`; work-stealing behavior tests | `[ ]` | — |
+| ue-r2-1b | Wire dial contract: capacity profile + peer capability + resize proto (`receiver_capacity=11`); compat tests | `[ ]` | — |
+| ue-r2-1c | `TransferEngine` shell + `TransferOrchestrator` as local adapter; local fast paths → engine strategies | `[ ]` | — |
+| ue-r2-1d | Streaming plan foundation (partial-scan InitialPlan/PlanUpdate); prove ~1s start; RELIABLE exceptions | `[ ]` | — |
+| ue-r2-1e | Live cheap dials replace the `determine_remote_tuning` ladder | `[ ]` | — |
+| ue-r2-1f | Push converge through the engine; retire daemon `desired_streams` ladder | `[ ]` | — |
+| ue-r2-1g | PullSync multistream through the engine (absorbs MULTISTREAM_PULL) | `[ ]` | — |
+| ue-r2-1h | Delete deprecated `Pull` RPC (+ its `pull_stream_count` ladder) after harvest | `[ ]` | — |
+| ue-r2-2 | Stream resize: negotiated `DataPlaneResize`/`Ack`, mid-transfer add/drop | `[ ]` | — |
+
 ## Design-review queue (ratified D-2026-06-11-2, in execution order)
 
 Source: `docs/audit/AUDIT_REPORT_2026-06-11_DESIGN.md` (slice specs) +
