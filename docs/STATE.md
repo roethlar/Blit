@@ -148,8 +148,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   - **(OPEN)** Edit D-2026-06-20-1 now to strip superseded
     warmup/size-gate wording, or let later decisions stand? Owner: not
     sure.
-- `docs/agent/SETUP.md` content — owner must supply (other machine);
-  `.review/README.md` lines 8/101 still point at unreadable paths.
+- **(RESOLVED 2026-06-20)** `docs/agent/SETUP.md` — owner supplied the
+  content; installed (no local paths) with a Blit banner reconciling it to
+  §8 (master-only) + the GPT-review variant; `.review/README.md` lines
+  8/101 repo-relativized. Remaining: historical audit/finding docs
+  (`audit-13/14/15`, `drift-*`) still embed `/Users/...` in recorded
+  evidence — left as-is pending an owner call on whether to scrub.
 - Disposition of adaptive-streams branch refs after `ue-1a` lands
   (D-2026-06-07-2).
 - Windows: w9-1 ungated 27 tests; w9-5/w9-4/w4-2 added ungated

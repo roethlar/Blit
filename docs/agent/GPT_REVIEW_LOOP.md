@@ -100,8 +100,8 @@ validation and review.
   interactive login). Reviews run read-only sandboxed.
 - The `superpowers@openai-curated` codex plugin injects a skill framework
   that derails focused reviews — disable it per-invocation as shown.
-- `.review/README.md` lines 8/101 carry stale macOS paths
-  (`/Users/michael/...`) — tracked as the SETUP.md open question; not
-  load-bearing for this loop.
+- The async two-agent loop is documented in `.review/README.md` +
+  `docs/agent/SETUP.md`; this synchronous loop reuses only their
+  `findings/` + `results/` records.
 - Branch model: AGENTS.md §8 (work on `master`, no agent branches) governs
   over `.review/README.md`'s "branch per finding."

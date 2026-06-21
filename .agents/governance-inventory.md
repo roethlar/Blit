@@ -19,7 +19,7 @@ files. No file is superseded; nothing earns a banner.
 | `docs/agent/PROTOCOL.md` | Procedures behind the trigger vocabulary (catchup, plan, decision, handoff, drift, slice) | leave | - | Working, referenced by all harness wrappers. |
 | `DEVLOG.md` | Append-only journal, newest first | leave | - | History, not state — exactly the standard treatment for journals. |
 | `TODO.md` | Long-horizon backlog | leave | - | AGENTS.md already declares it backlog-only. |
-| `REVIEW.md` + `.review/` | Two-agent coder/reviewer loop: status index, findings, sentinels, verdicts | leave | - | Working system with committed audit trail. Known wart: `.review/README.md` references paths on another machine (`/Users/michael/...`); already an open question in `docs/STATE.md`. |
+| `REVIEW.md` + `.review/` | Two-agent coder/reviewer loop: status index, findings, sentinels, verdicts | leave | - | Working system with committed audit trail. (2026-06-20: the former cross-machine path references were made repo-relative and `SETUP.md` was ported to `docs/agent/SETUP.md`.) |
 | `.claude/commands/*.md` | Slash-command wrappers resolving to PROTOCOL.md | leave | - | Already the thin pointers the standard asks for. |
 | `.claude/settings.json` | SessionStart context-inject + PreCompact hooks | leave | - | |
 | `.agents/skills/{catchup,handoff}` | Antigravity workspace skills mirroring the trigger vocabulary | leave | - | |

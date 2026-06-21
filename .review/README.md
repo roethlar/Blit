@@ -5,7 +5,7 @@ gate. `REVIEW.md` at the repo root is the human-readable status
 index; this directory is the structured handoff channel.
 
 For the workflow's design rationale (and onboarding any new agent
-into the contract) see `/Users/michael/Dev/SETUP.md`.
+into the contract) see `docs/agent/SETUP.md`.
 
 ## Layout
 
@@ -98,7 +98,7 @@ polled; that leaves the human in the loop.
 Default wake command:
 
 ```bash
-cd /Users/michael/Dev/Blit
+# from the repo root:
 .review/reviewer-wait.sh
 ```
 
