@@ -1179,4 +1179,158 @@ mod workqueue_tests {
             "forwarder should halt soon after the error, not drain all {n} payloads; pulled={pulled}"
         );
     }
+
+    /// Reports each payload's real byte size so the executor's byte and
+    /// file aggregation can be checked end to end without touching disk.
+    struct ByteSink {
+        bytes: Arc<AtomicU64>,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for ByteSink {
+        async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+            let (files, bytes): (usize, u64) = match &payload {
+                PreparedPayload::File(h) => (1, h.size),
+                PreparedPayload::TarShard { headers, .. } => {
+                    (headers.len(), headers.iter().map(|h| h.size).sum())
+                }
+                _ => (0, 0),
+            };
+            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+            Ok(SinkOutcome {
+                files_written: files,
+                bytes_written: bytes,
+            })
+        }
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    /// REV4 ue-r2-1a (work-stealing as behaviour): byte and file totals
+    /// stay correct when two sinks pull from the shared queue. Distinct
+    /// per-file sizes mean any double-count or dropped payload shifts the
+    /// totals, and the per-sink sum pins that every byte lands on exactly
+    /// one sink.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn byte_and_file_totals_correct_under_work_stealing() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let n = 30usize;
+        let mut expected_bytes = 0u64;
+        for i in 0..n {
+            // Distinct sizes so a miscount (double-add / drop) is visible.
+            let body = vec![b'x'; i + 1];
+            expected_bytes += body.len() as u64;
+            std::fs::write(src.join(format!("f{i}.dat")), &body).unwrap();
+        }
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan_handle.await.unwrap().unwrap();
+        assert_eq!(headers.len(), n, "one header per file");
+
+        let bytes_a = Arc::new(AtomicU64::new(0));
+        let bytes_b = Arc::new(AtomicU64::new(0));
+        let a: Arc<dyn TransferSink> = Arc::new(ByteSink {
+            bytes: Arc::clone(&bytes_a),
+            root: PathBuf::from("/a"),
+        });
+        let b: Arc<dyn TransferSink> = Arc::new(ByteSink {
+            bytes: Arc::clone(&bytes_b),
+            root: PathBuf::from("/b"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(4);
+        let feeder = tokio::spawn(async move {
+            for h in headers {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = execute_sink_pipeline_streaming(source, vec![a, b], rx, 2, None)
+            .await
+            .expect("pipeline ok");
+        let _ = feeder.await;
+
+        assert_eq!(outcome.files_written, n, "file total");
+        assert_eq!(outcome.bytes_written, expected_bytes, "byte total");
+        assert_eq!(
+            bytes_a.load(Ordering::Relaxed) + bytes_b.load(Ordering::Relaxed),
+            expected_bytes,
+            "every byte accounted to exactly one sink, none double-counted"
+        );
+    }
+
+    /// REV4 ue-r2-1a (cancellation): when the producer stops feeding and
+    /// drops the channel mid-stream, the work-stealing executor winds
+    /// down promptly — workers drain what was queued, run `finish`, and
+    /// the call returns without hanging (the timeout is the no-hang
+    /// assertion). Only the fed payloads complete; nothing past the
+    /// cancellation point is invented.
+    ///
+    /// Hard-abort of in-flight workers on dropping the pipeline future
+    /// itself is out of scope here: the workers are bare `tokio::spawn`
+    /// (a `JoinHandle` drop does not abort the task), which is the
+    /// AbortOnDrop family tracked under w4-1.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn producer_cancel_winds_down_pipeline_promptly() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let n = 50usize;
+        for i in 0..n {
+            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan_handle.await.unwrap().unwrap();
+        assert_eq!(headers.len(), n);
+
+        let count = Arc::new(AtomicU64::new(0));
+        let sink: Arc<dyn TransferSink> = Arc::new(CountingSink {
+            delay: Duration::ZERO,
+            count: Arc::clone(&count),
+            root: PathBuf::from("/c"),
+        });
+
+        // Feed only the first 5 headers, then drop the sender to model a
+        // cancelled / aborted producer.
+        let (tx, rx) = mpsc::channel::<TransferPayload>(2);
+        let feeder = tokio::spawn(async move {
+            for h in headers.into_iter().take(5) {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+            }
+            // `tx` dropped here → channel closes → pipeline must wind down.
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            execute_sink_pipeline_streaming(source, vec![sink], rx, 2, None),
+        )
+        .await
+        .expect("pipeline must wind down promptly after producer cancels, not hang")
+        .expect("graceful shutdown is not an error");
+        let _ = feeder.await;
+
+        assert_eq!(
+            outcome.files_written, 5,
+            "only the fed payloads are written"
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 5);
+    }
 }

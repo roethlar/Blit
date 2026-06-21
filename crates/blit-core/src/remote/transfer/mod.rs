@@ -26,8 +26,8 @@ pub use progress::{
     ByteProgressSink, LiveProbe, NoProbe, Probe, ProgressEvent, RemoteTransferProgress, StreamId,
     StreamProbe, StreamState, StreamTelemetry, StreamTelemetrySnapshot,
 };
-pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};
 pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
     NullSink, SinkOutcome, TransferSink,
 };
+pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};
