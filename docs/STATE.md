@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-06-20 (code→review→fix loop established, D-2026-06-20-6;
-REV4 Active, D-2026-06-20-5) at commit `b663091` (loop-setup docs
-uncommitted in working tree)
+Last updated: 2026-06-21 (`ue-r2-1a` complete — first REV4 slice landed via
+the code→review→fix loop) at commit `2c1b839`; unpushed stack
+`b663091..2c1b839` (this handoff commits on top).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -10,191 +10,107 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`ue-r2-1a` COMPLETE** (first REV4 slice; code→GPT-review→fix loop
-  validated end-to-end). Salvaged the adaptive substrate via cherry-pick
-  over the `-s ours` octopus trap (D-2026-06-07-2): PR1 zero-cost `Probe`
-  telemetry (`e569eea`), PR2 work-stealing `flume` queue (`3844a15`), PR2
-  forwarder-halt fix (`ec561f2`); hand-resolved the `data_plane.rs`
-  StallGuard-vs-`Probe` conflict; work-stealing behaviour tests
-  (`771a632`); codex/GPT-5.5 review → fix-then-ship, 4 findings all
-  accepted + fixed (`90ed43d`). Validation: fmt/clippy clean, `cargo test
-  --workspace` 1378 / 0 / 2 (baseline 1370). Carried to `ue-r2-1e`: PR1
-  `write_blocked_nanos` timing accuracy (telemetry not consumed until the
-  dial). Hard-abort-on-drop of workers stays `w4-1`. All on master,
-  **unpushed** (`515fb76..90ed43d`; full unpushed stack from `origin` is
-  `b663091..90ed43d`).
-- **Transfer-core architecture conflict RESOLVED** (D-2026-06-20-1):
-  convergence, not ground-up redesign. One src/dst-agnostic sequencer owns
-  all four paths (local↔local, push, pull, daemon↔daemon); one live dial
-  (streams + knobs) replaces the three static ladders, **bounded-unilateral**
-  (receiver capacity profile + sender controls within it). **No probe
-  phase** — the engine starts within ~1s at conservative defaults and the
-  tuner adjusts dials live from the first byte; the planner is
-  workload-shape-aware (file count vs bytes). Adaptive-streams PR1+PR2 (up
-  to `eafb187`) salvaged as the substrate per D-2026-06-07-2; PR3 WIP
-  `d9d4ec7` excluded.
-- **Plan decided — REV4 is the Active convergence plan** (owner: "rev4
-  replaces v1"; D-2026-06-20-5). `UNIFIED_TRANSFER_ENGINE_REV4.md` is
-  **Active**; v1, REV2, and REV3 are **Superseded**. The D-2026-06-20-4
-  coding freeze is lifted **as to the plan decision** — but per
-  AGENTS.md §9 no code slice starts without a fresh per-slice owner
-  authorization (next: `ue-r2-1a`). REV4 is REV3 with its
-  code-reality section corrected against the tree at `HEAD`. REV3's
-  headline "two static tables, not three" correction was itself **wrong**
-  — all three stream-count ladders are live (`determine_remote_tuning`,
-  `desired_streams` `push/control.rs:476`, `pull_stream_count`
-  `pull.rs:904`); v1's three-ladder count was right; `tuning.rs`'s own
-  doc comment confirms "the daemon's push negotiation runs its own ladder
-  and wins". REV4 also re-scopes the pull single-stream claim to PullSync
-  (deprecated `Pull` is already multistream), fixes strategy names
-  (`journal_no_work`, not `journal_skip`; no distinct `single_file`),
-  grounds every symbol with `file:line`, and carries v1's
-  lineage/absorption header forward so it can stand as plan-of-record.
-  (The D-2026-06-20-4 freeze that gated this is now resolved by the
-  owner's decision.) REV4 keeps convergence and the four bound
-  parameters from D-2026-06-20-2, but tighten slice shape: streaming
-  initial planning gets its own slice, local fast paths become
-  engine-owned strategies, work-stealing is treated as observable
-  behavior, proto capacity/resize compatibility is designed before
-  dependent code, and pull parity waits for multistream PullSync.
-- **Code→review→fix loop established** (D-2026-06-20-6;
-  `docs/agent/GPT_REVIEW_LOOP.md` Active): for `ue-r2-*` slices Claude
-  codes+commits each slice, GPT-5.5 (`codex`, confirmed headless here via
-  the local `headroom` proxy) reviews the commit, Claude adjudicates
-  findings against source/tests, fixes accepted ones, proceeds.
-  Per-slice commits to `master` are **ungated** (no branches, never
-  push); per-slice code acceptance is owner-delegated (not a gate — the
-  owner is not a developer). Async `.review/` sentinels dropped for this
-  loop; `findings/`+`results/` records reused. Owner gates remaining:
-  push, 10 GbE sign-off. Baseline: `cargo test --workspace` 1370 passed.
+- **`ue-r2-1a` COMPLETE** — first REV4 slice; the code→GPT-review→fix loop
+  ran end-to-end. Salvaged the adaptive substrate via cherry-pick over the
+  `-s ours` octopus trap (D-2026-06-07-2, where a plain merge no-ops): PR1
+  zero-cost `Probe` telemetry (`e569eea`), PR2 work-stealing `flume` queue
+  (`3844a15`), PR2 forwarder-halt fix (`ec561f2`); hand-resolved the
+  `data_plane.rs` StallGuard-vs-`Probe` conflict; work-stealing behaviour
+  tests (`771a632`); codex/GPT-5.5 review → fix-then-ship, 4 findings all
+  accepted + fixed (`90ed43d`); STATE/DEVLOG + codex-artifact trim
+  (`2c1b839`). Validation: fmt/clippy clean, `cargo test --workspace`
+  **1378 / 0 / 2** (baseline 1370). Carried to `ue-r2-1e`: PR1
+  `write_blocked_nanos` timing accuracy (no telemetry consumer until the
+  dial). Hard-abort-on-drop of workers stays `w4-1`.
+- **Active context** (settled background for the slice work):
+  - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the **Active**
+    convergence plan (D-2026-06-20-5); v1/REV2/REV3 Superseded.
+  - Direction (D-2026-06-20-1/-2): one src/dst-agnostic sequencer for all
+    four paths; one live dial replaces the three live stream-count ladders
+    (`determine_remote_tuning`, `desired_streams`, `pull_stream_count`);
+    **bounded-unilateral**, **no probe phase** (start within ~1s at
+    conservative defaults, tune live), workload-shape-aware planner.
+  - Process (D-2026-06-20-6, `docs/agent/GPT_REVIEW_LOOP.md`): for `ue-r2-*`
+    slices Claude codes+commits each slice, `codex`/GPT-5.5 reviews it,
+    Claude adjudicates + fixes. Per-slice commits to `master` ungated (no
+    branches, never push); per-slice code acceptance owner-delegated. Owner
+    gates remaining: **push**, **10 GbE sign-off**.
 
 ## Queue (ordered)
 
 1. **`ue-r2-1b` (wire dial contract)** — next REV4 slice: define the
    capacity-profile + peer-capability + resize proto shape
    (`receiver_capacity = 11`, `DataPlaneResize`/`Ack`) with old/new compat
-   tests, before any code depends on the fields. Paused here after
-   `ue-r2-1a` for an owner checkpoint (push the `b663091..90ed43d` stack /
-   confirm cadence); per D-2026-06-20-6 the loop may otherwise continue
-   autonomously. Also pending separately: push approval for the Windows
-   test-tuning commit (`439a2a7`, local-only — Windows CI red until it
-   lands).
+   tests, before any code depends on the fields. Per D-2026-06-20-6 the loop
+   may continue autonomously on owner "continue"; owner may push the
+   `b663091..2c1b839` stack first. Also pending separately: push approval for
+   the Windows test-tuning commit (`439a2a7`, local-only — Windows CI red
+   until it lands).
 2. **Then** the rest of the REV4 slice list in order —
    `1c` → `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
-   `REVIEW.md` order governs. Highest open ratified row is w4-1
-   (AbortOnDrop family, High); next include w4-3 and W1 socket-policy /
-   timeout constants. These are correctness findings, unaffected by the
-   engine convergence — may be folded into `ue-1c` or fixed standalone,
-   owner's call.
-4. **10 GbE benchmark session — DEFERRED** (owner 2026-06-12: rig assembly
-   is real work; benchmarking pre-convergence is churn). Now also the
-   `ue-1` sign-off measure (loopback parity band: local↔local /
-   local→daemon / daemon→local within a tight band) AND the gate for
-   `ue-2` (continuous/C). Capture before/after baselines there, not earlier.
-   Remains the zero-copy revisit gate (D-2026-06-12-1). After `ue-1`:
-   audit Round 1, TUI rework (Round 2), H10b streaming planner.
+   `REVIEW.md` order governs. Highest open ratified row is **w4-1**
+   (AbortOnDrop family, High) — now also owns the `ue-r2-1a` hard-abort gap.
+   Then w4-3, W1 socket-policy / timeout constants. May fold into `ue-r2-1c`
+   or fix standalone, owner's call.
+4. **10 GbE benchmark session — DEFERRED** (owner 2026-06-12). The `ue-1`
+   sign-off measure (loopback parity band: local↔local / local→daemon /
+   daemon→local within a tight band) AND the `ue-2` (continuous/C) gate; also
+   the zero-copy revisit gate (D-2026-06-12-1). Capture before/after
+   baselines there. After `ue-1`: audit Round 1, TUI rework, H10b planner.
 
 ## Authoritative docs right now
 
-- **Active plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** —
-  convergence engine; flipped Active by D-2026-06-20-5 ("rev4 replaces
-  v1"). Carries forward v1's absorption of `MULTISTREAM_PULL.md` (the
-  pull-multistream goal lands as slice `ue-r2-1g`).
-- Superseded by REV4 (history only, do not implement):
-  `UNIFIED_TRANSFER_ENGINE.md` (v1), `…_REV2.md`, `…_REV3.md`. REV4 = REV3
-  with the code-reality section corrected against `HEAD` (REV3's "two
-  tables, not three" ladder claim was wrong — all three ladders are
-  live), pull single-stream re-scoped to PullSync, strategy names fixed,
-  every symbol grounded with `file:line`.
-- Code→review→fix loop: `docs/agent/GPT_REVIEW_LOOP.md` (Active,
-  D-2026-06-20-6) — governs `ue-r2-*` slices (codex/GPT-5.5 reviews each
-  commit); the `.review/README.md` async two-agent loop still governs all
-  other work.
-- Design queue: `REVIEW.md` (13 design-queue rows `[x]`, 0 rows `[~]`) + the three
-  `docs/audit/` 2026-06-11 deliverables
-- Review loop: `REVIEW.md` + `.review/README.md` + `.review/findings/` +
-  `.review/results/` (ready queue empty)
-- Other plans: `docs/plan/ZERO_COPY_RECEIVE_EVAL.md` (delete ratified
-  D-2026-06-12-1, executes in w8-1), `docs/plan/TUI_REWORK.md` (gated on
-  Round 1), `docs/plan/BENCHMARK_10GBE_PLAN.md` (`ue-1` sign-off + `ue-2`
-  gate)
-- Findings: `docs/audit/AUDIT_REPORT_2026-06-04_INDEX.md` (R3 governs)
-- Decisions: D-2026-06-20-1 (convergence direction), D-2026-06-20-5
-  (REV4 replaces v1 as Active; v1/REV2/REV3 Superseded; plan-decision
-  freeze lifted), D-2026-06-20-6 (code→review→fix loop; ungated per-slice
-  commits; per-slice code acceptance owner-delegated)
+- **Active plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** — convergence
+  engine (D-2026-06-20-5); absorbs `MULTISTREAM_PULL.md` as slice `ue-r2-1g`.
+- Superseded by REV4 (history only): `UNIFIED_TRANSFER_ENGINE.md` (v1),
+  `…_REV2.md`, `…_REV3.md`.
+- Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active, D-2026-06-20-6) governs
+  `ue-r2-*`; `.review/README.md` async loop governs other work.
+- Review loop: `REVIEW.md` (`ue-r2-1a` row `[x]`; design-queue rows) +
+  `.review/findings/` + `.review/results/`.
+- Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified D-2026-06-12-1,
+  executes w8-1), `TUI_REWORK.md` (gated on Round 1),
+  `BENCHMARK_10GBE_PLAN.md` (`ue-1`/`ue-2` gate).
+- Decisions: D-2026-06-20-1 (direction), -5 (REV4 Active), -6 (review loop).
 
 ## Blocked / waiting
 
-- **Owner**: (1) single "go" to start coding `ue-r2-1a` — process is
-  established (D-2026-06-20-6); once given, the loop runs autonomously
-  with no further per-slice gates; (2) push approval for the Windows
-  test-tuning commit (`439a2a7`, local-only — Windows CI red until it
-  lands).
+- **Owner**: (1) "continue" → I pick up `ue-r2-1b` (or push the
+  `b663091..2c1b839` stack first); (2) push approval for `439a2a7` (Windows
+  CI red until it lands). Neither blocks me from continuing autonomously per
+  D-2026-06-20-6 once you say go.
 
 ## Open questions
 
-- **(RESOLVED 2026-06-20, D-2026-06-20-1 / -2)** Transfer-core architecture
-  — convergence per `UNIFIED_TRANSFER_ENGINE.md` (Active). Closed.
-- **(RESOLVED — veto, D-2026-06-20-3)** Agent's flagged inference to fold
-  the H10b streaming planner into the engine — **vetoed by owner.**
-  D-2026-06-04-3 stands unchanged; engine's workload-shape-awareness +
-  1s-start stand alone.
-- **Engine type** — deferred to agent (recommends new `TransferEngine` +
-  local adapter); ratified at `ue-r2-1c`, owner may override.
-- `UNIFIED_TRANSFER_ENGINE` plan-review decisions (2026-06-20, owner;
-  `REV4.md` is now the **Active** plan — D-2026-06-20-5; REV3's ladder
-  "correction" was wrong, all three ladders are live):
-  - **(RESOLVED)** First-byte-within-~1s is a hard invariant for every
-    mode except the modes where moving any byte before full knowledge
-    would be unsafe (mirror/delete, resume, checksum-refusal). Novel vs
-    known workload is a tuning-strategy choice (start-something-and-tune
-    vs replay-optimal-last-run via the in-tree `perf_history`/
-    `perf_predictor`), not an exception. Both meet 1s.
-  - **(RESOLVED)** Deprecated `Pull` deletion stays in-plan as
-    `ue-r2-1h`, gated on `ue-r2-1g` + `ue-r2-1b` compat tests.
-  - **(RESOLVED 2026-06-20, owner — D-2026-06-20-5)** REV4 **replaces**
-    v1. `UNIFIED_TRANSFER_ENGINE.md` Superseded; REV2/REV3
-    Superseded-by-REV4; REV4 is the one Active plan.
-  - **(OPEN)** Edit D-2026-06-20-1 now to strip superseded
-    warmup/size-gate wording, or let later decisions stand? Owner: not
-    sure.
-- **(RESOLVED 2026-06-20)** SETUP.md — the generic two-agent guide
-  predates this governance; owner is folding it into the governance as a
-  playbook (re-applied on governance setup), so it is **not** kept in-repo
-  (removed). `.review/README.md` lines 8/101 repo-relativized and the
-  dangling SETUP pointer removed. Remaining: historical audit/finding docs
-  (`audit-13/14/15`, `drift-*`) still embed `/Users/...` in recorded
-  evidence — left as-is pending an owner call on whether to scrub.
-- Disposition of adaptive-streams branch refs after `ue-1a` lands
-  (D-2026-06-07-2).
-- Windows: w9-1 ungated 27 tests; w9-5/w9-4/w4-2 added ungated
-  daemon-spawn tests — unverified on Windows; next windows-latest CI run or
-  run-blit-tests.ps1 triages real failures into findings.
+- **(OPEN)** Edit D-2026-06-20-1 to strip its superseded warmup/size-gate
+  wording? Owner: not sure. (Agent rec: edit with a one-line note → -2/-5.)
+- **(OPEN)** Historical audit/finding docs (`audit-13/14/15`, `drift-*`)
+  still embed `/Users/...` in recorded evidence — scrub, or leave as
+  evidence? Agent rec: leave; live docs are already clean.
+- **(OPEN, now live)** Disposition of the adaptive-streams branch refs
+  (`e6ef095`…`eafb187`, `d9d4ec7`) now that PR1/PR2 are cherry-picked onto
+  master (D-2026-06-07-2). Deleting them is an owner-named-branch op.
+- **Engine type** — agent recommends a new `TransferEngine` + local adapter;
+  ratified at `ue-r2-1c`, owner may override.
+- **Windows**: w9-1/w9-5/w9-4/w4-2 added ungated daemon-spawn tests,
+  unverified on Windows; next windows-latest CI run or run-blit-tests.ps1
+  triages real failures into findings.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-06-20** @ `09268eb` (doc edits uncommitted) — reviewed all three
-  unified-transfer candidates against the code, produced REV4 (= REV3 +
-  corrected code reality, every symbol grounded with `file:line`), and —
-  on owner's "rev4 replaces v1" — recorded **D-2026-06-20-5** and
-  propagated it: REV4 flipped to **Active**, v1/REV2/REV3 marked
-  **Superseded**, STATE + DECISIONS updated. Decisive finding: REV3's
-  "two static tables, not three" ladder correction was itself wrong —
-  all three ladders (`determine_remote_tuning`, `desired_streams`,
-  `pull_stream_count`) are live. No git commit (owner gate). In-flight:
-  none; coding still gated by AGENTS.md §9 absent a per-slice go-ahead.
-  **Exact first action next session**: owner authorizes `ue-r2-1a` (or
-  edits D-2026-06-20-1 / approves the `439a2a7` push — both still open).
-- **2026-06-20** @ `7ecc355` (doc edits uncommitted) — owner requested
-  plan review findings be rolled into `docs/plan/UNIFIED_TRANSFER_ENGINE_REV2.md`
-  and recorded a freeze (D-2026-06-20-4): unified-transfer-engine coding
-  is frozen pending owner final plan decision. Rev2 keeps convergence and
-  the D-2026-06-20-2 bound parameters but splits oversized slices and
-  clarifies local fast paths, work-stealing tests, proto compatibility,
-  and pull parity timing. In-flight: plan review only, no code. **Exact
-  first action next session**: owner decides whether rev2 replaces/amends
-  the original Active plan or requests another revision; push approval for
-  `439a2a7` still pending separately.
+- **2026-06-21** @ `2c1b839` — `ue-r2-1a` landed end-to-end through the
+  code→GPT-review→fix loop (substrate cherry-pick `e569eea`/`3844a15`/
+  `ec561f2`, conflict resolved, tests `771a632`, codex review → 4 findings
+  all fixed `90ed43d`, docs `2c1b839`). fmt/clippy clean; test 1378/0/2. All
+  on master, **unpushed** (`b663091..2c1b839`). In-flight: none — paused at a
+  slice boundary. **Exact first action next session**: on owner "continue",
+  start `ue-r2-1b` (wire/dial proto contract) through the loop; else owner
+  pushes the stack / approves `439a2a7` / decides the D-2026-06-20-1 edit.
+- **2026-06-20** @ `09268eb` — reviewed all three unified-transfer candidates,
+  produced REV4 (code-reality corrected; REV3's "two static tables" ladder
+  claim was wrong — all three ladders live), and on owner's "rev4 replaces
+  v1" recorded **D-2026-06-20-5** + propagated (REV4 Active; v1/REV2/REV3
+  Superseded). Then established the GPT review loop (D-2026-06-20-6) and
+  ported then removed SETUP.md (folded into governance).
