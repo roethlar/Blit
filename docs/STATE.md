@@ -89,9 +89,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **(OPEN)** Historical audit/finding docs (`audit-13/14/15`, `drift-*`)
   still embed `/Users/...` in recorded evidence — scrub, or leave as
   evidence? Agent rec: leave; live docs are already clean.
-- **(OPEN, now live)** Disposition of the adaptive-streams branch refs
-  (`e6ef095`…`eafb187`, `d9d4ec7`) now that PR1/PR2 are cherry-picked onto
-  master (D-2026-06-07-2). Deleting them is an owner-named-branch op.
+- **(RESOLVED 2026-06-21)** Adaptive-streams branch refs. Audited all three
+  past the `-s ours` octopus trap (real-tree diffs, not ancestor-diffs):
+  `pr2` (`b797b73`) was fully salvaged (PR1/PR2/forwarder-fix cherry-picked;
+  `9af276d` live-progress also on master via evolved `TransferProgress`);
+  `pr3` (`eafb187`) held only review artifacts, no code. Owner deleted both
+  from `origin`. **Kept `origin/feat/adaptive-streams-pr3-resizable`
+  (`d9d4ec7`)** — does-not-build, but its 73-line `proto/blit.proto` adaptive
+  contract (`adaptive_enabled`, `min/max_stream_count`, `epoch0_sub_token`,
+  `DataPlaneResize`/`Ack`, `supports_adaptive_streams` caps) is prior-art for
+  `ue-r2-1b`. Note field-number clash: that branch uses `11` for
+  `min_stream_count`; REV4 reserves `11` for `receiver_capacity`.
 - **Engine type** — agent recommends a new `TransferEngine` + local adapter;
   ratified at `ue-r2-1c`, owner may override.
 - **Windows**: w9-1/w9-5/w9-4/w4-2 added ungated daemon-spawn tests,
