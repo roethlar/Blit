@@ -29,12 +29,12 @@ pub(super) fn apply_mirror_deletions(
     source_paths: &HashSet<String>,
     dest_root: &Path,
     filter: &FileFilter,
-    delete_scope: crate::orchestrator::LocalMirrorDeleteScope,
+    delete_scope: super::options::LocalMirrorDeleteScope,
     perform: bool,
     verbose: bool,
 ) -> Result<(usize, usize)> {
+    use super::options::LocalMirrorDeleteScope;
     use crate::enumeration::{EntryKind, FileEnumerator};
-    use crate::orchestrator::LocalMirrorDeleteScope;
 
     // R58-F6: FilteredSubset uses the user's filter for the
     // enumeration (only in-scope entries become deletion

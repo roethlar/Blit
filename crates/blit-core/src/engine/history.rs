@@ -126,8 +126,8 @@ pub(super) fn update_predictor(
 
 #[cfg(test)]
 mod tests {
+    use super::super::summary::TransferOutcome;
     use super::*;
-    use crate::orchestrator::TransferOutcome;
     use std::time::Duration;
 
     fn options_with_mirror(mirror: bool) -> LocalMirrorOptions {
