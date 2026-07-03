@@ -10,19 +10,22 @@ use super::PullSyncSender;
 use crate::runtime::{ModuleConfig, RootExport};
 
 use base64::{engine::general_purpose, Engine as _};
-use blit_core::engine::TransferDial;
+use blit_core::buffer::BufferPool;
+use blit_core::engine::{initial_stream_proposal, TransferDial};
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
-    BlockTransferComplete, ClientPullMessage, ComparisonMode, DataTransferNegotiation, FileHeader,
-    FileList, ManifestBatch, MirrorMode, PullSummary, PullSyncAck, ServerPullMessage,
-    TransferOperationSpec,
+    BlockTransferComplete, CapacityProfile, ClientPullMessage, ComparisonMode,
+    DataTransferNegotiation, FileHeader, FileList, ManifestBatch, MirrorMode, PullSummary,
+    PullSyncAck, ServerPullMessage, TransferOperationSpec,
 };
 use blit_core::manifest::{
     compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
 };
+use blit_core::remote::transfer::data_plane::DataPlaneSession;
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::plan_transfer_payloads;
+use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::transfer_plan::PlanOptions;
 
@@ -30,6 +33,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tonic::{Status, Streaming};
 
@@ -300,9 +304,25 @@ pub(crate) async fn handle_pull_sync_stream(
     } else {
         // Data plane transfer (full files). Pass the enumeration `root`,
         // not module.path — header.relative_path is relative to `root`.
-        let stats =
-            stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx, &dial)
-                .await?;
+        // ue-r2-1g: the daemon (byte sender, shape-knower) proposes the
+        // stream count from the engine's shape table, bounded by the
+        // client's advertised receiver profile.
+        let stream_count = negotiated_pull_streams(
+            bytes_to_send,
+            entries_to_send.len(),
+            spec.receiver_capacity.as_ref(),
+            &dial,
+        );
+        let stats = stream_via_data_plane(
+            &module,
+            &root,
+            entries_to_send,
+            bytes_to_send,
+            &tx,
+            &dial,
+            stream_count,
+        )
+        .await?;
         send_summary(&tx, stats, false, scoped_deletions.len() as u64).await?;
     }
 
@@ -338,6 +358,38 @@ fn compare_mode_to_internal(mode: ComparisonMode) -> CompareMode {
         // Unspecified | SizeMtime — both fall back to the historical default.
         _ => CompareMode::Default,
     }
+}
+
+/// ue-r2-1g: stream count for the pull_sync full-file data plane. The
+/// daemon is the byte SENDER and the workload-shape-knower; it
+/// proposes from the engine-owned shape table, bounded by the client's
+/// advertised receiver ceiling, and records the result on the dial
+/// (the `ue-r2-2` resize target).
+///
+/// A client that advertised no capacity profile — or an unknown
+/// (`0`) `max_streams` — gets today's single-stream behavior: REV4
+/// Design §5 ("no capacity profile means use today's
+/// static/conservative behavior") and the proto contract on
+/// `CapacityProfile.max_streams` ("0 = unknown → sender stays at
+/// today's negotiated stream_count"). The resume path does not call
+/// this — its interleaved block-hash protocol is strictly ordered on
+/// the control stream, so it stays single-stream by design (an
+/// explicit RELIABLE exception, see `.review/findings/ue-r2-1g.md`).
+fn negotiated_pull_streams(
+    total_bytes: u64,
+    file_count: usize,
+    receiver_capacity: Option<&CapacityProfile>,
+    dial: &TransferDial,
+) -> u32 {
+    let client_multistream_capable = receiver_capacity.is_some_and(|p| p.max_streams > 0);
+    if !client_multistream_capable {
+        return 1;
+    }
+    // The dial's ceiling already folds in the client's profile (it was
+    // built from the same spec field), so the proposal is
+    // receiver-bounded; set_negotiated_streams re-clamps and records.
+    let proposal = initial_stream_proposal(total_bytes, file_count, dial.ceiling_max_streams());
+    dial.set_negotiated_streams(proposal as usize) as u32
 }
 
 async fn receive_client_manifest(
@@ -543,6 +595,7 @@ async fn stream_via_grpc(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_via_data_plane(
     _module: &ModuleConfig,
     source_root: &Path,
@@ -550,12 +603,10 @@ async fn stream_via_data_plane(
     total_bytes: u64,
     tx: &PullSyncSender,
     dial: &TransferDial,
+    stream_count: u32,
 ) -> Result<TransferStats, Status> {
-    use blit_core::buffer::BufferPool;
-    use blit_core::remote::transfer::data_plane::DataPlaneSession;
     use blit_core::remote::transfer::payload_file_count;
     use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
-    use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 
     // ue-r2-1e: dial-driven chunking (conservative start,
     // receiver-profile-bounded).
@@ -575,10 +626,9 @@ async fn stream_via_data_plane(
     let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
 
-    // Single stream for the resume path (multi-stream support lives in pull.rs).
-    let stream_count = 1u32;
-
-    // Send negotiation
+    // Send negotiation. ue-r2-1g: stream_count is the engine's
+    // shape-keyed, receiver-bounded proposal (negotiated_pull_streams);
+    // the client fans out to exactly this many receive workers.
     tx.send(Ok(ServerPullMessage {
         payload: Some(server_pull_message::Payload::Negotiation(
             DataTransferNegotiation {
@@ -608,66 +658,24 @@ async fn stream_via_data_plane(
 
     let file_count = payload_file_count(&planned.payloads);
 
-    // R46-F7: bounded waits on accept and token-read. Pre-fix, a
-    // peer that opened the control RPC but never opened the data
-    // socket would pin this task indefinitely, holding the
-    // listener and the queued payload work.
-    use std::time::Duration as StdDuration;
-    const PULL_SYNC_ACCEPT_TIMEOUT: StdDuration = StdDuration::from_secs(30);
-    const PULL_SYNC_TOKEN_TIMEOUT: StdDuration = StdDuration::from_secs(15);
-
-    let (socket, _) = match tokio::time::timeout(PULL_SYNC_ACCEPT_TIMEOUT, listener.accept()).await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => {
-            return Err(Status::internal(format!(
-                "failed to accept data plane connection: {}",
-                e
-            )));
-        }
-        Err(_elapsed) => {
-            return Err(Status::deadline_exceeded(format!(
-                "pull-sync data plane accept timed out after {:?}",
-                PULL_SYNC_ACCEPT_TIMEOUT
-            )));
-        }
-    };
-    let expected_token = token;
-    let mut token_buf = vec![0u8; expected_token.len()];
-    let mut socket = socket;
-    match tokio::time::timeout(PULL_SYNC_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            return Err(Status::internal(format!("failed to read token: {}", e)));
-        }
-        Err(_elapsed) => {
-            return Err(Status::deadline_exceeded(format!(
-                "pull-sync token read timed out after {:?}",
-                PULL_SYNC_TOKEN_TIMEOUT
-            )));
-        }
-    }
-    if token_buf != expected_token {
-        return Err(Status::unauthenticated("invalid data plane token"));
-    }
-
-    // Wrap the session as a TransferSink and route through the unified pipeline.
-    let buffer_size = dial.chunk_bytes().max(64 * 1024);
-    let pool_size = 4;
-    let memory_budget = buffer_size * pool_size * 2;
-    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
-
-    let session = DataPlaneSession::from_stream(socket, false, dial.chunk_bytes(), 8, pool).await;
+    // ue-r2-1g: accept N token-authenticated connections and wrap each
+    // as a DataPlaneSink (the multistream pattern harvested from the
+    // deprecated Pull RPC). The shared pipeline's elastic work-stealing
+    // queue distributes payloads across all streams.
+    let sinks = accept_and_wrap_sinks(
+        &listener,
+        &token,
+        stream_count.max(1) as usize,
+        dial.chunk_bytes(),
+        dial.prefetch_count(),
+        source_root,
+    )
+    .await?;
 
     let source: Arc<dyn TransferSource> =
         Arc::new(FsTransferSource::new(source_root.to_path_buf()));
-    let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
-        session,
-        source.clone(),
-        source_root.to_path_buf(),
-    ));
 
-    execute_sink_pipeline(source, vec![sink], planned.payloads, 8, None)
+    execute_sink_pipeline(source, sinks, planned.payloads, dial.prefetch_count(), None)
         .await
         .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
 
@@ -676,6 +684,101 @@ async fn stream_via_data_plane(
         bytes_transferred: total_bytes,
         bytes_zero_copy: 0,
     })
+}
+
+/// Accept N TCP connections, validate each token, wrap each in a
+/// `DataPlaneSink`. `source_root` is the enumeration root (module.path +
+/// requested subpath) — files are read relative to this via header.relative_path.
+///
+/// ue-r2-1g: harvested verbatim from the deprecated Pull RPC
+/// (`service/pull.rs`), which now calls it here — REV4 requires the
+/// multistream pattern to live in PullSync before `ue-r2-1h` deletes
+/// that RPC.
+pub(crate) async fn accept_and_wrap_sinks(
+    listener: &TcpListener,
+    expected_token: &[u8],
+    streams: usize,
+    chunk_bytes: usize,
+    payload_prefetch: usize,
+    source_root: &Path,
+) -> Result<Vec<Arc<dyn TransferSink>>, Status> {
+    let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
+        Arc::new(FsTransferSource::new(source_root.to_path_buf()));
+
+    // Shared buffer pool across all streams.
+    let buffer_size = chunk_bytes.max(64 * 1024);
+    let pool_size = streams * 2 + 4;
+    let memory_budget = buffer_size * pool_size * 2;
+    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+
+    let dst_root = source_root.to_path_buf();
+    let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
+    // R47-F5 / R46-F7: bound the accept + token-read so a peer that
+    // opened the control RPC but never opened the data socket(s)
+    // can't pin this task (and the listener) indefinitely.
+    use std::time::Duration as StdDuration;
+    const PULL_ACCEPT_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+    const PULL_TOKEN_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+    for idx in 0..streams {
+        let (mut socket, addr) =
+            match tokio::time::timeout(PULL_ACCEPT_TIMEOUT, listener.accept()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(err)) => {
+                    return Err(Status::internal(format!("data plane accept failed: {err}")));
+                }
+                Err(_elapsed) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "pull data plane accept timed out after {:?} \
+                         waiting for stream {}/{}",
+                        PULL_ACCEPT_TIMEOUT,
+                        idx + 1,
+                        streams
+                    )));
+                }
+            };
+        eprintln!(
+            "blitd: pull data plane: accepted connection {} from {}",
+            idx, addr
+        );
+
+        // Validate token before handing the socket to a sink.
+        let mut token_buf = vec![0u8; expected_token.len()];
+        match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                return Err(Status::internal(format!(
+                    "failed to read pull token: {err}"
+                )));
+            }
+            Err(_elapsed) => {
+                return Err(Status::deadline_exceeded(format!(
+                    "pull token read timed out after {:?}",
+                    PULL_TOKEN_TIMEOUT
+                )));
+            }
+        }
+        if token_buf != expected_token {
+            log::warn!("pull data plane: invalid token");
+            return Err(Status::permission_denied("invalid pull data plane token"));
+        }
+
+        let session = DataPlaneSession::from_stream(
+            socket,
+            false,
+            chunk_bytes,
+            payload_prefetch,
+            Arc::clone(&pool),
+        )
+        .await;
+
+        sinks.push(Arc::new(DataPlaneSink::new(
+            session,
+            source.clone(),
+            dst_root.clone(),
+        )));
+    }
+
+    Ok(sinks)
 }
 
 /// Stream files using block-level resume via data plane (primary path).
@@ -733,9 +836,10 @@ async fn stream_via_data_plane_resume(
     .map_err(|_| Status::internal("failed to send negotiation"))?;
 
     // R46-F7: bounded waits on accept + token-read. Same rationale
-    // as the streaming pull-sync path (PULL_SYNC_ACCEPT_TIMEOUT /
-    // PULL_SYNC_TOKEN_TIMEOUT defined above) — a stalled peer
-    // mustn't hold the daemon's listener indefinitely.
+    // and values as `accept_and_wrap_sinks` (the full-file path) —
+    // a stalled peer mustn't hold the daemon's listener indefinitely.
+    // This path stays single-connection (resume is single-stream by
+    // design), so it keeps its own inline accept.
     use std::time::Duration as StdDuration2;
     const ACCEPT_TIMEOUT: StdDuration2 = StdDuration2::from_secs(30);
     const TOKEN_TIMEOUT: StdDuration2 = StdDuration2::from_secs(15);
@@ -1146,6 +1250,84 @@ mod tests {
             &Some(filter),
         );
         assert_eq!(out, vec!["big.txt".to_string()]);
+    }
+
+    // ── ue-r2-1g: stream-count decision (engine proposal, gated on
+    //    the client's advertised receiver profile) ──────────────────
+
+    fn capacity(max_streams: u32) -> CapacityProfile {
+        CapacityProfile {
+            cpu_cores: 0,
+            drain_class: 0,
+            load_percent: 0,
+            max_streams,
+            drain_rate_bytes_per_sec: 0,
+            max_chunk_bytes: 0,
+            max_inflight_bytes: 0,
+        }
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn no_receiver_profile_stays_single_stream() {
+        // Old client (pre-1e spec, no receiver_capacity): today's
+        // behavior byte-for-byte, even for a huge workload — REV4
+        // Design §5's "no profile → static/conservative behavior".
+        let dial = TransferDial::conservative_within(None);
+        assert_eq!(negotiated_pull_streams(40 * GIB, 500_000, None, &dial), 1);
+    }
+
+    #[test]
+    fn unknown_max_streams_stays_single_stream() {
+        // Profile present but max_streams = 0 (unknown): the proto
+        // contract says "sender stays at today's negotiated
+        // stream_count" — 1 on pull_sync.
+        let profile = capacity(0);
+        let dial = TransferDial::conservative_within(Some(&profile));
+        assert_eq!(
+            negotiated_pull_streams(40 * GIB, 500_000, Some(&profile), &dial),
+            1
+        );
+    }
+
+    #[test]
+    fn capable_profile_gets_the_engine_shape_table() {
+        let profile = capacity(32);
+        let dial = TransferDial::conservative_within(Some(&profile));
+        // Table cap for a huge workload.
+        assert_eq!(
+            negotiated_pull_streams(40 * GIB, 10, Some(&profile), &dial),
+            16
+        );
+        // File-count key fires independently of bytes (300 files → 2).
+        let dial = TransferDial::conservative_within(Some(&profile));
+        assert_eq!(negotiated_pull_streams(1, 300, Some(&profile), &dial), 2);
+        // Tiny workload stays single-stream even for a capable client.
+        let dial = TransferDial::conservative_within(Some(&profile));
+        assert_eq!(negotiated_pull_streams(1, 10, Some(&profile), &dial), 1);
+    }
+
+    #[test]
+    fn receiver_ceiling_clamps_the_proposal() {
+        // Client advertises max_streams = 6: the 16-stream proposal
+        // must clamp to the receiver's authority.
+        let profile = capacity(6);
+        let dial = TransferDial::conservative_within(Some(&profile));
+        assert_eq!(
+            negotiated_pull_streams(40 * GIB, 10, Some(&profile), &dial),
+            6
+        );
+    }
+
+    #[test]
+    fn negotiated_count_is_recorded_on_the_dial() {
+        // The dial carries the settled count forward (the ue-r2-2
+        // resize target reads it).
+        let profile = capacity(32);
+        let dial = TransferDial::conservative_within(Some(&profile));
+        let n = negotiated_pull_streams(40 * GIB, 10, Some(&profile), &dial);
+        assert_eq!(dial.initial_streams(), n as usize);
     }
 
     #[test]

@@ -2,7 +2,6 @@ use super::PullPayload;
 use crate::runtime::ModuleConfig;
 use crate::service::PullSender;
 use base64::{engine::general_purpose, Engine as _};
-use blit_core::buffer::BufferPool;
 use blit_core::engine::TransferDial;
 use blit_core::generated::{
     DataTransferNegotiation, FileData, FileHeader, ManifestBatch, PullChunk, PullSummary,
@@ -10,7 +9,6 @@ use blit_core::generated::{
 use blit_core::remote::transfer::pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_streaming,
 };
-use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::remote::transfer::{plan_transfer_payloads, TransferPayload};
 use blit_core::transfer_plan::PlanOptions;
@@ -669,97 +667,11 @@ async fn accept_pull_data_connection(
     Ok(())
 }
 
-/// Accept N TCP connections, validate each token, wrap each in a
-/// `DataPlaneSink`. `source_root` is the enumeration root (module.path +
-/// requested subpath) — files are read relative to this via header.relative_path.
-async fn accept_and_wrap_sinks(
-    listener: &TcpListener,
-    expected_token: &[u8],
-    streams: usize,
-    chunk_bytes: usize,
-    payload_prefetch: usize,
-    source_root: &Path,
-) -> Result<Vec<Arc<dyn TransferSink>>, Status> {
-    let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
-        Arc::new(FsTransferSource::new(source_root.to_path_buf()));
-
-    // Shared buffer pool across all streams.
-    let buffer_size = chunk_bytes.max(64 * 1024);
-    let pool_size = streams * 2 + 4;
-    let memory_budget = buffer_size * pool_size * 2;
-    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
-
-    let dst_root = source_root.to_path_buf();
-    let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
-    // R47-F5: bound the accept + token-read with the same timeouts
-    // the push / pull-sync paths use (R46-F7). Pre-fix this
-    // deprecated-but-exposed Pull RPC path had unbounded waits,
-    // so a peer that opened the control RPC but never opened the
-    // data socket would pin this task indefinitely.
-    use std::time::Duration as StdDuration;
-    const PULL_ACCEPT_TIMEOUT: StdDuration = StdDuration::from_secs(30);
-    const PULL_TOKEN_TIMEOUT: StdDuration = StdDuration::from_secs(15);
-    for idx in 0..streams {
-        let (mut socket, addr) =
-            match tokio::time::timeout(PULL_ACCEPT_TIMEOUT, listener.accept()).await {
-                Ok(Ok(pair)) => pair,
-                Ok(Err(err)) => {
-                    return Err(Status::internal(format!("data plane accept failed: {err}")));
-                }
-                Err(_elapsed) => {
-                    return Err(Status::deadline_exceeded(format!(
-                        "pull data plane accept timed out after {:?} \
-                         waiting for stream {}/{}",
-                        PULL_ACCEPT_TIMEOUT,
-                        idx + 1,
-                        streams
-                    )));
-                }
-            };
-        eprintln!(
-            "blitd: pull data plane: accepted connection {} from {}",
-            idx, addr
-        );
-
-        // Validate token before handing the socket to a sink.
-        let mut token_buf = vec![0u8; expected_token.len()];
-        match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => {
-                return Err(Status::internal(format!(
-                    "failed to read pull token: {err}"
-                )));
-            }
-            Err(_elapsed) => {
-                return Err(Status::deadline_exceeded(format!(
-                    "pull token read timed out after {:?}",
-                    PULL_TOKEN_TIMEOUT
-                )));
-            }
-        }
-        if token_buf != expected_token {
-            log::warn!("pull data plane: invalid token");
-            return Err(Status::permission_denied("invalid pull data plane token"));
-        }
-
-        let session = blit_core::remote::transfer::data_plane::DataPlaneSession::from_stream(
-            socket,
-            false,
-            chunk_bytes,
-            payload_prefetch,
-            Arc::clone(&pool),
-        )
-        .await;
-
-        sinks.push(Arc::new(DataPlaneSink::new(
-            session,
-            source.clone(),
-            dst_root.clone(),
-        )));
-    }
-
-    Ok(sinks)
-}
+// ue-r2-1g: `accept_and_wrap_sinks` (accept N, per-socket bounded
+// token auth, shared buffer pool, N `DataPlaneSink`s) was HARVESTED
+// into `super::pull_sync` — PullSync is its long-term home; this
+// deprecated RPC (deleted at ue-r2-1h) now borrows it back.
+use super::pull_sync::accept_and_wrap_sinks;
 
 /// Streaming enumeration that sends entries through a channel as they're discovered.
 /// Returns total file count and bytes when enumeration completes.

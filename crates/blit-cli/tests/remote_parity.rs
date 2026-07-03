@@ -85,6 +85,67 @@ fn test_pull_tcp_negotiation() {
     assert_eq!(bytes, b"pull-tcp-test");
 }
 
+/// ue-r2-1g: a many-file pull against a new daemon negotiates >1
+/// stream (MULTISTREAM_PULL acceptance: observable, not assumed) and
+/// lands byte-identical content. 300 files clears the engine shape
+/// table's 256-file tier, so the daemon proposes 2 streams; the
+/// client's `[pull-data-plane]` per-stream throughput line is printed
+/// ONLY on the multi-stream receive branch, so its presence proves the
+/// negotiation actually fanned out.
+#[test]
+fn test_pull_multistream_many_files() {
+    let ctx = TestContext::new();
+    let dest_dir = ctx.workspace.join("dest");
+
+    let src_subdir = ctx.module_dir.join("many");
+    fs::create_dir_all(&src_subdir).expect("src subdir");
+    for i in 0..300 {
+        fs::write(
+            src_subdir.join(format!("file_{i:03}.txt")),
+            format!("multistream-pull-{i:03}"),
+        )
+        .expect("write source file");
+    }
+
+    let src_remote = format!("127.0.0.1:{}:/test/many/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("mirror")
+        .arg("--yes")
+        .arg(&src_remote)
+        .arg(&dest_dir);
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(120));
+    assert!(output.status.success(), "blit failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("[gRPC fallback]"),
+        "expected TCP data plane (no fallback), got stdout:\n{}",
+        stdout
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[pull-data-plane]"),
+        "expected the multi-stream per-stream receive marker \
+         (daemon should negotiate >1 stream for 300 files), got stderr:\n{}",
+        stderr
+    );
+
+    for i in 0..300 {
+        let dest_file = dest_dir.join(format!("file_{i:03}.txt"));
+        let bytes = fs::read(&dest_file)
+            .unwrap_or_else(|e| panic!("missing pulled file {}: {e}", dest_file.display()));
+        assert_eq!(
+            bytes,
+            format!("multistream-pull-{i:03}").as_bytes(),
+            "content mismatch for file_{i:03}.txt"
+        );
+    }
+}
+
 #[test]
 fn test_pull_grpc_fallback() {
     let ctx = TestContext::new();

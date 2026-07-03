@@ -215,6 +215,7 @@ impl PullWorkerStats {
 }
 
 /// Result from data plane receiver, used to merge with control plane report.
+#[derive(Debug)]
 struct DataPlaneResult {
     files_transferred: usize,
     bytes_transferred: u64,
@@ -1976,6 +1977,119 @@ mod abort_on_drop_tests {
             !completed.load(Ordering::SeqCst),
             "task ran to completion despite cancellation during join() await — \
              AbortOnDrop is leaking the handle out before the await again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod multi_stream_receive_tests {
+    //! ue-r2-1g: pins the multistream fan-in semantics of
+    //! `receive_data_plane_streams_owned` — the machinery the PullSync
+    //! daemon now drives with `stream_count > 1`. Fail-whole is the
+    //! contract (MULTISTREAM_PULL "per-stream failure" criterion): one
+    //! stream dying must fail the entire receive deterministically,
+    //! never silently drop that stream's files.
+
+    use super::receive_data_plane_streams_owned;
+    use crate::remote::transfer::data_plane::DATA_PLANE_RECORD_END;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const TOKEN: &[u8] = b"0123456789abcdef";
+
+    /// Stub daemon: accept `streams` connections, read the token from
+    /// each, then run `behave(idx, socket)` per connection.
+    async fn spawn_stub<F, Fut>(streams: usize, behave: F) -> u32
+    where
+        F: Fn(usize, tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+        let port = listener.local_addr().expect("stub addr").port() as u32;
+        tokio::spawn(async move {
+            for idx in 0..streams {
+                let (mut socket, _) = listener.accept().await.expect("stub accept");
+                let mut token_buf = vec![0u8; TOKEN.len()];
+                socket
+                    .read_exact(&mut token_buf)
+                    .await
+                    .expect("stub token read");
+                assert_eq!(token_buf, TOKEN, "client must send the token per stream");
+                behave(idx, socket).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn clean_end_on_all_streams_succeeds() {
+        let port = spawn_stub(2, |_idx, mut socket| async move {
+            socket
+                .write_all(&[DATA_PLANE_RECORD_END])
+                .await
+                .expect("stub write end");
+            socket.shutdown().await.ok();
+        })
+        .await;
+
+        let dest = tempfile::tempdir().expect("dest dir");
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            receive_data_plane_streams_owned(
+                "127.0.0.1".to_string(),
+                port,
+                TOKEN.to_vec(),
+                2,
+                dest.path().to_path_buf(),
+                false,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("receive must not hang")
+        .expect("two clean END-only streams succeed");
+        assert_eq!(result.files_transferred, 0);
+        assert_eq!(result.bytes_transferred, 0);
+    }
+
+    #[tokio::test]
+    async fn per_stream_failure_fails_whole_receive() {
+        // Stream 0 ends cleanly; stream 1 closes WITHOUT the END
+        // record (mid-protocol death). The whole receive must error —
+        // not report partial success.
+        let port = spawn_stub(2, |idx, mut socket| async move {
+            if idx == 0 {
+                socket
+                    .write_all(&[DATA_PLANE_RECORD_END])
+                    .await
+                    .expect("stub write end");
+            }
+            socket.shutdown().await.ok();
+        })
+        .await;
+
+        let dest = tempfile::tempdir().expect("dest dir");
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            receive_data_plane_streams_owned(
+                "127.0.0.1".to_string(),
+                port,
+                TOKEN.to_vec(),
+                2,
+                dest.path().to_path_buf(),
+                false,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("receive must not hang");
+        let err = result.expect_err("one dead stream must fail the whole receive");
+        assert!(
+            format!("{err:#}").contains("record tag"),
+            "expected the torn-stream parse error in the chain, got: {err:#}"
         );
     }
 }

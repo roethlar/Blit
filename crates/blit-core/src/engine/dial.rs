@@ -247,15 +247,18 @@ impl TransferDial {
 }
 
 /// Workload-shape-aware initial stream proposal (`ue-r2-1f`): the
-/// byte RECEIVER proposes a starting stream count from what it knows
-/// of the workload shape — file count matters as much as bytes (many
-/// small files parallelize on per-file overhead even at low byte
-/// totals). Table carried over verbatim from the daemon push
-/// `desired_streams` ladder it retires (the ladder the old
-/// `tuning.rs` doc said "wins"), now engine-owned and clamped to the
-/// proposer's advertised ceiling. The sender's dial clamps again on
-/// its side (`set_negotiated_streams`). Live mid-transfer stream
-/// changes arrive with `ue-r2-2` resize.
+/// end that KNOWS the workload shape proposes a starting stream
+/// count — file count matters as much as bytes (many small files
+/// parallelize on per-file overhead even at low byte totals). On push
+/// that is the receiving daemon (it has the manifest) clamped to its
+/// own advertised ceiling; on pull_sync it is the sending daemon (it
+/// enumerated the source) clamped to the CLIENT's advertised
+/// `receiver_capacity.max_streams` (`ue-r2-1g`) — either way the byte
+/// receiver's profile is the bound. Table carried over verbatim from
+/// the daemon push `desired_streams` ladder it retires (the ladder
+/// the old `tuning.rs` doc said "wins"), now engine-owned. The
+/// sender's dial clamps again on its side (`set_negotiated_streams`).
+/// Live mid-transfer stream changes arrive with `ue-r2-2` resize.
 pub fn initial_stream_proposal(total_bytes: u64, file_count: usize, ceiling: usize) -> u32 {
     if file_count == 0 {
         return 1;
