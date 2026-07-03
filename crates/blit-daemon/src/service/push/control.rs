@@ -211,14 +211,16 @@ pub(crate) async fn handle_push_stream(
                                         one_time_token: token_string,
                                         tcp_fallback: false,
                                         stream_count: stream_target,
-                                        // ue-r2-1b: wire shape only. On
-                                        // push the daemon IS the byte
-                                        // receiver — its profile is
-                                        // stamped here once the live
-                                        // dial consumes it (ue-r2-1e);
+                                        // ue-r2-1e: the daemon is the
+                                        // byte receiver on push — it
+                                        // advertises its capacity so
+                                        // the client's dial can ramp
+                                        // within it.
                                         // resize_enabled/epoch0_sub_token
                                         // arrive with ue-r2-2.
-                                        receiver_capacity: None,
+                                        receiver_capacity: Some(
+                                            blit_core::engine::local_receiver_capacity(),
+                                        ),
                                         resize_enabled: false,
                                         epoch0_sub_token: Vec::new(),
                                     },
@@ -294,8 +296,8 @@ pub(crate) async fn handle_push_stream(
                     one_time_token: token_string,
                     tcp_fallback: false,
                     stream_count: stream_target,
-                    // ue-r2-1b: see the early-flush negotiation above.
-                    receiver_capacity: None,
+                    // ue-r2-1e: see the early-flush negotiation above.
+                    receiver_capacity: Some(blit_core::engine::local_receiver_capacity()),
                     resize_enabled: false,
                     epoch0_sub_token: Vec::new(),
                 }),

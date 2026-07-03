@@ -57,14 +57,14 @@ pub(crate) fn dst_capabilities() -> PeerCapabilities {
 ///
 /// ue-r2-1b extends the same boundary to `receiver_capacity`: the byte
 /// recipient is this destination daemon, so a CLI-supplied profile is
-/// non-authoritative and is stripped. Replaced with `None` (not a dst
-/// profile) until the live dial builds one (ue-r2-1e) — absent means
-/// "stay conservative", which is the correct pre-dial behavior.
+/// non-authoritative and is REPLACED with this daemon's own profile
+/// (ue-r2-1e — dst is the receiver in delegation, so its capacity is
+/// what the source's dial must respect).
 pub(crate) fn apply_dst_capabilities_override(
     mut spec: TransferOperationSpec,
 ) -> TransferOperationSpec {
     spec.client_capabilities = Some(dst_capabilities());
-    spec.receiver_capacity = None;
+    spec.receiver_capacity = Some(blit_core::engine::local_receiver_capacity());
     spec
 }
 
@@ -675,13 +675,12 @@ mod tests {
     }
 
     #[test]
-    fn dst_override_strips_cli_supplied_receiver_capacity() {
-        // ue-r2-1b: the byte recipient in delegation is dst, so a
-        // CLI-supplied receiver profile is non-authoritative. Until dst
-        // builds a real profile (ue-r2-1e) the override must strip it
-        // to None — leaking it through would hand the src sender a
-        // fabricated capacity ceiling the moment ue-r2-1e starts
-        // reading the field.
+    fn dst_override_replaces_cli_supplied_receiver_capacity() {
+        // ue-r2-1b/1e: the byte recipient in delegation is dst, so a
+        // CLI-supplied receiver profile is non-authoritative — the
+        // override must replace it with dst's OWN profile; leaking the
+        // CLI value through would hand the src sender a fabricated
+        // capacity ceiling.
         let mut spec_in = spec_with_caps(dst_capabilities());
         spec_in.receiver_capacity = Some(blit_core::generated::CapacityProfile {
             cpu_cores: 999,
@@ -693,7 +692,11 @@ mod tests {
             max_inflight_bytes: u64::MAX,
         });
         let spec_out = apply_dst_capabilities_override(spec_in);
-        assert!(spec_out.receiver_capacity.is_none());
+        let profile = spec_out
+            .receiver_capacity
+            .expect("dst stamps its own profile");
+        assert_eq!(profile, blit_core::engine::local_receiver_capacity());
+        assert_ne!(profile.max_streams, 4096, "CLI ceiling must not leak");
     }
 
     #[test]

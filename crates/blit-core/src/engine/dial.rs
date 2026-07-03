@@ -53,6 +53,23 @@ pub const DIAL_TUNER_TICK: std::time::Duration = std::time::Duration::from_milli
 pub const DIAL_STEP_UP_BLOCKED_RATIO: f64 = 0.05;
 pub const DIAL_STEP_DOWN_BLOCKED_RATIO: f64 = 0.30;
 
+/// The capacity profile this host advertises when it is the byte
+/// RECEIVER (ue-r2-1e: the first real sender of the ue-r2-1b wire
+/// fields). Honest system facts only — fields we cannot measure yet
+/// stay 0 (= unknown per the wire contract), never fabricated:
+/// ceilings mirror what today's receive paths actually accept.
+pub fn local_receiver_capacity() -> CapacityProfile {
+    CapacityProfile {
+        cpu_cores: num_cpus::get() as u32,
+        drain_class: 0,
+        load_percent: 0,
+        max_streams: DIAL_CEILING_MAX_STREAMS as u32,
+        drain_rate_bytes_per_sec: 0,
+        max_chunk_bytes: DIAL_CEILING_CHUNK_BYTES as u64,
+        max_inflight_bytes: (DIAL_CEILING_CHUNK_BYTES * DIAL_CEILING_PREFETCH) as u64,
+    }
+}
+
 /// The one mutable tuning object for a transfer.
 #[derive(Debug)]
 pub struct TransferDial {

@@ -621,9 +621,10 @@ impl RemotePullClient {
             force_grpc: options.force_grpc,
             ignore_existing: options.ignore_existing,
             require_complete_scan: options.require_complete_scan,
-            // ue-r2-1b: wire shape only — the receiver profile is
-            // populated when the live dial consumes it (ue-r2-1e).
-            receiver_capacity: None,
+            // ue-r2-1e: on pull the CLIENT is the byte receiver — it
+            // advertises its capacity so the daemon's dial can ramp
+            // within it.
+            receiver_capacity: Some(crate::engine::local_receiver_capacity()),
         })
     }
 
@@ -2041,6 +2042,12 @@ mod spec_extraction_tests {
         assert_eq!(spec.mirror_mode, MirrorMode::Off as i32);
         assert!(!spec.force_grpc);
         assert!(!spec.ignore_existing);
+        // ue-r2-1e: the pull client is the byte receiver — its spec
+        // must advertise the local capacity profile.
+        assert_eq!(
+            spec.receiver_capacity.as_ref().expect("profile stamped"),
+            &crate::engine::local_receiver_capacity()
+        );
         let caps = spec.client_capabilities.as_ref().unwrap();
         assert!(caps.supports_resume);
         assert!(caps.supports_tar_shards);
