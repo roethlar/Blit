@@ -150,6 +150,40 @@ fn empty_source_dir_reports_source_empty() -> Result<()> {
     Ok(())
 }
 
+/// ue-r2-1c: the single-file shortcut historically bypassed
+/// perf-history recording entirely — the only strategy that did. It
+/// now records with the `single_file` tag and scanned-feature
+/// accounting (REV4 Design §2: strategies share common accounting).
+#[test]
+fn single_file_copy_records_history() -> Result<()> {
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = ConfigDirGuard::new()?;
+    perf_history::set_perf_history_enabled(true)?;
+    let _ = perf_history::clear_history()?;
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("one.bin");
+    let dest = tmp.path().join("dest.bin");
+    fs::write(&src, b"payload-bytes")?;
+
+    let options = LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        ..Default::default()
+    };
+
+    let orchestrator = TransferOrchestrator::new();
+    let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
+    assert_eq!(summary.copied_files, 1);
+
+    let records = perf_history::read_recent_records(0)?;
+    let last = records.last().expect("expected perf history record");
+    assert_eq!(last.fast_path.as_deref(), Some("single_file"));
+    assert_eq!(last.file_count, 1);
+    assert_eq!(last.total_bytes, b"payload-bytes".len() as u64);
+    Ok(())
+}
+
 #[test]
 fn larger_manifest_records_streaming_path() -> Result<()> {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());

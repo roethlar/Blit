@@ -1,7 +1,7 @@
 //! Single-file copy strategy. Moved from
-//! `orchestrator/orchestrator.rs` at ue-r2-1c; the same slice later
-//! adds the perf-history/predictor accounting this path lacked
-//! (REV4 Design §2).
+//! `orchestrator/orchestrator.rs` at ue-r2-1c; the same slice adds
+//! the perf-history/predictor accounting this path lacked
+//! (REV4 Design §2: engine strategies share common accounting).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -9,15 +9,55 @@ use std::time::Instant;
 use eyre::{Context, Result};
 
 use crate::generated::ComparisonMode;
+use crate::perf_predictor::PerformancePredictor;
 
+use super::history::{record_performance_history, update_predictor};
 use super::options::LocalMirrorOptions;
 use super::summary::{LocalMirrorSummary, TransferOutcome};
 
-/// Copy a single file source directly to `dest_root`, bypassing the
-/// enumerator/planner/pipeline machinery which assumes `src_root` is a
-/// directory. The CLI's destination resolver has already produced the final
-/// target path, so this is a simple `copy_file` call.
+/// Copy a single file source directly to `dest_root` (the CLI's
+/// destination resolver has already produced the exact target path),
+/// then account for the run. ue-r2-1c: before the engine existed this
+/// shortcut bypassed perf-history/predictor recording entirely — the
+/// only strategy that did. It now records like every other strategy:
+/// tag `single_file` (or `null_sink`, matching the streaming path's
+/// lane convention so RunKind::NullSink derivation keeps working), no
+/// predictor update on null-sink runs (zero write cost would teach the
+/// predictor that transfers are faster than they really are). Records
+/// carry `tar_shard_tasks == raw_bundle_tasks == 0`, so the tuning
+/// window's signal filter already excludes them from auto-tuning.
 pub(super) fn execute_single_file_copy(
+    src_root: &Path,
+    dest_root: &Path,
+    options: &LocalMirrorOptions,
+    start_time: Instant,
+) -> Result<LocalMirrorSummary> {
+    let summary = single_file_copy_inner(src_root, dest_root, options, start_time)?;
+
+    let fast_path_label = if options.null_sink {
+        "null_sink"
+    } else {
+        "single_file"
+    };
+    if let Some(record) = record_performance_history(
+        &summary,
+        options,
+        Some(fast_path_label),
+        0,
+        summary.duration.as_millis(),
+    ) {
+        if !options.null_sink {
+            let mut predictor = PerformancePredictor::load().ok();
+            update_predictor(&mut predictor, &record, options.verbose);
+        }
+    }
+
+    Ok(summary)
+}
+
+/// The copy itself, bypassing the enumerator/planner/pipeline
+/// machinery which assumes `src_root` is a directory.
+fn single_file_copy_inner(
     src_root: &Path,
     dest_root: &Path,
     options: &LocalMirrorOptions,
@@ -38,19 +78,9 @@ pub(super) fn execute_single_file_copy(
     // at `options.checksum`, so `--size-only` / `--ignore-times` /
     // `--force` were silently dropped — repro: copy src.txt dst.txt
     // --size-only re-copied even when sizes matched.
-    let compare_mode = match options.compare_mode {
-        crate::orchestrator::LocalCompareMode::Checksum => ComparisonMode::Checksum,
-        crate::orchestrator::LocalCompareMode::SizeOnly => ComparisonMode::SizeOnly,
-        crate::orchestrator::LocalCompareMode::Force => ComparisonMode::Force,
-        crate::orchestrator::LocalCompareMode::IgnoreTimes => ComparisonMode::IgnoreTimes,
-        crate::orchestrator::LocalCompareMode::SizeMtime => {
-            if options.checksum {
-                ComparisonMode::Checksum
-            } else {
-                ComparisonMode::SizeMtime
-            }
-        }
-    };
+    let compare_mode: ComparisonMode = options
+        .compare_mode
+        .resolve_comparison_mode(options.checksum);
 
     // R58-F5: the single-file strategy (engine dispatch)
     // bypasses the enumerator + planner, which is where the
