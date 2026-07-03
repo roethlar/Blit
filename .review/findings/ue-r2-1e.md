@@ -1,9 +1,10 @@
 # ue-r2-1e: Live cheap dials replace the `determine_remote_tuning` ladder
 
 **Slice**: ue-r2-1e — fifth slice of `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
-**Status**: In progress (this doc doubles as the slice implementation plan)
+**Status**: Coded; under GPT review (`docs/agent/GPT_REVIEW_LOOP.md`)
 **Branch**: master (no agent branches — AGENTS.md §8)
-**Commits**: (filled as they land)
+**Commits**: `3be9105` (dial type), `a0d2c9f` (profile stamping),
+`98943b7` (ladder retirement), `15968f4` (live tuner + measurement fix)
 
 ## What
 
@@ -99,10 +100,43 @@ pull_sync callers). The daemon-push `desired_streams` ladder retires at
 
 ## Tests
 
-Baseline entering the slice: 1399 / 0 / 2. The 4 deleted ladder-tier
-tests are called out here per the repo test-count rule; replacements
-must keep the total non-decreasing.
+Baseline entering the slice: 1399 / 0 / 2 → after: **1402 / 0 / 2**.
+The 4 deleted ladder-tier tests (tuning.rs) are offset by 7 dial tests
+(defaults, profile clamps both directions, step/hysteresis, negotiated
+clamp, blocked-ratio edges, paused-clock tuner loop incl. Weak
+self-termination) + the profile-stamp asserts in existing suites.
+
+## Deviations from the frozen design (called out for review)
+
+- The tuner attaches on the push client's real data-plane path only
+  (the flagship sender). Daemon pull paths construct dials and read
+  them at their (mostly connect-time) seams but do not yet run a
+  tuner: pull_sync's single-stream/resume paths and the deprecated
+  Pull RPC gain live tuning when they converge through the engine
+  (`1g`) or die (`1h`).
+- The daemon pull_sync data-plane paths still hardcode prefetch 8 and
+  their receive-pool sizes exactly as before — only their previously
+  tuning-derived values (chunk) moved to the dial.
 
 ## Known gaps
 
-(filled as they land)
+- Live chunk/prefetch reads INSIDE a running MultiStreamSender: the
+  dial ramps and the planner's per-batch `chunk_bytes_override`
+  follows it, but a session's pool buffer size and its stored
+  `chunk_bytes`/`payload_prefetch` remain connect-time values (the
+  ramped values apply to payload PLANNING immediately and to future
+  sockets; per-write chunking inside live sessions follows at
+  `ue-r2-2`'s resize wiring, which adds sockets that pick up dialed
+  values).
+- Remote transfers still record no perf history (`perf_history` is
+  local-only: `TransferMode::{Copy,Mirror}`), so the remote
+  known-workload replay of Design §3 has no data source; the dial
+  always novel-starts on remote paths. Surfaced to the owner —
+  recording remote runs is unplanned work (candidate for `1f`/`1g`).
+- The daemon-push `desired_streams` ladder still proposes stream
+  counts (retires at `1f`); `pull_stream_count` retires at `1g`/`1h`.
+- Dead local tuning window untouched (1d discovery; fold-or-retire at
+  w2-2/owner call).
+- The receiver profile advertises static ceilings; live load/drain
+  measurement (load_percent, drain_rate) stays 0 = unknown until a
+  measurement source exists.
