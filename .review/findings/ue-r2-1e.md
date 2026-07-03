@@ -1,7 +1,7 @@
 # ue-r2-1e: Live cheap dials replace the `determine_remote_tuning` ladder
 
 **Slice**: ue-r2-1e — fifth slice of `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
-**Status**: Coded; under GPT review (`docs/agent/GPT_REVIEW_LOOP.md`)
+**Status**: Reviewed (codex NEEDS FIXES → 3 Mediums fixed `46da929`); gate green
 **Branch**: master (no agent branches — AGENTS.md §8)
 **Commits**: `3be9105` (dial type), `a0d2c9f` (profile stamping),
 `98943b7` (ladder retirement), `15968f4` (live tuner + measurement fix)

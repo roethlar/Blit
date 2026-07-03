@@ -29,5 +29,5 @@ green.
 
 ## Fix commit
 
-- Fix sha: recorded in REVIEW.md row. Gate after fixes: fmt clean,
+- Fix sha: `46da929`. Gate after fixes: fmt clean,
   clippy clean, tests 1402 passed / 0 failed / 2 ignored.

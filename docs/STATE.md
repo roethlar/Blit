@@ -1,10 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-03 (`ue-r2-1b`+`1c`+`1d` complete — wire contract,
-engine shell, streaming plan foundation, all through the
-code→review→fix loop); unpushed to `origin`/gitea: `c08a5c1`+`29159ca`
-+ this handoff (owner pushed everything through `f648784` earlier
-today).
+Last updated: 2026-07-03 (`ue-r2-1b`+`1c`+`1d`+`1e` complete — wire
+contract, engine shell, streaming plan, live dials — all through the
+code→review→fix loop); unpushed to `origin`/gitea: everything after
+`e1a21a1` (six ue-r2-1e commits + this handoff; owner pushed through
+`e1a21a1` earlier today).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -12,6 +12,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **`ue-r2-1e` COMPLETE** — live cheap dials (details: DEVLOG
+  2026-07-03). `TransferDial` (conservative floor start, receiver-
+  profile-clamped ceilings, hysteresis stepper) replaces the DELETED
+  `determine_remote_tuning` ladder at all six call sites; receivers
+  advertise real `CapacityProfile`s (daemon push negotiation, pull_sync
+  client spec, delegated dst); live tuner samples PR1 telemetry on the
+  push data plane (first production `LiveProbe`); `write_blocked_nanos`
+  now times only the socket write (carried 1a finding). codex NEEDS
+  FIXES → 3 Mediums fixed (`46da929`: in-flight bounds chunk; idle
+  ticks are no-signal; shard writes feed the blocked signal). Commits
+  `3be9105`..`46da929`; tests **1402 / 0 / 2** (4 deleted ladder tests
+  called out, offset by 7 dial tests). Stream-count ladders remaining:
+  `desired_streams` (1f), `pull_stream_count` (1g/1h).
 - **`ue-r2-1d` COMPLETE** — streaming plan foundation (details: DEVLOG
   2026-07-03). The engine's local leg plans from a partial header
   stream: `engine/streaming_plan.rs` (`InitialPlan` novel/known split,
@@ -67,17 +80,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`ue-r2-1e` (live cheap dials)** — next REV4 slice: replace the
-   static `determine_remote_tuning` chunk/prefetch/TCP-buffer ladder
-   with the single mutable dial; start conservative within the receiver
-   profile (`ue-r2-1b` wire fields), adjust cheap dials from PR1
-   telemetry (`ue-r2-1a`). Decide there how the dead
-   `derive_local_plan_tuning` window (see 1d finding) folds in or
-   retires (w2-2 overlap). Per D-2026-06-20-6 the loop may continue
-   autonomously on owner "continue"; owner may push
-   `c08a5c1`..`29159ca`+docs first.
-2. **Then** the rest of the REV4 slice list in order —
-   `1f` → `1g` → `1h` → `ue-r2-2`
+1. **`ue-r2-1f` (push converge)** — next REV4 slice: route push
+   through the engine preserving manifest streaming, need-list
+   batching, fallback timing, scan-completeness purge safety, old/new
+   compat; **retire the daemon `desired_streams` ladder** into the
+   dial. Note for 1f: remote transfers record no perf history
+   (local-only lanes) — candidate to add remote lanes there; the dead
+   `derive_local_plan_tuning` window (1d finding) also still awaits a
+   fold-or-retire call (w2-2). Per D-2026-06-20-6 the loop may continue
+   autonomously on owner "continue"; owner may push the 1e stack first.
+2. **Then** `1g` → `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is **w4-1**
@@ -103,7 +115,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `…_REV2.md`, `…_REV3.md`.
 - Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active, D-2026-06-20-6) governs
   `ue-r2-*`; `.review/README.md` async loop governs other work.
-- Review loop: `REVIEW.md` (`ue-r2-1a`..`1d` rows `[x]`; design-queue
+- Review loop: `REVIEW.md` (`ue-r2-1a`..`1e` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified D-2026-06-12-1,
   executes w8-1), `TUI_REWORK.md` (gated on Round 1),
@@ -112,9 +124,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: "continue" → I pick up `ue-r2-1e` (or push
-  `origin..master` — three commits after `f648784` — first). Doesn't
-  block autonomous continuation per D-2026-06-20-6.
+- **Owner**: "continue" → I pick up `ue-r2-1f` (or push
+  `origin..master` — the ue-r2-1e stack after `e1a21a1` — first).
+  Doesn't block autonomous continuation per D-2026-06-20-6.
 
 ## Open questions
 
@@ -140,6 +152,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-03 (4th)** @ `46da929`+docs — `ue-r2-1e` landed end-to-end
+  (dial `3be9105`, profiles `a0d2c9f`, ladder retired `98943b7`, tuner
+  `15968f4`, codex 3 Mediums fixed `46da929`). fmt/clippy clean; tests
+  1402/0/2. In-flight: none — paused at a slice boundary. **Exact
+  first action next session**: on owner "continue", start `ue-r2-1f`
+  (push converge, retire `desired_streams`) through the loop; else
+  owner pushes the stack / decides the D-2026-06-20-1 edit.
 - **2026-07-03 (3rd)** @ `29159ca`+docs — `ue-r2-1d` landed end-to-end
   (slice `c08a5c1`; codex FAIL → nested-dest self-copy High + scan-handle
   Medium both fixed `29159ca`). fmt/clippy clean; tests 1399/0/2.
@@ -156,7 +175,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   session**: on owner "continue", start `ue-r2-1d` (streaming plan
   foundation) through the loop; else owner pushes the stack / decides
   the D-2026-06-20-1 edit.
-- **2026-07-03** @ `5bd345a` — `ue-r2-1b` landed end-to-end through the
-  code→GPT-review→fix loop (wire contract `2741dc8`; codex PASS zero
-  findings; 1 Low self-review finding fixed `5bd345a`). fmt/clippy clean;
-  tests 1391/0/2.
