@@ -220,6 +220,58 @@ fn cross_batch_boundary_copies_every_file() -> Result<()> {
     Ok(())
 }
 
+/// ue-r2-1d review F1 (codex, High): with writes concurrent to the
+/// walk, a destination nested INSIDE the source could be re-enumerated
+/// mid-run and self-copy recursively (`dst/dst/…`). The streaming
+/// planner must exclude the destination subtree. Two runs: the second
+/// run's walk definitely sees the pre-existing destination directory,
+/// so the exclusion is exercised deterministically.
+#[test]
+fn nested_destination_does_not_self_copy() -> Result<()> {
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = ConfigDirGuard::new()?;
+    perf_history::set_perf_history_enabled(true)?;
+    let _ = perf_history::clear_history()?;
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src)?;
+    // > TINY_FILE_LIMIT (256) so the streaming leg runs, not Tiny.
+    for idx in 0..300 {
+        fs::write(src.join(format!("f{idx}.txt")), format!("payload-{idx}"))?;
+    }
+    let dest = src.join("backup");
+
+    let options = || LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        preserve_times: true,
+        ..Default::default()
+    };
+
+    let orchestrator = TransferOrchestrator::new();
+    let first = orchestrator.execute_local_mirror(&src, &dest, options())?;
+    assert_eq!(first.copied_files, 300);
+    assert!(dest.join("f0.txt").exists());
+    assert!(
+        !dest.join("backup").exists(),
+        "first run must not copy the destination into itself"
+    );
+
+    let second = orchestrator.execute_local_mirror(&src, &dest, options())?;
+    assert!(
+        !dest.join("backup").exists(),
+        "second run re-walks a tree that now contains the destination; \
+         the streaming planner must exclude it (got copied_files={})",
+        second.copied_files
+    );
+    assert_eq!(
+        second.copied_files, 0,
+        "all 300 originals are up to date on the second run"
+    );
+    Ok(())
+}
+
 #[test]
 fn larger_manifest_records_streaming_path() -> Result<()> {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());

@@ -477,6 +477,22 @@ impl TransferEngine {
             strategy: initial_strategy,
             plan_options,
         };
+        // codex ue-r2-1d F1: with writes now CONCURRENT with the walk,
+        // a destination nested inside the source can be re-enumerated
+        // mid-run — freshly written copies would be planned and copied
+        // again (dst/dst/…, unbounded). The collect-all implementation
+        // was immune purely by ordering. Exclude the destination
+        // subtree from planning when dest sits under src. (Path-prefix
+        // check on the resolver-produced roots; the fast paths keep
+        // their walk-fully-then-copy ordering and are unaffected.)
+        let exclude_dest_subtree = if dest_root.starts_with(src_root) {
+            dest_root
+                .strip_prefix(src_root)
+                .ok()
+                .map(|rel| rel.to_path_buf())
+        } else {
+            None
+        };
         let (payload_tx, payload_rx) =
             mpsc::channel::<TransferPayload>(DEFAULT_PAYLOAD_PREFETCH.max(1));
         let planner_fut = run_streaming_plan(
@@ -489,6 +505,7 @@ impl TransferEngine {
                 skip_unchanged: options.skip_unchanged,
                 initial,
                 collect_source_paths: options.mirror,
+                exclude_dest_subtree,
             },
             payload_tx,
             planning_start,
@@ -501,16 +518,21 @@ impl TransferEngine {
             None,
         );
         let (plan_result, pipeline_result) = tokio::join!(planner_fut, pipeline_fut);
+        // Observe the scan task UNCONDITIONALLY before any error
+        // return (codex ue-r2-1d F2): both join arms have completed,
+        // so the walker has either finished or aborted on its dead
+        // header channel — this await is prompt and never detaches a
+        // running scan or drops its panic.
+        let scan_result = scan_handle.await;
         // Error precedence: the pipeline's error is the root cause when
         // the planner aborted on a payload-send failure (the walker
         // then also aborts with a queue error) — so surface pipeline
         // first, then planner (diff/plan failures), then the scan
-        // handle (walk errors reach the planner only as a channel
+        // result (walk errors reach the planner only as a channel
         // close; the real error lives in the handle).
         let pipeline_outcome = pipeline_result.context("transfer pipeline failed")?;
         let plan_outcome = plan_result?;
-        let _total_scanned = scan_handle
-            .await
+        let _total_scanned = scan_result
             .context("scan task panicked")?
             .context("scan failed")?;
 

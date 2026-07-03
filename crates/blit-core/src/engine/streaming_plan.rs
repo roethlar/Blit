@@ -85,6 +85,13 @@ pub(super) struct StreamingPlanInputs {
     /// Accumulate every scanned relative path (mirror needs the full
     /// source set for its post-scan deletion pass).
     pub collect_source_paths: bool,
+    /// When the destination sits INSIDE the source tree, its
+    /// source-relative prefix. Headers under it are dropped before
+    /// planning: with writes concurrent to the walk, freshly written
+    /// destination files can be re-enumerated and would otherwise be
+    /// copied again recursively (codex ue-r2-1d F1). `None` for the
+    /// normal disjoint-roots case.
+    pub exclude_dest_subtree: Option<PathBuf>,
 }
 
 /// What the planner learned by the end of the stream. Scan totals are
@@ -171,6 +178,15 @@ fn accumulate(
     batch: &mut Vec<FileHeader>,
     header: FileHeader,
 ) {
+    if let Some(excluded) = &inputs.exclude_dest_subtree {
+        if std::path::Path::new(&header.relative_path).starts_with(excluded) {
+            log::debug!(
+                "streaming plan: skipping {} (inside the nested destination subtree)",
+                header.relative_path
+            );
+            return;
+        }
+    }
     outcome.scanned_files += 1;
     outcome.scanned_bytes += header.size;
     if inputs.collect_source_paths {
@@ -251,6 +267,7 @@ mod tests {
                 plan_options: PlanOptions::default(),
             },
             collect_source_paths: true,
+            exclude_dest_subtree: None,
         }
     }
 

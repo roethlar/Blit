@@ -1,7 +1,7 @@
 # ue-r2-1d: Streaming plan foundation (partial-scan InitialPlan/PlanUpdate)
 
 **Slice**: ue-r2-1d — fourth slice of `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
-**Status**: Coded; under GPT review (`docs/agent/GPT_REVIEW_LOOP.md`)
+**Status**: Reviewed (codex FAIL → both findings fixed; gate green)
 **Branch**: master (no agent branches — AGENTS.md §8)
 **Commits**: slice commit (this finding committed with it)
 
