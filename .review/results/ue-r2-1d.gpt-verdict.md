@@ -41,6 +41,6 @@ green.
 
 ## Fix commit
 
-- Fix sha: recorded below after the commit lands. Gate after fixes:
+- Fix sha: `29159ca`. Gate after fixes:
   fmt clean, clippy clean, tests 1399 passed / 0 failed / 2 ignored
   (+1 regression test).

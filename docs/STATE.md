@@ -1,10 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-03 (`ue-r2-1b` AND `ue-r2-1c` complete — wire dial
-contract + engine shell, both through the code→review→fix loop); unpushed
-to `origin`: everything after `725aa07` (nine commits, `fcf3345` through
-the `ue-r2-1c` review fix `15e6334` + this handoff; gitea has `fcf3345`
-already — owner pushed it 2026-07-03).
+Last updated: 2026-07-03 (`ue-r2-1b`+`1c`+`1d` complete — wire contract,
+engine shell, streaming plan foundation, all through the
+code→review→fix loop); unpushed to `origin`/gitea: `c08a5c1`+`29159ca`
++ this handoff (owner pushed everything through `f648784` earlier
+today).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -12,6 +12,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **`ue-r2-1d` COMPLETE** — streaming plan foundation (details: DEVLOG
+  2026-07-03). The engine's local leg plans from a partial header
+  stream: `engine/streaming_plan.rs` (`InitialPlan` novel/known split,
+  `PlanUpdate`, 512-header/250ms-timer/close batch flush) feeding
+  `execute_sink_pipeline_streaming` concurrently. Mirror deletion still
+  requires a complete clean scan (RELIABLE); phase split redefined
+  (planner = time-to-first-payload). Structural proof revert-proven
+  (collect-all deadlocks the gated test). codex FAIL → 2 findings
+  accepted + fixed (`29159ca`): nested-dest self-copy exclusion (+
+  two-run regression test) and scan-handle observation on error paths.
+  Commits `c08a5c1`+`29159ca`; tests **1399 / 0 / 2** (baseline 1394).
+  Surfaced pre-existing gap: streaming summaries carry no tar/raw
+  bucket stats → tuning window never admits streaming records →
+  `derive_local_plan_tuning` dead at HEAD (see 1d finding Known gaps;
+  1e/w2-2 territory).
 - **`ue-r2-1c` COMPLETE** — engine shell landed (details: DEVLOG
   2026-07-03). New `crates/blit-core/src/engine/`: `TransferEngine::
   execute(EngineRequest)` owns strategy selection (single-file → journal
@@ -52,15 +67,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`ue-r2-1d` (streaming plan foundation)** — next REV4 slice:
-   partial-scan `InitialPlan`/`PlanUpdate`, prove ~1s start for local
-   and push shapes, document RELIABLE exceptions
-   (mirror/delete, resume, checksum-refusal). `1e` (live dials) is also
-   unblocked (needs `1b`+`1c`, both done) — REV4 sequences `1d` first.
-   Per D-2026-06-20-6 the loop may continue autonomously on owner
-   "continue"; owner may push the `origin..master` stack first.
+1. **`ue-r2-1e` (live cheap dials)** — next REV4 slice: replace the
+   static `determine_remote_tuning` chunk/prefetch/TCP-buffer ladder
+   with the single mutable dial; start conservative within the receiver
+   profile (`ue-r2-1b` wire fields), adjust cheap dials from PR1
+   telemetry (`ue-r2-1a`). Decide there how the dead
+   `derive_local_plan_tuning` window (see 1d finding) folds in or
+   retires (w2-2 overlap). Per D-2026-06-20-6 the loop may continue
+   autonomously on owner "continue"; owner may push
+   `c08a5c1`..`29159ca`+docs first.
 2. **Then** the rest of the REV4 slice list in order —
-   `1e`/`1f` → `1g` → `1h` → `ue-r2-2`
+   `1f` → `1g` → `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is **w4-1**
@@ -86,7 +103,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `…_REV2.md`, `…_REV3.md`.
 - Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active, D-2026-06-20-6) governs
   `ue-r2-*`; `.review/README.md` async loop governs other work.
-- Review loop: `REVIEW.md` (`ue-r2-1a`/`1b`/`1c` rows `[x]`; design-queue
+- Review loop: `REVIEW.md` (`ue-r2-1a`..`1d` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified D-2026-06-12-1,
   executes w8-1), `TUI_REWORK.md` (gated on Round 1),
@@ -95,11 +112,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: "continue" → I pick up `ue-r2-1d` (or push the
-  `origin..master` stack first — nine commits; gitea lacks eight).
-  Doesn't block autonomous continuation per D-2026-06-20-6. Codex access
-  restored by owner 2026-07-03 after a mid-review quota outage (first
-  `ue-r2-1c` review attempt died; retry succeeded).
+- **Owner**: "continue" → I pick up `ue-r2-1e` (or push
+  `origin..master` — three commits after `f648784` — first). Doesn't
+  block autonomous continuation per D-2026-06-20-6.
 
 ## Open questions
 
@@ -125,6 +140,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-03 (3rd)** @ `29159ca`+docs — `ue-r2-1d` landed end-to-end
+  (slice `c08a5c1`; codex FAIL → nested-dest self-copy High + scan-handle
+  Medium both fixed `29159ca`). fmt/clippy clean; tests 1399/0/2.
+  In-flight: none — paused at a slice boundary. **Exact first action
+  next session**: on owner "continue", start `ue-r2-1e` (live cheap
+  dials) through the loop; else owner pushes the stack / decides the
+  D-2026-06-20-1 edit.
 - **2026-07-03 (later)** @ `15e6334`+docs — `ue-r2-1c` landed end-to-end
   (pins `7730eb1`, engine move `dc9b0ed`, single-file accounting
   `29e210b`, codex retry PASS → 1 Low fixed `15e6334`). fmt/clippy
@@ -138,7 +160,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   code→GPT-review→fix loop (wire contract `2741dc8`; codex PASS zero
   findings; 1 Low self-review finding fixed `5bd345a`). fmt/clippy clean;
   tests 1391/0/2.
-- **2026-06-21** @ `2c1b839` — `ue-r2-1a` landed end-to-end through the
-  code→GPT-review→fix loop (substrate cherry-pick `e569eea`/`3844a15`/
-  `ec561f2`, conflict resolved, tests `771a632`, codex review → 4 findings
-  all fixed `90ed43d`, docs `2c1b839`). fmt/clippy clean; test 1378/0/2.
