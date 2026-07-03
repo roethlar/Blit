@@ -386,6 +386,8 @@ impl RemotePushClient {
                 filter: Some(wire_filter),
                 mirror_kind: mirror_kind as i32,
                 require_complete_scan,
+                // ue-r2-1b: stays false until ue-r2-2 implements resize.
+                supports_stream_resize: false,
             }),
         )
         .await
@@ -730,6 +732,13 @@ impl RemotePushClient {
                                 }
                                 Some(ServerPayload::Summary(push_summary)) => {
                                     summary = Some(push_summary);
+                                }
+                                Some(ServerPayload::DataPlaneResizeAck(_)) => {
+                                    // ue-r2-1b: wire shape only — the client
+                                    // never sends DataPlaneResize until
+                                    // ue-r2-2, so an ack here is a peer bug.
+                                    // Ignore it exactly as an old binary
+                                    // would (unknown payload → None arm).
                                 }
                                 None => {}
                             }

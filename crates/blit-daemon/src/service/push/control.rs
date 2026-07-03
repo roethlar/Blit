@@ -211,6 +211,16 @@ pub(crate) async fn handle_push_stream(
                                         one_time_token: token_string,
                                         tcp_fallback: false,
                                         stream_count: stream_target,
+                                        // ue-r2-1b: wire shape only. On
+                                        // push the daemon IS the byte
+                                        // receiver — its profile is
+                                        // stamped here once the live
+                                        // dial consumes it (ue-r2-1e);
+                                        // resize_enabled/epoch0_sub_token
+                                        // arrive with ue-r2-2.
+                                        receiver_capacity: None,
+                                        resize_enabled: false,
+                                        epoch0_sub_token: Vec::new(),
                                     },
                                 ),
                             )
@@ -232,6 +242,12 @@ pub(crate) async fn handle_push_stream(
                 ));
             }
             Some(client_push_request::Payload::UploadComplete(_)) => {}
+            Some(client_push_request::Payload::DataPlaneResize(_)) => {
+                // ue-r2-1b: wire shape only — the daemon never sets
+                // resize_enabled until ue-r2-2, so no compliant client
+                // sends this yet. Ignore it exactly as an old daemon
+                // would (unknown payload decodes to the None arm).
+            }
             None => {}
         }
     }
@@ -278,6 +294,10 @@ pub(crate) async fn handle_push_stream(
                     one_time_token: token_string,
                     tcp_fallback: false,
                     stream_count: stream_target,
+                    // ue-r2-1b: see the early-flush negotiation above.
+                    receiver_capacity: None,
+                    resize_enabled: false,
+                    epoch0_sub_token: Vec::new(),
                 }),
             )
             .await?;

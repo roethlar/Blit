@@ -43,6 +43,9 @@ pub(crate) fn dst_capabilities() -> PeerCapabilities {
         supports_tar_shards: true,
         supports_data_plane_tcp: true,
         supports_filter_spec: true,
+        // ue-r2-1b: stays false until ue-r2-2 implements resize on the
+        // delegated byte path.
+        supports_stream_resize: false,
     }
 }
 
@@ -51,10 +54,17 @@ pub(crate) fn dst_capabilities() -> PeerCapabilities {
 /// `client_capabilities` the CLI put on the spec must be replaced
 /// with the destination's actual capabilities before the spec leaves
 /// for src. Unconditional — no merging, no field-level fallback.
+///
+/// ue-r2-1b extends the same boundary to `receiver_capacity`: the byte
+/// recipient is this destination daemon, so a CLI-supplied profile is
+/// non-authoritative and is stripped. Replaced with `None` (not a dst
+/// profile) until the live dial builds one (ue-r2-1e) — absent means
+/// "stay conservative", which is the correct pre-dial behavior.
 pub(crate) fn apply_dst_capabilities_override(
     mut spec: TransferOperationSpec,
 ) -> TransferOperationSpec {
     spec.client_capabilities = Some(dst_capabilities());
+    spec.receiver_capacity = None;
     spec
 }
 
@@ -627,6 +637,7 @@ mod tests {
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
+            receiver_capacity: None,
         }
     }
 
@@ -643,6 +654,11 @@ mod tests {
             supports_tar_shards: false,
             supports_data_plane_tcp: false,
             supports_filter_spec: false,
+            // The CLI over-claims resize support; dst does not resize
+            // yet (ue-r2-1b), so the override must force this back to
+            // false — otherwise src could send resize frames dst can't
+            // handle.
+            supports_stream_resize: true,
         };
         let spec_in = spec_with_caps(cli_caps);
         let spec_out = apply_dst_capabilities_override(spec_in);
@@ -655,6 +671,29 @@ mod tests {
         assert!(caps_out.supports_tar_shards);
         assert!(caps_out.supports_data_plane_tcp);
         assert!(caps_out.supports_filter_spec);
+        assert!(!caps_out.supports_stream_resize);
+    }
+
+    #[test]
+    fn dst_override_strips_cli_supplied_receiver_capacity() {
+        // ue-r2-1b: the byte recipient in delegation is dst, so a
+        // CLI-supplied receiver profile is non-authoritative. Until dst
+        // builds a real profile (ue-r2-1e) the override must strip it
+        // to None — leaking it through would hand the src sender a
+        // fabricated capacity ceiling the moment ue-r2-1e starts
+        // reading the field.
+        let mut spec_in = spec_with_caps(dst_capabilities());
+        spec_in.receiver_capacity = Some(blit_core::generated::CapacityProfile {
+            cpu_cores: 999,
+            drain_class: 0,
+            load_percent: 0,
+            max_streams: 4096,
+            drain_rate_bytes_per_sec: u64::MAX,
+            max_chunk_bytes: u64::MAX,
+            max_inflight_bytes: u64::MAX,
+        });
+        let spec_out = apply_dst_capabilities_override(spec_in);
+        assert!(spec_out.receiver_capacity.is_none());
     }
 
     #[test]
@@ -679,10 +718,12 @@ mod tests {
                 supports_tar_shards: false,
                 supports_data_plane_tcp: false,
                 supports_filter_spec: false,
+                supports_stream_resize: false,
             }),
             force_grpc: true,
             ignore_existing: true,
             require_complete_scan: false,
+            receiver_capacity: None,
         };
         let snapshot_module = spec_in.module.clone();
         let snapshot_source_path = spec_in.source_path.clone();

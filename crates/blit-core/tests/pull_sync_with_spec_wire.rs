@@ -241,10 +241,22 @@ fn hand_built_spec() -> TransferOperationSpec {
             supports_tar_shards: true,
             supports_data_plane_tcp: true,
             supports_filter_spec: true,
+            supports_stream_resize: true,
         }),
         force_grpc: false,
         ignore_existing: false,
         require_complete_scan: false,
+        // ue-r2-1b: populated with every field set so the byte-identical
+        // assertion also regression-guards the new profile's wire shape.
+        receiver_capacity: Some(blit_core::generated::CapacityProfile {
+            cpu_cores: 16,
+            drain_class: blit_core::generated::DrainClass::SsdNvme as i32,
+            load_percent: 35,
+            max_streams: 8,
+            drain_rate_bytes_per_sec: 2_000_000_000,
+            max_chunk_bytes: 8 * 1024 * 1024,
+            max_inflight_bytes: 256 * 1024 * 1024,
+        }),
     }
 }
 

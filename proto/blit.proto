@@ -124,6 +124,134 @@ message DataTransferNegotiation {
   bool tcp_fallback = 3; // true when the server could not reserve the preferred data-plane.
   uint32 stream_count = 4; // number of parallel TCP streams negotiated for the data plane
   reserved 5 to 10; // RDMA fields (QP numbers, GID, etc.) for Phase 3.5
+
+  // ── ue-r2-1b wire dial contract (UNIFIED_TRANSFER_ENGINE_REV4 §5) ──
+  // Fields 11-13 are defined ahead of the behavior slices that consume
+  // them (ue-r2-1e live dials, ue-r2-2 stream resize). Until those land,
+  // senders leave all three unset. Mixed-version behavior: an old peer
+  // skips unknown fields, a new peer treats "absent" as "old peer" —
+  // both degrade to today's static-ladder behavior.
+  //
+  // NOTE on field numbers: the abandoned adaptive-streams PR3 branch
+  // (d9d4ec7) used 11-14 for min/max_stream_count/adaptive_enabled/
+  // epoch0_sub_token. That contract never shipped anywhere, so the
+  // numbers are free to reassign; REV4 assigns 11 to receiver_capacity.
+  // PR3's negotiated min/max stream bounds are subsumed by
+  // CapacityProfile.max_streams (ceiling) with an implicit floor of 1.
+
+  // The byte receiver's capacity profile, advertised to the byte sender
+  // during setup. On push this message already travels daemon→client and
+  // the daemon is the receiver, so the daemon stamps its own profile
+  // here. On pull_sync / deprecated Pull the negotiation travels
+  // daemon→client but the CLIENT is the byte receiver — the profile
+  // travels client→daemon in TransferOperationSpec.receiver_capacity
+  // instead, and this field stays unset. Absent = "peer predates the
+  // profile or has nothing to advertise" → the sender keeps today's
+  // conservative/static behavior.
+  CapacityProfile receiver_capacity = 11;
+
+  // Daemon-authoritative resize gate: the single source of truth both
+  // ends read before any DataPlaneResize may be sent (ue-r2-2). The
+  // daemon sets it true only when ALL hold: the peer advertised resize
+  // support (PushHeader.supports_stream_resize or
+  // PeerCapabilities.supports_stream_resize), the daemon itself supports
+  // resize, tcp_port != 0, and !tcp_fallback. False/absent = fixed
+  // stream count for the whole transfer; resize messages must not be
+  // sent in either direction (an old peer would decode them as an
+  // unknown payload variant and see an empty frame).
+  bool resize_enabled = 12;
+
+  // 16 random bytes that every initial (epoch 0) data socket must echo
+  // after the one_time_token when resize_enabled is true. Empty and
+  // ignored when resize_enabled is false (the pre-resize handshake is
+  // unchanged, so old peers never see a suffixed handshake).
+  bytes epoch0_sub_token = 13;
+}
+
+// ── ue-r2-1b: receiver capacity profile ─────────────────────────────
+// The rich profile the byte RECEIVER advertises to the byte SENDER at
+// setup. The sender owns the live dial (chunk size, prefetch, in-flight
+// bytes, and — after ue-r2-2 — stream count) and must keep it within
+// this profile; the initial dial additionally starts BELOW the ceiling
+// with margin (REV4 "Risks": a receiver may over-advertise, and there
+// is no probe phase to catch it before the first byte).
+//
+// Travel direction per path (receiver → sender):
+//   push:      dst daemon → client, in DataTransferNegotiation.receiver_capacity
+//   pull_sync: client → src daemon, in TransferOperationSpec.receiver_capacity
+//   delegated: dst daemon → src daemon, in the forwarded spec (the dst
+//              daemon REPLACES any CLI-supplied value — same override
+//              boundary as client_capabilities)
+//
+// Every field uses 0 (or UNSPECIFIED) as "unknown"; the sender treats
+// unknown as "no information — stay conservative", never as "unlimited".
+message CapacityProfile {
+  // Logical CPU cores the receiver can devote to this transfer.
+  uint32 cpu_cores = 1;
+  // Storage class of the receive target, the coarse drain-speed signal.
+  DrainClass drain_class = 2;
+  // Receiver's current overall load estimate, percent (0-100+; may
+  // exceed 100 when oversubscribed, e.g. loadavg > cores). 0 = unknown
+  // or idle — senders must not distinguish the two.
+  uint32 load_percent = 3;
+  // Maximum parallel data-plane streams the receiver will accept for
+  // this transfer (the dial's hard ceiling; floor is always 1).
+  // 0 = unknown → sender stays at today's negotiated stream_count.
+  uint32 max_streams = 4;
+  // Estimated sustainable drain (write-to-storage) rate in bytes/sec.
+  uint64 drain_rate_bytes_per_sec = 5;
+  // Largest single chunk the receiver wants on the wire, bytes.
+  uint64 max_chunk_bytes = 6;
+  // Ceiling on prefetch / un-acked in-flight bytes the receiver can
+  // buffer safely.
+  uint64 max_inflight_bytes = 7;
+}
+
+// Coarse storage class for CapacityProfile.drain_class. Deliberately
+// coarse: a hint for the sender's starting dial, not a benchmark.
+enum DrainClass {
+  DRAIN_CLASS_UNSPECIFIED = 0;
+  DRAIN_CLASS_HDD = 1;
+  DRAIN_CLASS_SSD_SATA = 2;
+  DRAIN_CLASS_SSD_NVME = 3;
+  DRAIN_CLASS_NETWORK_FS = 4; // receive target is itself remote (NFS/SMB/…)
+  DRAIN_CLASS_MEMORY = 5;     // tmpfs/ramdisk-class target
+}
+
+// ── ue-r2-1b: mid-transfer stream resize (consumed at ue-r2-2) ──────
+// Control-plane request to grow/shrink the live data-plane stream set.
+// Carried on the transfer control streams (never as a blind TCP
+// data-plane record), and only after the daemon set
+// DataTransferNegotiation.resize_enabled — old peers never receive one.
+// Shape carried over from the adaptive-streams PR3 prior art (d9d4ec7).
+enum DataPlaneResizeOp {
+  DATA_PLANE_RESIZE_OP_UNSPECIFIED = 0;
+  DATA_PLANE_RESIZE_OP_ADD = 1;
+  DATA_PLANE_RESIZE_OP_REMOVE = 2;
+}
+
+// Controller → peer request to resize the live stream set. `epoch` is a
+// monotonic resize id (0 is reserved for the initial streams);
+// `target_stream_count` is the absolute desired live count (idempotent),
+// bounded by CapacityProfile.max_streams. For ADD, `sub_token` is the
+// 16-byte credential the newly dialed data socket must present after
+// the one_time_token; the accepting side registers it before the dialer
+// dials. For REMOVE, sub_token is empty.
+message DataPlaneResize {
+  DataPlaneResizeOp op = 1;
+  uint32 epoch = 2;
+  uint32 target_stream_count = 3;
+  bytes sub_token = 4;
+}
+
+// Ack of a DataPlaneResize. `accepted` is false if the peer could not
+// honor it (e.g. registration refused, dial failed);
+// `effective_stream_count` is the live count the acking side now
+// believes is in effect.
+message DataPlaneResizeAck {
+  uint32 epoch = 1;
+  uint32 effective_stream_count = 2;
+  bool accepted = 3;
 }
 
 // Push Operation
@@ -137,6 +265,12 @@ message ClientPushRequest {
     TarShardHeader tar_shard_header = 6;
     TarShardChunk tar_shard_chunk = 7;
     TarShardComplete tar_shard_complete = 8;
+    // ue-r2-1b: on push the client is the sender/controller and the
+    // dialer. It sends a pre-dial ADD so the daemon can register
+    // (epoch, sub_token) and arm its accept loop before the dial;
+    // REMOVE is accounting-only. Never sent unless the daemon set
+    // resize_enabled. Unused until ue-r2-2 wires the controller.
+    DataPlaneResize data_plane_resize = 9;
   }
 }
 
@@ -146,6 +280,10 @@ message ServerPushResponse {
     FileList files_to_upload = 2; // The "NeedList"
     PushSummary summary = 3;
     DataTransferNegotiation negotiation = 4; // Negotiation event before summary
+    // ue-r2-1b: daemon confirms it registered the epoch and armed
+    // accept (ADD), or retired the streams (REMOVE). Unused until
+    // ue-r2-2.
+    DataPlaneResizeAck data_plane_resize_ack = 5;
   }
 }
 
@@ -183,6 +321,15 @@ message PushHeader {
   // mirror_kind: required for mirror correctness, also useful
   // for move-like pushes once those exist.
   bool require_complete_scan = 7;
+
+  // ue-r2-1b: the push client advertises that it can drive
+  // mid-transfer stream resize. Push opens with PushHeader (it does
+  // not carry PeerCapabilities), so the capability bit lives here;
+  // the daemon folds it into DataTransferNegotiation.resize_enabled.
+  // Old clients leave it false and run at the fixed negotiated
+  // stream count. Clients keep it false until ue-r2-2 actually
+  // implements resize.
+  bool supports_stream_resize = 8;
 }
 
 message FileHeader {
@@ -276,6 +423,12 @@ message ClientPullMessage {
     FileHeader local_file = 2;           // Client's local file metadata
     ManifestComplete manifest_done = 3;  // Signals end of client manifest
     BlockHashList block_hashes = 4;      // Client's block hashes for resume mode
+    // ue-r2-1b: on pull the daemon is the sender/controller and the
+    // client is the dialer. The client acks the daemon's resize command
+    // here, on the outbound half — a different stream direction than
+    // the inbound ServerPullMessage carrying the command, so no
+    // head-of-line block. Unused until ue-r2-2.
+    DataPlaneResizeAck data_plane_resize_ack = 5;
   }
 }
 
@@ -327,6 +480,11 @@ message ServerPullMessage {
     TarShardHeader tar_shard_header = 13;
     TarShardChunk tar_shard_chunk = 14;
     TarShardComplete tar_shard_complete = 15;
+    // ue-r2-1b: daemon (sender/controller on pull) registers the epoch
+    // locally, then sends this command so the client dials the new
+    // socket (ADD) or retires a receive worker (REMOVE). Never sent
+    // unless resize_enabled was negotiated. Unused until ue-r2-2.
+    DataPlaneResize data_plane_resize = 16;
   }
 }
 
@@ -431,6 +589,13 @@ message TransferOperationSpec {
   //   2: added `require_complete_scan` (R49-F2). Bumped so v1
   //      daemons fail closed when receiving a v2 spec instead of
   //      silently ignoring the safety-critical field.
+  //   2 (unchanged, ue-r2-1b): added `receiver_capacity` WITHOUT a
+  //      bump. Receivers enforce spec_version by exact match, so a
+  //      bump would make old daemons reject new clients outright.
+  //      The field is a pure optimization hint: an old daemon
+  //      skipping it keeps today's static behavior, which is the
+  //      intended mixed-version outcome — nothing safety-critical
+  //      is lost, unlike the v2 case.
   uint32 spec_version = 1;
 
   // Origin-side module name. Empty means "use default root export".
@@ -488,6 +653,24 @@ message TransferOperationSpec {
   // sets mirror_mode (it would purge dest extras), but it carries
   // the same scan-completeness requirement that mirror does.
   bool require_complete_scan = 11;
+
+  // ue-r2-1b: the byte receiver's capacity profile for the paths where
+  // the receiver is the spec INITIATOR — pull_sync (the pull client
+  // receives the bytes) and delegated pull (the destination daemon
+  // receives the bytes). Push ignores this field; there the receiver
+  // is the daemon and the profile travels the other way, in
+  // DataTransferNegotiation.receiver_capacity.
+  //
+  // OVERRIDE BOUNDARY (same rule as client_capabilities): in
+  // delegation the byte recipient is the destination daemon, not the
+  // CLI, so the destination handler REPLACES this field with its own
+  // profile before forwarding the spec to the source. Any
+  // CLI-supplied value is non-authoritative.
+  //
+  // Absent = old client or nothing to advertise → the sender keeps
+  // today's static/conservative behavior. Added at spec_version 2
+  // without a bump (see the spec_version history note).
+  CapacityProfile receiver_capacity = 12;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -581,6 +764,15 @@ message PeerCapabilities {
   // this to true; older receivers that didn't honor filter rules
   // will not.
   bool supports_filter_spec = 4;
+  // ue-r2-1b: the pull / delegated-pull byte recipient can drive
+  // mid-transfer stream resize (dial new data sockets on
+  // DataPlaneResize ADD, retire receive workers on REMOVE). The
+  // daemon folds this into DataTransferNegotiation.resize_enabled.
+  // Old peers leave it false and run at the fixed negotiated stream
+  // count. Stays false until ue-r2-2 implements resize. The push-side
+  // equivalent is PushHeader.supports_stream_resize (push does not
+  // carry PeerCapabilities).
+  bool supports_stream_resize = 5;
 }
 
 // ─────────────────────────────────────────────────────────────────────

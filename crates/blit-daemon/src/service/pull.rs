@@ -172,6 +172,11 @@ async fn stream_pull_non_streaming(
             one_time_token: token_string,
             tcp_fallback: false,
             stream_count: stream_target,
+            // ue-r2-1b: never set on the deprecated Pull path (it is
+            // deleted at ue-r2-1h before any behavior consumes these).
+            receiver_capacity: None,
+            resize_enabled: false,
+            epoch0_sub_token: Vec::new(),
         })),
     }))
     .await
@@ -283,6 +288,11 @@ async fn stream_pull_streaming(
             one_time_token: token_string,
             tcp_fallback: false,
             stream_count: stream_target,
+            // ue-r2-1b: never set on the deprecated Pull path (it is
+            // deleted at ue-r2-1h before any behavior consumes these).
+            receiver_capacity: None,
+            resize_enabled: false,
+            epoch0_sub_token: Vec::new(),
         })),
     }))
     .await

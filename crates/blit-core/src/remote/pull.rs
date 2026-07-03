@@ -615,10 +615,15 @@ impl RemotePullClient {
                 supports_tar_shards: true,
                 supports_data_plane_tcp: true,
                 supports_filter_spec: true,
+                // ue-r2-1b: stays false until ue-r2-2 implements resize.
+                supports_stream_resize: false,
             }),
             force_grpc: options.force_grpc,
             ignore_existing: options.ignore_existing,
             require_complete_scan: options.require_complete_scan,
+            // ue-r2-1b: wire shape only — the receiver profile is
+            // populated when the live dial consumes it (ue-r2-1e).
+            receiver_capacity: None,
         })
     }
 
@@ -1089,6 +1094,13 @@ impl RemotePullClient {
                         report.downloaded_paths.push(relative_path);
                     }
                     report.files_transferred += 1;
+                }
+                Some(server_pull_message::Payload::DataPlaneResize(_)) => {
+                    // ue-r2-1b: wire shape only — resize is never
+                    // negotiated yet (resize_enabled stays false until
+                    // ue-r2-2 wires the controller), so a command here is
+                    // a peer bug. Ignore it exactly as an old binary
+                    // would (unknown payload decodes to the None arm).
                 }
                 None => {}
             }

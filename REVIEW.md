@@ -22,7 +22,7 @@ accepted findings fixed, validation green. Records per slice:
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
 | ue-r2-1a | Salvage adaptive PR1+PR2 substrate; resolve StallGuard-vs-`Probe`; work-stealing behavior tests | `[x]` | `e569eea`…`771a632` + review fixes |
-| ue-r2-1b | Wire dial contract: capacity profile + peer capability + resize proto (`receiver_capacity=11`); compat tests | `[ ]` | — |
+| ue-r2-1b | Wire dial contract: capacity profile + peer capability + resize proto (`receiver_capacity=11`); compat tests | `[~]` | slice commit under review |
 | ue-r2-1c | `TransferEngine` shell + `TransferOrchestrator` as local adapter; local fast paths → engine strategies | `[ ]` | — |
 | ue-r2-1d | Streaming plan foundation (partial-scan InitialPlan/PlanUpdate); prove ~1s start; RELIABLE exceptions | `[ ]` | — |
 | ue-r2-1e | Live cheap dials replace the `determine_remote_tuning` ladder | `[ ]` | — |

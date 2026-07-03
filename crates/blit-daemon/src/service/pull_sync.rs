@@ -575,6 +575,14 @@ async fn stream_via_data_plane(
                 one_time_token: token_string,
                 tcp_fallback: false,
                 stream_count,
+                // ue-r2-1b: wire shape only. On pull the CLIENT is the
+                // byte receiver, so the profile travels client→daemon in
+                // TransferOperationSpec.receiver_capacity — this field
+                // stays unset on pull negotiations. resize_enabled /
+                // epoch0_sub_token arrive with ue-r2-2.
+                receiver_capacity: None,
+                resize_enabled: false,
+                epoch0_sub_token: Vec::new(),
             },
         )),
     }))
@@ -705,6 +713,10 @@ async fn stream_via_data_plane_resume(
                 one_time_token: token_string,
                 tcp_fallback: false,
                 stream_count: 1, // Single stream for resume mode
+                // ue-r2-1b: see the streaming-path negotiation above.
+                receiver_capacity: None,
+                resize_enabled: false,
+                epoch0_sub_token: Vec::new(),
             },
         )),
     }))

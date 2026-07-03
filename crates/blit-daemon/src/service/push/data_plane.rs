@@ -575,6 +575,11 @@ pub(crate) async fn execute_grpc_fallback(
             one_time_token: String::new(),
             tcp_fallback: true,
             stream_count: 0,
+            // ue-r2-1b: fallback = control-plane bytes; no capacity
+            // profile and never resizable.
+            receiver_capacity: None,
+            resize_enabled: false,
+            epoch0_sub_token: Vec::new(),
         }),
     )
     .await?;

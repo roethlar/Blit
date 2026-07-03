@@ -224,6 +224,7 @@ mod tests {
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
+            receiver_capacity: None,
         }
     }
 
