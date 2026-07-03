@@ -1,9 +1,9 @@
 # ue-r2-1f: Push converge — retire the daemon `desired_streams` ladder
 
 **Slice**: ue-r2-1f — sixth slice of `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
-**Status**: In progress (this doc doubles as the slice implementation plan)
+**Status**: Reviewed (codex PASS, 1 Low fixed; Interpretation judged plan-conformant)
 **Branch**: master (no agent branches — AGENTS.md §8)
-**Commits**: (filled as they land)
+**Commits**: `a4a9f70` + boundary-test review fix
 
 ## What
 
@@ -69,9 +69,9 @@ wire/behavior tests, which must stay green.
 
 ## Tests
 
-Baseline entering the slice: 1402 / 0 / 2. `desired_streams` has no
-dedicated tests today; the engine fn gains table + clamp coverage
-(count strictly up).
+Baseline entering the slice: 1402 / 0 / 2 → after: **1403 / 0 / 2**
+(+1 proposal-table test, extended per review to exact tier boundaries
+±1; the retired ladder had no tests at all).
 
 ## Known gaps
 

@@ -26,7 +26,7 @@ accepted findings fixed, validation green. Records per slice:
 | ue-r2-1c | `TransferEngine` shell + `TransferOrchestrator` as local adapter; local fast paths → engine strategies | `[x]` | `7730eb1`+`dc9b0ed`+`29e210b` + review fix `15e6334` |
 | ue-r2-1d | Streaming plan foundation (partial-scan InitialPlan/PlanUpdate); prove ~1s start; RELIABLE exceptions | `[x]` | `c08a5c1` + review fixes |
 | ue-r2-1e | Live cheap dials replace the `determine_remote_tuning` ladder | `[x]` | `3be9105`..`15968f4` + review fix `46da929` |
-| ue-r2-1f | Push converge through the engine; retire daemon `desired_streams` ladder | `[ ]` | — |
+| ue-r2-1f | Push converge through the engine; retire daemon `desired_streams` ladder | `[x]` | `a4a9f70` + review fix |
 | ue-r2-1g | PullSync multistream through the engine (absorbs MULTISTREAM_PULL) | `[ ]` | — |
 | ue-r2-1h | Delete deprecated `Pull` RPC (+ its `pull_stream_count` ladder) after harvest | `[ ]` | — |
 | ue-r2-2 | Stream resize: negotiated `DataPlaneResize`/`Ack`, mid-transfer add/drop | `[ ]` | — |

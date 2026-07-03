@@ -419,13 +419,20 @@ mod tests {
         const GIB: u64 = 1024 * MIB64;
         // Empty need-list → 1 (the old ladder's empty-guard).
         assert_eq!(initial_stream_proposal(0, 0, 32), 1);
-        // Byte-keyed tiers.
-        assert_eq!(initial_stream_proposal(10 * MIB64, 10, 32), 1);
-        assert_eq!(initial_stream_proposal(64 * MIB64, 10, 32), 2);
-        assert_eq!(initial_stream_proposal(256 * MIB64, 10, 32), 4);
-        assert_eq!(initial_stream_proposal(GIB, 10, 32), 8);
-        assert_eq!(initial_stream_proposal(4 * GIB, 10, 32), 10);
-        assert_eq!(initial_stream_proposal(16 * GIB, 10, 32), 12);
+        // Byte-keyed tiers: exact lower boundaries AND just-below each
+        // (codex ue-r2-1f: representative values would miss a doubled
+        // threshold).
+        assert_eq!(initial_stream_proposal(32 * MIB64 - 1, 10, 32), 1);
+        assert_eq!(initial_stream_proposal(32 * MIB64, 10, 32), 2);
+        assert_eq!(initial_stream_proposal(128 * MIB64 - 1, 10, 32), 2);
+        assert_eq!(initial_stream_proposal(128 * MIB64, 10, 32), 4);
+        assert_eq!(initial_stream_proposal(512 * MIB64 - 1, 10, 32), 4);
+        assert_eq!(initial_stream_proposal(512 * MIB64, 10, 32), 8);
+        assert_eq!(initial_stream_proposal(2 * GIB - 1, 10, 32), 8);
+        assert_eq!(initial_stream_proposal(2 * GIB, 10, 32), 10);
+        assert_eq!(initial_stream_proposal(8 * GIB - 1, 10, 32), 10);
+        assert_eq!(initial_stream_proposal(8 * GIB, 10, 32), 12);
+        assert_eq!(initial_stream_proposal(32 * GIB - 1, 10, 32), 12);
         assert_eq!(initial_stream_proposal(32 * GIB, 10, 32), 16);
         // File-count keys fire independently of bytes.
         assert_eq!(initial_stream_proposal(1, 256, 32), 2);
