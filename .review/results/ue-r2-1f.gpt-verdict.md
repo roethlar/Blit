@@ -20,5 +20,5 @@ review rather than assumed.
 
 ## Fix commit
 
-- Fix sha: recorded in REVIEW.md row. Gate after fix: fmt/clippy
+- Fix sha: `0c8da50`. Gate after fix: fmt/clippy
   clean, tests 1403 passed / 0 failed / 2 ignored.

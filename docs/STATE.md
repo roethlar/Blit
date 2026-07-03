@@ -1,10 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-03 (`ue-r2-1b`+`1c`+`1d`+`1e` complete — wire
-contract, engine shell, streaming plan, live dials — all through the
-code→review→fix loop); unpushed to `origin`/gitea: everything after
-`e1a21a1` (six ue-r2-1e commits + this handoff; owner pushed through
-`e1a21a1` earlier today).
+Last updated: 2026-07-03 (`ue-r2-1b` through `ue-r2-1f` complete — five
+REV4 slices in one day, all through the code→review→fix loop); unpushed
+to `origin`/gitea: everything after `7603177` (the ue-r2-1f commits +
+this handoff; owner pushed through `7603177` earlier today).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -12,6 +11,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **`ue-r2-1f` COMPLETE** — push converge (details: DEVLOG 2026-07-03).
+  `desired_streams` retired into `engine::initial_stream_proposal`
+  (same shape table, receiver-ceiling-clamped, first-ever tests with
+  exact tier boundaries); wire-identical negotiations; codex PASS with
+  1 Low fixed (`0c8da50`) and judged the finding doc's boundary
+  interpretation plan-conformant. Commits `a4a9f70`+`0c8da50`; tests
+  **1403 / 0 / 2**. Ladders remaining: `pull_stream_count` only
+  (`1g`/`1h`).
 - **`ue-r2-1e` COMPLETE** — live cheap dials (details: DEVLOG
   2026-07-03). `TransferDial` (conservative floor start, receiver-
   profile-clamped ceilings, hysteresis stepper) replaces the DELETED
@@ -80,16 +87,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`ue-r2-1f` (push converge)** — next REV4 slice: route push
-   through the engine preserving manifest streaming, need-list
-   batching, fallback timing, scan-completeness purge safety, old/new
-   compat; **retire the daemon `desired_streams` ladder** into the
-   dial. Note for 1f: remote transfers record no perf history
-   (local-only lanes) — candidate to add remote lanes there; the dead
-   `derive_local_plan_tuning` window (1d finding) also still awaits a
-   fold-or-retire call (w2-2). Per D-2026-06-20-6 the loop may continue
-   autonomously on owner "continue"; owner may push the 1e stack first.
-2. **Then** `1g` → `1h` → `ue-r2-2`
+1. **`ue-r2-1g` (PullSync multistream through the engine)** — next
+   REV4 slice: route PullSync through the engine and make it
+   multistream (single-stream today, `pull_sync.rs` hardcodes 1),
+   harvesting the deprecated Pull RPC's multistream pattern; preserve
+   resume, checksum refusal, delete-list authority, cancellation,
+   per-stream failure, gRPC fallback. Absorbs `MULTISTREAM_PULL.md`.
+   Carried context: remote perf-history lanes still unrecorded (1e
+   gap); dead `derive_local_plan_tuning` window awaits fold-or-retire
+   (w2-2). Per D-2026-06-20-6 the loop may continue autonomously on
+   owner "continue"; owner may push the 1f stack first.
+2. **Then** `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is **w4-1**
@@ -115,7 +123,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `…_REV2.md`, `…_REV3.md`.
 - Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active, D-2026-06-20-6) governs
   `ue-r2-*`; `.review/README.md` async loop governs other work.
-- Review loop: `REVIEW.md` (`ue-r2-1a`..`1e` rows `[x]`; design-queue
+- Review loop: `REVIEW.md` (`ue-r2-1a`..`1f` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified D-2026-06-12-1,
   executes w8-1), `TUI_REWORK.md` (gated on Round 1),
@@ -124,8 +132,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: "continue" → I pick up `ue-r2-1f` (or push
-  `origin..master` — the ue-r2-1e stack after `e1a21a1` — first).
+- **Owner**: "continue" → I pick up `ue-r2-1g` (or push
+  `origin..master` — the ue-r2-1f commits after `7603177` — first).
   Doesn't block autonomous continuation per D-2026-06-20-6.
 
 ## Open questions
@@ -152,6 +160,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-03 (5th)** @ `0c8da50`+docs — `ue-r2-1f` landed end-to-end
+  (`a4a9f70` ladder retirement; codex PASS, 1 Low boundary-test gap
+  fixed `0c8da50`; interpretation judged plan-conformant). fmt/clippy
+  clean; tests 1403/0/2. In-flight: none — paused at a slice boundary.
+  **Exact first action next session**: on owner "continue", start
+  `ue-r2-1g` (PullSync multistream through the engine — the biggest
+  remaining slice; fresh session recommended) through the loop; else
+  owner pushes the stack / decides the D-2026-06-20-1 edit.
 - **2026-07-03 (4th)** @ `46da929`+docs — `ue-r2-1e` landed end-to-end
   (dial `3be9105`, profiles `a0d2c9f`, ladder retired `98943b7`, tuner
   `15968f4`, codex 3 Mediums fixed `46da929`). fmt/clippy clean; tests
@@ -159,19 +175,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   first action next session**: on owner "continue", start `ue-r2-1f`
   (push converge, retire `desired_streams`) through the loop; else
   owner pushes the stack / decides the D-2026-06-20-1 edit.
-- **2026-07-03 (3rd)** @ `29159ca`+docs — `ue-r2-1d` landed end-to-end
-  (slice `c08a5c1`; codex FAIL → nested-dest self-copy High + scan-handle
-  Medium both fixed `29159ca`). fmt/clippy clean; tests 1399/0/2.
-  In-flight: none — paused at a slice boundary. **Exact first action
-  next session**: on owner "continue", start `ue-r2-1e` (live cheap
-  dials) through the loop; else owner pushes the stack / decides the
-  D-2026-06-20-1 edit.
-- **2026-07-03 (later)** @ `15e6334`+docs — `ue-r2-1c` landed end-to-end
-  (pins `7730eb1`, engine move `dc9b0ed`, single-file accounting
-  `29e210b`, codex retry PASS → 1 Low fixed `15e6334`). fmt/clippy
-  clean; tests 1394/0/2. Also: owner provided the 10GbE test env
-  (Queue item 4) and restored codex after a quota outage. In-flight:
-  none — paused at a slice boundary. **Exact first action next
-  session**: on owner "continue", start `ue-r2-1d` (streaming plan
-  foundation) through the loop; else owner pushes the stack / decides
-  the D-2026-06-20-1 edit.
