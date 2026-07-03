@@ -1,0 +1,1 @@
+2025-10-19: Implemented hybrid push data-plane scaffold. Daemon allocates ephemeral TCP port, issues 32-byte token, validates client connection, and writes requested files with traversal safeguards; CLI decodes negotiation, streams file contents, and reports transfer summary. CLI/daemon tests pass (`cargo test -p blit-core`, `cargo test -p blit-daemon`).

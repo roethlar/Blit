@@ -1,0 +1,1 @@
+Implemented daemon admin RPCs (`Find`, `DiskUsage`, `FilesystemStats`, enhanced `CompletePath`) and wired `blit-utils` commands (`find`, `du`, `df`, `completions`) to stream results/JSON filters. TODO/plan/DEVLOG updated (2025-10-24). Tests run: cargo check; cargo test -p blit-daemon; cargo test -p blit-cli; cargo test -p blit-utils.

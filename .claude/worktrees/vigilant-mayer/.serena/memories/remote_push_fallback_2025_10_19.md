@@ -1,0 +1,1 @@
+2025-10-19: Added gRPC fallback for remote push. When the daemon cannot allocate a TCP listener it signals `tcp_fallback=true`; the CLI resends file headers and payloads over the control stream, and the daemon writes them to disk before emitting a fallback-marked summary. `cargo check`, `cargo test -p blit-core`, and `cargo test -p blit-daemon` all pass.

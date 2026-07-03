@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/blit-core",
+    "crates/blit-cli",
+    "crates/blit-daemon",
+    "crates/blit-utils",
+]

@@ -1,0 +1,1 @@
+Windows USN fast-path confirmed 2025-10-25: snapshot comparison trusts volume/journal/USN, orchestrator reprobes before persisting. Zero-change NTFS mirror now skips planning in ~28 ms (wingpt-53). TODO/DEVLOG/docs updated; macOS/Linux journal integrations remain open follow-ups.

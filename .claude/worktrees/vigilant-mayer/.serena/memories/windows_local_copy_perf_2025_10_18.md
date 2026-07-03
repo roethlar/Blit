@@ -1,0 +1,1 @@
+Implemented CopyFileExW fast path for Windows local copies (crates/blit-core/src/copy.rs). 512 MiB benchmark now 0.724 s avg (707 MiB/s) vs robocopy 0.775 s. Larger 1-2 GiB workloads still lag (~1.5x) due to cache/worker heuristics; plan to add >1 GiB adjustments. Docs/DEVLOG/TODO updated; cargo test -p blit-core passes.

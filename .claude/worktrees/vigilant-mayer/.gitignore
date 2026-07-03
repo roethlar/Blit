@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target/
+**/target/
+Cargo.lock
+agentcomms/
+agentcomms/**
+
+# Rust specific
+*.rs.bk
+*.pdb
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code specific
+.claude/
+
+# Debug and test artifacts
+*.log
+*.tmp
+debug/
+tmp/
+logs/
+
+# OS specific
+Thumbs.db

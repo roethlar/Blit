@@ -1,0 +1,1 @@
+2025-10-19: Added CLI manpage at docs/cli/blit.1.md covering copy/mirror/diagnostics commands and the hidden --workers debug limiter banner. Updated PLAN docs (WORKFLOW_PHASE_2, MASTER_WORKFLOW, LOCAL_TRANSFER_HEURISTICS) plus TODO/DEVLOG to mark the documentation task complete.

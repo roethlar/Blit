@@ -1,0 +1,1 @@
+2025-10-25: Added macOS FSEvents backend to change_journal (MacSnapshot stores FSID/event ID/mtime), helper script scripts/macos/run-journal-fastpath.sh, and confirmed zero-change mirror skips planning (logs/macos/journal-fastpath-20251025T030912Z.log, 4.5 ms second run). TODO/DEVLOG/docs updated; Linux journal integration still outstanding.

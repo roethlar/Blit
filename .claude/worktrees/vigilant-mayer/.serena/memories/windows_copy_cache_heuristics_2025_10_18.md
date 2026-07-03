@@ -1,0 +1,4 @@
+- Added adaptive gating for Windows CopyFileExW fast path: only enable COPY_FILE_NO_BUFFERING when file size exceeds max(4 GiB, half of physical RAM) and available RAM is low (< file size + 512 MiB headroom).
+- Linux/mac paths untouched; change is guarded behind cfg(windows).
+- cargo fmt / cargo check / cargo test -p blit-core succeed.
+- TODO: have wingpt rerun Windows benchmarks (512 MiB–4 GiB) to validate the new heuristic and decide if additional tuning (worker fan-out / cache hints) is required.

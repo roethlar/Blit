@@ -1,0 +1,4 @@
+Updated local benchmark tooling.
+- scripts/bench_local_mirror.sh: generates synthetic payload, builds blit-cli release, disables perf-history by default, supports RUNS/WARMUP/KEEP_BENCH_DIR env vars, uses sequential fallback when hyperfine missing, logs preserved by default.
+- scripts/windows/bench-local-mirror.ps1: mirrors bash script behaviour (v2-only binary, optional -Warmup/-Runs, -Cleanup flag), keeps workspace/log unless cleaned, restores BLIT_DISABLE_PERF_HISTORY after runs.
+Docs (WORKFLOW_PHASE_2.md, PROJECT_STATE_ASSESSMENT.md) note v2-only harness status; DEVLOG entry 2025-10-18T02:45:12Z records change.

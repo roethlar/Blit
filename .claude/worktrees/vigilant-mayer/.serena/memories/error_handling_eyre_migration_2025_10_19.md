@@ -1,0 +1,4 @@
+- Replaced anyhow across blit-core, blit-cli, and blit-daemon with eyre/color-eyre per plan decision.
+- CLI installs color_eyre, exposes debug-mode banner when worker limiters are used.
+- Plan docs now state CLI remains quiet, progress exposed via hooks; debug limiters flagged as diagnostics only.
+- Tests updated; cargo fmt/check/test (-p blit-core and -p blit-cli) are clean as of 2025-10-19.
