@@ -62,6 +62,8 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tempfile = "3"
+# ue-r2-1e: paused-clock testing for the dial tuner (dev-only).
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

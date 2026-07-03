@@ -242,6 +242,52 @@ impl TransferDial {
     }
 }
 
+/// Blocked-time ratio for one tuner tick: the share of the tick's
+/// wall-clock (× stream count) the senders spent inside socket writes.
+/// 0 streams or a zero-length tick reads as "no signal" (0.0 — the
+/// hysteresis band holds the dial still rather than guessing).
+pub(crate) fn blocked_ratio(
+    delta_blocked_nanos: u64,
+    elapsed: std::time::Duration,
+    streams: usize,
+) -> f64 {
+    let denom = elapsed.as_nanos().saturating_mul(streams as u128);
+    if denom == 0 {
+        return 0.0;
+    }
+    (delta_blocked_nanos as f64 / denom as f64).clamp(0.0, 1.0)
+}
+
+/// Spawn the live tuner for one transfer (ue-r2-1e): every
+/// [`DIAL_TUNER_TICK`] it sums the PR1 per-stream `write_blocked`
+/// telemetry and steps the dial's cheap dials. Holds only a `Weak` to
+/// the dial, so it self-terminates within one tick of the transfer
+/// dropping its dial; callers may also abort the handle for prompt
+/// shutdown (`MultiStreamSender::finish` does).
+pub fn spawn_dial_tuner(
+    dial: &Arc<TransferDial>,
+    probes: Vec<crate::remote::transfer::progress::StreamProbe>,
+) -> tokio::task::JoinHandle<()> {
+    let weak = Arc::downgrade(dial);
+    tokio::spawn(async move {
+        let mut last_blocked: u64 = 0;
+        let mut last_tick = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(DIAL_TUNER_TICK).await;
+            let Some(dial) = weak.upgrade() else { return };
+            let blocked: u64 = probes
+                .iter()
+                .map(|p| p.snapshot().write_blocked_nanos)
+                .sum();
+            let elapsed = last_tick.elapsed();
+            last_tick = tokio::time::Instant::now();
+            let ratio = blocked_ratio(blocked.saturating_sub(last_blocked), elapsed, probes.len());
+            last_blocked = blocked;
+            dial.apply_tick(ratio);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +358,50 @@ mod tests {
         while dial.apply_tick(0.0) {}
         assert_eq!(dial.chunk_bytes(), DIAL_CEILING_CHUNK_BYTES);
         assert_eq!(dial.prefetch_count(), DIAL_CEILING_PREFETCH);
+    }
+
+    #[test]
+    fn blocked_ratio_handles_edges() {
+        use std::time::Duration;
+        assert_eq!(blocked_ratio(0, Duration::from_millis(500), 4), 0.0);
+        assert_eq!(blocked_ratio(1_000, Duration::ZERO, 4), 0.0, "no signal");
+        assert_eq!(blocked_ratio(1_000, Duration::from_millis(500), 0), 0.0);
+        let half = blocked_ratio(500_000_000, Duration::from_millis(500), 2);
+        assert!((half - 0.5).abs() < 1e-9, "got {half}");
+        assert_eq!(
+            blocked_ratio(u64::MAX, Duration::from_nanos(1), 1),
+            1.0,
+            "clamped"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tuner_steps_up_on_clean_telemetry_and_exits_when_dial_drops() {
+        use crate::remote::transfer::progress::{StreamId, StreamProbe};
+        let dial = TransferDial::conservative().shared();
+        let probes = vec![StreamProbe::new(StreamId(0)), StreamProbe::new(StreamId(1))];
+        let handle = spawn_dial_tuner(&dial, probes);
+        // Let the spawned task run to its first sleep so the timer is
+        // registered before the clock moves.
+        tokio::task::yield_now().await;
+
+        // One tick with zero blocked time: clean pipe → step up.
+        tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
+        for _ in 0..16 {
+            if dial.chunk_bytes() > 16 * MIB {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(dial.chunk_bytes(), 32 * MIB, "stepped up once");
+
+        // Drop the transfer's dial: the tuner must self-terminate.
+        drop(dial);
+        tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("tuner exits after the dial drops")
+            .expect("tuner does not panic");
     }
 
     #[test]

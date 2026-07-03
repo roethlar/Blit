@@ -93,6 +93,10 @@ async fn drain_pipeline_error(handle: JoinHandle<Result<SinkOutcome>>) -> eyre::
 /// round-robin distribution across sinks is handled by the pipeline.
 struct MultiStreamSender {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
+    /// ue-r2-1e: live tuner sampling the per-stream telemetry into the
+    /// dial. Aborted on finish(); self-terminates via its Weak<dial>
+    /// if the sender is dropped without finishing.
+    tuner_handle: Option<JoinHandle<()>>,
     /// Pipeline JoinHandle. `Option` so `queue()` can `take()` it on
     /// the unhappy path: if `tx.send().await` fails the receiver has
     /// been dropped, which means the pipeline died with an error
@@ -116,6 +120,7 @@ impl MultiStreamSender {
         source: Arc<dyn TransferSource>,
         tcp_buffer_size: Option<usize>,
         progress: Option<RemoteTransferProgress>,
+        dial: Option<Arc<crate::engine::TransferDial>>,
     ) -> Result<Self> {
         let streams = stream_count.max(1);
 
@@ -127,24 +132,60 @@ impl MultiStreamSender {
 
         let dst_root = PathBuf::from(format!("{}:{}", host, port));
 
+        // ue-r2-1e: with a dial, every stream carries LiveProbe
+        // telemetry and a tuner task steps the dial's cheap dials from
+        // it. Without one (no live tuning), the NoProbe path
+        // monomorphizes the telemetry away exactly as before.
         let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
-        for _ in 0..streams {
-            let session = DataPlaneSession::connect(
-                host,
-                port,
-                token,
-                chunk_bytes,
-                payload_prefetch,
-                trace,
-                tcp_buffer_size,
-                Arc::clone(&pool),
-            )
-            .await?;
-            sinks.push(Arc::new(DataPlaneSink::new(
-                session,
-                source.clone(),
-                dst_root.clone(),
-            )));
+        let mut tuner_handle = None;
+        if let Some(dial) = dial.as_ref() {
+            use crate::engine::spawn_dial_tuner;
+            use crate::remote::transfer::progress::{LiveProbe, StreamId, StreamProbe};
+            let mut tuner_probes = Vec::with_capacity(streams);
+            for idx in 0..streams {
+                let probe = StreamProbe::new(StreamId(idx as u32));
+                tuner_probes.push(StreamProbe::from_telemetry(
+                    StreamId(idx as u32),
+                    probe.telemetry(),
+                ));
+                let session = DataPlaneSession::connect_with_probe(
+                    host,
+                    port,
+                    token,
+                    chunk_bytes,
+                    payload_prefetch,
+                    trace,
+                    tcp_buffer_size,
+                    Arc::clone(&pool),
+                    LiveProbe(probe),
+                )
+                .await?;
+                sinks.push(Arc::new(DataPlaneSink::new(
+                    session,
+                    source.clone(),
+                    dst_root.clone(),
+                )));
+            }
+            tuner_handle = Some(spawn_dial_tuner(dial, tuner_probes));
+        } else {
+            for _ in 0..streams {
+                let session = DataPlaneSession::connect(
+                    host,
+                    port,
+                    token,
+                    chunk_bytes,
+                    payload_prefetch,
+                    trace,
+                    tcp_buffer_size,
+                    Arc::clone(&pool),
+                )
+                .await?;
+                sinks.push(Arc::new(DataPlaneSink::new(
+                    session,
+                    source.clone(),
+                    dst_root.clone(),
+                )));
+            }
         }
 
         let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(payload_prefetch.max(1));
@@ -164,6 +205,7 @@ impl MultiStreamSender {
 
         Ok(Self {
             payload_tx: Some(payload_tx),
+            tuner_handle,
             pipeline_handle: Some(pipeline_handle),
             started: Instant::now(),
         })
@@ -196,6 +238,11 @@ impl MultiStreamSender {
 
     /// Close the payload channel and wait for the pipeline to drain.
     async fn finish(mut self) -> Result<()> {
+        // ue-r2-1e: stop the tuner promptly (it would otherwise idle
+        // until its Weak<dial> dies at the end of the push).
+        if let Some(tuner) = self.tuner_handle.take() {
+            tuner.abort();
+        }
         // Drop the sender so the pipeline sees end-of-stream.
         drop(self.payload_tx.take());
         let handle = self
@@ -673,6 +720,7 @@ impl RemotePushClient {
                                                 source.clone(),
                                                 dial.tcp_buffer_bytes(),
                                                 progress.cloned(),
+                                                Some(dial.clone()),
                                             )
                                             .await?;
                                             data_plane_sender = Some(sender);

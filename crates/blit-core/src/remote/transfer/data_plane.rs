@@ -79,6 +79,7 @@ impl DataPlaneSession<NoProbe> {
     }
 
     /// Connect to a data plane endpoint with buffer pooling.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         host: &str,
         port: u32,
@@ -88,6 +89,37 @@ impl DataPlaneSession<NoProbe> {
         trace: bool,
         tcp_buffer_size: Option<usize>,
         pool: Arc<BufferPool>,
+    ) -> Result<Self> {
+        Self::connect_with_probe(
+            host,
+            port,
+            token,
+            chunk_bytes,
+            payload_prefetch,
+            trace,
+            tcp_buffer_size,
+            pool,
+            NoProbe,
+        )
+        .await
+    }
+}
+
+impl<P: Probe> DataPlaneSession<P> {
+    /// `connect` with an explicit probe (ue-r2-1e: the dial tuner
+    /// attaches `LiveProbe` telemetry to the push data plane; the
+    /// probe-free path monomorphizes to `NoProbe` and reads no clock).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn connect_with_probe(
+        host: &str,
+        port: u32,
+        token: &[u8],
+        chunk_bytes: usize,
+        payload_prefetch: usize,
+        trace: bool,
+        tcp_buffer_size: Option<usize>,
+        pool: Arc<BufferPool>,
+        probe: P,
     ) -> Result<Self> {
         let addr = format!("{}:{}", host, port);
         if trace {
@@ -133,7 +165,10 @@ impl DataPlaneSession<NoProbe> {
             .await
             .context("writing negotiation token")?;
 
-        Ok(Self::from_stream(stream, trace, chunk_bytes, payload_prefetch, pool).await)
+        Ok(
+            Self::from_stream_with_probe(stream, trace, chunk_bytes, payload_prefetch, pool, probe)
+                .await,
+        )
     }
 }
 
@@ -341,26 +376,35 @@ impl<P: Probe> DataPlaneSession<P> {
 
         // Main loop: write buf_a while reading into buf_b
         while remaining > 0 {
-            // Per-stream telemetry: time the overlapped write+read step
-            // as a backpressure proxy. Gated on the compile-time
-            // `P::ACTIVE` constant so `DataPlaneSession<NoProbe>` reads
-            // no clock and folds this to nothing.
-            let step_start = if P::ACTIVE {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
-            // Overlap: write from buf_a, read into buf_b concurrently
-            let (write_result, read_result) = tokio::join!(
-                self.stream.write_all(&buf_a.as_slice()[..bytes_a]),
+            // Per-stream telemetry: time ONLY the socket write as the
+            // backpressure signal. ue-r2-1e (carried ue-r2-1a review
+            // finding): the old code timed the whole overlapped
+            // write+read join, so a slow disk READ inflated
+            // "write blocked" and would bias the dial tuner
+            // conservative. The async block's clock starts when the
+            // join first polls it and stops when write_all completes —
+            // the concurrent read neither extends nor shortens it.
+            // Gated on the compile-time `P::ACTIVE` constant so
+            // `DataPlaneSession<NoProbe>` reads no clock.
+            let write_slice = &buf_a.as_slice()[..bytes_a];
+            let stream = &mut self.stream;
+            let (write_outcome, read_result) = tokio::join!(
+                async {
+                    let started = if P::ACTIVE {
+                        Some(std::time::Instant::now())
+                    } else {
+                        None
+                    };
+                    let result = stream.write_all(write_slice).await;
+                    (result, started.map(|t| t.elapsed()))
+                },
                 file.read(buf_b.as_mut_slice())
             );
 
+            let (write_result, write_elapsed) = write_outcome;
             write_result.with_context(|| format!("sending {}", rel))?;
-            if P::ACTIVE {
-                if let Some(t) = step_start {
-                    self.probe.note_write_blocked(t.elapsed().as_nanos() as u64);
-                }
+            if let Some(elapsed) = write_elapsed {
+                self.probe.note_write_blocked(elapsed.as_nanos() as u64);
             }
             self.probe.record_bytes(bytes_a as u64);
             crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(bytes_a as u64);

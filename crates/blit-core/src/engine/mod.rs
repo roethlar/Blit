@@ -27,8 +27,8 @@ mod summary;
 mod tuning;
 
 pub use dial::{
-    local_receiver_capacity, TransferDial, DIAL_CEILING_CHUNK_BYTES, DIAL_CEILING_MAX_STREAMS,
-    DIAL_CEILING_PREFETCH, DIAL_FLOOR_CHUNK_BYTES, DIAL_FLOOR_PREFETCH,
+    local_receiver_capacity, spawn_dial_tuner, TransferDial, DIAL_CEILING_CHUNK_BYTES,
+    DIAL_CEILING_MAX_STREAMS, DIAL_CEILING_PREFETCH, DIAL_FLOOR_CHUNK_BYTES, DIAL_FLOOR_PREFETCH,
     DIAL_STEP_DOWN_BLOCKED_RATIO, DIAL_STEP_UP_BLOCKED_RATIO, DIAL_TUNER_TICK,
 };
 pub use options::{LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions};
