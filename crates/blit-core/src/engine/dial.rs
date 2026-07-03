@@ -246,6 +246,38 @@ impl TransferDial {
     }
 }
 
+/// Workload-shape-aware initial stream proposal (`ue-r2-1f`): the
+/// byte RECEIVER proposes a starting stream count from what it knows
+/// of the workload shape — file count matters as much as bytes (many
+/// small files parallelize on per-file overhead even at low byte
+/// totals). Table carried over verbatim from the daemon push
+/// `desired_streams` ladder it retires (the ladder the old
+/// `tuning.rs` doc said "wins"), now engine-owned and clamped to the
+/// proposer's advertised ceiling. The sender's dial clamps again on
+/// its side (`set_negotiated_streams`). Live mid-transfer stream
+/// changes arrive with `ue-r2-2` resize.
+pub fn initial_stream_proposal(total_bytes: u64, file_count: usize, ceiling: usize) -> u32 {
+    if file_count == 0 {
+        return 1;
+    }
+    let proposal: u32 = if total_bytes >= 32 * 1024 * 1024 * 1024 || file_count >= 200_000 {
+        16
+    } else if total_bytes >= 8 * 1024 * 1024 * 1024 || file_count >= 80_000 {
+        12
+    } else if total_bytes >= 2 * 1024 * 1024 * 1024 || file_count >= 50_000 {
+        10
+    } else if total_bytes >= 512 * 1024 * 1024 || file_count >= 10_000 {
+        8
+    } else if total_bytes >= 128 * 1024 * 1024 || file_count >= 2_000 {
+        4
+    } else if total_bytes >= 32 * 1024 * 1024 || file_count >= 256 {
+        2
+    } else {
+        1
+    };
+    proposal.min(ceiling.max(1) as u32)
+}
+
 /// Blocked-time ratio for one tuner tick: the share of the tick's
 /// wall-clock (× stream count) the senders spent inside socket writes.
 /// 0 streams or a zero-length tick reads as "no signal" (0.0 — the
@@ -382,6 +414,32 @@ mod tests {
     }
 
     #[test]
+    fn initial_stream_proposal_matches_the_retired_daemon_table() {
+        const MIB64: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB64;
+        // Empty need-list → 1 (the old ladder's empty-guard).
+        assert_eq!(initial_stream_proposal(0, 0, 32), 1);
+        // Byte-keyed tiers.
+        assert_eq!(initial_stream_proposal(10 * MIB64, 10, 32), 1);
+        assert_eq!(initial_stream_proposal(64 * MIB64, 10, 32), 2);
+        assert_eq!(initial_stream_proposal(256 * MIB64, 10, 32), 4);
+        assert_eq!(initial_stream_proposal(GIB, 10, 32), 8);
+        assert_eq!(initial_stream_proposal(4 * GIB, 10, 32), 10);
+        assert_eq!(initial_stream_proposal(16 * GIB, 10, 32), 12);
+        assert_eq!(initial_stream_proposal(32 * GIB, 10, 32), 16);
+        // File-count keys fire independently of bytes.
+        assert_eq!(initial_stream_proposal(1, 256, 32), 2);
+        assert_eq!(initial_stream_proposal(1, 2_000, 32), 4);
+        assert_eq!(initial_stream_proposal(1, 10_000, 32), 8);
+        assert_eq!(initial_stream_proposal(1, 50_000, 32), 10);
+        assert_eq!(initial_stream_proposal(1, 80_000, 32), 12);
+        assert_eq!(initial_stream_proposal(1, 200_000, 32), 16);
+        // Ceiling clamps the proposal (receiver profile authority).
+        assert_eq!(initial_stream_proposal(32 * GIB, 10, 6), 6);
+        assert_eq!(initial_stream_proposal(32 * GIB, 10, 0), 1, "floor 1");
+    }
+
+    #[test]
     fn blocked_ratio_handles_edges() {
         use std::time::Duration;
         assert_eq!(blocked_ratio(0, Duration::from_millis(500), 4), 0.0);
@@ -400,7 +458,7 @@ mod tests {
     async fn tuner_steps_up_on_clean_telemetry_and_exits_when_dial_drops() {
         use crate::remote::transfer::progress::{StreamId, StreamProbe};
         let dial = TransferDial::conservative().shared();
-        let probes = vec![StreamProbe::new(StreamId(0)), StreamProbe::new(StreamId(1))];
+        let probes = [StreamProbe::new(StreamId(0)), StreamProbe::new(StreamId(1))];
         let tuner_view: Vec<StreamProbe> = probes
             .iter()
             .map(|p| StreamProbe::from_telemetry(p.id(), p.telemetry()))

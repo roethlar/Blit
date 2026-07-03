@@ -195,7 +195,7 @@ pub(crate) async fn handle_push_stream(
 
                             let module_for_transfer = module_ref.clone();
 
-                            let stream_target = desired_streams(&files_to_upload);
+                            let stream_target = engine_stream_proposal(&files_to_upload);
                             let transfer_task = tokio::spawn(accept_data_connection_stream(
                                 listener,
                                 token.clone(),
@@ -282,7 +282,7 @@ pub(crate) async fn handle_push_stream(
             let token = generate_token()?;
             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
             let module_for_transfer = module.clone();
-            let stream_target = desired_streams(&files_to_upload);
+            let stream_target = engine_stream_proposal(&files_to_upload);
             let transfer_task = tokio::spawn(accept_data_connection_stream(
                 listener,
                 token.clone(),
@@ -495,25 +495,16 @@ fn file_requires_upload(
     Ok(requires_upload)
 }
 
-fn desired_streams(files: &[FileHeader]) -> u32 {
-    if files.is_empty() {
-        return 1;
-    }
+/// ue-r2-1f: the daemon's private `desired_streams` ladder retired
+/// into the engine's shared shape-aware proposal (same table), clamped
+/// to the receiver ceiling this daemon advertises in its
+/// CapacityProfile. Single owner for the push stream-count start; the
+/// client's dial clamps again on its side.
+fn engine_stream_proposal(files: &[FileHeader]) -> u32 {
     let total_bytes: u64 = files.iter().map(|f| f.size).sum();
-    let file_count = files.len();
-    if total_bytes >= 32 * 1024 * 1024 * 1024 || file_count >= 200_000 {
-        16
-    } else if total_bytes >= 8 * 1024 * 1024 * 1024 || file_count >= 80_000 {
-        12
-    } else if total_bytes >= 2 * 1024 * 1024 * 1024 || file_count >= 50_000 {
-        10
-    } else if total_bytes >= 512 * 1024 * 1024 || file_count >= 10_000 {
-        8
-    } else if total_bytes >= 128 * 1024 * 1024 || file_count >= 2_000 {
-        4
-    } else if total_bytes >= 32 * 1024 * 1024 || file_count >= 256 {
-        2
-    } else {
-        1
-    }
+    blit_core::engine::initial_stream_proposal(
+        total_bytes,
+        files.len(),
+        blit_core::engine::local_receiver_capacity().max_streams as usize,
+    )
 }
