@@ -383,7 +383,11 @@ fn negotiated_pull_streams(
 ) -> u32 {
     let client_multistream_capable = receiver_capacity.is_some_and(|p| p.max_streams > 0);
     if !client_multistream_capable {
-        return 1;
+        // Record the settled single stream on the dial too (codex
+        // ue-r2-1g F2): ue-r2-2's resize reads the dial as the
+        // negotiation baseline, so leaving the constructor's floor (4)
+        // there would misstate what this transfer actually runs.
+        return dial.set_negotiated_streams(1) as u32;
     }
     // The dial's ceiling already folds in the client's profile (it was
     // built from the same spec field), so the proposal is
@@ -759,7 +763,13 @@ pub(crate) async fn accept_and_wrap_sinks(
         }
         if token_buf != expected_token {
             log::warn!("pull data plane: invalid token");
-            return Err(Status::permission_denied("invalid pull data plane token"));
+            // ue-r2-1g self-review F3: a bad token is a credentials
+            // failure — UNAUTHENTICATED, matching what the pull_sync
+            // full-file path returned before the harvest and what the
+            // resume path in this file still returns. (The deprecated
+            // Pull RPC previously said PERMISSION_DENIED here; it has
+            // no consumer keying on the code and dies at ue-r2-1h.)
+            return Err(Status::unauthenticated("invalid data plane token"));
         }
 
         let session = DataPlaneSession::from_stream(
@@ -1276,6 +1286,9 @@ mod tests {
         // Design §5's "no profile → static/conservative behavior".
         let dial = TransferDial::conservative_within(None);
         assert_eq!(negotiated_pull_streams(40 * GIB, 500_000, None, &dial), 1);
+        // codex F2: the settled count is recorded on the dial even on
+        // the conservative arm (ue-r2-2 reads it as the baseline).
+        assert_eq!(dial.initial_streams(), 1);
     }
 
     #[test]
@@ -1289,6 +1302,7 @@ mod tests {
             negotiated_pull_streams(40 * GIB, 500_000, Some(&profile), &dial),
             1
         );
+        assert_eq!(dial.initial_streams(), 1, "codex F2: recorded on the dial");
     }
 
     #[test]

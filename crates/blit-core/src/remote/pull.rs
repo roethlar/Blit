@@ -453,7 +453,7 @@ impl RemotePullClient {
         // Clone/own all values for the spawned task
         let host = self.endpoint.host.clone();
         let port = negotiation.tcp_port;
-        let stream_count = negotiation.stream_count.max(1) as usize;
+        let stream_count = bounded_stream_count(negotiation.stream_count);
         let dest_root = dest_root.to_path_buf();
         let progress = progress.cloned();
         let byte_progress = byte_progress.cloned();
@@ -1609,6 +1609,20 @@ mod tar_shard_safety_tests {
     }
 }
 
+/// ue-r2-1g (self-review): bound the daemon-advertised stream count by
+/// the ceiling this client itself advertises
+/// (`local_receiver_capacity().max_streams`). The daemon already clamps
+/// its proposal to our profile, but "the weak end protects itself in
+/// both directions" (REV4 Design §4) requires the receive side to
+/// enforce its own ceiling too — a buggy or hostile daemon advertising
+/// a huge count must not make this client spawn that many
+/// workers/sockets. Structural for honest peers: every committed
+/// daemon proposes ≤ 16, well under the advertised 32.
+fn bounded_stream_count(negotiated: u32) -> usize {
+    let ceiling = crate::engine::local_receiver_capacity().max_streams.max(1) as usize;
+    (negotiated.max(1) as usize).min(ceiling)
+}
+
 /// Owned-value version for spawning data plane receiver as background task. for spawning as background task.
 /// This allows the control plane to continue processing ManifestBatch messages.
 async fn receive_data_plane_streams_owned(
@@ -2052,6 +2066,87 @@ mod multi_stream_receive_tests {
         .expect("two clean END-only streams succeed");
         assert_eq!(result.files_transferred, 0);
         assert_eq!(result.bytes_transferred, 0);
+    }
+
+    #[test]
+    fn stream_count_is_bounded_by_the_local_receiver_ceiling() {
+        // ue-r2-1g self-review F1: the receive side enforces its own
+        // advertised ceiling — a daemon (buggy, hostile, or a port
+        // squatter) advertising a huge stream_count must not drive an
+        // unbounded worker/socket fan-out.
+        use super::bounded_stream_count;
+        let ceiling = crate::engine::local_receiver_capacity().max_streams as usize;
+        assert!(ceiling >= 1);
+        assert_eq!(bounded_stream_count(0), 1, "floor");
+        assert_eq!(bounded_stream_count(1), 1);
+        assert_eq!(bounded_stream_count(16), 16.min(ceiling));
+        assert_eq!(bounded_stream_count(u32::MAX), ceiling, "ceiling");
+    }
+
+    #[tokio::test]
+    async fn cancellation_aborts_all_stream_workers() {
+        // codex ue-r2-1g F1 (MULTISTREAM_PULL "cancellation
+        // mid-transfer" criterion): dropping the receive future while
+        // N workers hold live authenticated sockets must tear every
+        // connection down — exactly what dropping
+        // `pull_sync_with_spec`'s AbortOnDrop data-plane handle does
+        // on a CLI Ctrl-C. Observability is TCP-level: the stub holds
+        // each socket open and reports when it sees the peer close.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+        let port = listener.local_addr().expect("stub addr").port() as u32;
+        let (established_tx, mut established_rx) = tokio::sync::mpsc::channel::<()>(2);
+        let (closed_tx, mut closed_rx) = tokio::sync::mpsc::channel::<()>(2);
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("stub accept");
+                let established = established_tx.clone();
+                let closed = closed_tx.clone();
+                tokio::spawn(async move {
+                    let mut token_buf = vec![0u8; TOKEN.len()];
+                    socket
+                        .read_exact(&mut token_buf)
+                        .await
+                        .expect("stub token read");
+                    established.send(()).await.ok();
+                    // Hold the stream open mid-transfer; the client
+                    // abort closes its end (FIN reads Ok(0), a reset
+                    // reads Err — either counts as torn down).
+                    let mut probe = [0u8; 1];
+                    let _ = socket.read(&mut probe).await;
+                    closed.send(()).await.ok();
+                });
+            }
+        });
+
+        let dest = tempfile::tempdir().expect("dest dir");
+        let guard = super::AbortOnDrop::new(tokio::spawn(receive_data_plane_streams_owned(
+            "127.0.0.1".to_string(),
+            port,
+            TOKEN.to_vec(),
+            2,
+            dest.path().to_path_buf(),
+            false,
+            None,
+            None,
+        )));
+
+        // Both workers connected + authenticated → mid-transfer state.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(10), established_rx.recv())
+                .await
+                .expect("both stream workers must connect")
+                .expect("stub alive");
+        }
+
+        drop(guard);
+
+        // Cancellation must cascade to every stream's socket.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(10), closed_rx.recv())
+                .await
+                .expect("cancellation must close every stream socket")
+                .expect("stub alive");
+        }
     }
 
     #[tokio::test]

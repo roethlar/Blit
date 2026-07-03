@@ -1,9 +1,11 @@
 # ue-r2-1g: PullSync multistream through the engine
 
 **Slice**: ue-r2-1g — seventh slice of `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
-**Status**: In review
+**Status**: Reviewed (codex NEEDS FIXES → 2 findings accepted + fixed;
+adversarial self-review panel: 2 more accepted + fixed, 1 deferred —
+see `.review/results/ue-r2-1g.gpt-verdict.md`)
 **Branch**: master (no agent branches — AGENTS.md §8)
-**Commits**: (filled at commit time)
+**Commits**: `48e583e` (slice) + review-fix commit (verdict file has the sha)
 
 ## What
 
@@ -89,6 +91,12 @@ slice every tuning/decision input on the pull path is engine-owned:
   the forwarded spec (`delegated_pull.rs:63-69`, landed `1e`) and its
   byte path IS the shared `pull_sync_with_spec` — no delegated change
   needed.
+- **The weak end protects itself on the receive side too** (review
+  fix, self-review F1): the client clamps the daemon-advertised
+  `stream_count` to the ceiling it itself advertises
+  (`bounded_stream_count`, REV4 Design §4) — a hostile or buggy daemon
+  cannot drive an unbounded worker/socket fan-out. Structural for
+  honest peers (proposals cap at 16 < 32).
 
 ## Preserved properties (the slice's named invariants)
 
@@ -165,4 +173,17 @@ Baseline entering the slice: 1403 / 0 / 2.
   (starts 4, receiver-bounded — the dial is the one tuning owner);
   buffer pool sizing now scales with stream count
   (`streams * 2 + 4` slots, the harvested helper's sizing) instead of
-  the fixed 4-slot pool.
+  the fixed 4-slot pool. Review fix (self-review F3): the harvested
+  helper now returns UNAUTHENTICATED on a bad token — pull_sync's
+  full-file path keeps its pre-slice status code exactly; the delta
+  moved to the DEPRECATED Pull path (PERMISSION_DENIED →
+  UNAUTHENTICATED; no consumer keys on it, dies at `1h`).
+- Sequential accept means the worst-case *bounded* handler pin grows
+  ~N× (a trickling client can hold one handler ≈ 12 min at 16 streams
+  vs ≈ 45 s before; the deprecated Pull path always had this shape;
+  other RPCs unaffected). Deferred to the W1 socket-policy/timeout
+  design-queue row (self-review F2, adjudicated Deferred).
+- For `ue-r2-1h`: deleting `service/pull.rs` must relocate
+  `PullEntry` + `collect_pull_entries_with_checksums` (pull_sync
+  depends on them) alongside removing the borrowed-back
+  `accept_and_wrap_sinks` import.
