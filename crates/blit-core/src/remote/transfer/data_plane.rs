@@ -516,10 +516,22 @@ impl<P: Probe> DataPlaneSession<P> {
             .await
             .context("writing tar shard length")?;
         for chunk in data.chunks(self.chunk_bytes.max(1)) {
+            // codex ue-r2-1e F3: shard writes carry the small-file
+            // workloads — without a blocked signal here the tuner sees
+            // a saturated link as a clean one. Same P::ACTIVE gating as
+            // the file loop: NoProbe reads no clock.
+            let started = if P::ACTIVE {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             self.stream
                 .write_all(chunk)
                 .await
                 .context("writing tar shard payload")?;
+            if let Some(t) = started {
+                self.probe.note_write_blocked(t.elapsed().as_nanos() as u64);
+            }
             self.probe.record_bytes(chunk.len() as u64);
             crate::remote::instrumentation::record_cli_data_plane_outbound_bytes(chunk.len() as u64);
         }

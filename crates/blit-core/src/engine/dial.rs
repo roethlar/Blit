@@ -110,11 +110,15 @@ impl TransferDial {
                 ceiling_streams = ceiling_streams.min(profile.max_streams as usize);
             }
             if profile.max_inflight_bytes > 0 {
-                // Prefetch is the in-flight payload budget: bound it so
-                // prefetch × chunk stays within the receiver's stated
-                // in-flight ceiling (floor of 1 so work still moves).
-                let by_inflight =
-                    (profile.max_inflight_bytes as usize / ceiling_chunk.max(1)).max(1);
+                // The in-flight budget bounds the CHUNK ceiling first
+                // (codex ue-r2-1e F1: with max_chunk unknown, a budget
+                // smaller than one chunk must still be honored — floor
+                // 64 KiB, matching the session's minimum buffer), then
+                // prefetch so prefetch × chunk stays within budget
+                // (floor of 1 so work still moves).
+                let inflight = profile.max_inflight_bytes as usize;
+                ceiling_chunk = ceiling_chunk.min(inflight.max(64 * 1024));
+                let by_inflight = (inflight / ceiling_chunk.max(1)).max(1);
                 ceiling_prefetch = ceiling_prefetch.min(by_inflight);
             }
         }
@@ -271,19 +275,29 @@ pub fn spawn_dial_tuner(
     let weak = Arc::downgrade(dial);
     tokio::spawn(async move {
         let mut last_blocked: u64 = 0;
+        let mut last_bytes: u64 = 0;
         let mut last_tick = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(DIAL_TUNER_TICK).await;
             let Some(dial) = weak.upgrade() else { return };
-            let blocked: u64 = probes
-                .iter()
-                .map(|p| p.snapshot().write_blocked_nanos)
-                .sum();
+            let (blocked, bytes) = probes.iter().fold((0u64, 0u64), |(b, n), p| {
+                let snap = p.snapshot();
+                (b + snap.write_blocked_nanos, n + snap.bytes_sent)
+            });
             let elapsed = last_tick.elapsed();
             last_tick = tokio::time::Instant::now();
-            let ratio = blocked_ratio(blocked.saturating_sub(last_blocked), elapsed, probes.len());
+            let delta_blocked = blocked.saturating_sub(last_blocked);
+            let delta_bytes = bytes.saturating_sub(last_bytes);
             last_blocked = blocked;
-            dial.apply_tick(ratio);
+            last_bytes = bytes;
+            // codex ue-r2-1e F2: an idle tick (no bytes moved) is NO
+            // SIGNAL, not a clean pipe — stepping up during manifest /
+            // preparation stalls would ramp without evidence and break
+            // the conservative-start contract.
+            if delta_bytes == 0 {
+                continue;
+            }
+            dial.apply_tick(blocked_ratio(delta_blocked, elapsed, probes.len()));
         }
     })
 }
@@ -336,6 +350,13 @@ mod tests {
         assert_eq!(dial.prefetch_count(), 2, "prefetch bounded by max_inflight");
         assert_eq!(dial.ceiling_max_streams(), 4);
 
+        // codex F1: an in-flight budget smaller than one chunk bounds
+        // the chunk ceiling itself, even with max_chunk unknown (0).
+        let tight = TransferDial::conservative_within(Some(&profile(0, 0, 8 * MIB as u64)));
+        while tight.step_up_cheap_dials() {}
+        assert_eq!(tight.chunk_bytes(), 8 * MIB);
+        assert_eq!(tight.prefetch_count(), 1);
+
         let generous = TransferDial::conservative_within(Some(&profile(999, u64::MAX, u64::MAX)));
         while generous.step_up_cheap_dials() {}
         assert_eq!(generous.chunk_bytes(), DIAL_CEILING_CHUNK_BYTES);
@@ -380,12 +401,24 @@ mod tests {
         use crate::remote::transfer::progress::{StreamId, StreamProbe};
         let dial = TransferDial::conservative().shared();
         let probes = vec![StreamProbe::new(StreamId(0)), StreamProbe::new(StreamId(1))];
-        let handle = spawn_dial_tuner(&dial, probes);
+        let tuner_view: Vec<StreamProbe> = probes
+            .iter()
+            .map(|p| StreamProbe::from_telemetry(p.id(), p.telemetry()))
+            .collect();
+        let handle = spawn_dial_tuner(&dial, tuner_view);
         // Let the spawned task run to its first sleep so the timer is
         // registered before the clock moves.
         tokio::task::yield_now().await;
 
-        // One tick with zero blocked time: clean pipe → step up.
+        // codex F2: an idle tick (no bytes moved) must NOT step.
+        tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(dial.chunk_bytes(), 16 * MIB, "idle tick is no signal");
+
+        // One tick WITH byte progress and zero blocked time: step up.
+        probes[0].record_bytes(1024);
         tokio::time::advance(DIAL_TUNER_TICK + std::time::Duration::from_millis(10)).await;
         for _ in 0..16 {
             if dial.chunk_bytes() > 16 * MIB {
