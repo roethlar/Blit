@@ -68,6 +68,85 @@ fn tiny_manifest_records_fast_path() -> Result<()> {
     Ok(())
 }
 
+/// ue-r2-1c behavior pin (added before the engine move): a second run
+/// over an already-synced directory routes through
+/// `FastPathDecision::NoWork{examined > 0}`, reports
+/// `TransferOutcome::UpToDate`, and records the `no_work` perf-history
+/// tag. Previously this strategy had no test at all.
+#[test]
+fn up_to_date_second_run_records_no_work() -> Result<()> {
+    use blit_core::orchestrator::TransferOutcome;
+
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = ConfigDirGuard::new()?;
+    perf_history::set_perf_history_enabled(true)?;
+    let _ = perf_history::clear_history()?;
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::write(src.join("a.txt"), b"one")?;
+    fs::write(src.join("b.txt"), b"two")?;
+
+    let options = || LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        // preserve_times keeps mtimes matching so the second run's
+        // size+mtime comparison sees both files as unchanged.
+        preserve_times: true,
+        ..Default::default()
+    };
+
+    let orchestrator = TransferOrchestrator::new();
+    let first = orchestrator.execute_local_mirror(&src, &dest, options())?;
+    assert_eq!(first.copied_files, 2);
+
+    let second = orchestrator.execute_local_mirror(&src, &dest, options())?;
+    assert_eq!(second.copied_files, 0);
+    assert_eq!(second.outcome, TransferOutcome::UpToDate);
+    assert!(second.scanned_files >= 2, "NoWork must report examined files");
+
+    let records = perf_history::read_recent_records(0)?;
+    let last = records.last().expect("expected perf history record");
+    assert_eq!(last.fast_path.as_deref(), Some("no_work"));
+    Ok(())
+}
+
+/// ue-r2-1c behavior pin (added before the engine move): an empty
+/// source directory routes through `NoWork{examined: 0}` and reports
+/// `TransferOutcome::SourceEmpty`. Previously untested.
+#[test]
+fn empty_source_dir_reports_source_empty() -> Result<()> {
+    use blit_core::orchestrator::TransferOutcome;
+
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = ConfigDirGuard::new()?;
+    perf_history::set_perf_history_enabled(true)?;
+    let _ = perf_history::clear_history()?;
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+
+    let options = LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        ..Default::default()
+    };
+
+    let orchestrator = TransferOrchestrator::new();
+    let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
+    assert_eq!(summary.copied_files, 0);
+    assert_eq!(summary.outcome, TransferOutcome::SourceEmpty);
+
+    let records = perf_history::read_recent_records(0)?;
+    let last = records.last().expect("expected perf history record");
+    assert_eq!(last.fast_path.as_deref(), Some("no_work"));
+    Ok(())
+}
+
 #[test]
 fn larger_manifest_records_streaming_path() -> Result<()> {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
