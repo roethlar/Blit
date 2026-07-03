@@ -105,7 +105,10 @@ fn up_to_date_second_run_records_no_work() -> Result<()> {
     let second = orchestrator.execute_local_mirror(&src, &dest, options())?;
     assert_eq!(second.copied_files, 0);
     assert_eq!(second.outcome, TransferOutcome::UpToDate);
-    assert!(second.scanned_files >= 2, "NoWork must report examined files");
+    assert!(
+        second.scanned_files >= 2,
+        "NoWork must report examined files"
+    );
 
     let records = perf_history::read_recent_records(0)?;
     let last = records.last().expect("expected perf history record");
@@ -160,7 +163,7 @@ fn larger_manifest_records_streaming_path() -> Result<()> {
     fs::create_dir_all(&src)?;
     fs::create_dir_all(&dest)?;
     // Must exceed the fast-path tiny budget (TINY_FILE_LIMIT = 256
-    // in orchestrator/fast_path.rs) so the streaming planner runs.
+    // in engine/strategy.rs) so the streaming planner runs.
     // The original 32-file version predates that threshold.
     for idx in 0..300 {
         let file = src.join(format!("file-{idx}.txt"));

@@ -39,6 +39,57 @@ pub enum LocalCompareMode {
     IgnoreTimes,
 }
 
+impl LocalCompareMode {
+    /// Resolve onto the unified wire-side `ComparisonMode`, honoring
+    /// the legacy `checksum: bool` under the default `SizeMtime`
+    /// (back-compat: `--checksum` callers that haven't migrated to
+    /// `compare_mode` keep their behavior). ue-r2-1c: single home for
+    /// a translation that was previously copy-pasted at three sites
+    /// (streaming, tuning query, single-file), which had already
+    /// diverged once (R58-F7/R58-followup).
+    pub fn resolve_comparison_mode(
+        self,
+        legacy_checksum: bool,
+    ) -> crate::generated::ComparisonMode {
+        use crate::generated::ComparisonMode;
+        match self {
+            LocalCompareMode::Checksum => ComparisonMode::Checksum,
+            LocalCompareMode::SizeOnly => ComparisonMode::SizeOnly,
+            LocalCompareMode::Force => ComparisonMode::Force,
+            LocalCompareMode::IgnoreTimes => ComparisonMode::IgnoreTimes,
+            LocalCompareMode::SizeMtime => {
+                if legacy_checksum {
+                    ComparisonMode::Checksum
+                } else {
+                    ComparisonMode::SizeMtime
+                }
+            }
+        }
+    }
+
+    /// Same resolution, onto the perf-history snapshot enum (tuning
+    /// buckets key on the full comparison policy -- R59 finding #5).
+    pub(crate) fn resolve_compare_snapshot(
+        self,
+        legacy_checksum: bool,
+    ) -> crate::perf_history::CompareModeSnapshot {
+        use crate::perf_history::CompareModeSnapshot;
+        match self {
+            LocalCompareMode::Checksum => CompareModeSnapshot::Checksum,
+            LocalCompareMode::SizeOnly => CompareModeSnapshot::SizeOnly,
+            LocalCompareMode::Force => CompareModeSnapshot::Force,
+            LocalCompareMode::IgnoreTimes => CompareModeSnapshot::IgnoreTimes,
+            LocalCompareMode::SizeMtime => {
+                if legacy_checksum {
+                    CompareModeSnapshot::Checksum
+                } else {
+                    CompareModeSnapshot::SizeMtime
+                }
+            }
+        }
+    }
+}
+
 /// Options for executing a local mirror/copy operation.
 #[derive(Clone, Debug)]
 pub struct LocalMirrorOptions {

@@ -5,6 +5,7 @@ pub mod checksum;
 pub mod config;
 pub mod copy;
 pub mod delete;
+pub mod engine;
 pub mod enumeration;
 pub mod fs_capability;
 pub mod fs_enum;

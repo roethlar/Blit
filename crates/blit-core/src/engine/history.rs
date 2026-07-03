@@ -3,25 +3,15 @@ use crate::perf_history::{
 };
 use crate::perf_predictor::PerformancePredictor;
 
-use super::{LocalCompareMode, LocalMirrorOptions, LocalMirrorSummary};
+use super::{LocalMirrorOptions, LocalMirrorSummary};
 
 /// Map the orchestrator's `LocalCompareMode` onto the perf-history
 /// snapshot enum so tuning records preserve the user's full intent
 /// (not just `checksum: bool`).
 fn snapshot_compare_mode(options: &LocalMirrorOptions) -> CompareModeSnapshot {
-    match options.compare_mode {
-        LocalCompareMode::Checksum => CompareModeSnapshot::Checksum,
-        LocalCompareMode::SizeOnly => CompareModeSnapshot::SizeOnly,
-        LocalCompareMode::Force => CompareModeSnapshot::Force,
-        LocalCompareMode::IgnoreTimes => CompareModeSnapshot::IgnoreTimes,
-        LocalCompareMode::SizeMtime => {
-            if options.checksum {
-                CompareModeSnapshot::Checksum
-            } else {
-                CompareModeSnapshot::SizeMtime
-            }
-        }
-    }
+    options
+        .compare_mode
+        .resolve_compare_snapshot(options.checksum)
 }
 
 pub(super) fn record_performance_history(

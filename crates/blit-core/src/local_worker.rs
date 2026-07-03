@@ -1,7 +1,7 @@
 //! Local filesystem copy helpers used by the orchestrator's fast-path.
 //!
 //! The main transfer pipeline now uses `FsTransferSink` (via `execute_sink_pipeline`).
-//! These blocking helpers remain for the fast-path routing in `orchestrator::fast_path`
+//! These blocking helpers remain for the fast-path strategies in `engine::strategy`
 //! which handles tiny manifests and single huge files without the full pipeline overhead.
 
 use std::path::{Path, PathBuf};

@@ -421,7 +421,7 @@ pub(crate) async fn collect_pull_entries_with_checksums(
         // too. Pre-fix the daemon returned the entry unconditionally,
         // so `blit pull host:module/file.txt --exclude '*.txt'` still
         // pulled the file even though the local single-file path
-        // (orchestrator.rs:1132) correctly skipped on the same flag.
+        // (engine/single_file.rs) correctly skipped on the same flag.
         // Filter against the basename (matches what allows_entry
         // does for directory enumeration of leaf files).
         let name = physical.file_name().map(PathBuf::from);
@@ -977,7 +977,7 @@ fn payload_bytes(payload: &TransferPayload) -> u64 {
 mod single_file_filter_tests {
     //! R59 finding #4: the daemon pull single-file fast path
     //! returned the entry unconditionally, ignoring the user-supplied
-    //! filter. Local single-file copy (orchestrator.rs:1132) already
+    //! filter. Local single-file copy (engine/single_file.rs) already
     //! honored the filter, so the two paths drifted apart.
 
     use super::*;
