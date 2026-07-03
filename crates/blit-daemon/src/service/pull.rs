@@ -3,6 +3,7 @@ use crate::runtime::ModuleConfig;
 use crate::service::PullSender;
 use base64::{engine::general_purpose, Engine as _};
 use blit_core::buffer::BufferPool;
+use blit_core::engine::TransferDial;
 use blit_core::generated::{
     DataTransferNegotiation, FileData, FileHeader, ManifestBatch, PullChunk, PullSummary,
 };
@@ -12,7 +13,6 @@ use blit_core::remote::transfer::pipeline::{
 use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::remote::transfer::{plan_transfer_payloads, TransferPayload};
-use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -138,9 +138,12 @@ async fn stream_pull_non_streaming(
         return Ok(());
     }
 
-    let tuning = determine_remote_tuning(total_bytes);
+    // ue-r2-1e: dial-driven (conservative start). The deprecated Pull
+    // RPC carries no receiver profile (PullRequest has no spec) and is
+    // deleted at ue-r2-1h; it runs at the dial's conservative values.
+    let dial = TransferDial::conservative();
     let plan_options = PlanOptions {
-        chunk_bytes_override: Some(tuning.chunk_bytes),
+        chunk_bytes_override: Some(dial.chunk_bytes()),
         ..Default::default()
     };
 
@@ -164,7 +167,7 @@ async fn stream_pull_non_streaming(
         .port();
     let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
-    let stream_target = pull_stream_count(total_bytes, tuning.max_streams as usize);
+    let stream_target = pull_stream_count(total_bytes, dial.ceiling_max_streams());
 
     tx.send(Ok(PullChunk {
         payload: Some(PullPayload::Negotiation(DataTransferNegotiation {
@@ -187,8 +190,8 @@ async fn stream_pull_non_streaming(
         token,
         source_root,
         planned.payloads,
-        tuning.chunk_bytes,
-        tuning.max_streams,
+        dial.chunk_bytes(),
+        dial.prefetch_count(),
         stream_target,
     ));
 
@@ -262,10 +265,10 @@ async fn stream_pull_streaming(
         return Ok(());
     }
 
-    // Determine tuning based on accumulated bytes
-    let tuning = determine_remote_tuning(pending_bytes);
+    // ue-r2-1e: dial-driven (see stream_pull_non_streaming).
+    let dial = TransferDial::conservative();
     let plan_options = PlanOptions {
-        chunk_bytes_override: Some(tuning.chunk_bytes),
+        chunk_bytes_override: Some(dial.chunk_bytes()),
         ..Default::default()
     };
 
@@ -279,7 +282,7 @@ async fn stream_pull_streaming(
         .port();
     let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
-    let stream_target = pull_stream_count(pending_bytes, tuning.max_streams as usize);
+    let stream_target = pull_stream_count(pending_bytes, dial.ceiling_max_streams());
 
     // Send negotiation
     tx.send(Ok(PullChunk {
@@ -309,8 +312,8 @@ async fn stream_pull_streaming(
         token,
         source_root.clone(),
         payload_rx,
-        tuning.chunk_bytes,
-        tuning.max_streams,
+        dial.chunk_bytes(),
+        dial.prefetch_count(),
         stream_target,
     ));
 

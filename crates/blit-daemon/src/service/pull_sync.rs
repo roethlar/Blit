@@ -10,6 +10,7 @@ use super::PullSyncSender;
 use crate::runtime::{ModuleConfig, RootExport};
 
 use base64::{engine::general_purpose, Engine as _};
+use blit_core::engine::TransferDial;
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
@@ -23,7 +24,6 @@ use blit_core::manifest::{
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::plan_transfer_payloads;
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
-use blit_core::remote::tuning::determine_remote_tuning;
 use blit_core::transfer_plan::PlanOptions;
 
 use std::collections::HashMap;
@@ -254,6 +254,12 @@ pub(crate) async fn handle_pull_sync_stream(
     // Phase 4: Transfer files
     let bytes_to_send: u64 = entries_to_send.iter().map(|e| e.header.size).sum();
 
+    // ue-r2-1e: the daemon is the byte SENDER on pull_sync — one dial
+    // per transfer, conservative start, bounded by the client's
+    // advertised receiver profile from the spec (None = old client →
+    // conservative defaults).
+    let dial = TransferDial::conservative_within(spec.receiver_capacity.as_ref());
+
     if force_grpc {
         // gRPC fallback: stream via control plane (full files or blocks)
         if !effective_resume.is_empty() {
@@ -273,13 +279,14 @@ pub(crate) async fn handle_pull_sync_stream(
             // tar-shard batching applies to the same workloads that
             // benefit from it on push (Step 4C).
             let stats =
-                stream_via_grpc(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
+                stream_via_grpc(&module, &root, entries_to_send, bytes_to_send, &tx, &dial).await?;
             send_summary(&tx, stats, true, scoped_deletions.len() as u64).await?;
         }
     } else if !effective_resume.is_empty() {
         // Data plane with block-level resume
         // Use gRPC for block hash exchange, data plane for block transfer
         let stats = stream_via_data_plane_resume(
+            &dial,
             &module,
             entries_to_send,
             bytes_to_send,
@@ -294,7 +301,8 @@ pub(crate) async fn handle_pull_sync_stream(
         // Data plane transfer (full files). Pass the enumeration `root`,
         // not module.path — header.relative_path is relative to `root`.
         let stats =
-            stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx).await?;
+            stream_via_data_plane(&module, &root, entries_to_send, bytes_to_send, &tx, &dial)
+                .await?;
         send_summary(&tx, stats, false, scoped_deletions.len() as u64).await?;
     }
 
@@ -485,8 +493,9 @@ async fn stream_via_grpc(
     _module: &ModuleConfig,
     source_root: &Path,
     entries: Vec<PullEntry>,
-    total_bytes: u64,
+    _total_bytes: u64,
     tx: &PullSyncSender,
+    dial: &TransferDial,
 ) -> Result<TransferStats, Status> {
     use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
     use blit_core::remote::transfer::sink::GrpcServerStreamingSink;
@@ -497,9 +506,10 @@ async fn stream_via_grpc(
     // Reuse the unified planner so gRPC fallback emits the same
     // payload mix (single files / tar shards) as the TCP data plane —
     // closes Step 4C, no artificial single-file cripple.
-    let tuning = determine_remote_tuning(total_bytes);
+    // ue-r2-1e: chunking comes from the live dial (conservative start,
+    // receiver-profile-bounded), not the size-keyed ladder.
     let plan_options = PlanOptions {
-        chunk_bytes_override: Some(tuning.chunk_bytes),
+        chunk_bytes_override: Some(dial.chunk_bytes()),
         ..Default::default()
     };
     let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
@@ -512,7 +522,7 @@ async fn stream_via_grpc(
         Arc::new(GrpcServerStreamingSink::new(
             source.clone(),
             tx.clone(),
-            tuning.chunk_bytes,
+            dial.chunk_bytes(),
             source_root.to_path_buf(),
         ));
 
@@ -539,6 +549,7 @@ async fn stream_via_data_plane(
     entries: Vec<PullEntry>,
     total_bytes: u64,
     tx: &PullSyncSender,
+    dial: &TransferDial,
 ) -> Result<TransferStats, Status> {
     use blit_core::buffer::BufferPool;
     use blit_core::remote::transfer::data_plane::DataPlaneSession;
@@ -546,10 +557,10 @@ async fn stream_via_data_plane(
     use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
     use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 
-    // Determine tuning based on total bytes
-    let tuning = determine_remote_tuning(total_bytes);
+    // ue-r2-1e: dial-driven chunking (conservative start,
+    // receiver-profile-bounded).
     let plan_options = PlanOptions {
-        chunk_bytes_override: Some(tuning.chunk_bytes),
+        chunk_bytes_override: Some(dial.chunk_bytes()),
         ..Default::default()
     };
 
@@ -641,12 +652,12 @@ async fn stream_via_data_plane(
     }
 
     // Wrap the session as a TransferSink and route through the unified pipeline.
-    let buffer_size = tuning.chunk_bytes.max(64 * 1024);
+    let buffer_size = dial.chunk_bytes().max(64 * 1024);
     let pool_size = 4;
     let memory_budget = buffer_size * pool_size * 2;
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
-    let session = DataPlaneSession::from_stream(socket, false, tuning.chunk_bytes, 8, pool).await;
+    let session = DataPlaneSession::from_stream(socket, false, dial.chunk_bytes(), 8, pool).await;
 
     let source: Arc<dyn TransferSource> =
         Arc::new(FsTransferSource::new(source_root.to_path_buf()));
@@ -672,9 +683,10 @@ async fn stream_via_data_plane(
 /// Uses gRPC for block hash exchange, then sends blocks via TCP data plane.
 /// Pipelines block hash requests to avoid per-file RTT penalty.
 async fn stream_via_data_plane_resume(
+    dial: &TransferDial,
     module: &ModuleConfig,
     entries: Vec<PullEntry>,
-    total_bytes: u64,
+    _total_bytes: u64,
     block_size_param: u32,
     tx: &PullSyncSender,
     stream: &mut Streaming<ClientPullMessage>,
@@ -690,9 +702,6 @@ async fn stream_via_data_plane_resume(
     } else {
         block_size_param as usize
     };
-
-    // Determine tuning based on total bytes
-    let tuning = determine_remote_tuning(total_bytes);
 
     // Set up data plane listener
     let listener = bind_data_plane_listener()
@@ -767,14 +776,14 @@ async fn stream_via_data_plane_resume(
     }
 
     // Create buffer pool
-    let buffer_size = tuning.chunk_bytes.max(64 * 1024);
+    let buffer_size = dial.chunk_bytes().max(64 * 1024);
     let pool_size = 4;
     let memory_budget = buffer_size * pool_size * 2;
     let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
 
     // Create data plane session
     let mut session =
-        DataPlaneSession::from_stream(socket, false, tuning.chunk_bytes, 8, pool).await;
+        DataPlaneSession::from_stream(socket, false, dial.chunk_bytes(), 8, pool).await;
 
     let mut stats = TransferStats::default();
 

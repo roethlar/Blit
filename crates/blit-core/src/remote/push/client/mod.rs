@@ -8,7 +8,6 @@ use self::helpers::{
     decode_token, destination_path, drain_pending_headers, map_status, module_and_path,
     prefer_server_error, send_manifest_complete, send_payload, spawn_response_task,
 };
-use crate::auto_tune::TuningParams;
 use crate::buffer::BufferPool;
 use crate::fs_enum::FileFilter;
 use crate::generated::client_push_request::Payload as ClientPayload;
@@ -17,7 +16,6 @@ use crate::generated::ClientPushRequest;
 use crate::generated::{FileHeader, PushSummary};
 use crate::remote::endpoint::RemoteEndpoint;
 use crate::remote::transfer::CONTROL_PLANE_CHUNK_SIZE;
-use crate::remote::tuning::determine_remote_tuning;
 use crate::transfer_plan::PlanOptions;
 use eyre::{eyre, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -223,28 +221,25 @@ impl MultiStreamSender {
     }
 }
 
-fn ensure_remote_tuning(
-    remote_tuning: &mut Option<TuningParams>,
+/// ue-r2-1e: one dial per push, created at first need. Replaces the
+/// memoized size-keyed `determine_remote_tuning` ladder: conservative
+/// start, ceilings bounded by the daemon's advertised receiver profile
+/// when the negotiation carried one (first-wins, like the old memo).
+/// `plan_options.chunk_bytes_override` is refreshed from the live dial
+/// by the planning arms before each `plan_transfer_payloads` batch.
+fn ensure_dial(
+    dial: &mut Option<Arc<crate::engine::TransferDial>>,
     plan_options: &mut PlanOptions,
-    size_hint: u64,
-) -> TuningParams {
-    if remote_tuning.is_none() {
-        let tuning = determine_remote_tuning(size_hint);
-        plan_options.chunk_bytes_override = Some(tuning.chunk_bytes);
-        *remote_tuning = Some(tuning);
+    receiver_capacity: Option<&crate::generated::CapacityProfile>,
+) -> Arc<crate::engine::TransferDial> {
+    if dial.is_none() {
+        let d = crate::engine::TransferDial::conservative_within(receiver_capacity).shared();
+        plan_options.chunk_bytes_override = Some(d.chunk_bytes());
+        *dial = Some(d);
     }
-    remote_tuning
-        .as_ref()
+    dial.as_ref()
         .cloned()
-        .expect("remote_tuning set by preceding assignment")
-}
-
-fn effective_size_hint(requested: u64, manifest_bytes: u64) -> u64 {
-    if requested > 0 {
-        requested
-    } else {
-        manifest_bytes.max(1)
-    }
+        .expect("dial set by preceding assignment")
 }
 
 fn prune_unrequested_payloads(
@@ -337,7 +332,7 @@ impl RemotePushClient {
         let mut manifest_lookup: HashMap<String, FileHeader> = HashMap::new();
         let mut requested_files: HashSet<String> = HashSet::new();
         let mut plan_options = PlanOptions::default();
-        let mut remote_tuning: Option<TuningParams> = None;
+        let mut dial: Option<Arc<crate::engine::TransferDial>> = None;
         let mut manifest_total_bytes: u64 = 0;
         let mut transfer_size_hint: u64 = 0;
 
@@ -508,15 +503,13 @@ impl RemotePushClient {
                                             // in pending_queue (drained by the
                                             // Negotiation arm).
                                             if fallback_negotiated && need_list_received {
-                                                let size_hint = effective_size_hint(
-                                                    transfer_size_hint,
-                                                    manifest_total_bytes,
-                                                );
-                                                let tuning = ensure_remote_tuning(
-                                                    &mut remote_tuning,
+                                                let dial = ensure_dial(
+                                                    &mut dial,
                                                     &mut plan_options,
-                                                    size_hint,
+                                                    None,
                                                 );
+                                                plan_options.chunk_bytes_override =
+                                                    Some(dial.chunk_bytes());
                                                 let result = stream_fallback_from_queue(
                                                     source.clone(),
                                                     &mut pending_queue,
@@ -524,8 +517,8 @@ impl RemotePushClient {
                                                     &tx,
                                                     progress,
                                                     plan_options,
-                                                    tuning.chunk_bytes,
-                                                    tuning.initial_streams,
+                                                    dial.chunk_bytes(),
+                                                    dial.initial_streams(),
                                                     &unreadable_paths,
                                                 ).await?;
                                                 if result.files_sent > 0 {
@@ -552,15 +545,15 @@ impl RemotePushClient {
                                                     if headers.is_empty() {
                                                         continue;
                                                     }
-                                                    let size_hint = effective_size_hint(
-                                                        transfer_size_hint,
-                                                        manifest_total_bytes,
-                                                    );
-                                                    let _ = ensure_remote_tuning(
-                                                        &mut remote_tuning,
+                                                    let dial = ensure_dial(
+                                                        &mut dial,
                                                         &mut plan_options,
-                                                        size_hint,
+                                                        None,
                                                     );
+                                                    // Live dial: refresh the
+                                                    // planner chunk per batch.
+                                                    plan_options.chunk_bytes_override =
+                                                        Some(dial.chunk_bytes());
                                             let planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
                                             for payload in &planned.payloads {
@@ -615,15 +608,13 @@ impl RemotePushClient {
                                         fallback_negotiated = true;
 
                                             if need_list_received {
-                                                let size_hint = effective_size_hint(
-                                                    transfer_size_hint,
-                                                    manifest_total_bytes,
-                                                );
-                                            let tuning = ensure_remote_tuning(
-                                                &mut remote_tuning,
+                                            let dial = ensure_dial(
+                                                &mut dial,
                                                 &mut plan_options,
-                                                size_hint,
+                                                neg.receiver_capacity.as_ref(),
                                             );
+                                            plan_options.chunk_bytes_override =
+                                                Some(dial.chunk_bytes());
                                             let result = stream_fallback_from_queue(
                                                 source.clone(),
                                                 &mut pending_queue,
@@ -631,8 +622,8 @@ impl RemotePushClient {
                                                 &tx,
                                                 progress,
                                                 plan_options,
-                                                tuning.chunk_bytes,
-                                                tuning.prefetch_count.unwrap_or_else(|| tuning.initial_streams.max(1)),
+                                                dial.chunk_bytes(),
+                                                dial.prefetch_count(),
                                                 &unreadable_paths,
                                             ).await?;
                                             if result.files_sent > 0 {
@@ -656,33 +647,31 @@ impl RemotePushClient {
                                         }
 
                                         let token_bytes = decode_token(&neg.one_time_token)?;
-                                        let size_hint = effective_size_hint(
-                                            transfer_size_hint,
-                                            manifest_total_bytes,
-                                        );
-                                        let tuning = ensure_remote_tuning(
-                                            &mut remote_tuning,
+                                        // ue-r2-1e: the daemon (byte
+                                        // receiver) advertised its profile
+                                        // on this negotiation — the dial's
+                                        // ceilings honor it (first-wins,
+                                        // like the old tuning memo).
+                                        let dial = ensure_dial(
+                                            &mut dial,
                                             &mut plan_options,
-                                            size_hint,
+                                            neg.receiver_capacity.as_ref(),
                                         );
                                         if data_plane_sender.is_none() {
-                                            let stream_target = neg
-                                                .stream_count
-                                                .max(1)
-                                                .min(tuning.max_streams as u32) as usize;
-                                            let payload_prefetch = tuning
-                                                .prefetch_count
-                                                .unwrap_or_else(|| tuning.initial_streams.max(1));
+                                            let stream_target = dial.set_negotiated_streams(
+                                                neg.stream_count.max(1) as usize,
+                                            );
+                                            let payload_prefetch = dial.prefetch_count();
                                             let sender = MultiStreamSender::connect(
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
                                                 &token_bytes,
-                                                tuning.chunk_bytes,
+                                                dial.chunk_bytes(),
                                                 payload_prefetch,
                                                 stream_target,
                                                 trace_data_plane,
                                                 source.clone(),
-                                                tuning.tcp_buffer_size,
+                                                dial.tcp_buffer_bytes(),
                                                 progress.cloned(),
                                             )
                                             .await?;
@@ -787,15 +776,13 @@ impl RemotePushClient {
                                     // between our own manifest sends — wait
                                     // for the daemon's fallback negotiation.
                                     if fallback_negotiated && need_list_received {
-                                        let size_hint = effective_size_hint(
-                                            transfer_size_hint,
-                                            manifest_total_bytes,
-                                        );
-                                        let tuning = ensure_remote_tuning(
-                                            &mut remote_tuning,
+                                        let dial = ensure_dial(
+                                            &mut dial,
                                             &mut plan_options,
-                                            size_hint,
+                                            None,
                                         );
+                                        plan_options.chunk_bytes_override =
+                                            Some(dial.chunk_bytes());
                                         let result = stream_fallback_from_queue(
                                             source.clone(),
                                             &mut pending_queue,
@@ -803,8 +790,8 @@ impl RemotePushClient {
                                             &tx,
                                             progress,
                                             plan_options,
-                                            tuning.chunk_bytes,
-                                            tuning.initial_streams,
+                                            dial.chunk_bytes(),
+                                            dial.initial_streams(),
                                             &unreadable_paths,
                                         ).await?;
                                         if result.files_sent > 0 {
@@ -831,15 +818,13 @@ impl RemotePushClient {
                                             if headers.is_empty() {
                                                 continue;
                                             }
-                                            let size_hint = effective_size_hint(
-                                                transfer_size_hint,
-                                                manifest_total_bytes,
-                                            );
-                                            let _ = ensure_remote_tuning(
-                                                &mut remote_tuning,
+                                            let dial = ensure_dial(
+                                                &mut dial,
                                                 &mut plan_options,
-                                                size_hint,
+                                                None,
                                             );
+                                            plan_options.chunk_bytes_override =
+                                                Some(dial.chunk_bytes());
                                             let mut planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
                                             let skipped = prune_unrequested_payloads(

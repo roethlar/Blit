@@ -6,12 +6,13 @@
 //! only production caller passed `warmup_result = None`, and the
 //! caller overwrote most of what the None branch returned. That
 //! machinery is deleted; remote sizing is honestly static
-//! (`remote::tuning::determine_remote_tuning`, keyed on the byte
+//! (formerly `remote::tuning::determine_remote_tuning`, keyed on the byte
 //! estimate). A real warmup probe is H10b-class future work behind
 //! its own plan doc.
 
 /// Tuning parameters for remote transfers. Produced by the static
-/// size-keyed table in `remote::tuning::determine_remote_tuning`.
+/// size-keyed table the engine dial replaced at ue-r2-1e
+/// (`crate::engine::TransferDial`).
 #[derive(Debug, Clone)]
 pub struct TuningParams {
     /// Chunk size in bytes for network I/O

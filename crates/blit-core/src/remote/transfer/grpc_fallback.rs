@@ -7,7 +7,7 @@
 //! The gRPC fallback path cannot do that. `tonic::Streaming::message()`
 //! only resolves after a full protobuf message is decoded; nothing inside
 //! the message is observable from the receive side. So if the daemon
-//! sends TCP-sized chunks (16-64 MiB from [`crate::remote::tuning`]) over
+//! sends TCP-sized chunks (16-64 MiB from the engine dial) over
 //! the gRPC fallback, a 1 Mbps link takes ~128 seconds per `message()`
 //! await — defeating any per-message stall guard, and giving the slice-2
 //! progress watchdog nothing observable to measure.
@@ -90,7 +90,7 @@ use tonic::Streaming;
 /// which gives slice 2's watchdog something tangible to measure cadence
 /// against.
 ///
-/// The TCP data plane uses [`crate::remote::tuning`]-derived chunk sizes
+/// The TCP data plane uses dial-derived chunk sizes
 /// (16-64 MiB for large transfers) because its byte-level progress
 /// stream lets the read-side `StallGuard` observe every successful
 /// `poll_read`. gRPC fallback can only observe whole decoded messages,

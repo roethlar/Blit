@@ -89,6 +89,12 @@ pub struct NormalizedTransferOperation {
     /// purge dest extras) but carries the same scan-completeness
     /// requirement that a mirror operation does.
     pub require_complete_scan: bool,
+    /// ue-r2-1e: the byte receiver's capacity profile, carried through
+    /// (not validated — a hostile profile can only LOWER the sender's
+    /// dial ceilings, never raise them; see `TransferDial::
+    /// conservative_within`). `None` = old peer or nothing advertised
+    /// → conservative defaults.
+    pub receiver_capacity: Option<crate::generated::CapacityProfile>,
 }
 
 impl NormalizedTransferOperation {
@@ -139,6 +145,7 @@ impl NormalizedTransferOperation {
             force_grpc: spec.force_grpc,
             ignore_existing: spec.ignore_existing,
             require_complete_scan: spec.require_complete_scan,
+            receiver_capacity: spec.receiver_capacity,
         })
     }
 
