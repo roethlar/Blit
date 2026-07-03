@@ -36,5 +36,6 @@ adversarially verified as real:
 ## Fix commit
 
 - `ue-r2-1b: address review (1 finding)` carries the proto comment
-  correction, this record, and the trimmed codex artifact. Fix sha
-  appended below once the commit lands.
+  correction, this record, and the trimmed codex artifact.
+- Fix sha: `5bd345a`. Validation gate re-run green after the fix:
+  fmt clean, clippy clean, tests 1391 passed / 0 failed / 2 ignored.

@@ -1,8 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-06-21 (`ue-r2-1a` complete — first REV4 slice landed via
-the code→review→fix loop) at commit `2c1b839`; unpushed stack
-`b663091..2c1b839` (this handoff commits on top).
+Last updated: 2026-07-03 (`ue-r2-1b` complete — wire dial contract landed
+via the code→review→fix loop) at commits `2741dc8`+`5bd345a`; unpushed to
+`origin`: `fcf3345`+`2741dc8`+`5bd345a` (gitea has `fcf3345` already —
+owner pushed it 2026-07-03; this handoff commits on top).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -10,18 +11,27 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`ue-r2-1a` COMPLETE** — first REV4 slice; the code→GPT-review→fix loop
-  ran end-to-end. Salvaged the adaptive substrate via cherry-pick over the
-  `-s ours` octopus trap (D-2026-06-07-2, where a plain merge no-ops): PR1
-  zero-cost `Probe` telemetry (`e569eea`), PR2 work-stealing `flume` queue
-  (`3844a15`), PR2 forwarder-halt fix (`ec561f2`); hand-resolved the
-  `data_plane.rs` StallGuard-vs-`Probe` conflict; work-stealing behaviour
-  tests (`771a632`); codex/GPT-5.5 review → fix-then-ship, 4 findings all
-  accepted + fixed (`90ed43d`); STATE/DEVLOG + codex-artifact trim
-  (`2c1b839`). Validation: fmt/clippy clean, `cargo test --workspace`
-  **1378 / 0 / 2** (baseline 1370). Carried to `ue-r2-1e`: PR1
-  `write_blocked_nanos` timing accuracy (no telemetry consumer until the
-  dial). Hard-abort-on-drop of workers stays `w4-1`.
+- **`ue-r2-1b` COMPLETE** — second REV4 slice through the GPT review loop.
+  Wire dial contract defined before any behavior depends on it
+  (`2741dc8`): `CapacityProfile` (rich receiver→sender profile, 0 =
+  unknown = stay conservative) as `DataTransferNegotiation.
+  receiver_capacity = 11` (push; daemon is receiver) and
+  `TransferOperationSpec.receiver_capacity = 12` (pull_sync/delegated;
+  client/dst is receiver) — **spec_version stays 2, deliberately no bump**
+  (exact-match gate would make old daemons reject new clients; profile is
+  a skippable hint); daemon-authoritative `resize_enabled = 12` +
+  `epoch0_sub_token = 13`; capability bits `PushHeader.supports_stream_
+  resize = 8` / `PeerCapabilities.supports_stream_resize = 5` (false until
+  `ue-r2-2`); `DataPlaneResize`/`Ack` oneof variants in all four control
+  streams (prior art `d9d4ec7`; its 11–14 clash resolved —
+  min/max_stream_count subsumed by `CapacityProfile.max_streams`).
+  Delegated dst override now also strips CLI-supplied `receiver_capacity`
+  (R25-F2 boundary). Compat tests both mixed-version directions
+  (`crates/blit-core/tests/proto_wire_compat.rs`, old-shape prost
+  replicas). Review: codex/GPT-5.5 **PASS, zero findings**; supplementary
+  4-lens self-review found 1 Low (false deprecated-Pull claim in a proto
+  comment), fixed in `5bd345a`. Validation: fmt/clippy clean,
+  `cargo test --workspace` **1391 / 0 / 2** (baseline 1378, +13).
 - **Active context** (settled background for the slice work):
   - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the **Active**
     convergence plan (D-2026-06-20-5); v1/REV2/REV3 Superseded.
@@ -38,16 +48,18 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`ue-r2-1b` (wire dial contract)** — next REV4 slice: define the
-   capacity-profile + peer-capability + resize proto shape
-   (`receiver_capacity = 11`, `DataPlaneResize`/`Ack`) with old/new compat
-   tests, before any code depends on the fields. Per D-2026-06-20-6 the loop
-   may continue autonomously on owner "continue"; owner may push the
-   `b663091..2c1b839` stack first. Also pending separately: push approval for
-   the Windows test-tuning commit (`439a2a7`, local-only — Windows CI red
-   until it lands).
+1. **`ue-r2-1c` (engine shell + local adapter)** — next REV4 slice: add
+   `TransferEngine`, convert `TransferOrchestrator` into the local
+   adapter, move the local fast paths (`journal_no_work`, `no_work`,
+   `tiny_manifest`, `single_huge_file`, single-file shortcut) under
+   engine-owned strategies, preserving behavior and adding accounting
+   where the single-file shortcut lacked it. Engine-type recommendation
+   (new `TransferEngine` + local adapter) is ratified at this slice —
+   owner may override before it starts. Per D-2026-06-20-6 the loop may
+   continue autonomously on owner "continue"; owner may push the
+   `origin..master` stack first.
 2. **Then** the rest of the REV4 slice list in order —
-   `1c` → `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
+   `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is **w4-1**
@@ -68,8 +80,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `…_REV2.md`, `…_REV3.md`.
 - Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active, D-2026-06-20-6) governs
   `ue-r2-*`; `.review/README.md` async loop governs other work.
-- Review loop: `REVIEW.md` (`ue-r2-1a` row `[x]`; design-queue rows) +
-  `.review/findings/` + `.review/results/`.
+- Review loop: `REVIEW.md` (`ue-r2-1a`/`ue-r2-1b` rows `[x]`; design-queue
+  rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified D-2026-06-12-1,
   executes w8-1), `TUI_REWORK.md` (gated on Round 1),
   `BENCHMARK_10GBE_PLAN.md` (`ue-1`/`ue-2` gate).
@@ -77,10 +89,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: (1) "continue" → I pick up `ue-r2-1b` (or push the
-  `b663091..2c1b839` stack first); (2) push approval for `439a2a7` (Windows
-  CI red until it lands). Neither blocks me from continuing autonomously per
-  D-2026-06-20-6 once you say go.
+- **Owner**: (1) "continue" → I pick up `ue-r2-1c` (or push the
+  `origin..master` stack — `fcf3345`+`2741dc8`+`5bd345a` — first; gitea
+  additionally lacks the last two). Doesn't block autonomous continuation
+  per D-2026-06-20-6. (2) RESOLVED since last handoff: `439a2a7` (Windows
+  test-tuning) is now on `origin` — the Windows-CI push blocker is gone.
 
 ## Open questions
 
@@ -89,33 +102,35 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **(OPEN)** Historical audit/finding docs (`audit-13/14/15`, `drift-*`)
   still embed `/Users/...` in recorded evidence — scrub, or leave as
   evidence? Agent rec: leave; live docs are already clean.
-- **(RESOLVED 2026-06-21)** Adaptive-streams branch refs. Audited all three
-  past the `-s ours` octopus trap (real-tree diffs, not ancestor-diffs):
-  `pr2` (`b797b73`) was fully salvaged (PR1/PR2/forwarder-fix cherry-picked;
-  `9af276d` live-progress also on master via evolved `TransferProgress`);
-  `pr3` (`eafb187`) held only review artifacts, no code. Owner deleted both
-  from `origin`. **Kept `origin/feat/adaptive-streams-pr3-resizable`
-  (`d9d4ec7`)** — does-not-build, but its 73-line `proto/blit.proto` adaptive
-  contract (`adaptive_enabled`, `min/max_stream_count`, `epoch0_sub_token`,
-  `DataPlaneResize`/`Ack`, `supports_adaptive_streams` caps) is prior-art for
-  `ue-r2-1b`. Note field-number clash: that branch uses `11` for
-  `min_stream_count`; REV4 reserves `11` for `receiver_capacity`.
+- **(RESOLVED 2026-07-03)** Adaptive-streams prior art consumed:
+  `ue-r2-1b` harvested the `d9d4ec7` proto contract (resize messages kept
+  near-verbatim; its negotiation fields 11–14 renumbered/subsumed — see
+  the `NOTE on field numbers` block in `proto/blit.proto`). The branch
+  `origin/feat/adaptive-streams-pr3-resizable` has served its purpose for
+  the wire slice; still referenced as prior art for `ue-r2-2`'s
+  controller/dialer wiring. (Full audit history: DEVLOG 2026-06-21 /
+  STATE history at `2c1b839`.)
 - **Engine type** — agent recommends a new `TransferEngine` + local adapter;
   ratified at `ue-r2-1c`, owner may override.
 - **Windows**: w9-1/w9-5/w9-4/w4-2 added ungated daemon-spawn tests,
-  unverified on Windows; next windows-latest CI run or run-blit-tests.ps1
-  triages real failures into findings.
+  unverified on Windows; `439a2a7` is now on origin, so the next
+  windows-latest CI run is meaningful — triage real failures into findings.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-03** @ `5bd345a` — `ue-r2-1b` landed end-to-end through the
+  code→GPT-review→fix loop (wire contract `2741dc8`; codex PASS zero
+  findings; 1 Low self-review finding fixed `5bd345a`). fmt/clippy clean;
+  tests 1391/0/2. All on master; unpushed to origin:
+  `fcf3345`+`2741dc8`+`5bd345a`. In-flight: none — paused at a slice
+  boundary. **Exact first action next session**: on owner "continue",
+  start `ue-r2-1c` (engine shell + local adapter) through the loop —
+  ratifying the engine-type recommendation unless the owner overrides;
+  else owner pushes the stack / decides the D-2026-06-20-1 edit.
 - **2026-06-21** @ `2c1b839` — `ue-r2-1a` landed end-to-end through the
   code→GPT-review→fix loop (substrate cherry-pick `e569eea`/`3844a15`/
   `ec561f2`, conflict resolved, tests `771a632`, codex review → 4 findings
-  all fixed `90ed43d`, docs `2c1b839`). fmt/clippy clean; test 1378/0/2. All
-  on master, **unpushed** (`b663091..2c1b839`). In-flight: none — paused at a
-  slice boundary. **Exact first action next session**: on owner "continue",
-  start `ue-r2-1b` (wire/dial proto contract) through the loop; else owner
-  pushes the stack / approves `439a2a7` / decides the D-2026-06-20-1 edit.
+  all fixed `90ed43d`, docs `2c1b839`). fmt/clippy clean; test 1378/0/2.
 - **2026-06-20** @ `09268eb` — reviewed all three unified-transfer candidates,
   produced REV4 (code-reality corrected; REV3's "two static tables" ladder
   claim was wrong — all three ladders live), and on owner's "rev4 replaces
