@@ -1,9 +1,10 @@
 # ue-r2-1c: TransferEngine shell + TransferOrchestrator as local adapter
 
 **Slice**: ue-r2-1c — third slice of `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`
-**Status**: In progress (this doc doubles as the slice implementation plan)
+**Status**: Coded; under GPT review (`docs/agent/GPT_REVIEW_LOOP.md`)
 **Branch**: master (no agent branches — AGENTS.md §8)
-**Commits**: (filled as they land)
+**Commits**: `7730eb1` (behavior pins), `dc9b0ed` (engine move),
+`29e210b` (single-file accounting)
 
 ## What
 
@@ -80,13 +81,31 @@ moves, existing Known gaps.
 
 ## Files changed
 
-(filled as commits land)
+- `crates/blit-core/src/engine/` (new module, re-exported in `lib.rs`):
+  `mod.rs` (TransferEngine + EngineRequest + execute — moved body of
+  `execute_local_mirror_async`), `strategy.rs` (was
+  `orchestrator/fast_path.rs`), `single_file.rs` (moved + accounting),
+  `tuning.rs` (moved tuning-window helpers + 12 tests), `mirror.rs`
+  (moved `apply_mirror_deletions`), `journal.rs` (moved checkpoint
+  helpers), `options.rs` (+ the two compare-mode resolvers),
+  `summary.rs`, `history.rs` (moved; snapshot fn delegates to the
+  resolver).
+- `crates/blit-core/src/orchestrator/orchestrator.rs` — rewritten as
+  the local adapter (preconditions, source/sink construction, option
+  translation, EngineRequest handoff); public-API tests kept in place.
+- `crates/blit-core/src/orchestrator/mod.rs` — re-exports the six
+  public names from `crate::engine` (external callers unchanged).
+- `crates/blit-core/tests/local_transfers.rs` — 3 new tests (2 pins +
+  1 accounting guard).
+- Comment-path touch-ups: `local_worker.rs`, `blit-daemon/service/pull.rs`.
 
 ## Tests
 
-Baseline entering the slice: 1391 passed / 0 failed / 2 ignored. Count
-must not drop; expected to rise (new pins + single-file accounting
-test).
+Baseline entering the slice: 1391 / 0 / 2 → after: **1394 / 0 / 2**
+(+2 NoWork pins, +1 single-file accounting guard; every moved test —
+strategy, tuning-window, history, public-API — still runs and passes).
+Accounting guard proven non-vacuous: fails with the accounting
+reverted, passes restored.
 
 ## Known gaps
 
