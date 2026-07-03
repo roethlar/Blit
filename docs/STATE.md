@@ -1,9 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-03 (`ue-r2-1b` complete — wire dial contract landed
-via the code→review→fix loop) at commits `2741dc8`+`5bd345a`; unpushed to
-`origin`: `fcf3345`+`2741dc8`+`5bd345a` (gitea has `fcf3345` already —
-owner pushed it 2026-07-03; this handoff commits on top).
+Last updated: 2026-07-03 (`ue-r2-1b` AND `ue-r2-1c` complete — wire dial
+contract + engine shell, both through the code→review→fix loop); unpushed
+to `origin`: everything after `725aa07` (nine commits, `fcf3345` through
+the `ue-r2-1c` review fix `15e6334` + this handoff; gitea has `fcf3345`
+already — owner pushed it 2026-07-03).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -11,27 +12,30 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`ue-r2-1b` COMPLETE** — second REV4 slice through the GPT review loop.
-  Wire dial contract defined before any behavior depends on it
-  (`2741dc8`): `CapacityProfile` (rich receiver→sender profile, 0 =
-  unknown = stay conservative) as `DataTransferNegotiation.
-  receiver_capacity = 11` (push; daemon is receiver) and
-  `TransferOperationSpec.receiver_capacity = 12` (pull_sync/delegated;
-  client/dst is receiver) — **spec_version stays 2, deliberately no bump**
-  (exact-match gate would make old daemons reject new clients; profile is
-  a skippable hint); daemon-authoritative `resize_enabled = 12` +
-  `epoch0_sub_token = 13`; capability bits `PushHeader.supports_stream_
-  resize = 8` / `PeerCapabilities.supports_stream_resize = 5` (false until
-  `ue-r2-2`); `DataPlaneResize`/`Ack` oneof variants in all four control
-  streams (prior art `d9d4ec7`; its 11–14 clash resolved —
-  min/max_stream_count subsumed by `CapacityProfile.max_streams`).
-  Delegated dst override now also strips CLI-supplied `receiver_capacity`
-  (R25-F2 boundary). Compat tests both mixed-version directions
-  (`crates/blit-core/tests/proto_wire_compat.rs`, old-shape prost
-  replicas). Review: codex/GPT-5.5 **PASS, zero findings**; supplementary
-  4-lens self-review found 1 Low (false deprecated-Pull claim in a proto
-  comment), fixed in `5bd345a`. Validation: fmt/clippy clean,
-  `cargo test --workspace` **1391 / 0 / 2** (baseline 1378, +13).
+- **`ue-r2-1c` COMPLETE** — engine shell landed (details: DEVLOG
+  2026-07-03). New `crates/blit-core/src/engine/`: `TransferEngine::
+  execute(EngineRequest)` owns strategy selection (single-file → journal
+  → fast paths → streaming) and the streaming leg; `TransferOrchestrator`
+  is now the local adapter (source/sink construction + option
+  translation; public API preserved via re-exports). **Engine type
+  ratified** (REV4 Design §1: new engine + adapter). Single-file strategy
+  gained the REV4-named missing accounting (tag `single_file`, guard
+  test proven by revert). Commits `7730eb1` (pins) + `dc9b0ed` (move,
+  fidelity machine-checked) + `29e210b` (accounting); codex retry PASS
+  with 1 Low fixed (`15e6334`). Validation: fmt/clippy clean,
+  `cargo test --workspace` **1394 / 0 / 2** (baseline 1391, +3).
+- **`ue-r2-1b` COMPLETE** — wire dial contract (`2741dc8` + review fix
+  `5bd345a`; codex PASS zero findings): `CapacityProfile` as
+  `DataTransferNegotiation.receiver_capacity = 11` and
+  `TransferOperationSpec.receiver_capacity = 12` (**spec_version stays
+  2 — no bump**, exact-match gate), `resize_enabled = 12` +
+  `epoch0_sub_token = 13`, capability bits (PushHeader 8 /
+  PeerCapabilities 5, false until `ue-r2-2`), `DataPlaneResize`/`Ack`
+  variants in all four control streams (prior art `d9d4ec7`, 11–14
+  clash resolved via `CapacityProfile.max_streams`). Delegated dst
+  override also strips CLI-supplied `receiver_capacity`. Both
+  mixed-version directions compat-tested
+  (`crates/blit-core/tests/proto_wire_compat.rs`). Tests 1378→1391.
 - **Active context** (settled background for the slice work):
   - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the **Active**
     convergence plan (D-2026-06-20-5); v1/REV2/REV3 Superseded.
@@ -48,18 +52,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`ue-r2-1c` (engine shell + local adapter)** — next REV4 slice: add
-   `TransferEngine`, convert `TransferOrchestrator` into the local
-   adapter, move the local fast paths (`journal_no_work`, `no_work`,
-   `tiny_manifest`, `single_huge_file`, single-file shortcut) under
-   engine-owned strategies, preserving behavior and adding accounting
-   where the single-file shortcut lacked it. Engine-type recommendation
-   (new `TransferEngine` + local adapter) is ratified at this slice —
-   owner may override before it starts. Per D-2026-06-20-6 the loop may
-   continue autonomously on owner "continue"; owner may push the
-   `origin..master` stack first.
+1. **`ue-r2-1d` (streaming plan foundation)** — next REV4 slice:
+   partial-scan `InitialPlan`/`PlanUpdate`, prove ~1s start for local
+   and push shapes, document RELIABLE exceptions
+   (mirror/delete, resume, checksum-refusal). `1e` (live dials) is also
+   unblocked (needs `1b`+`1c`, both done) — REV4 sequences `1d` first.
+   Per D-2026-06-20-6 the loop may continue autonomously on owner
+   "continue"; owner may push the `origin..master` stack first.
 2. **Then** the rest of the REV4 slice list in order —
-   `1d`/`1e`/`1f` → `1g` → `1h` → `ue-r2-2`
+   `1e`/`1f` → `1g` → `1h` → `ue-r2-2`
    (deps in REV4 §"Slice dependencies"), each through the GPT review loop.
 3. **Design-review queue (independent, survives the convergence)** —
    `REVIEW.md` order governs. Highest open ratified row is **w4-1**
@@ -71,6 +72,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    daemon→local within a tight band) AND the `ue-2` (continuous/C) gate; also
    the zero-copy revisit gate (D-2026-06-12-1). Capture before/after
    baselines there. After `ue-1`: audit Round 1, TUI rework, H10b planner.
+   **Test environment (owner, 2026-07-03)**: `admin@skippy:/mnt/generic-pool/video/test`
+   — scp and ssh open from this user to `admin@skippy`; if a daemon needs
+   to run on skippy and can't, ping the owner. (BENCHMARK_10GBE_PLAN.md is
+   `Status: Historical`; the environment note lives here until a live
+   benchmark doc exists.)
 
 ## Authoritative docs right now
 
@@ -80,7 +86,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `…_REV2.md`, `…_REV3.md`.
 - Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active, D-2026-06-20-6) governs
   `ue-r2-*`; `.review/README.md` async loop governs other work.
-- Review loop: `REVIEW.md` (`ue-r2-1a`/`ue-r2-1b` rows `[x]`; design-queue
+- Review loop: `REVIEW.md` (`ue-r2-1a`/`1b`/`1c` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified D-2026-06-12-1,
   executes w8-1), `TUI_REWORK.md` (gated on Round 1),
@@ -89,11 +95,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: (1) "continue" → I pick up `ue-r2-1c` (or push the
-  `origin..master` stack — `fcf3345`+`2741dc8`+`5bd345a` — first; gitea
-  additionally lacks the last two). Doesn't block autonomous continuation
-  per D-2026-06-20-6. (2) RESOLVED since last handoff: `439a2a7` (Windows
-  test-tuning) is now on `origin` — the Windows-CI push blocker is gone.
+- **Owner**: "continue" → I pick up `ue-r2-1d` (or push the
+  `origin..master` stack first — nine commits; gitea lacks eight).
+  Doesn't block autonomous continuation per D-2026-06-20-6. Codex access
+  restored by owner 2026-07-03 after a mid-review quota outage (first
+  `ue-r2-1c` review attempt died; retry succeeded).
 
 ## Open questions
 
@@ -110,30 +116,29 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   the wire slice; still referenced as prior art for `ue-r2-2`'s
   controller/dialer wiring. (Full audit history: DEVLOG 2026-06-21 /
   STATE history at `2c1b839`.)
-- **Engine type** — agent recommends a new `TransferEngine` + local adapter;
-  ratified at `ue-r2-1c`, owner may override.
+- **(RESOLVED 2026-07-03)** Engine type — ratified at `ue-r2-1c` as
+  planned: new `TransferEngine` + `TransferOrchestrator` as local
+  adapter (REV4 Design §1); owner did not override.
 - **Windows**: w9-1/w9-5/w9-4/w4-2 added ungated daemon-spawn tests,
   unverified on Windows; `439a2a7` is now on origin, so the next
   windows-latest CI run is meaningful — triage real failures into findings.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-03 (later)** @ `15e6334`+docs — `ue-r2-1c` landed end-to-end
+  (pins `7730eb1`, engine move `dc9b0ed`, single-file accounting
+  `29e210b`, codex retry PASS → 1 Low fixed `15e6334`). fmt/clippy
+  clean; tests 1394/0/2. Also: owner provided the 10GbE test env
+  (Queue item 4) and restored codex after a quota outage. In-flight:
+  none — paused at a slice boundary. **Exact first action next
+  session**: on owner "continue", start `ue-r2-1d` (streaming plan
+  foundation) through the loop; else owner pushes the stack / decides
+  the D-2026-06-20-1 edit.
 - **2026-07-03** @ `5bd345a` — `ue-r2-1b` landed end-to-end through the
   code→GPT-review→fix loop (wire contract `2741dc8`; codex PASS zero
   findings; 1 Low self-review finding fixed `5bd345a`). fmt/clippy clean;
-  tests 1391/0/2. All on master; unpushed to origin:
-  `fcf3345`+`2741dc8`+`5bd345a`. In-flight: none — paused at a slice
-  boundary. **Exact first action next session**: on owner "continue",
-  start `ue-r2-1c` (engine shell + local adapter) through the loop —
-  ratifying the engine-type recommendation unless the owner overrides;
-  else owner pushes the stack / decides the D-2026-06-20-1 edit.
+  tests 1391/0/2.
 - **2026-06-21** @ `2c1b839` — `ue-r2-1a` landed end-to-end through the
   code→GPT-review→fix loop (substrate cherry-pick `e569eea`/`3844a15`/
   `ec561f2`, conflict resolved, tests `771a632`, codex review → 4 findings
   all fixed `90ed43d`, docs `2c1b839`). fmt/clippy clean; test 1378/0/2.
-- **2026-06-20** @ `09268eb` — reviewed all three unified-transfer candidates,
-  produced REV4 (code-reality corrected; REV3's "two static tables" ladder
-  claim was wrong — all three ladders live), and on owner's "rev4 replaces
-  v1" recorded **D-2026-06-20-5** + propagated (REV4 Active; v1/REV2/REV3
-  Superseded). Then established the GPT review loop (D-2026-06-20-6) and
-  ported then removed SETUP.md (folded into governance).

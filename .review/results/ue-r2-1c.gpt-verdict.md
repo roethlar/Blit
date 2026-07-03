@@ -37,6 +37,6 @@ silent drift.
 
 ## Fix commit
 
-- Fix sha: `PENDING` (`ue-r2-1c: address review (1 finding)`).
+- Fix sha: `15e6334` (`ue-r2-1c: address review (1 finding)`).
   Validation gate re-run green after the fix: fmt clean, clippy clean,
   tests 1394 passed / 0 failed / 2 ignored.
