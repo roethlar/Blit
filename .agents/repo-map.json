@@ -1,7 +1,7 @@
 {
   "validated_against": {
-    "commit": "fc9239e8f5db1c84ab46d7f3a7ad62413adaffb5",
-    "date": "2026-06-20"
+    "commit": "725aa07293fac39eddd47faf0e1a2af290ffb82b",
+    "date": "2026-07-03"
   },
   "projects": [
     {
@@ -16,7 +16,7 @@
         "crates/blit-tui",
         "crates/blit-prometheus-bridge"
       ],
-      "notes": "proto/blit.proto holds the gRPC definitions; blit-core's build script vendors protoc. Integration tests live per-crate (e.g. crates/blit-cli/tests/, crates/blit-core/tests/); the root Cargo.toml is a virtual workspace, so a root-level tests/ dir would never be compiled (w9-2 relocated the old one)."
+      "notes": "proto/blit.proto holds the gRPC definitions; blit-core's build script vendors protoc. Integration tests live per-crate (e.g. crates/blit-cli/tests/, crates/blit-core/tests/); the root Cargo.toml is a virtual workspace, so a root-level tests/ dir would never be compiled (w9-2 relocated the old one). blit-utils was intentionally removed; its admin verbs now live in blit-cli."
     }
   ],
   "verification": {
@@ -47,14 +47,17 @@
     "CLAUDE.md",
     "GEMINI.md",
     "docs/agent/PROTOCOL.md",
+    ".agents/repo-guidance.md",
+    ".agents/push-policy.md",
     ".agents/state.md",
     ".agents/decisions.md",
     ".agents/repo-map.json",
     ".agents/artifact-manifest.json"
   ],
   "notes": [
-    "State lives canonically in docs/STATE.md and decisions in docs/DECISIONS.md; .agents/state.md and .agents/decisions.md are pointer stubs only (AGENTS.md section 10 update rule). CI and hook scripts are wired to the docs/ paths.",
+    "State lives canonically in docs/STATE.md and decisions in docs/DECISIONS.md; .agents/state.md and .agents/decisions.md are pointer stubs only. CI and hook scripts are wired to the docs/ paths.",
+    "As of the 2026-07-03 governance reconciliation, AGENTS.md is a byte-identical copy of the toolkit template; every repo-specific rule (project map, style, git safety, source-of-truth order, operator procedures) lives in .agents/repo-guidance.md instead.",
     "DEVLOG.md is an append-only journal: write to it, never read it for current state. TODO.md is backlog-only.",
-    "Verification commands confirmed against AGENTS.md section 5, .review/README.md, and the CI workflows; not executed during the bootstrap run itself (docs-only change)."
+    "Verification commands confirmed against .agents/repo-guidance.md, .review/README.md, and the CI workflows; not executed during the bootstrap run itself (docs-only change)."
   ]
 }

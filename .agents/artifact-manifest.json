@@ -1,12 +1,22 @@
 {
   "validated_against": {
-    "commit": "fc9239e8f5db1c84ab46d7f3a7ad62413adaffb5",
-    "date": "2026-06-20"
+    "commit": "725aa07293fac39eddd47faf0e1a2af290ffb82b",
+    "date": "2026-07-03"
   },
   "artifacts": [
     {
       "path": "AGENTS.md",
-      "purpose": "Canonical agent contract for all harnesses (prime directives, precedence, triggers, validation, git safety, bootstrap handoff)",
+      "purpose": "Canonical cross-agent contract, byte-identical to the toolkit template as of this reconciliation (Prime Invariants, universal invariants, bootstrap handoff, source-of-truth order, operator vocabulary, verification, git safety)",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/repo-guidance.md",
+      "purpose": "Everything specific to this repo, extending AGENTS.md: mission detail, reading order, the repo-specific slice operator, verification commands, remotes, git-safety earned practices, style, project map",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/push-policy.md",
+      "purpose": "Narrow push-only policy (ask); points to .agents/repo-guidance.md for the fuller git-safety contract",
       "custody": "tracked"
     },
     {
@@ -51,7 +61,7 @@
     },
     {
       "path": ".agents/repo-map.json",
-      "purpose": "Machine-readable map: workspace layout, verification commands and policy, canonical fact-bearing paths",
+      "purpose": "Machine-readable map: workspace layout, verification commands and policy, canonical fact-bearing and guidance paths",
       "custody": "tracked"
     },
     {
@@ -61,7 +71,7 @@
     },
     {
       "path": ".agents/governance-inventory.md",
-      "purpose": "Record of the 2026-06-10 bootstrap migration: every governance artifact, verdict, destination",
+      "purpose": "Record of the 2026-06-07 bootstrap migration and the 2026-07-03 reconciliation: every governance artifact, verdict, destination",
       "custody": "tracked"
     },
     {
@@ -96,12 +106,17 @@
     },
     {
       "path": ".claude/commands/",
-      "purpose": "Claude Code slash-command wrappers resolving to PROTOCOL.md procedures",
+      "purpose": "Claude Code slash-command wrappers resolving to PROTOCOL.md procedures, including the new playbook.md",
       "custody": "tracked"
     },
     {
       "path": ".claude/settings.json",
-      "purpose": "Claude Code hooks: SessionStart context injection, PreCompact preservation hints",
+      "purpose": "Claude Code hooks: SessionStart context injection, PreCompact preservation hints, and the new AGENTS.md pre-edit tripwire",
+      "custody": "tracked"
+    },
+    {
+      "path": ".claude/agents-md-tripwire.py",
+      "purpose": "Advisory PreToolUse hook script: reminds an agent editing AGENTS.md that it is governance-only and gated",
       "custody": "tracked"
     },
     {
