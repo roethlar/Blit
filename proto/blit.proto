@@ -142,12 +142,14 @@ message DataTransferNegotiation {
   // The byte receiver's capacity profile, advertised to the byte sender
   // during setup. On push this message already travels daemon→client and
   // the daemon is the receiver, so the daemon stamps its own profile
-  // here. On pull_sync / deprecated Pull the negotiation travels
-  // daemon→client but the CLIENT is the byte receiver — the profile
-  // travels client→daemon in TransferOperationSpec.receiver_capacity
-  // instead, and this field stays unset. Absent = "peer predates the
-  // profile or has nothing to advertise" → the sender keeps today's
-  // conservative/static behavior.
+  // here. On pull_sync the negotiation travels daemon→client but the
+  // CLIENT is the byte receiver — the profile travels client→daemon in
+  // TransferOperationSpec.receiver_capacity instead, and this field
+  // stays unset. The deprecated Pull RPC has NO client→daemon profile
+  // channel at all (PullRequest carries no spec); it stays static until
+  // its deletion at ue-r2-1h and also leaves this field unset. Absent =
+  // "peer predates the profile or has nothing to advertise" → the
+  // sender keeps today's conservative/static behavior.
   CapacityProfile receiver_capacity = 11;
 
   // Daemon-authoritative resize gate: the single source of truth both
