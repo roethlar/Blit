@@ -24,7 +24,7 @@ accepted findings fixed, validation green. Records per slice:
 | ue-r2-1a | Salvage adaptive PR1+PR2 substrate; resolve StallGuard-vs-`Probe`; work-stealing behavior tests | `[x]` | `e569eea`…`771a632` + review fixes |
 | ue-r2-1b | Wire dial contract: capacity profile + peer capability + resize proto (`receiver_capacity=11`); compat tests | `[x]` | `2741dc8` + review fix `5bd345a` |
 | ue-r2-1c | `TransferEngine` shell + `TransferOrchestrator` as local adapter; local fast paths → engine strategies | `[x]` | `7730eb1`+`dc9b0ed`+`29e210b` + review fix `15e6334` |
-| ue-r2-1d | Streaming plan foundation (partial-scan InitialPlan/PlanUpdate); prove ~1s start; RELIABLE exceptions | `[ ]` | — |
+| ue-r2-1d | Streaming plan foundation (partial-scan InitialPlan/PlanUpdate); prove ~1s start; RELIABLE exceptions | `[~]` | slice commit under review |
 | ue-r2-1e | Live cheap dials replace the `determine_remote_tuning` ladder | `[ ]` | — |
 | ue-r2-1f | Push converge through the engine; retire daemon `desired_streams` ladder | `[ ]` | — |
 | ue-r2-1g | PullSync multistream through the engine (absorbs MULTISTREAM_PULL) | `[ ]` | — |

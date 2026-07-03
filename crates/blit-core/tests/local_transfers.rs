@@ -184,6 +184,42 @@ fn single_file_copy_records_history() -> Result<()> {
     Ok(())
 }
 
+/// ue-r2-1d: a workload spanning multiple streaming-plan batches
+/// (> STREAMING_PLAN_BATCH_HEADERS = 512) must copy every file exactly
+/// once across the batch boundary.
+#[test]
+fn cross_batch_boundary_copies_every_file() -> Result<()> {
+    let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = ConfigDirGuard::new()?;
+    perf_history::set_perf_history_enabled(true)?;
+    let _ = perf_history::clear_history()?;
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    for idx in 0..600 {
+        fs::write(src.join(format!("f{idx}.txt")), format!("payload-{idx}"))?;
+    }
+
+    let options = LocalMirrorOptions {
+        progress: false,
+        perf_history: true,
+        ..Default::default()
+    };
+
+    let orchestrator = TransferOrchestrator::new();
+    let summary = orchestrator.execute_local_mirror(&src, &dest, options)?;
+    assert_eq!(summary.copied_files, 600);
+    assert_eq!(summary.scanned_files, 600);
+    // Spot-check content on both sides of the 512 boundary.
+    assert_eq!(fs::read(dest.join("f0.txt"))?, b"payload-0");
+    assert_eq!(fs::read(dest.join("f511.txt"))?, b"payload-511");
+    assert_eq!(fs::read(dest.join("f512.txt"))?, b"payload-512");
+    assert_eq!(fs::read(dest.join("f599.txt"))?, b"payload-599");
+    Ok(())
+}
+
 #[test]
 fn larger_manifest_records_streaming_path() -> Result<()> {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());

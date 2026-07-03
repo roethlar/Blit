@@ -21,27 +21,31 @@ mod mirror;
 mod options;
 mod single_file;
 mod strategy;
+mod streaming_plan;
 mod summary;
 mod tuning;
 
 pub use options::{LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions};
+pub use streaming_plan::{
+    InitialPlan, InitialPlanStrategy, PlanUpdate, STREAMING_PLAN_BATCH_HEADERS,
+    STREAMING_PLAN_FLUSH_AFTER,
+};
 pub use summary::{LocalMirrorSummary, TransferOutcome};
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use eyre::{bail, Context, Result};
+use tokio::sync::mpsc;
 
 use crate::auto_tune::derive_local_plan_tuning;
 use crate::change_journal::{ChangeState, ChangeTracker, ProbeToken};
 use crate::local_worker::{copy_large_blocking, copy_paths_blocking};
 use crate::perf_history::{read_recent_records, TransferMode};
 use crate::perf_predictor::PerformancePredictor;
-use crate::remote::transfer::diff_planner::{plan_local_mirror, LocalDiffInputs};
-use crate::remote::transfer::payload::DEFAULT_PAYLOAD_PREFETCH;
-use crate::remote::transfer::pipeline::execute_sink_pipeline;
+use crate::remote::transfer::payload::{TransferPayload, DEFAULT_PAYLOAD_PREFETCH};
+use crate::remote::transfer::pipeline::execute_sink_pipeline_streaming;
 use crate::remote::transfer::sink::TransferSink;
 use crate::remote::transfer::source::TransferSource;
 use crate::transfer_plan::PlanOptions;
@@ -52,6 +56,7 @@ use self::journal::{log_probe, persist_journal_checkpoints};
 use self::mirror::apply_mirror_deletions;
 use self::single_file::execute_single_file_copy;
 use self::strategy::{maybe_select_fast_path, FastPathDecision};
+use self::streaming_plan::{run_streaming_plan, StreamingPlanInputs};
 use self::tuning::select_tuning_window_from_history;
 
 /// Everything the engine needs to run one transfer. The adapter owns
@@ -374,6 +379,12 @@ impl TransferEngine {
             ..PlanOptions::default()
         };
 
+        // ue-r2-1d: the Design §3 novel/known split, made explicit.
+        // Known = cross-run telemetry existed for this workload shape
+        // (the tuning window produced records; plan targets derive from
+        // them). Novel = no telemetry -> conservative defaults. Both
+        // start immediately and refine live; neither probes.
+        let mut initial_strategy = InitialPlanStrategy::Novel;
         if options.perf_history {
             // R57-F1: read ALL history, not a pre-cap window. The
             // R56-F2 fix correctly filtered run_kind before the
@@ -403,6 +414,9 @@ impl TransferEngine {
                 query_compare_mode,
                 options.skip_unchanged,
             ) {
+                initial_strategy = InitialPlanStrategy::Known {
+                    window_records: filtered.len(),
+                };
                 if let Some(tuning) = derive_local_plan_tuning(&filtered) {
                     plan_options.small_target = Some(tuning.small_target_bytes);
                     plan_options.small_count_target = Some(tuning.small_count_target);
@@ -410,13 +424,19 @@ impl TransferEngine {
                 }
             }
         }
+        if options.verbose {
+            match initial_strategy {
+                InitialPlanStrategy::Novel => {
+                    eprintln!("Initial plan: novel workload (no telemetry) — conservative defaults")
+                }
+                InitialPlanStrategy::Known { window_records } => {
+                    eprintln!("Initial plan: known workload ({window_records} telemetry record(s))")
+                }
+            }
+        }
 
         let planning_start = Instant::now();
 
-        let src_root_buf = src_root.to_path_buf();
-        let dest_root_buf = dest_root.to_path_buf();
-        let skip_unchanged = options.skip_unchanged;
-        let ignore_existing = options.ignore_existing;
         // R58-F7: translate the orchestrator's `compare_mode` (set by
         // the CLI from --size-only / --ignore-times / --force /
         // --checksum / default) onto the unified ComparisonMode enum.
@@ -438,59 +458,80 @@ impl TransferEngine {
         // ue-r2-1c: the adapter built the (filter-wrapped) source; the
         // engine owns running the scan.
         let unreadable = Arc::new(Mutex::new(Vec::new()));
-        let (mut header_rx, scan_handle) = source.scan(None, unreadable.clone());
+        let (header_rx, scan_handle) = source.scan(None, unreadable.clone());
 
-        // 2. Collect all headers
-        let mut all_headers = Vec::new();
-        while let Some(h) = header_rx.recv().await {
-            all_headers.push(h);
-        }
+        // 2.+3. ue-r2-1d streaming plan: diff/plan per batch of headers
+        // AS THE SCAN PROCEEDS and feed the pipeline concurrently
+        // (`execute_sink_pipeline_streaming` — the same entry push
+        // uses), so first useful work no longer waits for full
+        // enumeration. Diff semantics are unchanged (per-header
+        // destination stats inside the shared plan_local_mirror stage).
+        //
+        // RELIABLE: the mirror deletion pass below still requires a
+        // COMPLETE clean scan — only the copy phase streams. Failure
+        // envelope: a hard scan error can now surface after some files
+        // were already written; written files are complete correct
+        // copies, the operation still returns the error, and mirror
+        // deletion never runs on an incomplete scan.
+        let initial = InitialPlan {
+            strategy: initial_strategy,
+            plan_options,
+        };
+        let (payload_tx, payload_rx) =
+            mpsc::channel::<TransferPayload>(DEFAULT_PAYLOAD_PREFETCH.max(1));
+        let planner_fut = run_streaming_plan(
+            header_rx,
+            StreamingPlanInputs {
+                src_root: src_root.to_path_buf(),
+                dest_root: dest_root.to_path_buf(),
+                compare_mode,
+                ignore_existing: options.ignore_existing,
+                skip_unchanged: options.skip_unchanged,
+                initial,
+                collect_source_paths: options.mirror,
+            },
+            payload_tx,
+            planning_start,
+        );
+        let pipeline_fut = execute_sink_pipeline_streaming(
+            source.clone(),
+            vec![sink],
+            payload_rx,
+            DEFAULT_PAYLOAD_PREFETCH,
+            None,
+        );
+        let (plan_result, pipeline_result) = tokio::join!(planner_fut, pipeline_fut);
+        // Error precedence: the pipeline's error is the root cause when
+        // the planner aborted on a payload-send failure (the walker
+        // then also aborts with a queue error) — so surface pipeline
+        // first, then planner (diff/plan failures), then the scan
+        // handle (walk errors reach the planner only as a channel
+        // close; the real error lives in the handle).
+        let pipeline_outcome = pipeline_result.context("transfer pipeline failed")?;
+        let plan_outcome = plan_result?;
         let _total_scanned = scan_handle
             .await
             .context("scan task panicked")?
             .context("scan failed")?;
 
-        // 3. Diff + plan via the shared DiffPlanner stage. Combines
-        //    the comparison-filter and payload-planning steps that
-        //    were previously inline. Behavior preserved bit-for-bit
-        //    (size+mtime or Blake3 hash, then tar/large/raw planning).
-        let src = src_root_buf.clone();
-        let dst = dest_root_buf.clone();
-        let plan_opts = plan_options;
-        let headers = all_headers.clone();
-        let planned = tokio::task::spawn_blocking(move || {
-            plan_local_mirror(
-                headers,
-                LocalDiffInputs {
-                    src_root: &src,
-                    dst_root: &dst,
-                    compare_mode,
-                    ignore_existing,
-                    plan_options: plan_opts,
-                    skip_unchanged,
-                },
-            )
-        })
-        .await
-        .context("diff_planner task panicked")??;
+        // Phase split under overlap (ue-r2-1d redefinition, consumed by
+        // the predictor): `planner` = serial latency until the FIRST
+        // payload reached the pipeline (what the user waits before
+        // bytes can move); `transfer` = the remainder. Pre-1d the split
+        // was scan+plan vs pipeline, which streaming dissolves.
+        let total_elapsed_ms = planning_start.elapsed().as_millis();
+        let planner_duration_ms = plan_outcome
+            .first_payload_elapsed
+            .map(|d| d.as_millis())
+            .unwrap_or(total_elapsed_ms);
 
-        // 5. Execute the unified pipeline against the adapter-built
-        // sink (FsTransferSink with the translated compare_mode, or
-        // NullSink -- see TransferOrchestrator).
-
-        // Boundary between planner and transfer phases. `planning_start`
-        // covers scan + diff + plan; everything after this `Instant`
-        // is the transfer pipeline. §2.8 phase 2 split: pre-fix the
-        // record's `planner_duration_ms` field was set to whole-run
-        // time, so the v1 predictor effectively trained on `planner =
-        // total` for both targets and couldn't distinguish them.
-        let plan_done = Instant::now();
-        let planner_duration_ms = plan_done.duration_since(planning_start).as_millis();
-
-        // §2.8 phase 2: query the predictor BEFORE running the
-        // pipeline. Surfaces in summary.predictor_estimate so
-        // `--verbose` and `blit profile --json` can compare
-        // predicted vs actual.
+        // §2.8 phase 2: query the predictor for the estimate surfaced
+        // in summary.predictor_estimate (`--verbose`, `blit profile
+        // --json`). ue-r2-1d: the query needs final scan totals, which
+        // streaming only knows once the scan ends — so it now runs
+        // after the transfer instead of before it. It still runs
+        // BEFORE observe() (record_performance_history →
+        // update_predictor below), so train/query hygiene is intact.
         //
         // R44-F1: query and observation must use the same feature
         // vector. We query with `(scanned_files, scanned_bytes)`
@@ -504,8 +545,8 @@ impl TransferEngine {
         // src_fs/dest_fs are left None for 0.1.0 — wiring
         // `fs_capability` per-path probes into the predictor query
         // is post-release work (see §3.3 / Phase 4.8.2 deferral).
-        let scanned_files = all_headers.len();
-        let scanned_bytes: u64 = all_headers.iter().map(|h| h.size).sum();
+        let scanned_files = plan_outcome.scanned_files;
+        let scanned_bytes: u64 = plan_outcome.scanned_bytes;
         // R45 follow-up to R44-F1: never alias `total_bytes` to
         // `scanned_bytes`. `summary.total_bytes` is the
         // pipeline-wrote-bytes contract (see `LocalMirrorSummary`
@@ -591,16 +632,7 @@ impl TransferEngine {
             }
         }
 
-        let pipeline_outcome = execute_sink_pipeline(
-            source,
-            vec![sink],
-            planned.payloads,
-            DEFAULT_PAYLOAD_PREFETCH,
-            None,
-        )
-        .await
-        .context("transfer pipeline failed")?;
-        let transfer_duration_ms = plan_done.elapsed().as_millis();
+        let transfer_duration_ms = total_elapsed_ms.saturating_sub(planner_duration_ms);
 
         // R47-F4: snapshot unreadable paths so the CLI's source-
         // delete step (in `blit move`) can refuse to remove a
@@ -664,12 +696,8 @@ impl TransferEngine {
                 );
             }
 
-            let source_paths: HashSet<String> = all_headers
-                .iter()
-                .map(|h| h.relative_path.clone())
-                .collect();
             let deletions = apply_mirror_deletions(
-                &source_paths,
+                &plan_outcome.source_paths,
                 dest_root,
                 &options.filter,
                 options.delete_scope,
