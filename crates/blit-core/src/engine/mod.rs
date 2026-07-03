@@ -15,6 +15,7 @@
 //! remote paths converge -- renaming ahead of those slices would churn
 //! every caller twice.
 
+mod dial;
 mod history;
 mod journal;
 mod mirror;
@@ -25,6 +26,11 @@ mod streaming_plan;
 mod summary;
 mod tuning;
 
+pub use dial::{
+    TransferDial, DIAL_CEILING_CHUNK_BYTES, DIAL_CEILING_MAX_STREAMS, DIAL_CEILING_PREFETCH,
+    DIAL_FLOOR_CHUNK_BYTES, DIAL_FLOOR_PREFETCH, DIAL_STEP_DOWN_BLOCKED_RATIO,
+    DIAL_STEP_UP_BLOCKED_RATIO, DIAL_TUNER_TICK,
+};
 pub use options::{LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions};
 pub use streaming_plan::{
     InitialPlan, InitialPlanStrategy, PlanUpdate, STREAMING_PLAN_BATCH_HEADERS,
