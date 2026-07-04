@@ -12,13 +12,17 @@
 //!   `ActiveJobKind`, `register(...) -> ActiveJobGuard` with
 //!   a synchronous Drop that removes the row, `snapshot()`
 //!   for the future `GetState` reader, and wiring at the
-//!   `pull` and `delegated_pull` dispatch sites.
+//!   `pull` and `delegated_pull` dispatch sites (the `pull`
+//!   site has since died with the Pull RPC at ue-r2-1h).
 //! - `b-2-set-endpoint`: `ActiveJobGuard::set_endpoint(module,
 //!   path)` for the streaming-RPC case. Push and pull_sync now
 //!   register at dispatch with empty module/path strings and
 //!   their handlers fill the row once the first stream frame
-//!   parses. All four `ActiveJobKind` variants are now
-//!   actually constructed on the wire path.
+//!   parses. All four `ActiveJobKind` variants were constructed
+//!   on the wire path as of this slice — no longer true since
+//!   ue-r2-1h deleted the Pull RPC: `Pull` rows now exist only
+//!   via recents-history rehydration (see
+//!   [`ActiveJobKind::supports_cancellation`]).
 //! - `b-3-recent-ring`: bounded recent-runs ring of
 //!   [`TransferRecord`] entries on `ActiveJobs`, pushed by
 //!   Drop alongside the table removal. Outcome capture via
