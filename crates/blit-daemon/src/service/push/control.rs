@@ -140,7 +140,14 @@ pub(crate) async fn handle_push_stream(
                 })?;
                 let rel = resolve_manifest_relative_path(&file.relative_path)?;
                 expected_rel_files.push(rel.clone());
-                let sanitized = rel.to_string_lossy().to_string();
+                // Wire paths are canonically POSIX (`path_posix`). On
+                // Windows, `PathBuf::to_string_lossy` re-joins the
+                // validated components with backslashes, so the
+                // need-list echoed paths the client's manifest lookup
+                // (keyed by its own POSIX strings) could never match —
+                // every nested-path push to a Windows daemon planned
+                // zero payloads for those files and both ends stalled.
+                let sanitized = blit_core::path_posix::relative_path_to_posix(&rel);
 
                 if file_requires_upload(module_ref, &rel, &file)? {
                     file.relative_path = sanitized.clone();
