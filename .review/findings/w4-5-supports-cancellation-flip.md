@@ -1,7 +1,7 @@
 # w4-5-supports-cancellation-flip — CancelJob works on attached Push/PullSync
 
 **Branch**: `master`
-**Commit**: (this commit)
+**Commit**: `05a8b39` + review fix `1708075`
 **Source**: D-2026-07-04-3 (owner: "flip it"), queued as the
 `w4-5-supports-cancellation-flip` row in REVIEW.md; anticipated by the
 w4-3 finding doc's "Deliberately out of scope" note (now annotated as
@@ -98,9 +98,10 @@ token→teardown+client-notify (`streaming_canceljob_resolves_pending_
 handler_and_notifies_client` and kin, w4-3).
 
 **Mutation verification**: reverting the flip (restoring
-`matches!(self, ActiveJobKind::DelegatedPull)`) fails the four rewritten
-policy/dispatch tests; restoring it turns the suite green again.
-Recorded in the verdict file alongside the gate results.
+`matches!(self, ActiveJobKind::DelegatedPull)`) fails exactly the four
+rewritten policy/dispatch tests (4 failed / 15 passed under the `cancel`
+filter); restoring it turns all 19 green again. Details in
+`.review/results/w4-5-supports-cancellation-flip.gpt-verdict.md`.
 
 ## Known gaps
 
