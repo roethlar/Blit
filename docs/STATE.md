@@ -3,7 +3,7 @@
 Last updated: 2026-07-04 (`ue-r2-2` complete — **REV4 is complete**:
 all nine slices landed through the code→review→fix loop; the three
 static ladders are gone and stream resize is live end-to-end);
-unpushed to `origin`/gitea: everything after `7603177`.
+pushed to both `origin` and `github` through `5bb12fb` — nothing outstanding.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -40,7 +40,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   backslash echo). Erratum: `9f37a7a`/`48c5a11` don't build in
   isolation (a staging slip put the pull.rs deletion in the wrong
   commit; bisect must skip them; HEAD fully gated) — owner may
-  authorize a history fix of the unpushed stack or leave it.
+  authorize a history fix of the now-pushed stack or leave it.
 - **Active context** (settled background):
   - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the Active
     plan (D-2026-06-20-5) and is now **code-complete**; its remaining
@@ -50,8 +50,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     call after that session.
   - Process (D-2026-06-20-6, `docs/agent/GPT_REVIEW_LOOP.md`) governed
     `ue-r2-*`; with the slices done, the `.review/README.md` async loop
-    + REVIEW.md queue govern what's next. Owner gates remaining:
-    **push**, **10 GbE sign-off**.
+    + REVIEW.md queue govern what's next. Owner gate remaining:
+    **10 GbE sign-off**.
 
 ## Queue (ordered)
 
@@ -91,11 +91,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner**: push approval for `origin..master` (everything after
-  `7603177` — the 1f/1g/1h/2 stacks + Windows fixes + records).
 - **Owner call on the commit erratum** (`9f37a7a`/`48c5a11` unbuildable
-  in isolation): leave as-is (default) or authorize a rewrite of the
-  unpushed stack.
+  in isolation, now pushed to both remotes): leave as-is (default) or
+  authorize a history rewrite to fix it.
 - **Owner**: 10 GbE session scheduling (REV4 sign-off + zero-copy
   revisit + resize behavior measurement).
 - `Cargo.lock`: the pre-existing dependency-refresh drift was
@@ -128,9 +126,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   fmt/clippy clean; tests 1405/0/3 on Windows. In-flight: none — REV4
   boundary. **Exact first action next session**: on owner "continue",
   pick up the design-review queue at **w4-1** (AbortOnDrop family)
-  through the `.review/` loop; else owner pushes the stack / schedules
-  the 10 GbE sign-off / decides the erratum + D-2026-06-20-1
-  questions.
+  through the `.review/` loop; else owner schedules the 10 GbE sign-off
+  / decides the erratum + D-2026-06-20-1 questions. (Stack pushed to
+  both remotes 2026-07-04, after this entry was written.)
 - **2026-07-04 (7th)** @ `f6f52d7`+docs — `ue-r2-1h` landed end-to-end
   (`2a13f53` deletion+port; codex NEEDS FIXES 3 + panel → 5 fixed
   `f6f52d7`, 1 deferred relay-1, 1 rejected; plus Windows-host

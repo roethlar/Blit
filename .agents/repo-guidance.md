@@ -83,10 +83,10 @@ cargo test --workspace
 
 ## Remotes & Sync
 
-- `origin` — `https://github.com/roethlar/Blit.git` (GitHub, canonical).
-- `gitea` — `http://q:3000/michael/blit_v2.git` (LAN mirror; pushed manually
-  alongside or after `origin`, not auto-synced by any hook or CI job — it can
-  lag `origin` by a commit or more at any given time).
+- `github` — `https://github.com/roethlar/Blit.git` (GitHub, canonical).
+- `origin` — `http://q:3000/michael/Blit_v2.git` (LAN gitea mirror; pushed
+  manually alongside or after `github`, not auto-synced by any hook or CI
+  job — it can lag `github` by a commit or more at any given time).
 - Push policy: `.agents/push-policy.md` (ask). This repo's git-safety rules
   go well beyond a simple push policy — see Earned Practices below.
 
