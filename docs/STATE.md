@@ -122,14 +122,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-04 (8th)** @ `ec4a3fe`+docs — `ue-r2-2` landed end-to-end
+- **2026-07-04 (8th)** @ `8d62afc` — `ue-r2-2` landed end-to-end
   (`042ca4b`..`0788e83`; codex NEEDS FIXES 3 + panel 4 → 9 fixed
-  `ec4a3fe`, 1 deferred). **REV4 code-complete.** fmt/clippy clean;
-  tests 1405/0/3 on Windows. In-flight: none — REV4 boundary. **Exact
-  first action next session**: on owner "continue", pick up the
-  design-review queue at **w4-1** (AbortOnDrop family) through the
-  `.review/` loop; else owner pushes the stack / schedules the 10 GbE
-  sign-off / decides the erratum + D-2026-06-20-1 questions.
+  `ec4a3fe`, 1 deferred; records `8d62afc`). **REV4 code-complete.**
+  fmt/clippy clean; tests 1405/0/3 on Windows. In-flight: none — REV4
+  boundary. **Exact first action next session**: on owner "continue",
+  pick up the design-review queue at **w4-1** (AbortOnDrop family)
+  through the `.review/` loop; else owner pushes the stack / schedules
+  the 10 GbE sign-off / decides the erratum + D-2026-06-20-1
+  questions.
 - **2026-07-04 (7th)** @ `f6f52d7`+docs — `ue-r2-1h` landed end-to-end
   (`2a13f53` deletion+port; codex NEEDS FIXES 3 + panel → 5 fixed
   `f6f52d7`, 1 deferred relay-1, 1 rejected; plus Windows-host
