@@ -7,6 +7,7 @@ pub mod payload;
 pub mod pipeline;
 pub mod progress;
 pub mod sink;
+pub mod socket;
 pub mod source;
 pub mod stall_guard;
 pub mod tar_safety;
@@ -35,4 +36,5 @@ pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
     NullSink, SinkOutcome, TransferSink,
 };
+pub use socket::configure_data_socket;
 pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};

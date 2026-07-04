@@ -1,6 +1,5 @@
 use eyre::{bail, Context, Result};
 use futures::StreamExt;
-use socket2::Socket;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -143,40 +142,15 @@ impl<P: Probe> DataPlaneSession<P> {
         if trace {
             eprintln!("[data-plane-client] connecting to {}", addr);
         }
-        let stream = TcpStream::connect(addr.clone())
+        let mut stream = TcpStream::connect(addr.clone())
             .await
             .with_context(|| format!("connecting to data plane {}", addr))?;
 
-        let std_stream = stream.into_std().context("converting to std stream")?;
-        let socket = Socket::from(std_stream);
-        socket
-            .set_tcp_nodelay(true)
+        // w1-2: the NODELAY/keepalive/tuned-buffer policy lives in the
+        // shared helper — one owner for every data-plane socket, both
+        // directions, both ends.
+        super::socket::configure_data_socket(&stream, tcp_buffer_size)
             .context("setting TCP_NODELAY")?;
-        // Keep idle connections alive during long transfers on
-        // other streams. Best-effort — kernel can refuse if the
-        // platform doesn't support keepalive on this socket type
-        // (uncommon but documented). Surface failures via log so a
-        // misconfigured run isn't silent. POST_REVIEW_FIXES §1.1.
-        if let Err(e) = socket.set_keepalive(true) {
-            log::warn!("set TCP keepalive on data-plane socket: {}", e);
-        }
-
-        if let Some(size) = tcp_buffer_size {
-            // Buffer-size knobs are advisory; the kernel can clamp.
-            // Log failures so operators can spot a sysctl/rlimit
-            // mismatch instead of wondering why throughput sat
-            // below the configured target.
-            if let Err(e) = socket.set_send_buffer_size(size) {
-                log::warn!("set TCP send buffer to {} bytes: {}", size, e);
-            }
-            if let Err(e) = socket.set_recv_buffer_size(size) {
-                log::warn!("set TCP recv buffer to {} bytes: {}", size, e);
-            }
-        }
-
-        let std_stream: std::net::TcpStream = socket.into();
-        let mut stream =
-            TcpStream::from_std(std_stream).context("converting back to tokio stream")?;
 
         stream
             .write_all(token)

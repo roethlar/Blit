@@ -4,6 +4,7 @@ use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
 };
+use blit_core::remote::transfer::configure_data_socket;
 use blit_core::remote::transfer::pipeline::execute_receive_pipeline;
 use blit_core::remote::transfer::sink::{SinkOutcome, TransferSink};
 use blit_core::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
@@ -112,8 +113,11 @@ pub(crate) async fn accept_data_connection_stream(
                 }
             };
         // Enable nodelay + keepalive to prevent idle stream timeouts
-        // during long transfers on other streams.
-        let socket = configure_data_socket(accepted)?;
+        // during long transfers on other streams. No tuned buffer:
+        // the daemon is the byte receiver here and holds no dial.
+        configure_data_socket(&accepted, None)
+            .map_err(|err| Status::internal(format!("configuring data socket: {err}")))?;
+        let socket = accepted;
         eprintln!(
             "blitd: push data plane: accepted connection {} from {}",
             idx, addr
@@ -272,20 +276,6 @@ enum StreamCredential {
     Armed(Arc<std::sync::Mutex<Vec<ArmedEpoch>>>),
 }
 
-/// nodelay + keepalive, shared by both accept paths (prevents idle
-/// stream timeouts during long transfers on sibling streams).
-fn configure_data_socket(accepted: TcpStream) -> Result<TcpStream, Status> {
-    let std_sock = accepted
-        .into_std()
-        .map_err(|err| Status::internal(format!("converting socket: {err}")))?;
-    let s2 = socket2::Socket::from(std_sock);
-    let _ = s2.set_tcp_nodelay(true);
-    let _ = s2.set_keepalive(true);
-    let std_back: std::net::TcpStream = s2.into();
-    TcpStream::from_std(std_back)
-        .map_err(|err| Status::internal(format!("re-wrapping socket: {err}")))
-}
-
 /// `ue-r2-2`: the resize-enabled variant of
 /// [`accept_data_connection_stream`]. Epoch 0 behaves exactly like the
 /// fixed path (bounded sequential accepts, parallel handshakes,
@@ -331,7 +321,9 @@ pub(crate) async fn accept_data_connection_stream_resizable(
                     )));
                 }
             };
-        let socket = configure_data_socket(accepted)?;
+        configure_data_socket(&accepted, None)
+            .map_err(|err| Status::internal(format!("configuring data socket: {err}")))?;
+        let socket = accepted;
         eprintln!(
             "blitd: push data plane: accepted connection {} from {}",
             idx, addr
@@ -397,8 +389,8 @@ pub(crate) async fn accept_data_connection_stream_resizable(
                 tokio::time::sleep_until(earliest_expiry.expect("gated on has_armed")).await
             }, if earliest_expiry.is_some() => {}
             accepted = listener.accept(), if has_armed => match accepted {
-                Ok((sock, addr)) => match configure_data_socket(sock) {
-                    Ok(socket) => {
+                Ok((socket, addr)) => match configure_data_socket(&socket, None) {
+                    Ok(()) => {
                         eprintln!(
                             "blitd: push data plane: accepted resize connection from {}",
                             addr
@@ -416,8 +408,8 @@ pub(crate) async fn accept_data_connection_stream_resizable(
                             .await
                         });
                     }
-                    Err(status) => {
-                        log::warn!("push data plane: resize socket setup failed: {status}");
+                    Err(err) => {
+                        log::warn!("push data plane: resize socket setup failed: {err}");
                     }
                 },
                 Err(err) => {

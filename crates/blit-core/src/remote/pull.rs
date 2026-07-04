@@ -1861,6 +1861,12 @@ async fn connect_pull_stream(host: &str, port: u32, handshake: &[u8]) -> Result<
     let mut stream = TcpStream::connect(addr.clone())
         .await
         .with_context(|| format!("connecting pull data plane {}", addr))?;
+    // w1-2: same socket policy as every other data-plane endpoint
+    // (before this, the pull client ran with Nagle enabled and no
+    // keepalive). No tuned buffer: the pull dial lives on the daemon
+    // — the byte sender — so the client has no value to apply.
+    crate::remote::transfer::socket::configure_data_socket(&stream, None)
+        .context("setting TCP_NODELAY on pull data plane")?;
     stream
         .write_all(handshake)
         .await
@@ -2088,6 +2094,45 @@ mod multi_stream_receive_tests {
         .expect("two clean END-only streams succeed");
         assert_eq!(result.files_transferred, 0);
         assert_eq!(result.bytes_transferred, 0);
+    }
+
+    #[tokio::test]
+    async fn connect_pull_stream_applies_socket_policy() {
+        // w1-2: the pull client connect must route through the shared
+        // configure_data_socket policy — nodelay + keepalive on the
+        // dialed socket (the direction that ran with Nagle enabled
+        // before the helper). Asserted on the returned stream itself,
+        // so reverting the call-site wiring fails this test even with
+        // the helper's own unit tests green.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+        let port = listener.local_addr().expect("stub addr").port() as u32;
+        let accept = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("stub accept");
+            let mut token_buf = vec![0u8; TOKEN.len()];
+            socket
+                .read_exact(&mut token_buf)
+                .await
+                .expect("stub token read");
+            token_buf
+        });
+
+        let stream = super::connect_pull_stream("127.0.0.1", port, TOKEN)
+            .await
+            .expect("connect");
+        let sock = socket2::SockRef::from(&stream);
+        assert!(
+            sock.tcp_nodelay().expect("read nodelay"),
+            "pull data-plane socket must have TCP_NODELAY on"
+        );
+        assert!(
+            sock.keepalive().expect("read keepalive"),
+            "pull data-plane socket must have SO_KEEPALIVE on"
+        );
+        assert_eq!(
+            accept.await.expect("stub join"),
+            TOKEN,
+            "handshake bytes must still be written after configuring"
+        );
     }
 
     #[test]

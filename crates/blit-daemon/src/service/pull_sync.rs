@@ -24,6 +24,7 @@ use blit_core::generated::{
 use blit_core::manifest::{
     compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
 };
+use blit_core::remote::transfer::configure_data_socket;
 use blit_core::remote::transfer::data_plane::DataPlaneSession;
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::plan_transfer_payloads;
@@ -757,6 +758,7 @@ async fn stream_via_data_plane(
         streams,
         dial.chunk_bytes(),
         dial.prefetch_count(),
+        dial.tcp_buffer_bytes(),
         source_root,
         Arc::clone(&pool),
         probes.as_ref(),
@@ -1041,6 +1043,14 @@ async fn accept_one_resize_socket(
 ) -> Result<Arc<dyn TransferSink>, Status> {
     use blit_core::remote::transfer::progress::{LiveProbe, StreamId, StreamProbe};
 
+    // w1-2: live dial read at accept time — an ADD only fires once
+    // the cheap dials are maxed, so this is the one pull socket that
+    // actually gets the ramped buffer size (mirror of the push
+    // client's add_stream). Failure is the caller's non-fatal
+    // drop-the-offer path, same as every other refusal here.
+    configure_data_socket(&socket, dial.tcp_buffer_bytes())
+        .map_err(|err| Status::internal(format!("configuring data socket: {err}")))?;
+
     let mut buf = vec![0u8; expected_token.len() + expected_sub.len()];
     match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut buf)).await {
         Ok(Ok(_)) => {}
@@ -1108,6 +1118,10 @@ async fn accept_and_wrap_sinks(
     streams: usize,
     chunk_bytes: usize,
     payload_prefetch: usize,
+    // w1-2: connect-time snapshot of the dial's tuned buffer size
+    // (None until the tuner's first step-up — i.e. every epoch-0
+    // socket runs kernel defaults, matching the push direction).
+    tcp_buffer_size: Option<usize>,
     source_root: &Path,
     pool: Arc<BufferPool>,
     probes: Option<&blit_core::engine::SharedStreamProbes>,
@@ -1137,6 +1151,13 @@ async fn accept_and_wrap_sinks(
                     )));
                 }
             };
+        // w1-2: the daemon is the byte SENDER on pull — these accepted
+        // sockets carry the transfer, so they get the same
+        // nodelay/keepalive/tuned-buffer policy as push sockets
+        // (before this, the tuner's tcp_buffer_bytes was computed and
+        // discarded for every pull, and Nagle stayed on).
+        configure_data_socket(&socket, tcp_buffer_size)
+            .map_err(|err| Status::internal(format!("configuring data socket: {err}")))?;
         eprintln!(
             "blitd: pull data plane: accepted connection {} from {}",
             idx, addr
@@ -1290,6 +1311,12 @@ async fn stream_via_data_plane_resume(
             )));
         }
     };
+
+    // w1-2: same policy as the multistream path's accepts. The resume
+    // dial never runs a tuner, so this is None (kernel defaults) in
+    // practice — passed for symmetry with the other accept sites.
+    configure_data_socket(&socket, dial.tcp_buffer_bytes())
+        .map_err(|err| Status::internal(format!("configuring data socket: {err}")))?;
 
     // Verify token
     let expected_token = token;
