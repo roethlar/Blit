@@ -31,6 +31,12 @@ pub(super) struct VolumeInfo {
 static BLOCK_CLONE_CACHE: Lazy<RwLock<HashMap<u32, BlockCloneStatus>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+impl Default for WindowsCapability {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WindowsCapability {
     pub fn new() -> Self {
         Self {

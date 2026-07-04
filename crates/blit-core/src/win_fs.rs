@@ -149,7 +149,7 @@ pub fn enable_manage_volume_privilege() -> bool {
             return false;
         }
 
-        let mut privileges = TOKEN_PRIVILEGES {
+        let privileges = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
             Privileges: [LUID_AND_ATTRIBUTES {
                 Luid: luid,
@@ -157,7 +157,7 @@ pub fn enable_manage_volume_privilege() -> bool {
             }],
         };
 
-        if AdjustTokenPrivileges(token, false, Some(&mut privileges), 0, None, None).is_err() {
+        if AdjustTokenPrivileges(token, false, Some(&privileges), 0, None, None).is_err() {
             let _ = CloseHandle(token);
             return false;
         }
@@ -233,9 +233,7 @@ pub fn ensure_long_path(p: &Path) -> PathBuf {
         return p.to_path_buf();
     }
     // UNC path (\\server\share\...)
-    if s.starts_with(r"\\") {
-        // Strip leading \\
-        let rest = &s[2..];
+    if let Some(rest) = s.strip_prefix(r"\\") {
         let mut buf = String::from(r"\\?\UNC\");
         buf.push_str(rest);
         return PathBuf::from(buf);

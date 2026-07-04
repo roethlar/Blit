@@ -183,6 +183,9 @@ impl TestContext {
     }
 }
 
+// Shared across many test binaries; the ones whose tests are all
+// unix-gated compile this helper unused on Windows.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Output {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn command");

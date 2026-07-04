@@ -3,11 +3,17 @@
 //! Each test here reproduces a scenario that would have caught the bug
 //! before it reached users. Tests are integration-level (real daemon + CLI).
 
+// Every test in this file is unix-gated today, so on Windows these
+// imports would be flagged as unused.
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::time::Duration;
 
 mod common;
+#[cfg(unix)]
 use common::{run_with_timeout, TestContext};
 
 // -- pull_sync deadlock (fixed in 946bd77) -----------------------------------

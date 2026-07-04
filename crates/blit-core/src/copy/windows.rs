@@ -17,7 +17,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::Storage::FileSystem::CopyFileExW;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
-const WINDOWS_NO_BUFFERING_THRESHOLD: u64 = 1 * 1024 * 1024 * 1024; // 1 GiB
+const WINDOWS_NO_BUFFERING_THRESHOLD: u64 = 1024 * 1024 * 1024; // 1 GiB
 const WINDOWS_NO_BUFFERING_FLOOR: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB baseline
 const WINDOWS_NO_BUFFERING_HEADROOM: u64 = 512 * 1024 * 1024; // leave 512 MiB for cache
 const WINDOWS_NO_BUFFERING_SMALL_FILE_MAX: u64 = 512 * 1024 * 1024; // always cache ≤512 MiB
@@ -26,7 +26,7 @@ const COPY_FILE_NO_BUFFERING_FLAG: u32 = 0x0000_1000; // per CopyFileExW docs
 static MANAGE_VOLUME_PRIVILEGE: OnceCell<bool> = OnceCell::new();
 
 thread_local! {
-    static LAST_BLOCK_CLONE_SUCCESS: Cell<bool> = Cell::new(false);
+    static LAST_BLOCK_CLONE_SUCCESS: Cell<bool> = const { Cell::new(false) };
 }
 
 fn set_last_block_clone_success(value: bool) {
@@ -57,8 +57,10 @@ struct MemorySnapshot {
 
 fn should_use_copyfile_no_buffering(file_size: u64) -> bool {
     let snapshot = unsafe {
-        let mut status = MEMORYSTATUSEX::default();
-        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        let mut status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
 
         if GlobalMemoryStatusEx(&mut status).is_ok() {
             Some(MemorySnapshot {
@@ -155,7 +157,7 @@ fn should_use_copyfile_no_buffering_inner(
 }
 
 fn ensure_manage_volume_privilege_once() -> bool {
-    *MANAGE_VOLUME_PRIVILEGE.get_or_init(|| enable_manage_volume_privilege())
+    *MANAGE_VOLUME_PRIVILEGE.get_or_init(enable_manage_volume_privilege)
 }
 
 fn duplicate_extents(src: &File, dst: &File, file_size: u64) -> Result<BlockCloneOutcome> {
@@ -165,10 +167,17 @@ fn duplicate_extents(src: &File, dst: &File, file_size: u64) -> Result<BlockClon
     }
 
     use core::ffi::c_void;
+    // Aliases deliberately mirror the Win32 API's own spelling so the
+    // extern block below reads like the SDK documentation.
+    #[allow(clippy::upper_case_acronyms)]
     type HANDLE = isize;
+    #[allow(clippy::upper_case_acronyms)]
     type DWORD = u32;
+    #[allow(clippy::upper_case_acronyms)]
     type BOOL = i32;
+    #[allow(clippy::upper_case_acronyms)]
     type LPVOID = *mut c_void;
+    #[allow(clippy::upper_case_acronyms)]
     type LPOVERLAPPED = *mut c_void;
 
     #[link(name = "Kernel32")]

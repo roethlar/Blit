@@ -12,11 +12,17 @@
 //! reject every such request with a permission-denied containment
 //! error.
 
+// Every test in this file is unix-gated (the escape vector needs unix
+// symlinks), so on Windows these imports would be flagged as unused.
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::time::Duration;
 
 mod common;
+#[cfg(unix)]
 use common::{run_with_timeout, TestContext};
 
 #[cfg(unix)]

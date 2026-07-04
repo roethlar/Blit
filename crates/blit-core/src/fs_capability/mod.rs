@@ -8,8 +8,10 @@
 //! Results are cached per device to avoid redundant probes.
 
 use eyre::Result;
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::Path;
+#[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
@@ -84,7 +86,10 @@ pub fn get_platform_capability() -> PlatformCapability {
     PlatformCapability::new()
 }
 
-/// Global cache of probed capabilities keyed by device ID.
+/// Global cache of probed capabilities keyed by device ID. Only the
+/// unix arm of `cached_probe` can key by device, so the cache itself
+/// is unix-only.
+#[cfg(unix)]
 fn probe_cache() -> &'static Mutex<HashMap<u64, Capabilities>> {
     static CACHE: OnceLock<Mutex<HashMap<u64, Capabilities>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))

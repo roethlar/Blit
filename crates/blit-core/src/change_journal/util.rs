@@ -15,7 +15,7 @@ pub fn canonicalize(path: &Path) -> Result<PathBuf> {
         let norm = normpath::BasePath::new(std::env::current_dir()?)
             .map_err(|err| eyre!("failed to resolve base path for canonicalisation: {err}"))?;
         let joined = norm.join(path);
-        return Ok(joined.into_path_buf());
+        Ok(joined.into_path_buf())
     }
 
     #[cfg(not(windows))]
