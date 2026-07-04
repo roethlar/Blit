@@ -28,7 +28,8 @@
 //!   progress, with the same idle-vs-total-deadline semantics as the
 //!   read side. The earlier R2/R3 wording for h3b ("daemon pull-data-
 //!   plane accepts") was imprecise — the accept + token phases are
-//!   already bounded by `PULL_ACCEPT_TIMEOUT` / `PULL_TOKEN_TIMEOUT`;
+//!   already bounded by the shared `DATA_PLANE_ACCEPT_TIMEOUT` /
+//!   `DATA_PLANE_TOKEN_TIMEOUT` pair (`remote::transfer::socket`);
 //!   the missing guard is daemon pull-data-plane **write progress
 //!   after token acceptance**, addressed here by wiring this writer
 //!   inside `DataPlaneSession`.
@@ -59,10 +60,11 @@ use tokio::time::{Instant, Sleep};
 /// - Daemon push-receive TCP (`daemon::service::push::data_plane`
 ///   — audit-h3a) via [`StallGuard`].
 /// - Daemon pull-data-plane **write progress after token acceptance**
-///   (`daemon::service::{pull, pull_sync}` — audit-h3b) via
-///   [`StallGuardWriter`] inside `DataPlaneSession`. The accept + token
-///   phases on those paths are separately bounded by
-///   `PULL_ACCEPT_TIMEOUT` / `PULL_TOKEN_TIMEOUT`.
+///   (`daemon::service::pull_sync` — audit-h3b; the `pull` service died
+///   at ue-r2-1h) via [`StallGuardWriter`] inside `DataPlaneSession`.
+///   The accept + token phases on those paths are separately bounded by
+///   the shared `DATA_PLANE_ACCEPT_TIMEOUT` / `DATA_PLANE_TOKEN_TIMEOUT`
+///   pair (`remote::transfer::socket`, w1-4).
 ///
 /// The gRPC-fallback paths sit below `tonic::Streaming<T>` rather than
 /// `AsyncRead` / `AsyncWrite` and are covered separately (audit-h3c).
