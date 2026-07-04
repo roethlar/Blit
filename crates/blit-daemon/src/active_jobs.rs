@@ -152,13 +152,19 @@ impl ActiveJobKind {
         }
     }
 
-    /// Whether the daemon side honors a cancellation token for
-    /// this kind of transfer. Only `DelegatedPull` today —
-    /// push / pull / pull_sync have the CLI in the byte path
-    /// (a client-side cancel already drops the handler future
-    /// via `tx.closed()`), so `CancelJob` from another client
-    /// has no meaningful semantic. M-Jobs may flip this for
-    /// future locally-spawned daemon transfers.
+    /// Whether `CancelJob` dispatch fires this kind's cancellation
+    /// token. Only `DelegatedPull` today. This is **policy**, not
+    /// handler capability: since w4-3 the push / pull_sync
+    /// dispatchers race their handler against both `tx.closed()`
+    /// (client hangup — this comment used to claim that race
+    /// existed before it actually did) and the row token, so a
+    /// disconnected client's transfer is torn down promptly and
+    /// flipping this bit for those kinds is all a future
+    /// CancelJob-for-attached-transfers decision would need. The
+    /// policy stands because those kinds keep the originating CLI
+    /// in the byte path — disconnecting IS the client-side cancel.
+    /// (`Pull` rows are history-only; the Pull RPC was deleted in
+    /// ue-r2-1h.)
     pub fn supports_cancellation(self) -> bool {
         matches!(self, ActiveJobKind::DelegatedPull)
     }
@@ -170,9 +176,10 @@ impl ActiveJobKind {
 ///
 /// - `Cancelled` → `Code::Ok` with a body acknowledging the
 ///   cancel was fired.
-/// - `Unsupported` → `Code::FailedPrecondition` — the
-///   transfer kind doesn't support cancellation today
-///   (push / pull / pull_sync; the CLI is in the byte path).
+/// - `Unsupported` → `Code::FailedPrecondition` — CancelJob
+///   dispatch policy gates the kind off (push / pull_sync: the
+///   CLI is in the byte path, and disconnecting it is the
+///   cancel — honored by the dispatchers' w4-3 hangup race).
 /// - `NotFound` → `Code::NotFound` — no active row matches
 ///   the requested transfer_id.
 /// - `Unauthorized` → `Code::PermissionDenied` — the caller is not
@@ -1805,11 +1812,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_returns_unsupported_for_non_delegated_kinds() {
-        // Push / pull / pull_sync register tokens for
-        // consistent shape, but their handlers don't race the
-        // token (CLI is in the byte path). `cancel` must
-        // surface that policy as `Unsupported` rather than
-        // firing the token and reporting `Cancelled`.
+        // Since w4-3 the push / pull_sync dispatchers DO race the
+        // row token (see `supports_cancellation`'s rustdoc), but
+        // CancelJob dispatch policy still gates those kinds off:
+        // `cancel` must surface that as `Unsupported` rather than
+        // firing the token and reporting `Cancelled`. (`Pull` is
+        // exercised for shape even though the RPC is deleted —
+        // rows of that kind survive only in recents history.)
         let table = ActiveJobs::new();
         for kind in [
             ActiveJobKind::Push,

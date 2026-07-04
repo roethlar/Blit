@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
 /// Capacity of the daemon's `Subscribe` event broadcast channel.
@@ -499,20 +500,29 @@ impl Blit for BlitService {
             // Drop fires no matter how the task ends.
             let guard = guard;
             let job = job;
-            let result = handle_push_stream(
-                modules,
-                default_root,
-                stream,
-                tx.clone(),
-                force_grpc_data,
-                &job,
+            // w4-3: cloned off the guard so the select can hold a
+            // `cancelled()` future while the handler borrows `job`.
+            let cancel_token = job.cancellation_token().clone();
+            // w4-3: race the handler against client hangup and the
+            // row's cancel token instead of bare-awaiting it. Pre-fix
+            // a client that disconnected during a send-free compute
+            // phase left this task running the full handler for a
+            // dead peer — the mechanism `delegated_pull` has had
+            // since R30-F2. See `resolve_streaming_outcome`.
+            let (ok, err_msg) = resolve_streaming_outcome(
+                handle_push_stream(
+                    modules,
+                    default_root,
+                    stream,
+                    tx.clone(),
+                    force_grpc_data,
+                    &job,
+                ),
+                &tx,
+                &cancel_token,
+                &metrics,
             )
             .await;
-            let (ok, err_msg) = outcome_from_status(&result);
-            if let Err(status) = result {
-                metrics.inc_error();
-                let _ = tx.send(Err(status)).await;
-            }
             // Record the outcome before dropping the
             // ActiveJob guard — Drop builds the recent-runs
             // TransferRecord and reads this cell. If we
@@ -576,21 +586,27 @@ impl Blit for BlitService {
         tokio::spawn(async move {
             let guard = guard;
             let job = job;
-            let result = handle_pull_sync_stream(
-                modules,
-                default_root,
-                stream,
-                tx.clone(),
-                force_grpc_data,
-                server_checksums_enabled,
-                &job,
+            // w4-3: same handler-vs-hangup-vs-cancel race as the push
+            // site above — pull_sync's enumerate+checksum collection
+            // is the longest send-free compute window of the three
+            // transfer RPCs, so it was the most exposed to running to
+            // completion for a client that had already disconnected.
+            let cancel_token = job.cancellation_token().clone();
+            let (ok, err_msg) = resolve_streaming_outcome(
+                handle_pull_sync_stream(
+                    modules,
+                    default_root,
+                    stream,
+                    tx.clone(),
+                    force_grpc_data,
+                    server_checksums_enabled,
+                    &job,
+                ),
+                &tx,
+                &cancel_token,
+                &metrics,
             )
             .await;
-            let (ok, err_msg) = outcome_from_status(&result);
-            if let Err(status) = result {
-                metrics.inc_error();
-                let _ = tx.send(Err(status)).await;
-            }
             job.record_outcome(ok, err_msg.clone());
             // c-3 round 2: same ordering as push/pull — build,
             // drain, then broadcast so subscribers can race
@@ -705,12 +721,12 @@ impl Blit for BlitService {
             //                  error already sent to client over
             //                  handler_tx)
             // audit-10: the handler branch is ordered FIRST in the
-            // `biased` select inside `resolve_delegated_pull_outcome`, so
+            // `biased` select inside `resolve_transfer_outcome`, so
             // a handler that has run to completion wins even if the
             // cancel token fires (or the client hangs up) at the same
             // instant. A still-running (Pending) handler still yields to
             // a hangup / `CancelJob`. See that helper for the rationale.
-            let outcome: Option<bool> = resolve_delegated_pull_outcome(
+            let outcome: Option<bool> = resolve_transfer_outcome(
                 super::delegated_pull::handle_delegated_pull(
                     req,
                     modules,
@@ -1227,8 +1243,14 @@ fn peer_addr_string<T>(request: &Request<T>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Resolve a `DelegatedPull`'s terminal outcome from its three racing
+/// Resolve a transfer's terminal outcome from its three racing
 /// conditions, giving handler completion priority (audit-10).
+///
+/// Extracted for `delegated_pull` (R30-F2 / m-jobs-1) and generalized
+/// in w4-3 to be the single owner of the biased select every transfer
+/// RPC races through — `delegated_pull` calls it directly (handler
+/// output `bool`), while `push` / `pull_sync` go through
+/// [`resolve_streaming_outcome`] (handler output `Result<(), Status>`).
 ///
 /// The select is `biased` with the **handler branch first**: when the
 /// handler future is `Ready`, its result wins even if the cancel token
@@ -1243,32 +1265,100 @@ fn peer_addr_string<T>(request: &Request<T>) -> String {
 /// actually succeeded. Ordering completion first makes a real result
 /// (success *or* failure) authoritative over a simultaneous cancel.
 ///
-/// Returns `Some(true)`/`Some(false)` for handler success/failure, or
-/// `None` for a client hangup or cancel.
-async fn resolve_delegated_pull_outcome<H, C, K>(
+/// Returns `Some(output)` when the handler completed, or `None` for a
+/// client hangup or cancel.
+async fn resolve_transfer_outcome<T, H, C, K>(
     handler: H,
     tx_closed: C,
     cancelled: K,
     detach: bool,
-) -> Option<bool>
+) -> Option<T>
 where
-    H: std::future::Future<Output = bool>,
+    H: std::future::Future<Output = T>,
     C: std::future::Future<Output = ()>,
     K: std::future::Future<Output = ()>,
 {
     tokio::select! {
         biased;
-        handler_ok = handler => Some(handler_ok),
+        output = handler => Some(output),
         _ = tx_closed, if !detach => None,
         _ = cancelled => None,
     }
 }
 
+/// w4-3: resolve a streaming transfer RPC's (`push` / `pull_sync`)
+/// terminal outcome, racing the handler against client hangup and the
+/// row's `CancelJob` token via [`resolve_transfer_outcome`].
+///
+/// Pre-w4-3 these dispatchers bare-awaited their handlers, so a client
+/// that disconnected during a send-free compute phase (pull_sync's
+/// enumerate+checksum collection, push's mirror purge) left the daemon
+/// running the whole remaining handler for a dead peer — unbounded,
+/// unobservable work that `CancelJob` also refused to touch
+/// (async-daemon-handlers-blind-to-disconnect-in-compute-phases).
+/// Dropping the handler future propagates through the existing
+/// cancellation paths: the push data-plane accept task is
+/// `AbortOnDrop`-wrapped and its workers live in a `JoinSet` (w4-1),
+/// and pull_sync's payload feeder exits when its channel closes. An
+/// in-flight `spawn_blocking` enumeration/checksum batch still runs to
+/// its natural end with the result discarded — making that window
+/// abortable is the finding's stated follow-up slice.
+///
+/// The streaming RPCs have no `detach` mode (the client is inherently
+/// attached to the byte path), so the hangup arm is always armed —
+/// hence the hardcoded `detach: false`.
+///
+/// Returns the `(ok, error_message)` pair the ActiveJobs ring records:
+/// - handler completed → its result via [`outcome_from_status`]; an
+///   `Err` is counted (`inc_error`) and forwarded to the
+///   still-connected client, exactly as the pre-w4-3 dispatchers did.
+/// - client hung up → `(false, "client cancelled")`; nothing is sent —
+///   the receiver is gone, that's what ended the race.
+/// - cancel token fired → `(false, "cancelled via CancelJob")`, and the
+///   still-connected client gets a terminal `Status::cancelled`. Today
+///   `ActiveJobKind::supports_cancellation` keeps `CancelJob` dispatch
+///   gated off for push/pull_sync, so this arm is armed but
+///   production-unreachable until that policy flips — wired per the
+///   w4-3 slice spec so a future flip is policy-only.
+async fn resolve_streaming_outcome<T, H>(
+    handler: H,
+    tx: &mpsc::Sender<Result<T, Status>>,
+    cancel_token: &CancellationToken,
+    metrics: &TransferMetrics,
+) -> (bool, Option<String>)
+where
+    H: std::future::Future<Output = Result<(), Status>>,
+{
+    let outcome =
+        resolve_transfer_outcome(handler, tx.closed(), cancel_token.cancelled(), false).await;
+    match outcome {
+        Some(result) => {
+            let (ok, err_msg) = outcome_from_status(&result);
+            if let Err(status) = result {
+                metrics.inc_error();
+                let _ = tx.send(Err(status)).await;
+            }
+            (ok, err_msg)
+        }
+        // Same disambiguation the delegated_pull closure uses: a fired
+        // token means the cause was CancelJob; otherwise the client
+        // hung up.
+        None if cancel_token.is_cancelled() => {
+            let _ = tx
+                .send(Err(Status::cancelled("transfer cancelled via CancelJob")))
+                .await;
+            (false, Some("cancelled via CancelJob".to_string()))
+        }
+        None => (false, Some("client cancelled".to_string())),
+    }
+}
+
 /// Translate a handler's `Result<_, Status>` into the
 /// `(ok, error_message)` pair the ActiveJobs guard expects.
-/// Used by `push`, `pull`, and `pull_sync` dispatchers.
-/// `delegated_pull` has its own shape (handler returns `bool`
-/// inside a select) and inlines the equivalent mapping there.
+/// Used inside [`resolve_streaming_outcome`] for the `push` /
+/// `pull_sync` dispatchers. `delegated_pull` has its own shape
+/// (handler returns `bool` inside a select) and inlines the
+/// equivalent mapping there.
 fn outcome_from_status<T>(result: &Result<T, Status>) -> (bool, Option<String>) {
     match result {
         Ok(_) => (true, None),
@@ -1290,19 +1380,19 @@ mod tests {
     /// select even when the cancel token (and the client-hangup signal)
     /// have ALSO fired — otherwise a transfer that succeeded at the same
     /// instant `CancelJob` fired gets mis-recorded as cancelled.
+    /// (Helper renamed `resolve_delegated_pull_outcome` →
+    /// `resolve_transfer_outcome` in w4-3; same select, now generic.)
     #[tokio::test]
     async fn resolve_pull_handler_completion_wins_over_simultaneous_cancel() {
         use std::future::ready;
         // Handler ready(success); client hung up; cancel fired — all
         // simultaneously. Handler-first ordering must yield Some(true).
-        let outcome =
-            resolve_delegated_pull_outcome(ready(true), ready(()), ready(()), false).await;
+        let outcome = resolve_transfer_outcome(ready(true), ready(()), ready(()), false).await;
         assert_eq!(outcome, Some(true), "ready success must win the race");
 
         // The same holds for a handler that completed with failure: a
         // real result beats a simultaneous cancel.
-        let outcome =
-            resolve_delegated_pull_outcome(ready(false), ready(()), ready(()), false).await;
+        let outcome = resolve_transfer_outcome(ready(false), ready(()), ready(()), false).await;
         assert_eq!(outcome, Some(false), "ready failure must win the race");
     }
 
@@ -1312,7 +1402,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_pull_pending_handler_yields_to_cancel() {
         use std::future::{pending, ready};
-        let outcome = resolve_delegated_pull_outcome(
+        let outcome = resolve_transfer_outcome(
             pending::<bool>(), // handler still running
             pending::<()>(),   // client still connected
             ready(()),         // CancelJob fired
@@ -1327,7 +1417,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_pull_detach_disables_client_hangup() {
         use std::future::{pending, ready};
-        let fut = resolve_delegated_pull_outcome(
+        let fut = resolve_transfer_outcome(
             pending::<bool>(), // handler still running
             ready(()),         // client hung up...
             pending::<()>(),   // ...but no cancel
@@ -1340,6 +1430,108 @@ mod tests {
                 .await
                 .is_err(),
             "detach=true must keep a client hangup from ending the pull"
+        );
+    }
+
+    /// w4-3: a client hangup (dropped response `Receiver`) must resolve
+    /// a still-running streaming handler as `(false, "client
+    /// cancelled")` instead of letting it run to completion for a dead
+    /// peer. Pre-fix the push/pull_sync dispatchers bare-awaited the
+    /// handler, so with a `pending()` handler this future would never
+    /// resolve — the test would hang, not merely assert-fail.
+    /// Deterministic: the receiver is dropped before the race starts,
+    /// so `tx.closed()` is already level-set.
+    #[tokio::test]
+    async fn streaming_hangup_resolves_pending_handler_as_client_cancelled() {
+        use std::future::pending;
+        let (tx, rx) = mpsc::channel::<Result<(), Status>>(1);
+        drop(rx); // client hung up: tonic drops the ReceiverStream
+        let token = CancellationToken::new();
+        let metrics = TransferMetrics::disabled();
+        let (ok, err) =
+            resolve_streaming_outcome(pending::<Result<(), Status>>(), &tx, &token, &metrics).await;
+        assert!(!ok, "a hangup-terminated transfer must record ok=false");
+        assert_eq!(err.as_deref(), Some("client cancelled"));
+    }
+
+    /// w4-3: a fired row token must resolve a still-running streaming
+    /// handler as `(false, "cancelled via CancelJob")` and deliver a
+    /// terminal `Status::cancelled` to the still-connected client.
+    /// (Production dispatch keeps `CancelJob` gated off for
+    /// push/pull_sync via `supports_cancellation`; this pins the
+    /// handler-side capability so a future policy flip is policy-only.)
+    #[tokio::test]
+    async fn streaming_canceljob_resolves_pending_handler_and_notifies_client() {
+        use std::future::pending;
+        let (tx, mut rx) = mpsc::channel::<Result<(), Status>>(1);
+        let token = CancellationToken::new();
+        token.cancel();
+        let metrics = TransferMetrics::disabled();
+        let (ok, err) =
+            resolve_streaming_outcome(pending::<Result<(), Status>>(), &tx, &token, &metrics).await;
+        assert!(!ok);
+        assert_eq!(err.as_deref(), Some("cancelled via CancelJob"));
+        let sent = rx.recv().await.expect("client must get a terminal frame");
+        let status = sent.expect_err("terminal frame must be an error status");
+        assert_eq!(status.code(), tonic::Code::Cancelled);
+    }
+
+    /// w4-3 extends audit-10's guarantee to the streaming dispatchers:
+    /// a handler that has completed must win the race even when the
+    /// client has hung up AND the token has fired at the same instant —
+    /// a real success must not be mis-recorded as a cancellation.
+    #[tokio::test]
+    async fn streaming_completed_handler_wins_simultaneous_races() {
+        use std::future::ready;
+        let (tx, rx) = mpsc::channel::<Result<(), Status>>(1);
+        drop(rx);
+        let token = CancellationToken::new();
+        token.cancel();
+        let metrics = TransferMetrics::disabled();
+        let (ok, err) = resolve_streaming_outcome(ready(Ok(())), &tx, &token, &metrics).await;
+        assert!(ok, "a completed handler must beat simultaneous cancels");
+        assert_eq!(err, None);
+    }
+
+    /// w4-3: the pre-existing dispatcher error path must survive the
+    /// rewire — a handler `Err` is recorded with the status message and
+    /// the status itself is forwarded to the still-connected client.
+    #[tokio::test]
+    async fn streaming_handler_error_recorded_and_forwarded_to_client() {
+        use std::future::ready;
+        let (tx, mut rx) = mpsc::channel::<Result<(), Status>>(1);
+        let token = CancellationToken::new();
+        let metrics = TransferMetrics::disabled();
+        let (ok, err) =
+            resolve_streaming_outcome(ready(Err(Status::internal("boom"))), &tx, &token, &metrics)
+                .await;
+        assert!(!ok);
+        assert_eq!(err.as_deref(), Some("boom"));
+        let status = rx
+            .recv()
+            .await
+            .expect("client must get the terminal frame")
+            .expect_err("terminal frame must be an error status");
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "boom");
+    }
+
+    /// w4-3: a clean success sends nothing extra on the response
+    /// channel (the handler already sent its own summary frames) and
+    /// records `(true, None)`.
+    #[tokio::test]
+    async fn streaming_handler_success_records_ok_and_sends_nothing() {
+        use std::future::ready;
+        let (tx, mut rx) = mpsc::channel::<Result<(), Status>>(1);
+        let token = CancellationToken::new();
+        let metrics = TransferMetrics::disabled();
+        let (ok, err) = resolve_streaming_outcome(ready(Ok(())), &tx, &token, &metrics).await;
+        assert!(ok);
+        assert!(err.is_none());
+        drop(tx);
+        assert!(
+            rx.recv().await.is_none(),
+            "success must not push extra frames at the client"
         );
     }
 
