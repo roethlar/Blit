@@ -28,6 +28,9 @@ mdns-sd = "0.19"
 hostname = "0.4"
 flume = "0.11"
 owo-colors = "4"
+# ue-r2-2: data-plane resize sub-token generation (same crate/version
+# the daemon already uses for the one-time token).
+rand = "0.10"
 
 # gRPC dependencies
 tonic = "0.14"

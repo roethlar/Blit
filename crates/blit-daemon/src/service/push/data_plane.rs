@@ -108,17 +108,7 @@ pub(crate) async fn accept_data_connection_stream(
             };
         // Enable nodelay + keepalive to prevent idle stream timeouts
         // during long transfers on other streams.
-        let socket = {
-            let std_sock = accepted
-                .into_std()
-                .map_err(|err| Status::internal(format!("converting socket: {err}")))?;
-            let s2 = socket2::Socket::from(std_sock);
-            let _ = s2.set_tcp_nodelay(true);
-            let _ = s2.set_keepalive(true);
-            let std_back: std::net::TcpStream = s2.into();
-            TcpStream::from_std(std_back)
-                .map_err(|err| Status::internal(format!("re-wrapping socket: {err}")))?
-        };
+        let socket = configure_data_socket(accepted)?;
         eprintln!(
             "blitd: push data plane: accepted connection {} from {}",
             idx, addr
@@ -177,6 +167,18 @@ async fn handle_data_plane_stream(
         log::warn!("push data plane: invalid token");
         return Err(Status::permission_denied("invalid data plane token"));
     }
+    receive_stream_into_module(socket, module, start).await
+}
+
+/// The per-socket receive tail shared by the fixed and resizable
+/// accept paths (`ue-r2-2` split it out of `handle_data_plane_stream`
+/// so an epoch-N socket runs the identical byte path after its
+/// stronger handshake).
+async fn receive_stream_into_module(
+    socket: TcpStream,
+    module: ModuleConfig,
+    start: Instant,
+) -> Result<TransferStats, Status> {
     eprintln!(
         "blitd: push data plane: token accepted (module='{}', root={})",
         module.name,
@@ -227,6 +229,273 @@ async fn handle_data_plane_stream(
         stats.files_transferred, stats.bytes_transferred, gbps
     );
     Ok(stats)
+}
+
+// ── ue-r2-2: resizable accept (mid-transfer stream ADD) ──────────────
+
+/// A control-loop → acceptor registration: the credential the next
+/// epoch-N socket must present. Sent BEFORE the daemon acks the ADD,
+/// so the accept is armed by the time the client dials.
+pub(crate) struct ResizeArm {
+    pub(crate) epoch: u32,
+    pub(crate) sub_token: Vec<u8>,
+}
+
+struct ArmedEpoch {
+    epoch: u32,
+    sub_token: Vec<u8>,
+    expires: tokio::time::Instant,
+}
+
+/// How long an armed ADD epoch waits for its socket. The client dials
+/// immediately after the ack, so an older slot is a failed or
+/// abandoned dial. Expiry is NON-fatal: the offer lapses and the
+/// transfer continues at its current width (the client settled its
+/// side when the dial failed).
+const RESIZE_ARM_TTL: Duration = DATA_PLANE_ACCEPT_TIMEOUT;
+
+/// What a resizable-path socket must present after the one-time token.
+enum StreamCredential {
+    /// Epoch-0 socket: the negotiation's fixed sub-token; failures are
+    /// transfer-fatal, exactly like the fixed path's initial accepts.
+    Epoch0(Vec<u8>),
+    /// Epoch-N socket: consume a live armed entry. Failures drop the
+    /// socket WITHOUT failing the transfer — the accept was an
+    /// optional capacity offer, and a stray or hostile dial must not
+    /// kill a healthy stream set.
+    Armed(Arc<std::sync::Mutex<Vec<ArmedEpoch>>>),
+}
+
+/// nodelay + keepalive, shared by both accept paths (prevents idle
+/// stream timeouts during long transfers on sibling streams).
+fn configure_data_socket(accepted: TcpStream) -> Result<TcpStream, Status> {
+    let std_sock = accepted
+        .into_std()
+        .map_err(|err| Status::internal(format!("converting socket: {err}")))?;
+    let s2 = socket2::Socket::from(std_sock);
+    let _ = s2.set_tcp_nodelay(true);
+    let _ = s2.set_keepalive(true);
+    let std_back: std::net::TcpStream = s2.into();
+    TcpStream::from_std(std_back)
+        .map_err(|err| Status::internal(format!("re-wrapping socket: {err}")))
+}
+
+/// `ue-r2-2`: the resize-enabled variant of
+/// [`accept_data_connection_stream`]. Epoch 0 behaves exactly like the
+/// fixed path (bounded sequential accepts, parallel handshakes,
+/// failures fatal); afterwards the listener stays alive for the whole
+/// transfer but only accepts while a live armed slot exists — an
+/// unarmed listener leaves stray dials in the OS backlog, so the
+/// 1g-era "accept phase is bounded" reasoning keeps holding in spirit
+/// (every accept is credential-gated and TTL-bounded). Ends when every
+/// worker — initial and added — has finished.
+pub(crate) async fn accept_data_connection_stream_resizable(
+    listener: TcpListener,
+    expected_token: Vec<u8>,
+    epoch0_sub_token: Vec<u8>,
+    module: ModuleConfig,
+    stream_count: u32,
+    mut arm_rx: tokio::sync::mpsc::UnboundedReceiver<ResizeArm>,
+) -> Result<TransferStats, Status> {
+    let start = Instant::now();
+    let streams = stream_count.max(1) as usize;
+    // NOTE: unlike the fixed path's bare JoinHandle Vec, dropping a
+    // JoinSet aborts every remaining worker — a first-error return no
+    // longer detaches the survivors (a strict improvement on the
+    // design-2 shape for this path; w4-1 still owns the family).
+    let mut join_set: tokio::task::JoinSet<Result<Option<TransferStats>, Status>> =
+        tokio::task::JoinSet::new();
+
+    for idx in 0..streams {
+        let (accepted, addr) =
+            match tokio::time::timeout(DATA_PLANE_ACCEPT_TIMEOUT, listener.accept()).await {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(err)) => {
+                    return Err(Status::internal(format!(
+                        "data plane accept failed: {}",
+                        err
+                    )));
+                }
+                Err(_elapsed) => {
+                    return Err(Status::deadline_exceeded(format!(
+                        "data plane accept timed out after {:?} waiting for stream {}/{}",
+                        DATA_PLANE_ACCEPT_TIMEOUT,
+                        idx + 1,
+                        streams
+                    )));
+                }
+            };
+        let socket = configure_data_socket(accepted)?;
+        eprintln!(
+            "blitd: push data plane: accepted connection {} from {}",
+            idx, addr
+        );
+        let token = expected_token.clone();
+        let sub = epoch0_sub_token.clone();
+        let module = module.clone();
+        join_set.spawn(async move {
+            handle_resizable_stream(socket, token, StreamCredential::Epoch0(sub), module).await
+        });
+    }
+
+    let armed: Arc<std::sync::Mutex<Vec<ArmedEpoch>>> = Arc::default();
+    let mut arm_open = true;
+    let mut total = TransferStats::default();
+    loop {
+        // Lapse expired offers so `has_armed` (the accept gate) is
+        // honest; a socket that raced in anyway is dropped by the
+        // worker's consume-time expiry check.
+        let has_armed = {
+            let mut slots = armed.lock().expect("armed registry poisoned");
+            let now = tokio::time::Instant::now();
+            slots.retain(|slot| {
+                if slot.expires > now {
+                    true
+                } else {
+                    log::warn!(
+                        "push data plane: resize ADD epoch {} expired unclaimed",
+                        slot.epoch
+                    );
+                    false
+                }
+            });
+            !slots.is_empty()
+        };
+        tokio::select! {
+            joined = join_set.join_next() => match joined {
+                None => break,
+                Some(Ok(Ok(Some(stats)))) => accumulate_transfer_stats(&mut total, &stats),
+                Some(Ok(Ok(None))) => {} // dropped epoch-N socket, non-fatal
+                Some(Ok(Err(status))) => return Err(status),
+                Some(Err(_)) => {
+                    return Err(Status::internal("data plane worker cancelled"));
+                }
+            },
+            arm = arm_rx.recv(), if arm_open => match arm {
+                Some(arm) => {
+                    armed.lock().expect("armed registry poisoned").push(ArmedEpoch {
+                        epoch: arm.epoch,
+                        sub_token: arm.sub_token,
+                        expires: tokio::time::Instant::now() + RESIZE_ARM_TTL,
+                    });
+                }
+                None => arm_open = false,
+            },
+            accepted = listener.accept(), if has_armed => match accepted {
+                Ok((sock, addr)) => match configure_data_socket(sock) {
+                    Ok(socket) => {
+                        eprintln!(
+                            "blitd: push data plane: accepted resize connection from {}",
+                            addr
+                        );
+                        let token = expected_token.clone();
+                        let registry = Arc::clone(&armed);
+                        let module = module.clone();
+                        join_set.spawn(async move {
+                            handle_resizable_stream(
+                                socket,
+                                token,
+                                StreamCredential::Armed(registry),
+                                module,
+                            )
+                            .await
+                        });
+                    }
+                    Err(status) => {
+                        log::warn!("push data plane: resize socket setup failed: {status}");
+                    }
+                },
+                Err(err) => {
+                    log::warn!("push data plane: resize accept failed: {err}");
+                }
+            },
+        }
+    }
+
+    let elapsed = start.elapsed().as_secs_f64().max(1e-6);
+    let gbps = (total.bytes_transferred as f64 * 8.0) / elapsed / 1e9;
+    eprintln!(
+        "blitd: push data plane: aggregate throughput {:.2} Gbps ({} bytes in {:.2}s)",
+        gbps, total.bytes_transferred, elapsed
+    );
+    Ok(total)
+}
+
+/// Per-socket worker on the resizable path: 48-byte handshake
+/// (one-time token ‖ sub-token), then the shared receive tail.
+/// `Ok(None)` = socket dropped non-fatally (bad epoch-N credential);
+/// post-handshake receive errors are always fatal — an authorized
+/// live stream dying mid-transfer is data loss on any epoch.
+async fn handle_resizable_stream(
+    mut socket: TcpStream,
+    expected_token: Vec<u8>,
+    credential: StreamCredential,
+    module: ModuleConfig,
+) -> Result<Option<TransferStats>, Status> {
+    fn refuse(fatal: bool, status: Status) -> Result<Option<TransferStats>, Status> {
+        if fatal {
+            Err(status)
+        } else {
+            log::warn!("push data plane: dropping resize socket: {status}");
+            Ok(None)
+        }
+    }
+
+    let start = Instant::now();
+    let fatal = matches!(credential, StreamCredential::Epoch0(_));
+    let mut buf = vec![0u8; expected_token.len() + blit_core::remote::transfer::SUB_TOKEN_LEN];
+    match tokio::time::timeout(DATA_PLANE_TOKEN_TIMEOUT, socket.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            return refuse(
+                fatal,
+                Status::internal(format!("failed to read data plane token: {}", err)),
+            );
+        }
+        Err(_elapsed) => {
+            return refuse(
+                fatal,
+                Status::deadline_exceeded(format!(
+                    "data plane token read timed out after {:?}",
+                    DATA_PLANE_TOKEN_TIMEOUT
+                )),
+            );
+        }
+    }
+    let (token, sub) = buf.split_at(expected_token.len());
+    if token != &expected_token[..] {
+        log::warn!("push data plane: invalid token");
+        return refuse(fatal, Status::permission_denied("invalid data plane token"));
+    }
+    let authorized = match &credential {
+        StreamCredential::Epoch0(expected_sub) => sub == &expected_sub[..],
+        StreamCredential::Armed(registry) => {
+            let mut slots = registry.lock().expect("armed registry poisoned");
+            let now = tokio::time::Instant::now();
+            match slots
+                .iter()
+                .position(|slot| slot.sub_token == sub && slot.expires > now)
+            {
+                Some(i) => {
+                    let slot = slots.remove(i);
+                    eprintln!(
+                        "blitd: push data plane: resize epoch {} socket authorized",
+                        slot.epoch
+                    );
+                    true
+                }
+                None => false,
+            }
+        }
+    };
+    if !authorized {
+        log::warn!("push data plane: invalid resize sub-token");
+        return refuse(
+            fatal,
+            Status::permission_denied("invalid data plane sub-token"),
+        );
+    }
+    receive_stream_into_module(socket, module, start).await.map(Some)
 }
 
 /// Validate `TarShardHeader.archive_size` at the wire boundary so a

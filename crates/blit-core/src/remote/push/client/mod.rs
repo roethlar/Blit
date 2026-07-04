@@ -13,7 +13,7 @@ use crate::fs_enum::FileFilter;
 use crate::generated::client_push_request::Payload as ClientPayload;
 use crate::generated::server_push_response::Payload as ServerPayload;
 use crate::generated::ClientPushRequest;
-use crate::generated::{FileHeader, PushSummary};
+use crate::generated::{DataPlaneResize, DataPlaneResizeOp, FileHeader, PushSummary};
 use crate::remote::endpoint::RemoteEndpoint;
 use crate::remote::transfer::CONTROL_PLANE_CHUNK_SIZE;
 use crate::transfer_plan::PlanOptions;
@@ -32,7 +32,9 @@ use super::payload::{payload_file_count, TransferPayload};
 // canonical entry point is the same regardless of origin type. Push's
 // "diff" itself lives on the daemon side (NeedList) — see plan_push_payloads.
 use crate::remote::transfer::diff_planner::plan_push_payloads as plan_transfer_payloads;
-use crate::remote::transfer::pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
+use crate::remote::transfer::pipeline::{
+    execute_sink_pipeline, execute_sink_pipeline_elastic, SinkControl,
+};
 use crate::remote::transfer::progress::RemoteTransferProgress;
 use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, SinkOutcome, TransferSink};
 use crate::remote::transfer::source::TransferSource;
@@ -105,6 +107,37 @@ struct MultiStreamSender {
     /// unexpectedly" string. POST_REVIEW_FIXES §1.1b.
     pipeline_handle: Option<JoinHandle<Result<SinkOutcome>>>,
     started: Instant,
+    /// ue-r2-2: present only when the negotiation enabled resize.
+    resize: Option<ResizeRuntime>,
+    /// ue-r2-2: the tuner's proposal stream, handed to the control
+    /// loop via `take_resize_rx` (the loop owns ack correlation).
+    resize_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::engine::ResizeProposal>>,
+}
+
+/// ue-r2-2: the client-side controller's one in-flight resize epoch,
+/// held from the `DataPlaneResize` send until the daemon's ack.
+struct PendingResize {
+    epoch: u32,
+    target: usize,
+    add: bool,
+    /// The credential the epoch-N socket will present (ADD only).
+    sub_token: Vec<u8>,
+}
+
+/// ue-r2-2: everything an epoch-N dial needs, retained from connect
+/// time, plus the live handles into the running pipeline and tuner.
+struct ResizeRuntime {
+    ctl_tx: mpsc::UnboundedSender<SinkControl>,
+    probes: crate::engine::SharedStreamProbes,
+    host: String,
+    port: u32,
+    token: Vec<u8>,
+    trace: bool,
+    pool: Arc<BufferPool>,
+    source: Arc<dyn TransferSource>,
+    dst_root: PathBuf,
+    dial: Arc<crate::engine::TransferDial>,
+    next_stream_id: u32,
 }
 
 impl MultiStreamSender {
@@ -121,10 +154,19 @@ impl MultiStreamSender {
         tcp_buffer_size: Option<usize>,
         progress: Option<RemoteTransferProgress>,
         dial: Option<Arc<crate::engine::TransferDial>>,
+        // ue-r2-2: `Some(epoch0_sub_token)` when the daemon's
+        // negotiation set `resize_enabled` — every epoch-0 socket
+        // echoes it after the one-time token, and the sender becomes
+        // elastic (proposal stream + add/retire plumbing). Requires
+        // the dial path (telemetry drives the policy).
+        resize_sub: Option<Vec<u8>>,
     ) -> Result<Self> {
         let streams = stream_count.max(1);
 
-        // Shared buffer pool across all sinks.
+        // Shared buffer pool across all sinks. Sized at the epoch-0
+        // count: streams ADDed by resize share it (the tokio semaphore
+        // inside is FIFO-fair, so late sinks queue for buffers rather
+        // than starve; growing the pool live is a W3.1 concern).
         let pool_size = streams * 2 + 4;
         let buffer_size = chunk_bytes.max(64 * 1024);
         let memory_budget = buffer_size * pool_size * 2;
@@ -132,14 +174,33 @@ impl MultiStreamSender {
 
         let dst_root = PathBuf::from(format!("{}:{}", host, port));
 
+        // ue-r2-2: epoch-0 sockets present token ‖ epoch0_sub_token
+        // when resize was negotiated; the plain token otherwise (the
+        // handshake is a raw byte write, so pre-concatenation IS the
+        // suffix contract).
+        let handshake: Vec<u8> = match &resize_sub {
+            Some(sub) => {
+                let mut h = token.to_vec();
+                h.extend_from_slice(sub);
+                h
+            }
+            None => token.to_vec(),
+        };
+
+        // Control channel into the (elastic) pipeline. Without resize
+        // the sender is simply never used and drops with this scope.
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel::<SinkControl>();
+
         // ue-r2-1e: with a dial, every stream carries LiveProbe
         // telemetry and a tuner task steps the dial's cheap dials from
         // it. Without one (no live tuning), the NoProbe path
         // monomorphizes the telemetry away exactly as before.
         let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
         let mut tuner_handle = None;
+        let mut resize = None;
+        let mut resize_rx = None;
         if let Some(dial) = dial.as_ref() {
-            use crate::engine::spawn_dial_tuner;
+            use crate::engine::spawn_dial_tuner_with_resize;
             use crate::remote::transfer::progress::{LiveProbe, StreamId, StreamProbe};
             let mut tuner_probes = Vec::with_capacity(streams);
             for idx in 0..streams {
@@ -151,7 +212,7 @@ impl MultiStreamSender {
                 let session = DataPlaneSession::connect_with_probe(
                     host,
                     port,
-                    token,
+                    &handshake,
                     chunk_bytes,
                     payload_prefetch,
                     trace,
@@ -166,13 +227,38 @@ impl MultiStreamSender {
                     dst_root.clone(),
                 )));
             }
-            tuner_handle = Some(spawn_dial_tuner(dial, tuner_probes));
+            let probes: crate::engine::SharedStreamProbes =
+                Arc::new(std::sync::Mutex::new(tuner_probes));
+            if resize_sub.is_some() {
+                let (proposal_tx, proposal_rx) = tokio::sync::mpsc::unbounded_channel();
+                tuner_handle = Some(spawn_dial_tuner_with_resize(
+                    dial,
+                    Arc::clone(&probes),
+                    Some(proposal_tx),
+                ));
+                resize_rx = Some(proposal_rx);
+                resize = Some(ResizeRuntime {
+                    ctl_tx: ctl_tx.clone(),
+                    probes,
+                    host: host.to_string(),
+                    port,
+                    token: token.to_vec(),
+                    trace,
+                    pool: Arc::clone(&pool),
+                    source: source.clone(),
+                    dst_root: dst_root.clone(),
+                    dial: Arc::clone(dial),
+                    next_stream_id: streams as u32,
+                });
+            } else {
+                tuner_handle = Some(spawn_dial_tuner_with_resize(dial, probes, None));
+            }
         } else {
             for _ in 0..streams {
                 let session = DataPlaneSession::connect(
                     host,
                     port,
-                    token,
+                    &handshake,
                     chunk_bytes,
                     payload_prefetch,
                     trace,
@@ -192,13 +278,15 @@ impl MultiStreamSender {
 
         let source_clone = source.clone();
         let prefetch = payload_prefetch.max(1);
+        drop(ctl_tx);
         let pipeline_handle = tokio::spawn(async move {
-            execute_sink_pipeline_streaming(
+            execute_sink_pipeline_elastic(
                 source_clone,
                 sinks,
                 payload_rx,
                 prefetch,
                 progress.as_ref(),
+                Some(ctl_rx),
             )
             .await
         });
@@ -208,7 +296,80 @@ impl MultiStreamSender {
             tuner_handle,
             pipeline_handle: Some(pipeline_handle),
             started: Instant::now(),
+            resize,
+            resize_rx,
         })
+    }
+
+    /// ue-r2-2: the tuner's proposal stream (present only when resize
+    /// was negotiated). The control loop takes it once and correlates
+    /// proposals with the daemon's acks.
+    fn take_resize_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<crate::engine::ResizeProposal>> {
+        self.resize_rx.take()
+    }
+
+    /// ue-r2-2 ADD: dial one more data socket with the per-epoch
+    /// credential (token ‖ sub_token), register its probe with the
+    /// tuner, and hand its sink to the running pipeline. Errors are
+    /// the caller's to treat as NON-fatal — a failed optional ADD
+    /// must never kill a healthy transfer (the daemon's armed accept
+    /// slot simply expires).
+    async fn add_stream(&mut self, sub_token: &[u8]) -> Result<()> {
+        use crate::remote::transfer::progress::{LiveProbe, StreamId, StreamProbe};
+        let rt = self
+            .resize
+            .as_mut()
+            .ok_or_else(|| eyre!("resize was not negotiated for this transfer"))?;
+        let probe = StreamProbe::new(StreamId(rt.next_stream_id));
+        let tuner_probe = StreamProbe::from_telemetry(probe.id(), probe.telemetry());
+        let mut handshake = rt.token.clone();
+        handshake.extend_from_slice(sub_token);
+        let session = DataPlaneSession::connect_with_probe(
+            &rt.host,
+            rt.port,
+            &handshake,
+            // Live dial values: an epoch-N socket starts at the
+            // CURRENT tuning, not the connect-time snapshot.
+            rt.dial.chunk_bytes(),
+            rt.dial.prefetch_count(),
+            rt.trace,
+            rt.dial.tcp_buffer_bytes(),
+            Arc::clone(&rt.pool),
+            LiveProbe(probe),
+        )
+        .await?;
+        let sink: Arc<dyn TransferSink> =
+            Arc::new(DataPlaneSink::new(session, rt.source.clone(), rt.dst_root.clone()));
+        rt.ctl_tx
+            .send(SinkControl::Add(sink))
+            .map_err(|_| eyre!("data plane pipeline is no longer running"))?;
+        rt.next_stream_id += 1;
+        rt.probes
+            .lock()
+            .expect("probe registry poisoned")
+            .push(tuner_probe);
+        Ok(())
+    }
+
+    /// ue-r2-2 REMOVE: retire the most recently added live stream —
+    /// its worker drains at the payload boundary and emits its END —
+    /// and drop its probe from the tuner registry. Returns false when
+    /// nothing can be retired (floor of one stream, or the pipeline is
+    /// gone), so the caller can settle the epoch as refused.
+    fn retire_stream(&mut self) -> bool {
+        let Some(rt) = self.resize.as_mut() else {
+            return false;
+        };
+        {
+            let mut probes = rt.probes.lock().expect("probe registry poisoned");
+            if probes.len() <= 1 {
+                return false;
+            }
+            probes.pop();
+        }
+        rt.ctl_tx.send(SinkControl::RetireOne).is_ok()
     }
 
     /// Feed one or more payloads to the streaming pipeline.
@@ -428,8 +589,12 @@ impl RemotePushClient {
                 filter: Some(wire_filter),
                 mirror_kind: mirror_kind as i32,
                 require_complete_scan,
-                // ue-r2-1b: stays false until ue-r2-2 implements resize.
-                supports_stream_resize: false,
+                // ue-r2-2: the client dials and its pipeline is
+                // elastic — advertise resize. The daemon folds this
+                // with its own support + the TCP-path conditions into
+                // `resize_enabled`; against an old daemon the bit is
+                // skipped and nothing changes.
+                supports_stream_resize: true,
             }),
         )
         .await
@@ -474,6 +639,15 @@ impl RemotePushClient {
         // every forced-gRPC push of ≥128 files (one early need-list flush)
         // died, and ~100 files was a coin flip.
         let mut fallback_negotiated = false;
+
+        // ue-r2-2: resize controller state. The tuner's proposal stream
+        // appears once a resize-enabled negotiation lands;
+        // `resize_pending` is the single epoch awaiting the daemon's
+        // ack (the dial enforces one-in-flight too).
+        let mut resize_proposal_rx: Option<
+            tokio::sync::mpsc::UnboundedReceiver<crate::engine::ResizeProposal>,
+        > = None;
+        let mut resize_pending: Option<PendingResize> = None;
 
         let mut manifest_done = false;
         // Track whether we received new need-list entries this iteration.
@@ -709,7 +883,18 @@ impl RemotePushClient {
                                                 neg.stream_count.max(1) as usize,
                                             );
                                             let payload_prefetch = dial.prefetch_count();
-                                            let sender = MultiStreamSender::connect(
+                                            // ue-r2-2: the daemon's fold said
+                                            // resize is on for this transfer —
+                                            // epoch-0 sockets carry the
+                                            // sub-token suffix and the sender
+                                            // goes elastic. A malformed token
+                                            // length reads as "not enabled"
+                                            // (fail toward today's behavior).
+                                            let resize_sub = (neg.resize_enabled
+                                                && neg.epoch0_sub_token.len()
+                                                    == crate::remote::transfer::SUB_TOKEN_LEN)
+                                                .then(|| neg.epoch0_sub_token.clone());
+                                            let mut sender = MultiStreamSender::connect(
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
                                                 &token_bytes,
@@ -721,8 +906,10 @@ impl RemotePushClient {
                                                 dial.tcp_buffer_bytes(),
                                                 progress.cloned(),
                                                 Some(dial.clone()),
+                                                resize_sub,
                                             )
                                             .await?;
+                                            resize_proposal_rx = sender.take_resize_rx();
                                             data_plane_sender = Some(sender);
                                             data_port = Some(neg.tcp_port);
                                         }
@@ -770,12 +957,78 @@ impl RemotePushClient {
                                 Some(ServerPayload::Summary(push_summary)) => {
                                     summary = Some(push_summary);
                                 }
-                                Some(ServerPayload::DataPlaneResizeAck(_)) => {
-                                    // ue-r2-1b: wire shape only — the client
-                                    // never sends DataPlaneResize until
-                                    // ue-r2-2, so an ack here is a peer bug.
-                                    // Ignore it exactly as an old binary
-                                    // would (unknown payload → None arm).
+                                Some(ServerPayload::DataPlaneResizeAck(ack)) => {
+                                    // ue-r2-2: settle the in-flight epoch with
+                                    // what actually happened. An unsolicited or
+                                    // stale ack is ignored exactly as before.
+                                    match resize_pending.take() {
+                                        Some(pending) if ack.epoch == pending.epoch => {
+                                            let dial_ref = dial
+                                                .as_ref()
+                                                .expect("resize only negotiated on the dial path");
+                                            if pending.add && ack.accepted {
+                                                // Daemon armed the accept —
+                                                // dial the new socket. A failed
+                                                // dial must NOT kill a healthy
+                                                // transfer: the armed slot
+                                                // expires daemon-side and the
+                                                // live count simply stands.
+                                                let added = match data_plane_sender.as_mut() {
+                                                    Some(sender) => {
+                                                        match sender
+                                                            .add_stream(&pending.sub_token)
+                                                            .await
+                                                        {
+                                                            Ok(()) => true,
+                                                            Err(err) => {
+                                                                log::warn!(
+                                                                    "resize ADD (epoch {}) dial \
+                                                                     failed; continuing at the \
+                                                                     current stream count: {err:#}",
+                                                                    pending.epoch
+                                                                );
+                                                                false
+                                                            }
+                                                        }
+                                                    }
+                                                    None => false,
+                                                };
+                                                if added {
+                                                    dial_ref.resize_settled(
+                                                        pending.epoch,
+                                                        pending.target,
+                                                        true,
+                                                    );
+                                                } else {
+                                                    dial_ref.resize_settled(
+                                                        pending.epoch,
+                                                        dial_ref.live_streams(),
+                                                        true,
+                                                    );
+                                                }
+                                            } else if !pending.add && ack.accepted {
+                                                dial_ref.resize_settled(
+                                                    pending.epoch,
+                                                    pending.target,
+                                                    true,
+                                                );
+                                            } else {
+                                                dial_ref.resize_settled(
+                                                    pending.epoch,
+                                                    dial_ref.live_streams(),
+                                                    false,
+                                                );
+                                            }
+                                        }
+                                        other => {
+                                            resize_pending = other;
+                                            log::debug!(
+                                                "ignoring unsolicited/stale DataPlaneResizeAck \
+                                                 (epoch {})",
+                                                ack.epoch
+                                            );
+                                        }
+                                    }
                                 }
                                 None => {}
                             }
@@ -945,6 +1198,108 @@ impl RemotePushClient {
                                 );
                             }
                         }
+                    }
+                }
+
+                // ue-r2-2: the tuner proposed a stream-count change.
+                // Lowest select priority (biased): control frames and
+                // manifest flow always come first, and at most one
+                // epoch is in flight.
+                proposal = async {
+                    match resize_proposal_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if resize_pending.is_none() => {
+                    match proposal {
+                        Some(p) => {
+                            let dial_ref = dial
+                                .as_ref()
+                                .expect("resize only negotiated on the dial path");
+                            if p.add {
+                                // Pre-dial ADD: mint the epoch credential,
+                                // ask the daemon to register it and arm an
+                                // accept; the dial happens on the ack.
+                                match crate::remote::transfer::generate_sub_token() {
+                                    Ok(sub) => {
+                                        if let Err(send_err) = send_payload(
+                                            &tx,
+                                            ClientPayload::DataPlaneResize(DataPlaneResize {
+                                                op: DataPlaneResizeOp::Add as i32,
+                                                epoch: p.epoch,
+                                                target_stream_count: p.target_streams as u32,
+                                                sub_token: sub.clone(),
+                                            }),
+                                        )
+                                        .await
+                                        {
+                                            return Err(prefer_server_error(
+                                                &mut response_rx,
+                                                send_err,
+                                            )
+                                            .await);
+                                        }
+                                        resize_pending = Some(PendingResize {
+                                            epoch: p.epoch,
+                                            target: p.target_streams,
+                                            add: true,
+                                            sub_token: sub,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        log::warn!(
+                                            "resize ADD skipped (no credential source): {err:#}"
+                                        );
+                                        dial_ref.resize_settled(
+                                            p.epoch,
+                                            dial_ref.live_streams(),
+                                            false,
+                                        );
+                                    }
+                                }
+                            } else {
+                                // REMOVE: retire locally first — the drained
+                                // worker's END record is the daemon-side
+                                // teardown — then tell the daemon
+                                // (accounting) and settle on its ack.
+                                let retired = data_plane_sender
+                                    .as_mut()
+                                    .map(|s| s.retire_stream())
+                                    .unwrap_or(false);
+                                if retired {
+                                    if let Err(send_err) = send_payload(
+                                        &tx,
+                                        ClientPayload::DataPlaneResize(DataPlaneResize {
+                                            op: DataPlaneResizeOp::Remove as i32,
+                                            epoch: p.epoch,
+                                            target_stream_count: p.target_streams as u32,
+                                            sub_token: Vec::new(),
+                                        }),
+                                    )
+                                    .await
+                                    {
+                                        return Err(prefer_server_error(
+                                            &mut response_rx,
+                                            send_err,
+                                        )
+                                        .await);
+                                    }
+                                    resize_pending = Some(PendingResize {
+                                        epoch: p.epoch,
+                                        target: p.target_streams,
+                                        add: false,
+                                        sub_token: Vec::new(),
+                                    });
+                                } else {
+                                    dial_ref.resize_settled(
+                                        p.epoch,
+                                        dial_ref.live_streams(),
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        None => resize_proposal_rx = None,
                     }
                 }
             }

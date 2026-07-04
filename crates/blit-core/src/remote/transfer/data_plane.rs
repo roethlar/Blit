@@ -20,6 +20,24 @@ pub const DATA_PLANE_RECORD_BLOCK: u8 = 2;
 pub const DATA_PLANE_RECORD_BLOCK_COMPLETE: u8 = 3;
 pub const DATA_PLANE_RECORD_END: u8 = 0xFF;
 
+/// ue-r2-2: length of the per-epoch resize credential a data socket
+/// echoes after the one-time token when resize was negotiated
+/// (`DataTransferNegotiation.epoch0_sub_token` for the initial
+/// sockets, `DataPlaneResize.sub_token` for an ADD epoch's socket).
+pub const SUB_TOKEN_LEN: usize = 16;
+
+/// Generate one 16-byte resize sub-token. Same fallible-RNG posture
+/// as the daemon's one-time token (audit-3b): a missing system RNG is
+/// an error, never a weaker credential.
+pub fn generate_sub_token() -> eyre::Result<Vec<u8>> {
+    use rand::{rngs::SysRng, TryRng};
+    let mut buf = vec![0u8; SUB_TOKEN_LEN];
+    SysRng
+        .try_fill_bytes(&mut buf)
+        .map_err(|err| eyre::eyre!("system RNG unavailable: {err}"))?;
+    Ok(buf)
+}
+
 /// A single data-plane TCP stream and its send loop.
 ///
 /// Generic over a [`Probe`] so the byte-copy hot path can carry

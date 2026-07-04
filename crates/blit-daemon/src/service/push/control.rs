@@ -4,14 +4,15 @@ use super::super::util::{
 };
 use super::super::PushSender;
 use super::data_plane::{
-    accept_data_connection_stream, bind_data_plane_listener, execute_grpc_fallback, generate_token,
-    TransferStats,
+    accept_data_connection_stream, accept_data_connection_stream_resizable,
+    bind_data_plane_listener, execute_grpc_fallback, generate_token, ResizeArm, TransferStats,
 };
 use crate::runtime::{ModuleConfig, RootExport};
 use base64::{engine::general_purpose, Engine as _};
 use blit_core::generated::{
-    client_push_request, server_push_response, Ack, ClientPushRequest, DataTransferNegotiation,
-    FileHeader, FileList, PushSummary, ServerPushResponse,
+    client_push_request, server_push_response, Ack, ClientPushRequest, DataPlaneResize,
+    DataPlaneResizeAck, DataPlaneResizeOp, DataTransferNegotiation, FileHeader, FileList,
+    PushSummary, ServerPushResponse,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -55,6 +56,11 @@ pub(crate) async fn handle_push_stream(
         None;
     let mut force_grpc_effective = force_grpc_data;
     let mut fallback_used = false;
+    // ue-r2-2: the client's advertised resize capability (PushHeader
+    // bit) and, once a resize-enabled TCP negotiation is out, the
+    // channel that arms the acceptor for each ADD epoch.
+    let mut client_supports_resize = false;
+    let mut resize_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<ResizeArm>> = None;
 
     while let Some(request) = stream.message().await? {
         match request.payload {
@@ -80,6 +86,11 @@ pub(crate) async fn handle_push_stream(
                 mirror_mode = header.mirror_mode;
                 force_grpc_client = header.force_grpc;
                 force_grpc_effective = force_grpc_data || force_grpc_client;
+                // ue-r2-2: fold input (a) of the resize gate — the
+                // peer's capability bit. (b) own support and (c)/(d)
+                // the live-TCP conditions fold in at the negotiation
+                // literals, which only exist on the TCP path.
+                client_supports_resize = header.supports_stream_resize;
                 // R59 #1: capture F1 / F2 fields from the new wire shape.
                 require_complete_scan = header.require_complete_scan;
                 mirror_kind = blit_core::generated::MirrorMode::try_from(header.mirror_kind)
@@ -203,12 +214,35 @@ pub(crate) async fn handle_push_stream(
                             let module_for_transfer = module_ref.clone();
 
                             let stream_target = engine_stream_proposal(&files_to_upload);
-                            let transfer_task = tokio::spawn(accept_data_connection_stream(
-                                listener,
-                                token.clone(),
-                                module_for_transfer,
-                                stream_target,
-                            ));
+                            // ue-r2-2: full resize fold — peer bit AND
+                            // own support AND a live TCP data plane
+                            // (this literal only exists on that path;
+                            // the fallback literal stays false).
+                            let resize_on = client_supports_resize;
+                            let epoch0_sub = if resize_on {
+                                generate_resize_sub_token()?
+                            } else {
+                                Vec::new()
+                            };
+                            let transfer_task = if resize_on {
+                                let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                                resize_cmd_tx = Some(cmd_tx);
+                                tokio::spawn(accept_data_connection_stream_resizable(
+                                    listener,
+                                    token.clone(),
+                                    epoch0_sub.clone(),
+                                    module_for_transfer,
+                                    stream_target,
+                                    cmd_rx,
+                                ))
+                            } else {
+                                tokio::spawn(accept_data_connection_stream(
+                                    listener,
+                                    token.clone(),
+                                    module_for_transfer,
+                                    stream_target,
+                                ))
+                            };
 
                             send_control_message(
                                 &tx,
@@ -223,13 +257,11 @@ pub(crate) async fn handle_push_stream(
                                         // advertises its capacity so
                                         // the client's dial can ramp
                                         // within it.
-                                        // resize_enabled/epoch0_sub_token
-                                        // arrive with ue-r2-2.
                                         receiver_capacity: Some(
                                             blit_core::engine::local_receiver_capacity(),
                                         ),
-                                        resize_enabled: false,
-                                        epoch0_sub_token: Vec::new(),
+                                        resize_enabled: resize_on,
+                                        epoch0_sub_token: epoch0_sub,
                                     },
                                 ),
                             )
@@ -251,11 +283,11 @@ pub(crate) async fn handle_push_stream(
                 ));
             }
             Some(client_push_request::Payload::UploadComplete(_)) => {}
-            Some(client_push_request::Payload::DataPlaneResize(_)) => {
-                // ue-r2-1b: wire shape only — the daemon never sets
-                // resize_enabled until ue-r2-2, so no compliant client
-                // sends this yet. Ignore it exactly as an old daemon
-                // would (unknown payload decodes to the None arm).
+            Some(client_push_request::Payload::DataPlaneResize(req)) => {
+                // ue-r2-2: an ADD can land while the manifest loop is
+                // still running (the data plane starts at the early
+                // flush) — same handling as the transfer phase.
+                handle_resize_request(&tx, &resize_cmd_tx, req).await?;
             }
             None => {}
         }
@@ -290,12 +322,32 @@ pub(crate) async fn handle_push_stream(
             let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
             let module_for_transfer = module.clone();
             let stream_target = engine_stream_proposal(&files_to_upload);
-            let transfer_task = tokio::spawn(accept_data_connection_stream(
-                listener,
-                token.clone(),
-                module_for_transfer,
-                stream_target,
-            ));
+            // ue-r2-2: same fold as the early-flush site.
+            let resize_on = client_supports_resize;
+            let epoch0_sub = if resize_on {
+                generate_resize_sub_token()?
+            } else {
+                Vec::new()
+            };
+            let transfer_task = if resize_on {
+                let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                resize_cmd_tx = Some(cmd_tx);
+                tokio::spawn(accept_data_connection_stream_resizable(
+                    listener,
+                    token.clone(),
+                    epoch0_sub.clone(),
+                    module_for_transfer,
+                    stream_target,
+                    cmd_rx,
+                ))
+            } else {
+                tokio::spawn(accept_data_connection_stream(
+                    listener,
+                    token.clone(),
+                    module_for_transfer,
+                    stream_target,
+                ))
+            };
             send_control_message(
                 &tx,
                 server_push_response::Payload::Negotiation(DataTransferNegotiation {
@@ -305,8 +357,8 @@ pub(crate) async fn handle_push_stream(
                     stream_count: stream_target,
                     // ue-r2-1e: see the early-flush negotiation above.
                     receiver_capacity: Some(blit_core::engine::local_receiver_capacity()),
-                    resize_enabled: false,
-                    epoch0_sub_token: Vec::new(),
+                    resize_enabled: resize_on,
+                    epoch0_sub_token: epoch0_sub,
                 }),
             )
             .await?;
@@ -314,9 +366,29 @@ pub(crate) async fn handle_push_stream(
         }
 
         if let Some(handle) = data_plane_handle.take() {
-            handle
-                .await
-                .map_err(|_| Status::internal("data plane task cancelled"))??
+            // ue-r2-2: keep servicing the request stream while the data
+            // plane runs — the client's DataPlaneResize frames arrive
+            // mid-transfer. Everything else on the stream during this
+            // phase was previously unread; ignore it the same way.
+            let mut handle = handle;
+            let mut client_stream_done = false;
+            loop {
+                tokio::select! {
+                    res = &mut handle => {
+                        break res.map_err(|_| Status::internal("data plane task cancelled"))??;
+                    }
+                    msg = stream.message(), if !client_stream_done => match msg? {
+                        Some(request) => {
+                            if let Some(client_push_request::Payload::DataPlaneResize(req)) =
+                                request.payload
+                            {
+                                handle_resize_request(&tx, &resize_cmd_tx, req).await?;
+                            }
+                        }
+                        None => client_stream_done = true,
+                    },
+                }
+            }
         } else {
             TransferStats::default()
         }
@@ -373,6 +445,63 @@ pub(crate) async fn handle_push_stream(
     .await?;
 
     Ok(())
+}
+
+/// ue-r2-2: 16 random bytes for the resize handshake suffix, minted
+/// beside the one-time token (`Status`-mapped like `generate_token`).
+fn generate_resize_sub_token() -> Result<Vec<u8>, Status> {
+    blit_core::remote::transfer::generate_sub_token()
+        .map_err(|err| Status::internal(format!("{err:#}")))
+}
+
+/// ue-r2-2: answer a client `DataPlaneResize`. ADD registers the
+/// epoch's credential with the acceptor (which arms exactly one
+/// accept, TTL-bounded) BEFORE the ack goes out, so the client's dial
+/// can never race an unarmed listener. REMOVE is accounting-only —
+/// the client retires a worker and that worker's END record tears the
+/// daemon-side stream down through the normal path. Refusals
+/// (`accepted: false`) cover: resize never negotiated, a malformed
+/// credential, a target beyond this daemon's advertised ceiling, or
+/// an acceptor that already finished.
+async fn handle_resize_request(
+    tx: &PushSender,
+    resize_cmd_tx: &Option<tokio::sync::mpsc::UnboundedSender<ResizeArm>>,
+    req: DataPlaneResize,
+) -> Result<(), Status> {
+    let op = DataPlaneResizeOp::try_from(req.op).unwrap_or(DataPlaneResizeOp::Unspecified);
+    let within_ceiling = req.target_stream_count
+        <= blit_core::engine::local_receiver_capacity().max_streams.max(1);
+    let accepted = match (op, resize_cmd_tx) {
+        (DataPlaneResizeOp::Add, Some(cmd_tx)) => {
+            req.sub_token.len() == blit_core::remote::transfer::SUB_TOKEN_LEN
+                && within_ceiling
+                && cmd_tx
+                    .send(ResizeArm {
+                        epoch: req.epoch,
+                        sub_token: req.sub_token.clone(),
+                    })
+                    .is_ok()
+        }
+        (DataPlaneResizeOp::Remove, Some(_)) => true,
+        _ => false,
+    };
+    if !accepted {
+        log::warn!(
+            "push: refusing DataPlaneResize (op {:?}, epoch {}, target {})",
+            op,
+            req.epoch,
+            req.target_stream_count
+        );
+    }
+    send_control_message(
+        tx,
+        server_push_response::Payload::DataPlaneResizeAck(DataPlaneResizeAck {
+            epoch: req.epoch,
+            effective_stream_count: req.target_stream_count,
+            accepted,
+        }),
+    )
+    .await
 }
 
 struct FileListBatcher {
