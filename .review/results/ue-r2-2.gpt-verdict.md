@@ -3,7 +3,7 @@
 **Slice commits**: `042ca4b` (engine) + `ce0e396` (pipeline) +
 `04c9c6d` (push) + `b08d80e` (pull/delegated) + `0788e83` (fmt +
 wire-test fix + finding doc)
-**Fix commit**: (sha in the records commit note below)
+**Fix commit**: `ec4a3fe`
 **reviewer: gpt-5.5** (codex exec, read-only, headroom proxy; raw
 findings tail preserved in `.review/results/ue-r2-2.codex.md`). A
 3-lens adversarial self-review panel (concurrency / wire-security /
