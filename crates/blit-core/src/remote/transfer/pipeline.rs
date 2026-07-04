@@ -77,10 +77,46 @@ pub async fn execute_sink_pipeline(
 pub async fn execute_sink_pipeline_streaming(
     source: Arc<dyn TransferSource>,
     sinks: Vec<Arc<dyn TransferSink>>,
-    mut payload_rx: mpsc::Receiver<TransferPayload>,
+    payload_rx: mpsc::Receiver<TransferPayload>,
     prefetch: usize,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<SinkOutcome> {
+    execute_sink_pipeline_elastic(source, sinks, payload_rx, prefetch, progress, None).await
+}
+
+/// Control commands for a RUNNING pipeline (`ue-r2-2` stream resize).
+pub enum SinkControl {
+    /// Spawn a worker for this sink, pulling from the shared work
+    /// queue like every other worker. Safe at any time: a worker added
+    /// after end-of-stream sees the closed queue immediately and just
+    /// runs `finish()`.
+    Add(Arc<dyn TransferSink>),
+    /// Retire one worker: it stops pulling new payloads at the next
+    /// payload boundary, emits its sink's per-stream END record via
+    /// `finish()`, and exits — the receiving end's worker terminates
+    /// normally on that END, so a REMOVE needs no receiver-side
+    /// coordination. Refused (no-op) when only one live worker
+    /// remains: with zero workers the forwarder's queue send fails and
+    /// it treats that as shutdown, silently dropping the rest of the
+    /// payload stream.
+    RetireOne,
+}
+
+/// `ue-r2-2`: [`execute_sink_pipeline_streaming`] plus a control
+/// channel that can grow or shrink the live worker set mid-run. The
+/// shared queue's capacity stays `prefetch * initial sink count`
+/// (added workers raise parallelism, not in-flight buffering — the
+/// bound is a back-pressure property, not a correctness one).
+pub async fn execute_sink_pipeline_elastic(
+    source: Arc<dyn TransferSource>,
+    sinks: Vec<Arc<dyn TransferSink>>,
+    mut payload_rx: mpsc::Receiver<TransferPayload>,
+    prefetch: usize,
+    progress: Option<&RemoteTransferProgress>,
+    control_rx: Option<mpsc::UnboundedReceiver<SinkControl>>,
+) -> Result<SinkOutcome> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     if sinks.is_empty() {
         // Drain incoming channel so the producer isn't left dangling.
         while payload_rx.recv().await.is_some() {}
@@ -95,7 +131,6 @@ pub async fn execute_sink_pipeline_streaming(
     // pulls payloads from the common queue, so work is stolen by
     // whichever sink is free rather than pre-assigned round-robin.
     let (work_tx, work_rx) = flume::bounded::<TransferPayload>(capacity);
-    let mut sink_handles: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::with_capacity(sink_count);
 
     // Cancellation flag set by the first worker that errors. Without it,
     // one sink failing only drops that worker's `work_rx` clone; as long
@@ -105,15 +140,31 @@ pub async fn execute_sink_pipeline_streaming(
     // (Codex review, PR2). With it, the forwarder stops at the next
     // payload boundary and closes the queue so the survivors drain and
     // finish promptly.
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
 
-    for sink in sinks {
-        let work_rx = work_rx.clone();
-        let source_clone = source.clone();
-        let progress_clone = progress.cloned();
-        let total_clone = total.clone();
-        let cancelled_worker = cancelled.clone();
-        sink_handles.push(tokio::spawn(async move {
+    // Dynamic worker membership (`ue-r2-2`): a JoinSet instead of a
+    // fixed Vec of handles, plus a per-worker retire flag so a REMOVE
+    // can drain exactly one worker. `retire_flags` holds the workers
+    // that are live and not yet asked to retire — its length is the
+    // count the retire floor checks.
+    let mut join_set: tokio::task::JoinSet<(usize, Result<()>)> = tokio::task::JoinSet::new();
+    let mut retire_flags: Vec<(usize, tokio::sync::watch::Sender<bool>)> = Vec::new();
+    let mut next_slot = 0usize;
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_sink_worker(
+        join_set: &mut tokio::task::JoinSet<(usize, Result<()>)>,
+        slot: usize,
+        sink: Arc<dyn TransferSink>,
+        work_rx: flume::Receiver<TransferPayload>,
+        source: Arc<dyn TransferSource>,
+        progress: Option<RemoteTransferProgress>,
+        total: Arc<std::sync::Mutex<SinkOutcome>>,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        mut retire: tokio::sync::watch::Receiver<bool>,
+    ) {
+        use std::sync::atomic::Ordering;
+        join_set.spawn(async move {
             // Wrap the body so any early-return error trips the shared
             // cancel flag before the `?` unwinds the task.
             let run = async {
@@ -123,14 +174,27 @@ pub async fn execute_sink_pipeline_streaming(
                     // survivors draining the rest of the bounded queue.
                     // Interrupting an in-flight prepare/write (true prompt
                     // cancellation) is the AbortOnDrop family, w4-1.
-                    if cancelled_worker.load(std::sync::atomic::Ordering::Relaxed) {
+                    if cancelled.load(Ordering::Relaxed) {
                         break;
                     }
-                    let payload = match work_rx.recv_async().await {
-                        Ok(p) => p,
-                        Err(_) => break, // queue closed and drained
+                    // ue-r2-2: a retired worker stops at the same payload
+                    // boundary; queued payloads stay in the shared queue
+                    // for the survivors (dequeue = ownership, so
+                    // exactly-once is preserved — flume's RecvFut only
+                    // takes an item when it resolves, so racing it is
+                    // safe). The watch (not a flag) also frees a worker
+                    // parked on an IDLE queue. Its `finish()` below emits
+                    // the per-stream END record — the receiver-side
+                    // teardown signal.
+                    let payload = tokio::select! {
+                        biased;
+                        _ = retire.changed() => break,
+                        recv = work_rx.recv_async() => match recv {
+                            Ok(p) => p,
+                            Err(_) => break, // queue closed and drained
+                        },
                     };
-                    let prepared = source_clone
+                    let prepared = source
                         .prepare_payload(payload)
                         .await
                         .context("preparing payload")?;
@@ -149,12 +213,12 @@ pub async fn execute_sink_pipeline_streaming(
                         .write_payload(prepared)
                         .await
                         .context("writing payload")?;
-                    if let Some(p) = &progress_clone {
+                    if let Some(p) = &progress {
                         for (name, size) in &files {
                             p.report_file_complete(name.clone(), *size);
                         }
                     }
-                    let mut t = total_clone.lock().unwrap();
+                    let mut t = total.lock().unwrap();
                     t.merge(&outcome);
                 }
                 sink.finish().await?;
@@ -164,16 +228,29 @@ pub async fn execute_sink_pipeline_streaming(
             if run.is_err() {
                 // Signal the forwarder (and implicitly the other workers,
                 // once the queue closes) to stop feeding new work.
-                cancelled_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+                cancelled.store(true, Ordering::Relaxed);
             }
-            run
-        }));
+            (slot, run)
+        });
     }
 
-    // Drop our own receiver handle so the channel closes once the
-    // forwarder drops its sender and the workers' clones drain — without
-    // this, `recv_async` would never see `Disconnected`.
-    drop(work_rx);
+    for sink in sinks {
+        let (retire_tx, retire_rx) = tokio::sync::watch::channel(false);
+        let slot = next_slot;
+        next_slot += 1;
+        retire_flags.push((slot, retire_tx));
+        spawn_sink_worker(
+            &mut join_set,
+            slot,
+            sink,
+            work_rx.clone(),
+            source.clone(),
+            progress.cloned(),
+            total.clone(),
+            cancelled.clone(),
+            retire_rx,
+        );
+    }
 
     // Forwarder: move payloads from the incoming channel onto the shared
     // work queue. `send_async` applies back-pressure (bounded queue); if
@@ -181,7 +258,9 @@ pub async fn execute_sink_pipeline_streaming(
     // and we stop. It also bails as soon as a worker sets `cancelled`, so
     // a single sink error halts intake promptly instead of waiting for
     // every worker to drop. Dropping `work_tx` on end-of-stream (or on
-    // cancel) signals the workers.
+    // cancel) signals the workers. (The executor keeps a `work_rx` clone
+    // for late-added workers — flume disconnect is sender-driven, so the
+    // retained receiver does not keep the queue alive.)
     let cancelled_fwd = cancelled.clone();
     let forwarder = tokio::spawn(async move {
         while let Some(payload) = payload_rx.recv().await {
@@ -199,22 +278,79 @@ pub async fn execute_sink_pipeline_streaming(
         }
         // Dropping work_tx closes the queue → workers see Disconnected
         // after draining and run finish().
-        drop(work_tx);
     });
 
-    // Wait for all sinks to finish and aggregate errors (first wins).
+    // Supervise: join workers (first error wins) while servicing the
+    // resize control channel. `join_next() == None` means every worker
+    // — initial and added — has finished, which only happens once the
+    // queue closed and drained (or errored/retired), so control is
+    // moot beyond that point.
+    let mut control_rx = control_rx;
     let mut first_err: Option<eyre::Report> = None;
-    for h in sink_handles {
-        match h.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) if first_err.is_none() => first_err = Some(e),
-            Ok(Err(_)) => {}
-            Err(join) if first_err.is_none() => {
-                first_err = Some(eyre::eyre!("sink worker panicked: {}", join));
+    loop {
+        let control_recv = async {
+            match control_rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending().await,
             }
-            Err(_) => {}
+        };
+        tokio::select! {
+            joined = join_set.join_next() => {
+                match joined {
+                    None => break,
+                    Some(Ok((slot, res))) => {
+                        retire_flags.retain(|(s, _)| *s != slot);
+                        if let Err(e) = res {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                    Some(Err(join)) => {
+                        if first_err.is_none() {
+                            first_err = Some(eyre::eyre!("sink worker panicked: {}", join));
+                        }
+                    }
+                }
+            }
+            cmd = control_recv => {
+                match cmd {
+                    Some(SinkControl::Add(sink)) => {
+                        if !cancelled.load(Ordering::Relaxed) {
+                            let (retire_tx, retire_rx) = tokio::sync::watch::channel(false);
+                            let slot = next_slot;
+                            next_slot += 1;
+                            retire_flags.push((slot, retire_tx));
+                            spawn_sink_worker(
+                                &mut join_set,
+                                slot,
+                                sink,
+                                work_rx.clone(),
+                                source.clone(),
+                                progress.cloned(),
+                                total.clone(),
+                                cancelled.clone(),
+                                retire_rx,
+                            );
+                        }
+                        // On a failing transfer the added sink is dropped
+                        // unused; its socket closes and the peer's worker
+                        // errors into the already-failing teardown.
+                    }
+                    Some(SinkControl::RetireOne) => {
+                        // Floor at one live worker (see SinkControl docs).
+                        if retire_flags.len() > 1 {
+                            if let Some((_, retire_tx)) = retire_flags.pop() {
+                                let _ = retire_tx.send(true);
+                            }
+                        }
+                    }
+                    None => control_rx = None, // controller gone; keep draining
+                }
+            }
         }
     }
+    drop(work_rx);
     let _ = forwarder.await;
 
     if let Some(err) = first_err {
@@ -1139,6 +1275,291 @@ mod workqueue_tests {
         fn root(&self) -> &Path {
             &self.root
         }
+    }
+
+    /// ue-r2-2: like `CountingSink` but also records `finish()` (the
+    /// per-stream END emission) and can block until released, so a
+    /// test can hold a worker mid-payload while the supervisor acts.
+    struct GatedSink {
+        count: Arc<AtomicU64>,
+        finished: Arc<AtomicU64>,
+        gate: Option<Arc<tokio::sync::Semaphore>>,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for GatedSink {
+        async fn write_payload(&self, _payload: PreparedPayload) -> Result<SinkOutcome> {
+            if let Some(gate) = &self.gate {
+                let permit = gate.acquire().await.expect("gate open");
+                permit.forget();
+            }
+            self.count.fetch_add(1, Ordering::Relaxed);
+            Ok(SinkOutcome {
+                files_written: 1,
+                bytes_written: 0,
+            })
+        }
+        async fn finish(&self) -> Result<()> {
+            self.finished.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    async fn scan_headers(
+        src: &Path,
+        n: usize,
+    ) -> (Arc<FsTransferSource>, Vec<crate::generated::FileHeader>) {
+        std::fs::create_dir_all(src).unwrap();
+        for i in 0..n {
+            std::fs::write(src.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let source = Arc::new(FsTransferSource::new(src.to_path_buf()));
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut header_rx, scan_handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = header_rx.recv().await {
+            headers.push(h);
+        }
+        let _ = scan_handle.await.unwrap().unwrap();
+        assert_eq!(headers.len(), n);
+        (source, headers)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn elastic_add_puts_a_new_worker_on_the_running_queue() {
+        // One worker blocks on its first payload; the queue holds the
+        // second. Adding a sink mid-run must let the new worker take
+        // that queued payload — deterministic proof the ADDed worker
+        // participates. Then release the gate and drain.
+        let tmp = tempdir().unwrap();
+        let (source, headers) = scan_headers(&tmp.path().join("src"), 2).await;
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let c1 = Arc::new(AtomicU64::new(0));
+        let f1 = Arc::new(AtomicU64::new(0));
+        let first: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: c1.clone(),
+            finished: f1.clone(),
+            gate: Some(gate.clone()),
+            root: PathBuf::from("/one"),
+        });
+        let c2 = Arc::new(AtomicU64::new(0));
+        let f2 = Arc::new(AtomicU64::new(0));
+        let second: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: c2.clone(),
+            finished: f2.clone(),
+            gate: None,
+            root: PathBuf::from("/two"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(4);
+        for h in headers {
+            tx.send(TransferPayload::File(h)).await.unwrap();
+        }
+        drop(tx);
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(source, vec![first], rx, 2, None, Some(ctl_rx)).await
+        });
+
+        // Give worker 1 time to dequeue payload 1 and park inside its
+        // gated write (the count stays 0 while parked).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(c1.load(Ordering::Relaxed), 0, "worker 1 is parked in the gate");
+
+        ctl_tx
+            .send(SinkControl::Add(second))
+            .expect("pipeline alive");
+        // The added worker must drain the queued payload while worker 1
+        // is still gated.
+        for _ in 0..200 {
+            if c2.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            c2.load(Ordering::Relaxed),
+            1,
+            "added worker processed the queued payload while the original was blocked"
+        );
+
+        gate.add_permits(8);
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        assert_eq!(outcome.files_written, 2, "exactly-once across both workers");
+        assert_eq!(c1.load(Ordering::Relaxed), 1);
+        assert_eq!(f1.load(Ordering::Relaxed), 1, "original sink finished");
+        assert_eq!(f2.load(Ordering::Relaxed), 1, "added sink finished");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn elastic_retire_ends_one_worker_and_survivors_drain_the_queue() {
+        let tmp = tempdir().unwrap();
+        let n = 30usize;
+        let (source, headers) = scan_headers(&tmp.path().join("src"), n).await;
+
+        let c1 = Arc::new(AtomicU64::new(0));
+        let f1 = Arc::new(AtomicU64::new(0));
+        let keep: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: c1.clone(),
+            finished: f1.clone(),
+            gate: None,
+            root: PathBuf::from("/keep"),
+        });
+        let c2 = Arc::new(AtomicU64::new(0));
+        let f2 = Arc::new(AtomicU64::new(0));
+        let victim: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: c2.clone(),
+            finished: f2.clone(),
+            gate: None,
+            root: PathBuf::from("/victim"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(4);
+        let feeder = tokio::spawn(async move {
+            for h in headers {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+                // Trickle so the retire lands mid-run, not after.
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let pipeline = tokio::spawn(async move {
+            // Retire targets the most recently added live worker —
+            // `victim` here.
+            execute_sink_pipeline_elastic(source, vec![keep, victim], rx, 2, None, Some(ctl_rx))
+                .await
+        });
+
+        // Let both workers move some payloads, then retire one.
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        ctl_tx.send(SinkControl::RetireOne).expect("pipeline alive");
+
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        let _ = feeder.await;
+        let kept = c1.load(Ordering::Relaxed);
+        let retired = c2.load(Ordering::Relaxed);
+        assert_eq!(outcome.files_written, n, "no payload lost on retire");
+        assert_eq!(kept + retired, n as u64, "exactly-once across the resize");
+        assert_eq!(f2.load(Ordering::Relaxed), 1, "retired sink emitted its END");
+        assert_eq!(
+            f1.load(Ordering::Relaxed),
+            1,
+            "survivor finished at end-of-stream"
+        );
+        assert!(
+            retired < n as u64,
+            "the retired worker must not have drained the whole queue itself"
+        );
+        assert!(kept > 0, "the survivor kept working after the retire");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn elastic_refuses_to_retire_the_last_worker() {
+        let tmp = tempdir().unwrap();
+        let n = 10usize;
+        let (source, headers) = scan_headers(&tmp.path().join("src"), n).await;
+
+        let count = Arc::new(AtomicU64::new(0));
+        let finished = Arc::new(AtomicU64::new(0));
+        let only: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: count.clone(),
+            finished: finished.clone(),
+            gate: None,
+            root: PathBuf::from("/only"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(2);
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        // Ask for the impossible before any payload flows: the floor
+        // must hold and every payload still lands.
+        ctl_tx.send(SinkControl::RetireOne).unwrap();
+        let feeder = tokio::spawn(async move {
+            for h in headers {
+                if tx.send(TransferPayload::File(h)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = execute_sink_pipeline_elastic(source, vec![only], rx, 2, None, Some(ctl_rx))
+            .await
+            .expect("pipeline ok");
+        let _ = feeder.await;
+        assert_eq!(outcome.files_written, n, "retire floor held at one worker");
+        assert_eq!(count.load(Ordering::Relaxed), n as u64);
+        assert_eq!(finished.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn elastic_add_after_end_of_stream_just_finishes_the_sink() {
+        // Worker 1 owns the ONLY payload (parked in its gate) and the
+        // queue is closed, so a worker added now finds a drained,
+        // disconnected queue: it must process nothing and still close
+        // its sink cleanly (the END record).
+        let tmp = tempdir().unwrap();
+        let (source, headers) = scan_headers(&tmp.path().join("src"), 1).await;
+
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let c1 = Arc::new(AtomicU64::new(0));
+        let f1 = Arc::new(AtomicU64::new(0));
+        let first: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: c1.clone(),
+            finished: f1.clone(),
+            gate: Some(gate.clone()),
+            root: PathBuf::from("/one"),
+        });
+        let c2 = Arc::new(AtomicU64::new(0));
+        let f2 = Arc::new(AtomicU64::new(0));
+        let late: Arc<dyn TransferSink> = Arc::new(GatedSink {
+            count: c2.clone(),
+            finished: f2.clone(),
+            gate: None,
+            root: PathBuf::from("/late"),
+        });
+
+        let (tx, rx) = mpsc::channel::<TransferPayload>(2);
+        for h in headers {
+            tx.send(TransferPayload::File(h)).await.unwrap();
+        }
+        drop(tx); // end-of-stream
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_elastic(source, vec![first], rx, 2, None, Some(ctl_rx)).await
+        });
+
+        // Wait until worker 1 has dequeued the payload and parked.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(c1.load(Ordering::Relaxed), 0, "worker 1 is parked");
+
+        ctl_tx.send(SinkControl::Add(late)).expect("pipeline alive");
+        // The late worker sees the drained closed queue and finishes.
+        for _ in 0..200 {
+            if f2.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            f2.load(Ordering::Relaxed),
+            1,
+            "late worker still closes its sink cleanly (END record)"
+        );
+        assert_eq!(
+            c2.load(Ordering::Relaxed),
+            0,
+            "nothing left for the late worker"
+        );
+
+        gate.add_permits(4);
+        let outcome = pipeline.await.unwrap().expect("pipeline ok");
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(f1.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

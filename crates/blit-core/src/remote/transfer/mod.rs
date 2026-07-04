@@ -21,7 +21,10 @@ pub use payload::{
     prepared_payload_stream, transfer_payloads_via_control_plane, PlannedPayloads, PreparedPayload,
     TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
-pub use pipeline::{execute_sink_pipeline, execute_sink_pipeline_streaming};
+pub use pipeline::{
+    execute_sink_pipeline, execute_sink_pipeline_elastic, execute_sink_pipeline_streaming,
+    SinkControl,
+};
 pub use progress::{
     ByteProgressSink, LiveProbe, NoProbe, Probe, ProgressEvent, RemoteTransferProgress, StreamId,
     StreamProbe, StreamState, StreamTelemetry, StreamTelemetrySnapshot,
