@@ -1,9 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w2-2` landed and graded through the codex
-loop — **the dial is the single stream/chunk owner**; the planner's
-dead chunk lane is deleted); local HEAD `27f53a0`+records, **not yet
-pushed** to either remote across these sessions.
+Last updated: 2026-07-04 (`w3-1` landed and graded through the codex
+loop — **`BufferPool::for_data_plane` owns the pool formula + the
+available-memory cap**; sysinfo 1024× units bug fixed); local HEAD
+`f49f8f6`+records, **not yet pushed** to either remote across these
+sessions.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -11,35 +12,35 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **w2-2 DONE — dial is the single stream/chunk owner** (`01209bc`+fix
-  `27f53a0`; finding `.review/findings/w2-2-stream-ladder-owner.md`).
-  The row's three stream-ladder legs died with REV4
-  (ue-r2-1e/-1f/-1h, absorption recorded D-2026-06-20-1); this slice
-  closed the remaining leg by deleting the planner's **dead chunk
-  lane**: a 5-agent audit workflow + hand verification proved the
-  transfer_plan 16/32 MiB ladder lost to the dial override on every
-  remote path, won only where the value was discarded (local engine,
-  tests), and its one guarded read was unreachable. Deleted: the
-  ladder, `Plan`/`PlannedPayloads` wrappers (`build_plan`/
-  `plan_transfer_payloads` return vecs), `chunk_bytes_override` + all
-  refresh sites, never-called `plan_to_daemon_format`, orphaned
-  `TuningParams`. Behavior byte-identical; wire chunking read the dial
-  before and after. Comment-truth sweep: dial.rs mutability model
-  (chunk/prefetch steps reach new sessions/batches, not live ones),
-  buffer.rs example. W3.1's "settled tuning owner" prerequisite =
-  `engine::TransferDial`. Codex: NEEDS FIXES 1 Low (new comment said
-  "fallback batch" in the data-plane branch → `27f53a0`). 4 new
-  transfer_plan pins (module had none); workspace 1448 → 1452/0/2
-  across 37 suites.
-- **Earlier 2026-07-04: w4-5, W1 family, w4-1, w4-3 all `[x]`**
+- **w3-1 DONE — memory-aware BufferPool** (`f49f8f6`; finding
+  `.review/findings/w3-1-memory-aware-buffer-pool.md`).
+  `BufferPool::for_data_plane(chunk_bytes, streams)` owns the formula
+  (streams×2+4, shared 64 KiB `DATA_PLANE_BUFFER_FLOOR`) plus an
+  available/4 memory cap with a **2-buffers-per-stream liveness
+  floor** (the double-buffered sender holds 2, acquired sequentially —
+  a tighter cap shrinks buffer size, never concurrency, so the cap can
+  never deadlock a sender). Replaces the 3 pasted sites (push client,
+  pull_sync multistream, pull_sync resume — whose pool is inert at
+  runtime, verified). Elastic paths authorize
+  `dial.ceiling_max_streams()` up front (lazy allocation → free until
+  resize ADDs streams), closing both sites' "growing the pool live is
+  a W3.1 concern" deferral. **Bonus bug fixed**: the old
+  available-memory helper multiplied sysinfo by 1024, but sysinfo 0.38
+  returns bytes — memory was over-reported 1024×, making every
+  downstream cap vacuous (incl. BufferSizer's /10). Comment-truth:
+  `RECEIVE_CHUNK_SIZE`'s false "matches the send side" claim
+  rewritten. Codex: **PASS, 0 findings**. 8 params-layer pins,
+  mutation-verified; workspace 1452 → 1460/0/2 across 37 suites.
+- **Earlier 2026-07-04: w2-2, w4-5, W1 family, w4-1, w4-3 all `[x]`**
   (details: DEVLOG 2026-07-04 entries; findings
-  `.review/findings/w4-5-*.md`, `w1-*.md`, `w4-*.md`):
+  `.review/findings/w2-2-*.md`, `w4-5-*.md`, `w1-*.md`, `w4-*.md`):
+  dial = single stream/chunk owner w2-2 `01209bc`+`27f53a0` (planner's
+  dead chunk lane deleted; tuning owner = `engine::TransferDial`);
   `supports_cancellation` flipped for Push/PullSync w4-5
-  `05a8b39`+`1708075` (D-2026-07-04-3 executed — CancelJob + TUI work
-  on attached transfers); socket policy helper w1-2 `16237e2`; real
-  keepalive timing w1-3 `865fc1e`; shared accept/token bounds w1-4
-  `6a19e1d`+`d17b089`; AbortOnDrop family w4-1; disconnect racing
-  w4-3 `37d7f91`.
+  `05a8b39`+`1708075` (D-2026-07-04-3 executed); socket policy helper
+  w1-2 `16237e2`; real keepalive timing w1-3 `865fc1e`; shared
+  accept/token bounds w1-4 `6a19e1d`+`d17b089`; AbortOnDrop family
+  w4-1; disconnect racing w4-3 `37d7f91`.
 - **REV4 code-complete** (`ue-r2-1b`..`ue-r2-2`, all nine slices;
   details: DEVLOG 2026-07-03/04 entries, REVIEW.md commit map). Stream
   resize live end-to-end; all three static stream-count ladders
@@ -62,11 +63,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w2-2 closed
-   `[x]` 2026-07-04 (see Now), the seventh row that day. Strict row
-   order now gives **w3-1** (memory-aware BufferPool, High) as the
-   topmost open row — its "after W2.2 settles the tuning owner"
-   prerequisite is satisfied (owner = `engine::TransferDial`);
+1. **Design-review queue** — `REVIEW.md` order governs. w3-1 closed
+   `[x]` 2026-07-04 (see Now), the eighth row that day. Strict row
+   order now gives **w6-1** (ProgressEvent contract, Medium — defines
+   semantics in blit-core, normalizes producers, shared accumulator,
+   incorporates design-1's byte double-count) as the topmost open row;
    **design-3** (data-plane connect timeouts, filed-findings section)
    remains the sanctioned smaller alternative (two client connect
    sites, bound imports the shared `DATA_PLANE_ACCEPT_TIMEOUT`) —
@@ -84,7 +85,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    fold-or-retire (statically live on the local engine path but
    dynamically dead — nothing fills the tar/raw telemetry buckets
    since `4ce4898`, 2026-04-07; verified during the w2-2 audit,
-   design decision not review-queue material).
+   design decision not review-queue material); receive-side dial
+   tuning (rest of constants-receive-chunk-1mib-asymmetry — w3-1
+   scoped it out, wire needs no change; separate slice if wanted).
 
 ## Authoritative docs right now
 
@@ -118,13 +121,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(RESOLVED 2026-07-04, owner Q&A session)** Four standing items
-  answered one-at-a-time: commit erratum → **leave as-is**
-  (D-2026-07-04-2); 10 GbE → **soon, keep coding first** (see
-  Blocked); D-2026-06-20-1 stale wording → **follow the existing
-  pattern** (edited in place, D-2026-06-20-3/-6 style);
-  `supports_cancellation` → **flip it** (D-2026-07-04-3 — **executed**,
-  landed as w4-5 `05a8b39`+`1708075`).
 - **(OPEN)** Historical audit/finding docs (`audit-13/14/15`, `drift-*`)
   still embed `/Users/...` in recorded evidence — scrub, or leave as
   evidence? Agent rec: leave; live docs are already clean.
@@ -149,6 +145,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (14th)** @ `f49f8f6`+records+docs —
+  **w3-1-memory-aware-buffer-pool landed and graded through the codex
+  loop** (owner go: "continue" → topmost open row per the 13th
+  handoff). `BufferPool::for_data_plane(chunk_bytes, streams)`:
+  formula + 64 KiB floor + available/4 cap + 2-buffers-per-stream
+  liveness floor (cap shrinks buffers, never concurrency — deadlock-
+  proof by construction); 3 pasted sites replaced; elastic paths
+  authorize `ceiling_max_streams()` up front. Sysinfo 1024× units bug
+  fixed (0.38 returns bytes; old helper's ×1024 made every memory cap
+  vacuous). Design assumptions verified by a 5-agent audit workflow
+  before coding (two-buffer hold-and-wait, wire tolerance of shrunk
+  buffers, hard resize ceiling, resume pool inert). Codex: **PASS 0
+  findings** (first invocation killed by a session restart before
+  output; record is the complete re-run). 8 params pins mutation-
+  verified. Workspace 1452 → 1460/0/2 across 37 suites, fmt/clippy
+  clean (macOS host). In-flight: none. **Exact first action next
+  session**: on owner "continue", pick up **w6-1** (ProgressEvent
+  contract, topmost open row; design-3 remains the sanctioned smaller
+  alternative) through the codex loop. Nothing pushed — push stays
+  owner-gated.
 - **2026-07-04 (13th)** @ `27f53a0`+records+docs —
   **w2-2-stream-ladder-owner landed and graded through the codex
   loop** (owner go: "continue" → topmost open row per the 12th
@@ -158,20 +174,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   planner's dead chunk lane (ladder, `Plan`/`PlannedPayloads`
   wrappers, `chunk_bytes_override` + 5 refresh sites, never-called
   `plan_to_daemon_format`, orphaned `TuningParams`); dial =
-  single chunk owner; byte-identical wire behavior. Evidence for
-  "dead": 5-agent audit workflow + hand verification (one guarded
-  read, unreachable; local path discards the value). Codex: NEEDS
-  FIXES 1 Low (new ensure_dial comment said "fallback batch" in the
-  data-plane branch → `27f53a0`); verdict + trimmed review recorded,
-  REVIEW.md row `[x]`. 4 new transfer_plan pins (module had zero
-  tests); deletions compile-guarded (w2-1 evidence shape). Workspace
-  1448 → 1452/0/2 across 37 suites, fmt/clippy clean (macOS host).
-  New discoveries → Open questions: tracked stale worktree snapshot
-  `725aa07`; WHITEPAPER tuning drift. In-flight: none. **Exact first
-  action next session**: on owner "continue", pick up **w3-1**
-  (memory-aware BufferPool, topmost open row; design-3 remains the
-  sanctioned smaller alternative) through the codex loop. Nothing
-  pushed — push stays owner-gated.
+  single chunk owner; byte-identical wire behavior. Codex: NEEDS
+  FIXES 1 Low (comment-truth → `27f53a0`). 4 new transfer_plan pins.
+  Workspace 1448 → 1452/0/2. New discoveries → Open questions:
+  tracked stale worktree snapshot `725aa07`; WHITEPAPER tuning drift.
+  Nothing pushed.
 - **2026-07-04 (12th)** @ `1708075`+records+docs —
   **w4-5-supports-cancellation-flip landed and graded** (owner go:
   "continue"). D-2026-07-04-3 executed: CancelJob dispatch flipped on
@@ -183,14 +190,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   1448/0/2 across 37 suites. Known gap: no e2e drives a live
   mid-flight attached cancel (needs a test seam; w4-3 evidence
   shape). Nothing pushed.
-- **2026-07-04 (11th)** @ `d17b089`+records+docs — **w1-2, w1-3, w1-4
-  landed and graded in one session** (owner go: "continue. use
-  /playbook reviewloop with codex" — playbook doesn't exist; mapped
-  to D-2026-07-04-1). Codex: PASS 0 / PASS 0 / NEEDS FIXES 1 Low
-  (stall_guard doc drift → `d17b089`). W1 transport-policy family
-  complete. blit-core 414 → 418; workspace 1446/0/2. Environment
-  note: **codex hangs if invoked in a chained command — run it
-  standalone with stdin closed (`< /dev/null`)**. Same session, owner
-  Q&A: erratum leave (D-2026-07-04-2), 10 GbE soon-keep-coding,
-  D-2026-06-20-1 edited in place, cancellation flip authorized
-  (D-2026-07-04-3 → w4-5). Nothing pushed.
