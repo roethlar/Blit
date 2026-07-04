@@ -4,8 +4,10 @@ Last updated: 2026-07-04 (`w6-1`, `w6-2`, `w4-4`, and `design-3` all
 landed and graded through the codex loop in one session —
 ProgressEvent contract in blit-core; §1.6 residue filed as
 w6-2a/-2b/-2c; blocking filesystem work off the tokio runtime;
-**bounded data-plane dials**); local HEAD `49dcec6`+records, **not
-yet pushed** to either remote across these sessions.
+**bounded data-plane dials**). **Owner pushed `master` → `github` at
+`10d89e0`** (2026-07-04); the `origin` gitea mirror was not pushed
+and lags. windows-latest CI on this push is the "meaningfully green"
+check the Open questions entry anticipates.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -194,6 +196,5 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   pushed.
 - **2026-07-04 (16th)** @ `8b7829d`+records —
   **w6-2-progress-residue-verify landed and graded**. All three §1.6
-  claims CONFIRMED; filed as independent rows w6-2a/-2b/-2c. Codex:
-  NEEDS FIXES 2 Low (doc-coherence) → fixed `8b7829d`. No code;
-  suite stayed 1472/0/2. Nothing pushed.
+  claims CONFIRMED; filed as w6-2a/-2b/-2c. Codex: NEEDS FIXES 2 Low
+  (doc-coherence) → fixed `8b7829d`. No code; 1472/0/2.
