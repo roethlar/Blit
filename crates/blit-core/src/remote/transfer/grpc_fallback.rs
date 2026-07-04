@@ -33,11 +33,12 @@
 //!
 //! ## In scope for slice 1
 //!
-//! - `crates/blit-core/src/remote/pull.rs:316` (plain `pull()` entry —
-//!   CLI receives `PullChunk`s from the daemon).
-//! - `crates/blit-core/src/remote/pull.rs:484` (`scan_remote_files` —
-//!   metadata-only force-gRPC scan).
-//! - `crates/blit-core/src/remote/pull.rs:752` (`pull_sync_with_spec`
+//! (ue-r2-1h: the audit chain also named the deprecated `pull()`
+//! entry, deleted with its RPC — two CLI receive sites remain.)
+//!
+//! - `crates/blit-core/src/remote/pull.rs` (`scan_remote_files` —
+//!   metadata-only PullSync scan).
+//! - `crates/blit-core/src/remote/pull.rs` (`pull_sync_with_spec`
 //!   — the load-bearing gRPC-fallback control + data loop named by
 //!   GPT-12 / R3 §H3).
 //! - Send-side cap: `GrpcFallbackSink` (push, client → daemon) and
@@ -49,11 +50,12 @@
 //!
 //! ## Out of scope for slice 1 / 2 (named explicitly to prevent drift)
 //!
-//! - `crates/blit-core/src/remote/pull.rs:~1210` — `RemoteFileStream`'s
+//! - `crates/blit-core/src/remote/pull.rs` — `RemoteFileStream`'s
 //!   `poll_read` consumes pull-stream messages via `Stream::poll_next`
 //!   inside an `AsyncRead` impl. Structurally different from the bare
 //!   `Streaming::message().await` shape; needs its own adapter and is
-//!   not on the audit chain's named h3c surface.
+//!   not on the audit chain's named h3c surface. (Since ue-r2-1h it
+//!   reads `ServerPullMessage` frames — same structural exclusion.)
 //! - `crates/blit-core/src/remote/push/client/helpers.rs:245` — CLI
 //!   push response forwarder (`spawn_response_task`). Symmetric PUSH
 //!   analog; tracked as a potential h3-sibling slice if owner extends

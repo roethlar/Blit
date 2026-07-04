@@ -211,6 +211,9 @@ fn new_spec_with_capacity() -> TransferOperationSpec {
         ignore_existing: false,
         require_complete_scan: true,
         receiver_capacity: Some(full_capacity_profile()),
+        // ue-r2-1h: set so the old-daemon decode assertions also cover
+        // the newest spec field being skipped as unknown.
+        metadata_only: true,
     }
 }
 

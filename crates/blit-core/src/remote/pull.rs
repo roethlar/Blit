@@ -67,9 +67,9 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 use crate::generated::{
-    client_pull_message, pull_chunk, server_pull_message, BlockHashList, ClientPullMessage,
-    ComparisonMode, DataTransferNegotiation, FileData, FileHeader, ManifestComplete, MirrorMode,
-    PeerCapabilities, PullChunk, PullRequest, PullSummary, ResumeSettings, TransferOperationSpec,
+    client_pull_message, server_pull_message, BlockHashList, ClientPullMessage, ComparisonMode,
+    DataTransferNegotiation, FileData, FileHeader, ManifestComplete, MirrorMode, PeerCapabilities,
+    PullSummary, ResumeSettings, ServerPullMessage, TransferOperationSpec,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::grpc_fallback::recv_fallback_message;
@@ -249,188 +249,96 @@ impl RemotePullClient {
         Ok(Self { endpoint, client })
     }
 
-    pub async fn pull(
-        &mut self,
-        dest_root: &Path,
-        force_grpc: bool,
-        track_paths: bool,
-        progress: Option<&RemotePullProgress>,
-    ) -> Result<RemotePullReport> {
-        // dest_root is the fully-resolved target. For a directory-source
-        // pull, it's the container dir; for a single-file pull, it's the
-        // final file path. Creating dest_root unconditionally would turn
-        // a file target into a directory. Only ensure the parent exists —
-        // handle_file_record will mkdir sub-directories as files arrive.
-        if let Some(parent) = dest_root.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("creating destination parent {}", parent.display()))?;
-            }
-        }
+    /// Open a PullSync session with `spec`, immediately completing the
+    /// client-manifest phase with an empty manifest, and return the
+    /// server-side frame stream. Shared by the relay's metadata scan
+    /// and single-file streaming (ue-r2-1h: both rode the deprecated
+    /// Pull RPC until its deletion; PullSync is the only pull wire).
+    ///
+    /// The request-stream sender is dropped on return, half-closing
+    /// the client→daemon direction. That is protocol-complete: the
+    /// daemon has the spec and the (empty) manifest, and these
+    /// sessions never use the resume protocol, the only later
+    /// client→daemon traffic. The response stream stays readable.
+    async fn open_relay_session(
+        &self,
+        spec: TransferOperationSpec,
+    ) -> Result<Streaming<ServerPullMessage>> {
+        use tokio_stream::wrappers::ReceiverStream;
 
-        // R46-F3: capture the canonical destination root once at
-        // the entry point so every per-file write site below can
-        // verify containment without re-canonicalizing. Best-effort:
-        // a missing-deepest-ancestor failure (very rare) leaves
-        // canonical_dest_root as None and the per-write check
-        // degrades to lexical-only with a logged warning. Falling
-        // back to lexical-only is preferable to refusing to write
-        // because the canonicalize layer is fragile (e.g. on
-        // unusual filesystems).
-        let canonical_dest_root = crate::path_safety::canonical_dest_root(dest_root).ok();
-
-        let (module, rel_path) = match &self.endpoint.path {
-            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
-            RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
-            RemotePath::Discovery => {
-                bail!("remote source must specify a module (server:/module/...)");
-            }
-        };
-
-        let path_str = if rel_path.as_os_str().is_empty() {
-            ".".to_string()
-        } else {
-            normalize_for_request(&rel_path)
-        };
-
-        let pull_request = PullRequest {
-            module,
-            path: path_str,
-            force_grpc,
-            metadata_only: false,
-        };
-
-        let mut stream = self
-            .client
-            .pull(pull_request)
+        let mut client = self.client.clone();
+        // Capacity 4 comfortably holds both messages even before the
+        // daemon consumes anything (cf. the >30-entry deadlock note in
+        // `pull_sync_with_spec` — an empty manifest can't reproduce it).
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientPullMessage>(4);
+        let response_stream = client
+            .pull_sync(ReceiverStream::new(rx))
             .await
-            .map_err(|status| eyre!(status.message().to_string()))?
+            .map_err(|status| eyre!(format_status(status)))?
             .into_inner();
 
-        let mut report = RemotePullReport::default();
-        let mut active_file: Option<(File, PathBuf)> = None;
-        // Store data plane task handle - spawned as background task so
-        // control plane can continue. R32-F2: AbortOnDrop ensures the
-        // task is cancelled if this future is dropped mid-flight.
-        let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
+        tx.send(ClientPullMessage {
+            payload: Some(client_pull_message::Payload::Spec(spec)),
+        })
+        .await
+        .map_err(|_| eyre!("failed to send pull sync spec"))?;
+        tx.send(ClientPullMessage {
+            payload: Some(client_pull_message::Payload::ManifestDone(
+                // Nothing enumerated on this side, so the empty
+                // manifest is trivially complete.
+                ManifestComplete {
+                    scan_complete: true,
+                },
+            )),
+        })
+        .await
+        .map_err(|_| eyre!("failed to send manifest done"))?;
 
-        // audit-h3c slice 1: route gRPC fallback receive through the
-        // helper so slice 2's progress watchdog has a single chokepoint.
-        // No behavior change today — `recv_fallback_message` is a
-        // pass-through.
-        //
-        // TODO(audit-h3c-2): the `map_err` below strips tonic::Status
-        // to a String, dropping the std::io::Error chain that slice 2's
-        // watchdog will attach when it surfaces a TimedOut. Without
-        // preserving the chain, `crate::remote::retry::is_retryable`
-        // will not classify a stall as retryable and `--retry/--wait`
-        // will not fire. Slice 2 must replace this conversion with one
-        // that preserves the io::Error in the eyre chain (e.g.
-        // `eyre::Report::new(status).wrap_err(...)`).
-        while let Some(chunk) = recv_fallback_message(&mut stream)
-            .await
-            .map_err(|status| eyre!(status.message().to_string()))?
-        {
-            match chunk.payload {
-                Some(pull_chunk::Payload::FileHeader(header)) => {
-                    finalize_active_file(&mut active_file, progress).await?;
+        Ok(response_stream)
+    }
 
-                    let relative_path = sanitize_relative_path(&header.relative_path)?;
-                    let dest_path = resolve_pull_dest_contained(
-                        dest_root,
-                        canonical_dest_root.as_deref(),
-                        &relative_path,
-                    )?;
-                    if let Some(parent) = dest_path.parent() {
-                        fs::create_dir_all(parent)
-                            .await
-                            .with_context(|| format!("creating directory {}", parent.display()))?;
-                    }
-
-                    let file = File::create(&dest_path)
-                        .await
-                        .with_context(|| format!("creating {}", dest_path.display()))?;
-
-                    if track_paths {
-                        report.downloaded_paths.push(relative_path.clone());
-                    }
-
-                    active_file = Some((file, dest_path));
-                    report.files_transferred += 1;
-                }
-                Some(pull_chunk::Payload::FileData(FileData { content })) => {
-                    let (file, path) = active_file
-                        .as_mut()
-                        .ok_or_else(|| eyre!("received file data without a preceding header"))?;
-                    file.write_all(&content)
-                        .await
-                        .with_context(|| format!("reading {}", path.display()))?;
-                    report.bytes_transferred += content.len() as u64;
-                    if let Some(progress) = progress {
-                        progress.report_payload(0, content.len() as u64);
-                    }
-                }
-                Some(pull_chunk::Payload::Negotiation(neg)) => {
-                    if neg.tcp_fallback {
-                        continue;
-                    }
-                    // Spawn data plane as background task so we can continue processing
-                    // ManifestBatch messages on the control plane.
-                    // `pull` is CLI-only — no daemon-side ActiveJobs
-                    // row to feed a byte sink for, so pass None.
-                    // `pull_sync_with_spec`'s site below is the one
-                    // that threads through the daemon's per-row
-                    // counter for delegated_pull.
-                    data_plane_handle = Some(AbortOnDrop::new(self.spawn_data_plane_receiver(
-                        neg,
-                        dest_root,
-                        track_paths,
-                        progress,
-                        None,
-                    )?));
-                }
-                Some(pull_chunk::Payload::Summary(summary)) => {
-                    report.summary = Some(summary);
-                }
-                Some(pull_chunk::Payload::ManifestBatch(batch)) => {
-                    if let Some(progress) = progress {
-                        progress.report_manifest_batch(batch.file_count as usize);
-                    }
-                }
-                None => {}
-            }
-        }
-
-        finalize_active_file(&mut active_file, progress).await?;
-
-        // Wait for data plane to complete and merge results. We
-        // `.join()` on the AbortOnDrop wrapper so the wrapper stays
-        // alive across the await — if the surrounding future is
-        // cancelled here, Drop fires abort() on the still-owned
-        // handle. Using a hypothetical `into_inner().await` here
-        // would release the wrapper before awaiting and re-introduce
-        // the detach-on-cancel bug (R34-F2).
-        if let Some(handle) = data_plane_handle {
-            let dp_result = handle
-                .join()
-                .await
-                .map_err(|err| eyre!("data plane task panicked: {}", err))??;
-            report.files_transferred = report
-                .files_transferred
-                .saturating_add(dp_result.files_transferred);
-            report.bytes_transferred = report
-                .bytes_transferred
-                .saturating_add(dp_result.bytes_transferred);
-            if track_paths {
-                report.downloaded_paths.extend(dp_result.downloaded_paths);
-            }
-            if report.summary.is_none() {
-                log::warn!("pull data plane completed without summary payload");
-            }
-        }
-
-        Ok(report)
+    /// Minimal spec for the relay's PullSync sessions: no filter,
+    /// default comparison against an empty client manifest (every file
+    /// is New → the daemon sends everything asked for), no
+    /// mirror/resume, and always `force_grpc` — bytes, when any, ride
+    /// the control stream; these sessions never dial a data plane.
+    fn build_relay_session_spec(
+        endpoint: &RemoteEndpoint,
+        path: &Path,
+        metadata_only: bool,
+    ) -> Result<TransferOperationSpec> {
+        let (module, rel_path) = match &endpoint.path {
+            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.join(path)),
+            RemotePath::Root { rel_path } => (String::new(), rel_path.join(path)),
+            RemotePath::Discovery => bail!("remote source must specify a module"),
+        };
+        Ok(TransferOperationSpec {
+            spec_version: crate::remote::transfer::operation_spec::SUPPORTED_SPEC_VERSION,
+            module,
+            source_path: normalize_for_request(&rel_path),
+            filter: None,
+            compare_mode: ComparisonMode::Unspecified as i32,
+            mirror_mode: MirrorMode::Unspecified as i32,
+            resume: None,
+            // Truthful for these sessions: no resume protocol, no tar
+            // parsing (the single-file reader consumes bare file_data
+            // frames), no TCP data plane, filter chokepoint present.
+            client_capabilities: Some(PeerCapabilities {
+                supports_resume: false,
+                supports_tar_shards: false,
+                supports_data_plane_tcp: false,
+                supports_filter_spec: true,
+                supports_stream_resize: false,
+            }),
+            force_grpc: true,
+            ignore_existing: false,
+            require_complete_scan: false,
+            // These sessions receive at most one file's bytes on the
+            // control stream — nothing for a sender dial to ramp
+            // against, so advertise nothing.
+            receiver_capacity: None,
+            metadata_only,
+        })
     }
 
     /// Spawn data plane receiver as background task, returning JoinHandle.
@@ -472,76 +380,81 @@ impl RemotePullClient {
             .await
         }))
     }
+    /// Enumerate the remote subtree's file headers without moving
+    /// bytes. Rides a metadata-only PullSync session — ue-r2-1h's port
+    /// of the deleted Pull RPC's `metadata_only` request; the daemon
+    /// answers with one bare `file_header` frame per file, then a
+    /// summary.
+    ///
+    /// Mixed versions: a daemon that predates
+    /// `TransferOperationSpec.metadata_only` ignores the flag and runs
+    /// the full protocol — with an empty client manifest and
+    /// `force_grpc` it streams every file's bytes over the control
+    /// stream. The loop still returns the right headers (they arrive
+    /// as `file_header` / `tar_shard_header` frames ahead of the data)
+    /// and discards the unwanted bytes: correct, just wasteful.
     pub async fn scan_remote_files(&mut self, path: &Path) -> Result<Vec<FileHeader>> {
-        let (module, rel_path) = match &self.endpoint.path {
-            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.join(path)),
-            RemotePath::Root { rel_path } => (String::new(), rel_path.join(path)),
-            RemotePath::Discovery => bail!("remote source must specify a module"),
-        };
-
-        let path_str = normalize_for_request(&rel_path);
-        let pull_request = PullRequest {
-            module,
-            path: path_str,
-            force_grpc: true, // Force gRPC to get headers in the control stream
-            metadata_only: true,
-        };
-
-        let mut stream = self
-            .client
-            .pull(pull_request)
-            .await
-            .map_err(|status| eyre!(status.message().to_string()))?
-            .into_inner();
+        let spec = Self::build_relay_session_spec(&self.endpoint, path, true)?;
+        let mut stream = self.open_relay_session(spec).await?;
 
         let mut headers = Vec::new();
-        // audit-h3c slice 1: same helper as the bulk-data loop at :316,
-        // for the same reason — single chokepoint for slice 2's
-        // watchdog. Metadata-only pull, but a stalled peer would hang
-        // this scan indefinitely just like the data path.
+        // audit-h3c slice 1: same receive chokepoint as the pull_sync
+        // loop, so slice 2's progress watchdog covers this scan — a
+        // stalled peer would otherwise hang it indefinitely.
         //
         // TODO(audit-h3c-2): same error-chain-stripping concern as the
-        // :316 site above — slice 2 must preserve the io::Error chain
+        // pull_sync loop — slice 2 must preserve the io::Error chain
         // through this map_err for the retry classifier to fire.
-        while let Some(chunk) = recv_fallback_message(&mut stream)
+        while let Some(msg) = recv_fallback_message(&mut stream)
             .await
-            .map_err(|status| eyre!(status.message().to_string()))?
+            .map_err(|status| eyre!(format_status(status)))?
         {
-            if let Some(pull_chunk::Payload::FileHeader(header)) = chunk.payload {
-                headers.push(header);
+            match msg.payload {
+                Some(server_pull_message::Payload::FileHeader(header)) => {
+                    headers.push(header);
+                }
+                // Old-daemon degradation: batched small files arrive
+                // as tar shards, whose headers travel in the shard
+                // header. The archive bytes themselves fall through to
+                // the catch-all below like plain file_data.
+                Some(server_pull_message::Payload::TarShardHeader(shard)) => {
+                    headers.extend(shard.files);
+                }
+                Some(server_pull_message::Payload::Summary(_)) => break,
+                // force_grpc was set, so a real TCP negotiation (as
+                // opposed to a tcp_fallback announcement) means the
+                // daemon expects us to dial a data plane this scan
+                // never will — fail fast instead of stalling both ends
+                // until the daemon's accept timeout.
+                Some(server_pull_message::Payload::Negotiation(neg)) if !neg.tcp_fallback => {
+                    bail!(
+                        "daemon attempted a data-plane negotiation during a \
+                         metadata-only scan (force_grpc was set)"
+                    );
+                }
+                // Ack / PullSyncAck / ManifestBatch / FilesToDownload /
+                // fallback-announcement Negotiation, and — from old
+                // daemons — file_data / tar-shard bytes: all irrelevant
+                // to a header scan.
+                _ => {}
             }
         }
         Ok(headers)
     }
 
+    /// Stream one remote file's bytes over the control stream. Rides a
+    /// single-file `force_grpc` PullSync session — ue-r2-1h's port of
+    /// the deleted Pull RPC's single-file gRPC path. With an empty
+    /// client manifest the daemon always sends the file; the planner
+    /// never tar-shards a single file (and the session's capabilities
+    /// advertise no tar support), so the payload arrives as bare
+    /// file_header + file_data frames followed by a summary.
     pub async fn open_remote_file(
         &self,
         path: &Path,
     ) -> Result<impl tokio::io::AsyncRead + Unpin + Send> {
-        let (module, rel_path) = match &self.endpoint.path {
-            RemotePath::Module { module, rel_path } => (module.clone(), rel_path.join(path)),
-            RemotePath::Root { rel_path } => (String::new(), rel_path.join(path)),
-            RemotePath::Discovery => bail!("remote source must specify a module"),
-        };
-
-        let path_str = normalize_for_request(&rel_path);
-        let pull_request = PullRequest {
-            module,
-            path: path_str,
-            force_grpc: true, // Force gRPC to get data in the control stream for single file
-            metadata_only: false,
-        };
-
-        // Clone client to use in async block if needed, but here we need to return a stream.
-        // We can't easily return the stream directly because it's a gRPC stream.
-        // We need to wrap it in an AsyncRead adapter.
-        let mut client = self.client.clone();
-        let stream = client
-            .pull(pull_request)
-            .await
-            .map_err(|status| eyre!(status.message().to_string()))?
-            .into_inner();
-
+        let spec = Self::build_relay_session_spec(&self.endpoint, path, false)?;
+        let stream = self.open_relay_session(spec).await?;
         Ok(RemoteFileStream::new(stream))
     }
 
@@ -626,6 +539,9 @@ impl RemotePullClient {
             // advertises its capacity so the daemon's dial can ramp
             // within it.
             receiver_capacity: Some(crate::engine::local_receiver_capacity()),
+            // Real pulls move bytes; metadata-only sessions build
+            // their spec in `build_relay_session_spec`.
+            metadata_only: false,
         })
     }
 
@@ -1214,18 +1130,27 @@ async fn compute_block_hashes(path: &Path, block_size: usize) -> Result<Vec<Vec<
     Ok(hashes)
 }
 
+/// `AsyncRead` over a single-file PullSync session's control-stream
+/// frames (see `open_remote_file`). Yields `file_data` bytes; the
+/// session's `summary` frame — or stream end — is EOF. ue-r2-1h: the
+/// predecessor of this adapter read the deleted Pull RPC's
+/// `PullChunk` frames; the frame vocabulary changed, the shape didn't.
 struct RemoteFileStream {
-    stream: Streaming<PullChunk>,
+    stream: Streaming<ServerPullMessage>,
     buffer: Vec<u8>,
     position: usize,
+    /// Set once the summary frame arrives; later polls return EOF
+    /// without touching the underlying stream again.
+    done: bool,
 }
 
 impl RemoteFileStream {
-    fn new(stream: Streaming<PullChunk>) -> Self {
+    fn new(stream: Streaming<ServerPullMessage>) -> Self {
         Self {
             stream,
             buffer: Vec::new(),
             position: 0,
+            done: false,
         }
     }
 }
@@ -1242,24 +1167,52 @@ impl tokio::io::AsyncRead for RemoteFileStream {
             self.position += len;
             return Poll::Ready(Ok(()));
         }
+        if self.done {
+            return Poll::Ready(Ok(()));
+        }
 
         match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => {
-                match chunk.payload {
-                    Some(pull_chunk::Payload::FileData(data)) => {
+            Poll::Ready(Some(Ok(msg))) => {
+                use crate::generated::server_pull_message::Payload;
+                match msg.payload {
+                    Some(Payload::FileData(data)) => {
                         self.buffer = data.content;
                         self.position = 0;
                         // Recurse to copy data to buf
                         self.poll_read(cx, buf)
                     }
-                    Some(pull_chunk::Payload::FileHeader(_)) => {
-                        // Skip headers in data stream
-                        self.poll_read(cx, buf)
+                    // The summary closes the file — treat it as EOF
+                    // rather than draining to stream end, so the
+                    // reader completes as soon as the bytes do.
+                    Some(Payload::Summary(_)) => {
+                        self.done = true;
+                        Poll::Ready(Ok(()))
                     }
-                    _ => {
-                        // Skip non-data messages (ManifestBatch, Summary, Negotiation, etc.)
-                        self.poll_read(cx, buf)
+                    // The session advertised no tar support and a
+                    // single file never plans into a shard; archive
+                    // bytes here would be undecodable, so fail loudly
+                    // rather than hand the caller a tar stream.
+                    Some(Payload::TarShardHeader(_))
+                    | Some(Payload::TarShardChunk(_))
+                    | Some(Payload::TarShardComplete(_)) => {
+                        Poll::Ready(Err(std::io::Error::other(
+                            "daemon sent tar-shard frames on a single-file \
+                             session that advertised no tar support",
+                        )))
                     }
+                    // force_grpc was set — a real TCP negotiation
+                    // means the daemon is waiting on a data-plane dial
+                    // this reader will never make.
+                    Some(Payload::Negotiation(neg)) if !neg.tcp_fallback => {
+                        Poll::Ready(Err(std::io::Error::other(
+                            "daemon attempted a data-plane negotiation on a \
+                             force_grpc single-file session",
+                        )))
+                    }
+                    // Ack / PullSyncAck / ManifestBatch /
+                    // FilesToDownload / FileHeader / fallback
+                    // Negotiation — control chatter; skip.
+                    _ => self.poll_read(cx, buf),
                 }
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Err(std::io::Error::other(e.to_string()))),
@@ -1879,8 +1832,8 @@ fn normalize_for_request(path: &Path) -> String {
 #[cfg(test)]
 mod abort_on_drop_tests {
     //! Regression tests for the `AbortOnDrop` wrapper that bounds
-    //! every internal `tokio::spawn` in `pull_sync_with_spec` and the
-    //! deprecated `pull` method (R32-F2). Without this, dropping the
+    //! every internal `tokio::spawn` in `pull_sync_with_spec` and
+    //! its data-plane receive workers (R32-F2). Without this, dropping the
     //! `JoinHandle` would detach the spawned task — meaning a CLI
     //! Ctrl-C from the daemon's `delegated_pull` handler couldn't
     //! actually stop a running data-plane receiver.

@@ -6,9 +6,14 @@ service Blit {
   // Push uses a bidirectional stream for an efficient "check-then-send" workflow.
   rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
 
-  // Streams a file or directory from the server to the client.
-  // DEPRECATED: Use PullSync for incremental/selective transfers.
-  rpc Pull(PullRequest) returns (stream PullChunk);
+  // Removed 2026-07-03 (ue-r2-1h): rpc Pull(PullRequest) returns
+  // (stream PullChunk) — the deprecated server-streaming pull.
+  // Superseded whole by PullSync; the relay client's metadata scan and
+  // single-file streaming moved to PullSync sessions
+  // (TransferOperationSpec.metadata_only / a single-file force_grpc
+  // spec). PullRequest/PullChunk were deleted with it (they had no
+  // other referents); PullSummary, ManifestBatch, FileHeader, FileData,
+  // and DataTransferNegotiation survive — PullSync and push share them.
 
   // Bidirectional pull with manifest comparison for selective transfers.
   // Client sends local manifest, server compares and sends only needed files.
@@ -59,7 +64,7 @@ service Blit {
   // Cancel a daemon-side in-flight transfer by transfer_id.
   // M-Jobs of docs/plan/TUI_DESIGN.md §6.5. Only delegated
   // remote→remote pulls support cancellation today —
-  // push / pull / pull_sync have the CLI in the byte path,
+  // push / pull_sync have the CLI in the byte path,
   // so a client-side cancel already drops the handler future
   // and `CancelJob` from another client wouldn't have a
   // meaningful semantic.
@@ -145,11 +150,8 @@ message DataTransferNegotiation {
   // here. On pull_sync the negotiation travels daemon→client but the
   // CLIENT is the byte receiver — the profile travels client→daemon in
   // TransferOperationSpec.receiver_capacity instead, and this field
-  // stays unset. The deprecated Pull RPC has NO client→daemon profile
-  // channel at all (PullRequest carries no spec); it stays static until
-  // its deletion at ue-r2-1h and also leaves this field unset. Absent =
-  // "peer predates the profile or has nothing to advertise" → the
-  // sender keeps today's conservative/static behavior.
+  // stays unset. Absent = "peer predates the profile or has nothing to
+  // advertise" → the sender keeps today's conservative/static behavior.
   CapacityProfile receiver_capacity = 11;
 
   // Daemon-authoritative resize gate: the single source of truth both
@@ -383,24 +385,10 @@ message PushSummary {
     uint64 entries_deleted = 5; // count of files/dirs removed during mirror purge
 }
 
-// Pull Operation
-message PullRequest {
-  string module = 1;
-  string path = 2;
-  bool force_grpc = 3;
-  bool metadata_only = 4;
-}
-
-message PullChunk {
-  oneof payload {
-    FileHeader file_header = 1;
-    FileData file_data = 2;
-    DataTransferNegotiation negotiation = 3;
-    PullSummary summary = 4;
-    ManifestBatch manifest_batch = 5;
-  }
-}
-
+// Pull progress/summary messages. (PullRequest/PullChunk, the
+// deprecated Pull RPC's messages, were removed 2026-07-03 at
+// ue-r2-1h — see the note in the service block. These two survive
+// because ServerPullMessage and DelegatedPullProgress reuse them.)
 message ManifestBatch {
   uint64 file_count = 1;
   uint64 total_bytes = 2;
@@ -673,6 +661,25 @@ message TransferOperationSpec {
   // today's static/conservative behavior. Added at spec_version 2
   // without a bump (see the spec_version history note).
   CapacityProfile receiver_capacity = 12;
+
+  // ue-r2-1h: metadata-only session — the origin enumerates (honoring
+  // `filter`) and streams one ServerPullMessage.file_header per entry,
+  // then a summary, and never moves file bytes or negotiates a data
+  // plane. This is how the remote→remote relay's manifest scan rides
+  // PullSync now that the deprecated Pull RPC (whose PullRequest had
+  // the same flag) is gone. Only meaningful on PullSync; push and
+  // delegated pull ignore it.
+  //
+  // Added at spec_version 2 without a bump, like receiver_capacity.
+  // Mixed-version note: this flag is NOT a pure optimization hint — an
+  // old daemon ignores it and runs the full protocol, streaming file
+  // bytes the caller didn't ask for. That degradation is CORRECT for
+  // the scan caller (it reads headers off the fallback stream and
+  // discards data frames; it always sets force_grpc=true so no data
+  // plane is negotiated) — just wasteful. Nothing safety-critical is
+  // lost, which is the bar the spec_version history note sets for
+  // bump-free additions.
+  bool metadata_only = 13;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -828,7 +835,7 @@ message DelegatedPullRequest {
   // session.
   //
   // Only valid on `DelegatedPull` (the daemon-to-daemon byte
-  // path). Push / pull / pull_sync put the CLI in the byte
+  // path). Push / pull_sync put the CLI in the byte
   // path — detach is meaningless there because the CLI
   // disconnecting drops the bytes. The CLI rejects `--detach`
   // for those routes; the daemon-side flag is therefore
@@ -960,6 +967,10 @@ message DaemonState {
 enum TransferKind {
   TRANSFER_KIND_UNSPECIFIED = 0;
   TRANSFER_KIND_PUSH = 1;
+  // The deprecated Pull RPC was removed at ue-r2-1h (2026-07-03); no
+  // new transfer produces this kind, but historical recent[] rows and
+  // persisted recents.jsonl entries may still carry it, so the value
+  // stays and renderers keep handling it.
   TRANSFER_KIND_PULL = 2;
   TRANSFER_KIND_PULL_SYNC = 3;
   TRANSFER_KIND_DELEGATED_PULL = 4;
@@ -974,7 +985,8 @@ message ActiveTransfer {
   string module = 4;
   // Module-relative path the transfer targets. Empty until the
   // streaming RPCs (push / pull_sync) parse their first stream
-  // frame; populated immediately for pull / delegated_pull.
+  // frame; populated immediately for delegated_pull (the only
+  // remaining unary-request kind).
   string path = 5;
   uint64 start_unix_ms = 6;
   // Byte-level progress fields. Always zero in milestone B —

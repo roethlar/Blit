@@ -270,6 +270,52 @@ fn remote_to_remote_explicit_relay_uses_legacy_cli_byte_path() {
 }
 
 #[test]
+fn remote_to_remote_relay_transfers_nested_tree() {
+    // ue-r2-1h: the relay's enumeration (`scan_remote_files`) and
+    // per-file byte streaming (`open_remote_file`) moved from the
+    // deleted Pull RPC onto PullSync sessions (metadata-only scan +
+    // single-file force_grpc reads). A nested multi-file tree
+    // exercises both against the REAL daemon: recursive header
+    // enumeration with correct relative paths, then byte-identical
+    // per-file relay.
+    let ctx = DualDaemonContext::new(false);
+    let big = vec![b'B'; 512 * 1024];
+    fs::create_dir_all(ctx.module_a_dir.join("nested/deep")).expect("mkdirs");
+    fs::write(ctx.module_a_dir.join("top.bin"), &big).expect("write top");
+    fs::write(ctx.module_a_dir.join("nested/mid.txt"), b"middle file").expect("write mid");
+    fs::write(ctx.module_a_dir.join("nested/deep/leaf.txt"), b"leaf").expect("write leaf");
+
+    let counter = ctx.counter_path("relay_tree");
+    let output = run_blit(
+        &ctx,
+        &[
+            "copy",
+            "--relay-via-cli",
+            &ctx.source_remote(),
+            &ctx.dest_remote(),
+        ],
+        Some(&counter),
+    );
+    assert_success(&output);
+
+    assert_eq!(fs::read(ctx.module_b_dir.join("top.bin")).unwrap(), big);
+    assert_eq!(
+        fs::read(ctx.module_b_dir.join("nested/mid.txt")).unwrap(),
+        b"middle file"
+    );
+    assert_eq!(
+        fs::read(ctx.module_b_dir.join("nested/deep/leaf.txt")).unwrap(),
+        b"leaf"
+    );
+
+    let counters = read_counters(&counter);
+    assert!(
+        counters.remote_transfer_source_constructed > 0,
+        "--relay-via-cli must construct the relay source"
+    );
+}
+
+#[test]
 fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     let work = tempdir().expect("tempdir");
     let config_dir = work.path().join("cli-config");
@@ -595,9 +641,6 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     type PushStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::ServerPushResponse, tonic::Status>,
     >;
-    type PullStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::PullChunk, tonic::Status>,
-    >;
     type PullSyncStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::ServerPullMessage, tonic::Status>,
     >;
@@ -622,13 +665,6 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
     ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stale daemon"))
-    }
-
-    async fn pull(
-        &self,
-        _: tonic::Request<blit_core::generated::PullRequest>,
-    ) -> Result<tonic::Response<Self::PullStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stale daemon"))
     }
 
@@ -731,9 +767,6 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
     type PushStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::ServerPushResponse, tonic::Status>,
     >;
-    type PullStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::PullChunk, tonic::Status>,
-    >;
     type PullSyncStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::ServerPullMessage, tonic::Status>,
     >;
@@ -758,15 +791,6 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
     ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "test only exercises pull_sync",
-        ))
-    }
-
-    async fn pull(
-        &self,
-        _: tonic::Request<blit_core::generated::PullRequest>,
-    ) -> Result<tonic::Response<Self::PullStream>, tonic::Status> {
         Err(tonic::Status::unimplemented(
             "test only exercises pull_sync",
         ))

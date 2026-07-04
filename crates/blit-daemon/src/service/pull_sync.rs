@@ -3,9 +3,11 @@
 //! This module implements the PullSync RPC which allows clients to send their
 //! local manifest so the server can compare and only send files that need updating.
 
-use super::pull::{collect_pull_entries_with_checksums, PullEntry};
 use super::push::{bind_data_plane_listener, generate_token, TransferStats};
-use super::util::{resolve_module, resolve_relative_path};
+use super::util::{
+    metadata_mtime_seconds, normalize_relative_path, permissions_mode, resolve_module,
+    resolve_relative_path,
+};
 use super::PullSyncSender;
 use crate::runtime::{ModuleConfig, RootExport};
 
@@ -169,6 +171,34 @@ pub(crate) async fn handle_pull_sync_stream(
     // Send manifest batch for progress reporting
     let total_bytes: u64 = server_manifest.iter().map(|h| h.size).sum();
     send_manifest_batch(&tx, server_manifest.len() as u64, total_bytes).await?;
+
+    // ue-r2-1h: metadata-only session — the relay's manifest scan,
+    // ported from the deprecated Pull RPC's `metadata_only` flag. One
+    // file_header frame per enumerated entry, then a summary: no
+    // comparison, no need-list, no delete-list, no data plane, no
+    // bytes moved. Placed after the incomplete-scan refusal so a
+    // metadata_only+mirror/move combination still fails closed rather
+    // than reporting a manifest a destructive follow-up can't trust.
+    // Summary counts mirror the deprecated path: files/bytes describe
+    // the enumerated manifest (callers treat them as workload size,
+    // not bytes moved).
+    if spec.metadata_only {
+        for entry in &server_entries {
+            send_file_header(&tx, entry.header.clone()).await?;
+        }
+        send_summary(
+            &tx,
+            TransferStats {
+                files_transferred: server_manifest.len() as u64,
+                bytes_transferred: total_bytes,
+                bytes_zero_copy: 0,
+            },
+            true,
+            0,
+        )
+        .await?;
+        return Ok(());
+    }
 
     // Map protocol ComparisonMode onto the internal CompareMode used
     // by manifest comparison primitives. ignore_existing is now its
@@ -457,6 +487,17 @@ async fn send_manifest_batch(
     .map_err(|_| Status::internal("failed to send manifest batch"))
 }
 
+/// ue-r2-1h: metadata-only sessions stream the enumerated manifest as
+/// bare `file_header` frames (no `file_data` follows — the same frame
+/// the gRPC fallback uses, minus the bytes).
+async fn send_file_header(tx: &PullSyncSender, header: FileHeader) -> Result<(), Status> {
+    tx.send(Ok(ServerPullMessage {
+        payload: Some(server_pull_message::Payload::FileHeader(header)),
+    }))
+    .await
+    .map_err(|_| Status::internal("failed to send file header"))
+}
+
 async fn send_need_list(tx: &PullSyncSender, files: &[String]) -> Result<(), Status> {
     tx.send(Ok(ServerPullMessage {
         payload: Some(server_pull_message::Payload::FilesToDownload(FileList {
@@ -664,8 +705,8 @@ async fn stream_via_data_plane(
 
     // ue-r2-1g: accept N token-authenticated connections and wrap each
     // as a DataPlaneSink (the multistream pattern harvested from the
-    // deprecated Pull RPC). The shared pipeline's elastic work-stealing
-    // queue distributes payloads across all streams.
+    // Pull RPC deleted at ue-r2-1h). The shared pipeline's elastic
+    // work-stealing queue distributes payloads across all streams.
     let sinks = accept_and_wrap_sinks(
         &listener,
         &token,
@@ -694,11 +735,11 @@ async fn stream_via_data_plane(
 /// `DataPlaneSink`. `source_root` is the enumeration root (module.path +
 /// requested subpath) — files are read relative to this via header.relative_path.
 ///
-/// ue-r2-1g: harvested verbatim from the deprecated Pull RPC
-/// (`service/pull.rs`), which now calls it here — REV4 requires the
-/// multistream pattern to live in PullSync before `ue-r2-1h` deletes
-/// that RPC.
-pub(crate) async fn accept_and_wrap_sinks(
+/// ue-r2-1g: harvested verbatim from the deprecated Pull RPC — REV4
+/// required the multistream pattern to live in PullSync before
+/// `ue-r2-1h` deleted that RPC (which it since has, along with the
+/// borrow-back import that briefly pointed the old handlers here).
+async fn accept_and_wrap_sinks(
     listener: &TcpListener,
     expected_token: &[u8],
     streams: usize,
@@ -767,8 +808,8 @@ pub(crate) async fn accept_and_wrap_sinks(
             // failure — UNAUTHENTICATED, matching what the pull_sync
             // full-file path returned before the harvest and what the
             // resume path in this file still returns. (The deprecated
-            // Pull RPC previously said PERMISSION_DENIED here; it has
-            // no consumer keying on the code and dies at ue-r2-1h.)
+            // Pull RPC said PERMISSION_DENIED here; it died at
+            // ue-r2-1h with no consumer keying on the code.)
             return Err(Status::unauthenticated("invalid data plane token"));
         }
 
@@ -1178,6 +1219,242 @@ async fn stream_via_block_resume_grpc(
     }
 
     Ok(stats)
+}
+
+// ── Enumeration entries (relocated from the deleted service/pull.rs
+// at ue-r2-1h — pull_sync is their only consumer) ────────────────────
+
+pub(crate) struct PullEntry {
+    pub(crate) header: FileHeader,
+    pub(crate) relative_path: PathBuf,
+}
+
+/// R47-F3: returns the enumeration outcome alongside the entry
+/// list so destructive callers (pull_sync's delete-list builder)
+/// can detect an incomplete source scan and refuse to translate
+/// "absent at source" into "delete from destination." On a clean
+/// scan `outcome.suppressed_errors` is empty and behavior matches
+/// the historical contract.
+async fn collect_pull_entries_with_checksums(
+    module_root: &Path,
+    root: &Path,
+    requested: &Path,
+    compute_checksums: bool,
+    filter: blit_core::fs_enum::FileFilter,
+) -> Result<(Vec<PullEntry>, blit_core::enumeration::EnumerationOutcome), Status> {
+    if root.is_file() {
+        // Single-file root: physical path (for reads) is the requested path
+        // from the module; wire path (in the header, for the client's
+        // dest_root.join) must be empty so the client writes to its
+        // already-resolved dest target — not nested under a basename it
+        // already appended.
+        let physical = if requested == Path::new(".") {
+            root.file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            requested.to_path_buf()
+        };
+        // R59 finding #4: apply the user filter to single-file roots
+        // too. Pre-fix the daemon returned the entry unconditionally,
+        // so `blit pull host:module/file.txt --exclude '*.txt'` still
+        // pulled the file even though the local single-file path
+        // (engine/single_file.rs) correctly skipped on the same flag.
+        // Filter against the basename (matches what allows_entry
+        // does for directory enumeration of leaf files).
+        let name = physical.file_name().map(PathBuf::from);
+        let size = std::fs::metadata(root).map(|m| m.len()).unwrap_or(0);
+        let mtime = std::fs::metadata(root).and_then(|m| m.modified()).ok();
+        let allows = match name.as_deref() {
+            Some(name_path) => filter.allows_entry(Some(name_path), root, size, mtime),
+            None => true,
+        };
+        if !allows {
+            return Ok((
+                Vec::new(),
+                blit_core::enumeration::EnumerationOutcome::default(),
+            ));
+        }
+        let mut header = build_file_header(module_root, &physical, compute_checksums)?;
+        header.relative_path = String::new();
+        return Ok((
+            vec![PullEntry {
+                header,
+                relative_path: physical,
+            }],
+            blit_core::enumeration::EnumerationOutcome::default(),
+        ));
+    }
+
+    if !root.is_dir() {
+        return Err(Status::invalid_argument("unsupported path type for pull"));
+    }
+
+    let root_clone = root.to_path_buf();
+    let requested_clone = requested.to_path_buf();
+    let module_root = module_root.to_path_buf();
+    tokio::task::spawn_blocking(
+        move || -> Result<(Vec<PullEntry>, blit_core::enumeration::EnumerationOutcome), Status> {
+            use rayon::prelude::*;
+
+            let enumerator = blit_core::enumeration::FileEnumerator::new(filter);
+            let (entries, outcome) = enumerator
+                .enumerate_local_capturing(&root_clone)
+                .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;
+
+            // Filter to files only
+            let file_entries: Vec<_> = entries
+                .into_iter()
+                .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
+                .collect();
+
+            // Physical path (relative to module_root, used for reading) = requested + entry
+            // Wire path (in header.relative_path, used by client for dest_root.join) = entry only
+            // Previously both were set to the joined form, causing the client to double-nest
+            // when the CLI resolver had already appended the basename to dest_root.
+            let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
+                file_entries
+                    .into_par_iter()
+                    .map(|entry| {
+                        let physical = requested_clone.join(&entry.relative_path);
+                        let wire = entry.relative_path.clone();
+                        let mut header = build_file_header(&module_root, &physical, true)?;
+                        header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
+                        Ok(PullEntry {
+                            header,
+                            relative_path: physical,
+                        })
+                    })
+                    .collect()
+            } else {
+                file_entries
+                    .into_iter()
+                    .map(|entry| {
+                        let physical = requested_clone.join(&entry.relative_path);
+                        let wire = entry.relative_path.clone();
+                        let mut header = build_file_header(&module_root, &physical, false)?;
+                        header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
+                        Ok(PullEntry {
+                            header,
+                            relative_path: physical,
+                        })
+                    })
+                    .collect()
+            };
+
+            files.map(|f| (f, outcome))
+        },
+    )
+    .await
+    .map_err(|err| Status::internal(format!("enumeration task failed: {}", err)))?
+}
+
+fn build_file_header(
+    base: &Path,
+    relative: &Path,
+    compute_checksum: bool,
+) -> Result<FileHeader, Status> {
+    let abs_path = base.join(relative);
+
+    if compute_checksum {
+        // Open file once for both metadata and hashing
+        let mut file = std::fs::File::open(&abs_path)
+            .map_err(|err| Status::internal(format!("open {}: {}", abs_path.display(), err)))?;
+        let metadata = file
+            .metadata()
+            .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
+
+        // w7-4: hash via the shared read loop in blit-core (this was
+        // the fifth hand-rolled copy, with a 256 KiB stack array).
+        let checksum =
+            blit_core::checksum::hash_reader(&mut file, blit_core::checksum::ChecksumType::Blake3)
+                .map_err(|err| Status::internal(format!("hash {}: {err:#}", abs_path.display())))?;
+
+        Ok(FileHeader {
+            relative_path: normalize_relative_path(relative),
+            size: metadata.len(),
+            mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            permissions: permissions_mode(&metadata),
+            checksum,
+        })
+    } else {
+        // Just get metadata, no checksum needed
+        let metadata = std::fs::metadata(&abs_path)
+            .map_err(|err| Status::internal(format!("stat {}: {}", abs_path.display(), err)))?;
+
+        Ok(FileHeader {
+            relative_path: normalize_relative_path(relative),
+            size: metadata.len(),
+            mtime_seconds: metadata_mtime_seconds(&metadata).unwrap_or(0),
+            permissions: permissions_mode(&metadata),
+            checksum: vec![],
+        })
+    }
+}
+
+#[cfg(test)]
+mod single_file_filter_tests {
+    //! R59 finding #4: the daemon pull single-file fast path
+    //! returned the entry unconditionally, ignoring the user-supplied
+    //! filter. Local single-file copy (engine/single_file.rs) already
+    //! honored the filter, so the two paths drifted apart.
+    //! (Relocated from service/pull.rs at ue-r2-1h with
+    //! `collect_pull_entries_with_checksums`, the function they pin.)
+
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn single_file_root_excluded_by_filter_returns_empty() {
+        let tmp = tempdir().unwrap();
+        let module = tmp.path();
+        let file = module.join("payload.txt");
+        fs::write(&file, b"hello").unwrap();
+
+        let mut filter = blit_core::fs_enum::FileFilter::default();
+        filter.exclude_files = vec!["*.txt".to_string()];
+
+        let (entries, outcome) = collect_pull_entries_with_checksums(
+            module,
+            &file,
+            Path::new("payload.txt"),
+            false,
+            filter,
+        )
+        .await
+        .unwrap();
+        assert!(
+            entries.is_empty(),
+            "single-file root matching --exclude must yield no entries"
+        );
+        assert!(outcome.suppressed_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_file_root_included_by_filter_passes() {
+        let tmp = tempdir().unwrap();
+        let module = tmp.path();
+        let file = module.join("payload.txt");
+        fs::write(&file, b"hello").unwrap();
+
+        let mut filter = blit_core::fs_enum::FileFilter::default();
+        filter.include_files = vec!["*.txt".to_string()];
+
+        let (entries, _) = collect_pull_entries_with_checksums(
+            module,
+            &file,
+            Path::new("payload.txt"),
+            false,
+            filter,
+        )
+        .await
+        .unwrap();
+        assert_eq!(entries.len(), 1);
+        // Wire path stays empty (preserves the single-file dest target
+        // contract — client appends nothing).
+        assert!(entries[0].header.relative_path.is_empty());
+    }
 }
 
 #[cfg(test)]

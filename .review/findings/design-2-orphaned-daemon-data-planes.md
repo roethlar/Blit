@@ -7,12 +7,22 @@ any cancel mechanism).
 
 ## What
 
+> **Scope update (2026-07-03, ue-r2-1h)**: the two `service/pull.rs`
+> sites below were **deleted with that file** when the deprecated Pull
+> RPC was removed (slice `ue-r2-1h`, see
+> `.review/findings/ue-r2-1h.md`). Only the
+> `push/control.rs:57` site remains; the w4-1 row now scopes to it
+> (plus the AbortOnDrop hoist and the regression test, which are
+> unchanged). Note pull_sync's own data plane runs inline in the
+> handler (no spawned handle), so it was never on this list.
+
 Three daemon spawn sites hold **bare `tokio::task::JoinHandle`s** for their TCP
 data-plane tasks:
 
-- `crates/blit-daemon/src/service/pull.rs:180` — `transfer_task` in the legacy
-  Pull path (`accept_pull_data_connection`).
-- `crates/blit-daemon/src/service/pull.rs:297` — `data_plane_handle` in
+- ~~`crates/blit-daemon/src/service/pull.rs:180`~~ (deleted at ue-r2-1h) —
+  `transfer_task` in the legacy Pull path (`accept_pull_data_connection`).
+- ~~`crates/blit-daemon/src/service/pull.rs:297`~~ (deleted at ue-r2-1h) —
+  `data_plane_handle` in
   `stream_pull_streaming` (`accept_pull_data_connection_streaming`).
 - `crates/blit-daemon/src/service/push/control.rs:57` —
   `data_plane_handle: Option<JoinHandle<...>>` in the push control loop.

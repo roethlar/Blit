@@ -95,6 +95,13 @@ pub struct NormalizedTransferOperation {
     /// conservative_within`). `None` = old peer or nothing advertised
     /// → conservative defaults.
     pub receiver_capacity: Option<crate::generated::CapacityProfile>,
+    /// ue-r2-1h: metadata-only session — the origin enumerates
+    /// (honoring `filter`) and streams headers plus a summary, never
+    /// moving file bytes or negotiating a data plane. Carries the
+    /// relay's manifest scan, ported from the deleted Pull RPC's flag
+    /// of the same name. Only pull_sync honors it; push and delegated
+    /// pull ignore it.
+    pub metadata_only: bool,
 }
 
 impl NormalizedTransferOperation {
@@ -146,6 +153,7 @@ impl NormalizedTransferOperation {
             ignore_existing: spec.ignore_existing,
             require_complete_scan: spec.require_complete_scan,
             receiver_capacity: spec.receiver_capacity,
+            metadata_only: spec.metadata_only,
         })
     }
 
@@ -232,6 +240,7 @@ mod tests {
             ignore_existing: false,
             require_complete_scan: false,
             receiver_capacity: None,
+            metadata_only: false,
         }
     }
 

@@ -638,6 +638,7 @@ mod tests {
             ignore_existing: false,
             require_complete_scan: false,
             receiver_capacity: None,
+            metadata_only: false,
         }
     }
 
@@ -727,6 +728,8 @@ mod tests {
             ignore_existing: true,
             require_complete_scan: false,
             receiver_capacity: None,
+            // ue-r2-1h: non-default so preservation is provable below.
+            metadata_only: true,
         };
         let snapshot_module = spec_in.module.clone();
         let snapshot_source_path = spec_in.source_path.clone();
@@ -735,6 +738,7 @@ mod tests {
         let snapshot_resume = spec_in.resume;
         let snapshot_force_grpc = spec_in.force_grpc;
         let snapshot_ignore_existing = spec_in.ignore_existing;
+        let snapshot_metadata_only = spec_in.metadata_only;
         // Move spec_in by value through the override.
         spec_in = apply_dst_capabilities_override(spec_in);
         assert_eq!(spec_in.module, snapshot_module);
@@ -744,6 +748,7 @@ mod tests {
         assert_eq!(spec_in.resume, snapshot_resume);
         assert_eq!(spec_in.force_grpc, snapshot_force_grpc);
         assert_eq!(spec_in.ignore_existing, snapshot_ignore_existing);
+        assert_eq!(spec_in.metadata_only, snapshot_metadata_only);
     }
 
     #[test]

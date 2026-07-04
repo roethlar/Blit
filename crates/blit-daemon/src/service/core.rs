@@ -2,7 +2,6 @@ use super::admin::{
     delete_rel_paths, filesystem_stats_for_path, list_completions, sanitize_request_paths,
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
-use super::pull::stream_pull;
 use super::pull_sync::handle_pull_sync_stream;
 use super::push::handle_push_stream;
 use super::util::{
@@ -20,9 +19,9 @@ use blit_core::generated::{
     CompletionResponse, Counters, DaemonEvent, DaemonState, DelegatedPullProgress,
     DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo, FilesystemStatsRequest,
     FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest, ListModulesRequest,
-    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PullChunk, PullRequest,
-    PurgeRequest, PurgeResponse, ServerPullMessage, ServerPushResponse, SubscribeRequest,
-    TransferComplete, TransferError, TransferProgress, TransferRecord, TransferStarted,
+    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PurgeRequest, PurgeResponse,
+    ServerPullMessage, ServerPushResponse, SubscribeRequest, TransferComplete, TransferError,
+    TransferProgress, TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -342,7 +341,6 @@ pub(crate) fn build_transfer_finished_event(
 #[tonic::async_trait]
 impl Blit for BlitService {
     type PushStream = ReceiverStream<Result<ServerPushResponse, Status>>;
-    type PullStream = ReceiverStream<Result<PullChunk, Status>>;
     type PullSyncStream = ReceiverStream<Result<ServerPullMessage, Status>>;
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
@@ -540,59 +538,6 @@ impl Blit for BlitService {
             drop(guard);
             let _ = events_tx.send(finished_event);
             metrics.log_completion("push", started.elapsed(), ok);
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
-    async fn pull(
-        &self,
-        request: Request<PullRequest>,
-    ) -> Result<Response<Self::PullStream>, Status> {
-        let peer = peer_addr_string(&request);
-        let req = request.into_inner();
-        let module = resolve_module(&self.modules, self.default_root.as_ref(), &req.module).await?;
-
-        let force_grpc = req.force_grpc || self.force_grpc_data;
-        let metadata_only = req.metadata_only;
-        let (tx, rx) = mpsc::channel(32);
-        let metrics = Arc::clone(&self.metrics);
-        metrics.inc_pull();
-        let guard = Arc::clone(&metrics).enter_transfer();
-        // ActiveJobs row registered alongside the metrics gauge:
-        // both are RAII-scoped to the spawned task so they
-        // drain together on every termination path (success,
-        // error, panic, client cancellation).
-        let job = self.active_jobs.register(
-            ActiveJobKind::Pull,
-            peer.clone(),
-            req.module.clone(),
-            req.path.clone(),
-        );
-        // Subscribe event — pull has module/path synchronously
-        // available, so subscribers get the populated row from
-        // the first event.
-        self.emit_transfer_started(&job, ActiveJobKind::Pull, &peer, &req.module, &req.path);
-        let started = std::time::Instant::now();
-        let events_tx = self.events_tx();
-
-        tokio::spawn(async move {
-            let guard = guard;
-            let job = job;
-            let result = stream_pull(module, req.path, force_grpc, metadata_only, tx.clone()).await;
-            let (ok, err_msg) = outcome_from_status(&result);
-            if let Err(status) = result {
-                metrics.inc_error();
-                let _ = tx.send(Err(status)).await;
-            }
-            job.record_outcome(ok, err_msg.clone());
-            // c-3 round 2: build event from live guard, drain
-            // daemon bookkeeping, then broadcast.
-            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
-            drop(guard);
-            drop(job);
-            let _ = events_tx.send(finished_event);
-            metrics.log_completion("pull", started.elapsed(), ok);
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))

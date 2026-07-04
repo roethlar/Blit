@@ -524,9 +524,6 @@ impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
     type PushStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::ServerPushResponse, tonic::Status>,
     >;
-    type PullStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::PullChunk, tonic::Status>,
-    >;
     type PullSyncStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::ServerPullMessage, tonic::Status>,
     >;
@@ -551,13 +548,6 @@ impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
     ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stalling fake source"))
-    }
-
-    async fn pull(
-        &self,
-        _: tonic::Request<blit_core::generated::PullRequest>,
-    ) -> Result<tonic::Response<Self::PullStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 

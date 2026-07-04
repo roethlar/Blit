@@ -611,13 +611,14 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             // R50-F1 / R51-F2 (data-loss): reject `--relay-via-cli`
             // for remote-source move. The relay path goes through
             // `run_remote_push_transfer` → `RemoteTransferSource::
-            // scan`, which uses the legacy metadata-only Pull RPC
-            // (`collect_pull_entries` discards
-            // EnumerationOutcome). There's no scan-complete signal
-            // to thread through that path without restructuring
-            // the legacy RPC, so for 0.1.0 we close the data-loss
-            // window by refusing the combination entirely. The
-            // direct delegated path (default) carries the
+            // scan` — since ue-r2-1h a metadata-only PullSync
+            // session, which deliberately does NOT set the spec's
+            // require_complete_scan (a copy relay keeps its
+            // historical send-what's-readable behavior), so a
+            // silently-partial scan is still possible on that path
+            // and we keep closing the move data-loss window by
+            // refusing the combination entirely. The direct
+            // delegated path (default) carries the
             // require_complete_scan signal end-to-end.
             if args.relay_via_cli {
                 bail!(
