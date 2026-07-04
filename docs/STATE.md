@@ -46,10 +46,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **Windows-host session artifacts (2026-07-04)**: first fully-gated
   sessions on the owner's Windows machine — fixed pre-existing
   `9f37a7a` (clippy baseline) + `48c5a11` (win-1 High: push need-list
-  backslash echo). Erratum: `9f37a7a`/`48c5a11` don't build in
-  isolation (a staging slip put the pull.rs deletion in the wrong
-  commit; bisect must skip them; HEAD fully gated) — owner may
-  authorize a history fix of the now-pushed stack or leave it.
+  backslash echo). Erratum **settled (D-2026-07-04-2)**: those two
+  commits don't build in isolation (staging slip); they stay as
+  pushed, no history rewrite — bisect must skip them; HEAD fully
+  gated.
 - **Active context** (settled background):
   - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the Active
     plan (D-2026-06-20-5), code-complete; flipping to Shipped is an
@@ -64,11 +64,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 1. **Design-review queue** — `REVIEW.md` order governs. w4-1, w4-3,
    and the whole W1 family (w1-2/w1-3/w1-4) closed `[x]` 2026-07-04
    (see Now). Topmost open row is now **w4-5-supports-cancellation-flip**
-   (owner-authorized D-2026-07-04-3, small, policy-only after w4-3);
-   then **design-3** (data-plane connect timeouts — trivially placeable
-   after W1: two client connect sites, bound imports the shared
-   `DATA_PLANE_ACCEPT_TIMEOUT`) and **w2-2** (stream-ladder owner).
-   Open Low rows: `relay-1-subpath-double-join`.
+   (owner-authorized D-2026-07-04-3, small, policy-only after w4-3).
+   After it, strict row order gives **w2-2** (stream-ladder owner);
+   **design-3** (data-plane connect timeouts, filed-findings section)
+   is trivially placeable after W1 (two client connect sites, bound
+   imports the shared `DATA_PLANE_ACCEPT_TIMEOUT`) — w2-2 vs design-3
+   sequencing stays the coder's pick unless the owner orders
+   otherwise. Open Low rows: `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
