@@ -26,38 +26,18 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   black-holed ephemeral data ports. Codex: **PASS, 0 findings**. +3
   tests (deterministic stalled-handshake shape pin,
   mutation-verified); workspace 1476 → 1479/0/2.
-- **w4-4 DONE — blocking work off the runtime** (`0feca34`+fix
-  `768e7e3`; finding
-  `.review/findings/w4-4-blocking-work-off-runtime.md`). Push
-  manifest requires-upload checks (canonical containment walk + stat
-  — ~3M+ blocking syscalls per 1M-file push, previously inline on a
-  tokio worker) now run in chunked `spawn_blocking` batches
-  (chunk=128 = need-list early-flush threshold; lexical-containment
-  alternative rejected — weakens F2); need-list order kept,
-  mid-manifest TCP spin-up post-chunk-drain, design-4 untouched.
-  `collect_pull_entries_with_checksums` runs entirely on one
-  `spawn_blocking` thread (single-file `--checksum` branch was
-  hashing whole files inline on a worker). Codex: **NEEDS FIXES (1
-  Medium, accepted — chunk-only draining muted the batcher's 5 ms
-  early-flush for trickling manifests)** → `manifest_drain_due`
-  chunk-or-delay trigger, fixed `768e7e3`. +4 tests,
-  mutation-verified; workspace 1472 → 1476/0/2.
-- **Earlier same day: w6-2 verify-then-file** (`0aba593`+`8b7829d`):
-  all three §1.6 residue claims CONFIRMED (delegated live progress
-  wire-dead; daemon counters 0 for push/pull_sync; denominators
-  hardcoded 0); filed as independent rows **w6-2a/-2b/-2c**
-  (pending-review section). Codex: 2 Low doc-coherence, fixed.
-- **w6-1 DONE — ProgressEvent contract** (`8fd8978`; finding
-  `.review/findings/w6-1-progress-event-contract.md`). Contract on
-  the enum in blit-core: **bytes ride `Payload` only —
-  `FileComplete.bytes` deleted** (design-1's class unrepresentable);
-  files count once via byteless `FileComplete{wire path}` or
-  `Payload.files` (aggregate lane); `ManifestBatch` = documented
-  denominator. All producers normalized (double-emit, tar-shard +
-  resume gaps, absolute-path leak, dead emitters); consumers
-  collapsed onto shared `ProgressTotals` (CLI + 3 TUI forwarders;
-  TUI's 3 rules deleted). **design-1 closed alongside.** Codex:
-  **PASS, 0 findings**. +12 tests, 2 mutation checks; 1460 → 1472.
+- **Earlier same session: w4-4, w6-2, w6-1 (+design-1) all `[x]`**
+  (details: DEVLOG 2026-07-04 entries; findings + verdicts in
+  `.review/`): blocking work off the runtime w4-4
+  `0feca34`+`768e7e3` (chunked manifest checks with the
+  chunk-or-delay `manifest_drain_due` trigger from the codex round;
+  pull enumeration fully on `spawn_blocking`; F2 stays canonical);
+  §1.6 residue verified + filed as **w6-2a/-2b/-2c** w6-2
+  `0aba593`+`8b7829d`; **ProgressEvent contract in blit-core** w6-1
+  `8fd8978` (bytes ride `Payload` only, `FileComplete.bytes` deleted
+  — design-1's class unrepresentable; shared `ProgressTotals` fold
+  replaced the TUI's 3 rules + the CLI's wrong one; design-1 closed
+  alongside, codex PASS 0 findings).
 - **Earlier 2026-07-04: w3-1, w2-2, w4-5, W1 family, w4-1, w4-3 all
   `[x]`** (details: DEVLOG 2026-07-04 entries; findings
   `.review/findings/`): memory-aware BufferPool + sysinfo 1024× bug
@@ -104,7 +84,18 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
    `ue-1` loopback parity band, `ue-2` continuous/resize behavior
-   under real load, zero-copy revisit gate (D-2026-06-12-1). After
+   under real load, zero-copy revisit gate (D-2026-06-12-1).
+   **Host plan (owner, 2026-07-04)**: sign-off pair = TrueNAS
+   (skippy) ↔ **Arch client**, all-Linux — the zero-copy/splice gate
+   needs a Linux consumer, and the parity band should measure the
+   engine, not Windows I/O quirks. The client box dual-boots
+   Win 11/Arch (identical hardware → clean Win-vs-Linux delta):
+   after the Linux gates close, boot Win 11 bare-metal for a
+   TrueNAS→Win pull datapoint in the same window (deployment parity,
+   not a gate). The Win VM on the Arch install is for
+   Windows-specific *functional* checks only — never perf numbers
+   (virtio/NAT skews throughput). iperf3 baseline per pair before
+   any Blit numbers (the parity band is defined against it). After
    `ue-1`: audit Round 1, TUI rework, H10b planner.
 3. **Post-REV4 residue** (unowned until the owner slots them): pull
    1s-start restructuring; epoch-0/early-ADD hardening; remote
@@ -172,6 +163,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (19th)** @ `c609192`+docs — **push recorded + 10 GbE
+  host plan settled** (owner Q&A). Owner pushed `master` → `github`
+  at `10d89e0`; gitea mirror lags. Benchmark sign-off pair decided:
+  TrueNAS ↔ Arch (all-Linux; splice gate + clean parity band), Win 11
+  bare-metal datapoint after on the same dual-boot hardware, Win VM
+  for functional checks only — recorded in Queue item 2. No code.
+  In-flight: none. **Exact first action next session**: standing
+  "reviewloop" go → **w9-3** (test-harness builder) through the codex
+  loop; the owner will call "benchmark" for the 10 GbE session.
 - **2026-07-04 (18th)** @ `49dcec6`+records —
   **design-3-unbounded-data-plane-connects landed and graded** (same
   session, fourth slice; coder's pick of the sanctioned smaller
@@ -194,7 +194,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   trickling manifests) → chunk-or-delay `manifest_drain_due`, fixed
   `768e7e3`. +4 tests mutation-verified; 1472 → 1476/0/2. Nothing
   pushed.
-- **2026-07-04 (16th)** @ `8b7829d`+records —
-  **w6-2-progress-residue-verify landed and graded**. All three §1.6
-  claims CONFIRMED; filed as w6-2a/-2b/-2c. Codex: NEEDS FIXES 2 Low
-  (doc-coherence) → fixed `8b7829d`. No code; 1472/0/2.
