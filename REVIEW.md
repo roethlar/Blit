@@ -28,7 +28,7 @@ accepted findings fixed, validation green. Records per slice:
 | ue-r2-1e | Live cheap dials replace the `determine_remote_tuning` ladder | `[x]` | `3be9105`..`15968f4` + review fix `46da929` |
 | ue-r2-1f | Push converge through the engine; retire daemon `desired_streams` ladder | `[x]` | `a4a9f70` + review fix `0c8da50` |
 | ue-r2-1g | PullSync multistream through the engine (absorbs MULTISTREAM_PULL) | `[x]` | `48e583e` + review fix `4a2e58d` |
-| ue-r2-1h | Delete deprecated `Pull` RPC (+ its `pull_stream_count` ladder) after harvest | `[ ]` | — |
+| ue-r2-1h | Delete deprecated `Pull` RPC (+ its `pull_stream_count` ladder) after harvest; port relay onto PullSync | `[x]` | `2a13f53` (+`9f37a7a` baseline/staging-slip, `48c5a11` win-1) + review fix `f6f52d7` |
 | ue-r2-2 | Stream resize: negotiated `DataPlaneResize`/`Ack`, mid-transfer add/drop | `[ ]` | — |
 
 ## Design-review queue (ratified D-2026-06-11-2, in execution order)
@@ -51,8 +51,8 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | w1-4-accept-token-constants | Low | One shared accept(30s)/token(15s) constant pair replacing 4 local declarations | `[ ]` | — | — |
 | w2-1-delete-warmup-machinery | Medium | Delete dead auto_tune warmup branches + analyze_warmup_result (honest static table) | `[x]` | master | `2a8a490` |
 | w2-2-stream-ladder-owner | Medium | Single stream-count/chunk owner in determine_remote_tuning (takes file_count); delete 2 daemon ladders + transfer_plan ladder | `[ ]` | — | — |
-| w2-3-multistream-pull-plan | High | Multi-stream pull-sync: write plan doc (authorized D-2026-06-11-2), harvest deprecated Pull's pattern, implement | `[ ]` | — | — |
-| w2-4-delete-pull-rpc | High | Delete deprecated Pull RPC after w2-3 harvest (owner-decided, wire-breaking OK); port scan_remote_files | `[ ]` | — | — |
+| w2-3-multistream-pull-plan | High | Multi-stream pull-sync: write plan doc (authorized D-2026-06-11-2), harvest deprecated Pull's pattern, implement — absorbed into REV4 (D-2026-06-20-1); delivered as `ue-r2-1g` | `[x]` | master | `48e583e` |
+| w2-4-delete-pull-rpc | High | Delete deprecated Pull RPC after w2-3 harvest (owner-decided, wire-breaking OK); port scan_remote_files — absorbed into REV4; delivered as `ue-r2-1h` | `[x]` | master | `2a13f53` |
 | w3-1-memory-aware-buffer-pool | High | BufferPool::for_data_plane(tuning, streams) with available-memory cap; replaces 3 pasted formula sites | `[ ]` | — | — |
 | w6-1-progress-event-contract | Medium | Define ProgressEvent semantics in blit-core; normalize producers; shared accumulator (incorporates design-1) | `[ ]` | — | — |
 | w6-2-progress-residue-verify | Medium | Verify-then-fix map §1.6 residue: delegated zero progress, daemon counters 0 for 3/4 kinds, no denominators | `[ ]` | — | — |
@@ -82,6 +82,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
 | relay-1-subpath-double-join | Low | `--relay-via-cli` with a subpath source scans `sub/sub` (endpoint rel_path joined twice). Pre-existing (deleted Pull-RPC code had the identical join); surfaced by the ue-r2-1h self-review panel; port kept parity, fix deferred | `[ ]` | — | — |
+| win-1-push-needlist-separators | High | Windows daemon push need-list echoed native separators — every nested push to a Windows daemon stalled 30s. One-line `relative_path_to_posix` fix; reviewed within the ue-r2-1h codex+panel batch | `[x]` | master | `48c5a11` |
 | design-1-cli-pull-byte-double-count | Medium | CLI pull progress double-counts bytes on the TCP data plane (producer reports both Payload and FileComplete with full bytes; CLI fold adds both). From design map §1.6, hand-verified | `[ ]` | — | — |
 | design-2-orphaned-daemon-data-planes | High | Daemon data-plane tasks detach (not abort) on control-stream death at 3 spawn sites; orphan unreachable by CancelJob. AbortOnDrop fix exists but never propagated. From design map §1.9, hand-verified | `[ ]` | — | — |
 | design-3-unbounded-data-plane-connects | Medium | Both TCP data-plane connects lack timeouts (audit-2 fix never reached the data plane); hangs 60-127s on black-holed ports. From design map §1.1/§1.2, hand-verified | `[ ]` | — | — |

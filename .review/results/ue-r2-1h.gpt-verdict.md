@@ -3,7 +3,7 @@
 **Slice commits**: `9f37a7a` (Windows clippy baseline + the mis-staged
 `service/pull.rs` deletion) + `48c5a11` (win-1 push separator fix) +
 `2a13f53` (the slice proper)
-**Fix commit**: (sha appended below after the gate)
+**Fix commit**: `f6f52d7`
 **reviewer: gpt-5.5** (codex exec, read-only, headroom proxy; raw
 output `.review/results/ue-r2-1h.codex.md` — the tail carries the
 findings; the file is a full session transcript). A 3-lens adversarial
