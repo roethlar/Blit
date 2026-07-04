@@ -142,20 +142,13 @@ impl<P: Probe> DataPlaneSession<P> {
         if trace {
             eprintln!("[data-plane-client] connecting to {}", addr);
         }
-        let mut stream = TcpStream::connect(addr.clone())
+        // design-3: bounded dial (connect + w1-2 socket policy +
+        // negotiation-token write) via the shared data-plane helper —
+        // one owner for every client-side data-plane dial, both
+        // directions.
+        let stream = super::socket::dial_data_plane(&addr, token, tcp_buffer_size)
             .await
-            .with_context(|| format!("connecting to data plane {}", addr))?;
-
-        // w1-2: the NODELAY/keepalive/tuned-buffer policy lives in the
-        // shared helper — one owner for every data-plane socket, both
-        // directions, both ends.
-        super::socket::configure_data_socket(&stream, tcp_buffer_size)
-            .context("setting TCP_NODELAY")?;
-
-        stream
-            .write_all(token)
-            .await
-            .context("writing negotiation token")?;
+            .context("dialing push data plane")?;
 
         Ok(
             Self::from_stream_with_probe(stream, trace, chunk_bytes, payload_prefetch, pool, probe)

@@ -10,14 +10,17 @@
 //! discarded (design map §1.1, finding
 //! boundaries-pull-direction-bypasses-socket-policy).
 //!
-//! Connect *timeouts* are deliberately not owned here: this helper
-//! configures an already-established stream. The missing data-plane
-//! connect bounds are design-3's slice and live at the call sites.
+//! design-3 added [`dial_data_plane`]: the client-side dial (bounded
+//! connect + policy + bounded handshake write) lives here too, so
+//! both data-plane connect sites share one owner and neither can
+//! regress to an unbounded `TcpStream::connect`.
 
 use std::io;
 use std::time::Duration;
 
+use eyre::Context as _;
 use socket2::{SockRef, TcpKeepalive};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 /// Bounded wait for a data-plane accept (w1-4: one shared pair — this
@@ -101,6 +104,80 @@ pub fn configure_data_socket(stream: &TcpStream, tcp_buffer_size: Option<usize>)
     Ok(())
 }
 
+/// design-3: dial a data-plane endpoint with the shared bounds — the
+/// client-side mirror of the daemon's bounded accept. Connect is
+/// bounded by [`DATA_PLANE_ACCEPT_TIMEOUT`] (the audit-2 wave bounded
+/// every control-plane connect at the same 30 s but never reached the
+/// TCP data plane: a firewalled or black-holed data port — the daemon
+/// advertises a fresh ephemeral port per transfer, and asymmetric
+/// firewalls that pass the control port but block ephemerals are
+/// common — hung for the kernel SYN timeout, 60–127 s, with no
+/// message). The handshake-token write is bounded by
+/// [`DATA_PLANE_TOKEN_TIMEOUT`], mirroring the acceptor's bounded
+/// token read. Applies [`configure_data_socket`] in between.
+///
+/// On timeout the error chain carries an `io::ErrorKind::TimedOut`
+/// source so `remote::retry::is_retryable` classifies it as a
+/// transient transport failure (`--retry` re-dials instead of giving
+/// up on a deterministic-looking error).
+pub async fn dial_data_plane(
+    addr: &str,
+    handshake: &[u8],
+    tcp_buffer_size: Option<usize>,
+) -> eyre::Result<TcpStream> {
+    dial_data_plane_with_timeouts(
+        addr,
+        handshake,
+        tcp_buffer_size,
+        DATA_PLANE_ACCEPT_TIMEOUT,
+        DATA_PLANE_TOKEN_TIMEOUT,
+    )
+    .await
+}
+
+/// Timeout-parameterized core of [`dial_data_plane`], so tests can pin
+/// the bounded-failure shape without waiting out the production 30 s.
+async fn dial_data_plane_with_timeouts(
+    addr: &str,
+    handshake: &[u8],
+    tcp_buffer_size: Option<usize>,
+    connect_timeout: Duration,
+    token_timeout: Duration,
+) -> eyre::Result<TcpStream> {
+    let mut stream = match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
+        Ok(connected) => connected.with_context(|| format!("connecting data plane {addr}"))?,
+        Err(_) => {
+            return Err(eyre::Report::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("connect did not complete within {connect_timeout:?}"),
+            ))
+            .wrap_err(format!(
+                "data-plane connect to {addr} timed out after {connect_timeout:?} — the \
+                 port is likely unreachable (the daemon advertises a fresh ephemeral \
+                 data port per transfer; a firewall that passes the control port but \
+                 blocks ephemeral ports produces exactly this failure)"
+            )));
+        }
+    };
+    configure_data_socket(&stream, tcp_buffer_size).context("setting TCP_NODELAY")?;
+    match tokio::time::timeout(token_timeout, stream.write_all(handshake)).await {
+        Ok(written) => {
+            written.with_context(|| format!("writing data-plane handshake token to {addr}"))?
+        }
+        Err(_) => {
+            return Err(eyre::Report::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("handshake write did not complete within {token_timeout:?}"),
+            ))
+            .wrap_err(format!(
+                "data-plane handshake to {addr} stalled for {token_timeout:?} — the peer \
+                 accepted the connection but is not reading"
+            )));
+        }
+    }
+    Ok(stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +250,124 @@ mod tests {
             TCP_KEEPALIVE_RETRIES,
             "probe retry count must be the policy value"
         );
+    }
+
+    // ── design-3: bounded dial ────────────────────────────────────
+
+    fn chain_has_timed_out(err: &eyre::Report) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|io_err| io_err.kind() == io::ErrorKind::TimedOut)
+        })
+    }
+
+    /// Happy path: the dial connects, applies the socket policy, and
+    /// delivers the handshake bytes to the peer.
+    #[tokio::test]
+    async fn dial_connects_applies_policy_and_sends_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+
+        let (dialed, accepted) = tokio::join!(
+            dial_data_plane_with_timeouts(
+                &addr,
+                b"tok-123",
+                None,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            ),
+            listener.accept(),
+        );
+        let stream = dialed.expect("dial succeeds");
+        let (mut server, _) = accepted.expect("accept");
+
+        assert!(
+            SockRef::from(&stream).tcp_nodelay().expect("read nodelay"),
+            "dial must apply the shared socket policy"
+        );
+        let mut buf = [0u8; 7];
+        tokio::io::AsyncReadExt::read_exact(&mut server, &mut buf)
+            .await
+            .expect("handshake bytes arrive");
+        assert_eq!(&buf, b"tok-123");
+    }
+
+    /// A stalled handshake (peer accepted but never reads, socket
+    /// buffers full) fails within the token bound — with
+    /// `io::ErrorKind::TimedOut` in the chain so the retry classifier
+    /// treats it as transient. This is the deterministic pin of the
+    /// bounded-failure SHAPE (a real black hole can't be fabricated
+    /// portably; the stalled write exercises the same timeout arm).
+    #[tokio::test]
+    async fn dial_token_write_stall_times_out_bounded_and_retryable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+
+        // Handshake far larger than any default socket-buffer pair, so
+        // write_all must block on a peer that never reads. The accepted
+        // socket is held (not read) for the duration of the dial.
+        let big_handshake = vec![0xA5u8; 64 * 1024 * 1024];
+        let start = std::time::Instant::now();
+        let (dialed, accepted) = tokio::join!(
+            dial_data_plane_with_timeouts(
+                &addr,
+                &big_handshake,
+                None,
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+            ),
+            listener.accept(),
+        );
+        let _held_open = accepted.expect("accept");
+        let err = dialed.expect_err("stalled handshake must time out");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "failure must arrive within the bound, not the OS timeout"
+        );
+        assert!(
+            chain_has_timed_out(&err),
+            "chain must carry io::ErrorKind::TimedOut: {err:#}"
+        );
+        assert!(
+            crate::remote::retry::is_retryable(&err),
+            "a dial timeout is a transient transport failure"
+        );
+    }
+
+    /// A black-holed connect fails within the connect bound instead of
+    /// hanging for the kernel SYN timeout (60–127 s). RFC 5737
+    /// TEST-NET-1 is reserved and never routable; most stacks
+    /// black-hole it (timeout arm — assert the TimedOut chain), some
+    /// networks reject it fast (unreachable — the dial still failed
+    /// bounded, which is the invariant under test either way).
+    #[tokio::test]
+    async fn dial_connect_to_black_hole_fails_within_bound() {
+        let start = std::time::Instant::now();
+        let result = dial_data_plane_with_timeouts(
+            "192.0.2.1:9",
+            b"tok",
+            None,
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        let err = result.expect_err("TEST-NET dial must fail");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "dial must fail within the bound (took {elapsed:?}) — an unbounded \
+             connect rides the kernel SYN timeout for 60-127s"
+        );
+        // Only the black-hole arm produces our TimedOut shape; a fast
+        // OS rejection (some networks) is also a bounded failure.
+        if elapsed >= Duration::from_millis(250) {
+            assert!(
+                chain_has_timed_out(&err),
+                "black-holed connect must surface the timeout shape: {err:#}"
+            );
+            assert!(crate::remote::retry::is_retryable(&err));
+        }
     }
 
     /// `None` = kernel-default buffers: nodelay/keepalive still land,

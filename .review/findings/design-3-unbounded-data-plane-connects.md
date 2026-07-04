@@ -40,3 +40,57 @@ assert a plain error within the bound instead of an OS-timeout hang.
 - Map §1.1 (channel construction) risk list; §1.2 (timeouts & liveness).
 - Queued slice-2 transport work (STATE.md Queue item 2) — same policy family;
   this finding is the TCP-connect corner of it and can land independently.
+
+---
+
+## Implementation record (2026-07-04, the slice that closed this)
+
+**Commit**: see REVIEW.md row. Landed as the coder's-pick smaller
+alternative after w4-4, per the long-standing queue note.
+
+### What / Approach
+
+`remote::transfer::socket::dial_data_plane(addr, handshake,
+tcp_buffer_size)` — the client-side mirror of the daemon's bounded
+accept, owned by the same w1-family socket-policy module:
+
+- connect bounded by the shared `DATA_PLANE_ACCEPT_TIMEOUT` (30 s, the
+  row's sanctioned constant — no fifth literal);
+- `configure_data_socket` (w1-2/w1-3 policy) applied;
+- handshake-token write bounded by `DATA_PLANE_TOKEN_TIMEOUT` (15 s),
+  mirroring the acceptor's bounded token read (the finding's "also the
+  token write" clause);
+- on either timeout the chain carries an `io::ErrorKind::TimedOut`
+  source with explanatory text naming addr + the likely-firewall
+  cause, so `remote::retry::is_retryable` classifies it transient
+  (`--retry` re-dials).
+
+Both connect sites collapsed onto it: `pull.rs connect_pull_stream`
+(pull/pull-sync + resize-ADD dials) and
+`data_plane.rs DataPlaneSession::connect_with_probe` (push TCP —
+elastic/resize dials included, since ADD streams route through the
+same constructor). A timeout-parameterized private core
+(`dial_data_plane_with_timeouts`) exists solely so tests pin the
+bounded shape without waiting the production 30 s. The socket.rs
+module doc's "connect timeouts live at the call sites" paragraph
+(written when w1-2 anticipated this slice) rewritten to match.
+
+### Tests (blit-core lib 389 → 392)
+
+- happy path: dial + policy landed + handshake bytes received;
+- deterministic timeout SHAPE: a peer that accepts but never reads,
+  against a 64 MiB handshake — write_all stalls, the token bound
+  fires, the chain carries TimedOut and classifies retryable
+  (mutation-verified: replacing the timeout error with a plain eyre
+  message fails this pin);
+- black-holed connect (RFC 5737 TEST-NET-1) fails within the bound —
+  the timeout-shape assertions apply on the (common) black-hole arm;
+  a network that fast-rejects TEST-NET still proves the bound.
+
+### Known gaps
+
+- The connect-bound pin is environment-tolerant (fast-reject networks
+  skip the shape assertions); the shape is deterministically pinned
+  via the token-write arm instead.
+- No e2e drives a real firewalled daemon; the failure text is
+  reviewed, not user-tested.

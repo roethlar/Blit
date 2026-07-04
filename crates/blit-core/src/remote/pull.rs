@@ -1878,20 +1878,13 @@ async fn receive_data_plane_streams_owned(
 /// stream can treat dial failure as non-fatal.
 async fn connect_pull_stream(host: &str, port: u32, handshake: &[u8]) -> Result<TcpStream> {
     let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect(addr.clone())
+    // design-3: bounded dial (connect + w1-2 socket policy + handshake
+    // write) via the shared data-plane helper. No tuned buffer: the
+    // pull dial lives on the daemon — the byte sender — so the client
+    // has no value to apply.
+    crate::remote::transfer::socket::dial_data_plane(&addr, handshake, None)
         .await
-        .with_context(|| format!("connecting pull data plane {}", addr))?;
-    // w1-2: same socket policy as every other data-plane endpoint
-    // (before this, the pull client ran with Nagle enabled and no
-    // keepalive). No tuned buffer: the pull dial lives on the daemon
-    // — the byte sender — so the client has no value to apply.
-    crate::remote::transfer::socket::configure_data_socket(&stream, None)
-        .context("setting TCP_NODELAY on pull data plane")?;
-    stream
-        .write_all(handshake)
-        .await
-        .context("writing pull data-plane token")?;
-    Ok(stream)
+        .context("dialing pull data plane")
 }
 
 async fn receive_on_pull_stream(
