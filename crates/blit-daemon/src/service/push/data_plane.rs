@@ -85,7 +85,12 @@ pub(crate) async fn accept_data_connection_stream(
 ) -> Result<TransferStats, Status> {
     let start = Instant::now();
     let streams = stream_count.max(1) as usize;
-    let mut handles = Vec::with_capacity(streams);
+    // w4-1: a JoinSet, not a Vec<JoinHandle> — dropping a JoinSet
+    // aborts every remaining worker, so a first-error return (or this
+    // whole future being cancelled) no longer detaches the survivors.
+    // Mirrors `accept_data_connection_stream_resizable`, which fixed
+    // this same class during ue-r2-2.
+    let mut join_set: JoinSet<Result<TransferStats, Status>> = JoinSet::new();
 
     for idx in 0..streams {
         let (accepted, addr) =
@@ -115,17 +120,18 @@ pub(crate) async fn accept_data_connection_stream(
         );
         let expected_token = expected_token.clone();
         let module_clone = module.clone();
-        handles.push(tokio::spawn(async move {
+        join_set.spawn(async move {
             handle_data_plane_stream(socket, expected_token, module_clone).await
-        }));
+        });
     }
 
     let mut final_stats = TransferStats::default();
-    for handle in handles {
-        let stats = handle
-            .await
-            .map_err(|_| Status::internal("data plane worker cancelled"))??;
-        accumulate_transfer_stats(&mut final_stats, &stats);
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(stats)) => accumulate_transfer_stats(&mut final_stats, &stats),
+            Ok(Err(status)) => return Err(status),
+            Err(_) => return Err(Status::internal("data plane worker cancelled")),
+        }
     }
 
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
@@ -1467,5 +1473,76 @@ mod tests {
             .await
             .expect_err("EOF without UploadComplete must be rejected");
         assert!(err.message().contains("UploadComplete"));
+    }
+
+    /// w4-1 (`async-daemon-push-stream-workers-detach-on-first-error`):
+    /// `accept_data_connection_stream`'s per-stream workers used to be
+    /// a bare `Vec<JoinHandle>`, so the first worker to error dropped
+    /// the remaining handles without aborting them — a live sibling
+    /// kept its socket open (and would have kept writing files into
+    /// the module) after the RPC had already failed. The `JoinSet`
+    /// conversion means dropping it on the first-error return tears
+    /// every remaining worker down. Observability is TCP-level, same
+    /// pattern as `blit_core::remote::pull`'s
+    /// `cancellation_aborts_all_stream_workers`: a surviving stream's
+    /// peer sees its socket close.
+    #[tokio::test]
+    async fn first_stream_error_aborts_sibling_worker() {
+        let dest_root = tempdir().expect("dest tempdir");
+        let module = module_for_test(dest_root.path().to_path_buf());
+        let token = vec![7u8; TOKEN_LEN];
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let accept_fut = accept_data_connection_stream(listener, token.clone(), module, 2);
+
+        // Client A: sends the token then closes immediately without a
+        // DATA_PLANE_RECORD_END — an incomplete stream, which the
+        // receive pipeline rejects as soon as it tries to read the
+        // next record tag (read_exact sees EOF, not a stall, so this
+        // resolves promptly rather than waiting on StallGuard).
+        let token_a = token.clone();
+        let client_a = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.expect("client A connect");
+            sock.write_all(&token_a)
+                .await
+                .expect("client A write token");
+        });
+
+        // Client B: sends the token then holds the socket open,
+        // watching for the daemon to close its end.
+        let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+        let token_b = token.clone();
+        let client_b = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.expect("client B connect");
+            sock.write_all(&token_b)
+                .await
+                .expect("client B write token");
+            let mut buf = [0u8; 1];
+            let result = sock.read(&mut buf).await;
+            let _ = probe_tx.send(result);
+        });
+
+        client_a.await.expect("client A task");
+
+        let result = tokio::time::timeout(Duration::from_secs(10), accept_fut)
+            .await
+            .expect("accept_data_connection_stream must not hang");
+        assert!(result.is_err(), "the first worker's error must propagate");
+
+        let probe = tokio::time::timeout(Duration::from_secs(10), probe_rx)
+            .await
+            .expect("sibling probe must resolve")
+            .expect("probe sender dropped without sending");
+        match probe {
+            Ok(0) => {}  // Clean EOF: the daemon closed its side.
+            Err(_) => {} // Reset: also counts as torn down.
+            Ok(n) => panic!("unexpected {n} byte(s) from a supposedly-aborted sibling worker"),
+        }
+
+        client_b.await.expect("client B task");
     }
 }

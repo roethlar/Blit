@@ -14,6 +14,7 @@ use blit_core::generated::{
     DataPlaneResizeAck, DataPlaneResizeOp, DataTransferNegotiation, FileHeader, FileList,
     PushSummary, ServerPushResponse,
 };
+use blit_core::remote::transfer::AbortOnDrop;
 use std::collections::HashMap;
 use std::fs;
 use std::mem;
@@ -52,8 +53,11 @@ pub(crate) async fn handle_push_stream(
     let mut purge_filter = blit_core::fs_enum::FileFilter::default();
     let mut scan_complete = false;
     let mut need_list_sender = FileListBatcher::new(tx.clone());
-    let mut data_plane_handle: Option<tokio::task::JoinHandle<Result<TransferStats, Status>>> =
-        None;
+    // design-2 / w4-1: `AbortOnDrop`, not a bare `JoinHandle` — an
+    // early `?` return anywhere in this handler while a data-plane
+    // task is running (or the `stream.message()` race below erroring)
+    // must abort the accept/receive task instead of detaching it.
+    let mut data_plane_handle: Option<AbortOnDrop<Result<TransferStats, Status>>> = None;
     let mut force_grpc_effective = force_grpc_data;
     let mut fallback_used = false;
     // ue-r2-2: the client's advertised resize capability (PushHeader
@@ -231,21 +235,23 @@ pub(crate) async fn handle_push_stream(
                                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                                 resize_cmd_tx = Some(cmd_tx);
                                 resize_live = stream_target.max(1);
-                                tokio::spawn(accept_data_connection_stream_resizable(
-                                    listener,
-                                    token.clone(),
-                                    epoch0_sub.clone(),
-                                    module_for_transfer,
-                                    stream_target,
-                                    cmd_rx,
+                                AbortOnDrop::new(tokio::spawn(
+                                    accept_data_connection_stream_resizable(
+                                        listener,
+                                        token.clone(),
+                                        epoch0_sub.clone(),
+                                        module_for_transfer,
+                                        stream_target,
+                                        cmd_rx,
+                                    ),
                                 ))
                             } else {
-                                tokio::spawn(accept_data_connection_stream(
+                                AbortOnDrop::new(tokio::spawn(accept_data_connection_stream(
                                     listener,
                                     token.clone(),
                                     module_for_transfer,
                                     stream_target,
-                                ))
+                                )))
                             };
 
                             send_control_message(
@@ -337,21 +343,21 @@ pub(crate) async fn handle_push_stream(
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                 resize_cmd_tx = Some(cmd_tx);
                 resize_live = stream_target.max(1);
-                tokio::spawn(accept_data_connection_stream_resizable(
+                AbortOnDrop::new(tokio::spawn(accept_data_connection_stream_resizable(
                     listener,
                     token.clone(),
                     epoch0_sub.clone(),
                     module_for_transfer,
                     stream_target,
                     cmd_rx,
-                ))
+                )))
             } else {
-                tokio::spawn(accept_data_connection_stream(
+                AbortOnDrop::new(tokio::spawn(accept_data_connection_stream(
                     listener,
                     token.clone(),
                     module_for_transfer,
                     stream_target,
-                ))
+                )))
             };
             send_control_message(
                 &tx,
@@ -375,11 +381,20 @@ pub(crate) async fn handle_push_stream(
             // plane runs — the client's DataPlaneResize frames arrive
             // mid-transfer. Everything else on the stream during this
             // phase was previously unread; ignore it the same way.
-            let mut handle = handle;
+            //
+            // design-2 / w4-1: `handle.join()` is pinned across loop
+            // iterations rather than polling a bare `JoinHandle`
+            // directly — `AbortOnDrop::join` holds `self` across its
+            // internal await, so if `msg?` below errors and this
+            // function returns, dropping `join_fut` mid-poll drops the
+            // still-owned `AbortOnDrop`, which aborts the data-plane
+            // task instead of detaching it.
             let mut client_stream_done = false;
+            let join_fut = handle.join();
+            tokio::pin!(join_fut);
             loop {
                 tokio::select! {
-                    res = &mut handle => {
+                    res = &mut join_fut => {
                         break res.map_err(|_| Status::internal("data plane task cancelled"))??;
                     }
                     msg = stream.message(), if !client_stream_done => match msg? {
@@ -662,4 +677,55 @@ fn engine_stream_proposal(files: &[FileHeader]) -> u32 {
         files.len(),
         blit_core::engine::local_receiver_capacity().max_streams as usize,
     )
+}
+
+#[cfg(test)]
+mod data_plane_handle_abort_tests {
+    //! design-2 / w4-1: `handle_push_stream`'s `data_plane_handle` was
+    //! a bare `Option<JoinHandle<...>>`. Any early `?` return while a
+    //! data-plane accept/receive task was running (the manifest
+    //! loop's several fallible `send_control_message` calls, or the
+    //! `stream.message()?` race in the post-manifest select loop)
+    //! dropped the handle without aborting it, leaving the task
+    //! running with no owner — unreachable by `CancelJob`. This pins
+    //! the fix at the field-type level: wrapping the same
+    //! `tokio::spawn` result in `AbortOnDrop` and dropping the
+    //! `Option` (simulating the early-return path) must abort the
+    //! task instead of detaching it. The full handler is exercised
+    //! end-to-end elsewhere; reproducing a real gRPC push stream just
+    //! to trigger this drop path would be disproportionate to the
+    //! fix, which is purely "the field is wrapped now".
+
+    use super::AbortOnDrop;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tonic::Status;
+
+    #[tokio::test]
+    async fn dropping_data_plane_handle_aborts_task() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_task = Arc::clone(&completed);
+        let handle: Option<AbortOnDrop<Result<(), Status>>> =
+            Some(AbortOnDrop::new(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                completed_in_task.store(true, Ordering::SeqCst);
+                Ok(())
+            })));
+
+        // Simulate an early `?` return out of `handle_push_stream`
+        // while the field is still `Some`.
+        drop(handle);
+
+        // Wait well past the task's own 500ms delay — the margin has
+        // to exceed the task's natural runtime, not just be "soon
+        // after drop", or the assertion would pass regardless of
+        // whether abort actually fired.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "data plane task ran to completion despite its handle being dropped — \
+             data_plane_handle detached instead of aborting"
+        );
+    }
 }

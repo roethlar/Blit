@@ -1,3 +1,4 @@
+pub mod abort_on_drop;
 pub mod data_plane;
 pub mod diff_planner;
 pub mod grpc_fallback;
@@ -11,6 +12,7 @@ pub mod stall_guard;
 pub mod tar_safety;
 pub mod tcp_info;
 
+pub use abort_on_drop::AbortOnDrop;
 pub use data_plane::{
     generate_sub_token, receive_stream_double_buffered, DataPlaneSession, CONTROL_PLANE_CHUNK_SIZE,
     DATA_PLANE_RECORD_BLOCK, DATA_PLANE_RECORD_BLOCK_COMPLETE, DATA_PLANE_RECORD_END,

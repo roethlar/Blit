@@ -38,6 +38,7 @@ use crate::remote::transfer::pipeline::{
 use crate::remote::transfer::progress::RemoteTransferProgress;
 use crate::remote::transfer::sink::{DataPlaneSink, GrpcFallbackSink, SinkOutcome, TransferSink};
 use crate::remote::transfer::source::TransferSource;
+use crate::remote::transfer::AbortOnDrop;
 
 /// Await a pipeline JoinHandle and return the outcome with
 /// consistent error wrapping. Used by both `MultiStreamSender::queue`
@@ -59,8 +60,12 @@ use crate::remote::transfer::source::TransferSource;
 /// Closes R43 follow-up to R42-F2: previously `finish()` duplicated
 /// these match arms while a comment claimed they routed through the
 /// helper. Now there's actually one helper.
-async fn drain_pipeline_outcome(handle: JoinHandle<Result<SinkOutcome>>) -> Result<SinkOutcome> {
-    match handle.await {
+///
+/// w4-1: takes `AbortOnDrop` (not a bare `JoinHandle`) and drains via
+/// `.join()` — if the caller's future is cancelled mid-await, the
+/// wrapper's Drop aborts the pipeline task instead of detaching it.
+async fn drain_pipeline_outcome(handle: AbortOnDrop<Result<SinkOutcome>>) -> Result<SinkOutcome> {
+    match handle.join().await {
         Ok(Ok(o)) => Ok(o),
         Ok(Err(e)) => Err(e.wrap_err("data plane pipeline failed")),
         Err(join) => Err(eyre!("data plane pipeline panicked: {join}")),
@@ -79,7 +84,7 @@ async fn drain_pipeline_outcome(handle: JoinHandle<Result<SinkOutcome>>) -> Resu
 /// directly testable without spinning up a full
 /// `MultiStreamSender::connect` (which requires real TCP streams).
 /// Closes R42-F2.
-async fn drain_pipeline_error(handle: JoinHandle<Result<SinkOutcome>>) -> eyre::Report {
+async fn drain_pipeline_error(handle: AbortOnDrop<Result<SinkOutcome>>) -> eyre::Report {
     match drain_pipeline_outcome(handle).await {
         Ok(_) => eyre!(
             "data plane pipeline closed cleanly but the producer \
@@ -99,13 +104,19 @@ struct MultiStreamSender {
     /// dial. Aborted on finish(); self-terminates via its Weak<dial>
     /// if the sender is dropped without finishing.
     tuner_handle: Option<JoinHandle<()>>,
-    /// Pipeline JoinHandle. `Option` so `queue()` can `take()` it on
+    /// Pipeline handle. `Option` so `queue()` can `take()` it on
     /// the unhappy path: if `tx.send().await` fails the receiver has
     /// been dropped, which means the pipeline died with an error
     /// inside the spawned task. We surface that real error instead
     /// of the previous generic "data plane pipeline closed
     /// unexpectedly" string. POST_REVIEW_FIXES §1.1b.
-    pipeline_handle: Option<JoinHandle<Result<SinkOutcome>>>,
+    ///
+    /// w4-1: `AbortOnDrop`, not a bare `JoinHandle` — if `push()`
+    /// returns early via `?` while a `MultiStreamSender` is still
+    /// live, dropping it must abort the pipeline task (which owns
+    /// the sink workers' `JoinSet`) rather than leaving it running
+    /// with no owner.
+    pipeline_handle: Option<AbortOnDrop<Result<SinkOutcome>>>,
     started: Instant,
     /// ue-r2-2: present only when the negotiation enabled resize.
     resize: Option<ResizeRuntime>,
@@ -279,7 +290,7 @@ impl MultiStreamSender {
         let source_clone = source.clone();
         let prefetch = payload_prefetch.max(1);
         drop(ctl_tx);
-        let pipeline_handle = tokio::spawn(async move {
+        let pipeline_handle = AbortOnDrop::new(tokio::spawn(async move {
             execute_sink_pipeline_elastic(
                 source_clone,
                 sinks,
@@ -289,7 +300,7 @@ impl MultiStreamSender {
                 Some(ctl_rx),
             )
             .await
-        });
+        }));
 
         Ok(Self {
             payload_tx: Some(payload_tx),
@@ -1366,7 +1377,7 @@ impl RemotePushClient {
             sender.finish().await?;
         }
 
-        if let Err(join_err) = response_task.await {
+        if let Err(join_err) = response_task.join().await {
             return Err(eyre::eyre!("response stream task failed: {}", join_err));
         }
 
@@ -1470,6 +1481,61 @@ impl FallbackStreamResult {
 }
 
 #[cfg(test)]
+mod multi_stream_sender_drop_tests {
+    //! w4-1: `MultiStreamSender` cannot be exercised end-to-end without
+    //! real TCP streams (`connect()`'s requirement — see
+    //! `drain_pipeline_error_tests` below), but the Drop-time abort
+    //! behavior this slice adds doesn't need real sockets — it only
+    //! needs the `pipeline_handle` field wired through `AbortOnDrop`.
+    //! This pins the fix at the struct level: dropping a
+    //! `MultiStreamSender` without calling `.finish()` (the path
+    //! `push()` takes on any early `?` return while a sender is still
+    //! live) must abort the pipeline task, not detach it — the
+    //! `async-push-client-pipeline-detach-on-drop` finding's proposed
+    //! regression ("drop a push() future mid-transfer and assert the
+    //! pipeline task stops").
+
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn dropping_sender_without_finish_aborts_pipeline_task() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_task = Arc::clone(&completed);
+        let pipeline_handle = AbortOnDrop::new(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            completed_in_task.store(true, Ordering::SeqCst);
+            Ok(SinkOutcome::default())
+        }));
+
+        let sender = MultiStreamSender {
+            payload_tx: None,
+            tuner_handle: None,
+            pipeline_handle: Some(pipeline_handle),
+            started: Instant::now(),
+            resize: None,
+            resize_rx: None,
+        };
+
+        // Simulate push() returning early via `?` while the sender is
+        // still live: drop it without calling finish().
+        drop(sender);
+
+        // Wait well past the task's own 500ms delay: if abort didn't
+        // fire, the task completes naturally and the assertion below
+        // would pass regardless of whether the drop actually tore it
+        // down — the margin has to exceed the task's natural runtime,
+        // not just be "soon after drop".
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "pipeline task ran to completion despite MultiStreamSender being \
+             dropped mid-transfer — pipeline_handle detached instead of aborting"
+        );
+    }
+}
+
+#[cfg(test)]
 mod drain_pipeline_error_tests {
     //! R42-F2: pin the producer-side join-error-drain logic that
     //! `MultiStreamSender::queue` and `MultiStreamSender::finish`
@@ -1491,8 +1557,9 @@ mod drain_pipeline_error_tests {
         // Pipeline task returned `Err(...)`. drain_pipeline_error
         // must wrap with "data plane pipeline failed" so the eyre
         // cause chain reads `data plane pipeline failed: <inner>`.
-        let handle: JoinHandle<Result<SinkOutcome>> =
-            tokio::spawn(async { Err(eyre!("synthetic sink failure: disk full on dest")) });
+        let handle = AbortOnDrop::new(tokio::spawn(async {
+            Err(eyre!("synthetic sink failure: disk full on dest"))
+        }));
 
         let report = drain_pipeline_error(handle).await;
         let msg = format!("{:#}", report);
@@ -1513,9 +1580,9 @@ mod drain_pipeline_error_tests {
         // Pipeline task panicked. drain_pipeline_error must produce
         // a "data plane pipeline panicked" message rather than
         // hiding the panic.
-        let handle: JoinHandle<Result<SinkOutcome>> = tokio::spawn(async {
+        let handle = AbortOnDrop::new(tokio::spawn(async {
             panic!("synthetic pipeline panic");
-        });
+        }));
 
         let report = drain_pipeline_error(handle).await;
         let msg = format!("{:#}", report);
@@ -1538,7 +1605,7 @@ mod drain_pipeline_error_tests {
             bytes_written: 1024,
         };
         let cloned = outcome.clone();
-        let handle: JoinHandle<Result<SinkOutcome>> = tokio::spawn(async move { Ok(cloned) });
+        let handle = AbortOnDrop::new(tokio::spawn(async move { Ok(cloned) }));
         let got = drain_pipeline_outcome(handle).await.expect("clean finish");
         assert_eq!(got.files_written, outcome.files_written);
         assert_eq!(got.bytes_written, outcome.bytes_written);
@@ -1550,8 +1617,9 @@ mod drain_pipeline_error_tests {
         // must wrap the same way `queue()`'s drain does so the user-
         // visible message is "data plane pipeline failed: <cause>"
         // regardless of which call site reported the error.
-        let handle: JoinHandle<Result<SinkOutcome>> =
-            tokio::spawn(async { Err(eyre!("synthetic apply error: ENOSPC")) });
+        let handle = AbortOnDrop::new(tokio::spawn(async {
+            Err(eyre!("synthetic apply error: ENOSPC"))
+        }));
         let err = drain_pipeline_outcome(handle).await.expect_err("must err");
         let msg = format!("{:#}", err);
         assert!(
@@ -1568,9 +1636,9 @@ mod drain_pipeline_error_tests {
 
     #[tokio::test]
     async fn drain_outcome_surfaces_panic_message() {
-        let handle: JoinHandle<Result<SinkOutcome>> = tokio::spawn(async {
+        let handle = AbortOnDrop::new(tokio::spawn(async {
             panic!("synthetic finish-time panic");
-        });
+        }));
         let err = drain_pipeline_outcome(handle).await.expect_err("must err");
         let msg = format!("{:#}", err);
         assert!(
@@ -1589,8 +1657,7 @@ mod drain_pipeline_error_tests {
         // emit a diagnostic message rather than swallowing this as
         // success, so a future regression where this race becomes
         // common surfaces in logs.
-        let handle: JoinHandle<Result<SinkOutcome>> =
-            tokio::spawn(async { Ok(SinkOutcome::default()) });
+        let handle = AbortOnDrop::new(tokio::spawn(async { Ok(SinkOutcome::default()) }));
 
         let report = drain_pipeline_error(handle).await;
         let msg = format!("{:#}", report);

@@ -14,6 +14,7 @@ use crate::enumeration::{EntryKind, FileEnumerator};
 use crate::fs_enum::FileFilter;
 use crate::generated::client_push_request::Payload as ClientPayload;
 use crate::generated::{ClientPushRequest, FileHeader, ManifestComplete, ServerPushResponse};
+use crate::remote::transfer::AbortOnDrop;
 
 pub fn drain_pending_headers(
     queue: &mut VecDeque<String>,
@@ -252,14 +253,19 @@ pub async fn filter_readable_headers(
     Ok(filtered)
 }
 
+/// w4-1: the returned task is wrapped in `AbortOnDrop` so a caller
+/// that drops it without awaiting (an early `?` return out of
+/// `push()`) aborts the stream-reader task instead of detaching it —
+/// previously a bare `JoinHandle` left this looping on `stream.message()`
+/// with no owner.
 pub fn spawn_response_task(
     mut stream: tonic::Streaming<ServerPushResponse>,
 ) -> (
     mpsc::Receiver<Result<ServerPushResponse, eyre::Report>>,
-    task::JoinHandle<()>,
+    AbortOnDrop<()>,
 ) {
     let (response_tx, response_rx) = mpsc::channel::<Result<ServerPushResponse, eyre::Report>>(32);
-    let task = tokio::spawn(async move {
+    let task = AbortOnDrop::new(tokio::spawn(async move {
         loop {
             match stream.message().await {
                 Ok(Some(msg)) => {
@@ -274,7 +280,7 @@ pub fn spawn_response_task(
                 }
             }
         }
-    });
+    }));
     (response_rx, task)
 }
 

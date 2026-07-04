@@ -10,62 +10,6 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use crate::generated::blit_client::BlitClient;
-
-/// RAII wrapper that aborts the underlying tokio task when dropped
-/// without awaiting (R32-F2).
-///
-/// `JoinHandle::drop` detaches; it does NOT cancel the spawned task.
-/// That's a real bug for `pull_sync_with_spec`: when the outer future
-/// is dropped (e.g. CLI Ctrl-C cancels the gRPC stream from the
-/// daemon's `delegated_pull` handler), spawned data-plane receivers
-/// would otherwise continue reading TCP and writing files.
-///
-/// Usage: wrap every `tokio::spawn` whose lifetime should be bounded
-/// by the calling future. Await with `.join().await` — that holds
-/// `self` across the await so a parent-future cancellation during
-/// the await still triggers `abort()` via Drop. Do NOT add an
-/// `into_inner()` accessor: returning the bare `JoinHandle` and then
-/// awaiting it re-introduces the cancellation gap (R34-F2 — the bare
-/// handle is dropped on parent-future cancel and detaches the task
-/// instead of aborting it).
-pub(crate) struct AbortOnDrop<T>(Option<JoinHandle<T>>);
-
-impl<T> AbortOnDrop<T> {
-    pub(crate) fn new(handle: JoinHandle<T>) -> Self {
-        Self(Some(handle))
-    }
-
-    /// Await the spawned task while keeping `self` alive across the
-    /// await. If the surrounding future is cancelled during the
-    /// await, `self` is dropped and our `Drop` impl fires `abort()`.
-    /// Compare to a hypothetical `into_inner().await` pattern, which
-    /// would release the guard before awaiting — that's the
-    /// cancellation-gap bug R34-F2 fixed.
-    pub(crate) async fn join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
-        // Borrow the JoinHandle out of the Option, but DON'T move it
-        // out of `self`. `self` lives across this await; if the
-        // surrounding future is cancelled here, `self` drops and
-        // `Drop::drop` aborts the still-owned handle.
-        let handle = self
-            .0
-            .as_mut()
-            .expect("AbortOnDrop already consumed (programming error)");
-        let result = handle.await;
-        // Task completed (success or panic). Clear the slot so the
-        // trailing Drop after this returns is a no-op rather than
-        // calling abort() on an already-finished handle.
-        self.0 = None;
-        result
-    }
-}
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
-            handle.abort();
-        }
-    }
-}
 use crate::generated::{
     client_pull_message, server_pull_message, BlockHashList, ClientPullMessage, ComparisonMode,
     DataTransferNegotiation, FileData, FileHeader, ManifestComplete, MirrorMode, PeerCapabilities,
@@ -74,6 +18,7 @@ use crate::generated::{
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::grpc_fallback::recv_fallback_message;
 use crate::remote::transfer::progress::{ByteProgressSink, RemoteTransferProgress};
+use crate::remote::transfer::AbortOnDrop;
 
 /// Phase-bearing pull-sync error used by delegation callers to preserve the
 /// source-refusal vs mid-transfer distinction across the `eyre::Report`
@@ -2065,125 +2010,6 @@ fn normalize_for_request(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod abort_on_drop_tests {
-    //! Regression tests for the `AbortOnDrop` wrapper that bounds
-    //! every internal `tokio::spawn` in `pull_sync_with_spec` and
-    //! its data-plane receive workers (R32-F2). Without this, dropping the
-    //! `JoinHandle` would detach the spawned task — meaning a CLI
-    //! Ctrl-C from the daemon's `delegated_pull` handler couldn't
-    //! actually stop a running data-plane receiver.
-
-    use super::AbortOnDrop;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn drop_without_consume_aborts_running_task() {
-        // The task tries to set the "completed" flag after a delay
-        // long enough that the test wouldn't naturally race past it.
-        // Wrapping in AbortOnDrop and dropping immediately must
-        // prevent the flag from ever being set.
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_in_task = Arc::clone(&completed);
-
-        let guard = AbortOnDrop::new(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            completed_in_task.store(true, Ordering::SeqCst);
-        }));
-        // Drop the wrapper without awaiting — this is the
-        // cancellation path (e.g. the outer pull_sync_with_spec
-        // future was dropped mid-flight).
-        drop(guard);
-
-        // Wait significantly longer than the task's natural
-        // duration. If abort actually happened, the task is dead
-        // and the flag never got set.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(
-            !completed.load(Ordering::SeqCst),
-            "task ran to completion despite AbortOnDrop being dropped"
-        );
-    }
-
-    #[tokio::test]
-    async fn join_returns_value_and_drop_becomes_noop() {
-        // Happy path: the caller awaits via `.join()`. The task
-        // completes naturally, the value is returned, and the
-        // wrapper's Drop is a no-op (slot was cleared inside join).
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_in_task = Arc::clone(&completed);
-
-        let guard = AbortOnDrop::new(tokio::spawn(async move {
-            completed_in_task.store(true, Ordering::SeqCst);
-            42_u32
-        }));
-
-        let value = guard.join().await.expect("task succeeds");
-        assert_eq!(value, 42);
-        assert!(completed.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn drop_after_natural_completion_does_not_panic() {
-        // If the task happens to complete before Drop fires, the
-        // wrapper must still drop cleanly. abort() on a completed
-        // JoinHandle is a no-op in tokio; this test pins that
-        // expectation in our wrapper.
-        let guard = AbortOnDrop::new(tokio::spawn(async {}));
-        // Let the task complete.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        drop(guard);
-    }
-
-    // ── R34-F2: cancellation during the join await still aborts ──────
-
-    #[tokio::test]
-    async fn cancellation_during_join_await_still_aborts_task() {
-        // The load-bearing R34-F2 regression. Pre-fix, the wrapper
-        // exposed `into_inner() -> JoinHandle<T>` and callers did
-        // `handle.into_inner().await`. That moved the handle out of
-        // the wrapper before the await: if the surrounding future was
-        // cancelled mid-await, the bare `JoinHandle` was dropped, and
-        // tokio detaches on JoinHandle drop. The spawned task kept
-        // running.
-        //
-        // Post-fix, `.join()` holds `self` across the await; if the
-        // surrounding future is dropped at that point, `self` drops
-        // and `Drop::drop` calls `abort()` on the still-owned handle.
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_in_task = Arc::clone(&completed);
-
-        let guard = AbortOnDrop::new(tokio::spawn(async move {
-            // Long enough that the test will reliably abort before
-            // natural completion.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            completed_in_task.store(true, Ordering::SeqCst);
-        }));
-
-        // Build the join future and drop it after a short timeout —
-        // simulating an outer `tokio::select!` whose other branch
-        // fired (the realistic scenario in the daemon's
-        // delegated_pull handler when the CLI hangs up).
-        let join_fut = guard.join();
-        let timed_out = tokio::time::timeout(Duration::from_millis(20), join_fut)
-            .await
-            .is_err();
-        assert!(timed_out, "timeout must fire to drop the join future");
-
-        // Wait well past when the task would have naturally
-        // completed. If abort actually fired through the wrapper
-        // during the dropped join await, the flag is still false.
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        assert!(
-            !completed.load(Ordering::SeqCst),
-            "task ran to completion despite cancellation during join() await — \
-             AbortOnDrop is leaking the handle out before the await again"
-        );
-    }
-}
-
-#[cfg(test)]
 mod multi_stream_receive_tests {
     //! ue-r2-1g: pins the multistream fan-in semantics of
     //! `receive_data_plane_streams_owned` — the machinery the PullSync
@@ -2191,6 +2017,13 @@ mod multi_stream_receive_tests {
     //! contract (MULTISTREAM_PULL "per-stream failure" criterion): one
     //! stream dying must fail the entire receive deterministically,
     //! never silently drop that stream's files.
+    //!
+    //! `AbortOnDrop`'s own contract (drop-without-consume aborts,
+    //! join-return-clears-drop, cancellation-during-join still
+    //! aborts) is pinned generically in
+    //! `crate::remote::transfer::abort_on_drop::tests` (hoisted
+    //! there under w4-1); `cancellation_aborts_all_stream_workers`
+    //! below is this module's integration point with that wrapper.
 
     use super::receive_data_plane_streams_owned;
     use crate::remote::transfer::data_plane::DATA_PLANE_RECORD_END;
