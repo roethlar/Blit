@@ -165,11 +165,15 @@ Entering baseline (Windows host): 1393 / 0 / 3. +12 new tests:
   handshake bytes (`token ‖ sub`), the accepted ack, and clean
   completion.
 
-Everything pre-existing stays green — notably every push/pull e2e now
-runs with resize NEGOTIATED (new client + new daemon), so the 48-byte
+Everything pre-existing stays green — every push/pull e2e now runs
+with resize NEGOTIATED (new client + new daemon), so the 48-byte
 handshake, the folds, and the concurrent control-stream servicing are
 exercised by the whole existing suite; the loopback workloads never
 saturate long enough to trigger a proposal (by design of the policy).
+(Review correction: as first committed this held only for PUSH — the
+pull capability flip was a dropped edit, caught by the review panel
+and fixed in the review-fix commit; the whole-suite rerun after the
+fix is what backs this claim for pull.)
 
 ## Known gaps
 
@@ -198,9 +202,24 @@ saturate long enough to trigger a proposal (by design of the policy).
   retiring changes nothing (its own worker keeps running — no daemon
   resource depends on the count).
 - **Narrow teardown race**: if a transfer completes while an ADD is
-  armed-but-undialed, the acceptor returns, the listener drops, and
-  the late dial fails — non-fatal on both ends (client logs + settles;
-  daemon slot dies with the task). Documented rather than locked out.
+  in flight, the late socket dies — made genuinely non-fatal on both
+  ends by the review fixes: the pipeline supervisor is biased
+  control-first and drains queued Adds with a clean END after break;
+  a dead-pipeline attach also closes with END; and an OPTIONAL client
+  worker that received nothing treats its death as a lapse, not a
+  failure (real loss still fails the transfer from the sender side).
+- **Stray-dial slot consumption (review trade-off)**: the pull
+  controller validates epoch-N sockets in a spawned task, so a stray
+  dial that wins the accept race consumes the armed slot — that epoch
+  settles refused and the real client socket degrades non-fatally.
+  Bounded harm chosen over the alternative (an inline 15s handshake
+  freezing the controller).
+- **Push epoch-0 phase vs a very early ADD (deferred, Low)**: the
+  epoch-0 accept loop doesn't service `arm_rx`, so an ADD acked while
+  an epoch-0 dial still straggles (needs the proposal floor ~2.5s to
+  beat a WAN dial) would be consumed as a fatal epoch-0 mismatch.
+  Improbable at current constants; servicing arms during epoch-0 is
+  post-REV4 hardening (panel wire-F4, adjudicated Deferred).
 - `StreamState`/`generation` telemetry fields remain unused (the
   registry add/remove model made the draining-state filter
   unnecessary); they stay for a future controller that samples

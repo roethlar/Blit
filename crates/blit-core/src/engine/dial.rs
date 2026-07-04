@@ -517,6 +517,10 @@ pub fn spawn_dial_tuner_with_resize(
             if blocked < last_blocked || bytes < last_bytes {
                 last_blocked = blocked;
                 last_bytes = bytes;
+                if let Some(tx) = &resize_tx {
+                    let _ = tx; // no proposal possible on a no-signal tick
+                    dial.resize_tick(0, 0.0);
+                }
                 continue;
             }
             let delta_blocked = blocked.saturating_sub(last_blocked);
@@ -526,8 +530,14 @@ pub fn spawn_dial_tuner_with_resize(
             // codex ue-r2-1e F2: an idle tick (no bytes moved) is NO
             // SIGNAL, not a clean pipe — stepping up during manifest /
             // preparation stalls would ramp without evidence and break
-            // the conservative-start contract.
+            // the conservative-start contract. ue-r2-2 review (panel
+            // F3): the idle tick must still reach `resize_tick` so a
+            // sustain streak cannot survive a stall — "consecutive
+            // busy ticks" means consecutive.
             if delta_bytes == 0 {
+                if resize_tx.is_some() {
+                    dial.resize_tick(0, 0.0);
+                }
                 continue;
             }
             let ratio = blocked_ratio(delta_blocked, elapsed, streams);

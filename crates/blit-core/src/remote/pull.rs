@@ -547,8 +547,13 @@ impl RemotePullClient {
                 supports_tar_shards: true,
                 supports_data_plane_tcp: true,
                 supports_filter_spec: true,
-                // ue-r2-1b: stays false until ue-r2-2 implements resize.
-                supports_stream_resize: false,
+                // ue-r2-2: the pull client dials and its receive
+                // worker set is growable — advertise resize. The
+                // daemon folds this into `resize_enabled`; old daemons
+                // skip the bit and nothing changes. (Review catch:
+                // this flip was dropped from the original stack —
+                // without it pull resize was dead on the CLI path.)
+                supports_stream_resize: true,
             }),
             force_grpc: options.force_grpc,
             ignore_existing: options.ignore_existing,
@@ -710,6 +715,11 @@ impl RemotePullClient {
         // ue-r2-2: ADD commands travel through here into the receiver
         // task (present only when the negotiation enabled resize).
         let mut data_plane_growth: Option<tokio::sync::mpsc::UnboundedSender<PullStreamAdd>> = None;
+        // ue-r2-2 review (codex): the acked live count. Bounds
+        // CUMULATIVE growth — per-command target checks alone would
+        // let a hostile daemon replay ADDs past the ceiling this
+        // client advertised.
+        let mut data_plane_live: usize = 0;
         let mut files_to_delete = 0u64;
         let mut negotiation_complete = false;
 
@@ -894,6 +904,7 @@ impl RemotePullClient {
                     if neg.tcp_fallback {
                         continue;
                     }
+                    data_plane_live = bounded_stream_count(neg.stream_count);
                     let (handle, growth) = self.spawn_data_plane_receiver(
                         neg,
                         dest_root,
@@ -1049,11 +1060,18 @@ impl RemotePullClient {
                     // refused, preserving the old peer-bug posture.
                     let op = crate::generated::DataPlaneResizeOp::try_from(cmd.op)
                         .unwrap_or(crate::generated::DataPlaneResizeOp::Unspecified);
+                    let ceiling =
+                        crate::engine::local_receiver_capacity().max_streams.max(1) as usize;
                     let within_ceiling = bounded_stream_count(cmd.target_stream_count)
                         == cmd.target_stream_count.max(1) as usize;
                     let accepted = match op {
                         crate::generated::DataPlaneResizeOp::Add => {
                             within_ceiling
+                                // ue-r2-2 review (codex): bound the
+                                // CUMULATIVE count too — replayed ADDs
+                                // with fresh credentials must not grow
+                                // the worker set past the ceiling.
+                                && data_plane_live < ceiling
                                 && cmd.sub_token.len() == crate::remote::transfer::SUB_TOKEN_LEN
                                 && data_plane_growth.as_ref().is_some_and(|growth| {
                                     growth
@@ -1066,6 +1084,15 @@ impl RemotePullClient {
                         crate::generated::DataPlaneResizeOp::Remove => data_plane_growth.is_some(),
                         _ => false,
                     };
+                    if accepted {
+                        match op {
+                            crate::generated::DataPlaneResizeOp::Add => data_plane_live += 1,
+                            crate::generated::DataPlaneResizeOp::Remove => {
+                                data_plane_live = data_plane_live.saturating_sub(1).max(1);
+                            }
+                            _ => {}
+                        }
+                    }
                     if !accepted {
                         log::warn!(
                             "pull: refusing DataPlaneResize (op {}, epoch {}, target {})",
@@ -1770,7 +1797,7 @@ async fn receive_data_plane_streams_owned(
                 }
                 Err(err) => return Err(err),
             };
-            receive_on_pull_stream(
+            match receive_on_pull_stream(
                 stream,
                 &dest_root,
                 track_paths,
@@ -1778,8 +1805,25 @@ async fn receive_data_plane_streams_owned(
                 byte_progress.as_ref(),
                 &mut stats,
             )
-            .await?;
-            Ok(stats)
+            .await
+            {
+                Ok(()) => Ok(stats),
+                // ue-r2-2 review (panel): an OPTIONAL stream that dies
+                // before receiving anything is still non-fatal — the
+                // teardown race (transfer completes while the ADD
+                // socket sits in the accept backlog) ends in an
+                // RST/EOF here, and no payload can have been lost on a
+                // stream that never carried one. Any real loss shows
+                // up sender-side (its write fails) and fails the
+                // transfer through the control stream.
+                Err(err)
+                    if dial_is_optional && stats.bytes == 0 && stats.files_transferred == 0 =>
+                {
+                    log::warn!("pull resize stream ended before any payload; continuing: {err:#}");
+                    Ok(PullWorkerStats::new())
+                }
+                Err(err) => Err(err),
+            }
         });
     }
 
@@ -1822,12 +1866,17 @@ async fn receive_data_plane_streams_owned(
                     if track_paths {
                         result.downloaded_paths.extend(stats.downloaded_paths);
                     }
-                    let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
-                    let gbps = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
-                    eprintln!(
-                        "[pull-data-plane] stream {:.2} Gbps ({} bytes in {:.2}s)",
-                        gbps, stats.bytes, elapsed
-                    );
+                    // Skip the per-stream line for a no-op worker (a
+                    // lapsed optional ADD) — a "0.00 Gbps" line would
+                    // misread as a stalled stream.
+                    if stats.bytes > 0 {
+                        let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
+                        let gbps = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
+                        eprintln!(
+                            "[pull-data-plane] stream {:.2} Gbps ({} bytes in {:.2}s)",
+                            gbps, stats.bytes, elapsed
+                        );
+                    }
                 }
                 Some(Ok(Err(err))) => return Err(err),
                 Some(Err(join)) => {

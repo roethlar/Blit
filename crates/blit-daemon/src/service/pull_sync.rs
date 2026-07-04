@@ -827,6 +827,9 @@ async fn stream_via_data_plane(
     let mut next_stream_id = streams as u32;
     let mut client_gone = false;
     let mut proposals_done = false;
+    // Spawned epoch-N validation tasks (each settles its own epoch);
+    // aborted at teardown so none outlives the handler.
+    let mut validations: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     let outcome = loop {
         let dial_deadline = match &pending {
@@ -927,48 +930,67 @@ async fn stream_via_data_plane(
             },
             accepted = listener.accept(), if dial_deadline.is_some() => match accepted {
                 Ok((socket, addr)) => {
-                    let Some(Pending::AwaitingDial { epoch, target, sub_token, expires }) =
+                    let Some(Pending::AwaitingDial { epoch, target, sub_token, .. }) =
                         pending.take()
                     else {
                         unreachable!("accept arm gated on AwaitingDial");
                     };
-                    match accept_one_resize_socket(
-                        socket,
-                        &token,
-                        &sub_token,
-                        dial,
-                        &source,
-                        source_root,
-                        Arc::clone(&pool),
-                        &probes,
-                        next_stream_id,
-                    )
-                    .await
-                    {
-                        Ok(sink) => {
-                            eprintln!(
-                                "blitd: pull data plane: resize epoch {} socket accepted from {}",
-                                epoch, addr
-                            );
-                            next_stream_id += 1;
-                            let _ = ctl_tx.send(SinkControl::Add(sink));
-                            dial.resize_settled(epoch, target, true);
+                    // ue-r2-2 review (codex): validate in a spawned
+                    // task — an inline 15s token-read would freeze the
+                    // controller (pipeline results, acks, expiry).
+                    // The accept consumes the armed slot: a stray dial
+                    // that beats the real one costs the epoch (settled
+                    // refused inside the task) and the real socket
+                    // degrades non-fatally client-side — bounded harm,
+                    // no controller stall. The task settles the dial
+                    // itself; on a finished pipeline it closes the
+                    // socket with a clean END (codex C3) so the
+                    // client's authorized worker exits normally.
+                    let stream_id = next_stream_id;
+                    next_stream_id += 1;
+                    let token = token.clone();
+                    let dial = Arc::clone(dial);
+                    let source = Arc::clone(&source);
+                    let source_root = source_root.to_path_buf();
+                    let pool = Arc::clone(&pool);
+                    let probes = Arc::clone(&probes);
+                    let ctl_tx = ctl_tx.clone();
+                    validations.push(tokio::spawn(async move {
+                        match accept_one_resize_socket(
+                            socket,
+                            &token,
+                            &sub_token,
+                            &dial,
+                            &source,
+                            &source_root,
+                            pool,
+                            &probes,
+                            stream_id,
+                        )
+                        .await
+                        {
+                            Ok(sink) => {
+                                eprintln!(
+                                    "blitd: pull data plane: resize epoch {} socket \
+                                     accepted from {}",
+                                    epoch, addr
+                                );
+                                if ctl_tx.send(SinkControl::Add(Arc::clone(&sink))).is_ok() {
+                                    dial.resize_settled(epoch, target, true);
+                                } else {
+                                    let _ = sink.finish().await;
+                                    dial.resize_settled(epoch, dial.live_streams(), false);
+                                }
+                            }
+                            Err(status) => {
+                                log::warn!(
+                                    "pull data plane: dropping resize socket from {addr}: \
+                                     {status}"
+                                );
+                                dial.resize_settled(epoch, dial.live_streams(), false);
+                            }
                         }
-                        Err(status) => {
-                            // A stray/hostile dial must not consume the
-                            // armed slot OR kill the transfer — keep
-                            // waiting for the real socket until the TTL.
-                            log::warn!(
-                                "pull data plane: dropping resize socket from {addr}: {status}"
-                            );
-                            pending = Some(Pending::AwaitingDial {
-                                epoch,
-                                target,
-                                sub_token,
-                                expires,
-                            });
-                        }
-                    }
+                    }));
                 }
                 Err(err) => {
                     log::warn!("pull data plane: resize accept failed: {err}");
@@ -985,6 +1007,12 @@ async fn stream_via_data_plane(
         }
     };
     tuner.abort();
+    for validation in validations {
+        // A mid-validation task at teardown holds only a socket the
+        // client already treats as optional (zero-received leniency);
+        // aborting bounds the handler's lifetime.
+        validation.abort();
+    }
     let _ = feeder.await;
     outcome.map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
 

@@ -295,24 +295,14 @@ pub async fn execute_sink_pipeline_elastic(
             }
         };
         tokio::select! {
-            joined = join_set.join_next() => {
-                match joined {
-                    None => break,
-                    Some(Ok((slot, res))) => {
-                        retire_flags.retain(|(s, _)| *s != slot);
-                        if let Err(e) = res {
-                            if first_err.is_none() {
-                                first_err = Some(e);
-                            }
-                        }
-                    }
-                    Some(Err(join)) => {
-                        if first_err.is_none() {
-                            first_err = Some(eyre::eyre!("sink worker panicked: {}", join));
-                        }
-                    }
-                }
-            }
+            // ue-r2-2 review (panel F2): biased, control FIRST — a
+            // ready Add must be processed before the join arm can
+            // observe an empty set and break, or an already-authorized
+            // socket would drop without its END record (fatal on the
+            // peer). Processing a control command is always cheap and
+            // never starves joins.
+            biased;
+
             cmd = control_recv => {
                 match cmd {
                     Some(SinkControl::Add(sink)) => {
@@ -347,6 +337,35 @@ pub async fn execute_sink_pipeline_elastic(
                     }
                     None => control_rx = None, // controller gone; keep draining
                 }
+            }
+            joined = join_set.join_next() => {
+                match joined {
+                    None => break,
+                    Some(Ok((slot, res))) => {
+                        retire_flags.retain(|(s, _)| *s != slot);
+                        if let Err(e) = res {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                    Some(Err(join)) => {
+                        if first_err.is_none() {
+                            first_err = Some(eyre::eyre!("sink worker panicked: {}", join));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // ue-r2-2 review (panel F2, second half): an Add can still be
+    // queued in the instant between the last join and the break.
+    // Close its sink cleanly — the END record is what keeps the
+    // already-authorized peer worker from dying on a reset.
+    if let Some(rx) = control_rx.as_mut() {
+        while let Ok(cmd) = rx.try_recv() {
+            if let SinkControl::Add(sink) = cmd {
+                let _ = sink.finish().await;
             }
         }
     }

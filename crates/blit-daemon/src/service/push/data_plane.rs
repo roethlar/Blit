@@ -345,7 +345,7 @@ pub(crate) async fn accept_data_connection_stream_resizable(
         // Lapse expired offers so `has_armed` (the accept gate) is
         // honest; a socket that raced in anyway is dropped by the
         // worker's consume-time expiry check.
-        let has_armed = {
+        let (has_armed, earliest_expiry) = {
             let mut slots = armed.lock().expect("armed registry poisoned");
             let now = tokio::time::Instant::now();
             slots.retain(|slot| {
@@ -359,7 +359,10 @@ pub(crate) async fn accept_data_connection_stream_resizable(
                     false
                 }
             });
-            !slots.is_empty()
+            (
+                !slots.is_empty(),
+                slots.iter().map(|slot| slot.expires).min(),
+            )
         };
         tokio::select! {
             joined = join_set.join_next() => match joined {
@@ -381,6 +384,12 @@ pub(crate) async fn accept_data_connection_stream_resizable(
                 }
                 None => arm_open = false,
             },
+            // ue-r2-2 review (panel F4): wake at the earliest slot
+            // expiry so a lapsed offer closes the accept gate on time
+            // instead of at the next unrelated event.
+            _ = async {
+                tokio::time::sleep_until(earliest_expiry.expect("gated on has_armed")).await
+            }, if earliest_expiry.is_some() => {}
             accepted = listener.accept(), if has_armed => match accepted {
                 Ok((sock, addr)) => match configure_data_socket(sock) {
                     Ok(socket) => {

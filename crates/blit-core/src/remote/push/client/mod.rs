@@ -345,9 +345,17 @@ impl MultiStreamSender {
             rt.source.clone(),
             rt.dst_root.clone(),
         ));
-        rt.ctl_tx
-            .send(SinkControl::Add(sink))
-            .map_err(|_| eyre!("data plane pipeline is no longer running"))?;
+        if let Err(returned) = rt.ctl_tx.send(SinkControl::Add(sink)) {
+            // Pipeline already finished (transfer completing under the
+            // ADD). Close the just-authorized socket CLEANLY — the END
+            // record keeps the daemon's epoch-N worker from dying on a
+            // reset, which would fail an otherwise-complete push
+            // (post-handshake stream errors are fatal by design).
+            if let SinkControl::Add(sink) = returned.0 {
+                let _ = sink.finish().await;
+            }
+            return Err(eyre!("data plane pipeline is no longer running"));
+        }
         rt.next_stream_id += 1;
         rt.probes
             .lock()
@@ -360,19 +368,24 @@ impl MultiStreamSender {
     /// its worker drains at the payload boundary and emits its END —
     /// and drop its probe from the tuner registry. Returns false when
     /// nothing can be retired (floor of one stream, or the pipeline is
-    /// gone), so the caller can settle the epoch as refused.
+    /// gone), so the caller can settle the epoch as refused. The probe
+    /// pops only AFTER the pipeline accepted the retire (review: the
+    /// old order lost a probe when the pipeline was already gone).
     fn retire_stream(&mut self) -> bool {
         let Some(rt) = self.resize.as_mut() else {
             return false;
         };
         {
-            let mut probes = rt.probes.lock().expect("probe registry poisoned");
+            let probes = rt.probes.lock().expect("probe registry poisoned");
             if probes.len() <= 1 {
                 return false;
             }
-            probes.pop();
         }
-        rt.ctl_tx.send(SinkControl::RetireOne).is_ok()
+        if rt.ctl_tx.send(SinkControl::RetireOne).is_err() {
+            return false;
+        }
+        rt.probes.lock().expect("probe registry poisoned").pop();
+        true
     }
 
     /// Feed one or more payloads to the streaming pipeline.
@@ -1264,7 +1277,13 @@ impl RemotePushClient {
                                 // REMOVE: retire locally first — the drained
                                 // worker's END record is the daemon-side
                                 // teardown — then tell the daemon
-                                // (accounting) and settle on its ack.
+                                // (accounting). Settle IMMEDIATELY with what
+                                // actually happened (review: the retire is
+                                // fait accompli; waiting on the
+                                // accounting-only ack could diverge the dial
+                                // from the real worker count on a refusal).
+                                // The daemon's ack then matches no pending
+                                // epoch and is ignored as unsolicited.
                                 let retired = data_plane_sender
                                     .as_mut()
                                     .map(|s| s.retire_stream())
@@ -1287,12 +1306,11 @@ impl RemotePushClient {
                                         )
                                         .await);
                                     }
-                                    resize_pending = Some(PendingResize {
-                                        epoch: p.epoch,
-                                        target: p.target_streams,
-                                        add: false,
-                                        sub_token: Vec::new(),
-                                    });
+                                    dial_ref.resize_settled(
+                                        p.epoch,
+                                        p.target_streams,
+                                        true,
+                                    );
                                 } else {
                                     dial_ref.resize_settled(
                                         p.epoch,

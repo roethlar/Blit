@@ -61,6 +61,9 @@ pub(crate) async fn handle_push_stream(
     // channel that arms the acceptor for each ADD epoch.
     let mut client_supports_resize = false;
     let mut resize_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<ResizeArm>> = None;
+    // ue-r2-2 review (codex): cumulative armed-stream count, seeded at
+    // negotiation - the ADD refusal bound.
+    let mut resize_live: u32 = 0;
 
     while let Some(request) = stream.message().await? {
         match request.payload {
@@ -227,6 +230,7 @@ pub(crate) async fn handle_push_stream(
                             let transfer_task = if resize_on {
                                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                                 resize_cmd_tx = Some(cmd_tx);
+                                resize_live = stream_target.max(1);
                                 tokio::spawn(accept_data_connection_stream_resizable(
                                     listener,
                                     token.clone(),
@@ -287,7 +291,7 @@ pub(crate) async fn handle_push_stream(
                 // ue-r2-2: an ADD can land while the manifest loop is
                 // still running (the data plane starts at the early
                 // flush) — same handling as the transfer phase.
-                handle_resize_request(&tx, &resize_cmd_tx, req).await?;
+                handle_resize_request(&tx, &resize_cmd_tx, &mut resize_live, req).await?;
             }
             None => {}
         }
@@ -332,6 +336,7 @@ pub(crate) async fn handle_push_stream(
             let transfer_task = if resize_on {
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
                 resize_cmd_tx = Some(cmd_tx);
+                resize_live = stream_target.max(1);
                 tokio::spawn(accept_data_connection_stream_resizable(
                     listener,
                     token.clone(),
@@ -382,7 +387,7 @@ pub(crate) async fn handle_push_stream(
                             if let Some(client_push_request::Payload::DataPlaneResize(req)) =
                                 request.payload
                             {
-                                handle_resize_request(&tx, &resize_cmd_tx, req).await?;
+                                handle_resize_request(&tx, &resize_cmd_tx, &mut resize_live, req).await?;
                             }
                         }
                         None => client_stream_done = true,
@@ -461,18 +466,23 @@ fn generate_resize_sub_token() -> Result<Vec<u8>, Status> {
 /// the client retires a worker and that worker's END record tears the
 /// daemon-side stream down through the normal path. Refusals
 /// (`accepted: false`) cover: resize never negotiated, a malformed
-/// credential, a target beyond this daemon's advertised ceiling, or
-/// an acceptor that already finished.
+/// credential, a target beyond this daemon's advertised ceiling, a
+/// CUMULATIVE count at the ceiling (codex review: per-request target
+/// checks alone would let replayed ADDs with fresh credentials grow
+/// the worker set unboundedly — `resize_live` counts every armed ADD,
+/// conservatively including ones whose dial later lapses), or an
+/// acceptor that already finished.
 async fn handle_resize_request(
     tx: &PushSender,
     resize_cmd_tx: &Option<tokio::sync::mpsc::UnboundedSender<ResizeArm>>,
+    resize_live: &mut u32,
     req: DataPlaneResize,
 ) -> Result<(), Status> {
     let op = DataPlaneResizeOp::try_from(req.op).unwrap_or(DataPlaneResizeOp::Unspecified);
-    let within_ceiling = req.target_stream_count
-        <= blit_core::engine::local_receiver_capacity()
-            .max_streams
-            .max(1);
+    let ceiling = blit_core::engine::local_receiver_capacity()
+        .max_streams
+        .max(1);
+    let within_ceiling = req.target_stream_count <= ceiling && *resize_live < ceiling;
     let accepted = match (op, resize_cmd_tx) {
         (DataPlaneResizeOp::Add, Some(cmd_tx)) => {
             req.sub_token.len() == blit_core::remote::transfer::SUB_TOKEN_LEN
@@ -487,6 +497,13 @@ async fn handle_resize_request(
         (DataPlaneResizeOp::Remove, Some(_)) => true,
         _ => false,
     };
+    if accepted {
+        match op {
+            DataPlaneResizeOp::Add => *resize_live = resize_live.saturating_add(1),
+            DataPlaneResizeOp::Remove => *resize_live = resize_live.saturating_sub(1).max(1),
+            _ => {}
+        }
+    }
     if !accepted {
         log::warn!(
             "push: refusing DataPlaneResize (op {:?}, epoch {}, target {})",
