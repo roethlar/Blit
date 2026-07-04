@@ -556,6 +556,10 @@ pub struct DelegatedPullOutcome {
 /// messages. `files_completed` / `bytes_completed` are
 /// monotonic counters from the daemon; we use them to compute
 /// deltas against the CLI's [`RemoteTransferProgress`] channel.
+/// This is the aggregate lane of the `ProgressEvent` contract
+/// (see `blit_core::remote::transfer::progress`): only counters
+/// are visible here, so file deltas ride `Payload.files` and no
+/// `FileComplete` is ever emitted.
 #[derive(Default)]
 struct DelegatedBytesProgressState {
     files_completed: u64,

@@ -2,11 +2,87 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
+/// One progress observation from a transfer producer.
+///
+/// **Contract (w6-1)** — every producer, every direction, both
+/// transports:
+///
+/// - **Bytes ride `Payload` only.** Transferred bytes are reported
+///   exclusively as `Payload { bytes, .. }` deltas (chunk- or
+///   file-granular, producer's choice). `FileComplete` carries no byte
+///   field at all, so no fold can double-count a file's bytes — the
+///   class of bug filed as design-1.
+/// - **Files are counted exactly once**, through exactly one of two
+///   lanes per file:
+///   - *per-file lane*: one `FileComplete { path }` per finished file,
+///     with `Payload.files == 0` on that producer — used wherever the
+///     producer sees individual files (receive pipelines, send
+///     pipelines);
+///   - *aggregate lane*: `Payload { files: delta, .. }` — used where
+///     only counters are visible (the delegated `BytesProgress` bridge,
+///     tar-shard batch appliers). Files counted this way get no
+///     `FileComplete`.
+/// - `FileComplete.path` is the source-relative wire path (POSIX
+///   separators), never an absolute local path.
+/// - `ManifestBatch { files }` is the enumeration denominator ("N of M
+///   files"); it never adds to transferred totals. Its meaning is
+///   direction-flavored (pull: full source manifest; push: need-list
+///   batches; delegated: post-hoc summary) — consumers must treat it
+///   as "expected files", nothing stronger.
+///
+/// [`ProgressTotals`] is the single shared fold for this contract;
+/// consumers must not re-derive per-direction folding rules.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
+    /// Enumeration denominator: `files` more files are expected.
     ManifestBatch { files: usize },
+    /// Transfer delta: `bytes` more bytes moved; `files` more files
+    /// finished on the aggregate lane (0 on per-file-lane producers).
     Payload { files: usize, bytes: u64 },
-    FileComplete { path: String, bytes: u64 },
+    /// Per-file lane: the file at the source-relative wire `path`
+    /// finished. Deliberately carries no byte count — bytes ride
+    /// [`ProgressEvent::Payload`] only.
+    FileComplete { path: String },
+}
+
+/// Running totals folded from a [`ProgressEvent`] stream under the
+/// contract documented on the enum. This is the one shared
+/// accumulator (w6-1) — the CLI progress monitor and all three TUI
+/// transfer footers fold through it; per-direction folding rules no
+/// longer exist.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressTotals {
+    /// Files announced by enumeration (`ManifestBatch`) — the
+    /// denominator, never part of transferred totals.
+    pub manifest_files: u64,
+    /// Files finished, counted once each via either lane.
+    pub files: u64,
+    /// Bytes transferred (`Payload` only).
+    pub bytes: u64,
+}
+
+impl ProgressTotals {
+    /// Fold one event into the running totals.
+    pub fn apply(&mut self, event: &ProgressEvent) {
+        match event {
+            ProgressEvent::ManifestBatch { files } => {
+                self.manifest_files = self.manifest_files.saturating_add(*files as u64);
+            }
+            ProgressEvent::Payload { files, bytes } => {
+                self.files = self.files.saturating_add(*files as u64);
+                self.bytes = self.bytes.saturating_add(*bytes);
+            }
+            ProgressEvent::FileComplete { .. } => {
+                self.files = self.files.saturating_add(1);
+            }
+        }
+    }
+
+    /// True once any transfer work (not mere enumeration) has been
+    /// observed — the "show live totals" gate consumers share.
+    pub fn started(&self) -> bool {
+        self.files > 0 || self.bytes > 0
+    }
 }
 
 /// Cumulative byte-progress reporter for data-plane write loops.
@@ -62,6 +138,114 @@ impl ByteProgressSink {
 impl Default for ByteProgressSink {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod progress_totals_tests {
+    use super::*;
+
+    /// TCP data-plane pull shape after w6-1: the receive pipeline
+    /// emits `Payload { 0, bytes_written }` then `FileComplete` per
+    /// file — totals must count the bytes exactly once (design-1's
+    /// class, now unrepresentable because FileComplete has no byte
+    /// field).
+    #[test]
+    fn tcp_pull_pair_counts_bytes_once_and_one_file() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Payload {
+            files: 0,
+            bytes: 1024,
+        });
+        totals.apply(&ProgressEvent::FileComplete {
+            path: "f.txt".into(),
+        });
+        assert_eq!(totals.bytes, 1024);
+        assert_eq!(totals.files, 1);
+    }
+
+    /// gRPC pull shape: chunk-granular `Payload`s then a
+    /// `FileComplete` — chunks sum, the file counts once.
+    #[test]
+    fn grpc_pull_chunks_sum_then_file_counts_once() {
+        let mut totals = ProgressTotals::default();
+        for chunk in [4096u64, 4096, 2000] {
+            totals.apply(&ProgressEvent::Payload {
+                files: 0,
+                bytes: chunk,
+            });
+        }
+        totals.apply(&ProgressEvent::FileComplete {
+            path: "big.bin".into(),
+        });
+        assert_eq!(totals.bytes, 10192);
+        assert_eq!(totals.files, 1);
+    }
+
+    /// Push send shape after w6-1: `Payload { 0, size }` +
+    /// `FileComplete` per file (bytes moved off FileComplete by the
+    /// contract).
+    #[test]
+    fn push_send_pairs_accumulate_per_file() {
+        let mut totals = ProgressTotals::default();
+        for (i, size) in [100u64, 200, 300].iter().enumerate() {
+            totals.apply(&ProgressEvent::Payload {
+                files: 0,
+                bytes: *size,
+            });
+            totals.apply(&ProgressEvent::FileComplete {
+                path: format!("f{i}"),
+            });
+        }
+        assert_eq!(totals.files, 3);
+        assert_eq!(totals.bytes, 600);
+    }
+
+    /// Aggregate lane (delegated bridge, tar-shard appliers):
+    /// `Payload` carries both deltas; no FileComplete arrives for
+    /// those files.
+    #[test]
+    fn aggregate_lane_counts_files_and_bytes_from_payload() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Payload {
+            files: 2,
+            bytes: 500,
+        });
+        totals.apply(&ProgressEvent::Payload {
+            files: 1,
+            bytes: 250,
+        });
+        assert_eq!(totals.files, 3);
+        assert_eq!(totals.bytes, 750);
+    }
+
+    /// ManifestBatch is the denominator: it moves `manifest_files`
+    /// only and never flips `started`.
+    #[test]
+    fn manifest_batch_is_denominator_only() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::ManifestBatch { files: 12 });
+        assert_eq!(totals.manifest_files, 12);
+        assert_eq!(totals.files, 0);
+        assert_eq!(totals.bytes, 0);
+        assert!(!totals.started());
+        totals.apply(&ProgressEvent::Payload { files: 0, bytes: 1 });
+        assert!(totals.started());
+    }
+
+    /// Totals saturate instead of wrapping on pathological inputs.
+    #[test]
+    fn totals_saturate_at_u64_max() {
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Payload {
+            files: 0,
+            bytes: u64::MAX,
+        });
+        totals.apply(&ProgressEvent::Payload {
+            files: 0,
+            bytes: u64::MAX,
+        });
+        assert_eq!(totals.bytes, u64::MAX);
     }
 }
 
@@ -338,18 +522,24 @@ impl RemoteTransferProgress {
         Self { sender }
     }
 
+    /// Announce `files` more expected files (the denominator). Never
+    /// adds to transferred totals.
     pub fn report_manifest_batch(&self, files: usize) {
         let _ = self.sender.send(ProgressEvent::ManifestBatch { files });
     }
 
+    /// Report a transfer delta. `bytes` is the only byte channel in
+    /// the contract; `files` is nonzero only on the aggregate lane
+    /// (producers with no per-file visibility — see the enum docs).
     pub fn report_payload(&self, files: usize, bytes: u64) {
         let _ = self.sender.send(ProgressEvent::Payload { files, bytes });
     }
 
-    pub fn report_file_complete(&self, path: String, bytes: u64) {
-        let _ = self
-            .sender
-            .send(ProgressEvent::FileComplete { path, bytes });
+    /// Report one finished file on the per-file lane. `path` is the
+    /// source-relative wire path. Carries no bytes by construction —
+    /// report those via [`report_payload`](Self::report_payload).
+    pub fn report_file_complete(&self, path: String) {
+        let _ = self.sender.send(ProgressEvent::FileComplete { path });
     }
 }
 

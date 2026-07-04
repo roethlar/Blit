@@ -651,7 +651,11 @@ impl RemotePullClient {
         }));
 
         let mut report = RemotePullReport::default();
-        let mut active_file: Option<(File, PathBuf)> = None;
+        // (open handle, local dest path for error context, wire-relative
+        // path for the FileComplete progress event — the contract in
+        // transfer::progress requires the source-relative wire path,
+        // never the absolute local one).
+        let mut active_file: Option<(File, PathBuf, String)> = None;
         let mut active_shard: Option<InProgressShard> = None;
         // R32-F2: wrap the data-plane handle in AbortOnDrop so an
         // outer-future drop cancels the spawned TCP receiver instead
@@ -756,11 +760,11 @@ impl RemotePullClient {
                         report.downloaded_paths.push(relative_path.clone());
                     }
 
-                    active_file = Some((file, dest_path));
+                    active_file = Some((file, dest_path, header.relative_path));
                     report.files_transferred += 1;
                 }
                 Some(server_pull_message::Payload::FileData(FileData { content })) => {
-                    let (file, path) = active_file
+                    let (file, path, _) = active_file
                         .as_mut()
                         .ok_or_else(|| eyre!("received file data without a preceding header"))?;
                     file.write_all(&content)
@@ -841,6 +845,13 @@ impl RemotePullClient {
                     .with_context(|| "applying tar shard")?;
                     report.files_transferred += stats.files;
                     report.bytes_transferred += stats.bytes;
+                    if let Some(progress) = progress {
+                        // Aggregate lane (see transfer::progress): the
+                        // shard applier only surfaces counts, so its
+                        // files ride Payload.files; the archive bytes
+                        // already rode the TarShardChunk Payloads.
+                        progress.report_payload(stats.files as usize, 0);
+                    }
                     if track_paths {
                         report.downloaded_paths.extend(stats.paths);
                     }
@@ -987,6 +998,12 @@ impl RemotePullClient {
                         )
                     })?;
 
+                    if let Some(progress) = progress {
+                        // Resumed file finished patching — count it on
+                        // the per-file lane (block bytes already rode
+                        // the BlockTransfer Payloads).
+                        progress.report_file_complete(complete.relative_path.clone());
+                    }
                     if track_paths {
                         report.downloaded_paths.push(relative_path);
                     }
@@ -1286,14 +1303,17 @@ impl tokio::io::AsyncRead for RemoteFileStream {
 }
 
 async fn finalize_active_file(
-    active: &mut Option<(File, PathBuf)>,
+    active: &mut Option<(File, PathBuf, String)>,
     progress: Option<&RemotePullProgress>,
 ) -> Result<()> {
-    if let Some((file, path)) = active.take() {
+    if let Some((file, _dest_path, wire_path)) = active.take() {
         file.sync_all().await?;
         if let Some(progress) = progress {
-            // Bytes already counted by FileData chunks, just report file completion
-            progress.report_file_complete(path.to_string_lossy().into_owned(), 0);
+            // Bytes already rode the FileData chunk Payloads; the
+            // completion event carries the wire-relative path per the
+            // contract in transfer::progress (previously this leaked
+            // the absolute local destination path).
+            progress.report_file_complete(wire_path);
         }
     }
     Ok(())
@@ -2506,4 +2526,56 @@ mod spec_extraction_tests {
     // two specs differ; it would not exercise the function under
     // test. R30-F4 (Round 30 review) replaced the original
     // construct-and-compare test with that real wire roundtrip.
+}
+
+#[cfg(test)]
+mod finalize_progress_tests {
+    use super::*;
+
+    /// w6-1 producer contract: the gRPC pull's completion event is
+    /// byteless and carries the source-relative WIRE path — not the
+    /// absolute local destination path it used to leak (every other
+    /// producer already emitted the wire path).
+    #[tokio::test]
+    async fn finalize_active_file_reports_byteless_wire_relative_completion() {
+        use crate::remote::transfer::ProgressEvent;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest_path = tmp.path().join("x.bin");
+        let file = File::create(&dest_path).await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemotePullProgress::new(tx);
+        let mut active = Some((file, dest_path, "dir/x.bin".to_string()));
+
+        finalize_active_file(&mut active, Some(&progress))
+            .await
+            .unwrap();
+        assert!(active.is_none(), "finalize consumes the active file");
+        drop(progress);
+
+        let event = rx.try_recv().expect("one completion event");
+        match event {
+            ProgressEvent::FileComplete { path } => {
+                assert_eq!(path, "dir/x.bin", "wire-relative, not absolute");
+            }
+            other => panic!("expected FileComplete, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "no extra events");
+    }
+
+    /// Finalizing with no active file is a no-op — no phantom
+    /// completion events.
+    #[tokio::test]
+    async fn finalize_without_active_file_emits_nothing() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemotePullProgress::new(tx);
+        let mut active: Option<(File, PathBuf, String)> = None;
+
+        finalize_active_file(&mut active, Some(&progress))
+            .await
+            .unwrap();
+        drop(progress);
+        assert!(rx.try_recv().is_err());
+    }
 }

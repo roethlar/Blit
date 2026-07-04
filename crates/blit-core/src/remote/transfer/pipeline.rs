@@ -214,8 +214,13 @@ pub async fn execute_sink_pipeline_elastic(
                         .await
                         .context("writing payload")?;
                     if let Some(p) = &progress {
+                        // Contract (progress.rs): bytes ride Payload, one
+                        // FileComplete per file. `size` is the planned
+                        // manifest size — the value this lane has always
+                        // reported, now on the right variant.
                         for (name, size) in &files {
-                            p.report_file_complete(name.clone(), *size);
+                            p.report_payload(0, *size);
+                            p.report_file_complete(name.clone());
                         }
                     }
                     let mut t = total.lock().unwrap();
@@ -444,13 +449,18 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
                     .with_context(|| format!("receiving {}", header.relative_path))?;
                 if let Some(p) = progress {
                     p.report_payload(0, outcome.bytes_written);
-                    p.report_file_complete(header.relative_path.clone(), outcome.bytes_written);
+                    p.report_file_complete(header.relative_path.clone());
                 }
                 total.merge(&outcome);
             }
             DATA_PLANE_RECORD_TAR_SHARD => {
                 let (headers, data) = read_tar_shard(socket).await?;
                 let bytes = data.len() as u64;
+                // Capture member paths for the per-file lane before the
+                // payload takes ownership; skip the allocation when no
+                // one is listening (the daemon receive path).
+                let member_paths: Option<Vec<String>> =
+                    progress.map(|_| headers.iter().map(|h| h.relative_path.clone()).collect());
                 let payload = PreparedPayload::TarShard { headers, data };
                 let outcome = sink
                     .write_payload(payload)
@@ -458,6 +468,9 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
                     .context("writing payload")?;
                 if let Some(p) = progress {
                     p.report_payload(0, bytes);
+                    for path in member_paths.unwrap_or_default() {
+                        p.report_file_complete(path);
+                    }
                 }
                 total.merge(&outcome);
             }
@@ -486,6 +499,9 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
                     .write_payload(payload)
                     .await
                     .context("writing payload")?;
+                if let Some(p) = progress {
+                    p.report_payload(0, outcome.bytes_written);
+                }
                 total.merge(&outcome);
             }
             DATA_PLANE_RECORD_BLOCK_COMPLETE => {
@@ -493,6 +509,7 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
                 let total_size = read_u64(socket).await?;
                 let mtime = read_i64(socket).await?;
                 let perms = read_u32(socket).await?;
+                let path_for_progress = progress.map(|_| path.clone());
                 let payload = PreparedPayload::FileBlockComplete {
                     relative_path: path,
                     total_size,
@@ -503,6 +520,9 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
                     .write_payload(payload)
                     .await
                     .context("writing payload")?;
+                if let Some(p) = progress {
+                    p.report_file_complete(path_for_progress.unwrap_or_default());
+                }
                 total.merge(&outcome);
             }
             other => bail!("unknown data-plane record tag: 0x{:02X}", other),
@@ -1056,7 +1076,251 @@ mod tests {
         v.extend_from_slice(&(path.len() as u32).to_be_bytes());
         v.extend_from_slice(path);
         v.extend_from_slice(&total_size.to_be_bytes());
+        // The reader also expects mtime (i64) + perms (u32) — without
+        // them the record is truncated (w6-1: the resume emission test
+        // needs a genuinely well-formed record; the fuzz cases accept
+        // either shape).
+        v.extend_from_slice(&0i64.to_be_bytes());
+        v.extend_from_slice(&0o644u32.to_be_bytes());
         v
+    }
+
+    // =================================================================
+    // w6-1: producer-side ProgressEvent contract tests. The contract
+    // (progress.rs): bytes ride Payload only; FileComplete is byteless
+    // and counts one file; nothing double-counts.
+    // =================================================================
+
+    use crate::remote::transfer::progress::{
+        ProgressEvent, ProgressTotals, RemoteTransferProgress,
+    };
+
+    /// Sink stub that accepts everything and reports what it was
+    /// given, so the emission tests can pin exactly what the pipeline
+    /// reports without real tar/resume filesystem plumbing.
+    struct RecordingSink {
+        dst_root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl TransferSink for RecordingSink {
+        async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+            let (files_written, bytes_written) = match &payload {
+                PreparedPayload::File(h) => (1, h.size),
+                PreparedPayload::TarShard { headers, data } => (headers.len(), data.len() as u64),
+                PreparedPayload::FileBlock { bytes, .. } => (0, bytes.len() as u64),
+                PreparedPayload::FileBlockComplete { .. } => (1, 0),
+            };
+            Ok(SinkOutcome {
+                files_written,
+                bytes_written,
+            })
+        }
+
+        async fn write_file_stream(
+            &self,
+            _header: &FileHeader,
+            reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+        ) -> Result<SinkOutcome> {
+            let mut buf = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(reader, &mut buf).await?;
+            Ok(SinkOutcome {
+                files_written: 1,
+                bytes_written: buf.len() as u64,
+            })
+        }
+
+        fn root(&self) -> &Path {
+            &self.dst_root
+        }
+    }
+
+    fn recording_receive_setup() -> (
+        Arc<dyn TransferSink>,
+        RemoteTransferProgress,
+        tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>,
+    ) {
+        let sink: Arc<dyn TransferSink> = Arc::new(RecordingSink {
+            dst_root: PathBuf::from("recording-sink"),
+        });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        (sink, RemoteTransferProgress::new(tx), rx)
+    }
+
+    fn drain_events(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProgressEvent>,
+    ) -> Vec<ProgressEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// FILE record: exactly one `Payload { 0, bytes_written }` then one
+    /// byteless `FileComplete { wire path }` — the design-1 double-emit
+    /// (same bytes on both variants) is gone at the producer.
+    #[tokio::test]
+    async fn receive_pipeline_reports_payload_bytes_then_byteless_file_complete() {
+        let mut wire = encode_file(b"dir/a.txt", b"alpha", 0, 0o644);
+        wire.push(DATA_PLANE_RECORD_END);
+
+        let (sink, progress, mut rx) = recording_receive_setup();
+        let mut reader = wire.as_slice();
+        let outcome = execute_receive_pipeline(&mut reader, sink, Some(&progress))
+            .await
+            .unwrap();
+        assert_eq!(outcome.bytes_written, 5);
+        drop(progress);
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 2, "exactly one Payload + one FileComplete");
+        assert!(
+            matches!(&events[0], ProgressEvent::Payload { files: 0, bytes: 5 }),
+            "first event must carry the bytes: {:?}",
+            events[0]
+        );
+        assert!(
+            matches!(&events[1], ProgressEvent::FileComplete { path } if path == "dir/a.txt"),
+            "second event must be the byteless completion: {:?}",
+            events[1]
+        );
+
+        let mut totals = ProgressTotals::default();
+        for event in &events {
+            totals.apply(event);
+        }
+        assert_eq!((totals.files, totals.bytes), (1, 5), "counted exactly once");
+    }
+
+    /// TAR_SHARD record: archive bytes ride one `Payload`; every member
+    /// file is counted via its own byteless `FileComplete` (previously
+    /// shard members were never counted as files).
+    #[tokio::test]
+    async fn receive_pipeline_tar_shard_counts_member_files() {
+        let mut wire = encode_tar_shard(
+            &[("a.txt", 3, 0, 0o644), ("sub/b.txt", 4, 0, 0o644)],
+            7,
+            b"XXXXXXX",
+        );
+        wire.push(DATA_PLANE_RECORD_END);
+
+        let (sink, progress, mut rx) = recording_receive_setup();
+        let mut reader = wire.as_slice();
+        execute_receive_pipeline(&mut reader, sink, Some(&progress))
+            .await
+            .unwrap();
+        drop(progress);
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 3, "one Payload + one FileComplete per member");
+        assert!(matches!(
+            &events[0],
+            ProgressEvent::Payload { files: 0, bytes: 7 }
+        ));
+        assert!(matches!(&events[1], ProgressEvent::FileComplete { path } if path == "a.txt"));
+        assert!(matches!(&events[2], ProgressEvent::FileComplete { path } if path == "sub/b.txt"));
+
+        let mut totals = ProgressTotals::default();
+        for event in &events {
+            totals.apply(event);
+        }
+        assert_eq!((totals.files, totals.bytes), (2, 7));
+    }
+
+    /// Resume records: BLOCK bytes ride `Payload`; BLOCK_COMPLETE
+    /// counts the patched file once (previously the TCP resume lane
+    /// emitted nothing at all).
+    #[tokio::test]
+    async fn receive_pipeline_resume_records_report_progress() {
+        let mut wire = encode_block(b"f.bin", 0, b"abcd");
+        wire.extend_from_slice(&encode_block_complete(b"f.bin", 4));
+        wire.push(DATA_PLANE_RECORD_END);
+
+        let (sink, progress, mut rx) = recording_receive_setup();
+        let mut reader = wire.as_slice();
+        execute_receive_pipeline(&mut reader, sink, Some(&progress))
+            .await
+            .unwrap();
+        drop(progress);
+
+        let events = drain_events(&mut rx);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            ProgressEvent::Payload { files: 0, bytes: 4 }
+        ));
+        assert!(matches!(&events[1], ProgressEvent::FileComplete { path } if path == "f.bin"));
+
+        let mut totals = ProgressTotals::default();
+        for event in &events {
+            totals.apply(event);
+        }
+        assert_eq!((totals.files, totals.bytes), (1, 4));
+    }
+
+    /// Send side (push TCP + gRPC fallback share this worker): per
+    /// file, planned bytes ride `Payload` and the completion is
+    /// byteless — moved off `FileComplete` by the contract.
+    #[tokio::test]
+    async fn sink_pipeline_reports_payload_bytes_then_byteless_completion_per_file() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("b.txt"), b"bravo").unwrap();
+        std::fs::write(src.join("c.txt"), b"charlie").unwrap();
+
+        let source = Arc::new(FsTransferSource::new(src.clone()));
+        let sink = Arc::new(FsTransferSink::new(
+            src,
+            dst,
+            FsSinkConfig {
+                preserve_times: false,
+                dry_run: false,
+                checksum: None,
+                resume: false,
+                compare_mode: ComparisonMode::SizeMtime,
+            },
+        ));
+
+        let unreadable = Arc::new(Mutex::new(Vec::new()));
+        let (mut rx, handle) = source.scan(None, unreadable);
+        let mut headers = Vec::new();
+        while let Some(h) = rx.recv().await {
+            headers.push(h);
+        }
+        let _ = handle.await.unwrap().unwrap();
+        let planned = crate::remote::transfer::payload::plan_transfer_payloads(
+            headers,
+            source.root(),
+            Default::default(),
+        )
+        .unwrap();
+
+        let (tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = RemoteTransferProgress::new(tx);
+        execute_sink_pipeline(source, vec![sink], planned, 4, Some(&progress))
+            .await
+            .unwrap();
+        drop(progress);
+
+        let events = drain_events(&mut events_rx);
+        let mut totals = ProgressTotals::default();
+        let mut completes = 0usize;
+        for event in &events {
+            if let ProgressEvent::Payload { files, .. } = event {
+                assert_eq!(*files, 0, "send side is a per-file-lane producer");
+            }
+            if matches!(event, ProgressEvent::FileComplete { .. }) {
+                completes += 1;
+            }
+            totals.apply(event);
+        }
+        assert_eq!(completes, 3, "one byteless completion per file");
+        assert_eq!(totals.files, 3);
+        assert_eq!(totals.bytes, 17, "planned sizes ride Payload exactly once");
     }
 
     /// POST_REVIEW_FIXES §1.1b regression. When a sink errors mid-

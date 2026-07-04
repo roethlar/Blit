@@ -11,7 +11,7 @@ use blit_app::transfers::remote::{
     PullSyncExecution, PushExecution,
 };
 use blit_core::remote::pull::PullSyncOptions;
-use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
+use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
 use blit_core::remote::{RemoteEndpoint, RemotePullReport, RemotePushReport};
 
 use blit_app::endpoints::{format_remote_endpoint, Endpoint};
@@ -44,12 +44,12 @@ pub(crate) fn spawn_progress_monitor_with_options(
     let progress = RemoteTransferProgress::new(tx);
     let join = tokio::spawn(async move {
         let start = Instant::now();
-        let mut total_manifest = 0usize;
-        let mut total_files = 0usize;
-        let mut total_bytes = 0u64;
+        // w6-1: fold through the shared accumulator in blit-core — the
+        // per-direction folding rules (and the CLI's byte double-count
+        // on TCP pulls, design-1) are gone with the contract.
+        let mut totals = ProgressTotals::default();
         let mut prev_bytes = 0u64;
         let mut prev_instant = start;
-        let mut started = false;
         let mut ticker = interval(Duration::from_secs(1));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -58,72 +58,64 @@ pub(crate) fn spawn_progress_monitor_with_options(
                 biased;
                 event = rx.recv() => {
                     match event {
-                        Some(ProgressEvent::ManifestBatch { files }) => {
-                            total_manifest = total_manifest.saturating_add(files);
-                        }
-                        Some(ProgressEvent::Payload { files, bytes }) => {
-                            if files > 0 {
-                                total_files = total_files.saturating_add(files);
-                            }
-                            if bytes > 0 {
-                                total_bytes = total_bytes.saturating_add(bytes);
-                                started = true;
-                            }
-                        }
-                        Some(ProgressEvent::FileComplete { path, bytes }) => {
-                            total_files = total_files.saturating_add(1);
-                            total_bytes = total_bytes.saturating_add(bytes);
-                            started = true;
-                            if json {
-                                eprintln!(
-                                    "{{\"event\":\"file_complete\",\"path\":\"{}\",\"bytes\":{}}}",
-                                    path.replace('\\', "\\\\").replace('"', "\\\""),
-                                    bytes
-                                );
-                            } else if verbose {
-                                println!("{}", path);
+                        Some(event) => {
+                            totals.apply(&event);
+                            if let ProgressEvent::FileComplete { path } = &event {
+                                if json {
+                                    // `bytes` stays in the JSON shape for
+                                    // stream compatibility; per-event bytes
+                                    // no longer exist under the contract
+                                    // (they ride Payload events), so it is
+                                    // always 0.
+                                    eprintln!(
+                                        "{{\"event\":\"file_complete\",\"path\":\"{}\",\"bytes\":0}}",
+                                        path.replace('\\', "\\\\").replace('"', "\\\""),
+                                    );
+                                } else if verbose {
+                                    println!("{}", path);
+                                }
                             }
                         }
                         None => break,
                     }
                 }
                 _ = ticker.tick() => {
-                    if started {
+                    if totals.started() {
                         let now = Instant::now();
                         let elapsed = now.duration_since(start).as_secs_f64().max(1e-6);
                         let window_elapsed = now.duration_since(prev_instant).as_secs_f64().max(1e-6);
-                        let window_bytes = total_bytes.saturating_sub(prev_bytes);
-                        let avg_bps = (total_bytes as f64) / elapsed;
+                        let window_bytes = totals.bytes.saturating_sub(prev_bytes);
+                        let avg_bps = (totals.bytes as f64) / elapsed;
                         let current_bps = (window_bytes as f64) / window_elapsed;
                         if json {
                             eprintln!(
                                 "{{\"event\":\"progress\",\"files\":{},\"total_files\":{},\"bytes_copied\":{},\"avg_bytes_sec\":{:.0},\"current_bytes_sec\":{:.0}}}",
-                                total_files, total_manifest, total_bytes, avg_bps, current_bps
+                                totals.files, totals.manifest_files, totals.bytes, avg_bps, current_bps
                             );
                         } else {
                             let avg_mib = avg_bps / (1024.0 * 1024.0);
                             let current_mib = current_bps / (1024.0 * 1024.0);
                             println!(
                                 "[progress] {}/{} files \u{2022} {:.2} MiB copied \u{2022} {:.2} MiB/s avg \u{2022} {:.2} MiB/s current",
-                                total_files,
-                                total_manifest,
-                                total_bytes as f64 / (1024.0 * 1024.0),
+                                totals.files,
+                                totals.manifest_files,
+                                totals.bytes as f64 / (1024.0 * 1024.0),
                                 avg_mib,
                                 current_mib,
                             );
                         }
                         prev_instant = now;
-                        prev_bytes = total_bytes;
-                    } else if total_manifest > 0 {
+                        prev_bytes = totals.bytes;
+                    } else if totals.manifest_files > 0 {
                         if json {
                             eprintln!(
                                 "{{\"event\":\"manifest\",\"total_files\":{}}}",
-                                total_manifest
+                                totals.manifest_files
                             );
                         } else {
                             println!(
                                 "[progress] manifest enumerated {} file(s)\u{2026}",
-                                total_manifest
+                                totals.manifest_files
                             );
                         }
                     }
@@ -131,31 +123,34 @@ pub(crate) fn spawn_progress_monitor_with_options(
             }
         }
 
-        if started && !suppress_final_line {
+        if totals.started() && !suppress_final_line {
             let elapsed = start.elapsed().as_secs_f64().max(1e-6);
-            let avg_bps = (total_bytes as f64) / elapsed;
+            let avg_bps = (totals.bytes as f64) / elapsed;
             if json {
                 eprintln!(
                     "{{\"event\":\"final\",\"files_transferred\":{},\"total_bytes\":{},\"avg_bytes_sec\":{:.0}}}",
-                    total_files, total_bytes, avg_bps
+                    totals.files, totals.bytes, avg_bps
                 );
             } else {
                 let avg_mib = avg_bps / (1024.0 * 1024.0);
                 println!(
                     "[progress] final: {} file(s) transferred \u{2022} {:.2} MiB total \u{2022} {:.2} MiB/s avg",
-                    total_files,
-                    total_bytes as f64 / (1024.0 * 1024.0),
+                    totals.files,
+                    totals.bytes as f64 / (1024.0 * 1024.0),
                     avg_mib,
                 );
             }
-        } else if !started && total_manifest > 0 {
+        } else if !totals.started() && totals.manifest_files > 0 {
             if json {
                 eprintln!(
                     "{{\"event\":\"manifest\",\"total_files\":{}}}",
-                    total_manifest
+                    totals.manifest_files
                 );
             } else {
-                println!("[progress] manifest enumerated {} file(s)", total_manifest);
+                println!(
+                    "[progress] manifest enumerated {} file(s)",
+                    totals.manifest_files
+                );
             }
         }
     });

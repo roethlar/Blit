@@ -54,10 +54,7 @@ use crate::display_f1::{f1_push_status, f1_trigger_prompt};
 use crate::display_f2::{cancel_status_remaining_ttl, cancel_status_to_display};
 use crate::display_f3::{f3_del_to_display, f3_du_to_display, f3_pull_to_display};
 use crate::exec_plan::{build_delegated_execution, build_f1_push_execution, f3_pull_options};
-use crate::progress_accum::{
-    accumulate_delegated_progress, accumulate_pull_progress, accumulate_push_progress,
-    du_total_from_entries, pull_throughput,
-};
+use crate::progress_accum::{du_total_from_entries, pull_throughput};
 use crate::theme_color::{base_theme_style, raw_color_to_ratatui};
 use crate::tick_budget::{compute_tick_budget, min_opt};
 use blit_app::admin::list_modules::Module;
@@ -3271,25 +3268,23 @@ fn spawn_f3_pull(
     use f3pull::PullKind;
     tokio::spawn(async move {
         // d-37: progress monitor. run_pull_sync reports
-        // ProgressEvents into `pe_rx`; the forwarder
-        // accumulates cumulative (files, bytes) via
-        // `accumulate_pull_progress` and ships snapshots
-        // to the UI.
+        // ProgressEvents into `pe_rx`; the forwarder folds them
+        // through the shared `ProgressTotals` accumulator (w6-1)
+        // and ships snapshots to the UI.
         let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
         let progress = RemoteTransferProgress::new(pe_tx);
         let forwarder = tokio::spawn(async move {
             let started = Instant::now();
-            let mut files = 0usize;
-            let mut bytes = 0u64;
+            let mut totals = blit_core::remote::transfer::ProgressTotals::default();
             while let Some(event) = pe_rx.recv().await {
-                accumulate_pull_progress(&mut files, &mut bytes, &event);
-                let bytes_per_sec = pull_throughput(bytes, started.elapsed().as_secs_f64());
+                totals.apply(&event);
+                let bytes_per_sec = pull_throughput(totals.bytes, started.elapsed().as_secs_f64());
                 // Lossy on a full channel — progress is
                 // approximate; the reply carries the truth.
                 let _ = progress_tx.try_send(F3PullProgress {
                     request_id,
-                    files,
-                    bytes,
+                    files: usize::try_from(totals.files).unwrap_or(usize::MAX),
+                    bytes: totals.bytes,
                     bytes_per_sec,
                 });
             }
@@ -3390,22 +3385,21 @@ fn spawn_f1_push(
     use f3pull::PullKind;
     tokio::spawn(async move {
         // d-63: progress monitor — run_remote_push reports
-        // ProgressEvents into `pe_rx`; the forwarder accumulates
-        // cumulative (files, bytes) via `accumulate_push_progress`
+        // ProgressEvents into `pe_rx`; the forwarder folds them
+        // through the shared `ProgressTotals` accumulator (w6-1)
         // and ships snapshots to the UI.
         let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
         let progress = RemoteTransferProgress::new(pe_tx);
         let forwarder = tokio::spawn(async move {
             let started = Instant::now();
-            let mut files = 0u64;
-            let mut bytes = 0u64;
+            let mut totals = blit_core::remote::transfer::ProgressTotals::default();
             while let Some(event) = pe_rx.recv().await {
-                accumulate_push_progress(&mut files, &mut bytes, &event);
-                let bytes_per_sec = pull_throughput(bytes, started.elapsed().as_secs_f64());
+                totals.apply(&event);
+                let bytes_per_sec = pull_throughput(totals.bytes, started.elapsed().as_secs_f64());
                 let _ = progress_tx.try_send(F1PushProgress {
                     request_id,
-                    files,
-                    bytes,
+                    files: totals.files,
+                    bytes: totals.bytes,
                     bytes_per_sec,
                 });
             }
@@ -3487,22 +3481,22 @@ fn spawn_f1_delegated_pull(
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     tokio::spawn(async move {
         // d-69: progress monitor — run_delegated_pull reports Payload
-        // deltas into `pe_rx`; the forwarder accumulates cumulative
-        // (files, bytes) via `accumulate_delegated_progress` and ships
-        // snapshots to the UI (lossy via try_send).
+        // deltas into `pe_rx` (the contract's aggregate lane); the
+        // forwarder folds them through the shared `ProgressTotals`
+        // accumulator (w6-1) and ships snapshots to the UI (lossy via
+        // try_send).
         let (pe_tx, mut pe_rx) = mpsc::unbounded_channel::<ProgressEvent>();
         let progress = RemoteTransferProgress::new(pe_tx);
         let forwarder = tokio::spawn(async move {
             let started = Instant::now();
-            let mut files = 0u64;
-            let mut bytes = 0u64;
+            let mut totals = blit_core::remote::transfer::ProgressTotals::default();
             while let Some(event) = pe_rx.recv().await {
-                accumulate_delegated_progress(&mut files, &mut bytes, &event);
-                let bytes_per_sec = pull_throughput(bytes, started.elapsed().as_secs_f64());
+                totals.apply(&event);
+                let bytes_per_sec = pull_throughput(totals.bytes, started.elapsed().as_secs_f64());
                 let _ = progress_tx.try_send(F1PushProgress {
                     request_id,
-                    files,
-                    bytes,
+                    files: totals.files,
+                    bytes: totals.bytes,
                     bytes_per_sec,
                 });
             }
@@ -9497,204 +9491,136 @@ mod tests {
         }
     }
 
-    // d-63: push-progress accumulator semantics. The push SEND
-    // path (data_plane.rs `send_payloads`) reports bytes on
-    // `FileComplete` and emits NO `Payload` — the opposite of the
-    // pull receive path. So the push accumulator must take bytes
-    // from FileComplete; taking them from Payload (like the pull
-    // accumulator) would report 0 bytes.
+    // w6-1: the three per-direction accumulators collapsed into the
+    // shared `ProgressTotals` fold in blit-core. These tests pin the
+    // TUI forwarders' consumer-side behavior: every direction's
+    // producer shape must fold to honest totals through the ONE rule
+    // (bytes from Payload; files once via FileComplete or
+    // Payload.files).
 
+    /// d-63 (w6-1 shape): push send emits `Payload { 0, size }` +
+    /// `FileComplete` per file — bytes moved off FileComplete by the
+    /// contract, totals unchanged.
     #[test]
-    fn accumulate_push_progress_counts_files_and_bytes_from_file_complete() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0u64;
-        let mut bytes = 0u64;
+    fn progress_totals_push_send_pairs() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
         for (i, size) in [100u64, 200, 300].iter().enumerate() {
-            accumulate_push_progress(
-                &mut files,
-                &mut bytes,
-                &ProgressEvent::FileComplete {
-                    path: format!("f{i}"),
-                    bytes: *size,
-                },
-            );
+            totals.apply(&ProgressEvent::Payload {
+                files: 0,
+                bytes: *size,
+            });
+            totals.apply(&ProgressEvent::FileComplete {
+                path: format!("f{i}"),
+            });
         }
-        assert_eq!(files, 3);
-        assert_eq!(bytes, 600, "push counts bytes from FileComplete");
+        assert_eq!(totals.files, 3);
+        assert_eq!(totals.bytes, 600, "push bytes ride Payload after w6-1");
     }
 
     /// d-69: the delegated path reports cumulative deltas via
-    /// `report_payload(file_delta, byte_delta)`, so each `Payload`
-    /// carries BOTH counts and there are no `FileComplete` events.
+    /// `report_payload(file_delta, byte_delta)` — the contract's
+    /// aggregate lane. Each `Payload` carries BOTH counts and there
+    /// are no `FileComplete` events.
     #[test]
-    fn accumulate_delegated_progress_sums_files_and_bytes_from_payload() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0u64;
-        let mut bytes = 0u64;
-        accumulate_delegated_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::Payload {
-                files: 2,
-                bytes: 500,
-            },
-        );
-        accumulate_delegated_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::Payload {
-                files: 1,
-                bytes: 250,
-            },
-        );
-        assert_eq!(
-            files, 3,
-            "delegated takes files from Payload, not FileComplete"
-        );
-        assert_eq!(bytes, 750);
-        // A stray FileComplete must NOT double-count files.
-        accumulate_delegated_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::FileComplete {
-                path: "x".into(),
-                bytes: 99,
-            },
-        );
-        assert_eq!(files, 3, "FileComplete ignored on the delegated path");
-        assert_eq!(bytes, 750);
+    fn progress_totals_delegated_deltas_from_payload() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Payload {
+            files: 2,
+            bytes: 500,
+        });
+        totals.apply(&ProgressEvent::Payload {
+            files: 1,
+            bytes: 250,
+        });
+        assert_eq!(totals.files, 3, "delegated files ride Payload.files");
+        assert_eq!(totals.bytes, 750);
     }
 
-    /// Push emits no Payload, but if one appeared it must NOT add
-    /// bytes (the FileComplete is authoritative for push) — guards
-    /// against a future double-count.
+    /// ManifestBatch is the denominator: it moves `manifest_files`
+    /// only, never the transferred totals the footer renders.
     #[test]
-    fn accumulate_push_progress_ignores_payload_and_manifest() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0u64;
-        let mut bytes = 0u64;
-        accumulate_push_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::Payload {
-                files: 0,
-                bytes: 999,
-            },
-        );
-        accumulate_push_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::ManifestBatch { files: 5 },
-        );
-        assert_eq!(files, 0);
-        assert_eq!(bytes, 0, "Payload/ManifestBatch don't move push totals");
+    fn progress_totals_manifest_is_denominator_only() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::ManifestBatch { files: 5 });
+        assert_eq!(totals.manifest_files, 5);
+        assert_eq!(totals.files, 0);
+        assert_eq!(totals.bytes, 0, "ManifestBatch doesn't move totals");
     }
 
-    // d-37 round 2: pull-progress accumulator semantics.
+    // d-37 round 2 (w6-1 shape): pull-progress semantics.
 
-    /// The reviewer-flagged regression: the TCP data-plane
-    /// path emits `Payload { bytes: N }` AND
-    /// `FileComplete { bytes: N }` for the SAME file.
-    /// Bytes must come from Payload only — the pair must
-    /// total N bytes / 1 file, not 2N.
+    /// The d-37 regression, now closed at the producer: the TCP
+    /// data-plane path emits `Payload { bytes: N }` then a byteless
+    /// `FileComplete` for the same file — the pair must total
+    /// N bytes / 1 file. (FileComplete can no longer carry bytes,
+    /// so the 2N double-count of design-1 is unrepresentable.)
     #[test]
-    fn accumulate_pull_progress_data_plane_pair_no_double_count() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0usize;
-        let mut bytes = 0u64;
-        accumulate_pull_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::Payload {
-                files: 0,
-                bytes: 1024,
-            },
-        );
-        accumulate_pull_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::FileComplete {
-                path: "f.txt".to_string(),
-                bytes: 1024,
-            },
-        );
-        assert_eq!(bytes, 1024, "bytes from Payload only — not doubled");
-        assert_eq!(files, 1, "one file from the FileComplete");
+    fn progress_totals_data_plane_pair_no_double_count() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::Payload {
+            files: 0,
+            bytes: 1024,
+        });
+        totals.apply(&ProgressEvent::FileComplete {
+            path: "f.txt".to_string(),
+        });
+        assert_eq!(totals.bytes, 1024, "bytes from Payload only — not doubled");
+        assert_eq!(totals.files, 1, "one file from the FileComplete");
     }
 
-    /// Direct-gRPC path: bytes arrive via `Payload` chunks,
-    /// `FileComplete` carries `bytes: 0`. Bytes accumulate
-    /// from the chunks; the file is counted once.
+    /// Direct-gRPC path: bytes arrive via `Payload` chunks, then a
+    /// byteless `FileComplete`. Bytes accumulate from the chunks;
+    /// the file is counted once.
     #[test]
-    fn accumulate_pull_progress_grpc_chunks_then_zero_byte_complete() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0usize;
-        let mut bytes = 0u64;
+    fn progress_totals_grpc_chunks_then_complete() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
         for chunk in [4096u64, 4096, 2000] {
-            accumulate_pull_progress(
-                &mut files,
-                &mut bytes,
-                &ProgressEvent::Payload {
-                    files: 0,
-                    bytes: chunk,
-                },
-            );
+            totals.apply(&ProgressEvent::Payload {
+                files: 0,
+                bytes: chunk,
+            });
         }
-        accumulate_pull_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::FileComplete {
-                path: "big.bin".to_string(),
-                bytes: 0,
-            },
-        );
-        assert_eq!(bytes, 10192);
-        assert_eq!(files, 1);
+        totals.apply(&ProgressEvent::FileComplete {
+            path: "big.bin".to_string(),
+        });
+        assert_eq!(totals.bytes, 10192);
+        assert_eq!(totals.files, 1);
     }
 
     /// ManifestBatch events don't touch the byte/file
     /// totals (they're a discovery-phase signal).
     #[test]
-    fn accumulate_pull_progress_manifest_batch_is_inert() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0usize;
-        let mut bytes = 0u64;
-        accumulate_pull_progress(
-            &mut files,
-            &mut bytes,
-            &ProgressEvent::ManifestBatch { files: 12 },
-        );
-        assert_eq!(files, 0);
-        assert_eq!(bytes, 0);
+    fn progress_totals_manifest_batch_is_inert_for_pull() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
+        totals.apply(&ProgressEvent::ManifestBatch { files: 12 });
+        assert_eq!(totals.files, 0);
+        assert_eq!(totals.bytes, 0);
+        assert!(!totals.started(), "manifest alone doesn't start the footer");
     }
 
     /// Multi-file data-plane transfer: each file emits the
     /// Payload+FileComplete pair; totals stay honest.
     #[test]
-    fn accumulate_pull_progress_multi_file_data_plane() {
-        use blit_core::remote::transfer::ProgressEvent;
-        let mut files = 0usize;
-        let mut bytes = 0u64;
+    fn progress_totals_multi_file_data_plane() {
+        use blit_core::remote::transfer::{ProgressEvent, ProgressTotals};
+        let mut totals = ProgressTotals::default();
         for (i, size) in [100u64, 200, 300].iter().enumerate() {
-            accumulate_pull_progress(
-                &mut files,
-                &mut bytes,
-                &ProgressEvent::Payload {
-                    files: 0,
-                    bytes: *size,
-                },
-            );
-            accumulate_pull_progress(
-                &mut files,
-                &mut bytes,
-                &ProgressEvent::FileComplete {
-                    path: format!("f{i}"),
-                    bytes: *size,
-                },
-            );
+            totals.apply(&ProgressEvent::Payload {
+                files: 0,
+                bytes: *size,
+            });
+            totals.apply(&ProgressEvent::FileComplete {
+                path: format!("f{i}"),
+            });
         }
-        assert_eq!(bytes, 600);
-        assert_eq!(files, 3);
+        assert_eq!(totals.bytes, 600);
+        assert_eq!(totals.files, 3);
     }
 
     #[test]

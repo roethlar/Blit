@@ -29,8 +29,9 @@ pub use pipeline::{
     SinkControl,
 };
 pub use progress::{
-    ByteProgressSink, LiveProbe, NoProbe, Probe, ProgressEvent, RemoteTransferProgress, StreamId,
-    StreamProbe, StreamState, StreamTelemetry, StreamTelemetrySnapshot,
+    ByteProgressSink, LiveProbe, NoProbe, Probe, ProgressEvent, ProgressTotals,
+    RemoteTransferProgress, StreamId, StreamProbe, StreamState, StreamTelemetry,
+    StreamTelemetrySnapshot,
 };
 pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,

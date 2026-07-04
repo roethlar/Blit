@@ -248,7 +248,7 @@ pub async fn transfer_payloads_via_control_plane(
 
                 if header.size == 0 {
                     if let Some(progress) = progress {
-                        progress.report_file_complete(header.relative_path.clone(), 0);
+                        progress.report_file_complete(header.relative_path.clone());
                     }
                     continue;
                 }
@@ -286,7 +286,9 @@ pub async fn transfer_payloads_via_control_plane(
                     remaining -= chunk as u64;
                 }
                 if let Some(progress) = progress {
-                    progress.report_file_complete(header.relative_path.clone(), header.size);
+                    // Bytes already rode the per-chunk Payload reports
+                    // above; FileComplete only marks the file done.
+                    progress.report_file_complete(header.relative_path.clone());
                 }
             }
             PreparedPayload::TarShard { headers, data } => {
@@ -315,7 +317,7 @@ pub async fn transfer_payloads_via_control_plane(
                 send_payload(tx, ClientPayload::TarShardComplete(TarShardComplete {})).await?;
                 if let Some(progress) = progress {
                     for header in &headers {
-                        progress.report_file_complete(header.relative_path.clone(), header.size);
+                        progress.report_file_complete(header.relative_path.clone());
                     }
                 }
             }
