@@ -6,8 +6,12 @@ See `.review/findings/<id>.md` for per-finding details.
 ## Legend
 
 - `[ ]` Open — coder may pick up
-- `[~]` In progress / pending review — sentinel in `.review/ready/`
-- `[x]` Verified — verdict in `.review/results/<id>.verified.json`
+- `[~]` In progress — coded/committed, codex review + adjudication in
+  flight (`docs/agent/GPT_REVIEW_LOOP.md`, D-2026-07-04-1)
+- `[x]` Verified — codex verdict adjudicated, accepted findings fixed
+  (records: `.review/results/<id>.codex.md` + `<id>.gpt-verdict.md`;
+  rows graded before 2026-07-04 carry `<id>.verified.json` from the
+  retired async loop)
 
 ## Unified transfer engine (REV4) — code→GPT-review→fix loop
 

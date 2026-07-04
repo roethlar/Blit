@@ -52,7 +52,11 @@ Turn a talked-through idea into a durable plan before any implementation.
    each) in the doc's Slices section.
 4. Add the doc to STATE.md's Queue (and to "Authoritative docs" if it will be the
    active plan).
-5. **Stop.** No implementation until the owner approves; record approval by
+5. Commit the plan doc and run the commit through the codex review loop
+   (`docs/agent/GPT_REVIEW_LOOP.md`, D-2026-07-04-1 — plan changes included;
+   docs gate is `bash scripts/agent/check-docs.sh`). Adjudicate and fix the
+   accepted findings before surfacing the draft to the owner.
+6. **Stop.** No implementation until the owner approves; record approval by
    flipping `**Status**: Draft` → `Active` and adding a DECISIONS.md entry.
 
 ---

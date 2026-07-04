@@ -20,11 +20,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `response_task`, and converted the daemon's per-stream push worker
   `Vec<JoinHandle>` to a `JoinSet` (mirrors the resizable path's
   existing `ue-r2-2` fix). Commits `65ecb93` (fix) + `44bf416` (finding
-  doc/REVIEW.md/sentinel); fmt/clippy clean; `cargo test --workspace`
-  green (blit-core 348, blit-daemon 162). Sentinel written to
-  `.review/ready/w4-1-abortondrop-family.json` — **awaiting reviewer
-  verdict**; also closes `design-2-orphaned-daemon-data-planes`'s
-  remaining scope (same commit).
+  doc/REVIEW.md); fmt/clippy clean; `cargo test --workspace` green
+  (blit-core 348, blit-daemon 162). **Grading via the codex loop is in
+  flight this session** (D-2026-07-04-1; the stale async sentinel from
+  before that decision is deleted with the verdict records); also
+  closes `design-2-orphaned-daemon-data-planes`'s remaining scope
+  (same commit).
 - **REV4 code-complete** (`ue-r2-1b`..`ue-r2-2`, all nine slices; details:
   DEVLOG 2026-07-03/04 entries, REVIEW.md commit map). Stream resize is
   live end-to-end (engine-owned `resize_tick` policy, elastic pipeline,
@@ -76,9 +77,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   code-complete; measurement gates remain (see Active context).
 - Superseded by REV4 (history only): `UNIFIED_TRANSFER_ENGINE.md` (v1),
   `…_REV2.md`, `…_REV3.md`.
-- Process: `.review/README.md` async loop for queue work;
-  `docs/agent/GPT_REVIEW_LOOP.md` (Active) applied to the now-finished
-  `ue-r2-*` slices.
+- Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active) — the codex loop
+  for **all code and plan changes** (D-2026-07-04-1); `.review/README.md`
+  is retired as the grading mechanism (its `findings/`/`results/`
+  records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (all `ue-r2-*` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
 - Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified
