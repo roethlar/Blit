@@ -1,9 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (D-2026-07-04-1: codex loop now governs ALL
-code and plan changes; `w4-1` landed AND graded through it — w4-1 +
-design-2 closed `[x]`); local HEAD past `6a38810`, **not yet pushed**
-to either remote this session.
+Last updated: 2026-07-04 (`w4-3` landed and graded through the codex
+loop — PASS, zero findings, closed `[x]`); local HEAD past `6a38810`,
+**not yet pushed** to either remote across these sessions.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -11,18 +10,18 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`w4-1-abortondrop-family` DONE — landed and graded `[x]`**
-  (details: DEVLOG 2026-07-04T05:00/05:45Z; finding:
-  `.review/findings/w4-1-abortondrop-family.md`). Hoisted `AbortOnDrop`
-  to `blit-core::remote::transfer::abort_on_drop` (`pub`); wrapped the
-  remaining detach-on-drop sites (daemon push `data_plane_handle` —
-  design-2's last site, now closed `[x]` too; push client
-  `pipeline_handle` + `response_task`); per-stream push workers
-  `Vec<JoinHandle>` → `JoinSet`. Commits `65ecb93` + records `44bf416`;
-  codex NEEDS FIXES (1 Low, vacuous relocated drop-test) → fixed
-  `bedfa52` (paused-time, mutation-verified); verdicts recorded,
-  sentinel deleted (`6a38810`). fmt/clippy clean; workspace tests
-  green (blit-core 348, blit-daemon 162).
+- **`w4-3-daemon-disconnect-racing` DONE — landed and graded `[x]`**
+  (details: DEVLOG 2026-07-04T05:59Z; finding:
+  `.review/findings/w4-3-daemon-disconnect-racing.md`). Push/pull_sync
+  dispatchers now race their handlers against `tx.closed()` + the row
+  cancel token (`resolve_transfer_outcome` generalized from
+  delegated_pull's audit-10 select; new `resolve_streaming_outcome`
+  wrapper); false `supports_cancellation` comment rewritten.
+  `CancelJob` dispatch policy deliberately unchanged (flip = new open
+  question below). Slice `37d7f91` + records; codex **PASS, zero
+  findings**. Select arms mutation-verified (M1/M2/M3). fmt/clippy
+  clean; workspace tests green (blit-daemon 162 → 167). Prior slice
+  w4-1 (`65ecb93`+`bedfa52`) closed `[x]` earlier the same day.
 - **Process (D-2026-07-04-1)**: the codex loop now governs **all code
   and plan changes** — no exceptions; codex is the **only** reviewer
   (no same-model panels; owner correction this session). Async
@@ -55,12 +54,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w4-1 closed
-   `[x]` 2026-07-04 (see Now). Highest open ratified row is **w4-3**
-   (daemon disconnect racing). Then W1 socket-policy / timeout rows
-   (note: ue-r2-2's armed-only accepts re-ratified the 1g W1 deferral
-   premise; the constants/policy consolidation still belongs to W1).
-   Open Low rows from the ue-r2 reviews: `relay-1-subpath-double-join`.
+1. **Design-review queue** — `REVIEW.md` order governs. w4-1 + w4-3
+   closed `[x]` 2026-07-04 (see Now). Highest open ratified row is
+   **w1-2** (shared `configure_data_socket` policy helper, coordinates
+   design-3), then w1-3 / w1-4 (note: ue-r2-2's armed-only accepts
+   re-ratified the 1g W1 deferral premise; the constants/policy
+   consolidation still belongs to W1). Open Low rows from the ue-r2
+   reviews: `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -112,6 +112,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   evidence? Agent rec: leave; live docs are already clean.
 - **(OPEN)** REV4 → Shipped flip: after the 10 GbE session, or now
   with the measurement gates tracked separately? Owner call.
+- **(OPEN, new w4-3)** Flip `supports_cancellation` for Push/PullSync
+  so `CancelJob` (and the TUI F2 cancel) works on attached transfers?
+  The handlers now race the row token, so the flip is policy-only —
+  but it changes the CancelJob contract (exit-code 2 → 0, TUI
+  Unsupported surfaces). Agent rec: flip in a small follow-up slice;
+  the "disconnect is the cancel" rationale no longer requires the gate.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: full suite green
   locally across three sessions (clippy baseline + win-1 fixed); the
   daemon-spawn e2e family shows load-flakiness under full-parallel
@@ -120,6 +126,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (10th)** @ `37d7f91`+records+docs —
+  `w4-3-daemon-disconnect-racing` landed and graded through the codex
+  loop: **PASS, zero findings**, no fix commit; row `[x]`, verdict +
+  trimmed review recorded. Select arms mutation-verified. blit-daemon
+  162 → 167; all 37 suites green (gates run in PowerShell — Git Bash
+  can't link on this host, coreutils `link` shadows MSVC). New open
+  question: flip `supports_cancellation` for Push/PullSync (now
+  policy-only). In-flight: none. **Exact first action next session**:
+  on owner "continue", pick up **w1-2** (data-socket policy helper)
+  through the codex loop; else the owner schedules the 10 GbE
+  sign-off / decides the erratum + D-2026-06-20-1 +
+  supports_cancellation questions. Nothing pushed — push stays
+  owner-gated.
 - **2026-07-04 (9th)** @ `6a38810`+docs — `w4-1-abortondrop-family`
   landed (`65ecb93`+`44bf416`) **and graded through the codex loop**:
   NEEDS FIXES 1 Low (vacuous relocated drop-test) → fixed `bedfa52`,
@@ -127,19 +146,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   (`6a38810`). Same session: **D-2026-07-04-1** — codex loop for ALL
   code and plan changes, codex the only reviewer (no same-model
   panels); decision+propagation `3ebcc37`, its codex round fixed
-  `10866e4`. fmt/clippy clean; workspace tests green. In-flight: none.
-  **Exact first action next session**: on owner "continue", pick up
-  **w4-3** (daemon disconnect racing) through the codex loop; else the
-  owner schedules the 10 GbE sign-off / decides the erratum +
-  D-2026-06-20-1 questions. Nothing pushed this session — push stays
-  owner-gated.
+  `10866e4`. fmt/clippy clean; workspace tests green.
 - **2026-07-04 (8th)** @ `8d62afc` — `ue-r2-2` landed end-to-end
   (`042ca4b`..`0788e83`; codex NEEDS FIXES 3 + panel 4 → 9 fixed
   `ec4a3fe`, 1 deferred; records `8d62afc`). **REV4 code-complete.**
   fmt/clippy clean; tests 1405/0/3 on Windows. (Stack pushed to both
   remotes 2026-07-04, after this entry was written.)
-- **2026-07-04 (7th)** @ `f6f52d7`+docs — `ue-r2-1h` landed end-to-end
-  (`2a13f53` deletion+port; codex NEEDS FIXES 3 + panel → 5 fixed
-  `f6f52d7`, 1 deferred relay-1, 1 rejected; plus Windows-host
-  pre-existing fixes `9f37a7a` clippy baseline + `48c5a11` win-1
-  push-separator). fmt/clippy clean; tests 1393/0/3 on Windows.
