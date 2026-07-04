@@ -4,10 +4,12 @@ Last updated: 2026-07-04 (`w6-1`, `w6-2`, `w4-4`, and `design-3` all
 landed and graded through the codex loop in one session —
 ProgressEvent contract in blit-core; §1.6 residue filed as
 w6-2a/-2b/-2c; blocking filesystem work off the tokio runtime;
-**bounded data-plane dials**). **Owner pushed `master` → `github` at
-`10d89e0`** (2026-07-04); the `origin` gitea mirror was not pushed
-and lags. windows-latest CI on this push is the "meaningfully green"
-check the Open questions entry anticipates.
+**bounded data-plane dials**). **Owner pushed `master` → GitHub
+(`origin`) at `10d89e0`** (2026-07-04); the `gitea` LAN mirror is
+also at `10d89e0` (verified via ls-remote — the remote NAMES in
+older notes were swapped; fixed in `.agents/repo-guidance.md`).
+windows-latest CI on this push is the "meaningfully green" check the
+Open questions entry anticipates.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
