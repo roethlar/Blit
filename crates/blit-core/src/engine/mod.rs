@@ -27,10 +27,11 @@ mod summary;
 mod tuning;
 
 pub use dial::{
-    initial_stream_proposal, local_receiver_capacity, spawn_dial_tuner, TransferDial,
+    initial_stream_proposal, local_receiver_capacity, spawn_dial_tuner,
+    spawn_dial_tuner_with_resize, ResizeProposal, SharedStreamProbes, TransferDial,
     DIAL_CEILING_CHUNK_BYTES, DIAL_CEILING_MAX_STREAMS, DIAL_CEILING_PREFETCH,
     DIAL_FLOOR_CHUNK_BYTES, DIAL_FLOOR_PREFETCH, DIAL_STEP_DOWN_BLOCKED_RATIO,
-    DIAL_STEP_UP_BLOCKED_RATIO, DIAL_TUNER_TICK,
+    DIAL_STEP_UP_BLOCKED_RATIO, DIAL_TUNER_TICK, RESIZE_COOLDOWN_TICKS, RESIZE_SUSTAIN_TICKS,
 };
 pub use options::{LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions};
 pub use streaming_plan::{
