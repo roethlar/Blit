@@ -26,9 +26,11 @@ residue claims are **CONFIRMED**; none refuted.
   (`DelegatedPayload::BytesProgress` arm → `report_bytes_progress`
   delta bridge, the contract's aggregate lane) + 2 unit tests; TUI
   delegated forwarder folds whatever arrives.
-- **Producers: zero.** `grep -rn BytesProgress crates/` hits only the
-  proto and blit-app — no code in `blit-daemon` (or anywhere)
-  constructs the message. `delegated_pull.rs` sends `Started`, then
+- **Production producers: zero.** `grep -rn BytesProgress crates/`
+  hits only the proto and blit-app — no production code constructs
+  the message (the only constructions are blit-app's own consumer
+  unit tests at `remote.rs:1068/:1078/:1108`, which feed the delta
+  bridge directly). `delegated_pull.rs` sends `Started`, then
   nothing during the transfer (comment at :363-369 records the
   deliberate 0.1.0 gap), then one post-hoc
   `ManifestBatch{file_count = summary.files_transferred}` (:433) and
@@ -71,13 +73,18 @@ residue claims are **CONFIRMED**; none refuted.
 
 ## Sequencing note (recorded in the filed rows)
 
-2b is the substrate: 2a bridges the same row atomic 2b feeds, and 2c's
-`files_completed` wants the same per-row counter family. Suggested
-order 2b → 2a → 2c, but each is independently landable; final
-sequencing is the coder's pick per queue policy unless the owner
-orders otherwise. All three touch the daemon only — the client-side
-contract (w6-1) needs no changes to absorb them (the delegated bridge
-and `ProgressTotals` already handle the aggregate lane).
+The three slices are **independent** — in particular 2a does NOT
+depend on 2b: the delegated row atomic is already fed
+(`core.rs:667` → `pull_sync_with_spec(.., Some(byte_progress))` at
+`delegated_pull.rs:379`); 2a bridges that existing counter onto the
+wire, while 2b wires the two sibling handlers (push receive,
+pull_sync serve) that today pass nothing. 2c adds new machinery of
+its own (totals + a files counter on rows). Suggested order
+2b → 2a → 2c on smallest-first grounds only; final sequencing is the
+coder's pick per queue policy unless the owner orders otherwise. All
+three touch the daemon only — the client-side contract (w6-1) needs
+no changes to absorb them (the delegated bridge and `ProgressTotals`
+already handle the aggregate lane).
 
 ## Files
 
