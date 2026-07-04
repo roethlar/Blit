@@ -63,14 +63,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 1. **Design-review queue** — `REVIEW.md` order governs. w4-1, w4-3,
    and the whole W1 family (w1-2/w1-3/w1-4) closed `[x]` 2026-07-04
-   (see Now). Next in REVIEW.md row order: **w2-2** (stream-ladder
-   owner) — but **design-3** (data-plane connect timeouts, filed
-   Medium, `.review/findings/design-3-unbounded-data-plane-connects.md`)
-   is now trivially placeable after W1: two client connect sites
-   (`connect_with_probe`, `connect_pull_stream`), bound can import the
-   shared `DATA_PLANE_ACCEPT_TIMEOUT`. Sequencing is the coder's pick
-   unless the owner orders otherwise. Open Low rows:
-   `relay-1-subpath-double-join`.
+   (see Now). Topmost open row is now **w4-5-supports-cancellation-flip**
+   (owner-authorized D-2026-07-04-3, small, policy-only after w4-3);
+   then **design-3** (data-plane connect timeouts — trivially placeable
+   after W1: two client connect sites, bound imports the shared
+   `DATA_PLANE_ACCEPT_TIMEOUT`) and **w2-2** (stream-ladder owner).
+   Open Low rows: `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -101,11 +99,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Owner call on the commit erratum** (`9f37a7a`/`48c5a11` unbuildable
-  in isolation, now pushed to both remotes): leave as-is (default) or
-  authorize a history rewrite to fix it.
-- **Owner**: 10 GbE session scheduling (REV4 sign-off + zero-copy
-  revisit + resize behavior measurement).
+- **10 GbE session** (REV4 sign-off + zero-copy revisit + resize
+  behavior measurement). Owner 2026-07-04: **"soon, but keep coding
+  first"** — keep working the review queue; the owner will call
+  "benchmark" when the hardware session is on. Not a daily blocker.
 - `Cargo.lock`: the pre-existing dependency-refresh drift was
   committed at `04c9c6d` out of necessity (blit-core gained `rand`,
   which cannot land without its lockfile edge; every gate this session
@@ -115,19 +112,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(OPEN)** Edit D-2026-06-20-1 to strip its superseded warmup/size-gate
-  wording? Owner: not sure. (Agent rec: edit with a one-line note → -2/-5.)
+- **(RESOLVED 2026-07-04, owner Q&A session)** Four standing items
+  answered one-at-a-time: commit erratum → **leave as-is**
+  (D-2026-07-04-2); 10 GbE → **soon, keep coding first** (see
+  Blocked); D-2026-06-20-1 stale wording → **follow the existing
+  pattern** (edited in place, D-2026-06-20-3/-6 style);
+  `supports_cancellation` → **flip it** (D-2026-07-04-3, queued as
+  w4-5).
 - **(OPEN)** Historical audit/finding docs (`audit-13/14/15`, `drift-*`)
   still embed `/Users/...` in recorded evidence — scrub, or leave as
   evidence? Agent rec: leave; live docs are already clean.
 - **(OPEN)** REV4 → Shipped flip: after the 10 GbE session, or now
-  with the measurement gates tracked separately? Owner call.
-- **(OPEN, new w4-3)** Flip `supports_cancellation` for Push/PullSync
-  so `CancelJob` (and the TUI F2 cancel) works on attached transfers?
-  The handlers now race the row token, so the flip is policy-only —
-  but it changes the CancelJob contract (exit-code 2 → 0, TUI
-  Unsupported surfaces). Agent rec: flip in a small follow-up slice;
-  the "disconnect is the cancel" rationale no longer requires the gate.
+  with the measurement gates tracked separately? Owner call (10 GbE
+  now "soon" — likely resolves with it).
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: full suite green
   locally across three sessions (clippy baseline + win-1 fixed); the
   daemon-spawn e2e family shows load-flakiness under full-parallel
@@ -148,14 +145,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   blit-core 414 → 418; workspace 1446/0/2 across 37 suites (macOS
   host; Windows coverage rides the next push's CI). Environment note:
   codex hangs if invoked in a chained command — run it standalone
-  with stdin closed (`< /dev/null`). In-flight: none. **Exact first
-  action next session**: on owner "continue", pick up **design-3**
-  (data-plane connect timeouts — now two consolidated call sites +
-  the shared bound; or w2-2 if the owner prefers strict row order)
-  through the codex loop; else the owner schedules the 10 GbE
-  sign-off / decides the erratum + D-2026-06-20-1 +
-  supports_cancellation questions. Nothing pushed — push stays
-  owner-gated.
+  with stdin closed (`< /dev/null`). Same session, owner Q&A: all
+  four standing questions answered one-at-a-time — erratum leave
+  (D-2026-07-04-2), 10 GbE soon-keep-coding, D-2026-06-20-1 edited
+  in place per existing pattern, cancellation flip authorized
+  (D-2026-07-04-3 → new row w4-5). In-flight: none. **Exact first
+  action next session**: on owner "continue", pick up **w4-5**
+  (cancel-policy flip, topmost open row) through the codex loop.
+  Nothing pushed — push stays owner-gated.
 - **2026-07-04 (10th)** @ `37d7f91`+records+docs —
   `w4-3-daemon-disconnect-racing` landed and graded through the codex
   loop: **PASS, zero findings**, no fix commit; row `[x]`, verdict +
