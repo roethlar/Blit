@@ -224,7 +224,7 @@ async fn plan_batch(batch: Vec<FileHeader>, inputs: &StreamingPlanInputs) -> Res
     .await
     .context("diff_planner task panicked")??;
     Ok(PlanUpdate {
-        payloads: planned.payloads,
+        payloads: planned,
         headers_planned,
         bytes_planned,
     })

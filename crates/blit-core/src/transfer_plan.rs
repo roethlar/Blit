@@ -13,13 +13,6 @@ pub enum TransferTask {
     },
 }
 
-/// Planned work queue along with the preferred chunk size for streaming.
-#[derive(Clone, Debug)]
-pub struct Plan {
-    pub tasks: Vec<TransferTask>,
-    pub chunk_bytes: usize,
-}
-
 /// Planner tuning options shared across engines.
 #[derive(Clone, Copy, Debug)]
 pub struct PlanOptions {
@@ -27,7 +20,6 @@ pub struct PlanOptions {
     pub small_target: Option<u64>,
     pub small_count_target: Option<usize>,
     pub medium_target: Option<u64>,
-    pub chunk_bytes_override: Option<usize>,
 }
 
 impl PlanOptions {
@@ -37,7 +29,6 @@ impl PlanOptions {
             small_target: None,
             small_count_target: None,
             medium_target: None,
-            chunk_bytes_override: None,
         }
     }
 }
@@ -48,23 +39,25 @@ impl Default for PlanOptions {
     }
 }
 
-/// Build an adaptive transfer plan from enumerated file entries.
+/// Build an adaptive transfer task queue from enumerated file entries.
 ///
 /// The heuristics mirror the original `net_async::client::build_plan` logic so that
-/// every mode (push, pull, local) can share the same task ordering and chunk sizing.
+/// every mode (push, pull, local) can share the same task ordering. Wire
+/// chunk sizing is NOT planned here — it is owned by the live
+/// [`crate::engine::TransferDial`] (w2-2: this module's static 16/32 MiB
+/// chunk ladder was dead policy — every remote path overrode it from the
+/// dial and no consumer read the planned value).
 pub fn build_plan(
     files: &[crate::fs_enum::FileEntry],
     rootsrc: &Path,
     options: PlanOptions,
-) -> Plan {
+) -> Vec<TransferTask> {
     let mut size_map: HashMap<PathBuf, u64> = HashMap::new();
     let mut small: Vec<PathBuf> = Vec::new();
     let mut medium: Vec<(PathBuf, u64)> = Vec::new();
     let mut total_medium_bytes: u64 = 0;
     let mut large_files: Vec<TransferTask> = Vec::new();
-    // Kickoff histogram (bytes per bin)
-    let mut bins_bytes = [0u128; 6];
-    let mut bins_count = [0u64; 6];
+    let mut total_bytes: u128 = 0;
     for e in files {
         if e.is_directory {
             continue;
@@ -75,42 +68,21 @@ pub fn build_plan(
             .unwrap_or(&e.path)
             .to_path_buf();
         size_map.insert(rel.clone(), e.size);
-        if e.size < 64 * 1024 {
-            // <64KiB
+        total_bytes += e.size as u128;
+        if e.size < 1_048_576 {
+            // <1MB
             small.push(rel);
-            bins_bytes[0] += e.size as u128;
-            bins_count[0] += 1;
-        } else if e.size < 1_048_576 {
-            // 64KiB–1MB
-            small.push(rel);
-            bins_bytes[1] += e.size as u128;
-            bins_count[1] += 1;
         } else if e.size < 256 * 1_048_576 {
             // <256MB
             medium.push((rel, e.size));
             total_medium_bytes = total_medium_bytes.saturating_add(e.size);
-            if e.size < 32 * 1_048_576 {
-                bins_bytes[2] += e.size as u128;
-                bins_count[2] += 1;
-            } else {
-                bins_bytes[3] += e.size as u128;
-                bins_count[3] += 1;
-            }
         } else {
             // Large: schedule as single large-file task; range/delta decided when sending
             large_files.push(TransferTask::Large { path: rel.clone() });
-            if e.size < 2 * 1024 * 1024 * 1024 {
-                bins_bytes[4] += e.size as u128;
-                bins_count[4] += 1;
-            } else {
-                bins_bytes[5] += e.size as u128;
-                bins_count[5] += 1;
-            }
         }
     }
     // Shard small files into larger tars for multi-GB workloads
     small.sort_by_key(|p| p.as_os_str().len());
-    let total_bytes: u128 = bins_bytes.iter().copied().sum();
 
     let mut small_tasks: Vec<TransferTask> = Vec::new();
     let small_count = small.len();
@@ -218,27 +190,101 @@ pub fn build_plan(
             i_m += 1;
         }
     }
-    // Choose chunk size: larger for big transfers dominated by large files
-    let large_bytes = bins_bytes[4] + bins_bytes[5];
-    let chunk_bytes = if total_bytes > 1_000_000_000 || large_bytes * 100 / total_bytes.max(1) >= 50
-    {
-        32 * 1024 * 1024 // 32 MiB for large transfers or large-file dominance
-    } else {
-        16 * 1024 * 1024 // 16 MiB default
-    };
-    let chunk_bytes = options.chunk_bytes_override.unwrap_or(chunk_bytes);
-    Plan { tasks, chunk_bytes }
+    tasks
 }
 
-/// Convert Plan to daemon format (u8 type code, paths)
-/// Used by server pull mode for backward compatibility
-pub fn plan_to_daemon_format(plan: &Plan) -> Vec<(u8, Vec<PathBuf>)> {
-    plan.tasks
-        .iter()
-        .map(|task| match task {
-            TransferTask::TarShard(paths) => (1u8, paths.clone()),
-            TransferTask::RawBundle(paths) => (2u8, paths.clone()),
-            TransferTask::Large { path } => (3u8, vec![path.clone()]),
-        })
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs_enum::FileEntry;
+
+    fn entry(rel: &str, size: u64) -> FileEntry {
+        FileEntry {
+            path: PathBuf::from("/src").join(rel),
+            size,
+            is_directory: false,
+        }
+    }
+
+    /// w2-2: the planner classifies and batches tasks; it no longer
+    /// mints a chunk size (the dial owns wire chunking). These pins
+    /// cover the classification tiers the deletion left untouched.
+    #[test]
+    fn classifies_small_medium_large_and_interleaves() {
+        // Two tiny files (avg ≤ 128 KiB → tar-eligible), one medium,
+        // one large.
+        let files = vec![
+            entry("small-a", 4 * 1024),
+            entry("small-b", 8 * 1024),
+            entry("medium", 8 * 1_048_576),
+            entry("large", 300 * 1_048_576),
+        ];
+        let tasks = build_plan(&files, Path::new("/src"), PlanOptions::default());
+        let mut large = 0;
+        let mut shards = 0;
+        let mut bundles = 0;
+        for task in &tasks {
+            match task {
+                TransferTask::Large { path } => {
+                    assert_eq!(path, Path::new("large"));
+                    large += 1;
+                }
+                TransferTask::TarShard(paths) => {
+                    shards += 1;
+                    assert_eq!(paths.len(), 2, "both small files share one shard");
+                }
+                TransferTask::RawBundle(paths) => {
+                    bundles += 1;
+                    assert_eq!(paths, &[PathBuf::from("medium")]);
+                }
+            }
+        }
+        assert_eq!((large, shards, bundles), (1, 1, 1));
+        // Interleave starts with the large task so no stream builds
+        // tars while another idles.
+        assert!(matches!(tasks[0], TransferTask::Large { .. }));
+    }
+
+    #[test]
+    fn single_small_file_is_never_tar_wrapped() {
+        let files = vec![entry("only", 1024)];
+        let tasks = build_plan(&files, Path::new("/src"), PlanOptions::default());
+        assert_eq!(tasks.len(), 1);
+        assert!(
+            matches!(&tasks[0], TransferTask::RawBundle(paths) if paths.len() == 1),
+            "a lone small file gains nothing from tar wrapping"
+        );
+    }
+
+    #[test]
+    fn force_tar_wraps_even_a_single_file() {
+        let files = vec![entry("only", 1024)];
+        let options = PlanOptions {
+            force_tar: true,
+            ..PlanOptions::default()
+        };
+        let tasks = build_plan(&files, Path::new("/src"), options);
+        assert_eq!(tasks.len(), 1);
+        assert!(matches!(&tasks[0], TransferTask::TarShard(paths) if paths.len() == 1));
+    }
+
+    #[test]
+    fn small_count_target_splits_shards() {
+        // 300 tiny files with a count target of 128 must split into
+        // ceil(300/128) = 3 shards (the clamp floor).
+        let files: Vec<FileEntry> = (0..300).map(|i| entry(&format!("f{i:03}"), 1024)).collect();
+        let options = PlanOptions {
+            small_count_target: Some(1), // clamped up to 128
+            ..PlanOptions::default()
+        };
+        let tasks = build_plan(&files, Path::new("/src"), options);
+        let shard_sizes: Vec<usize> = tasks
+            .iter()
+            .map(|t| match t {
+                TransferTask::TarShard(paths) => paths.len(),
+                other => panic!("expected only tar shards, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(shard_sizes, vec![128, 128, 44]);
+    }
 }

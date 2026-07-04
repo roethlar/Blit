@@ -460,17 +460,12 @@ impl MultiStreamSender {
 /// memoized size-keyed `determine_remote_tuning` ladder: conservative
 /// start, ceilings bounded by the daemon's advertised receiver profile
 /// when the negotiation carried one (first-wins, like the old memo).
-/// `plan_options.chunk_bytes_override` is refreshed from the live dial
-/// by the planning arms before each `plan_transfer_payloads` batch.
 fn ensure_dial(
     dial: &mut Option<Arc<crate::engine::TransferDial>>,
-    plan_options: &mut PlanOptions,
     receiver_capacity: Option<&crate::generated::CapacityProfile>,
 ) -> Arc<crate::engine::TransferDial> {
     if dial.is_none() {
-        let d = crate::engine::TransferDial::conservative_within(receiver_capacity).shared();
-        plan_options.chunk_bytes_override = Some(d.chunk_bytes());
-        *dial = Some(d);
+        *dial = Some(crate::engine::TransferDial::conservative_within(receiver_capacity).shared());
     }
     dial.as_ref()
         .cloned()
@@ -566,7 +561,7 @@ impl RemotePushClient {
 
         let mut manifest_lookup: HashMap<String, FileHeader> = HashMap::new();
         let mut requested_files: HashSet<String> = HashSet::new();
-        let mut plan_options = PlanOptions::default();
+        let plan_options = PlanOptions::default();
         let mut dial: Option<Arc<crate::engine::TransferDial>> = None;
         let mut manifest_total_bytes: u64 = 0;
         let mut transfer_size_hint: u64 = 0;
@@ -753,11 +748,8 @@ impl RemotePushClient {
                                             if fallback_negotiated && need_list_received {
                                                 let dial = ensure_dial(
                                                     &mut dial,
-                                                    &mut plan_options,
                                                     None,
                                                 );
-                                                plan_options.chunk_bytes_override =
-                                                    Some(dial.chunk_bytes());
                                                 let result = stream_fallback_from_queue(
                                                     source.clone(),
                                                     &mut pending_queue,
@@ -793,18 +785,12 @@ impl RemotePushClient {
                                                     if headers.is_empty() {
                                                         continue;
                                                     }
-                                                    let dial = ensure_dial(
-                                                        &mut dial,
-                                                        &mut plan_options,
-                                                        None,
-                                                    );
-                                                    // Live dial: refresh the
-                                                    // planner chunk per batch.
-                                                    plan_options.chunk_bytes_override =
-                                                        Some(dial.chunk_bytes());
+                                                    // Dial exists before the first
+                                                    // fallback batch (first-wins).
+                                                    ensure_dial(&mut dial, None);
                                             let planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
-                                            for payload in &planned.payloads {
+                                            for payload in &planned {
                                                 match payload {
                                                     TransferPayload::File(header) => {
                                                         // w5-1: was unconditional per-file
@@ -828,9 +814,9 @@ impl RemotePushClient {
                                                     }
                                                 }
                                             }
-                                            if !planned.payloads.is_empty() {
-                                                        let sent = payload_file_count(&planned.payloads);
-                                                        sender.queue(planned.payloads).await?;
+                                            if !planned.is_empty() {
+                                                        let sent = payload_file_count(&planned);
+                                                        sender.queue(planned).await?;
                                                         if sent > 0 && first_payload_elapsed.is_none() {
                                                             first_payload_elapsed = Some(start.elapsed());
                                                         }
@@ -858,11 +844,8 @@ impl RemotePushClient {
                                             if need_list_received {
                                             let dial = ensure_dial(
                                                 &mut dial,
-                                                &mut plan_options,
                                                 neg.receiver_capacity.as_ref(),
                                             );
-                                            plan_options.chunk_bytes_override =
-                                                Some(dial.chunk_bytes());
                                             let result = stream_fallback_from_queue(
                                                 source.clone(),
                                                 &mut pending_queue,
@@ -902,7 +885,6 @@ impl RemotePushClient {
                                         // like the old tuning memo).
                                         let dial = ensure_dial(
                                             &mut dial,
-                                            &mut plan_options,
                                             neg.receiver_capacity.as_ref(),
                                         );
                                         if data_plane_sender.is_none() {
@@ -957,7 +939,7 @@ impl RemotePushClient {
                                                 plan_options,
                                             )?;
                                             let skipped = prune_unrequested_payloads(
-                                                &mut planned.payloads,
+                                                &mut planned,
                                                 &mut requested_files,
                                             );
                                             if skipped > 0 {
@@ -966,9 +948,9 @@ impl RemotePushClient {
                                                     skipped
                                                 );
                                             }
-                                            if !planned.payloads.is_empty() {
-                                                let sent = payload_file_count(&planned.payloads);
-                                                sender.queue(planned.payloads).await?;
+                                            if !planned.is_empty() {
+                                                let sent = payload_file_count(&planned);
+                                                sender.queue(planned).await?;
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
@@ -1106,11 +1088,8 @@ impl RemotePushClient {
                                     if fallback_negotiated && need_list_received {
                                         let dial = ensure_dial(
                                             &mut dial,
-                                            &mut plan_options,
                                             None,
                                         );
-                                        plan_options.chunk_bytes_override =
-                                            Some(dial.chunk_bytes());
                                         let result = stream_fallback_from_queue(
                                             source.clone(),
                                             &mut pending_queue,
@@ -1146,17 +1125,13 @@ impl RemotePushClient {
                                             if headers.is_empty() {
                                                 continue;
                                             }
-                                            let dial = ensure_dial(
-                                                &mut dial,
-                                                &mut plan_options,
-                                                None,
-                                            );
-                                            plan_options.chunk_bytes_override =
-                                                Some(dial.chunk_bytes());
+                                            // Dial exists before the first
+                                            // data-plane batch (first-wins).
+                                            ensure_dial(&mut dial, None);
                                             let mut planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
                                             let skipped = prune_unrequested_payloads(
-                                                &mut planned.payloads,
+                                                &mut planned,
                                                 &mut requested_files,
                                             );
                                             if skipped > 0 {
@@ -1165,7 +1140,7 @@ impl RemotePushClient {
                                                     skipped
                                                 );
                                             }
-                                            for payload in &planned.payloads {
+                                            for payload in &planned {
                                                 match payload {
                                                     TransferPayload::File(header) => {
                                                         // w5-1: was unconditional per-file
@@ -1189,9 +1164,9 @@ impl RemotePushClient {
                                                     }
                                                 }
                                             }
-                                            if !planned.payloads.is_empty() {
-                                                let sent = payload_file_count(&planned.payloads);
-                                                sender.queue(planned.payloads).await?;
+                                            if !planned.is_empty() {
+                                                let sent = payload_file_count(&planned);
+                                                sender.queue(planned).await?;
                                                 if sent > 0 && first_payload_elapsed.is_none() {
                                                     first_payload_elapsed = Some(start.elapsed());
                                                 }
@@ -1434,26 +1409,21 @@ async fn stream_fallback_from_queue(
     }
 
     let planned = plan_transfer_payloads(headers, source.root(), plan_options)?;
-    if planned.payloads.is_empty() {
+    if planned.is_empty() {
         return Ok(FallbackStreamResult::empty());
     }
 
-    let sent = payload_file_count(&planned.payloads);
-    let control_chunk = if chunk_bytes == 0 {
-        planned.chunk_bytes
-    } else {
-        chunk_bytes
-    };
+    let sent = payload_file_count(&planned);
     let sink: Arc<dyn TransferSink> = Arc::new(GrpcFallbackSink::new(
         source.clone(),
         tx.clone(),
-        control_chunk,
+        chunk_bytes,
         PathBuf::from("grpc-fallback"),
     ));
     execute_sink_pipeline(
         source,
         vec![sink],
-        planned.payloads,
+        planned,
         payload_prefetch,
         progress.map(|p| p as &RemoteTransferProgress),
     )

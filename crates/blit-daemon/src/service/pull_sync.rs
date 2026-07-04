@@ -614,15 +614,11 @@ async fn stream_via_grpc(
 
     // Reuse the unified planner so gRPC fallback emits the same
     // payload mix (single files / tar shards) as the TCP data plane —
-    // closes Step 4C, no artificial single-file cripple.
-    // ue-r2-1e: chunking comes from the live dial (conservative start,
-    // receiver-profile-bounded), not the size-keyed ladder.
-    let plan_options = PlanOptions {
-        chunk_bytes_override: Some(dial.chunk_bytes()),
-        ..Default::default()
-    };
+    // closes Step 4C, no artificial single-file cripple. Chunking is
+    // dial-owned and passed to the sink directly (w2-2: the planner
+    // no longer carries a chunk size).
     let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
-    let planned = plan_transfer_payloads(headers, source_root, plan_options)
+    let planned = plan_transfer_payloads(headers, source_root, PlanOptions::default())
         .map_err(|err| Status::internal(format!("planning gRPC payloads: {err}")))?;
 
     let source: Arc<dyn TransferSource> =
@@ -635,15 +631,10 @@ async fn stream_via_grpc(
             source_root.to_path_buf(),
         ));
 
-    let outcome = execute_sink_pipeline(
-        source,
-        vec![sink],
-        planned.payloads,
-        DEFAULT_PAYLOAD_PREFETCH,
-        None,
-    )
-    .await
-    .map_err(|err| Status::internal(format!("gRPC pull pipeline failed: {err}")))?;
+    let outcome =
+        execute_sink_pipeline(source, vec![sink], planned, DEFAULT_PAYLOAD_PREFETCH, None)
+            .await
+            .map_err(|err| Status::internal(format!("gRPC pull pipeline failed: {err}")))?;
 
     Ok(TransferStats {
         files_transferred: outcome.files_written as u64,
@@ -669,13 +660,6 @@ async fn stream_via_data_plane(
     use blit_core::remote::transfer::payload_file_count;
     use blit_core::remote::transfer::pipeline::{
         execute_sink_pipeline, execute_sink_pipeline_elastic, SinkControl,
-    };
-
-    // ue-r2-1e: dial-driven chunking (conservative start,
-    // receiver-profile-bounded).
-    let plan_options = PlanOptions {
-        chunk_bytes_override: Some(dial.chunk_bytes()),
-        ..Default::default()
     };
 
     // Set up data plane listener
@@ -725,10 +709,10 @@ async fn stream_via_data_plane(
     // Plan transfer payloads against the enumeration root — header.relative_path
     // is relative to source_root (NOT module.path).
     let headers: Vec<FileHeader> = entries.iter().map(|e| e.header.clone()).collect();
-    let planned = plan_transfer_payloads(headers, source_root, plan_options)
+    let planned = plan_transfer_payloads(headers, source_root, PlanOptions::default())
         .map_err(|err| Status::internal(format!("failed to plan payloads: {}", err)))?;
 
-    let file_count = payload_file_count(&planned.payloads);
+    let file_count = payload_file_count(&planned);
 
     // Shared buffer pool across all streams (hoisted out of
     // accept_and_wrap_sinks at ue-r2-2 so an ADDed stream's session
@@ -771,7 +755,7 @@ async fn stream_via_data_plane(
         Arc::new(FsTransferSource::new(source_root.to_path_buf()));
 
     if !resize_on {
-        execute_sink_pipeline(source, sinks, planned.payloads, dial.prefetch_count(), None)
+        execute_sink_pipeline(source, sinks, planned, dial.prefetch_count(), None)
             .await
             .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
         return Ok(TransferStats {
@@ -793,7 +777,7 @@ async fn stream_via_data_plane(
     let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel::<SinkControl>();
     let prefetch = dial.prefetch_count().max(1);
     let (payload_tx, payload_rx) = tokio::sync::mpsc::channel(prefetch);
-    let payloads = planned.payloads;
+    let payloads = planned;
     let feeder = tokio::spawn(async move {
         for payload in payloads {
             if payload_tx.send(payload).await.is_err() {

@@ -107,21 +107,13 @@ pub enum PreparedPayload {
 
 pub const DEFAULT_PAYLOAD_PREFETCH: usize = 8;
 
-pub struct PlannedPayloads {
-    pub payloads: Vec<TransferPayload>,
-    pub chunk_bytes: usize,
-}
-
 pub fn plan_transfer_payloads(
     headers: Vec<FileHeader>,
     source_root: &Path,
     options: PlanOptions,
-) -> Result<PlannedPayloads> {
+) -> Result<Vec<TransferPayload>> {
     if headers.is_empty() {
-        return Ok(PlannedPayloads {
-            payloads: Vec::new(),
-            chunk_bytes: 0,
-        });
+        return Ok(Vec::new());
     }
 
     let mut entries: Vec<FileEntry> = Vec::with_capacity(headers.len());
@@ -140,10 +132,10 @@ pub fn plan_transfer_payloads(
         .map(|header| (header.relative_path.clone(), header))
         .collect();
 
-    let plan = transfer_plan::build_plan(&entries, source_root, options);
+    let tasks = transfer_plan::build_plan(&entries, source_root, options);
     let mut payloads: Vec<TransferPayload> = Vec::new();
 
-    for task in plan.tasks {
+    for task in tasks {
         match task {
             TransferTask::TarShard(paths) => {
                 let mut shard_headers: Vec<FileHeader> = Vec::with_capacity(paths.len());
@@ -192,10 +184,7 @@ pub fn plan_transfer_payloads(
         TransferPayload::FileBlockComplete { .. } => (3, 0),
     });
 
-    Ok(PlannedPayloads {
-        payloads,
-        chunk_bytes: plan.chunk_bytes,
-    })
+    Ok(payloads)
 }
 
 pub fn payload_file_count(payloads: &[TransferPayload]) -> usize {

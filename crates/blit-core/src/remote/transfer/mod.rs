@@ -21,8 +21,8 @@ pub use data_plane::{
 };
 pub use payload::{
     build_tar_shard, payload_file_count, plan_transfer_payloads, prepare_payload,
-    prepared_payload_stream, transfer_payloads_via_control_plane, PlannedPayloads, PreparedPayload,
-    TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
+    prepared_payload_stream, transfer_payloads_via_control_plane, PreparedPayload, TransferPayload,
+    DEFAULT_PAYLOAD_PREFETCH,
 };
 pub use pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_elastic, execute_sink_pipeline_streaming,

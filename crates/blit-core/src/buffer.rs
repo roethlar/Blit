@@ -140,16 +140,15 @@ mod tests {
 /// - Uses semaphore-based memory budget control
 /// - Tracks statistics for monitoring
 ///
-/// **Integration with Orchestrator**: This pool does NOT define default sizes.
-/// The orchestrator/auto_tune system determines optimal `buffer_size` and `pool_size`
-/// based on runtime conditions (available memory, network bandwidth, file sizes).
+/// **Integration with the engine**: This pool does NOT define default sizes.
+/// The caller determines `buffer_size` and `pool_size` — remote paths size
+/// them from the live dial (`crate::engine::TransferDial`).
 /// Create the pool with those tuned parameters.
 ///
 /// # Example
 /// ```ignore
-/// // Orchestrator determines these values via auto_tune
-/// let tuned_buffer_size = tuning_params.chunk_bytes;
-/// let tuned_pool_size = tuning_params.stream_count * 2;
+/// let tuned_buffer_size = dial.chunk_bytes();
+/// let tuned_pool_size = stream_count * 2 + 4;
 /// let memory_budget = available_memory / 4;
 ///
 /// let pool = BufferPool::new(tuned_buffer_size, tuned_pool_size, Some(memory_budget));

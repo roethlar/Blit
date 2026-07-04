@@ -8,9 +8,11 @@
 //! steps the cheap dials from the PR1 stream telemetry.
 //!
 //! Mutability model (the C-ready seam `ue-r2-2` builds on):
-//! - **Live dials** — `chunk_bytes`, `prefetch_count`: atomics read at
-//!   each use site (per tar-shard chunking, per queued payload batch),
-//!   so a tuner step takes effect mid-transfer.
+//! - **Cheap dials** — `chunk_bytes`, `prefetch_count`: atomics the
+//!   tuner steps mid-transfer. Consumers read them when a session,
+//!   pipeline, or fallback batch is set up, so a step takes effect for
+//!   sockets/batches started afterwards (epoch-N resize adds, the next
+//!   gRPC-fallback batch) — existing sessions keep their snapshot.
 //! - **Connect-time dials** — `tcp_buffer_bytes`, buffer-pool sizing:
 //!   read when a socket/pool is built; changes affect sockets opened
 //!   afterwards (no setsockopt on live sockets this slice).

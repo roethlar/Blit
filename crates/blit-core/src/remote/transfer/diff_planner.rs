@@ -27,7 +27,7 @@ use std::path::Path;
 use eyre::{Context, Result};
 
 use crate::generated::{ComparisonMode, FileHeader};
-use crate::remote::transfer::payload::{plan_transfer_payloads, PlannedPayloads};
+use crate::remote::transfer::payload::{plan_transfer_payloads, TransferPayload};
 use crate::transfer_plan::PlanOptions;
 
 /// Push origins outsource the diff to the daemon: the client sends its
@@ -47,7 +47,7 @@ pub fn plan_push_payloads(
     headers: Vec<FileHeader>,
     source_root: &Path,
     plan_options: PlanOptions,
-) -> Result<PlannedPayloads> {
+) -> Result<Vec<TransferPayload>> {
     plan_transfer_payloads(headers, source_root, plan_options).context("planning push payloads")
 }
 
@@ -86,7 +86,7 @@ pub struct LocalDiffInputs<'a> {
 pub fn plan_local_mirror(
     source_headers: Vec<FileHeader>,
     inputs: LocalDiffInputs<'_>,
-) -> Result<PlannedPayloads> {
+) -> Result<Vec<TransferPayload>> {
     let headers_to_copy = if inputs.skip_unchanged {
         filter_unchanged(
             &source_headers,
@@ -340,7 +340,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::remote::transfer::payload::payload_file_count(&planned.payloads),
+            crate::remote::transfer::payload::payload_file_count(&planned),
             2,
             "skip_unchanged=false must keep matching files in the plan"
         );
@@ -370,7 +370,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::remote::transfer::payload::payload_file_count(&planned.payloads),
+            crate::remote::transfer::payload::payload_file_count(&planned),
             0,
             "skip_unchanged=true must drop matching files before planning"
         );
@@ -384,7 +384,6 @@ mod tests {
         // shard exists — the exact mix depends on the planner's
         // adaptive thresholds, which are tuning concerns rather than
         // a contract.
-        use crate::remote::transfer::payload::TransferPayload;
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
@@ -408,15 +407,14 @@ mod tests {
         )
         .unwrap();
         let tar_shards = planned
-            .payloads
             .iter()
             .filter(|p| matches!(p, TransferPayload::TarShard { .. }))
             .count();
         assert!(
             tar_shards >= 1,
             "expected at least one TarShard payload for 50 small files, got {} payloads: {:?}",
-            planned.payloads.len(),
-            planned.payloads
+            planned.len(),
+            planned
         );
     }
 
@@ -424,7 +422,6 @@ mod tests {
     fn plan_local_mirror_force_tar_groups_even_a_few_files() {
         // PlanOptions::force_tar=true should always produce tar shards
         // regardless of file size distribution.
-        use crate::remote::transfer::payload::TransferPayload;
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -454,7 +451,6 @@ mod tests {
         )
         .unwrap();
         let has_tar = planned
-            .payloads
             .iter()
             .any(|p| matches!(p, TransferPayload::TarShard { .. }));
         assert!(has_tar, "force_tar must produce a TarShard payload");

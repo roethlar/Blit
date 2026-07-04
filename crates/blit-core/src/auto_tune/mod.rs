@@ -1,31 +1,14 @@
-//! Transfer tuning tables and history-derived planning thresholds.
+//! History-derived local planning thresholds.
 //!
-//! w2-1: this module previously advertised "warmup probes and
-//! heuristics" — runtime bandwidth adaptation that was never wired
-//! up: `analyze_warmup_result` had zero callers, `determine_tuning`'s
-//! only production caller passed `warmup_result = None`, and the
-//! caller overwrote most of what the None branch returned. That
-//! machinery is deleted; remote sizing is honestly static
-//! (formerly `remote::tuning::determine_remote_tuning`, keyed on the byte
-//! estimate). A real warmup probe is H10b-class future work behind
-//! its own plan doc.
-
-/// Tuning parameters for remote transfers. Produced by the static
-/// size-keyed table the engine dial replaced at ue-r2-1e
-/// (`crate::engine::TransferDial`).
-#[derive(Debug, Clone)]
-pub struct TuningParams {
-    /// Chunk size in bytes for network I/O
-    pub chunk_bytes: usize,
-    /// Initial number of parallel streams
-    pub initial_streams: usize,
-    /// Maximum parallel streams
-    pub max_streams: usize,
-    /// TCP buffer size (SO_SNDBUF/SO_RCVBUF)
-    pub tcp_buffer_size: Option<usize>,
-    /// Number of payloads to prefetch
-    pub prefetch_count: Option<usize>,
-}
+//! w2-1 deleted the dead warmup machinery (`analyze_warmup_result`,
+//! `determine_tuning`); ue-r2-1e replaced the remaining static remote
+//! table (`remote::tuning::determine_remote_tuning`) with the live
+//! engine dial (`crate::engine::TransferDial`); w2-2 removed the
+//! orphaned `TuningParams` carrier those left behind. What remains is
+//! the local-plan tuner below: it derives tar-shard / raw-bundle
+//! targets for `transfer_plan::PlanOptions` from perf-history
+//! records. A real warmup probe is H10b-class future work behind its
+//! own plan doc.
 
 /// Local plan tuning derived from historical performance records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

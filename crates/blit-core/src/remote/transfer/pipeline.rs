@@ -699,7 +699,7 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = execute_sink_pipeline(source, vec![sink], planned.payloads, 4, None)
+        let outcome = execute_sink_pipeline(source, vec![sink], planned, 4, None)
             .await
             .unwrap();
 
@@ -751,7 +751,7 @@ mod tests {
 
         // Feed payloads one-at-a-time asynchronously.
         let feeder = tokio::spawn(async move {
-            for p in planned.payloads {
+            for p in planned {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 let _ = tx.send(p).await;
             }
@@ -812,15 +812,9 @@ mod tests {
         )
         .unwrap();
 
-        let outcome = execute_sink_pipeline(
-            source,
-            vec![mk_sink(), mk_sink()],
-            planned.payloads,
-            4,
-            None,
-        )
-        .await
-        .unwrap();
+        let outcome = execute_sink_pipeline(source, vec![mk_sink(), mk_sink()], planned, 4, None)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.files_written, 8);
         for i in 0..8 {
@@ -1111,7 +1105,7 @@ mod tests {
             execute_sink_pipeline_streaming(source_clone, vec![failing], payload_rx, 4, None).await
         });
 
-        for payload in planned.payloads {
+        for payload in planned {
             // Sink errors after the first write; later sends may
             // race the channel close. We only care that the
             // pipeline future resolves with the real error.
