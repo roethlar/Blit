@@ -1,8 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w1-2` landed and graded through the codex
-loop — PASS, zero findings, closed `[x]`); local HEAD past `6a38810`,
-**not yet pushed** to either remote across these sessions.
+Last updated: 2026-07-04 (`w1-2` + `w1-3` landed and graded through
+the codex loop — both PASS, zero findings, closed `[x]`); local HEAD
+past `6a38810`, **not yet pushed** to either remote across these
+sessions.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -10,22 +11,24 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`w1-2-data-socket-policy-helper` DONE — landed and graded `[x]`**
-  (details: DEVLOG 2026-07-04T12:54Z; finding:
-  `.review/findings/w1-2-data-socket-policy-helper.md`). One shared
-  `configure_data_socket(&TcpStream, Option<usize>)` in
-  `blit_core::remote::transfer::socket` (SockRef in-place; nodelay
-  hard, keepalive/buffers logged); every data-plane socket routes
-  through it — push client connect, pull client connect (the pull
-  Nagle fix), daemon push accepts (silently-swallowing twin + daemon
-  socket2 dep deleted), pull_sync accepts (dial's `tcp_buffer_bytes`
-  now applied — snapshot at epoch-0/resume, LIVE at the resize accept,
-  closing the computed-and-discarded gap). design-3 (connect
-  timeouts), w1-3, w1-4 untouched. Slice `16237e2` + records
-  `f60942e`; codex **PASS, zero findings**. Helper + pull wiring
-  mutation-verified (M1/M2/M3). fmt/clippy clean; workspace 1445/0/2
-  (blit-core 414 → 417). Earlier same day: w4-3 (`37d7f91`) and w4-1
-  (`65ecb93`+`bedfa52`) closed `[x]`.
+- **`w1-2` + `w1-3` DONE — landed and graded `[x]`** (details: DEVLOG
+  2026-07-04T12:54Z + T13:06Z; findings:
+  `.review/findings/w1-2-data-socket-policy-helper.md`,
+  `w1-3-tcp-keepalive-honesty.md`). w1-2 (`16237e2` + records
+  `f60942e`): one shared `configure_data_socket(&TcpStream,
+  Option<usize>)` in `blit_core::remote::transfer::socket` (SockRef
+  in-place; nodelay hard, keepalive/buffers logged); every data-plane
+  socket routes through it — push client connect, pull client connect
+  (the pull Nagle fix), daemon push accepts (silently-swallowing twin
+  + daemon socket2 dep deleted), pull_sync accepts (dial's
+  `tcp_buffer_bytes` now applied — snapshot at epoch-0/resume, LIVE at
+  the resize accept, closing the computed-and-discarded gap). w1-3
+  (`865fc1e` + records `894f5e8`): real `TcpKeepalive` timing at that
+  single site — idle 60 s / interval 10 s / retries 5, dead idle peer
+  detected in ~2 min not ~2 h; comments now true; blit-core socket2 →
+  `features=["all"]`. Both codex **PASS, zero findings**;
+  mutation-verified; fmt/clippy clean; workspace 1446/0/2 (blit-core
+  414 → 418). Earlier same day: w4-3 + w4-1 closed `[x]`.
 - **Process (D-2026-07-04-1)**: the codex loop now governs **all code
   and plan changes** — no exceptions; codex is the **only** reviewer
   (no same-model panels; owner correction this session). Async
@@ -58,15 +61,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w4-1 + w4-3 +
-   w1-2 closed `[x]` 2026-07-04 (see Now). Highest open ratified row
-   is **w1-3** (TCP keepalive honesty — note its "daemon copy logs
-   failure" half is already satisfied structurally by w1-2: the daemon
-   copy no longer exists; what remains is real `TcpKeepalive` timing
-   or honest comments at the two `set_keepalive(true)` sites, now both
-   inside the shared helper), then w1-4 (accept/token constants) and
-   design-3 (data-plane connect timeouts — smaller now, the call sites
-   are consolidated). Open Low rows from the ue-r2 reviews:
+1. **Design-review queue** — `REVIEW.md` order governs. w4-1, w4-3,
+   w1-2, w1-3 all closed `[x]` 2026-07-04 (see Now). Highest open
+   ratified row is **w1-4** (one shared accept(30s)/token(15s)
+   constant pair replacing the four local declarations — sites at
+   HEAD: push `DATA_PLANE_ACCEPT_TIMEOUT`, pull_sync
+   `PULL_ACCEPT_TIMEOUT`/`PULL_TOKEN_TIMEOUT`, and the resume path's
+   inline `ACCEPT_TIMEOUT`/`TOKEN_TIMEOUT`), then design-3 (data-plane
+   connect timeouts — smaller now, the call sites are consolidated).
+   Open Low rows from the ue-r2 reviews:
    `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
@@ -133,18 +136,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-04 (11th)** @ `16237e2`+records+docs —
-  `w1-2-data-socket-policy-helper` landed and graded through the codex
-  loop: **PASS, zero findings**, no fix commit; row `[x]`, verdict +
-  trimmed review recorded. Helper + pull call-site wiring
-  mutation-verified. blit-core 414 → 417; workspace 1445/0/2 across 37
-  suites (macOS host; Windows coverage rides the next push's CI — the
-  code is platform-neutral SockRef). In-flight: none. **Exact first
-  action next session**: on owner "continue", pick up **w1-3**
-  (keepalive honesty; scope shrank — see Queue) through the codex
-  loop; else the owner schedules the 10 GbE sign-off / decides the
-  erratum + D-2026-06-20-1 + supports_cancellation questions. Nothing
-  pushed — push stays owner-gated.
+- **2026-07-04 (11th)** @ `865fc1e`+records+docs — **w1-2 then w1-3**
+  landed and graded through the codex loop in one session, both
+  **PASS, zero findings**, no fix commits; rows `[x]`, verdicts +
+  trimmed reviews recorded, everything mutation-verified. w1-2:
+  `configure_data_socket` hoisted to blit-core, whole pull direction
+  de-Nagled, pull_sync dial buffers wired, daemon twin + socket2 dep
+  deleted. w1-3: real keepalive timing (60s/10s/5) at the now-single
+  site. blit-core 414 → 418; workspace 1446/0/2 across 37 suites
+  (macOS host; Windows coverage rides the next push's CI — the code is
+  platform-neutral SockRef). In-flight: none. **Exact first action
+  next session**: on owner "continue", pick up **w1-4** (accept/token
+  constant pair; sites enumerated in Queue) through the codex loop;
+  else the owner schedules the 10 GbE sign-off / decides the erratum +
+  D-2026-06-20-1 + supports_cancellation questions. Nothing pushed —
+  push stays owner-gated.
 - **2026-07-04 (10th)** @ `37d7f91`+records+docs —
   `w4-3-daemon-disconnect-racing` landed and graded through the codex
   loop: **PASS, zero findings**, no fix commit; row `[x]`, verdict +
