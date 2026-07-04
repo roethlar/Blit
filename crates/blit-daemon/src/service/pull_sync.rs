@@ -1631,7 +1631,31 @@ pub(crate) struct PullEntry {
 /// "absent at source" into "delete from destination." On a clean
 /// scan `outcome.suppressed_errors` is empty and behavior matches
 /// the historical contract.
+///
+/// w4-4: the ENTIRE collection runs on one `spawn_blocking` thread.
+/// Previously only the directory branch did; the single-file branch
+/// ran its metadata probes and — with checksums on — a full
+/// synchronous Blake3 of an arbitrarily large file inline on a tokio
+/// worker, freezing every co-scheduled task for the duration (the
+/// `is_file`/`is_dir` root probes were inline too).
 async fn collect_pull_entries_with_checksums(
+    module_root: &Path,
+    root: &Path,
+    requested: &Path,
+    compute_checksums: bool,
+    filter: blit_core::fs_enum::FileFilter,
+) -> Result<(Vec<PullEntry>, blit_core::enumeration::EnumerationOutcome), Status> {
+    let module_root = module_root.to_path_buf();
+    let root = root.to_path_buf();
+    let requested = requested.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        collect_pull_entries_sync(&module_root, &root, &requested, compute_checksums, filter)
+    })
+    .await
+    .map_err(|err| Status::internal(format!("enumeration task failed: {}", err)))?
+}
+
+fn collect_pull_entries_sync(
     module_root: &Path,
     root: &Path,
     requested: &Path,
@@ -1686,63 +1710,57 @@ async fn collect_pull_entries_with_checksums(
         return Err(Status::invalid_argument("unsupported path type for pull"));
     }
 
-    let root_clone = root.to_path_buf();
-    let requested_clone = requested.to_path_buf();
-    let module_root = module_root.to_path_buf();
-    tokio::task::spawn_blocking(
-        move || -> Result<(Vec<PullEntry>, blit_core::enumeration::EnumerationOutcome), Status> {
-            use rayon::prelude::*;
+    // Directory branch: enumerate + (optionally) rayon-hash. Already on
+    // the caller's spawn_blocking thread (w4-4), so the work runs
+    // directly here.
+    use rayon::prelude::*;
 
-            let enumerator = blit_core::enumeration::FileEnumerator::new(filter);
-            let (entries, outcome) = enumerator
-                .enumerate_local_capturing(&root_clone)
-                .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;
+    let enumerator = blit_core::enumeration::FileEnumerator::new(filter);
+    let (entries, outcome) = enumerator
+        .enumerate_local_capturing(root)
+        .map_err(|err| Status::internal(format!("enumeration error: {}", err)))?;
 
-            // Filter to files only
-            let file_entries: Vec<_> = entries
-                .into_iter()
-                .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
-                .collect();
+    // Filter to files only
+    let file_entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| matches!(e.kind, blit_core::enumeration::EntryKind::File { .. }))
+        .collect();
 
-            // Physical path (relative to module_root, used for reading) = requested + entry
-            // Wire path (in header.relative_path, used by client for dest_root.join) = entry only
-            // Previously both were set to the joined form, causing the client to double-nest
-            // when the CLI resolver had already appended the basename to dest_root.
-            let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
-                file_entries
-                    .into_par_iter()
-                    .map(|entry| {
-                        let physical = requested_clone.join(&entry.relative_path);
-                        let wire = entry.relative_path.clone();
-                        let mut header = build_file_header(&module_root, &physical, true)?;
-                        header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
-                        Ok(PullEntry {
-                            header,
-                            relative_path: physical,
-                        })
-                    })
-                    .collect()
-            } else {
-                file_entries
-                    .into_iter()
-                    .map(|entry| {
-                        let physical = requested_clone.join(&entry.relative_path);
-                        let wire = entry.relative_path.clone();
-                        let mut header = build_file_header(&module_root, &physical, false)?;
-                        header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
-                        Ok(PullEntry {
-                            header,
-                            relative_path: physical,
-                        })
-                    })
-                    .collect()
-            };
+    // Physical path (relative to module_root, used for reading) = requested + entry
+    // Wire path (in header.relative_path, used by client for dest_root.join) = entry only
+    // Previously both were set to the joined form, causing the client to double-nest
+    // when the CLI resolver had already appended the basename to dest_root.
+    let files: Result<Vec<PullEntry>, Status> = if compute_checksums {
+        file_entries
+            .into_par_iter()
+            .map(|entry| {
+                let physical = requested.join(&entry.relative_path);
+                let wire = entry.relative_path.clone();
+                let mut header = build_file_header(module_root, &physical, true)?;
+                header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
+                Ok(PullEntry {
+                    header,
+                    relative_path: physical,
+                })
+            })
+            .collect()
+    } else {
+        file_entries
+            .into_iter()
+            .map(|entry| {
+                let physical = requested.join(&entry.relative_path);
+                let wire = entry.relative_path.clone();
+                let mut header = build_file_header(module_root, &physical, false)?;
+                header.relative_path = blit_core::path_posix::relative_path_to_posix(&wire);
+                Ok(PullEntry {
+                    header,
+                    relative_path: physical,
+                })
+            })
+            .collect()
+    };
 
-            files.map(|f| (f, outcome))
-        },
-    )
-    .await
-    .map_err(|err| Status::internal(format!("enumeration task failed: {}", err)))?
+    files.map(|f| (f, outcome))
 }
 
 fn build_file_header(

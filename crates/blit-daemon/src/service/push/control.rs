@@ -30,6 +30,12 @@ const FILE_LIST_BATCH_MAX_DELAY: Duration = Duration::from_millis(25);
 const FILE_LIST_EARLY_FLUSH_ENTRIES: usize = 128;
 const FILE_LIST_EARLY_FLUSH_BYTES: usize = 64 * 1024;
 const FILE_LIST_EARLY_FLUSH_DELAY: Duration = Duration::from_millis(5);
+/// w4-4: manifest entries are buffered and their requires-upload
+/// checks (canonical containment + stat — 3+ blocking syscalls each)
+/// run in chunked `spawn_blocking` batches instead of inline on the
+/// runtime per entry. Sized to the need-list early-flush threshold so
+/// the reply cadence a large push sees is unchanged.
+const MANIFEST_CHECK_CHUNK: usize = FILE_LIST_EARLY_FLUSH_ENTRIES;
 
 pub(crate) async fn handle_push_stream(
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
@@ -53,6 +59,9 @@ pub(crate) async fn handle_push_stream(
     let mut purge_filter = blit_core::fs_enum::FileFilter::default();
     let mut scan_complete = false;
     let mut need_list_sender = FileListBatcher::new(tx.clone());
+    // w4-4: manifest entries awaiting their chunked requires-upload
+    // check (see MANIFEST_CHECK_CHUNK / drain_manifest_checks).
+    let mut pending_manifest: Vec<PendingManifestEntry> = Vec::new();
     // design-2 / w4-1: `AbortOnDrop`, not a bare `JoinHandle` — an
     // early `?` return anywhere in this handler while a data-plane
     // task is running (or the `stream.message()` race below erroring)
@@ -166,21 +175,26 @@ pub(crate) async fn handle_push_stream(
                 // every nested-path push to a Windows daemon planned
                 // zero payloads for those files and both ends stalled.
                 let sanitized = blit_core::path_posix::relative_path_to_posix(&rel);
+                file.relative_path = sanitized.clone();
 
-                if file_requires_upload(module_ref, &rel, &file)? {
-                    file.relative_path = sanitized.clone();
-                    // w4-2: the 262,144-slot upload channel that used to sit
-                    // here is gone. Headers travel on the wire post-Phase-5;
-                    // the TCP receiver drained it into the void, and in gRPC
-                    // fallback nothing read it at all — so manifest entry
-                    // #262,145 wedged daemon and client forever with no
-                    // timeout in scope.
-                    // w5-1: was an unconditional per-file eprintln — stderr
-                    // spam proportional to file count. Debug-level now;
-                    // visible with BLIT_LOG=debug.
-                    log::debug!("push server queued {}", sanitized);
-                    let flushed = need_list_sender.push(sanitized).await?;
-                    files_to_upload.push(file);
+                // w4-4: buffer the entry; the requires-upload check
+                // (canonical containment + stat, 3+ blocking syscalls)
+                // runs in chunked spawn_blocking batches instead of
+                // inline on the runtime — a 1M-file push used to run
+                // ~3M+ blocking syscalls on an executor worker.
+                pending_manifest.push(PendingManifestEntry {
+                    rel,
+                    sanitized,
+                    file,
+                });
+                if pending_manifest.len() >= MANIFEST_CHECK_CHUNK {
+                    let flushed = drain_manifest_checks(
+                        module_ref,
+                        &mut pending_manifest,
+                        &mut need_list_sender,
+                        &mut files_to_upload,
+                    )
+                    .await?;
                     // design-4: in forced-gRPC mode the early-flush branch
                     // must NOT announce the fallback negotiation here. The
                     // client reacts to Negotiation(tcp_fallback) by
@@ -194,6 +208,9 @@ pub(crate) async fn handle_push_stream(
                     // path every working small push already takes. Early
                     // negotiation only ever helped the TCP path (it starts
                     // the data plane for pipelining), so it is now TCP-only.
+                    // (w4-4 moved this from per-entry to post-chunk-drain:
+                    // the data plane still spins up mid-manifest on the
+                    // first flush, at chunk granularity.)
                     if flushed && data_plane_handle.is_none() && !force_grpc_effective {
                         {
                             let listener = match bind_data_plane_listener().await {
@@ -283,6 +300,24 @@ pub(crate) async fn handle_push_stream(
                 }
             }
             Some(client_push_request::Payload::ManifestComplete(mc)) => {
+                // w4-4: drain the sub-chunk remainder before leaving the
+                // manifest phase — `need_list_sender.finish()` below and
+                // the post-manifest negotiation both need the complete
+                // need list / files_to_upload. No mid-manifest data-plane
+                // spin-up here: the post-manifest path owns negotiation
+                // once the manifest is done.
+                if !pending_manifest.is_empty() {
+                    let module_ref = module.as_ref().ok_or_else(|| {
+                        Status::failed_precondition("push manifest received before header")
+                    })?;
+                    drain_manifest_checks(
+                        module_ref,
+                        &mut pending_manifest,
+                        &mut need_list_sender,
+                        &mut files_to_upload,
+                    )
+                    .await?;
+                }
                 manifest_complete = true;
                 scan_complete = mc.scan_complete;
                 break;
@@ -638,6 +673,67 @@ pub(super) async fn send_control_message(
     .map_err(|_| Status::internal("failed to send push response"))
 }
 
+/// w4-4: one manifest entry buffered for the chunked requires-upload
+/// check. `rel` is the validated relative path (containment input),
+/// `sanitized` its canonical POSIX wire form (need-list echo), `file`
+/// the header (already rewritten to the sanitized path) queued for
+/// upload if the check says so.
+struct PendingManifestEntry {
+    rel: PathBuf,
+    sanitized: String,
+    file: FileHeader,
+}
+
+/// w4-4: run the buffered entries' requires-upload checks in ONE
+/// `spawn_blocking` call (each check is a canonical-containment
+/// ancestor walk plus a stat — blocking syscalls that used to run
+/// per-entry on the runtime), then feed the need list in the original
+/// manifest order. Returns true if any need-list push flushed a batch
+/// to the client (the caller's cue to spin up the data plane
+/// mid-manifest on the TCP path).
+async fn drain_manifest_checks(
+    module: &ModuleConfig,
+    pending: &mut Vec<PendingManifestEntry>,
+    need_list: &mut FileListBatcher,
+    files_to_upload: &mut Vec<FileHeader>,
+) -> Result<bool, Status> {
+    if pending.is_empty() {
+        return Ok(false);
+    }
+    let batch = mem::take(pending);
+    let module_for_check = module.clone();
+    let (batch, decisions) = tokio::task::spawn_blocking(move || {
+        let decisions: Result<Vec<bool>, Status> = batch
+            .iter()
+            .map(|entry| file_requires_upload(&module_for_check, &entry.rel, &entry.file))
+            .collect();
+        (batch, decisions)
+    })
+    .await
+    .map_err(|err| Status::internal(format!("manifest check task failed: {err}")))?;
+    let decisions = decisions?;
+
+    let mut any_flushed = false;
+    for (entry, requires_upload) in batch.into_iter().zip(decisions) {
+        if requires_upload {
+            // w4-2: the 262,144-slot upload channel that used to sit
+            // here is gone. Headers travel on the wire post-Phase-5;
+            // the TCP receiver drained it into the void, and in gRPC
+            // fallback nothing read it at all — so manifest entry
+            // #262,145 wedged daemon and client forever with no
+            // timeout in scope.
+            // w5-1: was an unconditional per-file eprintln — stderr
+            // spam proportional to file count. Debug-level now;
+            // visible with BLIT_LOG=debug.
+            log::debug!("push server queued {}", entry.sanitized);
+            let flushed = need_list.push(entry.sanitized).await?;
+            any_flushed = any_flushed || flushed;
+            files_to_upload.push(entry.file);
+        }
+    }
+    Ok(any_flushed)
+}
+
 fn file_requires_upload(
     module: &ModuleConfig,
     rel: &Path,
@@ -727,5 +823,150 @@ mod data_plane_handle_abort_tests {
             "data plane task ran to completion despite its handle being dropped — \
              data_plane_handle detached instead of aborting"
         );
+    }
+}
+
+#[cfg(test)]
+mod manifest_check_batch_tests {
+    //! w4-4: the per-entry requires-upload check moved into chunked
+    //! spawn_blocking batches (`drain_manifest_checks`). These pin the
+    //! drained batch's decision parity with the old inline loop: an
+    //! up-to-date file is skipped, a stale/missing file is queued with
+    //! its sanitized POSIX wire path, manifest order is preserved, and
+    //! the buffer comes back empty.
+
+    use super::super::super::util::metadata_mtime_seconds;
+    use super::*;
+
+    fn test_module(root: &Path) -> ModuleConfig {
+        ModuleConfig {
+            name: "test".to_string(),
+            path: root.to_path_buf(),
+            canonical_root: root.canonicalize().expect("canonicalize test root"),
+            read_only: false,
+            _comment: None,
+            delegation_allowed: true,
+        }
+    }
+
+    fn pending(rel: &str, size: u64, mtime_seconds: i64) -> PendingManifestEntry {
+        let rel_path = PathBuf::from(rel);
+        let sanitized = blit_core::path_posix::relative_path_to_posix(&rel_path);
+        PendingManifestEntry {
+            rel: rel_path,
+            sanitized: sanitized.clone(),
+            file: FileHeader {
+                relative_path: sanitized,
+                size,
+                mtime_seconds,
+                permissions: 0o644,
+                checksum: vec![],
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_skips_up_to_date_and_queues_stale_and_missing_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("same.txt"), b"12345").unwrap();
+        std::fs::write(root.join("sub/stale.txt"), b"old-content").unwrap();
+
+        let same_meta = std::fs::metadata(root.join("same.txt")).unwrap();
+        let module = test_module(root);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut need_list = FileListBatcher::new(tx);
+        let mut files_to_upload: Vec<FileHeader> = Vec::new();
+        let mut batch = vec![
+            // Same size + mtime as on disk → up to date → skipped.
+            pending(
+                "same.txt",
+                same_meta.len(),
+                metadata_mtime_seconds(&same_meta).unwrap_or(0),
+            ),
+            // Exists but wrong size → stale → queued.
+            pending("sub/stale.txt", 999, 0),
+            // Not on disk → queued.
+            pending("sub/missing.txt", 42, 0),
+        ];
+
+        let flushed =
+            drain_manifest_checks(&module, &mut batch, &mut need_list, &mut files_to_upload)
+                .await
+                .expect("drain succeeds");
+
+        assert!(batch.is_empty(), "drain consumes the pending buffer");
+        assert!(
+            !flushed,
+            "3 entries stay under the early-flush threshold — no batch flush"
+        );
+        let queued: Vec<&str> = files_to_upload
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        assert_eq!(
+            queued,
+            vec!["sub/stale.txt", "sub/missing.txt"],
+            "stale + missing queued with POSIX wire paths, manifest order kept, \
+             up-to-date file skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_on_empty_buffer_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        let module = test_module(tmp.path());
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let mut need_list = FileListBatcher::new(tx);
+        let mut files_to_upload: Vec<FileHeader> = Vec::new();
+        let mut batch: Vec<PendingManifestEntry> = Vec::new();
+
+        let flushed =
+            drain_manifest_checks(&module, &mut batch, &mut need_list, &mut files_to_upload)
+                .await
+                .expect("empty drain succeeds");
+        assert!(!flushed);
+        assert!(files_to_upload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_rejects_containment_escape() {
+        // A traversal that survives lexical validation upstream must
+        // still die at the canonical containment check inside the
+        // batched path, exactly as the inline check did. Symlink the
+        // escape (symlinks are the reason the check is canonical, not
+        // lexical).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("module");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        #[cfg(not(unix))]
+        {
+            // Windows symlink creation needs privileges; skip the
+            // escape arm there — the containment helper itself is
+            // platform-shared and pinned by path_safety's own suite.
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            let module = test_module(&root);
+            let (tx, _rx) = tokio::sync::mpsc::channel(64);
+            let mut need_list = FileListBatcher::new(tx);
+            let mut files_to_upload: Vec<FileHeader> = Vec::new();
+            let mut batch = vec![pending("link/escape.txt", 1, 0)];
+
+            let err =
+                drain_manifest_checks(&module, &mut batch, &mut need_list, &mut files_to_upload)
+                    .await
+                    .expect_err("containment escape must fail the drain");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+            assert!(files_to_upload.is_empty());
+        }
     }
 }
