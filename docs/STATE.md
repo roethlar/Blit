@@ -1,10 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w3-1` landed and graded through the codex
-loop — **`BufferPool::for_data_plane` owns the pool formula + the
-available-memory cap**; sysinfo 1024× units bug fixed); local HEAD
-`f49f8f6`+records, **not yet pushed** to either remote across these
-sessions.
+Last updated: 2026-07-04 (`w6-1` landed and graded through the codex
+loop — **the ProgressEvent contract lives in blit-core**: bytes ride
+`Payload` only, `FileComplete` is byteless, one shared `ProgressTotals`
+fold; closes design-1 structurally); local HEAD `8fd8978`+records,
+**not yet pushed** to either remote across these sessions.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -12,35 +12,36 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **w3-1 DONE — memory-aware BufferPool** (`f49f8f6`; finding
-  `.review/findings/w3-1-memory-aware-buffer-pool.md`).
-  `BufferPool::for_data_plane(chunk_bytes, streams)` owns the formula
-  (streams×2+4, shared 64 KiB `DATA_PLANE_BUFFER_FLOOR`) plus an
-  available/4 memory cap with a **2-buffers-per-stream liveness
-  floor** (the double-buffered sender holds 2, acquired sequentially —
-  a tighter cap shrinks buffer size, never concurrency, so the cap can
-  never deadlock a sender). Replaces the 3 pasted sites (push client,
-  pull_sync multistream, pull_sync resume — whose pool is inert at
-  runtime, verified). Elastic paths authorize
-  `dial.ceiling_max_streams()` up front (lazy allocation → free until
-  resize ADDs streams), closing both sites' "growing the pool live is
-  a W3.1 concern" deferral. **Bonus bug fixed**: the old
-  available-memory helper multiplied sysinfo by 1024, but sysinfo 0.38
-  returns bytes — memory was over-reported 1024×, making every
-  downstream cap vacuous (incl. BufferSizer's /10). Comment-truth:
-  `RECEIVE_CHUNK_SIZE`'s false "matches the send side" claim
-  rewritten. Codex: **PASS, 0 findings**. 8 params-layer pins,
-  mutation-verified; workspace 1452 → 1460/0/2 across 37 suites.
-- **Earlier 2026-07-04: w2-2, w4-5, W1 family, w4-1, w4-3 all `[x]`**
-  (details: DEVLOG 2026-07-04 entries; findings
-  `.review/findings/w2-2-*.md`, `w4-5-*.md`, `w1-*.md`, `w4-*.md`):
-  dial = single stream/chunk owner w2-2 `01209bc`+`27f53a0` (planner's
-  dead chunk lane deleted; tuning owner = `engine::TransferDial`);
-  `supports_cancellation` flipped for Push/PullSync w4-5
-  `05a8b39`+`1708075` (D-2026-07-04-3 executed); socket policy helper
-  w1-2 `16237e2`; real keepalive timing w1-3 `865fc1e`; shared
-  accept/token bounds w1-4 `6a19e1d`+`d17b089`; AbortOnDrop family
-  w4-1; disconnect racing w4-3 `37d7f91`.
+- **w6-1 DONE — ProgressEvent contract** (`8fd8978`; finding
+  `.review/findings/w6-1-progress-event-contract.md`). The contract is
+  defined ON the enum in blit-core: **bytes ride `Payload` only —
+  `FileComplete`'s `bytes` field is deleted**, so the design-1
+  double-count class is unrepresentable at the type level; files count
+  exactly once via either one byteless `FileComplete{wire-relative
+  path}` (per-file lane) or `Payload.files` deltas (aggregate lane:
+  delegated bridge, gRPC tar-shard applier); `ManifestBatch` is the
+  documented direction-flavored denominator. All producers normalized
+  (TCP receive double-emit fixed; tar-shard members + TCP/gRPC resume
+  lanes gain their missing events; send side moves planned bytes onto
+  `Payload`; gRPC pull's absolute-path leak fixed; both dead emitters
+  conformed pending w8 deletion). Consumers collapsed onto shared
+  `ProgressTotals`: CLI monitor (fixes design-1's ~2× bytes on TCP
+  pulls; `--json` `file_complete` keeps its shape with `bytes:0`) +
+  all three TUI forwarders; the TUI's three `accumulate_*` rules
+  deleted. **design-1 closed `[x]` alongside**, graded in the same
+  round. Codex: **PASS, 0 findings** (checked the W6.1/W6.2 split —
+  daemon/ByteProgressSink counters deliberately untouched). +12
+  blit-core tests incl. exact-sequence emission pins, 2 mutation
+  checks; workspace 1460 → 1472/0/2 across 37 suites.
+- **Earlier 2026-07-04: w3-1, w2-2, w4-5, W1 family, w4-1, w4-3 all
+  `[x]`** (details: DEVLOG 2026-07-04 entries; findings
+  `.review/findings/`): memory-aware BufferPool + sysinfo 1024× bug
+  w3-1 `f49f8f6`; dial = single stream/chunk owner w2-2
+  `01209bc`+`27f53a0`; `supports_cancellation` flipped w4-5
+  `05a8b39`+`1708075` (D-2026-07-04-3); socket policy helper w1-2
+  `16237e2`; real keepalive timing w1-3 `865fc1e`; shared accept/token
+  bounds w1-4 `6a19e1d`+`d17b089`; AbortOnDrop family w4-1;
+  disconnect racing w4-3 `37d7f91`.
 - **REV4 code-complete** (`ue-r2-1b`..`ue-r2-2`, all nine slices;
   details: DEVLOG 2026-07-03/04 entries, REVIEW.md commit map). Stream
   resize live end-to-end; all three static stream-count ladders
@@ -63,16 +64,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w3-1 closed
-   `[x]` 2026-07-04 (see Now), the eighth row that day. Strict row
-   order now gives **w6-1** (ProgressEvent contract, Medium — defines
-   semantics in blit-core, normalizes producers, shared accumulator,
-   incorporates design-1's byte double-count) as the topmost open row;
-   **design-3** (data-plane connect timeouts, filed-findings section)
-   remains the sanctioned smaller alternative (two client connect
-   sites, bound imports the shared `DATA_PLANE_ACCEPT_TIMEOUT`) —
-   sequencing stays the coder's pick unless the owner orders
-   otherwise. Open Low rows: `relay-1-subpath-double-join`.
+1. **Design-review queue** — `REVIEW.md` order governs. w6-1 (and
+   design-1 with it) closed `[x]` 2026-07-04 (see Now), the
+   ninth/tenth rows that day. Strict row order now gives **w6-2**
+   (progress-residue verify-then-fix, Medium — the §1.6 residue:
+   delegated zero live progress since `BytesProgress` is wire-dead,
+   daemon counters 0 for push/pull_sync rows, no denominators
+   end-to-end; verification is step 1, each confirmed item becomes its
+   own follow-on slice) as the topmost open row; **design-3**
+   (data-plane connect timeouts, filed-findings section) remains the
+   sanctioned smaller alternative (two client connect sites, bound
+   imports the shared `DATA_PLANE_ACCEPT_TIMEOUT`) — sequencing stays
+   the coder's pick unless the owner orders otherwise. Open Low rows:
+   `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -145,6 +149,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (15th)** @ `8fd8978`+records+docs —
+  **w6-1-progress-event-contract landed and graded through the codex
+  loop** (owner go: "continue. reviewloop with codex as each slice
+  lands" → topmost open row per the 14th handoff). ProgressEvent
+  contract defined on the enum in blit-core: bytes ride `Payload`
+  only (`FileComplete.bytes` DELETED — design-1's class
+  unrepresentable), files count once via byteless
+  `FileComplete{wire path}` or `Payload.files` (aggregate lane),
+  `ManifestBatch` = documented denominator. All producers normalized
+  (double-emit, tar-shard/resume gaps, absolute-path leak, dead
+  emitters); consumers collapsed onto shared `ProgressTotals` (CLI +
+  3 TUI forwarders; TUI's 3 rules deleted). design-1 closed `[x]` in
+  the same round. Codex: **PASS 0 findings**. +12 blit-core tests, 2
+  mutation checks; workspace 1460 → 1472/0/2 across 37 suites,
+  fmt/clippy clean (macOS host). In-flight: none. **Exact first
+  action next session**: owner's standing "reviewloop with codex as
+  each slice lands" go → pick up **w6-2** (progress-residue
+  verify-then-fix, topmost open row; design-3 remains the sanctioned
+  smaller alternative) through the codex loop.  Nothing pushed — push
+  stays owner-gated.
 - **2026-07-04 (14th)** @ `f49f8f6`+records+docs —
   **w3-1-memory-aware-buffer-pool landed and graded through the codex
   loop** (owner go: "continue" → topmost open row per the 13th
@@ -166,27 +190,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   alternative) through the codex loop. Nothing pushed — push stays
   owner-gated.
 - **2026-07-04 (13th)** @ `27f53a0`+records+docs —
-  **w2-2-stream-ladder-owner landed and graded through the codex
-  loop** (owner go: "continue" → topmost open row per the 12th
-  handoff). Row re-scoped to post-REV4 reality before coding: the
-  three stream ladders were already gone (ue-r2-1e/-1f/-1h,
-  D-2026-06-20-1), so the slice deleted the remaining leg — the
-  planner's dead chunk lane (ladder, `Plan`/`PlannedPayloads`
-  wrappers, `chunk_bytes_override` + 5 refresh sites, never-called
-  `plan_to_daemon_format`, orphaned `TuningParams`); dial =
-  single chunk owner; byte-identical wire behavior. Codex: NEEDS
-  FIXES 1 Low (comment-truth → `27f53a0`). 4 new transfer_plan pins.
-  Workspace 1448 → 1452/0/2. New discoveries → Open questions:
-  tracked stale worktree snapshot `725aa07`; WHITEPAPER tuning drift.
-  Nothing pushed.
-- **2026-07-04 (12th)** @ `1708075`+records+docs —
-  **w4-5-supports-cancellation-flip landed and graded** (owner go:
-  "continue"). D-2026-07-04-3 executed: CancelJob dispatch flipped on
-  for attached Push/PullSync (one predicate; Pull history-only stays
-  gated), every old-policy comment surface updated (3-agent workflow
-  sweep; TUI/CLI have no kind gating — zero logic changes). Codex:
-  NEEDS FIXES 1 Low (module scope-log rustdoc → `1708075`). Four new
-  contract pins mutation-verified. blit-daemon 168 → 170; workspace
-  1448/0/2 across 37 suites. Known gap: no e2e drives a live
-  mid-flight attached cancel (needs a test seam; w4-3 evidence
-  shape). Nothing pushed.
+  **w2-2-stream-ladder-owner landed and graded** (owner go:
+  "continue"). Three stream ladders were already gone post-REV4; the
+  slice deleted the planner's dead chunk lane (ladder,
+  `Plan`/`PlannedPayloads`, `chunk_bytes_override`, `TuningParams`);
+  dial = single chunk owner; byte-identical wire behavior. Codex:
+  NEEDS FIXES 1 Low (comment-truth → `27f53a0`). 4 transfer_plan
+  pins. Workspace 1448 → 1452/0/2. Discoveries → Open questions
+  (worktree snapshot `725aa07`; WHITEPAPER drift). Nothing pushed.
