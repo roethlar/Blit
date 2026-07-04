@@ -161,7 +161,8 @@ impl TransferDial {
                 // prefetch so prefetch × chunk stays within budget
                 // (floor of 1 so work still moves).
                 let inflight = profile.max_inflight_bytes as usize;
-                ceiling_chunk = ceiling_chunk.min(inflight.max(64 * 1024));
+                ceiling_chunk =
+                    ceiling_chunk.min(inflight.max(crate::buffer::DATA_PLANE_BUFFER_FLOOR));
                 let by_inflight = (inflight / ceiling_chunk.max(1)).max(1);
                 ceiling_prefetch = ceiling_prefetch.min(by_inflight);
             }

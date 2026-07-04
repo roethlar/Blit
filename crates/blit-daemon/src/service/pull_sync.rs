@@ -716,13 +716,20 @@ async fn stream_via_data_plane(
 
     // Shared buffer pool across all streams (hoisted out of
     // accept_and_wrap_sinks at ue-r2-2 so an ADDed stream's session
-    // shares it; sizing unchanged — epoch-0 count, FIFO-fair
-    // semaphore, growth is the W3.1 memory-aware-pool row).
+    // shares it; w3-1: the constructor owns the formula +
+    // available-memory cap, and resize-enabled transfers authorize the
+    // dial's stream ceiling up front — allocation is lazy, so an ADDed
+    // stream draws from a budget that already covers it).
     let streams = stream_count.max(1) as usize;
-    let buffer_size = dial.chunk_bytes().max(64 * 1024);
-    let pool_size = streams * 2 + 4;
-    let memory_budget = buffer_size * pool_size * 2;
-    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+    let authorized_streams = if resize_on {
+        dial.ceiling_max_streams().max(streams)
+    } else {
+        streams
+    };
+    let pool = Arc::new(BufferPool::for_data_plane(
+        dial.chunk_bytes(),
+        authorized_streams,
+    ));
 
     // ue-r2-1g: accept N token-authenticated connections and wrap each
     // as a DataPlaneSink (the multistream pattern harvested from the
@@ -1317,11 +1324,13 @@ async fn stream_via_data_plane_resume(
         return Err(Status::unauthenticated("invalid data plane token"));
     }
 
-    // Create buffer pool
-    let buffer_size = dial.chunk_bytes().max(64 * 1024);
-    let pool_size = 4;
-    let memory_budget = buffer_size * pool_size * 2;
-    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+    // Buffer pool for the single-stream session (w3-1: shared
+    // constructor; sizes for one stream where this site hand-rolled
+    // pool_size=4. The resume path only sends via send_block — which
+    // writes caller slices, never pool buffers — so the pool exists
+    // solely because from_stream requires one and the sizing change
+    // is inert).
+    let pool = Arc::new(BufferPool::for_data_plane(dial.chunk_bytes(), 1));
 
     // Create data plane session
     let mut session =

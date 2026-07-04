@@ -15,6 +15,38 @@ use tokio::sync::Semaphore;
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
+/// Minimum data-plane buffer/chunk size. The one floor shared by the
+/// pool formula (`BufferPool::for_data_plane`), the session chunk
+/// clamp, the receive-buffer clamp, and the dial's inflight-derived
+/// chunk ceiling — below this, per-syscall overhead dominates and
+/// throughput collapses regardless of memory pressure.
+pub const DATA_PLANE_BUFFER_FLOOR: usize = 64 * KB;
+
+/// Available system memory in bytes via sysinfo. `System::new()` +
+/// `refresh_memory()` reads only the memory counters (`new_all()`
+/// would walk the whole process table for the same answer).
+///
+/// sysinfo 0.38 reports **bytes** (not KiB — an earlier version of
+/// this helper multiplied by 1024 and over-reported memory 1024×,
+/// which made every downstream available-memory cap vacuous).
+fn available_memory_bytes() -> u64 {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sanitize_available_memory(sys.available_memory())
+}
+
+/// Zero means the platform couldn't report (sysinfo leaves the field 0
+/// when the underlying syscall fails); fall back conservatively rather
+/// than authorizing unbounded buffers.
+fn sanitize_available_memory(raw: u64) -> u64 {
+    if raw == 0 {
+        512 * MB as u64
+    } else {
+        raw
+    }
+}
+
 pub struct BufferSizer {
     max_buffer_size: usize,
     min_buffer_size: usize,
@@ -30,29 +62,12 @@ impl BufferSizer {
         }
     }
 
-    /// Get available memory using sysinfo
-    fn get_available_memory() -> u64 {
-        use sysinfo::System;
-        let mut sys = System::new_all();
-        sys.refresh_memory();
-        // sysinfo reports memory in kilobytes. Convert to bytes.
-        let avail_kib = sys.available_memory();
-        let avail_bytes = avail_kib.saturating_mul(1024);
-        // Apply a conservative fallback only if the reported value is zero.
-        if avail_bytes == 0 {
-            // Safer fallback than 4 GiB on low-memory systems.
-            512_u64 * 1024 * 1024
-        } else {
-            avail_bytes
-        }
-    }
-
     /// Calculate optimal buffer size based on file size and available memory
     pub fn calculate_buffer_size(&self, file_size: u64, is_network: bool) -> usize {
         // Get or cache available memory
         let available_memory = *self
             .cached_available_memory
-            .get_or_init(Self::get_available_memory);
+            .get_or_init(available_memory_bytes);
 
         // Base size: bigger for network
         let base_size = if is_network { 8 * MB } else { 4 * MB };
@@ -141,17 +156,14 @@ mod tests {
 /// - Tracks statistics for monitoring
 ///
 /// **Integration with the engine**: This pool does NOT define default sizes.
-/// The caller determines `buffer_size` and `pool_size` — remote paths size
-/// them from the live dial (`crate::engine::TransferDial`).
-/// Create the pool with those tuned parameters.
+/// Data-plane paths construct it via [`BufferPool::for_data_plane`], which
+/// owns the sizing formula and the available-memory cap; the chunk size
+/// comes from the live dial (`crate::engine::TransferDial`).
 ///
 /// # Example
 /// ```ignore
-/// let tuned_buffer_size = dial.chunk_bytes();
-/// let tuned_pool_size = stream_count * 2 + 4;
-/// let memory_budget = available_memory / 4;
-///
-/// let pool = BufferPool::new(tuned_buffer_size, tuned_pool_size, Some(memory_budget));
+/// // W3.1: the constructor owns the formula + memory cap.
+/// let pool = Arc::new(BufferPool::for_data_plane(dial.chunk_bytes(), stream_count));
 /// let buffer = pool.acquire().await;
 /// // Use buffer...
 /// // Buffer automatically returned to pool on drop
@@ -205,6 +217,42 @@ fn cache_returned_buffer(
     guard.push(buffer);
 }
 
+/// Pure sizing math behind [`BufferPool::for_data_plane`], split out so
+/// tests can pin every regime against an injected `available_memory`
+/// (the constructor reads sysinfo).
+///
+/// Returns `(buffer_size, pool_size, memory_budget)`:
+/// - `buffer_size = chunk_bytes.max(DATA_PLANE_BUFFER_FLOOR)`, shrunk
+///   toward the floor when a quarter of available memory can't hold
+///   two full-size buffers per authorized stream;
+/// - `pool_size = streams * 2 + 4` (reuse-cache cap);
+/// - `memory_budget = min(buffer_size * pool_size * 2, available/4)`,
+///   floored at `buffer_size * streams * 2` — the liveness minimum for
+///   the double-buffered send path (two held buffers per stream).
+fn data_plane_pool_params(
+    chunk_bytes: usize,
+    streams: usize,
+    available_memory: u64,
+) -> (usize, usize, usize) {
+    let streams = streams.max(1);
+    let pool_size = streams * 2 + 4;
+
+    let cap = usize::try_from(available_memory / 4).unwrap_or(usize::MAX);
+    let liveness = |buffer_size: usize| buffer_size.saturating_mul(streams).saturating_mul(2);
+
+    let mut buffer_size = chunk_bytes.max(DATA_PLANE_BUFFER_FLOOR);
+    if liveness(buffer_size) > cap {
+        // The cap can't hold two full-size buffers per stream: shrink
+        // the buffers, never the concurrency (a budget under
+        // 2×streams buffers can deadlock a double-buffered sender).
+        buffer_size = (cap / (streams * 2)).max(DATA_PLANE_BUFFER_FLOOR);
+    }
+
+    let uncapped = buffer_size.saturating_mul(pool_size).saturating_mul(2);
+    let budget = uncapped.min(cap).max(liveness(buffer_size));
+    (buffer_size, pool_size, budget)
+}
+
 impl BufferPool {
     /// Create a new buffer pool.
     ///
@@ -229,6 +277,37 @@ impl BufferPool {
             in_use: AtomicUsize::new(0),
             bytes_through: AtomicU64::new(0),
         }
+    }
+
+    /// W3.1: the single owner of the data-plane pool formula. Every
+    /// data-plane transfer pool (push client, pull-sync multistream,
+    /// pull-sync resume) is built here instead of pasting
+    /// `streams*2+4` / `.max(64 KiB)` / `budget = size*pool*2` at the
+    /// call site.
+    ///
+    /// `streams` is the pool's **concurrency authorization**: the most
+    /// data-plane streams that may ever draw from this pool at once.
+    /// Elastic (resize-enabled) paths pass the dial's
+    /// `ceiling_max_streams()` rather than the epoch-0 count — buffers
+    /// are allocated lazily, so authorizing the ceiling costs no memory
+    /// until streams actually grow, and ADDed streams can never starve
+    /// against a budget sized for epoch 0.
+    ///
+    /// The memory budget is capped at a quarter of available system
+    /// memory (the OOM-by-constant fix: 16 streams × 64 MiB chunks used
+    /// to authorize 4.5 GiB regardless of host RAM). When the cap binds
+    /// harder than two buffers per stream, the *buffer size* shrinks
+    /// (down to [`DATA_PLANE_BUFFER_FLOOR`]) instead of the concurrency:
+    /// the send path holds up to two buffers per stream
+    /// (`send_file_double_buffered` acquires them sequentially), so a
+    /// budget below `2 × streams` buffers could deadlock a stream
+    /// against its own first buffer. The liveness floor
+    /// `budget ≥ buffer_size × streams × 2` therefore always wins over
+    /// the cap.
+    pub fn for_data_plane(chunk_bytes: usize, streams: usize) -> Self {
+        let (buffer_size, pool_size, budget) =
+            data_plane_pool_params(chunk_bytes, streams, available_memory_bytes());
+        Self::new(buffer_size, pool_size, Some(budget))
     }
 
     /// Acquire a buffer from the pool.
@@ -459,6 +538,105 @@ impl Drop for PoolBuffer {
 #[cfg(test)]
 mod pool_tests {
     use super::*;
+
+    const MIB: usize = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// With plentiful memory the params ARE the legacy pasted formula:
+    /// this pins that for_data_plane is a pure hoist on normal hosts.
+    #[test]
+    fn params_match_legacy_formula_when_memory_plentiful() {
+        let (buffer_size, pool_size, budget) = data_plane_pool_params(16 * MIB, 4, 64 * GIB);
+        assert_eq!(buffer_size, 16 * MIB);
+        assert_eq!(pool_size, 4 * 2 + 4);
+        assert_eq!(budget, 16 * MIB * 12 * 2);
+    }
+
+    /// The 64 KiB floor the constructor owns (was pasted per-site).
+    #[test]
+    fn params_floor_small_chunk_at_64k() {
+        let (buffer_size, pool_size, budget) = data_plane_pool_params(1024, 1, 64 * GIB);
+        assert_eq!(buffer_size, DATA_PLANE_BUFFER_FLOOR);
+        assert_eq!(pool_size, 6);
+        assert_eq!(budget, DATA_PLANE_BUFFER_FLOOR * 6 * 2);
+    }
+
+    /// W3.1's point: the budget is capped at available/4 instead of
+    /// authorizing multi-GiB from the formula alone. Buffers keep full
+    /// size while the cap still holds two per stream.
+    #[test]
+    fn params_cap_budget_at_quarter_of_available() {
+        // Formula wants 384 MiB; a 1 GiB host caps at 256 MiB.
+        let (buffer_size, _, budget) = data_plane_pool_params(16 * MIB, 4, GIB);
+        assert_eq!(buffer_size, 16 * MIB, "cap holds 2/stream — no shrink");
+        assert_eq!(budget, 256 * MIB);
+    }
+
+    /// When the cap can't hold two full-size buffers per stream, the
+    /// BUFFER shrinks, not the concurrency — permits must never drop
+    /// below 2×streams or a double-buffered sender deadlocks against
+    /// its own held buffer.
+    #[test]
+    fn params_shrink_buffer_preserving_two_per_stream() {
+        // 8 streams × 2 × 64 MiB = 1 GiB liveness vs a 128 MiB cap.
+        let (buffer_size, pool_size, budget) =
+            data_plane_pool_params(64 * MIB, 8, 512 * MIB as u64);
+        assert_eq!(buffer_size, 8 * MIB, "128 MiB cap / (8 streams × 2)");
+        assert_eq!(pool_size, 20);
+        assert_eq!(budget, 128 * MIB);
+        assert_eq!(budget / buffer_size, 16, "exactly 2 permits per stream");
+    }
+
+    /// On a pathologically small host the floor wins over the cap:
+    /// liveness (2×streams at 64 KiB) beats available/4, because a
+    /// deadlocked pool is worse than briefly exceeding a tiny cap.
+    #[test]
+    fn params_liveness_floor_beats_tiny_cap() {
+        let (buffer_size, _, budget) = data_plane_pool_params(16 * MIB, 16, MIB as u64);
+        assert_eq!(buffer_size, DATA_PLANE_BUFFER_FLOOR);
+        assert_eq!(budget, DATA_PLANE_BUFFER_FLOOR * 16 * 2);
+        assert!(budget as u64 > MIB as u64 / 4, "liveness overrode the cap");
+    }
+
+    /// The liveness invariant holds across the whole parameter space:
+    /// budget/buffer_size (= semaphore permits) ≥ 2×streams, and the
+    /// buffer never sinks below the floor.
+    #[test]
+    fn params_always_admit_two_buffers_per_stream() {
+        for &chunk in &[0, 1024, DATA_PLANE_BUFFER_FLOOR, MIB, 16 * MIB, 64 * MIB] {
+            for &streams in &[0usize, 1, 2, 8, 32] {
+                for &avail in &[0u64, MIB as u64, 256 * MIB as u64, 8 * GIB, 64 * GIB] {
+                    let (buffer_size, pool_size, budget) =
+                        data_plane_pool_params(chunk, streams, avail);
+                    let effective_streams = streams.max(1);
+                    assert!(
+                        budget / buffer_size >= effective_streams * 2,
+                        "deadlockable: chunk={chunk} streams={streams} avail={avail} \
+                         → buffer={buffer_size} budget={budget}"
+                    );
+                    assert!(buffer_size >= DATA_PLANE_BUFFER_FLOOR);
+                    assert_eq!(pool_size, effective_streams * 2 + 4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_available_memory_falls_back_conservatively() {
+        assert_eq!(sanitize_available_memory(0), 512 * MB as u64);
+        assert_eq!(sanitize_available_memory(42), 42);
+    }
+
+    /// Smoke the real-sysinfo path: constructs without panicking and
+    /// honors the floor. (Exact sizes depend on host memory — the
+    /// deterministic regimes are pinned via data_plane_pool_params.)
+    #[tokio::test]
+    async fn for_data_plane_constructs_against_real_memory() {
+        let pool = Arc::new(BufferPool::for_data_plane(1024, 2));
+        assert!(pool.buffer_size() >= DATA_PLANE_BUFFER_FLOOR);
+        let buf = pool.acquire().await;
+        assert_eq!(buf.len(), pool.buffer_size());
+    }
 
     #[tokio::test]
     async fn test_buffer_pool_acquire_release() {

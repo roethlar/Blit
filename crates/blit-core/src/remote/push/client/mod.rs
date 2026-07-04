@@ -174,14 +174,18 @@ impl MultiStreamSender {
     ) -> Result<Self> {
         let streams = stream_count.max(1);
 
-        // Shared buffer pool across all sinks. Sized at the epoch-0
-        // count: streams ADDed by resize share it (the tokio semaphore
-        // inside is FIFO-fair, so late sinks queue for buffers rather
-        // than starve; growing the pool live is a W3.1 concern).
-        let pool_size = streams * 2 + 4;
-        let buffer_size = chunk_bytes.max(64 * 1024);
-        let memory_budget = buffer_size * pool_size * 2;
-        let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+        // Shared buffer pool across all sinks (w3-1: the constructor
+        // owns the formula + available-memory cap). Elastic senders
+        // authorize the dial's resize ceiling instead of the epoch-0
+        // count — allocation is lazy, so this costs nothing until
+        // resize actually ADDs streams, and an ADDed stream draws from
+        // a budget that already covers it instead of queueing against
+        // an epoch-0 authorization forever.
+        let authorized_streams = match (&resize_sub, dial.as_ref()) {
+            (Some(_), Some(dial)) => dial.ceiling_max_streams().max(streams),
+            _ => streams,
+        };
+        let pool = Arc::new(BufferPool::for_data_plane(chunk_bytes, authorized_streams));
 
         let dst_root = PathBuf::from(format!("{}:{}", host, port));
 

@@ -178,7 +178,7 @@ impl<P: Probe> DataPlaneSession<P> {
         probe: P,
     ) -> Self {
         let payload_prefetch = payload_prefetch.max(1);
-        let chunk_bytes = chunk_bytes.max(64 * 1024);
+        let chunk_bytes = chunk_bytes.max(crate::buffer::DATA_PLANE_BUFFER_FLOOR);
         Self {
             stream: StallGuardWriter::new(stream, TRANSFER_STALL_TIMEOUT),
             pool,
@@ -643,10 +643,14 @@ impl<P: Probe> DataPlaneSession<P> {
     }
 }
 
-/// Default buffer size for the symmetric receive path. Matches what the
-/// send side's buffer pool uses for chunk_bytes; large enough that the
-/// per-syscall overhead doesn't dominate at 10 GbE, and that ZFS-style
-/// transactional filesystems can amortize per-write costs.
+/// Default buffer size for the receive path. Deliberately smaller than
+/// the send side's pooled buffers (the dial's chunk_bytes, 16–64 MiB):
+/// the wire carries no per-chunk framing, so the receiver is free to
+/// drain a 16 MiB send in 1 MiB slices — it only needs to be large
+/// enough that per-syscall overhead doesn't dominate at 10 GbE, and
+/// that ZFS-style transactional filesystems can amortize per-write
+/// costs. Tuning the receive side into the dial is future work (W3.1
+/// scoped it out; see the w3-1 finding doc's Known gaps).
 ///
 /// Empirically, 8 KiB caps push throughput at ~1 Gbps on EPYC/ZFS even
 /// when the network can do 9.4 Gbps and the disk can do 14.76 Gbps.
@@ -690,7 +694,7 @@ where
         return Ok(0);
     }
 
-    let cap = buffer_size.max(64 * 1024);
+    let cap = buffer_size.max(crate::buffer::DATA_PLANE_BUFFER_FLOOR);
     let mut buf_a = vec![0u8; cap];
     let mut buf_b = vec![0u8; cap];
 
