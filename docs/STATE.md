@@ -1,9 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w4-1` landed via the `.review/` coder loop —
-AbortOnDrop hoisted, remaining detach-on-drop sites closed, closes
-`design-2` as a byproduct); local HEAD `44bf416`, **not yet pushed** to
-either remote this session.
+Last updated: 2026-07-04 (D-2026-07-04-1: codex loop now governs ALL
+code and plan changes; `w4-1` landed AND graded through it — w4-1 +
+design-2 closed `[x]`); local HEAD past `6a38810`, **not yet pushed**
+to either remote this session.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -11,21 +11,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`w4-1-abortondrop-family` landed, pending review** (details: DEVLOG
-  2026-07-04T05:00:00Z; finding: `.review/findings/w4-1-abortondrop-family.md`).
-  Hoisted `AbortOnDrop` from `blit-core/src/remote/pull.rs` (`pub(crate)`)
+- **`w4-1-abortondrop-family` DONE — landed and graded `[x]`**
+  (details: DEVLOG 2026-07-04T05:00/05:45Z; finding:
+  `.review/findings/w4-1-abortondrop-family.md`). Hoisted `AbortOnDrop`
   to `blit-core::remote::transfer::abort_on_drop` (`pub`); wrapped the
-  remaining detach-on-drop sites: daemon push `data_plane_handle`
-  (design-2's last site), push client `pipeline_handle` +
-  `response_task`, and converted the daemon's per-stream push worker
-  `Vec<JoinHandle>` to a `JoinSet` (mirrors the resizable path's
-  existing `ue-r2-2` fix). Commits `65ecb93` (fix) + `44bf416` (finding
-  doc/REVIEW.md); fmt/clippy clean; `cargo test --workspace` green
-  (blit-core 348, blit-daemon 162). **Grading via the codex loop is in
-  flight this session** (D-2026-07-04-1; the stale async sentinel from
-  before that decision is deleted with the verdict records); also
-  closes `design-2-orphaned-daemon-data-planes`'s remaining scope
-  (same commit).
+  remaining detach-on-drop sites (daemon push `data_plane_handle` —
+  design-2's last site, now closed `[x]` too; push client
+  `pipeline_handle` + `response_task`); per-stream push workers
+  `Vec<JoinHandle>` → `JoinSet`. Commits `65ecb93` + records `44bf416`;
+  codex NEEDS FIXES (1 Low, vacuous relocated drop-test) → fixed
+  `bedfa52` (paused-time, mutation-verified); verdicts recorded,
+  sentinel deleted (`6a38810`). fmt/clippy clean; workspace tests
+  green (blit-core 348, blit-daemon 162).
+- **Process (D-2026-07-04-1)**: the codex loop now governs **all code
+  and plan changes** — no exceptions; codex is the **only** reviewer
+  (no same-model panels; owner correction this session). Async
+  sentinel loop retired. Decision + propagation `3ebcc37`, its own
+  codex round fixed `10866e4`.
 - **REV4 code-complete** (`ue-r2-1b`..`ue-r2-2`, all nine slices; details:
   DEVLOG 2026-07-03/04 entries, REVIEW.md commit map). Stream resize is
   live end-to-end (engine-owned `resize_tick` policy, elastic pipeline,
@@ -53,13 +55,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w4-1 landed
-   2026-07-04, pending review (see Now). Highest still-open ratified
-   row is **w4-3** (daemon disconnect racing). Then W1 socket-policy /
-   timeout rows (note: ue-r2-2's armed-only accepts re-ratified the 1g
-   W1 deferral premise; the constants/policy consolidation still
-   belongs to W1). Open Low rows from the ue-r2 reviews:
-   `relay-1-subpath-double-join`.
+1. **Design-review queue** — `REVIEW.md` order governs. w4-1 closed
+   `[x]` 2026-07-04 (see Now). Highest open ratified row is **w4-3**
+   (daemon disconnect racing). Then W1 socket-policy / timeout rows
+   (note: ue-r2-2's armed-only accepts re-ratified the 1g W1 deferral
+   premise; the constants/policy consolidation still belongs to W1).
+   Open Low rows from the ue-r2 reviews: `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -90,10 +91,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Codex verdict on `w4-1-abortondrop-family`** (`65ecb93`): review in
-  flight via the codex loop (D-2026-07-04-1 — now governs ALL code and
-  plan changes; the async sentinel hand-off is retired and the w4-1
-  sentinel will be deleted with the verdict).
 - **Owner call on the commit erratum** (`9f37a7a`/`48c5a11` unbuildable
   in isolation, now pushed to both remotes): leave as-is (default) or
   authorize a history rewrite to fix it.
@@ -123,19 +120,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-04 (9th)** @ `44bf416` — `w4-1-abortondrop-family` landed via
-  the `.review/` coder loop (fix `65ecb93`; finding/REVIEW.md/sentinel
-  `44bf416`). Hoisted `AbortOnDrop`; closed the daemon push
-  `data_plane_handle`, push-client `pipeline_handle`/`response_task`,
-  and daemon per-stream-worker `Vec→JoinSet` detach-on-drop sites;
-  closes `design-2` as a byproduct. fmt/clippy clean; tests green
-  (blit-core 348, blit-daemon 162). In-flight: none — sentinel out,
-  awaiting reviewer verdict. **Exact first action next session**: if
-  the reviewer has graded it, act on the verdict (merge/close on
-  Accepted, or address `.review/results/w4-1-abortondrop-family.reopened.md`
-  on Reopened); otherwise pick up the next design-review queue row,
-  **w4-3** (daemon disconnect racing). Not pushed to either remote this
-  session — confirm with the owner before pushing.
+- **2026-07-04 (9th)** @ `6a38810`+docs — `w4-1-abortondrop-family`
+  landed (`65ecb93`+`44bf416`) **and graded through the codex loop**:
+  NEEDS FIXES 1 Low (vacuous relocated drop-test) → fixed `bedfa52`,
+  mutation-verified; w4-1 + design-2 `[x]`, sentinel deleted
+  (`6a38810`). Same session: **D-2026-07-04-1** — codex loop for ALL
+  code and plan changes, codex the only reviewer (no same-model
+  panels); decision+propagation `3ebcc37`, its codex round fixed
+  `10866e4`. fmt/clippy clean; workspace tests green. In-flight: none.
+  **Exact first action next session**: on owner "continue", pick up
+  **w4-3** (daemon disconnect racing) through the codex loop; else the
+  owner schedules the 10 GbE sign-off / decides the erratum +
+  D-2026-06-20-1 questions. Nothing pushed this session — push stays
+  owner-gated.
 - **2026-07-04 (8th)** @ `8d62afc` — `ue-r2-2` landed end-to-end
   (`042ca4b`..`0788e83`; codex NEEDS FIXES 3 + panel 4 → 9 fixed
   `ec4a3fe`, 1 deferred; records `8d62afc`). **REV4 code-complete.**

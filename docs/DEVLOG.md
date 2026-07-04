@@ -8,6 +8,37 @@ Write to it via the `handoff` procedure; prune STATE.md overflow here.
 
 ---
 
+## 2026-07-04T05:45:00Z — D-2026-07-04-1: codex loop goes repo-wide; w4-1 graded and closed
+
+Owner directive mid-session: **"use codex review loop for all code and
+plan changes", "NO EXCEPTIONS"** — recorded as D-2026-07-04-1. The
+`.review/README.md` async sentinel hand-off is retired as the grading
+mechanism (its `findings/`/`results/` records and REVIEW.md stay live);
+propagated through `GPT_REVIEW_LOOP.md` (scope + generalized steps),
+`PROTOCOL.md` (`slice` rewritten, `plan` gains a codex-review step),
+`.review/README.md` banner, `.agents/repo-guidance.md`, STATE.md
+(`3ebcc37`, review fixes `10866e4`).
+
+First two codex rounds under the new rule, both NEEDS FIXES, all
+findings accepted, none rejected:
+
+- **w4-1 (`65ecb93`)**: 1 Low — the relocated
+  `drop_without_consume_aborts_running_task` was vacuous (150ms wait vs
+  the task's 500ms completion; inherited from its pull.rs original,
+  whose comment contradicted its own code). Fixed `bedfa52` with
+  `start_paused` virtual time, mutation-verified (detaching `Drop` now
+  fails it deterministically). w4-1 and design-2 flip to `[x]`; the
+  pre-decision sentinel deleted.
+- **Decision docs (`3ebcc37`)**: 4 stale-text spots the propagation
+  missed (STATE process line + Now bullet, REVIEW.md legend, `plan`
+  procedure bypass). Fixed `10866e4`.
+
+Process correction, encoded in the loop doc: **codex is the only
+reviewer** — a same-model (Claude) review panel started alongside codex
+this session was stopped by the owner and its output discarded; Claude's
+only grading role is adjudicating codex's findings against source.
+Verdicts: `.review/results/{w4-1-abortondrop-family,d-2026-07-04-1-docs}.gpt-verdict.md`.
+
 ## 2026-07-04T05:00:00Z — w4-1 landed: AbortOnDrop hoisted, remaining detach-on-drop sites closed
 
 Picked up the design-review queue at **w4-1** (`REVIEW.md`, ratified
