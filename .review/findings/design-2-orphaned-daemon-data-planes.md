@@ -1,5 +1,10 @@
 # design-2 — Daemon data-plane tasks detach (not abort) when the control stream dies
 
+> **Closed 2026-07-04 by `w4-1`**: the remaining `push/control.rs:57` site
+> (see the scope update below) is now wrapped in the hoisted
+> `AbortOnDrop`. See `.review/findings/w4-1-abortondrop-family.md` for the
+> fix and its regression test.
+
 **Source**: Design-coherence review Phase A (`docs/audit/DESIGN_MAP_2026-06-11.md` §1.9),
 mechanism re-verified by hand 2026-06-11 before filing.
 **Severity**: High (DoS-class resource leak; transfer continues unreachable by
