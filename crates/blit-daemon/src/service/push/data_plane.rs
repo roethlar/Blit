@@ -4,11 +4,13 @@ use blit_core::generated::{
     client_push_request, server_push_response, ClientPushRequest, DataTransferNegotiation,
     FileHeader,
 };
-use blit_core::remote::transfer::configure_data_socket;
 use blit_core::remote::transfer::pipeline::execute_receive_pipeline;
 use blit_core::remote::transfer::sink::{SinkOutcome, TransferSink};
 use blit_core::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use blit_core::remote::transfer::tar_safety;
+use blit_core::remote::transfer::{
+    configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT,
+};
 use eyre::Result;
 use rand::{rngs::SysRng, TryRng};
 use std::collections::HashMap;
@@ -61,22 +63,6 @@ pub(crate) fn generate_token() -> Result<Vec<u8>, Status> {
         .map_err(|err| Status::internal(format!("system RNG unavailable: {err}")))?;
     Ok(buf)
 }
-
-/// Bounded wait for the first data-plane accept. R46-F7: pre-fix the
-/// daemon called `listener.accept().await` with no timeout — a peer
-/// that opened the control connection but never opened the data
-/// connection (or hung mid-handshake) would pin the daemon's stream
-/// task indefinitely, holding the listener and the queued
-/// FileHeaders. 30s gives a generous margin for slow networks while
-/// still bounding the worst case.
-const DATA_PLANE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bounded wait for the token bytes to arrive after a TCP accept.
-/// R46-F7: pre-fix `read_exact(&mut token_buf).await` had no
-/// timeout. A peer that opened the socket and stalled would hold
-/// this stream worker forever. 15s is enough for a healthy peer to
-/// send 32 bytes; anything slower indicates a stuck or hostile
-/// peer.
-const DATA_PLANE_TOKEN_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) async fn accept_data_connection_stream(
     listener: TcpListener,

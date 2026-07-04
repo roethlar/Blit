@@ -24,12 +24,14 @@ use blit_core::generated::{
 use blit_core::manifest::{
     compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
 };
-use blit_core::remote::transfer::configure_data_socket;
 use blit_core::remote::transfer::data_plane::DataPlaneSession;
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::plan_transfer_payloads;
 use blit_core::remote::transfer::sink::{DataPlaneSink, TransferSink};
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
+use blit_core::remote::transfer::{
+    configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT,
+};
 use blit_core::transfer_plan::PlanOptions;
 
 use std::collections::HashMap;
@@ -900,7 +902,7 @@ async fn stream_via_data_plane(
                                         target,
                                         sub_token,
                                         expires: tokio::time::Instant::now()
-                                            + PULL_ACCEPT_TIMEOUT,
+                                            + DATA_PLANE_ACCEPT_TIMEOUT,
                                     });
                                 } else {
                                     // REMOVE: retire one worker — its END
@@ -1052,7 +1054,7 @@ async fn accept_one_resize_socket(
         .map_err(|err| Status::internal(format!("configuring data socket: {err}")))?;
 
     let mut buf = vec![0u8; expected_token.len() + expected_sub.len()];
-    match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut buf)).await {
+    match tokio::time::timeout(DATA_PLANE_TOKEN_TIMEOUT, socket.read_exact(&mut buf)).await {
         Ok(Ok(_)) => {}
         Ok(Err(err)) => {
             return Err(Status::internal(format!(
@@ -1062,7 +1064,7 @@ async fn accept_one_resize_socket(
         Err(_elapsed) => {
             return Err(Status::deadline_exceeded(format!(
                 "pull resize token read timed out after {:?}",
-                PULL_TOKEN_TIMEOUT
+                DATA_PLANE_TOKEN_TIMEOUT
             )));
         }
     }
@@ -1092,13 +1094,6 @@ async fn accept_one_resize_socket(
         source_root.to_path_buf(),
     )))
 }
-
-// R47-F5 / R46-F7: bound the accept + token-read so a peer that
-// opened the control RPC but never opened the data socket(s)
-// can't pin this task (and the listener) indefinitely. Hoisted to
-// module scope at ue-r2-2 — the resize controller shares them.
-const PULL_ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const PULL_TOKEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Accept N TCP connections, validate each token, wrap each in a
 /// `DataPlaneSink`. `source_root` is the enumeration root (module.path +
@@ -1136,7 +1131,7 @@ async fn accept_and_wrap_sinks(
     let suffix_len = epoch0_sub.map(<[u8]>::len).unwrap_or(0);
     for idx in 0..streams {
         let (mut socket, addr) =
-            match tokio::time::timeout(PULL_ACCEPT_TIMEOUT, listener.accept()).await {
+            match tokio::time::timeout(DATA_PLANE_ACCEPT_TIMEOUT, listener.accept()).await {
                 Ok(Ok(pair)) => pair,
                 Ok(Err(err)) => {
                     return Err(Status::internal(format!("data plane accept failed: {err}")));
@@ -1145,7 +1140,7 @@ async fn accept_and_wrap_sinks(
                     return Err(Status::deadline_exceeded(format!(
                         "pull data plane accept timed out after {:?} \
                          waiting for stream {}/{}",
-                        PULL_ACCEPT_TIMEOUT,
+                        DATA_PLANE_ACCEPT_TIMEOUT,
                         idx + 1,
                         streams
                     )));
@@ -1166,7 +1161,9 @@ async fn accept_and_wrap_sinks(
         // Validate token (and, under resize, the epoch-0 sub-token)
         // before handing the socket to a sink.
         let mut token_buf = vec![0u8; expected_token.len() + suffix_len];
-        match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+        match tokio::time::timeout(DATA_PLANE_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf))
+            .await
+        {
             Ok(Ok(_)) => {}
             Ok(Err(err)) => {
                 return Err(Status::internal(format!(
@@ -1176,7 +1173,7 @@ async fn accept_and_wrap_sinks(
             Err(_elapsed) => {
                 return Err(Status::deadline_exceeded(format!(
                     "pull token read timed out after {:?}",
-                    PULL_TOKEN_TIMEOUT
+                    DATA_PLANE_TOKEN_TIMEOUT
                 )));
             }
         }
@@ -1288,15 +1285,13 @@ async fn stream_via_data_plane_resume(
     .await
     .map_err(|_| Status::internal("failed to send negotiation"))?;
 
-    // R46-F7: bounded waits on accept + token-read. Same rationale
-    // and values as `accept_and_wrap_sinks` (the full-file path) —
-    // a stalled peer mustn't hold the daemon's listener indefinitely.
-    // This path stays single-connection (resume is single-stream by
-    // design), so it keeps its own inline accept.
-    use std::time::Duration as StdDuration2;
-    const ACCEPT_TIMEOUT: StdDuration2 = StdDuration2::from_secs(30);
-    const TOKEN_TIMEOUT: StdDuration2 = StdDuration2::from_secs(15);
-    let (socket, _) = match tokio::time::timeout(ACCEPT_TIMEOUT, listener.accept()).await {
+    // R46-F7: bounded waits on accept + token-read — a stalled peer
+    // mustn't hold the daemon's listener indefinitely. Bounds are the
+    // shared data-plane pair (w1-4). This path stays
+    // single-connection (resume is single-stream by design), so it
+    // keeps its own inline accept.
+    let (socket, _) = match tokio::time::timeout(DATA_PLANE_ACCEPT_TIMEOUT, listener.accept()).await
+    {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
             return Err(Status::internal(format!(
@@ -1307,7 +1302,7 @@ async fn stream_via_data_plane_resume(
         Err(_elapsed) => {
             return Err(Status::deadline_exceeded(format!(
                 "pull-sync data plane accept timed out after {:?}",
-                ACCEPT_TIMEOUT
+                DATA_PLANE_ACCEPT_TIMEOUT
             )));
         }
     };
@@ -1322,7 +1317,7 @@ async fn stream_via_data_plane_resume(
     let expected_token = token;
     let mut token_buf = vec![0u8; expected_token.len()];
     let mut socket = socket;
-    match tokio::time::timeout(TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
+    match tokio::time::timeout(DATA_PLANE_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
             return Err(Status::internal(format!("failed to read token: {}", e)));
@@ -1330,7 +1325,7 @@ async fn stream_via_data_plane_resume(
         Err(_elapsed) => {
             return Err(Status::deadline_exceeded(format!(
                 "pull-sync token read timed out after {:?}",
-                TOKEN_TIMEOUT
+                DATA_PLANE_TOKEN_TIMEOUT
             )));
         }
     }

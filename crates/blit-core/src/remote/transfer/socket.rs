@@ -20,6 +20,23 @@ use std::time::Duration;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
 
+/// Bounded wait for a data-plane accept (w1-4: one shared pair — this
+/// and [`DATA_PLANE_TOKEN_TIMEOUT`] — replacing three per-file
+/// declarations of the same two values). R46-F7 lineage: pre-fix the
+/// daemon called `listener.accept().await` with no timeout — a peer
+/// that opened the control connection but never opened the data
+/// connection (or hung mid-handshake) would pin the daemon's stream
+/// task indefinitely, holding the listener and the queued work. 30 s
+/// gives a generous margin for slow networks while still bounding the
+/// worst case.
+pub const DATA_PLANE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounded wait for the handshake-token bytes after a TCP accept.
+/// R46-F7: pre-fix `read_exact(&mut token_buf).await` had no timeout —
+/// a peer that opened the socket and stalled would hold the stream
+/// worker forever. 15 s is enough for a healthy peer to send a few
+/// dozen bytes; anything slower is a stuck or hostile peer.
+pub const DATA_PLANE_TOKEN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Idle time before the first keepalive probe (w1-3). Before this the
 /// sockets ran `SO_KEEPALIVE` with OS-default timing (~2 h idle on
 /// every supported platform) — useless on transfer timescales, while

@@ -36,5 +36,5 @@ pub use sink::{
     DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
     NullSink, SinkOutcome, TransferSink,
 };
-pub use socket::configure_data_socket;
+pub use socket::{configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT};
 pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};
