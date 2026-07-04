@@ -34,8 +34,29 @@ const FILE_LIST_EARLY_FLUSH_DELAY: Duration = Duration::from_millis(5);
 /// checks (canonical containment + stat — 3+ blocking syscalls each)
 /// run in chunked `spawn_blocking` batches instead of inline on the
 /// runtime per entry. Sized to the need-list early-flush threshold so
-/// the reply cadence a large push sees is unchanged.
+/// the reply cadence a fast-streaming push sees is unchanged; a
+/// trickling manifest (client still scanning) is covered by the
+/// delay trigger in [`manifest_drain_due`] instead — without it the
+/// batcher's own 64 KiB/5 ms early-flush triggers could never fire
+/// between chunk boundaries (codex w4-4 review, 1 Medium).
 const MANIFEST_CHECK_CHUNK: usize = FILE_LIST_EARLY_FLUSH_ENTRIES;
+
+/// w4-4 (codex review): when a buffered manifest entry has waited
+/// this long, drain the chunk even if it is not full — mirrors the
+/// batcher's `FILE_LIST_EARLY_FLUSH_DELAY` so a slowly-enumerating
+/// client still gets its first need-list (and mid-manifest TCP
+/// spin-up) within milliseconds, not after 128 entries trickle in.
+/// Under a fast manifest stream 128 entries arrive well inside this
+/// window, so the chunk cap dominates and syscall batching is kept.
+const MANIFEST_CHECK_MAX_DELAY: Duration = FILE_LIST_EARLY_FLUSH_DELAY;
+
+/// The two drain triggers for the buffered manifest checks: chunk
+/// full, or the oldest buffered entry has waited past the delay
+/// bound. Pure so the trigger contract is unit-testable.
+fn manifest_drain_due(pending_len: usize, oldest_buffered: Option<Instant>) -> bool {
+    pending_len >= MANIFEST_CHECK_CHUNK
+        || matches!(oldest_buffered, Some(t) if t.elapsed() >= MANIFEST_CHECK_MAX_DELAY)
+}
 
 pub(crate) async fn handle_push_stream(
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
@@ -60,8 +81,12 @@ pub(crate) async fn handle_push_stream(
     let mut scan_complete = false;
     let mut need_list_sender = FileListBatcher::new(tx.clone());
     // w4-4: manifest entries awaiting their chunked requires-upload
-    // check (see MANIFEST_CHECK_CHUNK / drain_manifest_checks).
+    // check (see MANIFEST_CHECK_CHUNK / drain_manifest_checks), and
+    // when the oldest of them was buffered (drives the delay trigger;
+    // evaluated on the next arrival, matching the batcher's own
+    // push-time flush semantics).
     let mut pending_manifest: Vec<PendingManifestEntry> = Vec::new();
+    let mut manifest_buffered_at: Option<Instant> = None;
     // design-2 / w4-1: `AbortOnDrop`, not a bare `JoinHandle` — an
     // early `?` return anywhere in this handler while a data-plane
     // task is running (or the `stream.message()` race below erroring)
@@ -182,12 +207,15 @@ pub(crate) async fn handle_push_stream(
                 // runs in chunked spawn_blocking batches instead of
                 // inline on the runtime — a 1M-file push used to run
                 // ~3M+ blocking syscalls on an executor worker.
+                if manifest_buffered_at.is_none() {
+                    manifest_buffered_at = Some(Instant::now());
+                }
                 pending_manifest.push(PendingManifestEntry {
                     rel,
                     sanitized,
                     file,
                 });
-                if pending_manifest.len() >= MANIFEST_CHECK_CHUNK {
+                if manifest_drain_due(pending_manifest.len(), manifest_buffered_at) {
                     let flushed = drain_manifest_checks(
                         module_ref,
                         &mut pending_manifest,
@@ -195,6 +223,7 @@ pub(crate) async fn handle_push_stream(
                         &mut files_to_upload,
                     )
                     .await?;
+                    manifest_buffered_at = None;
                     // design-4: in forced-gRPC mode the early-flush branch
                     // must NOT announce the fallback negotiation here. The
                     // client reacts to Negotiation(tcp_fallback) by
@@ -912,6 +941,24 @@ mod manifest_check_batch_tests {
             "stale + missing queued with POSIX wire paths, manifest order kept, \
              up-to-date file skipped"
         );
+    }
+
+    #[test]
+    fn drain_trigger_fires_on_chunk_or_delay() {
+        // Chunk trigger: full chunk drains regardless of age.
+        assert!(manifest_drain_due(
+            MANIFEST_CHECK_CHUNK,
+            Some(Instant::now())
+        ));
+        // Neither trigger: young, sub-chunk buffer waits.
+        assert!(!manifest_drain_due(1, Some(Instant::now())));
+        assert!(!manifest_drain_due(0, None));
+        // Delay trigger (codex w4-4 review): a sub-chunk buffer whose
+        // oldest entry has aged past the bound drains — a trickling
+        // manifest must not wait for 128 entries to see its first
+        // need-list flush.
+        let stale = Instant::now() - (MANIFEST_CHECK_MAX_DELAY * 2);
+        assert!(manifest_drain_due(1, Some(stale)));
     }
 
     #[tokio::test]

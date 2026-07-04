@@ -41,9 +41,18 @@ canonical everywhere else by design):
   sanitization now happens unconditionally at buffer time (previously
   only for required files — the header is discarded otherwise, so
   this is behavior-neutral).
-- At `MANIFEST_CHECK_CHUNK` (= `FILE_LIST_EARLY_FLUSH_ENTRIES` = 128,
-  keeping the need-list reply cadence a large push sees) the buffer
-  drains through `drain_manifest_checks`: ONE `spawn_blocking` runs
+- The buffer drains when `manifest_drain_due` fires: chunk full
+  (`MANIFEST_CHECK_CHUNK` = `FILE_LIST_EARLY_FLUSH_ENTRIES` = 128 —
+  the cadence a fast-streaming push sees) **or** the oldest buffered
+  entry has waited past `MANIFEST_CHECK_MAX_DELAY`
+  (= `FILE_LIST_EARLY_FLUSH_DELAY`, 5 ms) — the codex-review fix:
+  without the delay trigger, a slowly-enumerating client's first
+  need-list (and mid-manifest TCP spin-up) would wait for 128 trickled
+  entries instead of milliseconds, since the batcher's own 64 KiB/5 ms
+  triggers only evaluate inside `push()` calls, which chunking
+  confines to drain time. The trigger is evaluated on the next
+  arrival, matching the batcher's own push-time flush semantics. Each
+  drain runs through `drain_manifest_checks`: ONE `spawn_blocking` runs
   the batch's `file_requires_upload` calls (batch moved in and back
   out — no per-entry clones), then need-list pushes + `files_to_upload`
   happen in async context in original manifest order.
@@ -79,20 +88,21 @@ failed: …")` on join error), and all semantics identical.
 
 ## Tests
 
-- +3 `manifest_check_batch_tests` (blit-daemon 170 → 173): decision
+- +4 `manifest_check_batch_tests` (blit-daemon 170 → 174): decision
   parity (up-to-date skipped; stale + missing queued with sanitized
   POSIX paths in manifest order; buffer drained), empty-drain no-op,
-  and containment-escape rejection through the batched path (unix
+  containment-escape rejection through the batched path (unix
   symlink; the escape arm is unix-gated, the helper itself is
-  platform-shared and pinned by path_safety's suite).
+  platform-shared and pinned by path_safety's suite), and the
+  `manifest_drain_due` trigger contract (chunk + delay, review fix).
 - Mutation check: batched check forced to all-`true` → the decision-
   parity test fails; restored → green.
 - Half B rides the existing pins: `single_file_filter_tests` and the
   enumeration tests call the same async fn; the 500-file design-5
   regression e2e + the remote push suites drive the chunked manifest
   path end-to-end (≥3 chunk drains + remainder + post-drain spin-up).
-- Workspace gate: fmt + clippy clean; suite count grew 1472 → 1475
-  (see verdict record for the run).
+- Workspace gate: fmt + clippy clean; suite count grew 1472 → 1476
+  (1475 at the slice commit, +1 trigger test with the review fix).
 
 ## User-visible changes
 
