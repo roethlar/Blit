@@ -786,7 +786,7 @@ impl RemotePushClient {
                                                         continue;
                                                     }
                                                     // Dial exists before the first
-                                                    // fallback batch (first-wins).
+                                                    // data-plane batch (first-wins).
                                                     ensure_dial(&mut dial, None);
                                             let planned =
                                                 plan_transfer_payloads(headers, source_root, plan_options)?;
