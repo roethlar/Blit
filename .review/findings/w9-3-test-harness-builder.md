@@ -1,7 +1,10 @@
 # w9-3-test-harness-builder — one daemon-spawn harness, one cli_bin, OnceLock build, fake-server keepalive parity
 
 **Branch**: `master` (owner-authorized branchless loop, D-2026-06-20-6)
-**Commit**: _(filled at commit time)_
+**Commit**: `f6e592e` + review fix `8641bc6`
+**Codex**: NEEDS FIXES, 1 Medium (fake-server port bypassed the
+claimed-port set) — accepted and fixed; see
+`.review/results/w9-3-test-harness-builder.gpt-verdict.md`.
 **Source findings**: tests-five-daemon-harness-clones,
 tests-per-test-cargo-build-subprocess, duplication-cli-test-daemon-harness,
 tests-fake-server-config-skew — `docs/audit/DESIGN_FINDINGS_2026-06-11_PHASE_B.md`;
