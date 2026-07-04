@@ -350,9 +350,9 @@ Defined in `proto/blit.proto` — a single `Blit` service:
 
 ```protobuf
 service Blit {
-  // Transfer
+  // Transfer (the deprecated server-streaming Pull RPC was removed
+  // 2026-07-03 at ue-r2-1h; PullSync is the only pull wire)
   rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
-  rpc Pull(PullRequest) returns (stream PullChunk);
   rpc PullSync(stream ClientPullMessage) returns (stream ServerPullMessage);
   rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
 

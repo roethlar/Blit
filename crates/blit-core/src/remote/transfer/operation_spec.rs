@@ -99,8 +99,11 @@ pub struct NormalizedTransferOperation {
     /// (honoring `filter`) and streams headers plus a summary, never
     /// moving file bytes or negotiating a data plane. Carries the
     /// relay's manifest scan, ported from the deleted Pull RPC's flag
-    /// of the same name. Only pull_sync honors it; push and delegated
-    /// pull ignore it.
+    /// of the same name. Only valid on a direct pull_sync session:
+    /// push never sees this type on the wire, and delegated pull
+    /// REJECTS the flag in `validate_spec` (a forwarded metadata-only
+    /// spec would make the destination materialize bare headers as
+    /// zero-byte files).
     pub metadata_only: bool,
 }
 

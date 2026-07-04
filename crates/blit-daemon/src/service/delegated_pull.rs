@@ -82,6 +82,21 @@ pub(crate) fn apply_dst_capabilities_override(
 /// failure.
 pub(crate) fn validate_spec(spec: TransferOperationSpec) -> Result<TransferOperationSpec, String> {
     NormalizedTransferOperation::from_spec(spec.clone()).map_err(|e| format!("{e:#}"))?;
+    // ue-r2-1h review (self-review panel F1): metadata_only is a
+    // header-scan session shape for the relay's direct PullSync use
+    // ONLY. Forwarded through delegation it would make the source
+    // stream bare FileHeaders that this daemon's pull_sync client
+    // loop answers with File::create — truncating every enumerated
+    // destination file to zero bytes and then reporting success.
+    // Fail closed at the same boundary that validates everything
+    // else, before any outbound connect.
+    if spec.metadata_only {
+        return Err(
+            "metadata_only is not valid on a delegated pull: the destination \
+             would materialize the source's headers as empty files"
+                .to_string(),
+        );
+    }
     Ok(spec)
 }
 
@@ -798,6 +813,22 @@ mod tests {
         spec.spec_version = 0;
         let err = validate_spec(spec).unwrap_err();
         assert!(err.contains("spec_version"));
+    }
+
+    #[test]
+    fn validate_spec_rejects_metadata_only() {
+        // ue-r2-1h review (panel F1): a forwarded metadata_only spec
+        // would make the source stream bare headers that this daemon's
+        // pull_sync client loop materializes as zero-byte files —
+        // silent destination truncation reported as success. Fail
+        // closed at the validation boundary.
+        let mut spec = spec_with_caps(PeerCapabilities::default());
+        spec.metadata_only = true;
+        let err = validate_spec(spec).unwrap_err();
+        assert!(
+            err.contains("metadata_only"),
+            "expected metadata_only rejection, got: {err}"
+        );
     }
 
     #[test]

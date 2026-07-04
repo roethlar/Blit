@@ -1142,6 +1142,10 @@ struct RemoteFileStream {
     /// Set once the summary frame arrives; later polls return EOF
     /// without touching the underlying stream again.
     done: bool,
+    /// Set by the session's (single) expected file_header — a second
+    /// header before the summary means the daemon is streaming another
+    /// file into what the caller believes is one file's bytes.
+    header_seen: bool,
 }
 
 impl RemoteFileStream {
@@ -1151,6 +1155,7 @@ impl RemoteFileStream {
             buffer: Vec::new(),
             position: 0,
             done: false,
+            header_seen: false,
         }
     }
 }
@@ -1161,63 +1166,83 @@ impl tokio::io::AsyncRead for RemoteFileStream {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if self.position < self.buffer.len() {
-            let len = std::cmp::min(buf.remaining(), self.buffer.len() - self.position);
-            buf.put_slice(&self.buffer[self.position..self.position + len]);
-            self.position += len;
-            return Poll::Ready(Ok(()));
-        }
-        if self.done {
-            return Poll::Ready(Ok(()));
-        }
-
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Poll::Ready(Some(Ok(msg))) => {
-                use crate::generated::server_pull_message::Payload;
-                match msg.payload {
-                    Some(Payload::FileData(data)) => {
-                        self.buffer = data.content;
-                        self.position = 0;
-                        // Recurse to copy data to buf
-                        self.poll_read(cx, buf)
-                    }
-                    // The summary closes the file — treat it as EOF
-                    // rather than draining to stream end, so the
-                    // reader completes as soon as the bytes do.
-                    Some(Payload::Summary(_)) => {
-                        self.done = true;
-                        Poll::Ready(Ok(()))
-                    }
-                    // The session advertised no tar support and a
-                    // single file never plans into a shard; archive
-                    // bytes here would be undecodable, so fail loudly
-                    // rather than hand the caller a tar stream.
-                    Some(Payload::TarShardHeader(_))
-                    | Some(Payload::TarShardChunk(_))
-                    | Some(Payload::TarShardComplete(_)) => {
-                        Poll::Ready(Err(std::io::Error::other(
-                            "daemon sent tar-shard frames on a single-file \
-                             session that advertised no tar support",
-                        )))
-                    }
-                    // force_grpc was set — a real TCP negotiation
-                    // means the daemon is waiting on a data-plane dial
-                    // this reader will never make.
-                    Some(Payload::Negotiation(neg)) if !neg.tcp_fallback => {
-                        Poll::Ready(Err(std::io::Error::other(
-                            "daemon attempted a data-plane negotiation on a \
-                             force_grpc single-file session",
-                        )))
-                    }
-                    // Ack / PullSyncAck / ManifestBatch /
-                    // FilesToDownload / FileHeader / fallback
-                    // Negotiation — control chatter; skip.
-                    _ => self.poll_read(cx, buf),
-                }
+        // ue-r2-1h review (panel F2): a loop, not per-frame recursion —
+        // skipped control frames (and empty file_data frames) must not
+        // consume stack, or a hostile daemon streaming endless chatter
+        // could overflow it.
+        loop {
+            if self.position < self.buffer.len() {
+                let len = std::cmp::min(buf.remaining(), self.buffer.len() - self.position);
+                buf.put_slice(&self.buffer[self.position..self.position + len]);
+                self.position += len;
+                return Poll::Ready(Ok(()));
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(std::io::Error::other(e.to_string()))),
-            Poll::Ready(None) => Poll::Ready(Ok(())),
-            Poll::Pending => Poll::Pending,
+            if self.done {
+                return Poll::Ready(Ok(()));
+            }
+
+            match Pin::new(&mut self.stream).poll_next(cx) {
+                Poll::Ready(Some(Ok(msg))) => {
+                    use crate::generated::server_pull_message::Payload;
+                    match msg.payload {
+                        Some(Payload::FileData(data)) => {
+                            self.buffer = data.content;
+                            self.position = 0;
+                            // Loop around to copy into `buf` (or poll
+                            // again if the frame was empty).
+                        }
+                        // The summary closes the file — treat it as EOF
+                        // rather than draining to stream end, so the
+                        // reader completes as soon as the bytes do.
+                        Some(Payload::Summary(_)) => {
+                            self.done = true;
+                            return Poll::Ready(Ok(()));
+                        }
+                        // One file per session: a second header would
+                        // silently concatenate the next file's bytes
+                        // into this one (panel F3) — protocol error.
+                        Some(Payload::FileHeader(_)) => {
+                            if self.header_seen {
+                                return Poll::Ready(Err(std::io::Error::other(
+                                    "daemon sent a second file_header on a \
+                                     single-file session",
+                                )));
+                            }
+                            self.header_seen = true;
+                        }
+                        // The session advertised no tar support and a
+                        // single file never plans into a shard; archive
+                        // bytes here would be undecodable, so fail loudly
+                        // rather than hand the caller a tar stream.
+                        Some(Payload::TarShardHeader(_))
+                        | Some(Payload::TarShardChunk(_))
+                        | Some(Payload::TarShardComplete(_)) => {
+                            return Poll::Ready(Err(std::io::Error::other(
+                                "daemon sent tar-shard frames on a single-file \
+                                 session that advertised no tar support",
+                            )));
+                        }
+                        // force_grpc was set — a real TCP negotiation
+                        // means the daemon is waiting on a data-plane dial
+                        // this reader will never make.
+                        Some(Payload::Negotiation(neg)) if !neg.tcp_fallback => {
+                            return Poll::Ready(Err(std::io::Error::other(
+                                "daemon attempted a data-plane negotiation on a \
+                                 force_grpc single-file session",
+                            )));
+                        }
+                        // Ack / PullSyncAck / ManifestBatch /
+                        // FilesToDownload / fallback Negotiation —
+                        // control chatter; keep looping.
+                        _ => {}
+                    }
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Err(std::io::Error::other(e.to_string())))
+                }
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                Poll::Pending => return Poll::Pending,
+            }
         }
     }
 }

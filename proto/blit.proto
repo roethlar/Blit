@@ -667,8 +667,11 @@ message TransferOperationSpec {
   // then a summary, and never moves file bytes or negotiates a data
   // plane. This is how the remote→remote relay's manifest scan rides
   // PullSync now that the deprecated Pull RPC (whose PullRequest had
-  // the same flag) is gone. Only meaningful on PullSync; push and
-  // delegated pull ignore it.
+  // the same flag) is gone. Only valid on a direct PullSync session:
+  // push never carries this message, and delegated pull REJECTS the
+  // flag at its validation boundary — a forwarded metadata-only spec
+  // would make the destination daemon materialize the source's bare
+  // headers as zero-byte files.
   //
   // Added at spec_version 2 without a bump, like receiver_capacity.
   // Mixed-version note: this flag is NOT a pure optimization hint — an

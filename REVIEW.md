@@ -81,6 +81,7 @@ Coder loop: pick the topmost `[ ]` row. W2.3 requires a `docs/plan/` doc with
 
 | ID                | Severity | Title                                       | Status | Branch      | Commit    |
 |-------------------|----------|---------------------------------------------|--------|-------------|-----------|
+| relay-1-subpath-double-join | Low | `--relay-via-cli` with a subpath source scans `sub/sub` (endpoint rel_path joined twice). Pre-existing (deleted Pull-RPC code had the identical join); surfaced by the ue-r2-1h self-review panel; port kept parity, fix deferred | `[ ]` | — | — |
 | design-1-cli-pull-byte-double-count | Medium | CLI pull progress double-counts bytes on the TCP data plane (producer reports both Payload and FileComplete with full bytes; CLI fold adds both). From design map §1.6, hand-verified | `[ ]` | — | — |
 | design-2-orphaned-daemon-data-planes | High | Daemon data-plane tasks detach (not abort) on control-stream death at 3 spawn sites; orphan unreachable by CancelJob. AbortOnDrop fix exists but never propagated. From design map §1.9, hand-verified | `[ ]` | — | — |
 | design-3-unbounded-data-plane-connects | Medium | Both TCP data-plane connects lack timeouts (audit-2 fix never reached the data plane); hangs 60-127s on black-holed ports. From design map §1.1/§1.2, hand-verified | `[ ]` | — | — |

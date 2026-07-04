@@ -841,3 +841,43 @@ async fn open_remote_file_rejects_tar_shard_frames() {
         "unexpected error: {err}"
     );
 }
+
+#[tokio::test]
+async fn open_remote_file_rejects_second_file_header() {
+    use tokio::io::AsyncReadExt;
+
+    // ue-r2-1h review (panel F3): one file per session — a second
+    // header would silently splice the next file's bytes into the
+    // current read. Must be a protocol error, like the tar arm.
+    let captured: Arc<Mutex<Option<TransferOperationSpec>>> = Arc::new(Mutex::new(None));
+    let frames = vec![
+        server_pull_message::Payload::FileHeader(wire_header("", 2)),
+        server_pull_message::Payload::FileData(blit_core::generated::FileData {
+            content: b"aa".to_vec(),
+        }),
+        server_pull_message::Payload::FileHeader(wire_header("other.txt", 2)),
+        server_pull_message::Payload::FileData(blit_core::generated::FileData {
+            content: b"bb".to_vec(),
+        }),
+        benign_summary(),
+    ];
+    let port = spawn_canned(Arc::clone(&captured), frames).await;
+
+    let client = RemotePullClient::connect(relay_endpoint(port))
+        .await
+        .expect("connect");
+    let mut reader = client
+        .open_remote_file(std::path::Path::new("s1.txt"))
+        .await
+        .expect("open itself succeeds");
+
+    let mut bytes = Vec::new();
+    let err = reader
+        .read_to_end(&mut bytes)
+        .await
+        .expect_err("a second file_header must fail the read");
+    assert!(
+        err.to_string().contains("second file_header"),
+        "unexpected error: {err}"
+    );
+}

@@ -11,7 +11,6 @@ The Blit daemon exposes a gRPC service defined in `proto/blit.proto`.
 ```protobuf
 service Blit {
   rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
-  rpc Pull(PullRequest) returns (stream PullChunk);
   rpc List(ListRequest) returns (ListResponse);
   rpc Purge(PurgeRequest) returns (PurgeResponse);
   rpc CompletePath(CompletionRequest) returns (CompletionResponse);
@@ -21,6 +20,14 @@ service Blit {
   rpc FilesystemStats(FilesystemStatsRequest) returns (FilesystemStatsResponse);
 }
 ```
+
+> Removed 2026-07-03 (ue-r2-1h): `rpc Pull(PullRequest) returns (stream
+> PullChunk)` — superseded whole by PullSync (bidirectional, manifest
+> comparison; also carries the relay's metadata-only scan via
+> `TransferOperationSpec.metadata_only`). This block was already a
+> partial snapshot before the removal — `PullSync`, `DelegatedPull`,
+> `GetState`, `CancelJob`, `ClearRecent`, and `Subscribe` are live RPCs
+> not yet documented here; `proto/blit.proto` is the source of truth.
 
 ---
 
@@ -124,49 +131,16 @@ message PushSummary {
 
 ## Pull Operation
 
-Server-side streaming RPC for downloading files from server to client.
-
-### Protocol Flow
-
-```
-Client                                    Server
-   │                                         │
-   ├──── PullRequest ────────────────────────▶│
-   │                                         │
-   │◀─── DataTransferNegotiation ────────────┤  (optional TCP handoff)
-   │◀─── FileHeader (file 1) ────────────────┤
-   │◀─── FileData chunks ────────────────────┤
-   │◀─── FileHeader (file 2) ────────────────┤
-   │◀─── FileData chunks ────────────────────┤
-   │◀─── PullSummary ────────────────────────┤
-   │                                         │
-```
-
-### Messages
-
-#### PullRequest
-
-```protobuf
-message PullRequest {
-  string module = 1;        // Source module name
-  string path = 2;          // Path within module
-  bool force_grpc = 3;      // Disable TCP data plane
-  bool metadata_only = 4;   // Return headers only, no content
-}
-```
-
-#### PullChunk
-
-```protobuf
-message PullChunk {
-  oneof payload {
-    FileHeader file_header = 1;
-    FileData file_data = 2;
-    DataTransferNegotiation negotiation = 3;
-    PullSummary summary = 4;
-  }
-}
-```
+Removed 2026-07-03 (ue-r2-1h). The deprecated server-streaming
+`Pull(PullRequest) → stream PullChunk` RPC and its two request/stream
+messages were deleted; pulls ride the bidirectional `PullSync` RPC
+(spec + manifest comparison + need-list; TCP data plane or gRPC
+fallback frames). `PullSummary` and `ManifestBatch` survive as
+`ServerPullMessage`/`DelegatedPullProgress` payloads. The former
+`metadata_only` request flag lives on as
+`TransferOperationSpec.metadata_only` (header-only enumeration for the
+remote→remote relay's scan; rejected on delegated pulls). See
+`proto/blit.proto` for the full PullSync contract.
 
 ---
 

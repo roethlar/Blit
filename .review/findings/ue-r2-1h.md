@@ -6,11 +6,16 @@
 **Commits**: slice commit (this doc rides with it) + two separate
 preceding commits: the Windows-host clippy baseline fixes and the
 win-1 push-separator fix (see Environment note below).
-**Commit-boundary erratum**: the `service/pull.rs` deletion was staged
-early (`git rm`) and rode into the clippy-baseline commit instead of
-the slice commit; content is correct across the stack, only that one
-file's commit attribution is off. Left as-is rather than rewriting
-history (AGENTS.md git-safety).
+**Commit-boundary erratum** (severity upgraded by the self-review
+panel): the `service/pull.rs` deletion was staged early (`git rm`) and
+rode into the clippy-baseline commit. Consequence: the two
+intermediate commits (`9f37a7a`, `48c5a11`) **do not build** — their
+trees delete `pull.rs` while `mod.rs`/`core.rs` still reference it —
+so `git bisect` must skip them, and their commit messages' gate claims
+describe the full working tree at commit time, not those exact trees.
+HEAD is correct and fully gated. Left as-is rather than rewriting
+history (AGENTS.md git-safety); flagged to the owner, who may approve
+a history fix if bisectability matters more than the no-rewrite rule.
 
 ## What
 
