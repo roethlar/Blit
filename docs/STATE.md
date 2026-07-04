@@ -1,9 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`ue-r2-2` complete — **REV4 is complete**:
-all nine slices landed through the code→review→fix loop; the three
-static ladders are gone and stream resize is live end-to-end);
-pushed to both `origin` and `github` through `5bb12fb` — nothing outstanding.
+Last updated: 2026-07-04 (`w4-1` landed via the `.review/` coder loop —
+AbortOnDrop hoisted, remaining detach-on-drop sites closed, closes
+`design-2` as a byproduct); local HEAD `44bf416`, **not yet pushed** to
+either remote this session.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -11,29 +11,29 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`ue-r2-2` COMPLETE — REV4 COMPLETE** (details: DEVLOG 2026-07-04).
-  Stream resize: engine-owned policy (`resize_tick`: ±1 stream/epoch,
-  cheap-dials-first escalation, sustain 2 / cooldown 4 busy ticks,
-  bounded by the receiver profile), elastic pipeline
-  (`SinkControl::Add`/`RetireOne`; a retired worker's END record IS the
-  receiver-side teardown), push (client controller/dialer + daemon
-  armed-only acceptor; sockets identified by which sub-token they
-  echo), pull (daemon controller + client growable JoinSet receiver;
-  delegated inherits via `dst_capabilities`). Commits
-  `042ca4b`..`0788e83` + review fix `ec4a3fe`; tests **1405 / 0 / 3
-  (Windows host)**. Review: codex NEEDS FIXES (3) + 3-lens panel (4) →
-  9 fixed, 1 deferred — headline catches: pull resize was DEAD on the
-  CLI path (a dropped edit; hand-built-spec wire tests masked it), no
-  cumulative stream bound at the acking ends, the pull controller's
-  inline handshake freeze. Post-REV4 residue, recorded in the finding
-  doc: pull 1s-start (needs pull negotiation ahead of enumeration — a
-  restructuring); epoch-0-loop-vs-early-ADD hardening (Low, deferred);
-  BufferPool live growth (W3.1); telemetry-triggered resize behavior
-  is measured at the 10 GbE sign-off per the plan.
-- **`ue-r2-1b`..`ue-r2-1h` COMPLETE** — wire contract, engine shell,
-  streaming plan, live dials, push converge, pull multistream, Pull-RPC
-  deletion (details: DEVLOG 2026-07-03/04 entries; REVIEW.md has the
-  commit map). All three static ladders retired (1e/1f/1h).
+- **`w4-1-abortondrop-family` landed, pending review** (details: DEVLOG
+  2026-07-04T05:00:00Z; finding: `.review/findings/w4-1-abortondrop-family.md`).
+  Hoisted `AbortOnDrop` from `blit-core/src/remote/pull.rs` (`pub(crate)`)
+  to `blit-core::remote::transfer::abort_on_drop` (`pub`); wrapped the
+  remaining detach-on-drop sites: daemon push `data_plane_handle`
+  (design-2's last site), push client `pipeline_handle` +
+  `response_task`, and converted the daemon's per-stream push worker
+  `Vec<JoinHandle>` to a `JoinSet` (mirrors the resizable path's
+  existing `ue-r2-2` fix). Commits `65ecb93` (fix) + `44bf416` (finding
+  doc/REVIEW.md/sentinel); fmt/clippy clean; `cargo test --workspace`
+  green (blit-core 348, blit-daemon 162). Sentinel written to
+  `.review/ready/w4-1-abortondrop-family.json` — **awaiting reviewer
+  verdict**; also closes `design-2-orphaned-daemon-data-planes`'s
+  remaining scope (same commit).
+- **REV4 code-complete** (`ue-r2-1b`..`ue-r2-2`, all nine slices; details:
+  DEVLOG 2026-07-03/04 entries, REVIEW.md commit map). Stream resize is
+  live end-to-end (engine-owned `resize_tick` policy, elastic pipeline,
+  push armed-only acceptor, pull growable JoinSet receiver); all three
+  static stream-count ladders retired. Remaining acceptance items are
+  measurement gates (loopback parity band, 1s-start verification, 10
+  GbE sign-off `ue-1`/`ue-2`) owned by the owner's benchmark session.
+  Post-REV4 residue: pull 1s-start restructuring; epoch-0-loop-vs-early-ADD
+  hardening (Low, deferred); BufferPool live growth (W3.1).
 - **Windows-host session artifacts (2026-07-04)**: first fully-gated
   sessions on the owner's Windows machine — fixed pre-existing
   `9f37a7a` (clippy baseline) + `48c5a11` (win-1 High: push need-list
@@ -43,21 +43,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   authorize a history fix of the now-pushed stack or leave it.
 - **Active context** (settled background):
   - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the Active
-    plan (D-2026-06-20-5) and is now **code-complete**; its remaining
-    acceptance items are measurement gates (loopback parity band,
-    1s-start verification, 10 GbE sign-off `ue-1`/`ue-2`) owned by the
-    owner's benchmark session. Flipping REV4 to Shipped is an owner
-    call after that session.
+    plan (D-2026-06-20-5), code-complete; flipping to Shipped is an
+    owner call after the 10 GbE benchmark session.
   - Process (D-2026-06-20-6, `docs/agent/GPT_REVIEW_LOOP.md`) governed
     `ue-r2-*`; with the slices done, the `.review/README.md` async loop
-    + REVIEW.md queue govern what's next. Owner gate remaining:
-    **10 GbE sign-off**.
+    + REVIEW.md queue govern what's next (current example: w4-1 above).
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. Highest open
-   ratified row is **w4-1** (AbortOnDrop family, High; design-2 now
-   scopes to `push/control.rs` only). Then w4-3, W1 socket-policy /
+1. **Design-review queue** — `REVIEW.md` order governs. w4-1 landed
+   2026-07-04, pending review (see Now). Highest still-open ratified
+   row is **w4-3** (daemon disconnect racing). Then W1 socket-policy /
    timeout rows (note: ue-r2-2's armed-only accepts re-ratified the 1g
    W1 deferral premise; the constants/policy consolidation still
    belongs to W1). Open Low rows from the ue-r2 reviews:
@@ -91,6 +87,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
+- **Reviewer verdict on `w4-1-abortondrop-family`**: sentinel written to
+  `.review/ready/w4-1-abortondrop-family.json` (branch `master`, sha
+  `65ecb93`); needs a reviewer pass per `.review/README.md` before the
+  REVIEW.md row flips `[~]` → `[x]`.
 - **Owner call on the commit erratum** (`9f37a7a`/`48c5a11` unbuildable
   in isolation, now pushed to both remotes): leave as-is (default) or
   authorize a history rewrite to fix it.
@@ -120,21 +120,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (9th)** @ `44bf416` — `w4-1-abortondrop-family` landed via
+  the `.review/` coder loop (fix `65ecb93`; finding/REVIEW.md/sentinel
+  `44bf416`). Hoisted `AbortOnDrop`; closed the daemon push
+  `data_plane_handle`, push-client `pipeline_handle`/`response_task`,
+  and daemon per-stream-worker `Vec→JoinSet` detach-on-drop sites;
+  closes `design-2` as a byproduct. fmt/clippy clean; tests green
+  (blit-core 348, blit-daemon 162). In-flight: none — sentinel out,
+  awaiting reviewer verdict. **Exact first action next session**: if
+  the reviewer has graded it, act on the verdict (merge/close on
+  Accepted, or address `.review/results/w4-1-abortondrop-family.reopened.md`
+  on Reopened); otherwise pick up the next design-review queue row,
+  **w4-3** (daemon disconnect racing). Not pushed to either remote this
+  session — confirm with the owner before pushing.
 - **2026-07-04 (8th)** @ `8d62afc` — `ue-r2-2` landed end-to-end
   (`042ca4b`..`0788e83`; codex NEEDS FIXES 3 + panel 4 → 9 fixed
   `ec4a3fe`, 1 deferred; records `8d62afc`). **REV4 code-complete.**
-  fmt/clippy clean; tests 1405/0/3 on Windows. In-flight: none — REV4
-  boundary. **Exact first action next session**: on owner "continue",
-  pick up the design-review queue at **w4-1** (AbortOnDrop family)
-  through the `.review/` loop; else owner schedules the 10 GbE sign-off
-  / decides the erratum + D-2026-06-20-1 questions. (Stack pushed to
-  both remotes 2026-07-04, after this entry was written.)
+  fmt/clippy clean; tests 1405/0/3 on Windows. (Stack pushed to both
+  remotes 2026-07-04, after this entry was written.)
 - **2026-07-04 (7th)** @ `f6f52d7`+docs — `ue-r2-1h` landed end-to-end
   (`2a13f53` deletion+port; codex NEEDS FIXES 3 + panel → 5 fixed
   `f6f52d7`, 1 deferred relay-1, 1 rejected; plus Windows-host
   pre-existing fixes `9f37a7a` clippy baseline + `48c5a11` win-1
   push-separator). fmt/clippy clean; tests 1393/0/3 on Windows.
-- **2026-07-03 (6th)** @ `4a2e58d`+docs — `ue-r2-1g` landed end-to-end
-  (`48e583e` multistream + engine proposal; codex NEEDS FIXES → 2
-  fixed + self-review panel 2 fixed / 1 deferred, `4a2e58d`).
-  fmt/clippy clean; tests 1413/0/2.
