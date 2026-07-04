@@ -870,9 +870,11 @@ mod tests {
         dial.set_negotiated_streams(2);
         while dial.step_up_cheap_dials() {}
         let probe = StreamProbe::new(StreamId(0));
-        let registry: SharedStreamProbes = Arc::new(std::sync::Mutex::new(vec![
-            StreamProbe::from_telemetry(probe.id(), probe.telemetry()),
-        ]));
+        let registry: SharedStreamProbes =
+            Arc::new(std::sync::Mutex::new(vec![StreamProbe::from_telemetry(
+                probe.id(),
+                probe.telemetry(),
+            )]));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let handle = spawn_dial_tuner_with_resize(&dial, Arc::clone(&registry), Some(tx));
         tokio::task::yield_now().await;

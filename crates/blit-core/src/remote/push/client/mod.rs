@@ -340,8 +340,11 @@ impl MultiStreamSender {
             LiveProbe(probe),
         )
         .await?;
-        let sink: Arc<dyn TransferSink> =
-            Arc::new(DataPlaneSink::new(session, rt.source.clone(), rt.dst_root.clone()));
+        let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
+            session,
+            rt.source.clone(),
+            rt.dst_root.clone(),
+        ));
         rt.ctl_tx
             .send(SinkControl::Add(sink))
             .map_err(|_| eyre!("data plane pipeline is no longer running"))?;

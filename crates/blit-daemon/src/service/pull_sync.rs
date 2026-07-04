@@ -662,11 +662,11 @@ async fn stream_via_data_plane(
     resize_on: bool,
 ) -> Result<TransferStats, Status> {
     use blit_core::engine::{spawn_dial_tuner_with_resize, SharedStreamProbes};
+    use blit_core::remote::transfer::generate_sub_token;
     use blit_core::remote::transfer::payload_file_count;
     use blit_core::remote::transfer::pipeline::{
         execute_sink_pipeline, execute_sink_pipeline_elastic, SinkControl,
     };
-    use blit_core::remote::transfer::{generate_sub_token, SUB_TOKEN_LEN};
 
     // ue-r2-1e: dial-driven chunking (conservative start,
     // receiver-profile-bounded).
@@ -1159,7 +1159,11 @@ async fn accept_and_wrap_sinks(
                 .lock()
                 .expect("probe registry poisoned")
                 .push(tuner_view);
-            Arc::new(DataPlaneSink::new(session, source.clone(), dst_root.clone()))
+            Arc::new(DataPlaneSink::new(
+                session,
+                source.clone(),
+                dst_root.clone(),
+            ))
         } else {
             let session = DataPlaneSession::from_stream(
                 socket,
@@ -1169,7 +1173,11 @@ async fn accept_and_wrap_sinks(
                 Arc::clone(&pool),
             )
             .await;
-            Arc::new(DataPlaneSink::new(session, source.clone(), dst_root.clone()))
+            Arc::new(DataPlaneSink::new(
+                session,
+                source.clone(),
+                dst_root.clone(),
+            ))
         };
         sinks.push(sink);
     }

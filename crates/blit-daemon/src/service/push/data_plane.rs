@@ -495,7 +495,9 @@ async fn handle_resizable_stream(
             Status::permission_denied("invalid data plane sub-token"),
         );
     }
-    receive_stream_into_module(socket, module, start).await.map(Some)
+    receive_stream_into_module(socket, module, start)
+        .await
+        .map(Some)
 }
 
 /// Validate `TarShardHeader.archive_size` at the wire boundary so a

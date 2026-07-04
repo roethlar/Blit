@@ -470,7 +470,9 @@ async fn handle_resize_request(
 ) -> Result<(), Status> {
     let op = DataPlaneResizeOp::try_from(req.op).unwrap_or(DataPlaneResizeOp::Unspecified);
     let within_ceiling = req.target_stream_count
-        <= blit_core::engine::local_receiver_capacity().max_streams.max(1);
+        <= blit_core::engine::local_receiver_capacity()
+            .max_streams
+            .max(1);
     let accepted = match (op, resize_cmd_tx) {
         (DataPlaneResizeOp::Add, Some(cmd_tx)) => {
             req.sub_token.len() == blit_core::remote::transfer::SUB_TOKEN_LEN

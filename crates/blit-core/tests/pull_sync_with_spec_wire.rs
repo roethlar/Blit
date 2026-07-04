@@ -494,8 +494,7 @@ impl Blit for CannedFramesServer {
             // are observable by tests.
             let ack_drain = tokio::spawn(async move {
                 while let Ok(Some(msg)) = stream.message().await {
-                    if let Some(client_pull_message::Payload::DataPlaneResizeAck(ack)) =
-                        msg.payload
+                    if let Some(client_pull_message::Payload::DataPlaneResizeAck(ack)) = msg.payload
                     {
                         acks.lock().await.push(ack);
                     }
@@ -937,9 +936,7 @@ async fn pull_client_refuses_resize_on_a_session_that_never_negotiated_it() {
 
     let dest = tempfile::tempdir().expect("dest dir");
     let endpoint = relay_endpoint(port);
-    let mut client = RemotePullClient::connect(endpoint)
-        .await
-        .expect("connect");
+    let mut client = RemotePullClient::connect(endpoint).await.expect("connect");
     let mut spec = hand_built_spec();
     spec.module = "relaymod".into();
     spec.mirror_mode = blit_core::generated::MirrorMode::Off as i32;
@@ -987,21 +984,35 @@ async fn pull_client_dials_resize_add_with_the_epoch_credential_and_acks() {
     let expect0: Vec<u8> = token.iter().chain(sub0.iter()).copied().collect();
     let expect1: Vec<u8> = token.iter().chain(sub1.iter()).copied().collect();
     let driver = tokio::spawn(async move {
-        let (mut s0, _) = data_listener.accept().await.expect("epoch-0 accept");
-        let mut buf0 = vec![0u8; expect0.len()];
-        s0.read_exact(&mut buf0).await.expect("epoch-0 handshake");
-        assert_eq!(buf0, expect0, "epoch-0 socket carries token || epoch0_sub");
-
-        let (mut s1, _) = data_listener.accept().await.expect("epoch-1 accept");
-        let mut buf1 = vec![0u8; expect1.len()];
-        s1.read_exact(&mut buf1).await.expect("epoch-1 handshake");
-        assert_eq!(buf1, expect1, "epoch-1 socket carries token || add sub_token");
+        // The epoch-0 and epoch-1 dials race (the canned server plays
+        // its script back-to-back), so accept order is not guaranteed
+        // — assert on the SET of handshakes instead.
+        let mut handshakes = Vec::new();
+        let mut sockets = Vec::new();
+        for i in 0..2 {
+            let (mut sock, _) = data_listener.accept().await.expect("accept");
+            let mut buf = vec![0u8; expect0.len()];
+            sock.read_exact(&mut buf)
+                .await
+                .unwrap_or_else(|e| panic!("handshake {i}: {e}"));
+            handshakes.push(buf);
+            sockets.push(sock);
+        }
+        assert!(
+            handshakes.contains(&expect0),
+            "one socket carries token || epoch0_sub"
+        );
+        assert!(
+            handshakes.contains(&expect1),
+            "one socket carries token || add sub_token"
+        );
+        assert_ne!(handshakes[0], handshakes[1], "distinct credentials");
 
         // END records terminate both receive workers normally.
-        s0.write_all(&[0xFF]).await.expect("end 0");
-        s1.write_all(&[0xFF]).await.expect("end 1");
-        s0.flush().await.ok();
-        s1.flush().await.ok();
+        for mut sock in sockets {
+            sock.write_all(&[0xFF]).await.expect("end record");
+            sock.flush().await.ok();
+        }
     });
 
     let captured: Arc<Mutex<Option<TransferOperationSpec>>> = Arc::new(Mutex::new(None));
@@ -1050,6 +1061,9 @@ async fn pull_client_dials_resize_add_with_the_epoch_credential_and_acks() {
     let acks = acks.lock().await;
     assert_eq!(acks.len(), 1, "exactly one resize ack");
     assert_eq!(acks[0].epoch, 1);
-    assert!(acks[0].accepted, "negotiated ADD within ceiling is accepted");
+    assert!(
+        acks[0].accepted,
+        "negotiated ADD within ceiling is accepted"
+    );
     assert_eq!(acks[0].effective_stream_count, 2);
 }

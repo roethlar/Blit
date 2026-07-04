@@ -709,8 +709,7 @@ impl RemotePullClient {
         let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
         // ue-r2-2: ADD commands travel through here into the receiver
         // task (present only when the negotiation enabled resize).
-        let mut data_plane_growth: Option<tokio::sync::mpsc::UnboundedSender<PullStreamAdd>> =
-            None;
+        let mut data_plane_growth: Option<tokio::sync::mpsc::UnboundedSender<PullStreamAdd>> = None;
         let mut files_to_delete = 0u64;
         let mut negotiation_complete = false;
 
@@ -1064,9 +1063,7 @@ impl RemotePullClient {
                                         .is_ok()
                                 })
                         }
-                        crate::generated::DataPlaneResizeOp::Remove => {
-                            data_plane_growth.is_some()
-                        }
+                        crate::generated::DataPlaneResizeOp::Remove => data_plane_growth.is_some(),
                         _ => false,
                     };
                     if !accepted {
@@ -1692,10 +1689,7 @@ async fn receive_data_plane_streams_owned(
     // ue-r2-2: `Some((epoch0_sub_token, growth))` when the negotiation
     // enabled resize. Forces the growable shape even at one epoch-0
     // stream (a resize can widen it later).
-    resize: Option<(
-        Vec<u8>,
-        tokio::sync::mpsc::UnboundedReceiver<PullStreamAdd>,
-    )>,
+    resize: Option<(Vec<u8>, tokio::sync::mpsc::UnboundedReceiver<PullStreamAdd>)>,
 ) -> Result<DataPlaneResult> {
     let mut result = DataPlaneResult {
         files_transferred: 0,

@@ -1369,7 +1369,11 @@ mod workqueue_tests {
         // Give worker 1 time to dequeue payload 1 and park inside its
         // gated write (the count stays 0 while parked).
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(c1.load(Ordering::Relaxed), 0, "worker 1 is parked in the gate");
+        assert_eq!(
+            c1.load(Ordering::Relaxed),
+            0,
+            "worker 1 is parked in the gate"
+        );
 
         ctl_tx
             .send(SinkControl::Add(second))
@@ -1447,7 +1451,11 @@ mod workqueue_tests {
         let retired = c2.load(Ordering::Relaxed);
         assert_eq!(outcome.files_written, n, "no payload lost on retire");
         assert_eq!(kept + retired, n as u64, "exactly-once across the resize");
-        assert_eq!(f2.load(Ordering::Relaxed), 1, "retired sink emitted its END");
+        assert_eq!(
+            f2.load(Ordering::Relaxed),
+            1,
+            "retired sink emitted its END"
+        );
         assert_eq!(
             f1.load(Ordering::Relaxed),
             1,
