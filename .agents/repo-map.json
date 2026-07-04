@@ -1,7 +1,7 @@
 {
   "validated_against": {
-    "commit": "725aa07293fac39eddd47faf0e1a2af290ffb82b",
-    "date": "2026-07-03"
+    "commit": "5bb12fb803b98ff273d1c76404fb8034b650a739",
+    "date": "2026-07-04"
   },
   "projects": [
     {
@@ -58,6 +58,7 @@
     "State lives canonically in docs/STATE.md and decisions in docs/DECISIONS.md; .agents/state.md and .agents/decisions.md are pointer stubs only. CI and hook scripts are wired to the docs/ paths.",
     "As of the 2026-07-03 governance reconciliation, AGENTS.md is a byte-identical copy of the toolkit template; every repo-specific rule (project map, style, git safety, source-of-truth order, operator procedures) lives in .agents/repo-guidance.md instead.",
     "DEVLOG.md is an append-only journal: write to it, never read it for current state. TODO.md is backlog-only.",
-    "Verification commands confirmed against .agents/repo-guidance.md, .review/README.md, and the CI workflows; not executed during the bootstrap run itself (docs-only change)."
+    "Verification commands confirmed against .agents/repo-guidance.md, .review/README.md, and the CI workflows; not executed during the bootstrap run itself (docs-only change).",
+    "2026-07-04 update-governance run: re-confirmed workspace members against Cargo.toml, script paths, and CI branch triggers against master with no drift found; only this stamp changed."
   ]
 }

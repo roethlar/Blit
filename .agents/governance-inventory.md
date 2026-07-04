@@ -61,3 +61,27 @@ source tree, etc. This is unrelated to governance and outside this
 reconciliation's scope; noted here only because discovery surfaced it as a
 governance-adjacent path under `.claude/`. Worth a deliberate owner decision
 (intentional tracking vs. accidental `git add`), but not touched by this run.
+Re-observed unchanged (still 236 tracked files, still no `.git` in that
+directory) during the 2026-07-04 confirmation run below.
+
+## 2026-07-04 confirmation run
+
+Ran `update-governance` one day after the 2026-07-03 reconciliation
+(`fcf3345`). `agentsTemplate.reconcileRecommended` came back `false`
+(`AGENTS.md` still byte-identical to template `2026-07-02.1`) and discovery's
+route confirmed `migration` with a small inventory. Re-verified every
+artifact above still matches its verdict at current `HEAD` (`5bb12fb`):
+command wrappers, hooks (`settings.json` + `agents-md-tripwire.py`,
+byte-identical to the toolkit's tripwire script), `.gitignore` committability
+of all wrapper/hook paths, and the pointer-stub role of `.agents/state.md` /
+`.agents/decisions.md` all unchanged. Re-confirmed `repo-map.json`'s
+verification commands and fact-bearing paths against current evidence:
+`Cargo.toml` workspace members, `scripts/agent/check-docs.sh` and
+`scripts/windows/run-blit-tests.ps1` presence, and both CI workflows'
+`push: branches: [master]` triggers against the current `master` branch. No
+governance-relevant file changed in `725aa07..5bb12fb` (the six new commits
+were all `ue-r2-1g`/`1h`/`2` feature work plus one `docs/STATE.md` handoff
+edit). Only change this round: `validated_against` stamps in `repo-map.json`
+and `artifact-manifest.json` bumped to `5bb12fb` / 2026-07-04. No new
+harvest-worthy incident identified beyond the two already recorded in
+`.agents/harvest.md`.
