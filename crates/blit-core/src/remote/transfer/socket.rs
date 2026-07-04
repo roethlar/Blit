@@ -15,9 +15,25 @@
 //! connect bounds are design-3's slice and live at the call sites.
 
 use std::io;
+use std::time::Duration;
 
-use socket2::SockRef;
+use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
+
+/// Idle time before the first keepalive probe (w1-3). Before this the
+/// sockets ran `SO_KEEPALIVE` with OS-default timing (~2 h idle on
+/// every supported platform) — useless on transfer timescales, while
+/// the comments claimed it prevented idle stream timeouts. With
+/// 60 s + 5 probes at 10 s, a vanished peer on an idle data socket
+/// (an armed resize slot, a stream waiting for work while siblings
+/// transfer) is detected in ~2 minutes. The complementary case — a
+/// stalled peer with data in flight — is StallGuard's 30 s, not
+/// keepalive's.
+pub const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+/// Interval between keepalive probes once idle has elapsed.
+pub const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Unanswered probes before the connection is declared dead.
+pub const TCP_KEEPALIVE_RETRIES: u32 = 5;
 
 /// Apply the data-plane socket policy to a connected or accepted
 /// stream, in place (no `into_std`/`from_std` round trip):
@@ -25,9 +41,13 @@ use tokio::net::TcpStream;
 /// - `TCP_NODELAY` on — **hard error**. Nagle on a data-plane socket
 ///   silently serializes small records behind ACKs; a socket we cannot
 ///   configure is a socket we do not use.
-/// - `SO_KEEPALIVE` on — best-effort, logged. Keeps idle connections
-///   alive during long transfers on sibling streams; the kernel can
-///   refuse on exotic socket types (POST_REVIEW_FIXES §1.1).
+/// - `SO_KEEPALIVE` on with explicit timing
+///   ([`TCP_KEEPALIVE_IDLE`]/[`TCP_KEEPALIVE_INTERVAL`]/
+///   [`TCP_KEEPALIVE_RETRIES`]) — best-effort, logged. Detects a
+///   vanished peer on an idle data socket within ~2 minutes instead of
+///   the OS-default ~2 hours; the kernel can refuse on exotic socket
+///   types (POST_REVIEW_FIXES §1.1 lineage — failure is loud, never
+///   fatal).
 /// - Send/receive buffers sized to `tcp_buffer_size` when `Some` —
 ///   best-effort, logged. The knobs are advisory (the kernel can
 ///   clamp); a failure here should be visible to operators chasing a
@@ -44,7 +64,13 @@ use tokio::net::TcpStream;
 pub fn configure_data_socket(stream: &TcpStream, tcp_buffer_size: Option<usize>) -> io::Result<()> {
     let socket = SockRef::from(stream);
     socket.set_tcp_nodelay(true)?;
-    if let Err(e) = socket.set_keepalive(true) {
+    // `set_tcp_keepalive` also flips SO_KEEPALIVE on, so this is the
+    // whole keepalive story in one call.
+    let keepalive = TcpKeepalive::new()
+        .with_time(TCP_KEEPALIVE_IDLE)
+        .with_interval(TCP_KEEPALIVE_INTERVAL)
+        .with_retries(TCP_KEEPALIVE_RETRIES);
+    if let Err(e) = socket.set_tcp_keepalive(&keepalive) {
         log::warn!("set TCP keepalive on data-plane socket: {}", e);
     }
     if let Some(size) = tcp_buffer_size {
@@ -97,6 +123,38 @@ mod tests {
         assert!(
             sock.recv_buffer_size().expect("read rcvbuf") >= requested,
             "recv buffer must be at least the requested size"
+        );
+    }
+
+    /// w1-3: the keepalive is configured with explicit timing, not
+    /// just switched on — OS-default timing (~2 h idle) is useless on
+    /// transfer timescales. Read back through the kernel so the test
+    /// pins what a peer actually experiences, not what we asked for.
+    /// The socket2 getters are unix-only; Windows exercises the set
+    /// path through every other test in this module.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn keepalive_timing_is_explicit() {
+        let (client, _server) = loopback_pair().await;
+        configure_data_socket(&client, None).expect("configure");
+
+        let sock = SockRef::from(&client);
+        assert_eq!(
+            sock.tcp_keepalive_time().expect("read keepalive time"),
+            TCP_KEEPALIVE_IDLE,
+            "idle time before the first probe must be the policy value"
+        );
+        assert_eq!(
+            sock.tcp_keepalive_interval()
+                .expect("read keepalive interval"),
+            TCP_KEEPALIVE_INTERVAL,
+            "probe interval must be the policy value"
+        );
+        assert_eq!(
+            sock.tcp_keepalive_retries()
+                .expect("read keepalive retries"),
+            TCP_KEEPALIVE_RETRIES,
+            "probe retry count must be the policy value"
         );
     }
 

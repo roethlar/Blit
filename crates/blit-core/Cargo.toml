@@ -44,7 +44,9 @@ futures = "0.3"
 blake3 = "1.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 md5 = "0.8"
-socket2 = "0.6.3"
+# `all` unlocks TcpKeepalive retries + the keepalive getters the
+# socket-policy tests read back (w1-3).
+socket2 = { version = "0.6.3", features = ["all"] }
 
 # OS-specific dependencies
 [target.'cfg(unix)'.dependencies]
