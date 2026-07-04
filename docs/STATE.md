@@ -1,10 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w6-1` landed and graded through the codex
-loop — **the ProgressEvent contract lives in blit-core**: bytes ride
-`Payload` only, `FileComplete` is byteless, one shared `ProgressTotals`
-fold; closes design-1 structurally); local HEAD `8fd8978`+records,
-**not yet pushed** to either remote across these sessions.
+Last updated: 2026-07-04 (`w6-1` + `w6-2` landed and graded through
+the codex loop — **the ProgressEvent contract lives in blit-core**
+and the §1.6 daemon-side residue is verified + filed as
+w6-2a/-2b/-2c); local HEAD `8b7829d`+records, **not yet pushed** to
+either remote across these sessions.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -12,6 +12,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **w6-2 DONE — progress-residue verify-then-file** (`0aba593`+fix
+  `8b7829d`; finding `.review/findings/w6-2-progress-residue-verify.md`).
+  All three §1.6 residue claims CONFIRMED at HEAD: delegated live
+  progress wire-dead (zero production `BytesProgress` producers; the
+  dst daemon already meters bytes — core.rs:667), daemon row counters
+  0 for push receive + pull_sync serve, denominators/file counts
+  hardcoded 0 across TransferProgress/TransferComplete/GetState. Per
+  the ratified spec, filed as three independent follow-on rows
+  **w6-2a/-2b/-2c** (pending-review section). Codex: **NEEDS FIXES (2
+  Low, doc-coherence)** → both fixed. No code change; suite stays
+  1472/0/2.
 - **w6-1 DONE — ProgressEvent contract** (`8fd8978`; finding
   `.review/findings/w6-1-progress-event-contract.md`). The contract is
   defined ON the enum in blit-core: **bytes ride `Payload` only —
@@ -64,19 +75,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w6-1 (and
-   design-1 with it) closed `[x]` 2026-07-04 (see Now), the
-   ninth/tenth rows that day. Strict row order now gives **w6-2**
-   (progress-residue verify-then-fix, Medium — the §1.6 residue:
-   delegated zero live progress since `BytesProgress` is wire-dead,
-   daemon counters 0 for push/pull_sync rows, no denominators
-   end-to-end; verification is step 1, each confirmed item becomes its
-   own follow-on slice) as the topmost open row; **design-3**
-   (data-plane connect timeouts, filed-findings section) remains the
-   sanctioned smaller alternative (two client connect sites, bound
-   imports the shared `DATA_PLANE_ACCEPT_TIMEOUT`) — sequencing stays
-   the coder's pick unless the owner orders otherwise. Open Low rows:
-   `relay-1-subpath-double-join`.
+1. **Design-review queue** — `REVIEW.md` order governs. w6-1,
+   design-1, and w6-2 all closed `[x]` 2026-07-04 (see Now). Strict
+   row order now gives **w4-4** (blocking-work-off-runtime, Medium —
+   spawn_blocking the per-entry stat/canonicalize batch + single-file
+   checksum hashing) as the topmost ratified open row. Filed
+   alternatives (pending-review section, coder's pick): **w6-2a/-2b/
+   -2c** (daemon progress residue — independent slices, 2b→2a→2c
+   smallest-first suggestion), **design-3** (data-plane connect
+   timeouts — two client connect sites, bound imports the shared
+   `DATA_PLANE_ACCEPT_TIMEOUT`), and Low `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -149,6 +157,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (16th)** @ `8b7829d`+records —
+  **w6-2-progress-residue-verify landed and graded** (same session as
+  w6-1; standing owner go). Verify-then-file per the ratified spec:
+  all three §1.6 claims CONFIRMED (BytesProgress zero production
+  producers; counters fed only by delegated dispatch; denominators
+  hardcoded 0), filed as independent rows w6-2a/-2b/-2c in the
+  pending-review section. Codex: NEEDS FIXES 2 Low (doc-coherence:
+  overstated "no code anywhere"; false 2b→2a dependency) → fixed
+  `8b7829d`. No code; suite stays 1472/0/2. In-flight: none. **Exact
+  first action next session**: standing "reviewloop" go → pick up
+  **w4-4** (blocking-work-off-runtime, topmost ratified open row;
+  w6-2a/b/c + design-3 are the filed coder's-pick alternatives)
+  through the codex loop. Nothing pushed — push stays owner-gated.
 - **2026-07-04 (15th)** @ `8fd8978`+records+docs —
   **w6-1-progress-event-contract landed and graded through the codex
   loop** (owner go: "continue. reviewloop with codex as each slice
@@ -170,31 +191,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   smaller alternative) through the codex loop.  Nothing pushed — push
   stays owner-gated.
 - **2026-07-04 (14th)** @ `f49f8f6`+records+docs —
-  **w3-1-memory-aware-buffer-pool landed and graded through the codex
-  loop** (owner go: "continue" → topmost open row per the 13th
-  handoff). `BufferPool::for_data_plane(chunk_bytes, streams)`:
-  formula + 64 KiB floor + available/4 cap + 2-buffers-per-stream
-  liveness floor (cap shrinks buffers, never concurrency — deadlock-
-  proof by construction); 3 pasted sites replaced; elastic paths
-  authorize `ceiling_max_streams()` up front. Sysinfo 1024× units bug
-  fixed (0.38 returns bytes; old helper's ×1024 made every memory cap
-  vacuous). Design assumptions verified by a 5-agent audit workflow
-  before coding (two-buffer hold-and-wait, wire tolerance of shrunk
-  buffers, hard resize ceiling, resume pool inert). Codex: **PASS 0
-  findings** (first invocation killed by a session restart before
-  output; record is the complete re-run). 8 params pins mutation-
-  verified. Workspace 1452 → 1460/0/2 across 37 suites, fmt/clippy
-  clean (macOS host). In-flight: none. **Exact first action next
-  session**: on owner "continue", pick up **w6-1** (ProgressEvent
-  contract, topmost open row; design-3 remains the sanctioned smaller
-  alternative) through the codex loop. Nothing pushed — push stays
-  owner-gated.
-- **2026-07-04 (13th)** @ `27f53a0`+records+docs —
-  **w2-2-stream-ladder-owner landed and graded** (owner go:
-  "continue"). Three stream ladders were already gone post-REV4; the
-  slice deleted the planner's dead chunk lane (ladder,
-  `Plan`/`PlannedPayloads`, `chunk_bytes_override`, `TuningParams`);
-  dial = single chunk owner; byte-identical wire behavior. Codex:
-  NEEDS FIXES 1 Low (comment-truth → `27f53a0`). 4 transfer_plan
-  pins. Workspace 1448 → 1452/0/2. Discoveries → Open questions
-  (worktree snapshot `725aa07`; WHITEPAPER drift). Nothing pushed.
+  **w3-1-memory-aware-buffer-pool landed and graded** (owner go:
+  "continue"). `BufferPool::for_data_plane`: formula + 64 KiB floor +
+  available/4 cap + 2-buffers-per-stream liveness floor (cap shrinks
+  buffers, never concurrency); 3 pasted sites replaced; elastic paths
+  authorize `ceiling_max_streams()` up front; sysinfo 1024× units bug
+  fixed. Codex: **PASS 0 findings**. 8 params pins mutation-verified.
+  Workspace 1452 → 1460/0/2. Nothing pushed.
