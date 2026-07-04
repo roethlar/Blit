@@ -75,11 +75,18 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    #[tokio::test]
+    // Paused virtual time (w4-1 codex review): the relocated test
+    // waited only 150ms real time against the task's 500ms natural
+    // completion, so it passed whether or not Drop aborted — vacuous
+    // since its pull.rs days. Under start_paused the auto-advancing
+    // clock deterministically runs a detached task's 500ms sleep
+    // BEFORE the test's 700ms wake, so a Drop impl that detaches
+    // instead of aborting now fails the assertion, with no wall-clock
+    // sensitivity.
+    #[tokio::test(start_paused = true)]
     async fn drop_without_consume_aborts_running_task() {
-        // The task tries to set the "completed" flag after a delay
-        // long enough that the test wouldn't naturally race past it.
-        // Wrapping in AbortOnDrop and dropping immediately must
+        // The task tries to set the "completed" flag after a delay;
+        // wrapping in AbortOnDrop and dropping immediately must
         // prevent the flag from ever being set.
         let completed = Arc::new(AtomicBool::new(false));
         let completed_in_task = Arc::clone(&completed);
@@ -93,10 +100,11 @@ mod tests {
         // mid-flight).
         drop(guard);
 
-        // Wait significantly longer than the task's natural
-        // duration. If abort actually happened, the task is dead
-        // and the flag never got set.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Wait past the task's natural completion point. If abort
+        // actually happened the task is dead and the flag never got
+        // set; if Drop detached instead, virtual time runs the task's
+        // 500ms sleep first and the flag IS set by now.
+        tokio::time::sleep(Duration::from_millis(700)).await;
         assert!(
             !completed.load(Ordering::SeqCst),
             "task ran to completion despite AbortOnDrop being dropped"
