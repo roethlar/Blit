@@ -1,11 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w6-1`, `w6-2`, and `w4-4` landed and
-graded through the codex loop — ProgressEvent contract in blit-core;
-§1.6 residue filed as w6-2a/-2b/-2c; **blocking filesystem work off
-the tokio runtime** in the push manifest loop + pull enumeration);
-local HEAD `768e7e3`+records, **not yet pushed** to either remote
-across these sessions.
+Last updated: 2026-07-04 (`w6-1`, `w6-2`, `w4-4`, and `design-3` all
+landed and graded through the codex loop in one session —
+ProgressEvent contract in blit-core; §1.6 residue filed as
+w6-2a/-2b/-2c; blocking filesystem work off the tokio runtime;
+**bounded data-plane dials**); local HEAD `49dcec6`+records, **not
+yet pushed** to either remote across these sessions.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -13,6 +13,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **design-3 DONE — bounded data-plane dials** (`49dcec6`; finding
+  `.review/findings/design-3-unbounded-data-plane-connects.md`, impl
+  record appended). Shared `socket::dial_data_plane`: connect bounded
+  by `DATA_PLANE_ACCEPT_TIMEOUT`, w1-2 policy, handshake write
+  bounded by `DATA_PLANE_TOKEN_TIMEOUT`; TimedOut in the chain →
+  `is_retryable` transient. Both client sites collapsed (pull
+  `connect_pull_stream` incl. resize-ADD; push `connect_with_probe`
+  incl. elastic). Was: kernel SYN-timeout hangs (60–127 s) on
+  black-holed ephemeral data ports. Codex: **PASS, 0 findings**. +3
+  tests (deterministic stalled-handshake shape pin,
+  mutation-verified); workspace 1476 → 1479/0/2.
 - **w4-4 DONE — blocking work off the runtime** (`0feca34`+fix
   `768e7e3`; finding
   `.review/findings/w4-4-blocking-work-off-runtime.md`). Push
@@ -77,17 +88,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Queue (ordered)
 
 1. **Design-review queue** — `REVIEW.md` order governs. w6-1,
-   design-1, w6-2, and w4-4 all closed `[x]` 2026-07-04 (see Now).
-   Strict row order now gives **w9-3** (test-harness builder, Medium
-   — `TestContext::builder()` consolidating 5 harness clones + 5
-   cli_bin copies, OnceLock daemon build, fake-server keepalive
+   design-1, w6-2, w4-4, and design-3 all closed `[x]` 2026-07-04
+   (see Now). Strict row order gives **w9-3** (test-harness builder,
+   Medium — `TestContext::builder()` consolidating 5 harness clones +
+   5 cli_bin copies, OnceLock daemon build, fake-server keepalive
    parity; also the home of the daemon-spawn e2e load-flakiness) as
-   the topmost ratified open row. Filed alternatives (pending-review
-   section, coder's pick): **w6-2a/-2b/-2c** (daemon progress residue
-   — independent slices, 2b→2a→2c smallest-first suggestion),
-   **design-3** (data-plane connect timeouts — two client connect
-   sites, bound imports the shared `DATA_PLANE_ACCEPT_TIMEOUT`), and
-   Low `relay-1-subpath-double-join`.
+   the topmost ratified open row — sized right for a fresh session.
+   Filed alternatives (pending-review section, coder's pick):
+   **w6-2a/-2b/-2c** (daemon progress residue — independent slices,
+   2b→2a→2c smallest-first suggestion) and Low
+   `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -160,38 +170,30 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (18th)** @ `49dcec6`+records —
+  **design-3-unbounded-data-plane-connects landed and graded** (same
+  session, fourth slice; coder's pick of the sanctioned smaller
+  alternative over the large w9-3). Shared `dial_data_plane`
+  (bounded connect + policy + bounded handshake write, TimedOut →
+  retryable); both client sites collapsed. Codex: **PASS 0
+  findings**. +3 tests, mutation-verified; workspace 1476 → 1479/0/2
+  across 37 suites, fmt/clippy clean (macOS host). Session closed
+  w6-1 (+design-1), w6-2 (filed w6-2a/b/c), w4-4, design-3.
+  In-flight: none. **Exact first action next session**: standing
+  "reviewloop" go → pick up **w9-3** (test-harness builder, topmost
+  ratified open row, sized for a fresh session; w6-2a/b/c + relay-1
+  are the filed coder's-pick alternatives) through the codex loop.
+  Nothing pushed — push stays owner-gated.
 - **2026-07-04 (17th)** @ `768e7e3`+records —
-  **w4-4-blocking-work-off-runtime landed and graded** (same session,
-  standing "reviewloop" go). Push manifest checks → chunked
-  spawn_blocking (order kept, spin-up post-drain, design-4 untouched,
-  F2 stays canonical); pull_sync enumeration fully off-runtime
-  (single-file --checksum hashed whole files inline before). Codex:
-  NEEDS FIXES 1 Medium (chunk-only draining muted the batcher's 5 ms
-  early-flush for trickling manifests) → chunk-or-delay
-  `manifest_drain_due`, fixed `768e7e3`. +4 tests mutation-verified;
-  workspace 1472 → 1476/0/2 across 37 suites, fmt/clippy clean (macOS
-  host). In-flight: none. **Exact first action next session**:
-  standing "reviewloop" go → pick up **w9-3** (test-harness builder,
-  topmost ratified open row; w6-2a/b/c + design-3 + relay-1 are the
-  filed coder's-pick alternatives) through the codex loop. Nothing
-  pushed — push stays owner-gated.
+  **w4-4-blocking-work-off-runtime landed and graded**. Push manifest
+  checks → chunked spawn_blocking (design-4 untouched, F2 canonical);
+  pull_sync enumeration fully off-runtime. Codex: NEEDS FIXES 1
+  Medium (chunk-only draining muted the 5 ms early-flush for
+  trickling manifests) → chunk-or-delay `manifest_drain_due`, fixed
+  `768e7e3`. +4 tests mutation-verified; 1472 → 1476/0/2. Nothing
+  pushed.
 - **2026-07-04 (16th)** @ `8b7829d`+records —
-  **w6-2-progress-residue-verify landed and graded** (same session as
-  w6-1; standing owner go). Verify-then-file per the ratified spec:
-  all three §1.6 claims CONFIRMED (BytesProgress zero production
-  producers; counters fed only by delegated dispatch; denominators
-  hardcoded 0), filed as independent rows w6-2a/-2b/-2c in the
-  pending-review section. Codex: NEEDS FIXES 2 Low (doc-coherence:
-  overstated "no code anywhere"; false 2b→2a dependency) → fixed
-  `8b7829d`. No code; suite stays 1472/0/2. In-flight: none. **Exact
-  first action next session**: standing "reviewloop" go → pick up
-  **w4-4** (blocking-work-off-runtime, topmost ratified open row;
-  w6-2a/b/c + design-3 are the filed coder's-pick alternatives)
-  through the codex loop. Nothing pushed — push stays owner-gated.
-- **2026-07-04 (15th)** @ `8fd8978`+records+docs —
-  **w6-1-progress-event-contract landed and graded** (owner go:
-  "continue. reviewloop with codex as each slice lands"). Contract on
-  the enum in blit-core (bytes ride Payload only; FileComplete
-  byteless; ProgressTotals shared fold); all producers normalized;
-  design-1 closed in the same round. Codex: **PASS 0 findings**. +12
-  tests, 2 mutation checks; 1460 → 1472/0/2. Nothing pushed.
+  **w6-2-progress-residue-verify landed and graded**. All three §1.6
+  claims CONFIRMED; filed as independent rows w6-2a/-2b/-2c. Codex:
+  NEEDS FIXES 2 Low (doc-coherence) → fixed `8b7829d`. No code;
+  suite stayed 1472/0/2. Nothing pushed.
