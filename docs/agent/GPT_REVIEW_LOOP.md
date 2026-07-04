@@ -21,6 +21,12 @@ the accepted ones, then moves to the next slice. There is no second
 human/agent in the loop and no async sentinel hand-off — `codex` is
 called inline and its output is read in the same session.
 
+**Codex is the only reviewer** (owner, 2026-07-04): do not add
+same-model self-review panels, Claude subagent reviewers, or any other
+substitute — the author's model grading its own work is what the
+Identity rule forbids and what codex exists to avoid. Claude's only
+grading role is adjudicating codex's findings against source.
+
 The owner is not a developer; per-slice code-quality sign-off is
 delegated to this loop plus the validation suite. Do **not** ask the
 owner whether the code "looks good" — that is theater (D-2026-06-20-6).
