@@ -29,7 +29,11 @@ use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use blit_core::remote::pull::{PullSyncError, RemotePullClient};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{transport::Server, Request, Response, Status, Streaming};
+// Fake servers start from the shared production-shaped builder
+// (blit_core::remote::grpc_server) so this wire-contract harness
+// carries the deployed HTTP/2 keepalive config (w9-3).
+use blit_core::remote::grpc_server::production_server_builder;
+use tonic::{Request, Response, Status, Streaming};
 
 /// Stub `Blit` impl that captures the first incoming
 /// `ClientPullMessage::Spec` and immediately ends the response stream
@@ -193,7 +197,7 @@ async fn spawn_spy_with_rejection(
             captured,
             reject_pull_sync,
         });
-        Server::builder()
+        production_server_builder()
             .add_service(svc)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
@@ -614,7 +618,7 @@ async fn spawn_canned_with_acks(
             frames,
             acks,
         });
-        Server::builder()
+        production_server_builder()
             .add_service(svc)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await

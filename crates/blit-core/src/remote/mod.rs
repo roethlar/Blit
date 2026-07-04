@@ -1,4 +1,5 @@
 pub mod endpoint;
+pub mod grpc_server;
 pub mod instrumentation;
 pub mod pull;
 pub mod push;
