@@ -43,9 +43,11 @@ pub(crate) fn dst_capabilities() -> PeerCapabilities {
         supports_tar_shards: true,
         supports_data_plane_tcp: true,
         supports_filter_spec: true,
-        // ue-r2-1b: stays false until ue-r2-2 implements resize on the
-        // delegated byte path.
-        supports_stream_resize: false,
+        // ue-r2-2: the delegated byte path IS `pull_sync_with_spec`,
+        // whose receive worker set is growable — the dst daemon (the
+        // byte receiver and dialer in delegation) advertises resize
+        // and inherits the whole client-side implementation.
+        supports_stream_resize: true,
     }
 }
 
@@ -670,11 +672,11 @@ mod tests {
             supports_tar_shards: false,
             supports_data_plane_tcp: false,
             supports_filter_spec: false,
-            // The CLI over-claims resize support; dst does not resize
-            // yet (ue-r2-1b), so the override must force this back to
-            // false — otherwise src could send resize frames dst can't
-            // handle.
-            supports_stream_resize: true,
+            // The CLI under-claims resize support; dst DOES resize
+            // (ue-r2-2), and dst — not the CLI — is the byte
+            // recipient, so the override must assert dst's own truth
+            // in both directions.
+            supports_stream_resize: false,
         };
         let spec_in = spec_with_caps(cli_caps);
         let spec_out = apply_dst_capabilities_override(spec_in);
@@ -687,7 +689,10 @@ mod tests {
         assert!(caps_out.supports_tar_shards);
         assert!(caps_out.supports_data_plane_tcp);
         assert!(caps_out.supports_filter_spec);
-        assert!(!caps_out.supports_stream_resize);
+        assert!(
+            caps_out.supports_stream_resize,
+            "ue-r2-2: dst advertises its real resize support"
+        );
     }
 
     #[test]

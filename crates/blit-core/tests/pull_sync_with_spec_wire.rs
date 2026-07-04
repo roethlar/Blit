@@ -450,10 +450,12 @@ async fn pull_sync_with_spec_classifies_initial_rpc_rejection_as_negotiation() {
 /// `Blit` impl that captures the pull_sync spec and then plays back a
 /// fixed frame script. Unlike `SpyServer` it never inspects the
 /// client's manifest phase — the relay sessions send an empty
-/// manifest and the script is unconditional.
+/// manifest and the script is unconditional. ue-r2-2: after the spec
+/// it keeps draining the client stream, capturing any resize acks.
 struct CannedFramesServer {
     captured: Arc<Mutex<Option<TransferOperationSpec>>>,
     frames: Vec<server_pull_message::Payload>,
+    acks: Arc<Mutex<Vec<blit_core::generated::DataPlaneResizeAck>>>,
 }
 
 #[tonic::async_trait]
@@ -475,6 +477,7 @@ impl Blit for CannedFramesServer {
         request: Request<Streaming<ClientPullMessage>>,
     ) -> Result<Response<Self::PullSyncStream>, Status> {
         let captured = Arc::clone(&self.captured);
+        let acks = Arc::clone(&self.acks);
         let frames = self.frames.clone();
         let mut stream = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -487,6 +490,17 @@ impl Blit for CannedFramesServer {
                     break;
                 }
             }
+            // ue-r2-2: keep the client stream drained so resize acks
+            // are observable by tests.
+            let ack_drain = tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    if let Some(client_pull_message::Payload::DataPlaneResizeAck(ack)) =
+                        msg.payload
+                    {
+                        acks.lock().await.push(ack);
+                    }
+                }
+            });
             for payload in frames {
                 if tx
                     .send(Ok(ServerPullMessage {
@@ -498,6 +512,10 @@ impl Blit for CannedFramesServer {
                     break;
                 }
             }
+            // Give the drain a beat to observe trailing acks, then
+            // stop (dropping tx above ends the client loop anyway).
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ack_drain.abort();
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -578,13 +596,25 @@ async fn spawn_canned(
     captured: Arc<Mutex<Option<TransferOperationSpec>>>,
     frames: Vec<server_pull_message::Payload>,
 ) -> u16 {
+    spawn_canned_with_acks(captured, frames, Arc::default()).await
+}
+
+async fn spawn_canned_with_acks(
+    captured: Arc<Mutex<Option<TransferOperationSpec>>>,
+    frames: Vec<server_pull_message::Payload>,
+    acks: Arc<Mutex<Vec<blit_core::generated::DataPlaneResizeAck>>>,
+) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
     let port = listener.local_addr().expect("local_addr").port();
 
     tokio::spawn(async move {
-        let svc = BlitServer::new(CannedFramesServer { captured, frames });
+        let svc = BlitServer::new(CannedFramesServer {
+            captured,
+            frames,
+            acks,
+        });
         Server::builder()
             .add_service(svc)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
@@ -880,4 +910,146 @@ async fn open_remote_file_rejects_second_file_header() {
         err.to_string().contains("second file_header"),
         "unexpected error: {err}"
     );
+}
+
+// ─── ue-r2-2: pull resize wire tests (client side) ───────────────────
+
+#[tokio::test]
+async fn pull_client_refuses_resize_on_a_session_that_never_negotiated_it() {
+    // A DataPlaneResize on a session whose negotiation did not set
+    // resize_enabled must be acked accepted:false (the old peer-bug
+    // posture, made observable) — and must not break the transfer.
+    let captured: Arc<Mutex<Option<TransferOperationSpec>>> = Arc::new(Mutex::new(None));
+    let acks: Arc<Mutex<Vec<blit_core::generated::DataPlaneResizeAck>>> = Arc::default();
+    let frames = vec![
+        server_pull_message::Payload::PullSyncAck(PullSyncAck {
+            server_checksums_enabled: true,
+        }),
+        server_pull_message::Payload::DataPlaneResize(blit_core::generated::DataPlaneResize {
+            op: blit_core::generated::DataPlaneResizeOp::Add as i32,
+            epoch: 9,
+            target_stream_count: 2,
+            sub_token: vec![7u8; 16],
+        }),
+        benign_summary(),
+    ];
+    let port = spawn_canned_with_acks(Arc::clone(&captured), frames, Arc::clone(&acks)).await;
+
+    let dest = tempfile::tempdir().expect("dest dir");
+    let endpoint = relay_endpoint(port);
+    let mut client = RemotePullClient::connect(endpoint)
+        .await
+        .expect("connect");
+    let mut spec = hand_built_spec();
+    spec.module = "relaymod".into();
+    spec.mirror_mode = blit_core::generated::MirrorMode::Off as i32;
+    spec.compare_mode = blit_core::generated::ComparisonMode::SizeMtime as i32;
+    let _ = client
+        .pull_sync_with_spec(dest.path(), Vec::new(), spec, false, None, None)
+        .await;
+
+    let mut tries = 0;
+    loop {
+        if !acks.lock().await.is_empty() {
+            break;
+        }
+        tries += 1;
+        assert!(tries < 100, "client never acked the resize command");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let acks = acks.lock().await;
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0].epoch, 9);
+    assert!(
+        !acks[0].accepted,
+        "resize on a non-negotiated session must be refused"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_client_dials_resize_add_with_the_epoch_credential_and_acks() {
+    // Full client-dialer pin against a real data-plane listener:
+    // epoch-0 socket presents token || epoch0_sub, the ADD is acked
+    // accepted:true, and the epoch-1 socket presents token || sub1.
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let token: Vec<u8> = (0u8..32).collect();
+    let sub0: Vec<u8> = vec![0xA0; 16];
+    let sub1: Vec<u8> = vec![0xB1; 16];
+
+    let data_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind data listener");
+    let data_port = data_listener.local_addr().expect("addr").port();
+
+    // Data-plane driver: verify both handshakes, then END both
+    // sockets so the client workers exit cleanly.
+    let expect0: Vec<u8> = token.iter().chain(sub0.iter()).copied().collect();
+    let expect1: Vec<u8> = token.iter().chain(sub1.iter()).copied().collect();
+    let driver = tokio::spawn(async move {
+        let (mut s0, _) = data_listener.accept().await.expect("epoch-0 accept");
+        let mut buf0 = vec![0u8; expect0.len()];
+        s0.read_exact(&mut buf0).await.expect("epoch-0 handshake");
+        assert_eq!(buf0, expect0, "epoch-0 socket carries token || epoch0_sub");
+
+        let (mut s1, _) = data_listener.accept().await.expect("epoch-1 accept");
+        let mut buf1 = vec![0u8; expect1.len()];
+        s1.read_exact(&mut buf1).await.expect("epoch-1 handshake");
+        assert_eq!(buf1, expect1, "epoch-1 socket carries token || add sub_token");
+
+        // END records terminate both receive workers normally.
+        s0.write_all(&[0xFF]).await.expect("end 0");
+        s1.write_all(&[0xFF]).await.expect("end 1");
+        s0.flush().await.ok();
+        s1.flush().await.ok();
+    });
+
+    let captured: Arc<Mutex<Option<TransferOperationSpec>>> = Arc::new(Mutex::new(None));
+    let acks: Arc<Mutex<Vec<blit_core::generated::DataPlaneResizeAck>>> = Arc::default();
+    let frames = vec![
+        server_pull_message::Payload::PullSyncAck(PullSyncAck {
+            server_checksums_enabled: true,
+        }),
+        server_pull_message::Payload::Negotiation(blit_core::generated::DataTransferNegotiation {
+            tcp_port: data_port as u32,
+            one_time_token: {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(&token)
+            },
+            tcp_fallback: false,
+            stream_count: 1,
+            receiver_capacity: None,
+            resize_enabled: true,
+            epoch0_sub_token: sub0.clone(),
+        }),
+        server_pull_message::Payload::DataPlaneResize(blit_core::generated::DataPlaneResize {
+            op: blit_core::generated::DataPlaneResizeOp::Add as i32,
+            epoch: 1,
+            target_stream_count: 2,
+            sub_token: sub1.clone(),
+        }),
+        benign_summary(),
+    ];
+    let port = spawn_canned_with_acks(Arc::clone(&captured), frames, Arc::clone(&acks)).await;
+
+    let dest = tempfile::tempdir().expect("dest dir");
+    let mut client = RemotePullClient::connect(relay_endpoint(port))
+        .await
+        .expect("connect");
+    let mut spec = hand_built_spec();
+    spec.module = "relaymod".into();
+    spec.mirror_mode = blit_core::generated::MirrorMode::Off as i32;
+    spec.compare_mode = blit_core::generated::ComparisonMode::SizeMtime as i32;
+    let report = client
+        .pull_sync_with_spec(dest.path(), Vec::new(), spec, false, None, None)
+        .await
+        .expect("pull completes cleanly across the resize");
+    assert!(report.summary.is_some(), "summary consumed");
+
+    driver.await.expect("both handshakes verified");
+    let acks = acks.lock().await;
+    assert_eq!(acks.len(), 1, "exactly one resize ack");
+    assert_eq!(acks[0].epoch, 1);
+    assert!(acks[0].accepted, "negotiated ADD within ceiling is accepted");
+    assert_eq!(acks[0].effective_stream_count, 2);
 }

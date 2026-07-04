@@ -17,9 +17,9 @@ use blit_core::engine::{initial_stream_proposal, TransferDial};
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{
     client_pull_message, server_pull_message, BlockHashRequest, BlockTransfer,
-    BlockTransferComplete, CapacityProfile, ClientPullMessage, ComparisonMode,
-    DataTransferNegotiation, FileHeader, FileList, ManifestBatch, MirrorMode, PullSummary,
-    PullSyncAck, ServerPullMessage, TransferOperationSpec,
+    BlockTransferComplete, CapacityProfile, ClientPullMessage, ComparisonMode, DataPlaneResize,
+    DataPlaneResizeOp, DataTransferNegotiation, FileHeader, FileList, ManifestBatch, MirrorMode,
+    PullSummary, PullSyncAck, ServerPullMessage, TransferOperationSpec,
 };
 use blit_core::manifest::{
     compare_manifests, files_needing_transfer, CompareMode, CompareOptions, FileStatus,
@@ -291,8 +291,9 @@ pub(crate) async fn handle_pull_sync_stream(
     // ue-r2-1e: the daemon is the byte SENDER on pull_sync — one dial
     // per transfer, conservative start, bounded by the client's
     // advertised receiver profile from the spec (None = old client →
-    // conservative defaults).
-    let dial = TransferDial::conservative_within(spec.receiver_capacity.as_ref());
+    // conservative defaults). Arc'd since ue-r2-2: the tuner and the
+    // resize controller share it.
+    let dial = TransferDial::conservative_within(spec.receiver_capacity.as_ref()).shared();
 
     if force_grpc {
         // gRPC fallback: stream via control plane (full files or blocks)
@@ -343,14 +344,22 @@ pub(crate) async fn handle_pull_sync_stream(
             spec.receiver_capacity.as_ref(),
             &dial,
         );
+        // ue-r2-2: resize gate, pull direction — the client (byte
+        // receiver AND dialer) advertised the capability bit in its
+        // spec, and this arm is by construction the live-TCP,
+        // non-resume path. The receiver profile is already folded
+        // into the dial's ceiling.
+        let resize_on = spec.capabilities.supports_stream_resize;
         let stats = stream_via_data_plane(
             &module,
             &root,
             entries_to_send,
             bytes_to_send,
             &tx,
+            &mut stream,
             &dial,
             stream_count,
+            resize_on,
         )
         .await?;
         send_summary(&tx, stats, false, scoped_deletions.len() as u64).await?;
@@ -647,11 +656,17 @@ async fn stream_via_data_plane(
     entries: Vec<PullEntry>,
     total_bytes: u64,
     tx: &PullSyncSender,
-    dial: &TransferDial,
+    stream: &mut Streaming<ClientPullMessage>,
+    dial: &Arc<TransferDial>,
     stream_count: u32,
+    resize_on: bool,
 ) -> Result<TransferStats, Status> {
+    use blit_core::engine::{spawn_dial_tuner_with_resize, SharedStreamProbes};
     use blit_core::remote::transfer::payload_file_count;
-    use blit_core::remote::transfer::pipeline::execute_sink_pipeline;
+    use blit_core::remote::transfer::pipeline::{
+        execute_sink_pipeline, execute_sink_pipeline_elastic, SinkControl,
+    };
+    use blit_core::remote::transfer::{generate_sub_token, SUB_TOKEN_LEN};
 
     // ue-r2-1e: dial-driven chunking (conservative start,
     // receiver-profile-bounded).
@@ -670,6 +685,13 @@ async fn stream_via_data_plane(
         .port();
     let token = generate_token()?;
     let token_string = general_purpose::STANDARD_NO_PAD.encode(&token);
+    // ue-r2-2: minted only when the client advertised resize — every
+    // epoch-0 socket must echo it after the one-time token.
+    let epoch0_sub = if resize_on {
+        generate_sub_token().map_err(|err| Status::internal(format!("{err:#}")))?
+    } else {
+        Vec::new()
+    };
 
     // Send negotiation. ue-r2-1g: stream_count is the engine's
     // shape-keyed, receiver-bounded proposal (negotiated_pull_streams);
@@ -681,14 +703,16 @@ async fn stream_via_data_plane(
                 one_time_token: token_string,
                 tcp_fallback: false,
                 stream_count,
-                // ue-r2-1b: wire shape only. On pull the CLIENT is the
-                // byte receiver, so the profile travels client→daemon in
+                // ue-r2-1b: on pull the CLIENT is the byte receiver, so
+                // the profile travels client→daemon in
                 // TransferOperationSpec.receiver_capacity — this field
-                // stays unset on pull negotiations. resize_enabled /
-                // epoch0_sub_token arrive with ue-r2-2.
+                // stays unset on pull negotiations.
                 receiver_capacity: None,
-                resize_enabled: false,
-                epoch0_sub_token: Vec::new(),
+                // ue-r2-2: the full fold — client capability bit
+                // (resize_on) AND own support AND this literal only
+                // exists on the live-TCP, non-resume path.
+                resize_enabled: resize_on,
+                epoch0_sub_token: epoch0_sub.clone(),
             },
         )),
     }))
@@ -703,26 +727,266 @@ async fn stream_via_data_plane(
 
     let file_count = payload_file_count(&planned.payloads);
 
+    // Shared buffer pool across all streams (hoisted out of
+    // accept_and_wrap_sinks at ue-r2-2 so an ADDed stream's session
+    // shares it; sizing unchanged — epoch-0 count, FIFO-fair
+    // semaphore, growth is the W3.1 memory-aware-pool row).
+    let streams = stream_count.max(1) as usize;
+    let buffer_size = dial.chunk_bytes().max(64 * 1024);
+    let pool_size = streams * 2 + 4;
+    let memory_budget = buffer_size * pool_size * 2;
+    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
+
     // ue-r2-1g: accept N token-authenticated connections and wrap each
     // as a DataPlaneSink (the multistream pattern harvested from the
     // Pull RPC deleted at ue-r2-1h). The shared pipeline's elastic
     // work-stealing queue distributes payloads across all streams.
+    let probes: Option<SharedStreamProbes> = if resize_on {
+        Some(Arc::new(std::sync::Mutex::new(Vec::new())))
+    } else {
+        None
+    };
     let sinks = accept_and_wrap_sinks(
         &listener,
         &token,
-        stream_count.max(1) as usize,
+        if resize_on {
+            Some(epoch0_sub.as_slice())
+        } else {
+            None
+        },
+        streams,
         dial.chunk_bytes(),
         dial.prefetch_count(),
         source_root,
+        Arc::clone(&pool),
+        probes.as_ref(),
     )
     .await?;
 
     let source: Arc<dyn TransferSource> =
         Arc::new(FsTransferSource::new(source_root.to_path_buf()));
 
-    execute_sink_pipeline(source, sinks, planned.payloads, dial.prefetch_count(), None)
-        .await
-        .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
+    if !resize_on {
+        execute_sink_pipeline(source, sinks, planned.payloads, dial.prefetch_count(), None)
+            .await
+            .map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
+        return Ok(TransferStats {
+            files_transferred: file_count as u64,
+            bytes_transferred: total_bytes,
+            bytes_zero_copy: 0,
+        });
+    }
+
+    // ── ue-r2-2: resize controller (the daemon is sender/controller
+    // on pull; the client dials). Owns the tuner's proposal stream,
+    // the client's acks on the request stream, and the listener for
+    // epoch-N sockets — armed for exactly one pending epoch at a time
+    // (the dial's one-in-flight rule), with a TTL so an abandoned dial
+    // lapses non-fatally. ──────────────────────────────────────────
+    let probes = probes.expect("probe registry exists when resize is on");
+    let (proposal_tx, mut proposal_rx) = tokio::sync::mpsc::unbounded_channel();
+    let tuner = spawn_dial_tuner_with_resize(dial, Arc::clone(&probes), Some(proposal_tx));
+    let (ctl_tx, ctl_rx) = tokio::sync::mpsc::unbounded_channel::<SinkControl>();
+    let prefetch = dial.prefetch_count().max(1);
+    let (payload_tx, payload_rx) = tokio::sync::mpsc::channel(prefetch);
+    let payloads = planned.payloads;
+    let feeder = tokio::spawn(async move {
+        for payload in payloads {
+            if payload_tx.send(payload).await.is_err() {
+                break;
+            }
+        }
+    });
+    let pipeline = execute_sink_pipeline_elastic(
+        Arc::clone(&source),
+        sinks,
+        payload_rx,
+        prefetch,
+        None,
+        Some(ctl_rx),
+    );
+    tokio::pin!(pipeline);
+
+    enum Pending {
+        /// Command sent; waiting for the client's ack.
+        AwaitingAck {
+            epoch: u32,
+            target: usize,
+            add: bool,
+            sub_token: Vec<u8>,
+        },
+        /// ADD acked; the accept is armed until `expires`.
+        AwaitingDial {
+            epoch: u32,
+            target: usize,
+            sub_token: Vec<u8>,
+            expires: tokio::time::Instant,
+        },
+    }
+    let mut pending: Option<Pending> = None;
+    let mut next_stream_id = streams as u32;
+    let mut client_gone = false;
+    let mut proposals_done = false;
+
+    let outcome = loop {
+        let dial_deadline = match &pending {
+            Some(Pending::AwaitingDial { expires, .. }) => Some(*expires),
+            _ => None,
+        };
+        tokio::select! {
+            res = &mut pipeline => break res,
+            proposal = proposal_rx.recv(), if pending.is_none() && !client_gone && !proposals_done => {
+                let Some(p) = proposal else {
+                    proposals_done = true;
+                    continue;
+                };
+                let (op, sub_token) = if p.add {
+                    match generate_sub_token() {
+                        Ok(sub) => (DataPlaneResizeOp::Add, sub),
+                        Err(err) => {
+                            log::warn!("pull resize ADD skipped (no credential source): {err:#}");
+                            dial.resize_settled(p.epoch, dial.live_streams(), false);
+                            continue;
+                        }
+                    }
+                } else {
+                    (DataPlaneResizeOp::Remove, Vec::new())
+                };
+                let sent = tx
+                    .send(Ok(ServerPullMessage {
+                        payload: Some(server_pull_message::Payload::DataPlaneResize(
+                            DataPlaneResize {
+                                op: op as i32,
+                                epoch: p.epoch,
+                                target_stream_count: p.target_streams as u32,
+                                sub_token: sub_token.clone(),
+                            },
+                        )),
+                    }))
+                    .await
+                    .is_ok();
+                if sent {
+                    pending = Some(Pending::AwaitingAck {
+                        epoch: p.epoch,
+                        target: p.target_streams,
+                        add: p.add,
+                        sub_token,
+                    });
+                } else {
+                    // Control stream gone — the transfer is ending.
+                    dial.resize_settled(p.epoch, dial.live_streams(), false);
+                }
+            }
+            msg = stream.message(), if !client_gone => match msg {
+                Ok(Some(frame)) => {
+                    if let Some(client_pull_message::Payload::DataPlaneResizeAck(ack)) =
+                        frame.payload
+                    {
+                        match pending.take() {
+                            Some(Pending::AwaitingAck { epoch, target, add, sub_token })
+                                if ack.epoch == epoch =>
+                            {
+                                if !ack.accepted {
+                                    dial.resize_settled(epoch, dial.live_streams(), false);
+                                } else if add {
+                                    // Client dials next; arm the accept.
+                                    pending = Some(Pending::AwaitingDial {
+                                        epoch,
+                                        target,
+                                        sub_token,
+                                        expires: tokio::time::Instant::now()
+                                            + PULL_ACCEPT_TIMEOUT,
+                                    });
+                                } else {
+                                    // REMOVE: retire one worker — its END
+                                    // record ends the client's worker.
+                                    {
+                                        let mut ps =
+                                            probes.lock().expect("probe registry poisoned");
+                                        if ps.len() > 1 {
+                                            ps.pop();
+                                        }
+                                    }
+                                    let _ = ctl_tx.send(SinkControl::RetireOne);
+                                    dial.resize_settled(epoch, target, true);
+                                }
+                            }
+                            other => {
+                                pending = other;
+                                log::debug!(
+                                    "pull: ignoring unsolicited/stale resize ack (epoch {})",
+                                    ack.epoch
+                                );
+                            }
+                        }
+                    }
+                    // Anything else on the request stream mid-transfer
+                    // was previously unread on this path; keep ignoring.
+                }
+                Ok(None) | Err(_) => client_gone = true,
+            },
+            accepted = listener.accept(), if dial_deadline.is_some() => match accepted {
+                Ok((socket, addr)) => {
+                    let Some(Pending::AwaitingDial { epoch, target, sub_token, expires }) =
+                        pending.take()
+                    else {
+                        unreachable!("accept arm gated on AwaitingDial");
+                    };
+                    match accept_one_resize_socket(
+                        socket,
+                        &token,
+                        &sub_token,
+                        dial,
+                        &source,
+                        source_root,
+                        Arc::clone(&pool),
+                        &probes,
+                        next_stream_id,
+                    )
+                    .await
+                    {
+                        Ok(sink) => {
+                            eprintln!(
+                                "blitd: pull data plane: resize epoch {} socket accepted from {}",
+                                epoch, addr
+                            );
+                            next_stream_id += 1;
+                            let _ = ctl_tx.send(SinkControl::Add(sink));
+                            dial.resize_settled(epoch, target, true);
+                        }
+                        Err(status) => {
+                            // A stray/hostile dial must not consume the
+                            // armed slot OR kill the transfer — keep
+                            // waiting for the real socket until the TTL.
+                            log::warn!(
+                                "pull data plane: dropping resize socket from {addr}: {status}"
+                            );
+                            pending = Some(Pending::AwaitingDial {
+                                epoch,
+                                target,
+                                sub_token,
+                                expires,
+                            });
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::warn!("pull data plane: resize accept failed: {err}");
+                }
+            },
+            _ = async {
+                tokio::time::sleep_until(dial_deadline.expect("gated")).await
+            }, if dial_deadline.is_some() => {
+                if let Some(Pending::AwaitingDial { epoch, .. }) = pending.take() {
+                    log::warn!("pull resize ADD epoch {epoch} expired unclaimed");
+                    dial.resize_settled(epoch, dial.live_streams(), false);
+                }
+            }
+        }
+    };
+    tuner.abort();
+    let _ = feeder.await;
+    outcome.map_err(|err| Status::internal(format!("pull sync data plane pipeline: {err:#}")))?;
 
     Ok(TransferStats {
         files_transferred: file_count as u64,
@@ -731,39 +995,103 @@ async fn stream_via_data_plane(
     })
 }
 
+/// ue-r2-2: validate and wrap ONE epoch-N pull socket: 48-byte
+/// handshake (one-time token ‖ this epoch's sub-token), then a
+/// LiveProbe session + sink registered with the tuner. Refusals are
+/// the caller's to treat as non-fatal (the armed slot stays).
+#[allow(clippy::too_many_arguments)]
+async fn accept_one_resize_socket(
+    mut socket: tokio::net::TcpStream,
+    expected_token: &[u8],
+    expected_sub: &[u8],
+    dial: &TransferDial,
+    source: &Arc<dyn TransferSource>,
+    source_root: &Path,
+    pool: Arc<BufferPool>,
+    probes: &blit_core::engine::SharedStreamProbes,
+    stream_id: u32,
+) -> Result<Arc<dyn TransferSink>, Status> {
+    use blit_core::remote::transfer::progress::{LiveProbe, StreamId, StreamProbe};
+
+    let mut buf = vec![0u8; expected_token.len() + expected_sub.len()];
+    match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            return Err(Status::internal(format!(
+                "failed to read pull resize token: {err}"
+            )));
+        }
+        Err(_elapsed) => {
+            return Err(Status::deadline_exceeded(format!(
+                "pull resize token read timed out after {:?}",
+                PULL_TOKEN_TIMEOUT
+            )));
+        }
+    }
+    let (token, sub) = buf.split_at(expected_token.len());
+    if token != expected_token || sub != expected_sub {
+        return Err(Status::unauthenticated("invalid data plane token"));
+    }
+
+    let probe = StreamProbe::new(StreamId(stream_id));
+    let tuner_view = StreamProbe::from_telemetry(probe.id(), probe.telemetry());
+    let session = DataPlaneSession::from_stream_with_probe(
+        socket,
+        false,
+        dial.chunk_bytes(),
+        dial.prefetch_count(),
+        pool,
+        LiveProbe(probe),
+    )
+    .await;
+    probes
+        .lock()
+        .expect("probe registry poisoned")
+        .push(tuner_view);
+    Ok(Arc::new(DataPlaneSink::new(
+        session,
+        Arc::clone(source),
+        source_root.to_path_buf(),
+    )))
+}
+
+// R47-F5 / R46-F7: bound the accept + token-read so a peer that
+// opened the control RPC but never opened the data socket(s)
+// can't pin this task (and the listener) indefinitely. Hoisted to
+// module scope at ue-r2-2 — the resize controller shares them.
+const PULL_ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PULL_TOKEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Accept N TCP connections, validate each token, wrap each in a
 /// `DataPlaneSink`. `source_root` is the enumeration root (module.path +
 /// requested subpath) — files are read relative to this via header.relative_path.
 ///
 /// ue-r2-1g: harvested verbatim from the deprecated Pull RPC — REV4
 /// required the multistream pattern to live in PullSync before
-/// `ue-r2-1h` deleted that RPC (which it since has, along with the
-/// borrow-back import that briefly pointed the old handlers here).
+/// `ue-r2-1h` deleted that RPC. ue-r2-2: when `epoch0_sub` is set the
+/// handshake is token ‖ sub-token (48 bytes) and each stream carries a
+/// LiveProbe registered in `probes` — the resize substrate. The pool
+/// is caller-owned so epoch-N sessions share it.
+#[allow(clippy::too_many_arguments)]
 async fn accept_and_wrap_sinks(
     listener: &TcpListener,
     expected_token: &[u8],
+    epoch0_sub: Option<&[u8]>,
     streams: usize,
     chunk_bytes: usize,
     payload_prefetch: usize,
     source_root: &Path,
+    pool: Arc<BufferPool>,
+    probes: Option<&blit_core::engine::SharedStreamProbes>,
 ) -> Result<Vec<Arc<dyn TransferSink>>, Status> {
+    use blit_core::remote::transfer::progress::{LiveProbe, StreamId, StreamProbe};
+
     let source: Arc<dyn blit_core::remote::transfer::source::TransferSource> =
         Arc::new(FsTransferSource::new(source_root.to_path_buf()));
 
-    // Shared buffer pool across all streams.
-    let buffer_size = chunk_bytes.max(64 * 1024);
-    let pool_size = streams * 2 + 4;
-    let memory_budget = buffer_size * pool_size * 2;
-    let pool = Arc::new(BufferPool::new(buffer_size, pool_size, Some(memory_budget)));
-
     let dst_root = source_root.to_path_buf();
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(streams);
-    // R47-F5 / R46-F7: bound the accept + token-read so a peer that
-    // opened the control RPC but never opened the data socket(s)
-    // can't pin this task (and the listener) indefinitely.
-    use std::time::Duration as StdDuration;
-    const PULL_ACCEPT_TIMEOUT: StdDuration = StdDuration::from_secs(30);
-    const PULL_TOKEN_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+    let suffix_len = epoch0_sub.map(<[u8]>::len).unwrap_or(0);
     for idx in 0..streams {
         let (mut socket, addr) =
             match tokio::time::timeout(PULL_ACCEPT_TIMEOUT, listener.accept()).await {
@@ -786,8 +1114,9 @@ async fn accept_and_wrap_sinks(
             idx, addr
         );
 
-        // Validate token before handing the socket to a sink.
-        let mut token_buf = vec![0u8; expected_token.len()];
+        // Validate token (and, under resize, the epoch-0 sub-token)
+        // before handing the socket to a sink.
+        let mut token_buf = vec![0u8; expected_token.len() + suffix_len];
         match tokio::time::timeout(PULL_TOKEN_TIMEOUT, socket.read_exact(&mut token_buf)).await {
             Ok(Ok(_)) => {}
             Ok(Err(err)) => {
@@ -802,7 +1131,8 @@ async fn accept_and_wrap_sinks(
                 )));
             }
         }
-        if token_buf != expected_token {
+        let (token_part, sub_part) = token_buf.split_at(expected_token.len());
+        if token_part != expected_token || epoch0_sub.is_some_and(|sub| sub_part != sub) {
             log::warn!("pull data plane: invalid token");
             // ue-r2-1g self-review F3: a bad token is a credentials
             // failure — UNAUTHENTICATED, matching what the pull_sync
@@ -813,20 +1143,35 @@ async fn accept_and_wrap_sinks(
             return Err(Status::unauthenticated("invalid data plane token"));
         }
 
-        let session = DataPlaneSession::from_stream(
-            socket,
-            false,
-            chunk_bytes,
-            payload_prefetch,
-            Arc::clone(&pool),
-        )
-        .await;
-
-        sinks.push(Arc::new(DataPlaneSink::new(
-            session,
-            source.clone(),
-            dst_root.clone(),
-        )));
+        let sink: Arc<dyn TransferSink> = if let Some(probes) = probes {
+            let probe = StreamProbe::new(StreamId(idx as u32));
+            let tuner_view = StreamProbe::from_telemetry(probe.id(), probe.telemetry());
+            let session = DataPlaneSession::from_stream_with_probe(
+                socket,
+                false,
+                chunk_bytes,
+                payload_prefetch,
+                Arc::clone(&pool),
+                LiveProbe(probe),
+            )
+            .await;
+            probes
+                .lock()
+                .expect("probe registry poisoned")
+                .push(tuner_view);
+            Arc::new(DataPlaneSink::new(session, source.clone(), dst_root.clone()))
+        } else {
+            let session = DataPlaneSession::from_stream(
+                socket,
+                false,
+                chunk_bytes,
+                payload_prefetch,
+                Arc::clone(&pool),
+            )
+            .await;
+            Arc::new(DataPlaneSink::new(session, source.clone(), dst_root.clone()))
+        };
+        sinks.push(sink);
     }
 
     Ok(sinks)

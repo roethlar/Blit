@@ -350,7 +350,10 @@ impl RemotePullClient {
         track_paths: bool,
         progress: Option<&RemotePullProgress>,
         byte_progress: Option<&ByteProgressSink>,
-    ) -> Result<JoinHandle<Result<DataPlaneResult>>> {
+    ) -> Result<(
+        JoinHandle<Result<DataPlaneResult>>,
+        Option<tokio::sync::mpsc::UnboundedSender<PullStreamAdd>>,
+    )> {
         if negotiation.tcp_port == 0 {
             bail!("server provided zero data-plane port for pull");
         }
@@ -366,7 +369,20 @@ impl RemotePullClient {
         let progress = progress.cloned();
         let byte_progress = byte_progress.cloned();
 
-        Ok(tokio::spawn(async move {
+        // ue-r2-2: the daemon negotiated resize — hand the control
+        // loop a growth channel into the receiver task, and make the
+        // epoch-0 sockets echo the sub-token. A malformed token
+        // length reads as "not enabled" (fail toward today's shape).
+        let resize_on = negotiation.resize_enabled
+            && negotiation.epoch0_sub_token.len() == crate::remote::transfer::SUB_TOKEN_LEN;
+        let (growth_tx, resize_arg) = if resize_on {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (Some(tx), Some((negotiation.epoch0_sub_token.clone(), rx)))
+        } else {
+            (None, None)
+        };
+
+        let handle = tokio::spawn(async move {
             receive_data_plane_streams_owned(
                 host,
                 port,
@@ -376,9 +392,11 @@ impl RemotePullClient {
                 track_paths,
                 progress,
                 byte_progress,
+                resize_arg,
             )
             .await
-        }))
+        });
+        Ok((handle, growth_tx))
     }
     /// Enumerate the remote subtree's file headers without moving
     /// bytes. Rides a metadata-only PullSync session — ue-r2-1h's port
@@ -689,6 +707,10 @@ impl RemotePullClient {
         // outer-future drop cancels the spawned TCP receiver instead
         // of detaching it.
         let mut data_plane_handle: Option<AbortOnDrop<Result<DataPlaneResult>>> = None;
+        // ue-r2-2: ADD commands travel through here into the receiver
+        // task (present only when the negotiation enabled resize).
+        let mut data_plane_growth: Option<tokio::sync::mpsc::UnboundedSender<PullStreamAdd>> =
+            None;
         let mut files_to_delete = 0u64;
         let mut negotiation_complete = false;
 
@@ -873,13 +895,15 @@ impl RemotePullClient {
                     if neg.tcp_fallback {
                         continue;
                     }
-                    data_plane_handle = Some(AbortOnDrop::new(self.spawn_data_plane_receiver(
+                    let (handle, growth) = self.spawn_data_plane_receiver(
                         neg,
                         dest_root,
                         track_paths,
                         progress,
                         byte_progress,
-                    )?));
+                    )?;
+                    data_plane_handle = Some(AbortOnDrop::new(handle));
+                    data_plane_growth = growth;
                 }
                 Some(server_pull_message::Payload::Summary(summary)) => {
                     files_to_delete = summary.entries_deleted;
@@ -1013,12 +1037,57 @@ impl RemotePullClient {
                     }
                     report.files_transferred += 1;
                 }
-                Some(server_pull_message::Payload::DataPlaneResize(_)) => {
-                    // ue-r2-1b: wire shape only — resize is never
-                    // negotiated yet (resize_enabled stays false until
-                    // ue-r2-2 wires the controller), so a command here is
-                    // a peer bug. Ignore it exactly as an old binary
-                    // would (unknown payload decodes to the None arm).
+                Some(server_pull_message::Payload::DataPlaneResize(cmd)) => {
+                    // ue-r2-2: the daemon (sender/controller on pull)
+                    // wants to resize the stream set. ADD: forward the
+                    // credential to the receiver task, which dials one
+                    // more socket; REMOVE: passive — after this ack the
+                    // daemon retires a sink whose END record ends one
+                    // of our workers. The target is clamped to the
+                    // ceiling this client itself advertises (the weak
+                    // end protects itself receive-side too); a command
+                    // on a session that never negotiated resize is
+                    // refused, preserving the old peer-bug posture.
+                    let op = crate::generated::DataPlaneResizeOp::try_from(cmd.op)
+                        .unwrap_or(crate::generated::DataPlaneResizeOp::Unspecified);
+                    let within_ceiling = bounded_stream_count(cmd.target_stream_count)
+                        == cmd.target_stream_count.max(1) as usize;
+                    let accepted = match op {
+                        crate::generated::DataPlaneResizeOp::Add => {
+                            within_ceiling
+                                && cmd.sub_token.len() == crate::remote::transfer::SUB_TOKEN_LEN
+                                && data_plane_growth.as_ref().is_some_and(|growth| {
+                                    growth
+                                        .send(PullStreamAdd {
+                                            sub_token: cmd.sub_token.clone(),
+                                        })
+                                        .is_ok()
+                                })
+                        }
+                        crate::generated::DataPlaneResizeOp::Remove => {
+                            data_plane_growth.is_some()
+                        }
+                        _ => false,
+                    };
+                    if !accepted {
+                        log::warn!(
+                            "pull: refusing DataPlaneResize (op {}, epoch {}, target {})",
+                            cmd.op,
+                            cmd.epoch,
+                            cmd.target_stream_count
+                        );
+                    }
+                    tx.send(ClientPullMessage {
+                        payload: Some(client_pull_message::Payload::DataPlaneResizeAck(
+                            crate::generated::DataPlaneResizeAck {
+                                epoch: cmd.epoch,
+                                effective_stream_count: cmd.target_stream_count,
+                                accepted,
+                            },
+                        )),
+                    })
+                    .await
+                    .map_err(|_| eyre!("failed to send resize ack"))?;
                 }
                 None => {}
             }
@@ -1601,8 +1670,16 @@ fn bounded_stream_count(negotiated: u32) -> usize {
     (negotiated.max(1) as usize).min(ceiling)
 }
 
+/// ue-r2-2: one ADD command forwarded from the control loop to the
+/// receiver task — dial one more data socket presenting
+/// `one_time_token ‖ sub_token`.
+pub(crate) struct PullStreamAdd {
+    pub(crate) sub_token: Vec<u8>,
+}
+
 /// Owned-value version for spawning data plane receiver as background task. for spawning as background task.
 /// This allows the control plane to continue processing ManifestBatch messages.
+#[allow(clippy::too_many_arguments)]
 async fn receive_data_plane_streams_owned(
     host: String,
     port: u32,
@@ -1612,6 +1689,13 @@ async fn receive_data_plane_streams_owned(
     track_paths: bool,
     progress: Option<RemotePullProgress>,
     byte_progress: Option<ByteProgressSink>,
+    // ue-r2-2: `Some((epoch0_sub_token, growth))` when the negotiation
+    // enabled resize. Forces the growable shape even at one epoch-0
+    // stream (a resize can widen it later).
+    resize: Option<(
+        Vec<u8>,
+        tokio::sync::mpsc::UnboundedReceiver<PullStreamAdd>,
+    )>,
 ) -> Result<DataPlaneResult> {
     let mut result = DataPlaneResult {
         files_transferred: 0,
@@ -1619,12 +1703,11 @@ async fn receive_data_plane_streams_owned(
         downloaded_paths: Vec::new(),
     };
 
-    if stream_count <= 1 {
+    if stream_count <= 1 && resize.is_none() {
         let mut stats = PullWorkerStats::new();
-        receive_data_plane_stream_inner(
-            &host,
-            port,
-            &token,
+        let stream = connect_pull_stream(&host, port, &token).await?;
+        receive_on_pull_stream(
+            stream,
             &dest_root,
             track_paths,
             progress.as_ref(),
@@ -1640,87 +1723,171 @@ async fn receive_data_plane_streams_owned(
         return Ok(result);
     }
 
-    let token = Arc::new(token);
+    let (epoch0_sub, mut growth_rx) = match resize {
+        Some((sub, rx)) => (Some(sub), Some(rx)),
+        None => (None, None),
+    };
+    // Epoch-0 handshake: token ‖ epoch0_sub_token under resize, the
+    // bare token otherwise (raw byte write — concatenation IS the
+    // suffix contract).
+    let handshake: Arc<Vec<u8>> = Arc::new(match &epoch0_sub {
+        Some(sub) => {
+            let mut h = token.clone();
+            h.extend_from_slice(sub);
+            h
+        }
+        None => token.clone(),
+    });
 
-    // R32-F2: each parallel data-plane worker is wrapped in
-    // AbortOnDrop so cancellation of the surrounding future cascades
-    // through the whole worker pool. Without this, dropping the
-    // outer JoinHandle would detach this function, which in turn
-    // would detach the per-stream workers — leaving N TCP receivers
-    // running with no observable cancellation.
-    let mut handles: Vec<AbortOnDrop<Result<PullWorkerStats>>> = Vec::with_capacity(stream_count);
-    for _ in 0..stream_count {
-        let host_clone = host.clone();
-        let token_clone = Arc::clone(&token);
-        let dest_root_clone = dest_root.clone();
-        let progress_clone = progress.clone();
-        // Each parallel worker reports against the SAME atomic —
-        // clones share the Arc inside `ByteProgressSink`. N
-        // workers running concurrently produce N×bigger reported
-        // numbers per snapshot, which is exactly correct: total
-        // bytes landed across all streams.
-        let byte_progress_clone = byte_progress.clone();
-        handles.push(AbortOnDrop::new(tokio::spawn(async move {
+    // R32-F2, restated for the ue-r2-2 shape: the fixed per-worker
+    // AbortOnDrop set became a JoinSet, which aborts every remaining
+    // worker when dropped — the same cancellation cascade, now also
+    // covering workers added by a mid-transfer resize. Fail-whole is
+    // unchanged: the first worker error returns (dropping the set).
+    let mut join_set: tokio::task::JoinSet<Result<PullWorkerStats>> = tokio::task::JoinSet::new();
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_pull_worker(
+        join_set: &mut tokio::task::JoinSet<Result<PullWorkerStats>>,
+        host: String,
+        port: u32,
+        handshake: Arc<Vec<u8>>,
+        dest_root: PathBuf,
+        track_paths: bool,
+        progress: Option<RemotePullProgress>,
+        byte_progress: Option<ByteProgressSink>,
+        // ue-r2-2: an ADDed stream is an optional capacity bump — a
+        // failed DIAL logs and contributes nothing rather than killing
+        // a healthy transfer (the daemon's armed slot expires and
+        // settles the epoch as refused). Errors after the socket is
+        // live stay fatal on every stream: that is mid-transfer data
+        // loss.
+        dial_is_optional: bool,
+    ) {
+        join_set.spawn(async move {
             let mut stats = PullWorkerStats::new();
-            receive_data_plane_stream_inner(
-                &host_clone,
-                port,
-                &token_clone,
-                &dest_root_clone,
+            let stream = match connect_pull_stream(&host, port, &handshake).await {
+                Ok(stream) => stream,
+                Err(err) if dial_is_optional => {
+                    log::warn!(
+                        "pull resize stream dial failed; continuing at the current width: {err:#}"
+                    );
+                    return Ok(stats);
+                }
+                Err(err) => return Err(err),
+            };
+            receive_on_pull_stream(
+                stream,
+                &dest_root,
                 track_paths,
-                progress_clone.as_ref(),
-                byte_progress_clone.as_ref(),
+                progress.as_ref(),
+                byte_progress.as_ref(),
                 &mut stats,
             )
             .await?;
-            Ok::<_, eyre::Report>(stats)
-        })));
+            Ok(stats)
+        });
     }
 
-    for handle in handles {
-        let stats = handle
-            .join()
-            .await
-            .map_err(|err| eyre!(format!("pull data-plane worker panicked: {}", err)))??;
-        result.files_transferred = result
-            .files_transferred
-            .saturating_add(stats.files_transferred as usize);
-        result.bytes_transferred = result
-            .bytes_transferred
-            .saturating_add(stats.bytes_transferred);
-        if track_paths {
-            result.downloaded_paths.extend(stats.downloaded_paths);
-        }
-        let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
-        let gbps = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
-        eprintln!(
-            "[pull-data-plane] stream {:.2} Gbps ({} bytes in {:.2}s)",
-            gbps, stats.bytes, elapsed
+    for _ in 0..stream_count.max(1) {
+        spawn_pull_worker(
+            &mut join_set,
+            host.clone(),
+            port,
+            Arc::clone(&handshake),
+            dest_root.clone(),
+            track_paths,
+            progress.clone(),
+            // Each parallel worker reports against the SAME atomic —
+            // clones share the Arc inside `ByteProgressSink`. N
+            // workers running concurrently produce N×bigger reported
+            // numbers per snapshot, which is exactly correct: total
+            // bytes landed across all streams.
+            byte_progress.clone(),
+            false,
         );
+    }
+
+    loop {
+        let growth = async {
+            match growth_rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            joined = join_set.join_next() => match joined {
+                None => break,
+                Some(Ok(Ok(stats))) => {
+                    result.files_transferred = result
+                        .files_transferred
+                        .saturating_add(stats.files_transferred as usize);
+                    result.bytes_transferred = result
+                        .bytes_transferred
+                        .saturating_add(stats.bytes_transferred);
+                    if track_paths {
+                        result.downloaded_paths.extend(stats.downloaded_paths);
+                    }
+                    let elapsed = stats.start.elapsed().as_secs_f64().max(1e-6);
+                    let gbps = (stats.bytes as f64 * 8.0) / elapsed / 1e9;
+                    eprintln!(
+                        "[pull-data-plane] stream {:.2} Gbps ({} bytes in {:.2}s)",
+                        gbps, stats.bytes, elapsed
+                    );
+                }
+                Some(Ok(Err(err))) => return Err(err),
+                Some(Err(join)) => {
+                    return Err(eyre!(format!("pull data-plane worker panicked: {}", join)));
+                }
+            },
+            add = growth => match add {
+                Some(cmd) => {
+                    let mut epoch_handshake = token.clone();
+                    epoch_handshake.extend_from_slice(&cmd.sub_token);
+                    spawn_pull_worker(
+                        &mut join_set,
+                        host.clone(),
+                        port,
+                        Arc::new(epoch_handshake),
+                        dest_root.clone(),
+                        track_paths,
+                        progress.clone(),
+                        byte_progress.clone(),
+                        true,
+                    );
+                }
+                None => growth_rx = None,
+            },
+        }
     }
 
     Ok(result)
 }
 
-async fn receive_data_plane_stream_inner(
-    host: &str,
-    port: u32,
-    token: &[u8],
+/// Dial the pull data plane and present the handshake bytes
+/// (`one_time_token`, plus the resize sub-token suffix when
+/// negotiated). Split from the receive half at ue-r2-2 so an ADDed
+/// stream can treat dial failure as non-fatal.
+async fn connect_pull_stream(host: &str, port: u32, handshake: &[u8]) -> Result<TcpStream> {
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(addr.clone())
+        .await
+        .with_context(|| format!("connecting pull data plane {}", addr))?;
+    stream
+        .write_all(handshake)
+        .await
+        .context("writing pull data-plane token")?;
+    Ok(stream)
+}
+
+async fn receive_on_pull_stream(
+    stream: TcpStream,
     dest_root: &Path,
     track_paths: bool,
     progress: Option<&RemotePullProgress>,
     byte_progress: Option<&ByteProgressSink>,
     stats: &mut PullWorkerStats,
 ) -> Result<()> {
-    let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect(addr.clone())
-        .await
-        .with_context(|| format!("connecting pull data plane {}", addr))?;
-    stream
-        .write_all(token)
-        .await
-        .context("writing pull data-plane token")?;
-
     // Route the inbound wire through the unified receive pipeline.
     // Builds an FsTransferSink rooted at the destination, optionally
     // tracking written paths for mirror's purge phase, and lets
@@ -2037,6 +2204,7 @@ mod multi_stream_receive_tests {
                 false,
                 None,
                 None,
+                None,
             ),
         )
         .await
@@ -2106,6 +2274,7 @@ mod multi_stream_receive_tests {
             false,
             None,
             None,
+            None,
         )));
 
         // Both workers connected + authenticated → mid-transfer state.
@@ -2153,6 +2322,7 @@ mod multi_stream_receive_tests {
                 2,
                 dest.path().to_path_buf(),
                 false,
+                None,
                 None,
                 None,
             ),
