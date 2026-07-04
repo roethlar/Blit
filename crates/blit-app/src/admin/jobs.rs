@@ -42,9 +42,12 @@ pub enum CancelJobOutcome {
     Cancelled { transfer_id: String },
     /// No active transfer matched the requested id.
     NotFound { transfer_id: String },
-    /// The transfer exists but its kind doesn't honor
-    /// cancellation from another client (push / pull /
-    /// pull_sync — CLI is in the byte path).
+    /// The transfer exists but its kind's dispatch policy gates
+    /// `CancelJob` off. Since D-2026-07-04-3 flipped push and
+    /// pull_sync on, only the daemon's history-only `Pull` kind is
+    /// gated — no active row of that kind can exist, so this arm
+    /// is kept for contract completeness, not as an expected
+    /// outcome.
     Unsupported {
         transfer_id: String,
         message: String,

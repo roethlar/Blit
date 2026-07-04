@@ -153,20 +153,22 @@ impl ActiveJobKind {
     }
 
     /// Whether `CancelJob` dispatch fires this kind's cancellation
-    /// token. Only `DelegatedPull` today. This is **policy**, not
-    /// handler capability: since w4-3 the push / pull_sync
-    /// dispatchers race their handler against both `tx.closed()`
-    /// (client hangup — this comment used to claim that race
-    /// existed before it actually did) and the row token, so a
-    /// disconnected client's transfer is torn down promptly and
-    /// flipping this bit for those kinds is all a future
-    /// CancelJob-for-attached-transfers decision would need. The
-    /// policy stands because those kinds keep the originating CLI
-    /// in the byte path — disconnecting IS the client-side cancel.
-    /// (`Pull` rows are history-only; the Pull RPC was deleted in
-    /// ue-r2-1h.)
+    /// token. Every kind that can hold an active row — Push,
+    /// PullSync, and DelegatedPull (D-2026-07-04-3). This is
+    /// **policy**, not handler capability: all three dispatchers
+    /// race their handler against the row token (w4-3 wired the
+    /// streaming pair), so a fired token tears the transfer down
+    /// promptly and a still-connected client gets a terminal
+    /// `Status::cancelled`. The earlier DelegatedPull-only policy
+    /// ("the CLI is in the byte path — disconnecting IS the
+    /// cancel") predates that wiring; cancel-from-anywhere (a
+    /// second terminal, the TUI) is strictly more operable than
+    /// find-and-kill-the-client, so the owner flipped it. `Pull`
+    /// stays gated off: the Pull RPC was deleted in ue-r2-1h, rows
+    /// of that kind survive only in recents-history rehydration,
+    /// and no active `Pull` row can exist to cancel.
     pub fn supports_cancellation(self) -> bool {
-        matches!(self, ActiveJobKind::DelegatedPull)
+        !matches!(self, ActiveJobKind::Pull)
     }
 }
 
@@ -177,9 +179,11 @@ impl ActiveJobKind {
 /// - `Cancelled` → `Code::Ok` with a body acknowledging the
 ///   cancel was fired.
 /// - `Unsupported` → `Code::FailedPrecondition` — CancelJob
-///   dispatch policy gates the kind off (push / pull_sync: the
-///   CLI is in the byte path, and disconnecting it is the
-///   cancel — honored by the dispatchers' w4-3 hangup race).
+///   dispatch policy gates the kind off. Since D-2026-07-04-3
+///   flipped push/pull_sync on, only the history-only `Pull`
+///   kind is gated, and no active `Pull` row can exist — the
+///   variant survives as the policy's escape hatch and for
+///   test shape, not as a reachable production outcome.
 /// - `NotFound` → `Code::NotFound` — no active row matches
 ///   the requested transfer_id.
 /// - `Unauthorized` → `Code::PermissionDenied` — the caller is not
@@ -1796,6 +1800,22 @@ mod tests {
             table.cancel_authorized("no-such-id", Some(attacker)),
             CancelOutcome::NotFound
         );
+        let pull = table.register(
+            ActiveJobKind::Pull,
+            "10.0.0.1:5000".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let pull_id = pull.transfer_id().to_string();
+        assert_eq!(
+            table.cancel_authorized(&pull_id, Some(attacker)),
+            CancelOutcome::Unsupported,
+            "non-cancellable kinds report Unsupported before the authz check"
+        );
+
+        // The kinds D-2026-07-04-3 flipped on go through authz like
+        // DelegatedPull always has: a different-host caller is denied,
+        // not told "unsupported".
         let push = table.register(
             ActiveJobKind::Push,
             "10.0.0.1:5000".to_string(),
@@ -1805,42 +1825,57 @@ mod tests {
         let push_id = push.transfer_id().to_string();
         assert_eq!(
             table.cancel_authorized(&push_id, Some(attacker)),
-            CancelOutcome::Unsupported,
-            "non-cancellable kinds report Unsupported before the authz check"
+            CancelOutcome::Unauthorized,
+            "cancellable kinds hit the authz check, not the policy gate"
         );
     }
 
     #[tokio::test]
-    async fn cancel_returns_unsupported_for_non_delegated_kinds() {
-        // Since w4-3 the push / pull_sync dispatchers DO race the
-        // row token (see `supports_cancellation`'s rustdoc), but
-        // CancelJob dispatch policy still gates those kinds off:
-        // `cancel` must surface that as `Unsupported` rather than
-        // firing the token and reporting `Cancelled`. (`Pull` is
-        // exercised for shape even though the RPC is deleted —
-        // rows of that kind survive only in recents history.)
+    async fn cancel_fires_token_for_push_and_pull_sync() {
+        // D-2026-07-04-3 flipped CancelJob dispatch on for the
+        // streaming kinds: `cancel` must fire the row token (which
+        // the w4-3 dispatcher race honors) and report `Cancelled`.
         let table = ActiveJobs::new();
-        for kind in [
-            ActiveJobKind::Push,
-            ActiveJobKind::Pull,
-            ActiveJobKind::PullSync,
-        ] {
+        for kind in [ActiveJobKind::Push, ActiveJobKind::PullSync] {
             let guard = table.register(kind, "p".to_string(), "m".to_string(), "/".to_string());
             let id = guard.transfer_id().to_string();
             let token = guard.cancellation_token().clone();
             assert_eq!(
                 table.cancel(&id),
-                CancelOutcome::Unsupported,
-                "{} should not be cancellable today",
+                CancelOutcome::Cancelled,
+                "{} must be cancellable since D-2026-07-04-3",
                 kind.as_str()
             );
             assert!(
-                !token.is_cancelled(),
-                "{}: token must NOT have been fired for an unsupported kind",
+                token.is_cancelled(),
+                "{}: cancel must fire the row token",
                 kind.as_str()
             );
             drop(guard);
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_returns_unsupported_for_history_only_pull() {
+        // `Pull` is the one kind still gated off (the Pull RPC was
+        // deleted in ue-r2-1h; rows of that kind survive only in
+        // recents history, so no active row exists in production).
+        // `cancel` must surface the policy gate as `Unsupported`
+        // rather than firing a token no handler races.
+        let table = ActiveJobs::new();
+        let guard = table.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "m".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        let token = guard.cancellation_token().clone();
+        assert_eq!(table.cancel(&id), CancelOutcome::Unsupported);
+        assert!(
+            !token.is_cancelled(),
+            "token must NOT have been fired for an unsupported kind"
+        );
     }
 
     #[tokio::test]
@@ -1897,9 +1932,11 @@ mod tests {
 
     #[test]
     fn supports_cancellation_matches_dispatch_policy() {
-        assert!(!ActiveJobKind::Push.supports_cancellation());
+        // D-2026-07-04-3: every kind that can hold an active row is
+        // cancellable; only history-only Pull stays gated off.
+        assert!(ActiveJobKind::Push.supports_cancellation());
         assert!(!ActiveJobKind::Pull.supports_cancellation());
-        assert!(!ActiveJobKind::PullSync.supports_cancellation());
+        assert!(ActiveJobKind::PullSync.supports_cancellation());
         assert!(ActiveJobKind::DelegatedPull.supports_cancellation());
     }
 

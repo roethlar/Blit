@@ -62,12 +62,12 @@ service Blit {
   rpc GetState(GetStateRequest) returns (DaemonState);
 
   // Cancel a daemon-side in-flight transfer by transfer_id.
-  // M-Jobs of docs/plan/TUI_DESIGN.md §6.5. Only delegated
-  // remote→remote pulls support cancellation today —
-  // push / pull_sync have the CLI in the byte path,
-  // so a client-side cancel already drops the handler future
-  // and `CancelJob` from another client wouldn't have a
-  // meaningful semantic.
+  // M-Jobs of docs/plan/TUI_DESIGN.md §6.5. Every kind that can
+  // hold an active row — push, pull_sync, and delegated pull —
+  // supports cancellation (D-2026-07-04-3): the daemon fires the
+  // row's cancellation token and the dispatcher races it, so an
+  // attached transfer tears down promptly and its still-connected
+  // client receives a terminal CANCELLED status.
   //
   // Status semantics:
   //   OK                    → the cancellation token was fired;
@@ -76,8 +76,13 @@ service Blit {
   //   NOT_FOUND             → no active transfer matches the
   //                           requested transfer_id (already
   //                           completed, or never existed).
-  //   FAILED_PRECONDITION   → the transfer exists but its kind
-  //                           doesn't honor cancellation today.
+  //   FAILED_PRECONDITION   → the transfer exists but its kind's
+  //                           dispatch policy gates cancellation
+  //                           off. Only the history-only pull kind
+  //                           (RPC deleted) is gated, and no active
+  //                           row of that kind can exist — a
+  //                           contract escape hatch, not an
+  //                           expected outcome.
   rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
 
   // Clear the daemon's recent-transfers list (GetState.recent[]).

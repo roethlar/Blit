@@ -5,7 +5,10 @@
 //! contract (`docs/plan/TUI_DESIGN.md` §6.5: 0 cancelled / 1 not
 //! found / 2 unsupported) — previously ran in zero tests; coverage
 //! stopped at formatting/exit-code unit tests in `jobs.rs`. This file
-//! is the regression net W4 needs before changing cancellation.
+//! is the regression net W4 needed before changing cancellation
+//! (that change has since landed: D-2026-07-04-3 / w4-5 flipped
+//! CancelJob dispatch on for attached push/pull_sync, so exit 2 no
+//! longer occurs for those kinds; the 0/1/2 mapping is unchanged).
 //!
 //! Watch exit codes (see `run_jobs_watch`): 0 finished-ok,
 //! 1 finished-failed, 2 not-found, 3 timeout-while-active.

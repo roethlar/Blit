@@ -1074,8 +1074,7 @@ impl Blit for BlitService {
                 transfer_id: req.transfer_id,
             })),
             CancelOutcome::Unsupported => Err(Status::failed_precondition(format!(
-                "transfer '{}' is not cancellable from another client (CLI is in the byte path; \
-                 cancel from the originating client instead)",
+                "transfer '{}' has a kind whose dispatch policy does not support cancellation",
                 req.transfer_id
             ))),
             CancelOutcome::NotFound => Err(Status::not_found(format!(
@@ -1315,11 +1314,11 @@ where
 /// - client hung up → `(false, "client cancelled")`; nothing is sent —
 ///   the receiver is gone, that's what ended the race.
 /// - cancel token fired → `(false, "cancelled via CancelJob")`, and the
-///   still-connected client gets a terminal `Status::cancelled`. Today
-///   `ActiveJobKind::supports_cancellation` keeps `CancelJob` dispatch
-///   gated off for push/pull_sync, so this arm is armed but
-///   production-unreachable until that policy flips — wired per the
-///   w4-3 slice spec so a future flip is policy-only.
+///   still-connected client gets a terminal `Status::cancelled`. This
+///   arm is live in production: D-2026-07-04-3 flipped
+///   `ActiveJobKind::supports_cancellation` on for push/pull_sync, so
+///   `blit jobs cancel` (and the TUI `K`/`Shift+X`) reaches it for
+///   attached transfers.
 async fn resolve_streaming_outcome<T, H>(
     handler: H,
     tx: &mpsc::Sender<Result<T, Status>>,
@@ -1457,9 +1456,8 @@ mod tests {
     /// w4-3: a fired row token must resolve a still-running streaming
     /// handler as `(false, "cancelled via CancelJob")` and deliver a
     /// terminal `Status::cancelled` to the still-connected client.
-    /// (Production dispatch keeps `CancelJob` gated off for
-    /// push/pull_sync via `supports_cancellation`; this pins the
-    /// handler-side capability so a future policy flip is policy-only.)
+    /// (Production dispatch reaches this arm since D-2026-07-04-3
+    /// flipped `supports_cancellation` on for push/pull_sync.)
     #[tokio::test]
     async fn streaming_canceljob_resolves_pending_handler_and_notifies_client() {
         use std::future::pending;
@@ -1693,33 +1691,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_job_failed_precondition_for_non_delegated_kind() {
+    async fn cancel_job_ok_for_push_and_pull_sync() {
+        // D-2026-07-04-3: CancelJob dispatch fires the row token for
+        // the streaming kinds too — the RPC succeeds and echoes the
+        // id, exactly like the delegated_pull case above.
         let svc = empty_service();
-        for kind in [
-            ActiveJobKind::Push,
-            ActiveJobKind::Pull,
-            ActiveJobKind::PullSync,
-        ] {
+        for kind in [ActiveJobKind::Push, ActiveJobKind::PullSync] {
             let guard =
                 svc.active_jobs
                     .register(kind, "p".to_string(), "mod".to_string(), "/".to_string());
             let id = guard.transfer_id().to_string();
             let token = guard.cancellation_token().clone();
 
-            let err = svc
+            let resp = svc
                 .cancel_job(Request::new(CancelJobRequest {
                     transfer_id: id.clone(),
                 }))
                 .await
-                .expect_err("non-delegated kind must reject CancelJob");
-            assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+                .expect("cancel_job ok");
+            assert_eq!(resp.into_inner().transfer_id, id);
             assert!(
-                !token.is_cancelled(),
-                "{}: token must NOT be fired when CancelJob is unsupported",
+                token.is_cancelled(),
+                "{}: CancelJob must fire the row token",
                 kind.as_str()
             );
             drop(guard);
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_job_failed_precondition_for_history_only_pull() {
+        // The one kind still gated off by dispatch policy (`Pull` rows
+        // are history-only — the RPC was deleted in ue-r2-1h, so this
+        // is shape coverage, not a reachable production outcome).
+        let svc = empty_service();
+        let guard = svc.active_jobs.register(
+            ActiveJobKind::Pull,
+            "p".to_string(),
+            "mod".to_string(),
+            "/".to_string(),
+        );
+        let id = guard.transfer_id().to_string();
+        let token = guard.cancellation_token().clone();
+
+        let err = svc
+            .cancel_job(Request::new(CancelJobRequest {
+                transfer_id: id.clone(),
+            }))
+            .await
+            .expect_err("a policy-gated kind must reject CancelJob");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            !token.is_cancelled(),
+            "token must NOT be fired when CancelJob is unsupported"
+        );
     }
 
     #[tokio::test]

@@ -60,6 +60,10 @@ rehydration and tests.
 
 ## Deliberately out of scope
 
+*(Superseded by D-2026-07-04-3: the owner flipped the policy; the flip
+landed as slice `w4-5-supports-cancellation-flip`. Kept as the record
+of this slice's scope at the time it was graded.)*
+
 - **`supports_cancellation` policy unchanged** (DelegatedPull-only).
   The ratified W4.3 text calls for the race + the comment fix, not a
   CancelJob contract change (exit-code 2 / FailedPrecondition / TUI
