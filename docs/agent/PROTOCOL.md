@@ -117,11 +117,15 @@ Audit one document against reality. Never run unscoped.
 
 ## slice
 
-Pick up the next unit of review-loop work.
+Pick up the next unit of review-queue work.
 
 1. Run `catchup` first if you haven't this session.
-2. Follow the Coder loop in `.review/README.md` exactly: pick the
-   highest-priority `[ ]` item, branch per the branch model, implement with
-   tests, pass the validation suite, write the finding doc, update the
-   `REVIEW.md` row, write the sentinel atomically.
+2. Pick the highest-priority `[ ]` item in `REVIEW.md` and run it through
+   the codex review loop in `docs/agent/GPT_REVIEW_LOOP.md`
+   (D-2026-07-04-1 — all code and plan changes, no exceptions): implement
+   with tests on `master` (no agent branches), pass the validation suite,
+   commit, write the finding doc, invoke codex on the commit, adjudicate
+   every finding, fix the accepted ones, record
+   `.review/results/<id>.codex.md` + `<id>.gpt-verdict.md`, update the
+   `REVIEW.md` row. No sentinel — the async hand-off is retired.
 3. Finish with the `handoff` procedure.

@@ -55,13 +55,19 @@ execute it exactly:
 - `drift [scope]` → audit a doc against code; fix docs, file findings, raise
   questions.
 - `slice` (repo-specific, no generic-template equivalent) → pick up the next
-  review finding per `.review/README.md`'s coder/reviewer loop.
+  review finding and run it through the codex review loop
+  (`docs/agent/GPT_REVIEW_LOOP.md`).
+
+**Review policy (D-2026-07-04-1): every code change and every plan change
+goes through the codex review loop in `docs/agent/GPT_REVIEW_LOOP.md` — no
+exceptions.** The `.review/README.md` async sentinel hand-off is retired;
+its `findings/`/`results/` records and `REVIEW.md` remain the record store.
 
 Claude Code exposes these as `/catchup`, `/plan`, … via `.claude/commands/`;
 Antigravity exposes `catchup`/`handoff` as workspace skills in
 `.agents/skills/`. This repo does not currently use `.agents/playbooks/` —
-the `.review/` two-agent review loop and `docs/agent/PROTOCOL.md` already
-cover that role for review-loop work.
+the codex review loop and `docs/agent/PROTOCOL.md` already cover that role
+for review-loop work.
 
 ## Verification
 

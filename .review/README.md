@@ -1,5 +1,14 @@
 # Blit review workflow
 
+> **Superseded as the grading mechanism (2026-07-04, D-2026-07-04-1).**
+> All code and plan changes now go through the synchronous codex loop in
+> `docs/agent/GPT_REVIEW_LOOP.md` — no exceptions. That loop reuses this
+> directory's `findings/` + `results/` records and the `REVIEW.md` status
+> index, which remain live. The async parts below — `ready/` sentinels,
+> `reviewer-wait.sh`, the separate Reviewer agent, WIP limits — are
+> historical; do not write new sentinels. The Identity section (sign the
+> `reviewer` field honestly) still applies to verdict records.
+
 Two-agent loop: **Coder** is the implementer, **Reviewer** is the
 gate. `REVIEW.md` at the repo root is the human-readable status
 index; this directory is the structured handoff channel.

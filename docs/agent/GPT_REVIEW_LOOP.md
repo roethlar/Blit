@@ -2,10 +2,13 @@
 
 **Status**: Active
 **Created**: 2026-06-20
-**Decision**: D-2026-06-20-6
-**Applies to**: unified transfer engine slices (`ue-r2-*`, plan
-`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`). All other work keeps using
-the async two-agent loop in `.review/README.md`.
+**Decision**: D-2026-06-20-6 (created, `ue-r2-*` scope);
+**D-2026-07-04-1** (widened: this loop now governs **all code changes and
+all plan changes** — owner: "no exceptions").
+**Applies to**: every code change and every plan/docs change in this
+repo. The async two-agent sentinel loop in `.review/README.md` is retired
+as the grading mechanism (D-2026-07-04-1); this loop reuses its
+`findings/` + `results/` records and the `REVIEW.md` status index.
 **Precedence**: where this loop conflicts with `AGENTS.md`,
 `docs/STATE.md`, or `docs/DECISIONS.md`, governance wins (AGENTS.md §1).
 
@@ -24,8 +27,9 @@ owner whether the code "looks good" — that is theater (D-2026-06-20-6).
 
 ## Per-slice steps
 
-1. Implement one slice from REV4, in the order/dependencies the plan's
-   "Slice dependencies" section gives (`ue-r2-1a` first).
+1. Implement one commit-sized unit of work from whatever queue governs:
+   a `REVIEW.md` design-queue row, a plan slice, a bug fix, or a
+   plan/docs change. One coherent slice per commit; no bundling.
 2. **Validation gate** (never skip, never commit on failure; test count
    must not drop):
    ```bash
@@ -33,22 +37,28 @@ owner whether the code "looks good" — that is theater (D-2026-06-20-6).
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    ```
+   For docs/plan-only changes the gate is `bash scripts/agent/check-docs.sh`
+   instead (D-2026-07-04-1; `.agents/repo-guidance.md` Verification) —
+   the review step below still runs.
 3. Commit to `master` — ungated for this loop (D-2026-06-20-6): no agent
-   branches, never push. Subject `ue-r2-XX: <summary>`. Write
-   `.review/findings/<id>.md` (What / Approach / Files / Tests / Known
-   gaps) and commit it with the slice.
+   branches, never push. Subject per repo convention (`Fix <id>: <summary>`
+   for review-queue rows; short imperative otherwise). For code slices,
+   write `.review/findings/<id>.md` (What / Approach / Files / Tests /
+   Known gaps) and commit it with the slice.
 4. **GPT review** of the commit (slow — minutes; run in the background and
    capture to a file):
    ```bash
    codex exec -s read-only \
      -c 'plugins."superpowers@openai-curated".enabled=false' \
      "Review the diff of commit <SHA> (run: git show <SHA>). It implements
-      slice <id> of docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md. Check:
-      correctness regressions, the slice's acceptance criteria,
-      FAST/SIMPLE/RELIABLE, byte-identical / StallGuard / cancellation /
-      byte-accounting invariants, and that the test count did not drop.
-      Output a concise markdown findings list — each finding with
-      file:line, severity, rationale — then a final VERDICT line. Be
+      <id / one-line description; name the spec doc or queue row>. Check:
+      correctness regressions, the change's acceptance criteria,
+      FAST/SIMPLE/RELIABLE, the invariants relevant to the touched area
+      (byte-identical / StallGuard / cancellation / byte-accounting for
+      transfer code; internal coherence + no contradiction with
+      docs/DECISIONS.md for plan changes), and that the test count did
+      not drop. Output a concise markdown findings list — each finding
+      with file:line, severity, rationale — then a final VERDICT line. Be
       concise; do not invoke skills." \
      > .review/results/<id>.codex.md 2>&1
    ```
@@ -65,7 +75,7 @@ owner whether the code "looks good" — that is theater (D-2026-06-20-6).
      the STATE queue.
    Sign `reviewer: gpt-5.5` honestly (`.review/README.md` → Identity).
 6. Fix the Accepted findings (follow-up commit
-   `ue-r2-XX: address review (<n> findings)`), re-run the validation gate,
+   `<id>: address review (<n> findings)`), re-run the validation gate,
    append the fix sha to the verdict file.
 7. Append one `DEVLOG.md` line: what landed, what GPT caught, what was
    rejected and why, the fix sha.
@@ -75,12 +85,12 @@ owner whether the code "looks good" — that is theater (D-2026-06-20-6).
 
 Proceed autonomously through code→review→fix→next. Pause and surface only
 for:
-- a genuine design choice REV4 did not settle;
-- a GPT finding that implies a **plan change** (edit REV4 + record a
+- a genuine design choice the governing plan/spec did not settle;
+- a GPT finding that implies a **plan change** (edit the plan + record a
   decision, then continue);
 - a blocker, an ambiguity, or a RELIABLE risk needing an owner call;
-- an owner-gated checkpoint: **push** (always — §8), and the **10 GbE
-  benchmark sign-off** (`ue-1`/`ue-2`, plan-defined).
+- an owner-gated checkpoint: **push** (always — §8), and any plan-defined
+  gate (e.g. the 10 GbE benchmark sign-off, `ue-1`/`ue-2`).
 
 Never pause merely to have the owner bless code that already passed
 validation and review.
@@ -91,10 +101,10 @@ validation and review.
 - `.review/results/<id>.codex.md` — raw GPT review output.
 - `.review/results/<id>.gpt-verdict.md` — per-finding adjudication + fix
   sha.
-- `REVIEW.md` → "Unified transfer engine (REV4)" section — status index.
+- `REVIEW.md` — status index (whichever section the row lives in).
 - **No** `.review/ready/<id>.json` sentinel and **no** `reviewer-wait.sh`:
-  those exist to wake a *separate* reviewer agent; this loop calls codex
-  inline.
+  those existed to wake a *separate* reviewer agent; this loop calls codex
+  inline and is now the only grading mechanism (D-2026-07-04-1).
 
 ## Environment notes
 
@@ -102,7 +112,8 @@ validation and review.
   interactive login). Reviews run read-only sandboxed.
 - The `superpowers@openai-curated` codex plugin injects a skill framework
   that derails focused reviews — disable it per-invocation as shown.
-- The async two-agent loop is documented in `.review/README.md`; this
-  synchronous loop reuses only its `findings/` + `results/` records.
+- The retired async two-agent loop is documented in `.review/README.md`
+  (historical since D-2026-07-04-1); this synchronous loop reuses only its
+  `findings/` + `results/` records and the `REVIEW.md` index.
 - Branch model: AGENTS.md §8 (work on `master`, no agent branches) governs
   over `.review/README.md`'s "branch per finding."

@@ -45,9 +45,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the Active
     plan (D-2026-06-20-5), code-complete; flipping to Shipped is an
     owner call after the 10 GbE benchmark session.
-  - Process (D-2026-06-20-6, `docs/agent/GPT_REVIEW_LOOP.md`) governed
-    `ue-r2-*`; with the slices done, the `.review/README.md` async loop
-    + REVIEW.md queue govern what's next (current example: w4-1 above).
+  - Process: the codex loop (`docs/agent/GPT_REVIEW_LOOP.md`) now
+    governs **all code and plan changes** (D-2026-07-04-1, owner: "no
+    exceptions"); the `.review/README.md` async sentinel loop is
+    retired. REVIEW.md stays the queue/status index.
 
 ## Queue (ordered)
 
@@ -87,10 +88,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting
 
-- **Reviewer verdict on `w4-1-abortondrop-family`**: sentinel written to
-  `.review/ready/w4-1-abortondrop-family.json` (branch `master`, sha
-  `65ecb93`); needs a reviewer pass per `.review/README.md` before the
-  REVIEW.md row flips `[~]` → `[x]`.
+- **Codex verdict on `w4-1-abortondrop-family`** (`65ecb93`): review in
+  flight via the codex loop (D-2026-07-04-1 — now governs ALL code and
+  plan changes; the async sentinel hand-off is retired and the w4-1
+  sentinel will be deleted with the verdict).
 - **Owner call on the commit erratum** (`9f37a7a`/`48c5a11` unbuildable
   in isolation, now pushed to both remotes): leave as-is (default) or
   authorize a history rewrite to fix it.
