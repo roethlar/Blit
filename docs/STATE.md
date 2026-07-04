@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w4-3` landed and graded through the codex
+Last updated: 2026-07-04 (`w1-2` landed and graded through the codex
 loop — PASS, zero findings, closed `[x]`); local HEAD past `6a38810`,
 **not yet pushed** to either remote across these sessions.
 
@@ -10,18 +10,22 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **`w4-3-daemon-disconnect-racing` DONE — landed and graded `[x]`**
-  (details: DEVLOG 2026-07-04T05:59Z; finding:
-  `.review/findings/w4-3-daemon-disconnect-racing.md`). Push/pull_sync
-  dispatchers now race their handlers against `tx.closed()` + the row
-  cancel token (`resolve_transfer_outcome` generalized from
-  delegated_pull's audit-10 select; new `resolve_streaming_outcome`
-  wrapper); false `supports_cancellation` comment rewritten.
-  `CancelJob` dispatch policy deliberately unchanged (flip = new open
-  question below). Slice `37d7f91` + records; codex **PASS, zero
-  findings**. Select arms mutation-verified (M1/M2/M3). fmt/clippy
-  clean; workspace tests green (blit-daemon 162 → 167). Prior slice
-  w4-1 (`65ecb93`+`bedfa52`) closed `[x]` earlier the same day.
+- **`w1-2-data-socket-policy-helper` DONE — landed and graded `[x]`**
+  (details: DEVLOG 2026-07-04T12:54Z; finding:
+  `.review/findings/w1-2-data-socket-policy-helper.md`). One shared
+  `configure_data_socket(&TcpStream, Option<usize>)` in
+  `blit_core::remote::transfer::socket` (SockRef in-place; nodelay
+  hard, keepalive/buffers logged); every data-plane socket routes
+  through it — push client connect, pull client connect (the pull
+  Nagle fix), daemon push accepts (silently-swallowing twin + daemon
+  socket2 dep deleted), pull_sync accepts (dial's `tcp_buffer_bytes`
+  now applied — snapshot at epoch-0/resume, LIVE at the resize accept,
+  closing the computed-and-discarded gap). design-3 (connect
+  timeouts), w1-3, w1-4 untouched. Slice `16237e2` + records
+  `f60942e`; codex **PASS, zero findings**. Helper + pull wiring
+  mutation-verified (M1/M2/M3). fmt/clippy clean; workspace 1445/0/2
+  (blit-core 414 → 417). Earlier same day: w4-3 (`37d7f91`) and w4-1
+  (`65ecb93`+`bedfa52`) closed `[x]`.
 - **Process (D-2026-07-04-1)**: the codex loop now governs **all code
   and plan changes** — no exceptions; codex is the **only** reviewer
   (no same-model panels; owner correction this session). Async
@@ -54,13 +58,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w4-1 + w4-3
-   closed `[x]` 2026-07-04 (see Now). Highest open ratified row is
-   **w1-2** (shared `configure_data_socket` policy helper, coordinates
-   design-3), then w1-3 / w1-4 (note: ue-r2-2's armed-only accepts
-   re-ratified the 1g W1 deferral premise; the constants/policy
-   consolidation still belongs to W1). Open Low rows from the ue-r2
-   reviews: `relay-1-subpath-double-join`.
+1. **Design-review queue** — `REVIEW.md` order governs. w4-1 + w4-3 +
+   w1-2 closed `[x]` 2026-07-04 (see Now). Highest open ratified row
+   is **w1-3** (TCP keepalive honesty — note its "daemon copy logs
+   failure" half is already satisfied structurally by w1-2: the daemon
+   copy no longer exists; what remains is real `TcpKeepalive` timing
+   or honest comments at the two `set_keepalive(true)` sites, now both
+   inside the shared helper), then w1-4 (accept/token constants) and
+   design-3 (data-plane connect timeouts — smaller now, the call sites
+   are consolidated). Open Low rows from the ue-r2 reviews:
+   `relay-1-subpath-double-join`.
 2. **10 GbE benchmark session — owner-gated** (env:
    `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
    owner if a daemon can't run on skippy). This is the REV4 sign-off:
@@ -126,19 +133,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (11th)** @ `16237e2`+records+docs —
+  `w1-2-data-socket-policy-helper` landed and graded through the codex
+  loop: **PASS, zero findings**, no fix commit; row `[x]`, verdict +
+  trimmed review recorded. Helper + pull call-site wiring
+  mutation-verified. blit-core 414 → 417; workspace 1445/0/2 across 37
+  suites (macOS host; Windows coverage rides the next push's CI — the
+  code is platform-neutral SockRef). In-flight: none. **Exact first
+  action next session**: on owner "continue", pick up **w1-3**
+  (keepalive honesty; scope shrank — see Queue) through the codex
+  loop; else the owner schedules the 10 GbE sign-off / decides the
+  erratum + D-2026-06-20-1 + supports_cancellation questions. Nothing
+  pushed — push stays owner-gated.
 - **2026-07-04 (10th)** @ `37d7f91`+records+docs —
   `w4-3-daemon-disconnect-racing` landed and graded through the codex
   loop: **PASS, zero findings**, no fix commit; row `[x]`, verdict +
   trimmed review recorded. Select arms mutation-verified. blit-daemon
-  162 → 167; all 37 suites green (gates run in PowerShell — Git Bash
-  can't link on this host, coreutils `link` shadows MSVC). New open
-  question: flip `supports_cancellation` for Push/PullSync (now
-  policy-only). In-flight: none. **Exact first action next session**:
-  on owner "continue", pick up **w1-2** (data-socket policy helper)
-  through the codex loop; else the owner schedules the 10 GbE
-  sign-off / decides the erratum + D-2026-06-20-1 +
-  supports_cancellation questions. Nothing pushed — push stays
-  owner-gated.
+  162 → 167 (Windows-host count; macOS baseline measures 168); all 37
+  suites green (gates run in PowerShell — Git Bash can't link on that
+  host, coreutils `link` shadows MSVC). New open question: flip
+  `supports_cancellation` for Push/PullSync (now policy-only).
 - **2026-07-04 (9th)** @ `6a38810`+docs — `w4-1-abortondrop-family`
   landed (`65ecb93`+`44bf416`) **and graded through the codex loop**:
   NEEDS FIXES 1 Low (vacuous relocated drop-test) → fixed `bedfa52`,
@@ -147,8 +161,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   code and plan changes, codex the only reviewer (no same-model
   panels); decision+propagation `3ebcc37`, its codex round fixed
   `10866e4`. fmt/clippy clean; workspace tests green.
-- **2026-07-04 (8th)** @ `8d62afc` — `ue-r2-2` landed end-to-end
-  (`042ca4b`..`0788e83`; codex NEEDS FIXES 3 + panel 4 → 9 fixed
-  `ec4a3fe`, 1 deferred; records `8d62afc`). **REV4 code-complete.**
-  fmt/clippy clean; tests 1405/0/3 on Windows. (Stack pushed to both
-  remotes 2026-07-04, after this entry was written.)
