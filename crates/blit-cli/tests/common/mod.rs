@@ -159,17 +159,27 @@ pub fn ensure_daemon_built() {
 /// so per-process uniqueness is exactly the needed scope; collisions
 /// with unrelated system processes remain possible but are caught by
 /// the child-death check in `spawn_daemon`.
-pub fn pick_unused_port() -> u16 {
+/// Every port handed out in this process — by `pick_unused_port` AND
+/// by the fake-server scaffold — goes through this one set, so a fake
+/// server can never be assigned a port a daemon was promised (codex
+/// review of f6e592e caught the fake-server path bypassing the set).
+fn claim_port(port: u16) -> bool {
     static CLAIMED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
-    let claimed = CLAIMED.get_or_init(|| Mutex::new(HashSet::new()));
+    CLAIMED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("claimed-port set")
+        .insert(port)
+}
+
+pub fn pick_unused_port() -> u16 {
     loop {
         let port = TcpListener::bind(("127.0.0.1", 0))
             .expect("bind probe listener")
             .local_addr()
             .expect("listener addr")
             .port();
-        let mut claimed = claimed.lock().expect("claimed-port set");
-        if claimed.insert(port) {
+        if claim_port(port) {
             return port;
         }
     }
@@ -472,7 +482,20 @@ pub fn spawn_fake_blit_server<S>(svc: S, label: &str) -> FakeServerGuard
 where
     S: blit_core::generated::blit_server::Blit,
 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fake server");
+    // Unlike the daemon path there is no probe-to-bind gap here — the
+    // listener is kept and handed to tonic — but the OS-assigned port
+    // must still go through the shared claimed-set: it could otherwise
+    // be a port `pick_unused_port` already promised to a daemon whose
+    // own bind is still pending (that daemon would then die on
+    // "address in use" or, worse, its test would ready-check against
+    // this fake). Loop until the OS hands us an unclaimed port.
+    let listener = loop {
+        let candidate = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fake server");
+        let port = candidate.local_addr().expect("fake server addr").port();
+        if claim_port(port) {
+            break candidate;
+        }
+    };
     let port = listener.local_addr().expect("fake server addr").port();
     listener
         .set_nonblocking(true)
