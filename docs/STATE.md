@@ -157,8 +157,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   ue-r2-1e, `TuningParams` now deleted) — fold into w10-docs-batch or
   rewrite sooner? Agent rec: w10.
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: the 10 GbE
-  session delivered the measurement evidence; flip awaits the four
-  declarations in Blocked.
+  session delivered the measurement evidence; flip awaits the three
+  declarations in Blocked (was four — zero-copy resolved,
+  D-2026-07-05-3).
 - **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
   `blit copy src_large dst` with an existing local dir, no `./`,
   parses the bare name as an mDNS discovery endpoint and errors

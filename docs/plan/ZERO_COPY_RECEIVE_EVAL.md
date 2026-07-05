@@ -83,8 +83,9 @@ unified receive sink, sequenced after its cutover slice. The dead
 module's deletion (w8-1) still stands — this is a rewrite against the
 unified sink, not a revival.
 
-Revisit only after the 10 GbE benchmark plan runs and shows receive-side
-CPU saturation with the buffered relay. The design then should be: an
+~~Revisit only after the 10 GbE benchmark plan runs and shows receive-side
+CPU saturation with the buffered relay.~~ *(Gate met — see above.)*
+The design then should be: an
 `AsyncFd`-readiness splice loop owned by `data_plane.rs` (next to
 `receive_stream_double_buffered`, same progress contract), selected at
 runtime when the reader is a raw `TcpStream` and the payload is
@@ -94,14 +95,19 @@ else needs to survive.
 
 ## Non-goals
 
-- Implementing splice now (no measurement justifies it).
+- ~~Implementing splice now (no measurement justifies it).~~
+  *(Superseded by D-2026-07-05-3: the CPU-bound UNAS rig is the
+  justification; implementation is sequenced after ONE_TRANSFER_PATH
+  cutover, inside the unified receive sink.)*
 - Touching the send side (`sendfile_chunk` dies with the module; a send
   side sendfile evaluation would follow the same revisit gate).
 
 ## Acceptance criteria
 
-- [ ] Owner verdict on this doc: ratify **delete** (fold into w8-1) or
-      direct a FAST implementation plan instead.
+- [x] Owner verdict on this doc: **delete** ratified (D-2026-06-12-1);
+      the later D-2026-07-05-3 unpark directs the FAST implementation
+      through ONE_TRANSFER_PATH's unified sink instead of reviving the
+      module — both verdicts are in.
 - [ ] On delete: w8-1 removes `zero_copy.rs` + the `lib.rs` export and
       this doc's Status flips to Shipped with the deletion commit noted.
 
@@ -112,4 +118,5 @@ else needs to survive.
 
 ## Open questions
 
-- None beyond the owner verdict itself.
+- None. (The owner verdicts are in: delete D-2026-06-12-1; unpark
+  D-2026-07-05-3.)
