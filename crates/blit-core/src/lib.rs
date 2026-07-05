@@ -23,6 +23,7 @@ pub mod remote;
 pub mod stderr_log;
 pub mod tar_stream;
 pub mod transfer_plan;
+pub mod transfer_session;
 #[cfg(windows)]
 pub mod win_fs;
 pub mod zero_copy;

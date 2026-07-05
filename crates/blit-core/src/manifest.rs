@@ -3,7 +3,7 @@
 //! This module provides manifest comparison logic used by both push and pull
 //! operations to determine which files need to be transferred.
 
-use crate::generated::FileHeader;
+use crate::generated::{ComparisonMode, FileHeader};
 use std::collections::HashMap;
 
 /// How to compare files between source and target.
@@ -21,6 +21,21 @@ pub enum CompareMode {
     /// Checksum mode: Transfer if checksums differ (slower but more accurate).
     /// For remote transfers, server computes checksums on demand.
     Checksum,
+}
+
+/// Canonical mapping from the wire enum. `Unspecified` folds to the
+/// historical default, matching `NormalizedTransferOperation` and the
+/// diff planner's defensive handling.
+impl From<ComparisonMode> for CompareMode {
+    fn from(mode: ComparisonMode) -> Self {
+        match mode {
+            ComparisonMode::Checksum => CompareMode::Checksum,
+            ComparisonMode::SizeOnly => CompareMode::SizeOnly,
+            ComparisonMode::IgnoreTimes => CompareMode::IgnoreTimes,
+            ComparisonMode::Force => CompareMode::Force,
+            ComparisonMode::Unspecified | ComparisonMode::SizeMtime => CompareMode::Default,
+        }
+    }
 }
 
 /// Status of a file after manifest comparison.
@@ -104,24 +119,13 @@ pub fn compare_manifests(
 
     // Compare each source file against target
     for src in source {
-        let status = match target_map.get(src.relative_path.as_str()) {
-            None => FileStatus::New,
-            Some(&(target_size, target_mtime, target_checksum)) => {
-                // File exists on target
-                if options.ignore_existing {
-                    // Skip all existing files regardless of differences
-                    FileStatus::SkippedExisting
-                } else {
-                    compare_file(
-                        src,
-                        target_size,
-                        target_mtime,
-                        target_checksum,
-                        options.mode,
-                    )
-                }
-            }
-        };
+        let status = header_transfer_status(
+            src,
+            target_map
+                .get(src.relative_path.as_str())
+                .map(|&(size, mtime, checksum)| (size, mtime, checksum)),
+            options,
+        );
 
         if status == FileStatus::New || status == FileStatus::Modified {
             diff.bytes_to_transfer += src.size;
@@ -146,6 +150,39 @@ pub fn compare_manifests(
     }
 
     diff
+}
+
+/// Per-entry form of [`compare_manifests`]: status of one source
+/// header against the target's view of the same path —
+/// `Some((size, mtime_seconds, checksum))` when the target has the
+/// path, `None` when it doesn't. This is the single owner of the
+/// mode-aware header-vs-target decision; `compare_manifests` and the
+/// unified `transfer_session` destination diff (which stats its own
+/// filesystem per entry instead of materializing a full target
+/// manifest) both call it.
+pub fn header_transfer_status(
+    src: &FileHeader,
+    target: Option<(u64, i64, &[u8])>,
+    options: &CompareOptions,
+) -> FileStatus {
+    match target {
+        None => FileStatus::New,
+        Some((target_size, target_mtime, target_checksum)) => {
+            // File exists on target
+            if options.ignore_existing {
+                // Skip all existing files regardless of differences
+                FileStatus::SkippedExisting
+            } else {
+                compare_file(
+                    src,
+                    target_size,
+                    target_mtime,
+                    target_checksum,
+                    options.mode,
+                )
+            }
+        }
+    }
 }
 
 /// Compare a single file using the specified comparison mode.
