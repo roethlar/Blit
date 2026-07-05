@@ -60,6 +60,17 @@ impl Blit for SpyServer {
         >,
     >;
 
+    type TransferStream = ReceiverStream<Result<blit_core::generated::TransferFrame, Status>>;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<Response<Self::TransferStream>, Status> {
+        Err(Status::unimplemented("otp-1 stub"))
+    }
+
     async fn subscribe(
         &self,
         _: Request<blit_core::generated::SubscribeRequest>,
@@ -475,6 +486,17 @@ impl Blit for CannedFramesServer {
                 + Send,
         >,
     >;
+
+    type TransferStream = ReceiverStream<Result<blit_core::generated::TransferFrame, Status>>;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<Response<Self::TransferStream>, Status> {
+        Err(Status::unimplemented("otp-1 stub"))
+    }
 
     async fn pull_sync(
         &self,

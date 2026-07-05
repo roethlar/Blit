@@ -348,6 +348,19 @@ impl Blit for BlitService {
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
     type SubscribeStream =
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
+    type TransferStream = ReceiverStream<Result<blit_core::generated::TransferFrame, Status>>;
+
+    /// ONE_TRANSFER_PATH otp-1: the unified session's wire surface
+    /// exists compiled-but-refusing until otp-3/otp-4 land the
+    /// session behavior. Contract: docs/TRANSFER_SESSION.md.
+    async fn transfer(
+        &self,
+        _request: Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<Response<Self::TransferStream>, Status> {
+        Err(Status::unimplemented(
+            "Transfer session lands at ONE_TRANSFER_PATH otp-3/otp-4",
+        ))
+    }
 
     async fn subscribe(
         &self,

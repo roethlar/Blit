@@ -4,7 +4,13 @@ package blit.v2;
 // The main service for all data transfer and remote management operations.
 service Blit {
   // Push uses a bidirectional stream for an efficient "check-then-send" workflow.
+  // (Deleted at ONE_TRANSFER_PATH cutover, otp-10 — replaced by Transfer.)
   rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
+
+  // ONE_TRANSFER_PATH (otp-1): the single role-tagged transfer session
+  // that replaces Push and PullSync at cutover. Contract:
+  // docs/TRANSFER_SESSION.md. UNIMPLEMENTED until otp-3/otp-4.
+  rpc Transfer(stream TransferFrame) returns (stream TransferFrame);
 
   // Removed 2026-07-03 (ue-r2-1h): rpc Pull(PullRequest) returns
   // (stream PullChunk) — the deprecated server-streaming pull.
@@ -1205,4 +1211,161 @@ message TransferError {
   // recorded" when the spawn task didn't reach the
   // record_outcome call.
   string message = 2;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ONE_TRANSFER_PATH unified session (otp-1 wire contract).
+// Authoritative state machine + frame table: docs/TRANSFER_SESSION.md.
+// Compiled-but-refusing until otp-3/otp-4 land behavior (the Transfer
+// handler returns UNIMPLEMENTED, pinned by test). Replaces Push and
+// PullSync whole at cutover (otp-10, D-2026-07-05-1); no bridge
+// (D-2026-07-05-2: same-build peers only).
+// ═══════════════════════════════════════════════════════════════════
+
+// A transfer has a SOURCE role and a DESTINATION role. Which end
+// initiated, and which CLI verb was used, select roles — never code.
+enum TransferRole {
+  TRANSFER_ROLE_UNSPECIFIED = 0;
+  TRANSFER_ROLE_SOURCE = 1;
+  TRANSFER_ROLE_DESTINATION = 2;
+}
+
+// First frame BOTH directions. Exact-match same-build handshake
+// (D-2026-07-05-2): any inequality in either field is a
+// SessionError{BUILD_MISMATCH} naming both ids, then close. No
+// negotiate-down, no advisory fields, no capability bits.
+message SessionHello {
+  // "<crate version>+<git commit>[.dirty]", composed at compile time.
+  string build_id = 1;
+  // Bumped on any wire-shape change; exact match required.
+  uint32 contract_version = 2;
+}
+
+// Initiator's second frame: the whole operation, roles included.
+message SessionOpen {
+  // Role the INITIATOR takes; the responder takes the other.
+  TransferRole initiator_role = 1;
+  // Responder-side module (empty = default root export) and path
+  // within it. The initiator-side path never crosses the wire — the
+  // initiator owns its local endpoint.
+  string module = 2;
+  string path = 3;
+  FilterSpec filter = 4;
+  ComparisonMode compare_mode = 5;
+  // Mirror is explicit: enabled + scope. No implicit mirror.
+  bool mirror_enabled = 6;
+  MirrorMode mirror_kind = 7;
+  ResumeSettings resume = 8;
+  // Request the in-stream byte carrier (diagnostics / unreachable
+  // data-plane environments). The responder may also force it via a
+  // grant-less SessionAccept when it cannot bind a listener.
+  bool in_stream_bytes = 9;
+  bool ignore_existing = 10;
+  bool require_complete_scan = 11;
+  // Set iff the initiator is DESTINATION (dial contract: the byte
+  // receiver advertises capacity — D-2026-06-20-1/-2; absent/0 =
+  // unknown hardware value, conservative, never "old peer").
+  CapacityProfile receiver_capacity = 12;
+}
+
+// Responder's reply. Refusals are SessionError frames, never silent
+// closes.
+message SessionAccept {
+  // Set iff the responder is DESTINATION.
+  CapacityProfile receiver_capacity = 1;
+  // Absent = in-stream carrier (requested, or listener bind failed).
+  DataPlaneGrant data_plane = 2;
+}
+
+// TCP data-plane grant. The RESPONDER always binds; the INITIATOR
+// always dials (connection topology, not choreography — byte
+// direction on the sockets is set by role: SOURCE writes).
+message DataPlaneGrant {
+  uint32 tcp_port = 1;
+  bytes session_token = 2;
+  // Dial floor. SOURCE shape-corrects upward via resize (sf-2
+  // mechanism — the only stream policy).
+  uint32 initial_streams = 3;
+  // Resize is always available (same build): epoch-0 credential.
+  bytes epoch0_sub_token = 4;
+}
+
+// DESTINATION → SOURCE: files the destination wants, in batches.
+message NeedEntry {
+  string relative_path = 1;
+  // RELIABLE resume exception (docs/TRANSFER_SESSION.md): when true,
+  // the destination's BlockHashList for this file follows, and the
+  // source must not send any byte of this file before receiving it;
+  // stale/mismatched partials fall back to full-file transfer.
+  bool resume = 2;
+}
+message NeedBatch {
+  repeated NeedEntry entries = 1;
+}
+// DESTINATION's promise that no further NeedBatch follows.
+message NeedComplete {}
+
+// SOURCE's promise that every requested payload byte is flushed.
+message SourceDone {}
+
+// DESTINATION → SOURCE at close: the end that wrote bytes and
+// executed deletes attests to the outcome (one summary shape for
+// every direction; replaces PushSummary/PullSummary at cutover).
+message TransferSummary {
+  uint64 files_transferred = 1;
+  uint64 bytes_transferred = 2;
+  uint64 entries_deleted = 3;   // mirror executed destination-local
+  bool in_stream_carrier_used = 4;
+  uint64 files_resumed = 5;
+}
+
+// Structured refusal/abort — an end says why before closing.
+message SessionError {
+  enum Code {
+    SESSION_ERROR_UNSPECIFIED = 0;
+    BUILD_MISMATCH = 1;
+    MODULE_UNKNOWN = 2;
+    READ_ONLY = 3;
+    DELEGATION_REFUSED = 4;
+    SCAN_INCOMPLETE = 5;
+    PROTOCOL_VIOLATION = 6;
+    DATA_PLANE_FAILED = 7;
+    CANCELLED = 8;
+    INTERNAL = 9;
+  }
+  Code code = 1;
+  string message = 2;
+  // BUILD_MISMATCH: both build ids, so the operator sees exactly
+  // which end is stale.
+  string local_build_id = 3;
+  string peer_build_id = 4;
+}
+
+// The single frame type BOTH wire directions carry. Which frames an
+// end may send is determined by ROLE and phase
+// (docs/TRANSFER_SESSION.md frame table — field numbers frozen
+// there). Reuses the engine's existing payload vocabulary verbatim.
+message TransferFrame {
+  oneof frame {
+    SessionHello hello = 1;
+    SessionOpen open = 2;
+    SessionAccept accept = 3;
+    FileHeader manifest_entry = 4;
+    ManifestComplete manifest_complete = 5;
+    NeedBatch need_batch = 6;
+    NeedComplete need_complete = 7;
+    BlockHashList block_hashes = 8;
+    FileHeader file_begin = 9;
+    FileData file_data = 10;
+    TarShardHeader tar_shard_header = 11;
+    TarShardChunk tar_shard_chunk = 12;
+    TarShardComplete tar_shard_complete = 13;
+    BlockTransfer block = 14;
+    BlockTransferComplete block_complete = 15;
+    DataPlaneResize resize = 16;
+    DataPlaneResizeAck resize_ack = 17;
+    SourceDone source_done = 18;
+    TransferSummary summary = 19;
+    SessionError error = 20;
+  }
 }

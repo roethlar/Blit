@@ -357,6 +357,19 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         >,
     >;
 
+    type TransferStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::TransferFrame, tonic::Status>,
+    >;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("otp-1 stub"))
+    }
+
     async fn push(
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
@@ -482,6 +495,19 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
                 > + Send,
         >,
     >;
+
+    type TransferStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::TransferFrame, tonic::Status>,
+    >;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("otp-1 stub"))
+    }
 
     async fn push(
         &self,
