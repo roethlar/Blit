@@ -52,11 +52,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   resize (one stream saturates 10 GbE) — ue-2 interpretation call.
   Digest: DEVLOG 2026-07-05 00:34; evidence
   `docs/bench/10gbe-2026-07-05/`.
-- **Earlier 2026-07-04: w9-3 test-harness consolidation (port-TOCTOU
-  flake root-caused; tests 1478 → 1479), design-3, w4-4, w6-2 (filed
-  w6-2a/b/c), w6-1 (+design-1), w3-1, w2-2, w4-5, W1 family, w4-1,
-  w4-3 all `[x]`** — DEVLOG 2026-07-04 entries; `.review/`; commit
-  map in REVIEW.md.
+- **Earlier 2026-07-04: w9-3 + eleven review-queue rows all `[x]`**
+  — DEVLOG 2026-07-04 entries; commit map in REVIEW.md.
 - **REV4 code-complete**; measurement gates DATA-COMPLETE — only the
   owner declarations remain. Residue: Queue item 4. Windows: suite
   green on the owner's machine (erratum D-2026-07-04-2 settled).
@@ -101,6 +98,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    target-feature=+crt-static -C link-self-contained=yes"`, `cargo
    build --release --target aarch64-unknown-linux-musl -p blit-daemon
    -p blit-cli`. Binaries verified executing on zoey 2026-07-05.
+   **Owner constraints (2026-07-05, standing)**: ALL activity on
+   zoey is restricted to that blit-temp folder — test daemon module
+   roots there, test data there, nothing written outside it, ever.
+   Zero-copy is to be TESTED on this rig when the post-cutover slice
+   set reaches it (standing owner authorization for that test, within
+   the folder restriction); no daemon runs on zoey before then
+   without a fresh go.
 6. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
    (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
    epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
