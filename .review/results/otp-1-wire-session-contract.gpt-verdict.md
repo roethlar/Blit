@@ -5,7 +5,7 @@
 **Reviewer**: gpt-5.5 (codex exec, read-only sandbox)
 **Verdict line**: NEEDS FIXES before otp-3/otp-4 consume the contract
 (6 findings)
-(fix sha at end of file)
+**Fix commit**: `f861579`.
 
 ## Findings
 
