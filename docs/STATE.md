@@ -1,15 +1,14 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-05 (**the 10 GbE benchmark session ran** —
-owner-called, TrueNAS↔Arch @ MTU 9000, iperf3 ceiling 9.88/9.91
-Gbit/s: blit TCP push/pull 1 GiB both ≈ 9.5 Gbit/s at the wire
-ceiling, ue-1 loopback parity band HOLDS (worst spread 1.8×), both
-directions validated, zero-copy datapoint = saturation with 0 spliced
-bytes. Full digest: DEVLOG 2026-07-05 entry + logs/bench_10gbe_*.
-Same day: w9-3 harness consolidation landed and graded).
+Last updated: 2026-07-05 (**owner principle recorded + plan drafted**:
+perf goals are ceiling-driven, never competitor-relative —
+`docs/plan/SMALL_FILE_CEILING.md` Draft awaits the Active flip. Same
+session: 10 GbE benchmark ran end-to-end (wire-ceiling push/pull,
+ue-1 band holds), blit/rsync/rclone comparison measured (21/24 wire
+cells won; small-file/mixed push are the ceiling gaps the plan
+closes), zero-copy revisit-gate CPU data collected, w9-3 landed).
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
-local on top, unpushed — windows-latest CI check still queued behind
-the next push.
+local on top, unpushed — windows-latest CI check rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -17,54 +16,53 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
+- **Ceiling principle + SMALL_FILE_CEILING draft (2026-07-05)** —
+  owner correction now governing all perf work: FAST/SIMPLE/RELIABLE
+  gate every change; goals are **ceiling-driven, never
+  competitor-relative** (a "beat X by N%" bar embeds a stopping
+  condition; a ≥25% margin answer was explicitly retracted — do not
+  re-litigate). Plan `docs/plan/SMALL_FILE_CEILING.md` (Draft,
+  `78eabfd`+`811a3f2`, codex 5/5 accepted+fixed, records `219cecf`):
+  small-file/mixed cells to a NAMED hardware limiter, tools as
+  tripwires only; evidence durable at `docs/bench/10gbe-2026-07-05/`
+  (DIAGNOSIS.md: one-stream-for-10k-files dial gap, 215 µs/file
+  daemon cost vs 34 ms wire, CPU gate data). **No code until the
+  owner flips Active.** skippy torn down (daemons stopped, payloads
+  removed; binaries staged at `blit-bin/` for sf-4).
+- **Tool comparison measured (2026-07-05)** — blit vs rsyncd /
+  rsync-ssh / rclone (sftp, webdav, no-hash fairness cells): blit
+  fastest on all large/pull/local cells at the wire ceiling; rsyncd
+  faster on small push (1.5 s vs 2.4–3.3 s), small pull (0.37 vs
+  0.45 s), mixed push — exactly the plan's target cells. rclone has
+  no LAN config that competes (webdav smalls catastrophic: 315 s).
+  CSVs tracked in `docs/bench/10gbe-2026-07-05/`.
 - **10 GbE benchmark session DONE (2026-07-04/05)** — the REV4
-  sign-off data is in; **four owner declarations now pending** (see
-  Blocked). Headlines (full: DEVLOG 2026-07-05; evidence:
-  `logs/bench_10gbe_20260704T20*/`): TCP push/pull 1 GiB ≈ 9.5
-  Gbit/s against a 9.88 iperf3 ceiling, first payload 14.5 ms;
-  **ue-1 loopback parity band holds** (local/push/pull worst spread
-  1.8×, no 10×/2× gap); reverse direction validated (7.25/9.75
-  Gbit/s); gRPC fallback wire-competitive on large (8.0 Gbit/s);
-  no organic mid-transfer resize anywhere — one stream saturates
-  10 GbE (clean idle-stream teardown, no wedges, incl. under
-  2-concurrent-push contention) — ue-2 is therefore an owner
-  interpretation call (deterministic resize coverage = ue-r2-2
-  suite); zero-copy: `zero-copy 0 bytes` on every transfer AT wire
-  saturation (splice buys nothing at 10 GbE). Bench script repaired
-  en route through the codex loop (`b9befb8` grammar/flag +
-  `92d6326` matrix validity, 2 High accepted;
-  `.review/results/bench-script-fix.*`). Methodology: engine-vs-wire
-  isolation (tmpfs ends, async ZFS writes, ARC-warm re-reads, no
-  sync between runs — deliberate, recorded); disk-path variants
-  (post-push `zpool sync` timing, cold-ARC pulls) are owner-gated
-  follow-ups. Pool cleaned; binaries + config staged at
-  `skippy:/mnt/generic-pool/video/blit-bin/` for future sessions.
-- **w9-3 DONE — test-harness consolidation** (`f6e592e` + review fix
-  `8641bc6` + records `c62d15b`; finding
-  `.review/findings/w9-3-test-harness-builder.md`; full story: DEVLOG
-  2026-07-04 23:35 entry). One daemon-spawn harness in `tests/common`
-  (builder + spawn_second_daemon absorbed SEVEN clones + the pasted
-  cli_bin/run_with_timeout/ChildGuard copies); OnceLock'd daemon
-  build (R16-F1 kept); `blit_core::remote::grpc_server` = single
-  keepalive owner for daemon + all five fake servers. Daemon-spawn
-  load-flakiness root-caused (port TOCTOU) and fixed two-layer.
-  Codex: 1 Medium accepted (fake-server bind bypassed the claimed
-  set) → fixed. Tests 1478 → 1479/0/2 by same-method A/B.
-- **Earlier 2026-07-04 (four sessions): design-3, w4-4, w6-2 (filed
-  w6-2a/b/c), w6-1 (+design-1), w3-1, w2-2, w4-5, W1 family, w4-1,
-  w4-3 all `[x]`** — details in DEVLOG 2026-07-04 entries; findings
-  + verdicts in `.review/`; commit map in REVIEW.md.
-- **REV4 code-complete** (all nine `ue-r2-*` slices; stream resize
-  live; all three static ladders retired). The measurement gates are
-  now DATA-COMPLETE (see the 10 GbE item above) — only the owner
-  declarations remain. Residue: Queue item 3.
-- **Windows-host sessions (2026-07-04)**: suite fully green on the
-  owner's Windows machine. Erratum settled (D-2026-07-04-2):
-  `9f37a7a`/`48c5a11` don't build in isolation; bisect skips them.
-- **Active context**: REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4
-  .md`) Active (D-2026-06-20-5); the codex loop governs all code and
-  plan changes (D-2026-07-04-1); `.review/README.md` async loop
-  retired; REVIEW.md stays the queue/status index.
+  sign-off data is in; owner declarations pending (see Blocked).
+  Headlines (digest: DEVLOG 2026-07-05 00:34; durable evidence:
+  `docs/bench/10gbe-2026-07-05/`): push/pull 1 GiB ≈ 9.5 Gbit/s
+  against a 9.88 iperf3 ceiling @ MTU 9000, first payload 14.5 ms;
+  **ue-1 loopback parity band holds** (worst spread 1.8×); reverse
+  direction validated; no organic resize anywhere (one stream
+  saturates 10 GbE) — ue-2 is an interpretation call; zero-copy
+  0 bytes at wire saturation. Bench script repaired through the
+  codex loop en route (`b9befb8`+`92d6326`, 2 High accepted;
+  methodology + disk-path follow-ups recorded in DEVLOG).
+- **w9-3 DONE — test-harness consolidation** (`f6e592e`+`8641bc6`+
+  `c62d15b`; finding `.review/findings/w9-3-test-harness-builder.md`;
+  DEVLOG 2026-07-04 23:35). One harness (builder, second-daemon,
+  OnceLock build, keepalive parity via
+  `blit_core::remote::grpc_server`); daemon-spawn port-TOCTOU flake
+  root-caused + fixed. Codex 1 Medium accepted → fixed. Tests
+  1478 → 1479/0/2 same-method A/B.
+- **Earlier 2026-07-04: design-3, w4-4, w6-2 (filed w6-2a/b/c), w6-1
+  (+design-1), w3-1, w2-2, w4-5, W1 family, w4-1, w4-3 all `[x]`** —
+  DEVLOG 2026-07-04 entries; `.review/`; commit map in REVIEW.md.
+- **REV4 code-complete**; measurement gates DATA-COMPLETE — only the
+  owner declarations remain. Residue: Queue item 4. Windows: suite
+  green on the owner's machine (erratum D-2026-07-04-2 settled).
+- **Active context**: REV4 plan Active (D-2026-06-20-5); codex loop
+  governs all code + plan changes (D-2026-07-04-1); REVIEW.md is the
+  queue/status index.
 
 ## Queue (ordered)
 
@@ -121,25 +119,30 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   D-2026-06-12-1, executes w8-1), `TUI_REWORK.md` (gated on Round 1),
   `BENCHMARK_10GBE_PLAN.md` (Historical; env note lives in the queue).
 
-## Blocked / waiting
+## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Four owner declarations from the completed 10 GbE session**
-  (checkpoints are owner-only): ue-1 pass/fail, ue-2 pass/fail or
-  re-scope, zero-copy revisit verdict, REV4 → Shipped flip. Evidence
-  is in (Now + DEVLOG 2026-07-05); agent reads it as: band holds,
-  wire saturated, resize unexercisable at this wire speed, splice
-  unnecessary at 10 GbE.
-- **Push go** (always owner-gated): local commits `f6e592e`..HEAD
-  await the ref-listing + approval flow; windows-latest CI on the
-  w9-3 harness fix rides on it.
+- **SMALL_FILE_CEILING Draft → Active flip** (+ DECISIONS.md entry on
+  approval) — sf-1 starts on the flip, nothing before.
+- **Four 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
+  holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE —
+  sf-5 would give it a real trigger), zero-copy revisit verdict,
+  REV4 → Shipped.
+- **Zero-copy option a/b/c** (from the 2026-07-05 exchange): (a) keep
+  deletion + append measured CPU data and regeneralize the rig-bound
+  revisit gate in the eval doc, (b) amend D-2026-06-12-1 to keep the
+  module, (c) leave as-is (data stays in DEVLOG +
+  docs/bench/10gbe-2026-07-05/DIAGNOSIS.md). Measured: 1.43 cores
+  daemon-receive / 0.45 client at 9.5 Gbit/s — gate not met on this
+  rig, but "fraction of one core" was optimistic.
+- **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
+  approval flow; windows-latest CI on the w9-3 harness fix rides it.
 - `Cargo.lock`: dependency-refresh drift committed at `04c9c6d` (was
   unavoidable — blit-core gained `rand`); revert selectively if
   unwanted, otherwise settled.
 
 ## Open questions
 
-- **(OPEN)** Historical audit/finding docs still embed `/Users/...`
-  in recorded evidence — scrub or leave? Agent rec: leave.
+- **(OPEN)** Historical docs embed `/Users/...` paths — agent rec: leave.
 - **(OPEN, new 2026-07-04)** `725aa07` tracked a 236-file stale
   worktree snapshot (`.claude/worktrees/vigilant-mayer/`, incl. a
   full `crates/` copy). Keep or `git rm -r`? Agent rec: remove;
@@ -168,6 +171,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-05 (22nd)** @ `219cecf`+handoff — **ceiling principle
+  recorded + SMALL_FILE_CEILING drafted through the plan procedure**
+  (owner interview → correction → reframe; codex plan review 5/5
+  accepted+fixed; evidence bundle committed to
+  `docs/bench/10gbe-2026-07-05/`). Tool comparison + zero-copy CPU
+  data measured and recorded same session. skippy fully torn down;
+  tree clean. In-flight: none. **Exact first action next session**:
+  the owner declarations in Blocked — above all the
+  SMALL_FILE_CEILING Active flip (then sf-1); coding queue's w7-1
+  remains the fallback if the owner defers everything.
 - **2026-07-05 (21st)** @ `92d6326`+records — **10 GbE benchmark
   session ran end-to-end** (owner-called and owner-attended: MTU
   9000 set on the client mid-session, ufw confirmed, bench area
@@ -180,21 +193,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   zero-copy/REV4→Shipped); coding queue resumes at **w7-1** after
   that (or immediately if the owner defers the declarations).
   Nothing pushed — push stays owner-gated.
-- **2026-07-04 (20th)** @ `c62d15b` —
-  **w9-3-test-harness-builder landed and graded** (owner go:
-  "continue, use /playbook reviewloop codex" — no playbooks in this
-  repo; resolved to `slice`). One harness (builder + second-daemon +
-  OnceLock build + keepalive parity via new
-  `blit_core::remote::grpc_server`); the daemon-spawn port-collision
-  flake was caught live during validation and fixed (claimed-port set
-  + child-death check). Codex: NEEDS FIXES 1 Medium (fake-server bind
-  bypassed the claimed set) → fixed `8641bc6`; records `c62d15b`.
-  Gate: fmt/clippy clean; 1478 → 1479/0/2 same-method A/B; full suite
-  ×2 + admin_verbs ×10 green. In-flight: none. **Exact first action
-  next session**: standing "reviewloop" go → **w7-1**
-  (mirror-executor consolidation, topmost ratified open row) through
-  the codex loop; alternatives w6-2a/b/c + relay-1 (coder's pick).
-  Nothing pushed — push stays owner-gated.
-- **2026-07-04 (19th)** @ `c609192`+docs — push recorded (`10d89e0`
-  → GitHub) + 10 GbE host plan settled (TrueNAS ↔ Arch; details in
-  DEVLOG 2026-07-04 22:09). Executed by the 20th/21st entries.
+- **2026-07-04 (20th)** @ `c62d15b` — **w9-3 landed and graded**
+  (harness consolidation + port-race fix; codex 1 Medium accepted →
+  `8641bc6`; details: Now bullet + DEVLOG 2026-07-04 23:35). Next
+  action was the review queue (w7-1) — superseded by the 21st/22nd
+  entries' benchmark + plan work. Nothing pushed.
