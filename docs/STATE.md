@@ -89,7 +89,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    is now `skippy:/mnt/generic-pool/video/blit-bin/` (binaries +
    bench.toml staged; /tmp and /home on skippy are noexec). After
    the declarations: audit Round 1, TUI rework, H10b planner.
-3. **Post-REV4 residue** (unowned until the owner slots them): pull
+3. **`docs/plan/SMALL_FILE_CEILING.md` (Draft — awaiting owner
+   Active flip)**: close the measured small-file/mixed gaps to the
+   hardware ceiling. Owner principle recorded in the doc
+   (2026-07-05): goals are ceiling-driven, never competitor-relative
+   — tools like rsync are tripwires, not targets. Slices sf-1..7;
+   sf-6 (wire-visible tar-shard lane) carries its own owner gate.
+4. **Post-REV4 residue** (unowned until the owner slots them): pull
    1s-start restructuring; epoch-0/early-ADD hardening; remote
    perf-history lanes (1e gap); `derive_local_plan_tuning`
    fold-or-retire (statically live on the local engine path but
@@ -189,12 +195,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   (mirror-executor consolidation, topmost ratified open row) through
   the codex loop; alternatives w6-2a/b/c + relay-1 (coder's pick).
   Nothing pushed — push stays owner-gated.
-- **2026-07-04 (19th)** @ `c609192`+docs — **push recorded + 10 GbE
-  host plan settled** (owner Q&A). Owner pushed `master` → `github`
-  at `10d89e0`; gitea mirror lags. Benchmark sign-off pair decided:
-  TrueNAS ↔ Arch (all-Linux; splice gate + clean parity band), Win 11
-  bare-metal datapoint after on the same dual-boot hardware, Win VM
-  for functional checks only — recorded in Queue item 2. No code.
-  In-flight: none. **Exact first action next session**: standing
-  "reviewloop" go → **w9-3** (test-harness builder) through the codex
-  loop; the owner will call "benchmark" for the 10 GbE session.
+- **2026-07-04 (19th)** @ `c609192`+docs — push recorded (`10d89e0`
+  → GitHub) + 10 GbE host plan settled (TrueNAS ↔ Arch; details in
+  DEVLOG 2026-07-04 22:09). Executed by the 20th/21st entries.
