@@ -1,0 +1,7 @@
+transport,direction,workload,run,ms,status
+rclone_webdav,push,large,1,3326,0
+rclone_webdav,pull,large,1,1011,0
+rclone_webdav,push,large,2,3365,0
+rclone_webdav,pull,large,2,1004,0
+rclone_webdav,push,small,1,314978,0
+rclone_webdav,pull,small,1,108708,0

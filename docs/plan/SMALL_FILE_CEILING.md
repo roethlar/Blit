@@ -26,9 +26,10 @@ target-filesystem parallel create floor, source enumeration floor),
 demonstrated by profile evidence and a stream-scaling curve, not by
 blit's own stream policy or per-file overhead.
 
-Measured gap analysis (evidence:
-`logs/bench_10gbe_20260704T201804/tool_comparison.csv`, daemon logs,
-DEVLOG 2026-07-05):
+Measured gap analysis (durable evidence:
+`docs/bench/10gbe-2026-07-05/` — DIAGNOSIS.md carries the daemon-log
+extracts and arithmetic; the CSVs carry every matrix cell; DEVLOG
+2026-07-05 entries are the narrative record):
 
 | cell | blit today | ceiling arithmetic | tripwire |
 |---|---|---|---|
@@ -81,11 +82,14 @@ This is a policy gap plus per-file overhead, not missing machinery.
 - [ ] Scaling evidence: files/s rises with stream count until the
       named limiter binds — the curve flattens at hardware, not at
       policy.
-- [ ] **Tripwires clean**: no tested tool (rsyncd, rsync-over-ssh,
-      rclone in its best measured config, `cp -a` locally) measures
-      faster than blit on any cell of the committed matrix.
-- [ ] All currently-winning cells stay within noise of today's
-      baseline.
+- [ ] **Tripwires clean**: no tool in the committed sf-1 harness
+      matrix — rsyncd, rsync-over-ssh, rclone in its best measured
+      config (`--ignore-checksum`, tuned `--transfers`), and `cp -a`
+      for local cells — measures faster than blit on any cell. (The
+      harness and this list are the same set by construction; adding
+      a tripwire tool means adding it to the harness.)
+- [ ] All baseline matrix cells stay within run-to-run noise (±10%)
+      of the committed `docs/bench/10gbe-2026-07-05/` baseline.
 - [ ] The comparison + scaling harness is committed and the owner
       can rerun it against any daemon host in one command.
 
@@ -123,29 +127,45 @@ analysis to prove it earns its keep before design review.
 
 ## Slices
 
-1. **sf-1 harness + baseline**: `RSYNC_COMPARE=1` tripwire section
-   in `scripts/bench_10gbe.sh` (spins rsyncd on the daemon host,
-   same fresh-target matrix) + a stream-scaling probe mode; commit
-   the 2026-07-05 baseline CSVs under `docs/bench/`. No production
-   code.
+1. **sf-1 tripwire harness**: commit `scripts/bench_tripwires.sh`
+   (derived from the session's ad-hoc runner): full matrix — blit,
+   rsyncd (spun on the daemon host over ssh), rsync-over-ssh,
+   rclone best-config, `cp -a` local — fresh targets every run,
+   plus a stream-scaling probe mode (files/s vs stream count). The
+   2026-07-05 baseline already lives in `docs/bench/10gbe-2026-07-05/`
+   (committed with this plan); sf-1 makes it re-runnable in one
+   command. No production code.
 2. **sf-2 dial file-count weighting**: proposal-table unit pins
    (10k tiny → multi-stream; 1×1 GiB unchanged; mixed →
    intermediate) + loopback e2e pin that a 10k-file push opens >1
    data-plane connection.
-3. **sf-3 per-file cost profile + trim**: profiling evidence in the
-   finding doc, then the cheapest cuts; loopback per-file-cost
-   proxy pin so CI catches gross regressions without the rig.
-4. **sf-4 rig re-measure + limiter analysis**: rerun sf-1 harness on
+3. **sf-3a per-file cost limiter analysis** (analysis-only, w8-1b
+   precedent): `strace -c`/`perf` profile of daemon receive and
+   client pull-write during a small transfer; deliverable is a
+   committed analysis naming each per-file syscall cost and the
+   ordered list of candidate cuts, each with its expected saving.
+   No code.
+4. **sf-3b… one cut per slice**: each accepted cut from sf-3a lands
+   as its own review-loop slice with its own loopback
+   per-file-cost proxy pin (so CI catches gross regressions
+   without the rig). The count of sf-3x slices is set by sf-3a's
+   list, not guessed here.
+5. **sf-4 rig re-measure + limiter analysis**: rerun sf-1 harness on
    the 10 GbE rig; record the limiter analysis per cell. Hardware-
    bound everywhere + tripwires clean → acceptance review with the
    owner. Otherwise the analysis names what binds; continue.
-5. **sf-5 resize-on-backlog feed** (if sf-4 names stream count
+6. **sf-5 resize-on-backlog feed** (if sf-4 names stream count
    under load as a binder, or the owner wants the ue-2 organic
    trigger regardless — flagged at sf-4).
-6. **sf-6 tar-shard push lane** (if sf-4/sf-5's analysis names
-   per-file wire framing as the binder): wire-compat design section
-   to the owner **before any code**; then implement.
-7. **sf-7 verdict**: final rig run, limiter analyses committed,
+7. **sf-6 tar-shard push lane** (if sf-4/sf-5's analysis names
+   per-file wire framing as the binder). Wire-visible; the owner
+   gate consumes the full REV4 wire-contract deliverable set
+   **before any code**: the proto messages/fields and their field
+   numbers named; capability negotiation for the shard lane
+   specified; old-client→new-daemon and new-client→old-daemon
+   behavior stated; and mixed-version compatibility tests specified
+   and landing **before** any behavior depends on the lane.
+8. **sf-7 verdict**: final rig run, limiter analyses committed,
    acceptance checklist walked with the owner; plan → Shipped or
    the remaining gap gets its own named follow-on.
 
