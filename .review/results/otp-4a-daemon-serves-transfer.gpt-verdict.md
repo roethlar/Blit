@@ -55,4 +55,5 @@ while bytes are in flight, assert the client surfaces a
 plane and a long-enough transfer to cancel mid-stream. The frame path
 is now correct and unit-guarded.
 
-**Fix sha**: (appended after the fix commit)
+**Fix sha**: `25f538b` (gate re-run: fmt + clippy clean, workspace
+suite 1508 → 1509 passed / 0 failed).
