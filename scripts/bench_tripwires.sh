@@ -32,9 +32,15 @@
 #                      TrueNAS /tmp and /home are noexec (session lesson).
 #   REMOTE_BLIT_DAEMON path to blit-daemon ON the daemon host
 #   SPIN_DAEMONS=1     spin blitd (--root, module "default") + rsyncd on
-#                      the daemon host over ssh; 0 = daemons already run
-#                      (then set BLIT_PORT/BLIT_MODULE/RSYNCD_PORT and
-#                      optionally BLITD_LOG for scale-mode stream counts)
+#                      the daemon host over ssh, both exporting the
+#                      per-invocation session dir. 0 = daemons already
+#                      run; then blitd's BLIT_MODULE and an rsyncd
+#                      module named "bench" must BOTH export REMOTE_ROOT
+#                      itself (the harness works in a session subdir of
+#                      the shared root; rsyncd cells are probed and
+#                      skipped if no daemon answers). Set BLIT_PORT/
+#                      BLIT_MODULE/RSYNCD_PORT to match, and BLITD_LOG
+#                      for scale-mode stream counts.
 #   BLIT_PORT=9031  BLIT_MODULE=default  RSYNCD_PORT=8730
 #   BLITD_LOG          remote path of blitd's stderr log (scale mode
 #                      stream counting when SPIN_DAEMONS=0)
@@ -62,8 +68,11 @@
 # warm, so pulls are warm re-reads), async writes, no sync between
 # runs, wall-clock ms.
 #
-# Exit codes: 0 = ran and no tripwire tripped; 3 = at least one tool
-# beat blit somewhere (the summary names the cells); 1 = harness error.
+# Exit codes: 0 = full matrix ran and no tripwire tripped; 3 = at
+# least one tool beat blit somewhere (the summary names the cells);
+# 4 = matrix incomplete (a tripwire tool was missing or produced no
+# successful run in some cell — "clean" cannot be claimed); 1 =
+# harness error. Trips take precedence over incompleteness.
 
 set -euo pipefail
 
@@ -110,8 +119,13 @@ rssh() { ssh -o BatchMode=yes "$SSH_HOST" "$@"; }
 
 # ── remote session lifecycle ─────────────────────────────────────────
 SESSION=""            # per-invocation dir under REMOTE_ROOT
+REL=""                # session path relative to the daemons' module root
+                      # (empty when SPIN_DAEMONS=1: the module root IS the
+                      # session dir; "tripwires_…/" when targeting external
+                      # daemons that export REMOTE_ROOT)
 BLITD_STARTED=0
 RSYNCD_STARTED=0
+RSYNCD_CELLS=0
 
 teardown() {
     rm -rf "$WORK"
@@ -131,8 +145,15 @@ trap teardown EXIT
 setup_remote() {
     [[ -n "$REMOTE_ROOT" ]] || { echo "DAEMON_HOST set but REMOTE_ROOT is empty" >&2; exit 1; }
     rssh "true" || { echo "cannot ssh to $SSH_HOST" >&2; exit 1; }
-    SESSION="$REMOTE_ROOT/tripwires_$STAMP"
-    rssh "mkdir -p '$SESSION/push' '$SESSION/seed'"
+    # Plain (non -p) mkdir on the session dir: creation must fail if it
+    # already exists, because teardown rm -rf's it — the harness never
+    # deletes a directory it did not itself create. $$ defeats
+    # same-second collisions between invocations.
+    local candidate="$REMOTE_ROOT/tripwires_${STAMP}_$$"
+    rssh "mkdir -p '$REMOTE_ROOT' && mkdir '$candidate'" \
+        || { echo "cannot create session dir $candidate (already exists?)" >&2; exit 1; }
+    SESSION="$candidate"
+    rssh "mkdir '$SESSION/push' '$SESSION/seed'"
 
     HAVE_REMOTE_RSYNC=$(rssh "command -v rsync >/dev/null && echo 1 || echo 0")
 
@@ -154,9 +175,22 @@ setup_remote() {
             log "NOTE: rsync missing on $SSH_HOST — rsyncd + rsync_ssh cells skipped"
         fi
         sleep 1   # both daemons bind before the first cell
+        RSYNCD_CELLS=$RSYNCD_STARTED
+    else
+        # External daemons export REMOTE_ROOT; this session works in a
+        # subdir of it, so daemon-relative paths need the prefix.
+        REL="tripwires_${STAMP}_$$/"
     fi
     BLIT_EP="$DAEMON_HOST:$BLIT_PORT:/$BLIT_MODULE/"    # trailing slash is load-bearing (endpoint.rs)
     RSYNCD_URL="rsync://$DAEMON_HOST:$RSYNCD_PORT/bench"
+    if (( ! SPIN_DAEMONS )) && (( HAVE_RSYNC )); then
+        # Probe the external rsyncd rather than trusting it exists.
+        if timeout 5 rsync --list-only "$RSYNCD_URL/" >/dev/null 2>&1; then
+            RSYNCD_CELLS=1
+        else
+            log "NOTE: no rsyncd answering at $RSYNCD_URL — rsyncd cells skipped"
+        fi
+    fi
 }
 
 # ── timing ───────────────────────────────────────────────────────────
@@ -224,7 +258,7 @@ run_matrix() {
 
         log "=== seeding pull source: $workload ==="
         fresh_remote "$SESSION/seed/$workload"
-        "$BLIT" copy "$src/" "${BLIT_EP}seed/$workload/" --yes >/dev/null 2>&1 \
+        "$BLIT" copy "$src/" "${BLIT_EP}${REL}seed/$workload/" --yes >/dev/null 2>&1 \
             || { echo "seeding $workload over blit failed — is the daemon reachable at $BLIT_EP ?" >&2; exit 1; }
 
         log "=== remote cells: $workload ==="
@@ -232,11 +266,11 @@ run_matrix() {
             # push — fresh never-seen remote target every run
             fresh_remote "$SESSION/push/blit_${workload}_r${run}"
             timed_row blit push "$workload" "$run" \
-                "$BLIT" copy "$src/" "${BLIT_EP}push/blit_${workload}_r${run}/" --yes
-            if [[ "$HAVE_REMOTE_RSYNC" == 1 && $HAVE_RSYNC == 1 && $RSYNCD_STARTED == 1 ]]; then
+                "$BLIT" copy "$src/" "${BLIT_EP}${REL}push/blit_${workload}_r${run}/" --yes
+            if (( RSYNCD_CELLS && HAVE_RSYNC )); then
                 fresh_remote "$SESSION/push/rsyncd_${workload}_r${run}"
                 timed_row rsyncd push "$workload" "$run" \
-                    rsync -a --whole-file --inplace --no-compress "$src/" "$RSYNCD_URL/push/rsyncd_${workload}_r${run}/"
+                    rsync -a --whole-file --inplace --no-compress "$src/" "$RSYNCD_URL/${REL}push/rsyncd_${workload}_r${run}/"
             fi
             if [[ "$HAVE_REMOTE_RSYNC" == 1 && $HAVE_RSYNC == 1 ]]; then
                 fresh_remote "$SESSION/push/rsync_ssh_${workload}_r${run}"
@@ -253,10 +287,10 @@ run_matrix() {
             # pull — same seeded source for every tool, fresh local target
             dst="$WORK/dst_pull"
             fresh_local "$dst"
-            timed_row blit pull "$workload" "$run" "$BLIT" copy "${BLIT_EP}seed/$workload/" "$dst/" --yes
-            if [[ $RSYNCD_STARTED == 1 && $HAVE_RSYNC == 1 ]]; then
+            timed_row blit pull "$workload" "$run" "$BLIT" copy "${BLIT_EP}${REL}seed/$workload/" "$dst/" --yes
+            if (( RSYNCD_CELLS && HAVE_RSYNC )); then
                 fresh_local "$dst"
-                timed_row rsyncd pull "$workload" "$run" rsync -a --whole-file --inplace --no-compress "$RSYNCD_URL/seed/$workload/" "$dst/"
+                timed_row rsyncd pull "$workload" "$run" rsync -a --whole-file --inplace --no-compress "$RSYNCD_URL/${REL}seed/$workload/" "$dst/"
             fi
             if [[ "$HAVE_REMOTE_RSYNC" == 1 && $HAVE_RSYNC == 1 ]]; then
                 fresh_local "$dst"
@@ -293,7 +327,7 @@ run_scale() {
         [[ -n "$BLITD_LOG" ]] && before=$(rssh "wc -l < '$BLITD_LOG' 2>/dev/null || echo 0")
         status=0
         start=$(date +%s%N)
-        timeout "$TIMEOUT_S" "$BLIT" copy "$src/" "${BLIT_EP}push/scale_$count/" --yes >/dev/null 2>&1 || status=$?
+        timeout "$TIMEOUT_S" "$BLIT" copy "$src/" "${BLIT_EP}${REL}push/scale_$count/" --yes >/dev/null 2>&1 || status=$?
         end=$(date +%s%N)
         ms=$(( (end - start) / 1000000 ))
         streams=""
@@ -308,36 +342,49 @@ run_scale() {
 }
 
 # ── summary: best-of per cell, tripwire verdict, baseline delta ─────
+# The tripwire set is fixed by the plan, not by what happens to be
+# installed: any expected tool with no successful run in a cell makes
+# that cell INCOMPLETE (exit 4) — "clean" is only claimable on full
+# coverage. Trips still win the exit code (3).
 summarize() {
     log ""
     log "=== TRIPWIRE SUMMARY (best of $RUNS, successful runs only) ==="
-    # exit 3 from awk marks "tripped"; anything else from awk is a bug.
+    local expected_remote=""
+    [[ -n "$DAEMON_HOST" ]] && expected_remote="blit rsyncd rsync_ssh rclone_sftp"
     local tripped=0
-    awk -F, '
+    awk -F, -v expected_local="blit rsync rclone cp" -v expected_remote="$expected_remote" '
         NR > 1 && $6 == 0 {
-            cell = $2 "," $3
-            key = $1 SUBSEP cell
+            key = $1 SUBSEP $2 "," $3
             if (!(key in best) || $5 < best[key]) best[key] = $5
-            cells[cell] = 1; tools[$1] = 1
         }
+        NR > 1 { cells[$2 "," $3] = 1 }
         END {
+            nl = split(expected_local, el, " ")
+            nr = split(expected_remote, er, " ")
             printf "%-12s %-8s %10s %10s %-12s %s\n", "direction", "workload", "blit_ms", "rival_ms", "rival", "verdict"
-            n = 0
+            trips = 0; gaps = 0
             for (cell in cells) {
-                if (!(("blit" SUBSEP cell) in best)) continue
-                b = best["blit" SUBSEP cell]
+                split(cell, dw, ",")
+                n = (dw[1] == "local") ? nl : nr
+                missing = ""
+                for (i = 1; i <= n; i++) {
+                    t = (dw[1] == "local") ? el[i] : er[i]
+                    if (!((t SUBSEP cell) in best)) missing = missing (missing == "" ? "" : "+") t
+                }
+                b = (("blit" SUBSEP cell) in best) ? best["blit" SUBSEP cell] : -1
                 rbest = -1; rname = "-"
-                for (t in tools) {
+                for (i = 1; i <= n; i++) {
+                    t = (dw[1] == "local") ? el[i] : er[i]
                     if (t == "blit") continue
                     k = t SUBSEP cell
                     if (k in best && (rbest < 0 || best[k] < rbest)) { rbest = best[k]; rname = t }
                 }
-                split(cell, dw, ",")
-                verdict = "clean"
-                if (rbest >= 0 && rbest < b) { verdict = "TRIPPED"; n++ }
-                printf "%-12s %-8s %10d %10s %-12s %s\n", dw[1], dw[2], b, (rbest < 0 ? "-" : rbest), rname, verdict
+                if (b >= 0 && rbest >= 0 && rbest < b) { verdict = "TRIPPED"; trips++ }
+                else if (missing != "") { verdict = "INCOMPLETE (no run: " missing ")"; gaps++ }
+                else verdict = "clean"
+                printf "%-12s %-8s %10s %10s %-12s %s\n", dw[1], dw[2], (b < 0 ? "-" : b), (rbest < 0 ? "-" : rbest), rname, verdict
             }
-            exit (n > 0 ? 3 : 0)
+            exit (trips > 0 ? 3 : (gaps > 0 ? 4 : 0))
         }' "$MATRIX_CSV" | sort | tee -a "$LOG_DIR/bench.log" || tripped=$?
 
     if [[ -f "$BASELINE_CSV" ]]; then
@@ -352,11 +399,16 @@ summarize() {
             }
             END {
                 for (key in now) {
-                    if (key in base)
-                        printf "  blit %-14s %6dms -> %6dms  (%+.1f%%)\n", key, base[key], now[key], (now[key] - base[key]) * 100.0 / base[key]
-                    else
+                    if (key in base) {
+                        delta = (now[key] - base[key]) * 100.0 / base[key]
+                        flag = (delta > 10 || delta < -10) ? "  <-- outside +/-10% noise band" : ""
+                        printf "  blit %-14s %6dms -> %6dms  (%+.1f%%)%s\n", key, base[key], now[key], delta, flag
+                    } else
                         printf "  blit %-14s (no baseline cell)\n", key
                 }
+                for (key in base)
+                    if (!(key in now))
+                        printf "  blit %-14s (baseline cell not run this invocation)\n", key
             }' "$BASELINE_CSV" "$MATRIX_CSV" | sort | tee -a "$LOG_DIR/bench.log"
     fi
     return "$tripped"

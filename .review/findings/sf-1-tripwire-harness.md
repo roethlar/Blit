@@ -47,9 +47,13 @@ was never committed, so this reconstructs it durably.
   table divergence is exactly the sf-2 evidence the plan wants the
   curve to show.
 - **Tripwire verdict is the exit code**: summary prints best-of per
-  cell, blit vs fastest rival; any rival win → `TRIPPED` + exit 3.
-  Also diffs blit cells against the committed baseline CSV (the ±10%
-  regression criterion) when present.
+  cell, blit vs fastest rival; any rival win → `TRIPPED` + exit 3;
+  any expected tool with no successful run in a cell → `INCOMPLETE`
+  + exit 4 (the tripwire set is fixed by the plan — a missing tool
+  must not let a partial run read as "clean"). Also diffs blit cells
+  against the committed baseline CSV (the ±10% regression criterion),
+  flagging cells outside the noise band and baseline cells not run;
+  informational only, since the baseline binds to the 10 GbE rig.
 - Missing tools (rsync/rclone locally or remotely) skip their cells
   with a note; a wedged tool is capped by `timeout` and recorded in
   the status column rather than hanging the run.
@@ -60,8 +64,9 @@ was never committed, so this reconstructs it durably.
 
 ## Tests
 
-Script-only slice — cargo suite unaffected (run anyway: fmt, clippy,
-full workspace suite green; count vs 1479 baseline in verdict file).
+Script-only slice — cargo suite unaffected; run anyway: fmt clean,
+clippy clean, `cargo test --workspace` **1479 passed / 0 failed**
+across 37 suites (matches the w9-3 baseline count exactly).
 Script verified by execution:
 
 - `bash -n` clean.
