@@ -32,8 +32,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   rows only. **D-2026-07-05-2: no version compatibility, EVER —
   same-build peers only, mismatched builds refuse at session open
   (strict handshake specified in otp-1); REV4's negotiate-down
-  clause is void, annotated.** Current slice: **otp-1 wire+session
-  contract** (doc + proto, no behavior) through the codex loop.
+  clause is void, annotated.** **otp-1 `[x]`** (`a3e2acb`+`f861579`,
+  codex 6/6 accepted+fixed; contract: `docs/TRANSFER_SESSION.md`;
+  suite 1483 → 1484/0). Current slice: **otp-3 TransferSession core**
+  (otp-2 symmetric baseline is rig-gated; must land before otp-10).
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1 `[x]`
   sf-2 `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`, codex 1/1,
   suite 1479 → 1483/0, DEVLOG 2026-07-05 06:45); **sf-3a+ blocked**
@@ -65,9 +67,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
-   codex loop per slice (owner re-affirmed). Current: otp-1
-   (wire+session contract, doc+proto, no behavior). Then otp-2
-   symmetric baseline (needs the 10 GbE rig + zoey-class endpoints).
+   codex loop per slice (owner re-affirmed). otp-1 `[x]`. Current:
+   otp-3 (TransferSession core, role-parameterized, in-process
+   transport). otp-2 (symmetric baseline) is RIG-GATED — runs when
+   the 10 GbE rig is available, must land before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
    REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
@@ -178,19 +181,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-05 (25th)** @ ONE_TRANSFER_PATH records — **owner
-  directive D-2026-07-05-1** (one transfer path,
-  direction-invariance by construction; verbatim quotes in the plan
-  doc) after the owner rejected the push/pull disparity and the
-  mixed-fs benchmark methodology. Plan drafted through the plan
-  procedure; SMALL_FILE_CEILING + design queue paused. In-flight:
-  codex plan review adjudication. **Exact first action next
-  session**: finish the plan-review adjudication if incomplete, then
-  STOP for the owner's Active flip — no implementation anywhere
-  until it lands (then otp-1: wire+session contract, doc+proto).
-- **2026-07-05 (24th)** @ `7627e7b`+records — **sf-2 landed and
-  graded** (shape-correction stream resize `c70c2ac`, codex 1/1
-  accepted → `7627e7b`; e2e guard proven by revert; suite
-  1479 → 1483/0; DEVLOG 2026-07-05 06:45). In-flight: none.
-  (Its "next: sf-3a" is superseded by the 25th entry above.)
-- (older entries pruned — see DEVLOG 2026-07-05 03:03 and earlier)
+- **2026-07-05 (25th)** @ `cb96e91`+records — **plan Active
+  (D-2026-07-05-4) + otp-1 landed and graded** (contract
+  `docs/TRANSFER_SESSION.md`, `a3e2acb`, codex 6/6 → `f861579`;
+  suite 1484/0). Same session: D-2026-07-05-2 (same-build only) and
+  D-2026-07-05-3 (zero-copy unparked, zoey rig proven — static
+  aarch64-musl binaries executing in the owner's blit-temp folder,
+  recipe in queue item 5). In-flight: none. **Exact first action
+  next session**: otp-3 (TransferSession core in blit-core —
+  role-parameterized state machine over the existing engine, in-
+  process transport, both role assignments over the same fixtures)
+  through the codex loop, per `docs/TRANSFER_SESSION.md`. otp-2 is
+  rig-gated (before otp-10). Owner declarations: three 10 GbE gates
+  + push go remain in Blocked.
+- (older entries pruned — see DEVLOG 2026-07-05 06:45 and earlier)
