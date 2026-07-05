@@ -5,7 +5,7 @@
 **Reviewer**: gpt-5.5 (codex exec, read-only sandbox)
 **Verdict line**: NEEDS FIXES before Active flip (5 findings; no quiet
 re-litigation of settled decisions found)
-**Fix commit**: appended to this file after the fix lands.
+(fix sha recorded at end of file)
 
 ## Findings
 
@@ -47,3 +47,4 @@ re-litigation of settled decisions found)
 Nothing rejected, nothing deferred.
 
 reviewer: gpt-5.5
+**Fix commit**: `496357d`.
