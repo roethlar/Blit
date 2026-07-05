@@ -18,6 +18,7 @@ pub mod transport;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use eyre::Result;
@@ -476,16 +477,33 @@ pub async fn run_source(
 
     let (mut tx, rx) = transport.split();
     let sent: Arc<StdMutex<HashMap<String, FileHeader>>> = Arc::default();
+    // Set by the send half the moment ManifestComplete goes out. On
+    // an ordered transport, a NeedComplete arriving while this is
+    // still false is provably premature — the peer cannot have
+    // received what we have not sent (contract: NeedComplete only
+    // after ManifestComplete received + all entries diffed).
+    let manifest_sent = Arc::new(AtomicBool::new(false));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     // AbortOnDrop: an early error return below must abort the receive
     // half instead of leaking it (same rationale as design-2 / w4-1).
     let _recv_guard = AbortOnDrop::new(tokio::spawn(source_recv_half(
         rx,
         Arc::clone(&sent),
+        Arc::clone(&manifest_sent),
         event_tx,
     )));
 
-    match source_send_half(&cfg, &negotiated, &mut tx, source, sent, event_rx).await {
+    match source_send_half(
+        &cfg,
+        &negotiated,
+        &mut tx,
+        source,
+        sent,
+        &manifest_sent,
+        event_rx,
+    )
+    .await
+    {
         Ok(summary) => Ok(summary),
         Err(report) => {
             let mut fault = fault_from_report(report);
@@ -505,6 +523,7 @@ pub async fn run_source(
 async fn source_recv_half(
     mut rx: Box<dyn FrameRx>,
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
+    manifest_sent: Arc<AtomicBool>,
     events: mpsc::UnboundedSender<SourceEvent>,
 ) {
     loop {
@@ -556,6 +575,16 @@ async fn source_recv_half(
                 }
             }
             Some(Frame::NeedComplete(_)) => {
+                if !manifest_sent.load(Ordering::Acquire) {
+                    // Fail fast at arrival time (otp-3 codex F2): the
+                    // event queue would otherwise let an early
+                    // NeedComplete be processed late and pass as
+                    // legitimate.
+                    let _ = events.send(SourceEvent::Fault(SessionFault::protocol_violation(
+                        "NeedComplete before the source's ManifestComplete",
+                    )));
+                    return;
+                }
                 let _ = events.send(SourceEvent::NeedComplete);
             }
             Some(Frame::Summary(summary)) => {
@@ -582,6 +611,7 @@ async fn source_send_half(
     tx: &mut Box<dyn FrameTx>,
     source: Arc<dyn TransferSource>,
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
+    manifest_sent: &AtomicBool,
     mut events: mpsc::UnboundedReceiver<SourceEvent>,
 ) -> Result<TransferSummary> {
     let mut pending: Vec<FileHeader> = Vec::new();
@@ -614,6 +644,7 @@ async fn source_send_half(
         scan_complete,
     })))
     .await?;
+    manifest_sent.store(true, Ordering::Release);
 
     // Payload phase. In-stream record grammar: payload records only
     // after ManifestComplete, strictly serialized per record

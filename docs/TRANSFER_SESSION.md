@@ -24,9 +24,14 @@ session"; this doc explains the state machine the proto cannot.
    EXACT equality; any mismatch → `SessionError{BUILD_MISMATCH}`
    naming both ids, then stream close. No negotiate-down, no advisory
    fields, no feature-capability bits — same build implies same
-   features. `build_id` = `<crate version>+<git commit hash>[.dirty]`
+   features. `build_id` = `<crate version>+<git commit hash>`
    composed at compile time; `contract_version` is a belt-and-braces
    integer bumped on any wire-shape change (exact match required).
+   Imprecise identities never false-match (otp-3 codex F1): a dirty
+   tree composes `<sha>.dirty.<content hash>` (deterministic — only
+   byte-identical dirty trees match), and a build without git
+   identity composes `unknown.<per-compilation entropy>` (only the
+   selfsame binary matches itself).
 3. **Roles.** The initiator (the end that opened the RPC — a CLI
    client, or a daemon acting as delegated initiator) declares in
    `SessionOpen` whether it is SOURCE or DESTINATION; the responder

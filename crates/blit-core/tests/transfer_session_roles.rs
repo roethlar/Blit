@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, ComparisonMode, FileHeader, ManifestComplete, NeedBatch, NeedEntry,
-    SessionHello, SessionOpen, TransferFrame, TransferRole, TransferSummary,
+    session_error, ComparisonMode, FileHeader, ManifestComplete, NeedBatch, NeedComplete,
+    NeedEntry, SessionHello, SessionOpen, TransferFrame, TransferRole, TransferSummary,
 };
 use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::transfer_plan::PlanOptions;
@@ -664,6 +664,73 @@ async fn resume_flagged_need_is_refused_in_non_resume_session() {
     assert_eq!(
         fault_of(&source_err).code,
         session_error::Code::ProtocolViolation
+    );
+}
+
+#[tokio::test]
+async fn need_complete_before_manifest_complete_faults_the_source() {
+    // codex otp-3 F2: NeedComplete is only legal after the source's
+    // ManifestComplete has been received (contract §Phase state
+    // machine). A peer promising "nothing further needed" before it
+    // could have seen the full manifest must fail the session fast,
+    // not end it as an empty transfer. The 500-entry manifest plus a
+    // peer that reads nothing until after its early NeedComplete
+    // keeps the source provably mid-manifest (64-frame transport
+    // cap) when the violation is processed.
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    std::fs::create_dir_all(&src_root).unwrap();
+    let mut files: Vec<FileSpec> = Vec::new();
+    for i in 0..500 {
+        let name: &'static str = Box::leak(format!("f{i:03}.txt").into_boxed_str());
+        files.push((name, b"x".to_vec(), 1_600_000_000 + i as i64));
+    }
+    write_tree(&src_root, &files);
+
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
+        plan_options: PlanOptions::default(),
+    };
+    let (source_transport, mut peer) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root));
+    let source_task = tokio::spawn(run_source(source_cfg, source_transport, source));
+
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Open(_)));
+    peer.send(wire(Frame::Accept(Default::default())))
+        .await
+        .unwrap();
+    // The violation: promise need-completion before reading a single
+    // manifest frame.
+    peer.send(wire(Frame::NeedComplete(NeedComplete {})))
+        .await
+        .unwrap();
+
+    // The source must abort with a SessionError before its manifest
+    // completes — never treat the early promise as a clean empty
+    // transfer.
+    let refusal = loop {
+        match recv_or_panic(&mut peer).await {
+            Frame::ManifestEntry(_) => continue,
+            Frame::Error(e) => break e,
+            Frame::ManifestComplete(_) => {
+                panic!("source completed its manifest instead of failing fast")
+            }
+            Frame::SourceDone(_) => panic!("source treated early NeedComplete as legitimate"),
+            other => panic!("expected SessionError, got {other:?}"),
+        }
+    };
+    assert_eq!(refusal.code, session_error::Code::ProtocolViolation as i32);
+
+    let source_err = source_task.await.unwrap().unwrap_err();
+    let fault = fault_of(&source_err);
+    assert_eq!(fault.code, session_error::Code::ProtocolViolation);
+    assert!(
+        fault.message.contains("ManifestComplete"),
+        "fault must name the ordering rule, got: {}",
+        fault.message
     );
 }
 

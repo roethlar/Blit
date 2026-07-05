@@ -1,8 +1,10 @@
 # otp-3 — TransferSession core (role-parameterized, in-process)
 
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-3.
-**Status**: implemented — awaiting codex review.
-**Contract**: `docs/TRANSFER_SESSION.md` (post-review, `f861579`).
+**Status**: implemented + reviewed — codex 2/2 findings accepted and
+fixed (`.review/results/otp-3-transfer-session-core.gpt-verdict.md`).
+**Contract**: `docs/TRANSFER_SESSION.md` (post-review, `f861579`;
+§Invariants 2 identity forms extended by the F1 fix).
 
 ## What
 
@@ -22,12 +24,15 @@ identical summary, and byte-identical destination tree.
   `FrameTx`/`FrameRx` halves + `FrameTransport` (splittable) +
   `in_process_pair()` on bounded mpsc (64 frames/direction).
 - `crates/blit-core/src/transfer_session/mod.rs` —
-  - `session_build_id()` = `CARGO_PKG_VERSION+BLIT_GIT_SHA[.dirty]`
-    (build.rs emits the sha; rerun-if-changed on `.git/HEAD` +
-    `.git/refs`; dirty flag sampled at build-script time, best-effort
-    by nature). `CONTRACT_VERSION = 1`. Exact-match hello both ways;
-    mismatch → `SessionError{BUILD_MISMATCH}` naming both ids
-    (D-2026-07-05-2).
+  - `session_build_id()` = `CARGO_PKG_VERSION+BLIT_GIT_SHA` where the
+    suffix is `<sha>` (clean), `<sha>.dirty.<content hash>` (dirty;
+    deterministic porcelain+diff hash — identical dirty trees match,
+    different content refuses), or `unknown.<entropy>` (no git;
+    per-compilation unique) — codex F1. build.rs re-samples on
+    `.git/{HEAD,refs,index}`, each currently-dirty path, blit-core
+    `src/`, and `proto/`. `CONTRACT_VERSION = 1`. Exact-match hello
+    both ways; mismatch → `SessionError{BUILD_MISMATCH}` naming both
+    ids (D-2026-07-05-2).
   - `establish()` — ONE hello/open/accept implementation both role
     drivers call. Responder-side capability validation refuses what
     later slices implement (mirror → otp-6, filters → otp-6, resume →
@@ -105,7 +110,8 @@ identical summary, and byte-identical destination tree.
 
 ## Tests
 
-Suite 1484 → 1500 (+16; count never dropped). New:
+Suite 1484 → 1500 (+16; count never dropped); 1501 after the review
+fix (F2 pin, guard proven by revert). New:
 
 - `transfer_session_roles.rs` (12): small mixed tree (multi-chunk
   3 MiB file, empty file, spaced/nested names) byte-identical under
@@ -168,3 +174,9 @@ Gate: `cargo fmt --check` ✓, `clippy --workspace --all-targets
 - In-process transport caps frames, not bytes (64 × ≤1 MiB payload
   frames ≈ 64 MiB/direction worst case). Fine for tests and local
   use; the wire carrier has HTTP/2 byte-level flow control.
+- Build-identity residual window (post-F1, reviewed): a first edit
+  to a previously-clean file outside blit-core/proto with no git
+  operation in between keeps the last sampled identity until the
+  next build-script trigger. Closing it fully means watching every
+  workspace source (full recompile cascade on any edit) — flagged
+  for the owner in the verdict record, deliberately not taken.
