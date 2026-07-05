@@ -83,12 +83,13 @@ REV3:
 - **RELIABLE**: mirror/delete safety, scan-completeness checks, resume,
   StallGuard behavior, cancellation, byte-progress accounting, and
   byte-identical transfer tests cannot regress.
-- Wire changes are allowed (proto unfrozen, D-2026-06-11-1), but mixed
-  old/new peers must negotiate down to today's behavior. New fields are
-  advisory until both peers advertise support. **(Superseded at
-  ONE_TRANSFER_PATH's cutover slice by D-2026-07-05-1: the unified
-  `Transfer` session replaces `Push`/`PullSync` without back-compat,
-  lockstep upgrade. This constraint governs until that slice lands.)**
+- ~~Wire changes are allowed (proto unfrozen, D-2026-06-11-1), but
+  mixed old/new peers must negotiate down to today's behavior. New
+  fields are advisory until both peers advertise support.~~
+  **(Superseded by D-2026-07-05-2: blit has no version-compatibility
+  obligation of any kind — same-build peers only, mismatched builds
+  refuse at session open. Proto remains unfrozen; the negotiate-down
+  and advisory-fields requirements are void.)**
 - The 1370-test baseline must not drop.
 - Windows parity remains required unless a test is genuinely platform
   specific.

@@ -29,7 +29,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   the better direction per cell ±10%); benchmark verdict cells must
   be symmetric-fs disk-to-disk (owner: "tmp on one side, spinning
   rust on the other is not a valid test"), tmpfs = wire-reference
-  rows only. **No code until the owner flips Active.**
+  rows only. **D-2026-07-05-2: no version compatibility, EVER —
+  same-build peers only, mismatched builds refuse at session open
+  (strict handshake specified in otp-1); REV4's negotiate-down
+  clause is void, annotated.** **No code until the owner flips
+  Active.**
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1 `[x]`
   sf-2 `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`, codex 1/1,
   suite 1479 → 1483/0, DEVLOG 2026-07-05 06:45); **sf-3a+ blocked**

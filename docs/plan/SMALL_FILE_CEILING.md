@@ -63,8 +63,9 @@ This is a policy gap plus per-file overhead, not missing machinery.
   survive past their measured need) or RELIABLE (REV4 invariants:
   byte-identical, StallGuard, cancellation, byte accounting).
 - No wire-visible protocol change without a dedicated owner gate on
-  the wire design before code (sf-6); mixed-version peers keep
-  working via existing negotiation.
+  the wire design before code (sf-6). ~~mixed-version peers keep
+  working via existing negotiation~~ **(superseded by D-2026-07-05-2:
+  same-build peers only, no version compatibility of any kind)**.
 - No measured cell regresses beyond run-to-run noise (±10%),
   guarded by the committed baseline.
 - Test count never drops; every slice through the codex loop
@@ -162,9 +163,11 @@ analysis to prove it earns its keep before design review.
    gate consumes the full REV4 wire-contract deliverable set
    **before any code**: the proto messages/fields and their field
    numbers named; capability negotiation for the shard lane
-   specified; old-client→new-daemon and new-client→old-daemon
+   specified. ~~old-client→new-daemon and new-client→old-daemon
    behavior stated; and mixed-version compatibility tests specified
-   and landing **before** any behavior depends on the lane.
+   and landing **before** any behavior depends on the lane~~
+   **(superseded by D-2026-07-05-2: same-build only — no
+   mixed-version behavior exists to specify or test)**.
 8. **sf-7 verdict**: final rig run, limiter analyses committed,
    acceptance checklist walked with the owner; plan → Shipped or
    the remaining gap gets its own named follow-on.

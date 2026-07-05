@@ -4,9 +4,9 @@
 **Created**: 2026-07-05
 **Supersedes**: post-REV4 residue item "pull 1s-start restructuring"
 (absorbed here); pauses `docs/plan/SMALL_FILE_CEILING.md` after sf-2
-(D-2026-07-05-1); at cutover (otp-10) supersedes REV4's
-mixed-version-peers constraint ("mixed old/new peers must negotiate
-down to today's behavior") — annotated in REV4 §Constraints
+(D-2026-07-05-1). REV4's mixed-version-peers constraint is superseded
+outright by **D-2026-07-05-2 (no version compatibility, ever — same
+build only)** — annotated in REV4 §Constraints
 **Decision ref**: D-2026-07-05-1 (directive + pause); Active flip gets
 its own entry
 
@@ -45,14 +45,16 @@ no second code path to differ.
 
 ## Non-goals
 
-- Preserving wire compatibility with pre-plan builds. The `Push` and
-  `PullSync` RPCs are deleted at cutover; both ends upgrade in
-  lockstep (repo precedent: the `PullSyncHeader` removal; the owner
-  operates every deployed peer). This **explicitly supersedes** REV4's
-  "mixed old/new peers must negotiate down to today's behavior"
-  constraint at the cutover slice (codex plan review F1; REV4
-  §Constraints annotated) — until cutover lands, old paths keep
-  working unchanged.
+- Version compatibility of ANY kind (D-2026-07-05-2, owner standing
+  rule: "backward compatibility is NOT a consideration... same build
+  only. do not engineer tech debt into an unshipped product"). A blit
+  client talks only to a blit-daemon from the same build; the session
+  handshake REFUSES a mismatched peer outright. No negotiate-down, no
+  advisory fields, no feature-capability bits for version skew.
+  `Push`/`PullSync` are deleted at cutover with no bridge. (Old-path
+  code coexists in-tree during the migration slices solely so each
+  slice lands green — that is migration scaffolding, not wire
+  compatibility.)
 - Making different hardware perform identically. If src and dst sit
   on different disks, the two *data directions* still differ by
   physics; the invariant is that the same data direction between the
@@ -226,11 +228,15 @@ otp-9 deletes them.
 
 1. **otp-1 wire+session contract (doc + proto, no behavior)**: the
    `Transfer` RPC and message set — roles, phases, field numbers,
-   capability negotiation (incl. the receiver capacity profile and
-   bounded-unilateral dial contract, D-2026-06-20-1/-2), transport
-   selection, resume phase ordering (the RELIABLE exception above),
-   mirror phase, error/cancel semantics. Full REV4 wire-contract
-   deliverable set; codex-reviewed before any code consumes it.
+   the **strict same-build handshake** (exact protocol/build identity
+   exchanged at session open; any mismatch is refused with a clear
+   error — D-2026-07-05-2; pinned by test when the session lands),
+   the receiver capacity profile + bounded-unilateral dial contract
+   (D-2026-06-20-1/-2 — hardware negotiation, the only negotiation
+   that exists), transport selection, resume phase ordering (the
+   RELIABLE exception above), mirror phase, error/cancel semantics.
+   No feature-capability bits: same build implies same features.
+   Codex-reviewed before any code consumes it.
 2. **otp-2 symmetric baseline (harness + rig, no production code)**:
    correct the sf-1 harness matrix — same-fs disk-to-disk verdict
    cells, cold caches, tmpfs rows re-labeled wire-reference only —
@@ -257,10 +263,10 @@ otp-9 deletes them.
    `DelegatedPull` RPC reduced to trigger + progress relay.
 10. **otp-10 cutover + deletion**: CLI/app/TUI route every remote
     operation through the session; `Push`/`PullSync` and all four
-    drivers deleted from the tree and the proto (REV4 mixed-version
-    constraint superseded here, per the decision); ported-test
-    accounting proves count never dropped. Deletion proof recorded,
-    incl. the DelegatedPull no-payload-bytes assertion.
+    drivers deleted from the tree and the proto, no bridge
+    (D-2026-07-05-2); ported-test accounting proves count never
+    dropped. Deletion proof recorded, incl. the DelegatedPull
+    no-payload-bytes assertion.
 11. **otp-11 local transfers** ride the in-process transport; the
     separate local orchestration is deleted; local perf pins hold.
 12. **otp-12 symmetric-rig acceptance run**: rerun the otp-2 matrix
