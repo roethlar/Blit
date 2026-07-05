@@ -236,7 +236,13 @@ otp-9 deletes them.
    that exists), transport selection, resume phase ordering (the
    RELIABLE exception above), mirror phase, error/cancel semantics.
    No feature-capability bits: same build implies same features.
-   Codex-reviewed before any code consumes it.
+   The new proto text must carry NO version-tolerance semantics; the
+   capacity profile's absent/0 fields mean "unknown hardware value"
+   only, never "old peer" (today's proto comments frame some of that
+   contract as old-peer fallback — those comment blocks describe live
+   pre-cutover code and die with their messages at otp-10, per the
+   D-2026-07-05-2 review adjudication). Codex-reviewed before any
+   code consumes it.
 2. **otp-2 symmetric baseline (harness + rig, no production code)**:
    correct the sf-1 harness matrix — same-fs disk-to-disk verdict
    cells, cold caches, tmpfs rows re-labeled wire-reference only —

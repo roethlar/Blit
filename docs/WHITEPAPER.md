@@ -540,11 +540,13 @@ if matches!(transfer_mode, TransferMode::DataPlane)
 }
 ```
 
-**Watch for:** old daemon × new client interactions. The daemon now
+~~**Watch for:** old daemon × new client interactions. The daemon now
 emits a trailing empty FilesToUpload that an old client would
 interpret as a 0-entry need-list (harmless — it advances the loop
 once more). New daemon × old client never receives the terminator and
-falls back to the post-loop `finish()` after `Summary` arrives.
+falls back to the post-loop `finish()` after `Summary` arrives.~~
+*(Superseded by D-2026-07-05-2: mixed-build peers cannot exist —
+same build only. There is no old×new interaction to review.)*
 
 ### 7.6 Daemon push-receive backpressure (`b64bfd8`)
 

@@ -144,8 +144,9 @@ REV3:
       capacity profile. The weak end protects itself in both directions
       (strong→weak and weak→strong).
 - [ ] The wire contract names the capacity-profile and stream-resize
-      fields/messages, their field numbers, and the mixed-version
-      behavior before code lands. (Grounded: `DataTransferNegotiation`
+      fields/messages, their field numbers, ~~and the mixed-version
+      behavior~~ *(mixed-version clause superseded by D-2026-07-05-2 —
+      same-build only)* before code lands. (Grounded: `DataTransferNegotiation`
       uses fields 1–4 today and reserves 5–10 for RDMA, so
       `CapacityProfile receiver_capacity = 11` is the first free number.)
 - [ ] **C-ready by construction, not by retrofit** (restored from v1):
@@ -162,8 +163,10 @@ REV3:
       single-stream path today; the deprecated `Pull` RPC is already
       multistream — see Current Code Reality.)
 - [ ] Deprecated `Pull` RPC deletion waits until its multistream/fallback
-      pattern has been harvested into PullSync and compatibility/fallback
-      tests cover old/new peer pairs.
+      pattern has been harvested into PullSync ~~and compatibility/fallback
+      tests cover old/new peer pairs~~ *(done at ue-r2-1h; the
+      old/new-peer clause is superseded by D-2026-07-05-2 and such tests
+      are deleted with the unified session, ONE_TRANSFER_PATH otp-10)*.
 - [ ] **Loopback parity band:** once pull is multistream, local↔local,
       local→daemon, and daemon→local all measure within a tight band on
       the same hardware (the one-engine property, measured) — no 10×/2×
@@ -354,8 +357,10 @@ REV4 makes wire shape an early deliverable. Proposed proto direction:
   5–10 RDMA reservation);
 - add a capacity profile to the request/setup side where the receiver is
   the client, especially PullSync and delegated pull;
-- add explicit peer capability bits/fields so resize messages are never
-  sent to an old peer;
+- ~~add explicit peer capability bits/fields so resize messages are never
+  sent to an old peer;~~ *(superseded by D-2026-07-05-2 — same-build
+  peers only; capability bits exist in the built code and die with the
+  unified session, ONE_TRANSFER_PATH otp-10)*
 - add `DataPlaneResize` and `DataPlaneResizeAck` as negotiated control
   messages in the relevant control streams, not as blind TCP data-plane
   records.
@@ -403,11 +408,15 @@ multistream lands through the engine.
   initial plan from a partial scan and refines; it does not wait for full
   enumeration. Any mode that genuinely cannot meet the budget must be an
   explicit, tested, reported RELIABLE exception — not a silent miss.
-- **Wire-compat break with mixed peers.** Adding field 11 and resize
+- ~~**Wire-compat break with mixed peers.** Adding field 11 and resize
   messages could mispair old/new peers. Mitigation: the wire slice lands
   with explicit old-client/new-daemon and new-client/old-daemon
   compatibility tests *before* any behavior depends on the new fields,
-  and resize messages are gated on advertised peer capability bits.
+  and resize messages are gated on advertised peer capability bits.~~
+  *(Risk retired by D-2026-07-05-2: mixed peers cannot exist —
+  same-build only, mismatched builds refuse at session open. The
+  capability gating shipped in the built code and is deleted with the
+  unified session, ONE_TRANSFER_PATH otp-10.)*
 - **RELIABLE-exception loophole.** Allowing tested first-byte exceptions
   risks exceptions proliferating until RELIABLE is silently eroded.
   Mitigation: every exception is explicit, tested, individually reported
@@ -438,9 +447,12 @@ change; only the code-reality grounding did).
    work-stealing stream-set exists from this slice onward (C-ready seam).
 2. **`ue-r2-1b-wire-dial-contract`** — Define capacity profile, peer
    capability, and resize proto shape (`receiver_capacity = 11`,
-   `DataPlaneResize`/`Ack`). Add compatibility tests for old client/new
-   daemon and new client/old daemon. No behavior depends on these fields
-   until this slice is green.
+   `DataPlaneResize`/`Ack`). ~~Add compatibility tests for old client/new
+   daemon and new client/old daemon.~~ *(executed as written; the
+   old/new-peer requirement is superseded by D-2026-07-05-2 and those
+   tests are deleted with the unified session, ONE_TRANSFER_PATH
+   otp-10)* No behavior depends on these fields until this slice is
+   green.
 3. **`ue-r2-1c-engine-shell-local-adapter`** — Add `TransferEngine` and
    convert `TransferOrchestrator` into a local adapter. Move the local
    fast paths (`journal_no_work`, `no_work`, `tiny_manifest`,
@@ -459,7 +471,8 @@ change; only the code-reality grounding did).
    object read by both ends from this slice onward (C-ready seam).
 6. **`ue-r2-1f-push-converge`** — Route push through the engine while
    preserving manifest streaming, need-list batching, fallback timing,
-   scan-completeness purge safety, and old/new compatibility. **Retire
+   scan-completeness purge safety, ~~and old/new compatibility~~
+   *(superseded by D-2026-07-05-2)*. **Retire
    the daemon `desired_streams` ladder** into the dial (this is the
    ladder `tuning.rs` says currently "wins").
 7. **`ue-r2-1g-pull-multistream-converge`** — Route PullSync through the
@@ -471,7 +484,8 @@ change; only the code-reality grounding did).
 8. **`ue-r2-1h-delete-deprecated-pull-rpc`** — Delete the deprecated
    `Pull` RPC (and its `pull_stream_count` ladder) after PullSync has
    harvested the needed multistream/fallback pattern and tests cover the
-   replacement, including old/new peer pairs.
+   replacement~~, including old/new peer pairs~~ *(superseded by
+   D-2026-07-05-2)*.
 9. **`ue-r2-2-stream-resize`** — Finish negotiated
    `DataPlaneResize`/`DataPlaneResizeAck` and add/drop streams mid
    transfer from live telemetry, using the elastic work queue from
