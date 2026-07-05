@@ -1,7 +1,8 @@
 # sf-2 — Shape-correction stream resize (dial file-count weighting, e2e)
 
 **Plan**: `docs/plan/SMALL_FILE_CEILING.md` (Active, D-2026-07-04-4), slice sf-2.
-**Status**: implemented, codex review pending.
+**Status**: landed + graded — `c70c2ac` + review fix `7627e7b` (codex
+1/1 accepted; verdict in `.review/results/`).
 
 ## What
 
