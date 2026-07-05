@@ -9,6 +9,11 @@ pub struct RemotePushReport {
     pub data_port: Option<u32>,
     pub summary: PushSummary,
     pub first_payload_elapsed: Option<Duration>,
+    /// sf-2: the dial's settled live stream count when the transfer
+    /// finished (`None` on the gRPC fallback path — no data plane).
+    /// Observable pin for the shape-correction resize: a many-tiny-file
+    /// push must end above the 1-stream partial-manifest proposal.
+    pub data_plane_streams: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

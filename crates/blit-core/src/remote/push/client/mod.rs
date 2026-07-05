@@ -476,6 +476,74 @@ fn ensure_dial(
         .expect("dial set by preceding assignment")
 }
 
+/// ue-r2-2 / sf-2 shared pre-dial ADD: mint the epoch credential, send
+/// the `DataPlaneResize` ADD, and record the in-flight epoch (the
+/// socket itself is dialed on the daemon's ack). A missing credential
+/// source settles the epoch failed and is not an error; a send error
+/// is returned for the caller to route through `prefer_server_error`.
+async fn send_resize_add(
+    tx: &mpsc::Sender<ClientPushRequest>,
+    dial: &crate::engine::TransferDial,
+    proposal: crate::engine::ResizeProposal,
+    resize_pending: &mut Option<PendingResize>,
+) -> Result<()> {
+    match crate::remote::transfer::generate_sub_token() {
+        Ok(sub) => {
+            send_payload(
+                tx,
+                ClientPayload::DataPlaneResize(DataPlaneResize {
+                    op: DataPlaneResizeOp::Add as i32,
+                    epoch: proposal.epoch,
+                    target_stream_count: proposal.target_streams as u32,
+                    sub_token: sub.clone(),
+                }),
+            )
+            .await?;
+            *resize_pending = Some(PendingResize {
+                epoch: proposal.epoch,
+                target: proposal.target_streams,
+                add: true,
+                sub_token: sub,
+            });
+        }
+        Err(err) => {
+            log::warn!("resize ADD skipped (no credential source): {err:#}");
+            dial.resize_settled(proposal.epoch, dial.live_streams(), false);
+        }
+    }
+    Ok(())
+}
+
+/// sf-2: one shape-correction step. The daemon proposes the epoch-0
+/// stream count from whatever manifest prefix it had seen at its early
+/// flush, so a many-tiny-file push can negotiate far fewer streams
+/// than the shape table assigns the full workload
+/// (`.review/findings/sf-1-tripwire-harness.md` Known gaps: a
+/// 1000-file push measured 1 stream where the table says 2). As the
+/// need list accumulates, re-run [`crate::engine::initial_stream_proposal`]
+/// over the ACTUAL transfer shape (need-list files + bytes, not the
+/// manifest — an incremental push of a large tree may move only a few
+/// files) and correct upward one ADD epoch at a time. Call sites gate
+/// on the transfer running resize-enabled on the data plane.
+async fn maybe_shape_resize(
+    tx: &mpsc::Sender<ClientPushRequest>,
+    dial: &crate::engine::TransferDial,
+    need_bytes: u64,
+    need_count: usize,
+    resize_pending: &mut Option<PendingResize>,
+) -> Result<()> {
+    if resize_pending.is_some() {
+        return Ok(());
+    }
+    let target =
+        crate::engine::initial_stream_proposal(need_bytes, need_count, dial.ceiling_max_streams())
+            as usize;
+    match dial.propose_shape_resize(target) {
+        Some(proposal) => send_resize_add(tx, dial, proposal, resize_pending).await,
+        None => Ok(()),
+    }
+}
+
 fn prune_unrequested_payloads(
     payloads: &mut Vec<TransferPayload>,
     requested: &mut HashSet<String>,
@@ -674,6 +742,14 @@ impl RemotePushClient {
             tokio::sync::mpsc::UnboundedReceiver<crate::engine::ResizeProposal>,
         > = None;
         let mut resize_pending: Option<PendingResize> = None;
+        // sf-2: shape-correction gate. `resize_negotiated` records that
+        // this transfer's data plane went elastic (epoch-0 sub-token
+        // present). `shape_resize_enabled` flips off permanently the
+        // first time the tuner proposes a REMOVE — live throughput
+        // evidence outranks the static shape table, and re-adding what
+        // the tuner just retired would flap.
+        let mut resize_negotiated = false;
+        let mut shape_resize_enabled = true;
 
         let mut manifest_done = false;
         // Track whether we received new need-list entries this iteration.
@@ -777,6 +853,32 @@ impl RemotePushClient {
                                             }
                                         }
                                         TransferMode::DataPlane => {
+                                            // sf-2: the need list just grew —
+                                            // re-run the shape table and
+                                            // correct the stream count before
+                                            // queueing the batch.
+                                            if resize_negotiated
+                                                && shape_resize_enabled
+                                                && data_plane_sender.is_some()
+                                            {
+                                                if let Some(dial_ref) = dial.as_ref() {
+                                                    if let Err(send_err) = maybe_shape_resize(
+                                                        &tx,
+                                                        dial_ref,
+                                                        transfer_size_hint,
+                                                        requested_files.len(),
+                                                        &mut resize_pending,
+                                                    )
+                                                    .await
+                                                    {
+                                                        return Err(prefer_server_error(
+                                                            &mut response_rx,
+                                                            send_err,
+                                                        )
+                                                        .await);
+                                                    }
+                                                }
+                                            }
                                             if let Some(sender) = data_plane_sender.as_mut() {
                                                 let headers =
                                                     drain_pending_headers(&mut pending_queue, &manifest_lookup);
@@ -907,6 +1009,7 @@ impl RemotePushClient {
                                                 && neg.epoch0_sub_token.len()
                                                     == crate::remote::transfer::SUB_TOKEN_LEN)
                                                 .then(|| neg.epoch0_sub_token.clone());
+                                            resize_negotiated = resize_sub.is_some();
                                             let mut sender = MultiStreamSender::connect(
                                                 &self.endpoint.host,
                                                 neg.tcp_port,
@@ -925,6 +1028,29 @@ impl RemotePushClient {
                                             resize_proposal_rx = sender.take_resize_rx();
                                             data_plane_sender = Some(sender);
                                             data_port = Some(neg.tcp_port);
+
+                                            // sf-2: need-list batches can
+                                            // predate the negotiation — the
+                                            // accumulated shape may already
+                                            // outgrow the daemon's
+                                            // partial-manifest stream count.
+                                            if resize_negotiated && shape_resize_enabled {
+                                                if let Err(send_err) = maybe_shape_resize(
+                                                    &tx,
+                                                    &dial,
+                                                    transfer_size_hint,
+                                                    requested_files.len(),
+                                                    &mut resize_pending,
+                                                )
+                                                .await
+                                                {
+                                                    return Err(prefer_server_error(
+                                                        &mut response_rx,
+                                                        send_err,
+                                                    )
+                                                    .await);
+                                                }
+                                            }
                                         }
 
                                         if let Some(sender) = data_plane_sender.as_mut() {
@@ -1031,6 +1157,32 @@ impl RemotePushClient {
                                                     dial_ref.live_streams(),
                                                     false,
                                                 );
+                                            }
+                                            // sf-2: the epoch settled — if the
+                                            // need-list shape still wants more
+                                            // streams, propose the next single
+                                            // ADD (the ramp is one stream per
+                                            // acked epoch).
+                                            if resize_negotiated
+                                                && shape_resize_enabled
+                                                && data_plane_sender.is_some()
+                                            {
+                                                let dial_ref = dial_ref.clone();
+                                                if let Err(send_err) = maybe_shape_resize(
+                                                    &tx,
+                                                    &dial_ref,
+                                                    transfer_size_hint,
+                                                    requested_files.len(),
+                                                    &mut resize_pending,
+                                                )
+                                                .await
+                                                {
+                                                    return Err(prefer_server_error(
+                                                        &mut response_rx,
+                                                        send_err,
+                                                    )
+                                                    .await);
+                                                }
                                             }
                                         }
                                         other => {
@@ -1226,44 +1378,21 @@ impl RemotePushClient {
                                 // Pre-dial ADD: mint the epoch credential,
                                 // ask the daemon to register it and arm an
                                 // accept; the dial happens on the ack.
-                                match crate::remote::transfer::generate_sub_token() {
-                                    Ok(sub) => {
-                                        if let Err(send_err) = send_payload(
-                                            &tx,
-                                            ClientPayload::DataPlaneResize(DataPlaneResize {
-                                                op: DataPlaneResizeOp::Add as i32,
-                                                epoch: p.epoch,
-                                                target_stream_count: p.target_streams as u32,
-                                                sub_token: sub.clone(),
-                                            }),
-                                        )
-                                        .await
-                                        {
-                                            return Err(prefer_server_error(
-                                                &mut response_rx,
-                                                send_err,
-                                            )
-                                            .await);
-                                        }
-                                        resize_pending = Some(PendingResize {
-                                            epoch: p.epoch,
-                                            target: p.target_streams,
-                                            add: true,
-                                            sub_token: sub,
-                                        });
-                                    }
-                                    Err(err) => {
-                                        log::warn!(
-                                            "resize ADD skipped (no credential source): {err:#}"
-                                        );
-                                        dial_ref.resize_settled(
-                                            p.epoch,
-                                            dial_ref.live_streams(),
-                                            false,
-                                        );
-                                    }
+                                if let Err(send_err) =
+                                    send_resize_add(&tx, dial_ref, p, &mut resize_pending).await
+                                {
+                                    return Err(prefer_server_error(
+                                        &mut response_rx,
+                                        send_err,
+                                    )
+                                    .await);
                                 }
                             } else {
+                                // sf-2: the tuner wants FEWER streams — live
+                                // throughput evidence outranks the static
+                                // shape table from here on. Never re-add what
+                                // the tuner retires.
+                                shape_resize_enabled = false;
                                 // REMOVE: retire locally first — the drained
                                 // worker's END record is the daemon-side
                                 // teardown — then tell the daemon
@@ -1385,6 +1514,10 @@ impl RemotePushClient {
             data_port,
             summary,
             first_payload_elapsed,
+            data_plane_streams: match (&dial, data_port) {
+                (Some(dial), Some(_)) => Some(dial.live_streams()),
+                _ => None,
+            },
         })
     }
 }

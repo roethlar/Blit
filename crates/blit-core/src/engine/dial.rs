@@ -313,12 +313,57 @@ impl TransferDial {
             return None;
         }
         let epoch = self.resize_epoch.load(Ordering::Relaxed).saturating_add(1);
-        self.pending_epoch.store(epoch, Ordering::Relaxed);
+        // CAS, not store: `propose_shape_resize` (sf-2) allocates from
+        // another task, and a plain store here could stack two live
+        // proposals onto one epoch number.
+        if self
+            .pending_epoch
+            .compare_exchange(0, epoch, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
         self.resize_sustain.store(0, Ordering::Relaxed);
         Some(ResizeProposal {
             epoch,
             target_streams: target,
             add: target > live,
+        })
+    }
+
+    /// sf-2: shape-correction proposal. On push the daemon proposes the
+    /// epoch-0 stream count from whatever manifest prefix it has seen at
+    /// the early flush (`FILE_LIST_EARLY_FLUSH_ENTRIES`), so a
+    /// many-tiny-file push can negotiate far fewer streams than
+    /// [`initial_stream_proposal`] assigns the full workload. As the
+    /// need list accumulates client-side, the client re-runs the shape
+    /// table and corrects upward through the normal resize wire.
+    ///
+    /// Unlike [`Self::resize_tick`] this is a definite signal — the
+    /// shape is known, not inferred from throughput — so there is no
+    /// sustain/cooldown discipline. It still honors one-in-flight and
+    /// the receiver-profile ceiling, still moves ONE stream per epoch
+    /// (the wire carries one `sub_token` per ADD), and never proposes
+    /// REMOVE: shrinking below a live count is throughput evidence and
+    /// stays the tuner's call.
+    pub fn propose_shape_resize(&self, desired_streams: usize) -> Option<ResizeProposal> {
+        let desired = desired_streams.clamp(1, self.ceiling_max_streams.max(1));
+        let live = self.live_streams.load(Ordering::Relaxed).max(1);
+        if desired <= live {
+            return None;
+        }
+        let epoch = self.resize_epoch.load(Ordering::Relaxed).saturating_add(1);
+        if self
+            .pending_epoch
+            .compare_exchange(0, epoch, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+        Some(ResizeProposal {
+            epoch,
+            target_streams: live + 1,
+            add: true,
         })
     }
 
@@ -874,6 +919,91 @@ mod tests {
                 "cannot add past the receiver's advertised ceiling"
             );
         }
+    }
+
+    // ── sf-2 shape-correction resize ─────────────────────────────────
+
+    /// The plan's three measured 10 GbE cells mapped through the shape
+    /// table (`docs/plan/SMALL_FILE_CEILING.md`): the small and mixed
+    /// cells must NOT ride the byte tiers alone.
+    #[test]
+    fn shape_table_covers_the_small_file_ceiling_cells() {
+        const KIB: u64 = 1024;
+        const MIB64: u64 = 1024 * KIB;
+        const GIB: u64 = 1024 * MIB64;
+        // push/pull 10k × 4 KiB: 40 MiB is the 2-stream byte tier, but
+        // 10_000 files must key the 8-stream file-count tier.
+        assert_eq!(initial_stream_proposal(10_000 * 4 * KIB, 10_000, 32), 8);
+        // 1 × 1 GiB: byte-keyed, file count is irrelevant — unchanged.
+        assert_eq!(initial_stream_proposal(GIB, 1, 32), 8);
+        // mixed 512 MiB + 5k × 2 KiB: the byte tier already reaches 8;
+        // the 5_001 files alone would say 4 — bytes win.
+        assert_eq!(
+            initial_stream_proposal(512 * MIB64 + 5_000 * 2 * KIB, 5_001, 32),
+            8
+        );
+        // sf-1 loopback probe evidence: 1_000 tiny files must propose 2
+        // (the measured transfer rode 1 — the input, not this table,
+        // was wrong).
+        assert_eq!(initial_stream_proposal(1_000 * 4 * KIB, 1_000, 32), 2);
+    }
+
+    #[test]
+    fn shape_resize_ramps_one_epoch_at_a_time_toward_the_target() {
+        let dial = TransferDial::conservative();
+        dial.set_negotiated_streams(1);
+
+        // At or below live: nothing to correct.
+        assert_eq!(dial.propose_shape_resize(0), None);
+        assert_eq!(dial.propose_shape_resize(1), None);
+
+        // Target 3 from live 1: epoch 1 proposes 2 (one per epoch),
+        // and the in-flight epoch blocks both proposers.
+        let p1 = dial.propose_shape_resize(3).expect("live 1 → target 3");
+        assert_eq!(
+            p1,
+            ResizeProposal {
+                epoch: 1,
+                target_streams: 2,
+                add: true
+            }
+        );
+        assert_eq!(dial.propose_shape_resize(3), None, "one in flight");
+        assert_eq!(dial.resize_tick(1024, 0.0), None, "tuner blocked too");
+
+        // Settle → next step; no cooldown for the definite shape signal.
+        dial.resize_settled(1, 2, true);
+        let p2 = dial.propose_shape_resize(3).expect("live 2 → target 3");
+        assert_eq!(p2.epoch, 2);
+        assert_eq!(p2.target_streams, 3);
+        dial.resize_settled(2, 3, true);
+        assert_eq!(dial.live_streams(), 3);
+        assert_eq!(dial.propose_shape_resize(3), None, "target reached");
+
+        // A refused epoch leaves live untouched; the next call retries.
+        let p3 = dial.propose_shape_resize(4).expect("live 3 → target 4");
+        dial.resize_settled(p3.epoch, dial.live_streams(), false);
+        assert_eq!(dial.live_streams(), 3);
+        assert!(
+            dial.propose_shape_resize(4).is_some(),
+            "retry after refusal"
+        );
+    }
+
+    #[test]
+    fn shape_resize_clamps_to_the_profile_ceiling() {
+        let dial = TransferDial::conservative_within(Some(&profile(2, 0, 0)));
+        dial.set_negotiated_streams(1);
+        let p = dial
+            .propose_shape_resize(100)
+            .expect("clamped, not refused");
+        assert_eq!(p.target_streams, 2);
+        dial.resize_settled(p.epoch, 2, true);
+        assert_eq!(
+            dial.propose_shape_resize(100),
+            None,
+            "at the receiver's advertised ceiling"
+        );
     }
 
     #[tokio::test(start_paused = true)]
