@@ -80,8 +80,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    for the owner's Active flip. After the flip: slices otp-1..13
    through the codex loop, starting with otp-1 (wire+session
    contract, doc+proto, no behavior).
-2. **10 GbE owner declarations (unchanged, still pending)**: ue-1,
-   ue-2, zero-copy a/b/c (D-2026-06-12-1), REV4 → Shipped. Optional
+2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
+   REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
    disk-path variants; >ARC-size push) — note the disk-path items
    are largely absorbed by otp-2/otp-12's symmetric-rig matrices. Env: bench
@@ -93,7 +93,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    open row; filed w6-2a/b/c + relay-1) — same directive; note w7-1
    (mirror-executor consolidation) likely lands for free inside
    otp-6's one-delete-rule slice; re-check before picking it up.
-5. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
+5. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: revisit gate
+   declared met (UNAS 8 Pro daemon CPU-bound below 10 GbE from SSD
+   cache). Executes AFTER ONE_TRANSFER_PATH cutover as a
+   runtime-selected write strategy in the unified receive sink
+   (design input: eval doc §If-FAST-evidence; dead module still
+   deletes in w8-1). UNAS is the measurement rig; symmetric-endpoint
+   methodology applies.
+6. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
    (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
    epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
    `derive_local_plan_tuning` fold-or-retire; receive-side dial
@@ -115,8 +122,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (all `ue-r2-*` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
-- Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified
-  D-2026-06-12-1, executes w8-1), `TUI_REWORK.md` (gated on Round 1),
+- Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (module delete ratified
+  D-2026-06-12-1, executes w8-1; **capability unparked
+  D-2026-07-05-3** — post-cutover write strategy), `TUI_REWORK.md`
+  (gated on Round 1),
   `BENCHMARK_10GBE_PLAN.md` (Historical; env note lives in the queue).
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
@@ -124,17 +133,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **ONE_TRANSFER_PATH Draft → Active flip** (owner; after the codex
   plan review is adjudicated). Until then no implementation anywhere
   — the directive blocks all other work too.
-- **Four 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
-  holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE —
-  sf-5 would give it a real trigger), zero-copy revisit verdict,
-  REV4 → Shipped.
-- **Zero-copy option a/b/c** (from the 2026-07-05 exchange): (a) keep
-  deletion + append measured CPU data and regeneralize the rig-bound
-  revisit gate in the eval doc, (b) amend D-2026-06-12-1 to keep the
-  module, (c) leave as-is (data stays in DEVLOG +
-  docs/bench/10gbe-2026-07-05/DIAGNOSIS.md). Measured: 1.43 cores
-  daemon-receive / 0.45 client at 9.5 Gbit/s — gate not met on this
-  rig, but "fraction of one core" was optimistic.
+- **Three 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
+  holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE),
+  REV4 → Shipped. (The zero-copy revisit verdict and the a/b/c
+  question are RESOLVED — D-2026-07-05-3, unparked; measured skippy
+  data 1.43 cores daemon-receive / 0.45 client at 9.5 Gbit/s stays
+  recorded in DEVLOG + DIAGNOSIS.md.)
 - **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
   approval flow; windows-latest CI on the w9-3 harness fix rides it.
 - `Cargo.lock`: dependency-refresh drift committed at `04c9c6d` (was

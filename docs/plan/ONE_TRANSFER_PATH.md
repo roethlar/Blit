@@ -63,7 +63,10 @@ no second code path to differ.
 - WAN-shaped tuning (unchanged from SMALL_FILE_CEILING's non-goal).
 - New features. This is a consolidation; capability parity with
   today (mirror, filters, resume, fallback, delegation, progress,
-  jobs, cancellation) is the bar.
+  jobs, cancellation) is the bar. Zero-copy receive is **unparked**
+  (D-2026-07-05-3, CPU-bound UNAS rig) but is a follow-on slice set
+  after cutover, not one of this plan's slices — see the Design note
+  on the write-strategy seam.
 
 ## Constraints
 
@@ -161,7 +164,15 @@ choreograph these pieces differently per direction.
    the only policy, both roles).
 5. SOURCE feeds payloads (files / tar-shards / resume blocks) through
    the one pipeline into the data plane; DESTINATION writes through
-   the one receive path.
+   the one receive path. The receive sink is built with a
+   **runtime-selected write-strategy seam**: buffered relay is the
+   universal strategy; capability-gated alternatives slot in behind
+   it without new paths — the first is zero-copy/splice
+   (D-2026-07-05-3, unparked for CPU-bound receivers like the
+   owner's UNAS 8 Pro; design input:
+   `ZERO_COPY_RECEIVE_EVAL.md` §If-FAST-evidence), landing as a
+   follow-on slice set after cutover. Strategy selection reads
+   capability and payload type, never role or initiator.
 6. Mirror: DESTINATION computes deletions from the completed source
    manifest it received (filter-scoped, scan-complete-guarded) and
    executes them locally. One rule, no per-direction delete

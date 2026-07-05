@@ -75,6 +75,14 @@ The receive byte path is structurally splice-friendly:
 
 ## If FAST evidence appears later
 
+**Gate declared MET by the owner, 2026-07-05 (D-2026-07-05-3)**: a
+UniFi UNAS 8 Pro daemon target is CPU-bound below 10 GbE even from SSD
+cache. The design below is now the input to the unparked work, which
+lands as a runtime-selected write strategy inside ONE_TRANSFER_PATH's
+unified receive sink, sequenced after its cutover slice. The dead
+module's deletion (w8-1) still stands — this is a rewrite against the
+unified sink, not a revival.
+
 Revisit only after the 10 GbE benchmark plan runs and shows receive-side
 CPU saturation with the buffered relay. The design then should be: an
 `AsyncFd`-readiness splice loop owned by `data_plane.rs` (next to
