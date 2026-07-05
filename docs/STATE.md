@@ -1,12 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-05 (**sf-2 landed + graded** — client-side
-shape-correction stream resize; a 10k-file push no longer rides the
-daemon's partial-manifest 1-stream proposal. sf-3a (limiter analysis,
-no code) is next. Earlier: SMALL_FILE_CEILING flipped Active
-(D-2026-07-04-4), sf-1 tripwire/scaling harness landed, 10 GbE
-benchmark session complete (wire-ceiling push/pull, ue-1 band holds),
-tool comparison measured, w9-3 landed.)
+Last updated: 2026-07-05 (**owner directive D-2026-07-05-1: ONE
+transfer path, direction-invariant by construction** — plan
+`docs/plan/ONE_TRANSFER_PATH.md` drafted, in codex review, awaiting
+the owner's Active flip. **All SMALL_FILE_CEILING work is paused**
+(sf-2 landed + graded earlier this date; sf-3a+ blocked). Earlier:
+sf-1/sf-2 landed, 10 GbE benchmark session complete, w9-3 landed.)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -16,28 +15,29 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **SMALL_FILE_CEILING Active (D-2026-07-04-4) — sf-1 `[x]`, sf-2
-  `[x]`, sf-3a next** — owner correction governing all perf work:
-  FAST/SIMPLE/RELIABLE gate every change; goals are **ceiling-driven,
-  never competitor-relative** (a "beat X by N%" bar embeds a stopping
-  condition; a ≥25% margin answer was explicitly retracted — do not
-  re-litigate). Plan `docs/plan/SMALL_FILE_CEILING.md` (**Active**):
-  small-file/mixed cells to a NAMED hardware limiter, tools as
-  tripwires only; evidence durable at `docs/bench/10gbe-2026-07-05/`.
-  **sf-2 landed + graded** (`c70c2ac`+`7627e7b`, codex 1/1
-  accepted+fixed; DEVLOG 2026-07-05 06:45): the many-file stream gap
-  was the INPUT to the shape table, not the table (file-count tiers
-  since ue-r2-1f) — the daemon proposes epoch-0 streams from its
-  128-entry early manifest flush. Client now re-runs the table over
-  the accumulated need list and corrects upward via the ue-r2-2
-  resize wire (dial-owned `propose_shape_resize`; no wire/daemon
-  change; old peers unchanged). Loopback e2e pins 10k-file push > 1
-  stream, guard proven by revert; suite 1479 → 1483/0. Pull side
-  verified clean. **sf-1** (`7202c1a`+`80633df`, codex 6/6):
-  `scripts/bench_tripwires.sh` — baseline re-runnable in one command
-  + stream-scaling probe (measured streams). sf-6 keeps its own wire
-  owner gate. skippy torn down; binaries staged at `blit-bin/` for
-  sf-4.
+- **ONE_TRANSFER_PATH (D-2026-07-05-1) — Draft, codex review, then
+  owner Active flip** — owner directive 2026-07-05, verbatim in the
+  plan doc: ONE block of transfer code; direction/initiator/verb can
+  NEVER affect wall time by blit's doing, impossible by construction
+  because the per-direction drivers and the `Push`/`PullSync` RPCs
+  are deleted. One `TransferSession` (roles SOURCE/DESTINATION), one
+  `Transfer` RPC, one choreography (streaming source manifest,
+  destination diffs, sf-2 shape-corrected dial as the only stream
+  policy); gRPC fallback becomes a byte-carrier option; delegated =
+  daemon-initiated session; local rides an in-process transport.
+  Slices otp-1..12; converge-up constraint (unified path must match
+  the better direction per cell ±10%); benchmark verdict cells must
+  be symmetric-fs disk-to-disk (owner: "tmp on one side, spinning
+  rust on the other is not a valid test"), tmpfs = wire-reference
+  rows only. **No code until the owner flips Active.**
+- **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1 `[x]`
+  sf-2 `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`, codex 1/1,
+  suite 1479 → 1483/0, DEVLOG 2026-07-05 06:45); **sf-3a+ blocked**
+  until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
+  baseline. Its principle stands: ceiling-driven, never
+  competitor-relative (D-2026-07-04-4; a ≥25% margin answer was
+  retracted — do not re-litigate). Evidence at
+  `docs/bench/10gbe-2026-07-05/`; binaries staged at `blit-bin/`.
 - **Tool comparison measured (2026-07-05)** — blit vs rsyncd /
   rsync-ssh / rclone (sftp, webdav, no-hash fairness cells): blit
   fastest on all large/pull/local cells at the wire ceiling; rsyncd
@@ -70,51 +70,37 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w9-3 closed
-   `[x]` 2026-07-04 (see Now). Strict row order gives **w7-1**
-   (mirror-executor consolidation, Medium — one mirror/purge deletion
-   executor + parallel enumerate_local_manifest in blit-core, R58-F3
-   class closure; four diverged copies today, only two clear Windows
-   read-only) as the topmost ratified open row. Filed alternatives
-   (pending-review section, coder's pick): **w6-2a/-2b/-2c** (daemon
-   progress residue — independent slices, 2b→2a→2c smallest-first
-   suggestion) and Low `relay-1-subpath-double-join`.
-2. **10 GbE session ran (see Now) — owner declarations pending**:
-   ue-1 (evidence: band holds), ue-2 (no organic resize at 10 GbE —
-   interpretation call), zero-copy revisit verdict (D-2026-06-12-1;
-   evidence: wire-saturated with 0 spliced bytes), REV4 → Shipped.
-   Optional measurement follow-ups (owner-gated): Win 11 bare-metal
-   datapoint on the dual-boot client (same hardware window,
-   deployment parity, not a gate); disk-path variants (post-push
-   `zpool sync` column, cold-ARC pulls via `primarycache`);
-   sustained >ARC-size push for the pool floor. Env note: bench area
-   is now `skippy:/mnt/generic-pool/video/blit-bin/` (binaries +
-   bench.toml staged; /tmp and /home on skippy are noexec). After
-   the declarations: audit Round 1, TUI rework, H10b planner.
-3. **`docs/plan/SMALL_FILE_CEILING.md` (Active, D-2026-07-04-4 —
-   sf-1 `[x]`, sf-2 `[x]`, sf-3a per-file cost limiter analysis is
-   the current slice — analysis-only, `strace -c`/`perf` profile of
-   daemon receive + client pull-write, deliverable is a committed
-   analysis naming each per-file syscall cost; no code)**: close the
-   measured small-file/mixed gaps to the hardware ceiling. Owner
-   principle recorded in the doc (2026-07-05): goals are
-   ceiling-driven, never competitor-relative — tools like rsync are
-   tripwires, not targets. Slices sf-1..7; sf-6 (wire-visible
-   tar-shard lane) carries its own owner gate.
-4. **Post-REV4 residue** (unowned until the owner slots them): pull
-   1s-start restructuring; epoch-0/early-ADD hardening; remote
-   perf-history lanes (1e gap); `derive_local_plan_tuning`
-   fold-or-retire (statically live on the local engine path but
-   dynamically dead — nothing fills the tar/raw telemetry buckets
-   since `4ce4898`, 2026-04-07; verified during the w2-2 audit,
-   design decision not review-queue material); receive-side dial
-   tuning (rest of constants-receive-chunk-1mib-asymmetry — w3-1
-   scoped it out, wire needs no change; separate slice if wanted).
+1. **`docs/plan/ONE_TRANSFER_PATH.md` — the only work item until it
+   ships (owner directive: "do not do ANYTHING else")**: Draft
+   written 2026-07-05, codex plan review + adjudication, then STOP
+   for the owner's Active flip. After the flip: slices otp-1..12
+   through the codex loop, starting with otp-1 (wire+session
+   contract, doc+proto, no behavior).
+2. **10 GbE owner declarations (unchanged, still pending)**: ue-1,
+   ue-2, zero-copy a/b/c (D-2026-06-12-1), REV4 → Shipped. Optional
+   owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
+   disk-path variants; >ARC-size push) — note the disk-path items
+   are largely absorbed by otp-11's symmetric-rig matrix. Env: bench
+   binaries staged at `skippy:/mnt/generic-pool/video/blit-bin/`
+   (/tmp and /home on skippy are noexec).
+3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
+   resumes/re-derives after ONE_TRANSFER_PATH ships.
+4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
+   open row; filed w6-2a/b/c + relay-1) — same directive; note w7-1
+   (mirror-executor consolidation) likely lands for free inside
+   otp-5's one-delete-rule slice; re-check before picking it up.
+5. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
+   (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
+   epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
+   `derive_local_plan_tuning` fold-or-retire; receive-side dial
+   tuning residue (w3-1 scoped it out).
 
 ## Authoritative docs right now
 
-- **Active plans: `docs/plan/SMALL_FILE_CEILING.md`**
-  (D-2026-07-04-4; sf-1 current) and
+- **`docs/plan/ONE_TRANSFER_PATH.md` (Draft — governs all work; no
+  code until Active, D-2026-07-05-1)**.
+- Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
+  sf-2, D-2026-07-05-1) and
   **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** —
   code-complete; measurement gates remain (see Active context).
 - Superseded by REV4 (history only): `UNIFIED_TRANSFER_ENGINE.md` (v1),
@@ -131,6 +117,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
+- **ONE_TRANSFER_PATH Draft → Active flip** (owner; after the codex
+  plan review is adjudicated). Until then no implementation anywhere
+  — the directive blocks all other work too.
 - **Four 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
   holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE —
   sf-5 would give it a real trigger), zero-copy revisit verdict,
@@ -179,21 +168,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-05 (25th)** @ ONE_TRANSFER_PATH records — **owner
+  directive D-2026-07-05-1** (one transfer path,
+  direction-invariance by construction; verbatim quotes in the plan
+  doc) after the owner rejected the push/pull disparity and the
+  mixed-fs benchmark methodology. Plan drafted through the plan
+  procedure; SMALL_FILE_CEILING + design queue paused. In-flight:
+  codex plan review adjudication. **Exact first action next
+  session**: finish the plan-review adjudication if incomplete, then
+  STOP for the owner's Active flip — no implementation anywhere
+  until it lands (then otp-1: wire+session contract, doc+proto).
 - **2026-07-05 (24th)** @ `7627e7b`+records — **sf-2 landed and
   graded** (shape-correction stream resize `c70c2ac`, codex 1/1
   accepted → `7627e7b`; e2e guard proven by revert; suite
-  1479 → 1483/0; DEVLOG 2026-07-05 06:45). In-flight: none. **Exact
-  first action next session**: sf-3a (per-file cost limiter
-  analysis) through the codex loop — analysis-only, profile daemon
-  receive + client pull-write during a small transfer (`strace -c`/
-  `perf`), deliverable names each per-file syscall cost + ordered
-  candidate cuts; no code. Loopback profiling works on this box; rig
-  numbers stay sf-4's. Owner declarations (four 10 GbE gates,
-  zero-copy a/b/c, push go) remain in Blocked.
-- **2026-07-04 (23rd)** @ `80633df`+records — **Active flip + sf-1
-  landed and graded** (owner "go" → D-2026-07-04-4 at `6ddbc68`;
-  tripwire/scaling harness `7202c1a`, codex 6/6 accepted → `80633df`;
-  verified by execution in all three modes; suite 1479/0 held).
-  In-flight: none. Owner declarations
-  (four 10 GbE gates, zero-copy a/b/c, push go) remain in Blocked.
-- (older entries pruned — see DEVLOG 2026-07-05 02:07 and earlier)
+  1479 → 1483/0; DEVLOG 2026-07-05 06:45). In-flight: none.
+  (Its "next: sf-3a" is superseded by the 25th entry above.)
+- (older entries pruned — see DEVLOG 2026-07-05 03:03 and earlier)
