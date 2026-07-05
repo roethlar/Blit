@@ -68,4 +68,5 @@ before any ManifestComplete). Guard proven: with the AtomicBool check
 reverted the new test fails (source completes with SourceDone);
 restored, suite green.
 
-**Fix sha**: (appended after the fix commit)
+**Fix sha**: `d5796a1` (both findings; gate re-run: fmt + clippy
+clean, workspace suite 1501 passed / 0 failed).
