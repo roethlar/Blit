@@ -525,6 +525,12 @@ async fn send_resize_add(
 /// manifest — an incremental push of a large tree may move only a few
 /// files) and correct upward one ADD epoch at a time. Call sites gate
 /// on the transfer running resize-enabled on the data plane.
+///
+/// `need_bytes`/`need_count` must come from the append-only
+/// accumulators (`transfer_size_hint`, `files_requested`) — NOT from
+/// `requested_files`, which `prune_unrequested_payloads` drains as
+/// payloads are matched (codex sf-2 review: the drained set undercounts
+/// the shape and can stall the ramp below the table's target).
 async fn maybe_shape_resize(
     tx: &mpsc::Sender<ClientPushRequest>,
     dial: &crate::engine::TransferDial,
@@ -866,7 +872,7 @@ impl RemotePushClient {
                                                         &tx,
                                                         dial_ref,
                                                         transfer_size_hint,
-                                                        requested_files.len(),
+                                                        files_requested.len(),
                                                         &mut resize_pending,
                                                     )
                                                     .await
@@ -1039,7 +1045,7 @@ impl RemotePushClient {
                                                     &tx,
                                                     &dial,
                                                     transfer_size_hint,
-                                                    requested_files.len(),
+                                                    files_requested.len(),
                                                     &mut resize_pending,
                                                 )
                                                 .await
@@ -1172,7 +1178,7 @@ impl RemotePushClient {
                                                     &tx,
                                                     &dial_ref,
                                                     transfer_size_hint,
-                                                    requested_files.len(),
+                                                    files_requested.len(),
                                                     &mut resize_pending,
                                                 )
                                                 .await
