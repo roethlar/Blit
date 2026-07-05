@@ -35,6 +35,17 @@ accepted findings fixed, validation green. Records per slice:
 | ue-r2-1h | Delete deprecated `Pull` RPC (+ its `pull_stream_count` ladder) after harvest; port relay onto PullSync | `[x]` | `2a13f53` (+`9f37a7a` baseline/staging-slip, `48c5a11` win-1) + review fix `f6f52d7` |
 | ue-r2-2 | Stream resize: negotiated `DataPlaneResize`/`Ack`, mid-transfer add/drop — **REV4 complete** | `[x]` | `042ca4b`..`0788e83` + review fix `ec4a3fe` |
 
+## Small-file ceiling (SMALL_FILE_CEILING) — code→GPT-review→fix loop
+
+Plan: `docs/plan/SMALL_FILE_CEILING.md` (Active, D-2026-07-04-4).
+Same codex loop and record formats as the REV4 section above. Slice
+order and gates live in the plan (sf-6 is owner-gated on wire design;
+sf-3b… count is set by sf-3a's analysis, rows added as filed).
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| sf-1 | Tripwire + stream-scaling harness (`scripts/bench_tripwires.sh`) — baseline re-runnable in one command | `[~]` | |
+
 ## Design-review queue (ratified D-2026-06-11-2, in execution order)
 
 Source: `docs/audit/AUDIT_REPORT_2026-06-11_DESIGN.md` (slice specs) +
