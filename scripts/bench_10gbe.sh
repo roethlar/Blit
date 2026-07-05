@@ -96,6 +96,57 @@ run_timed() {
     echo "$label,$avg,$best" >> "$LOG_DIR/results.csv"
 }
 
+# Like run_timed, but recreates the local destination before EVERY
+# run: blit skips unchanged files, so re-running a copy onto its own
+# output measures an incremental no-op, not a full copy. `noop` rows
+# use bare run_timed on purpose.
+run_timed_fresh() {
+    local label="$1"
+    local dest="$2"
+    shift 2
+    local total=0
+    local best=999999
+    for run in $(seq 1 "$RUNS"); do
+        cleanup_dest "$dest"
+        local start=$(date +%s%N)
+        "$@" 2>/dev/null
+        local end=$(date +%s%N)
+        local ms=$(( (end - start) / 1000000 ))
+        total=$(( total + ms ))
+        if (( ms < best )); then best=$ms; fi
+        log "  $label run $run: ${ms}ms"
+    done
+    local avg=$(( total / RUNS ))
+    log "  $label avg: ${avg}ms  best: ${best}ms"
+    echo "$label,$avg,$best" >> "$LOG_DIR/results.csv"
+}
+
+# Push to a FRESH remote subdirectory every run, for the same reason:
+# a re-push onto already-delivered content no-ops through the
+# need-list (regardless of transport), so each run gets its own
+# never-seen target under the module. Extra args (e.g. --force-grpc)
+# follow the src argument.
+push_timed() {
+    local label="$1"
+    local src="$2"
+    shift 2
+    local total=0
+    local best=999999
+    for run in $(seq 1 "$RUNS"); do
+        local target="${REMOTE}${label}_r${run}/"
+        local start=$(date +%s%N)
+        "$BLIT" copy "$src" "$target" --yes -v "$@" 2>/dev/null
+        local end=$(date +%s%N)
+        local ms=$(( (end - start) / 1000000 ))
+        total=$(( total + ms ))
+        if (( ms < best )); then best=$ms; fi
+        log "  $label run $run: ${ms}ms"
+    done
+    local avg=$(( total / RUNS ))
+    log "  $label avg: ${avg}ms  best: ${best}ms"
+    echo "$label,$avg,$best" >> "$LOG_DIR/results.csv"
+}
+
 cleanup_dest() {
     rm -rf "$1" 2>/dev/null || true
     mkdir -p "$1"
@@ -124,12 +175,9 @@ for workload in large small mixed; do
     dest="$WORK/dst_local_$workload"
 
     log "--- $workload ---"
-    for run_label in "local_${workload}_copy" ; do
-        cleanup_dest "$dest"
-        run_timed "$run_label" "$BLIT" copy "$src" "$dest" --yes
-    done
+    run_timed_fresh "local_${workload}_copy" "$dest" "$BLIT" copy "$src" "$dest" --yes
 
-    # Incremental (no-change) run
+    # Incremental (no-change) run against the last copy's output
     run_timed "local_${workload}_noop" "$BLIT" mirror "$src" "$dest" --yes
 done
 
@@ -144,8 +192,7 @@ if [[ -n "$NFS_MOUNT" && -d "$NFS_MOUNT" ]]; then
         dest="$NFS_MOUNT/blit_bench_$workload"
 
         log "--- $workload (NFS) ---"
-        cleanup_dest "$dest"
-        run_timed "nfs_${workload}_copy" "$BLIT" copy "$src" "$dest" --yes
+        run_timed_fresh "nfs_${workload}_copy" "$dest" "$BLIT" copy "$src" "$dest" --yes
         run_timed "nfs_${workload}_noop" "$BLIT" mirror "$src" "$dest" --yes
         rm -rf "$dest"
     done
@@ -162,8 +209,7 @@ if [[ -n "$SMB_MOUNT" && -d "$SMB_MOUNT" ]]; then
         dest="$SMB_MOUNT/blit_bench_$workload"
 
         log "--- $workload (SMB) ---"
-        cleanup_dest "$dest"
-        run_timed "smb_${workload}_copy" "$BLIT" copy "$src" "$dest" --yes
+        run_timed_fresh "smb_${workload}_copy" "$dest" "$BLIT" copy "$src" "$dest" --yes
         run_timed "smb_${workload}_noop" "$BLIT" mirror "$src" "$dest" --yes
         rm -rf "$dest"
     done
@@ -183,7 +229,7 @@ if [[ -n "$REMOTE_HOST" ]]; then
         eval "src=\$SRC_$(echo $workload | tr a-z A-Z)"
 
         log "--- $workload (TCP push) ---"
-        run_timed "push_tcp_${workload}" "$BLIT" copy "$src" "$REMOTE" --yes -v
+        push_timed "push_tcp_${workload}" "$src"
     done
 
     log ""
@@ -192,31 +238,39 @@ if [[ -n "$REMOTE_HOST" ]]; then
         eval "src=\$SRC_$(echo $workload | tr a-z A-Z)"
 
         log "--- $workload (gRPC push) ---"
-        run_timed "push_grpc_${workload}" "$BLIT" copy "$src" "$REMOTE" --yes -v --force-grpc
+        push_timed "push_grpc_${workload}" "$src" --force-grpc
     done
 
     # ============================================================
-    # 5. REMOTE → LOCAL PULL
+    # 5. REMOTE → LOCAL PULL (per-workload subpaths: each pull reads
+    # only its own workload's dir — pulling the module root would
+    # time the accumulated union of everything pushed above)
     # ============================================================
     log ""
     log "=== REMOTE → LOCAL PULL (TCP) ==="
     for workload in large small mixed; do
+        eval "src=\$SRC_$(echo $workload | tr a-z A-Z)"
+        pull_src="${REMOTE}push_tcp_${workload}_r1/$(basename "$src")/"
         dest="$WORK/dst_pull_tcp_$workload"
 
         log "--- $workload (TCP pull) ---"
-        cleanup_dest "$dest"
-        run_timed "pull_tcp_${workload}" "$BLIT" copy "$REMOTE" "$dest" --yes -v
+        run_timed_fresh "pull_tcp_${workload}" "$dest" "$BLIT" copy "$pull_src" "$dest" --yes -v
     done
 
     log ""
     log "=== REMOTE → LOCAL PULL (gRPC fallback) ==="
     for workload in large small mixed; do
+        eval "src=\$SRC_$(echo $workload | tr a-z A-Z)"
+        pull_src="${REMOTE}push_tcp_${workload}_r1/$(basename "$src")/"
         dest="$WORK/dst_pull_grpc_$workload"
 
         log "--- $workload (gRPC pull) ---"
-        cleanup_dest "$dest"
-        run_timed "pull_grpc_${workload}" "$BLIT" copy "$REMOTE" "$dest" --yes -v --force-grpc
+        run_timed_fresh "pull_grpc_${workload}" "$dest" "$BLIT" copy "$pull_src" "$dest" --yes -v --force-grpc
     done
+
+    log ""
+    log "NOTE: pushed bench dirs (push_*_r*) accumulate under the remote"
+    log "module; remove them on the daemon host after the session."
 fi
 
 # ============================================================
@@ -230,8 +284,7 @@ if command -v rsync &>/dev/null; then
         dest="$WORK/dst_rsync_$workload"
 
         log "--- $workload (rsync) ---"
-        cleanup_dest "$dest"
-        run_timed "rsync_${workload}" rsync -a --delete --whole-file --inplace --no-compress "$src/" "$dest/"
+        run_timed_fresh "rsync_${workload}" "$dest" rsync -a --delete --whole-file --inplace --no-compress "$src/" "$dest/"
         run_timed "rsync_${workload}_noop" rsync -a --delete --whole-file --inplace --no-compress "$src/" "$dest/"
     done
 fi
