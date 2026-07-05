@@ -350,16 +350,63 @@ impl Blit for BlitService {
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
     type TransferStream = ReceiverStream<Result<blit_core::generated::TransferFrame, Status>>;
 
-    /// ONE_TRANSFER_PATH otp-1: the unified session's wire surface
-    /// exists compiled-but-refusing until otp-3/otp-4 land the
-    /// session behavior. Contract: docs/TRANSFER_SESSION.md.
+    /// ONE_TRANSFER_PATH otp-4a: the daemon serves the unified session
+    /// by running `run_destination` as the Responder — the byte
+    /// RECEIVER of a client-initiated SOURCE push. Mirrors `push`:
+    /// register a jobs row, race the session against cancel/hangup, and
+    /// return the response stream immediately (the session runs in the
+    /// spawned task, feeding the `ReceiverStream`). Session refusals
+    /// travel to the peer as `SessionError` frames; the daemon-specific
+    /// module resolution + transport assembly live in `super::transfer`.
+    /// Contract: docs/TRANSFER_SESSION.md.
     async fn transfer(
         &self,
-        _request: Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+        request: Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
     ) -> Result<Response<Self::TransferStream>, Status> {
-        Err(Status::unimplemented(
-            "Transfer session lands at ONE_TRANSFER_PATH otp-3/otp-4",
-        ))
+        let peer = peer_addr_string(&request);
+        let modules = Arc::clone(&self.modules);
+        let default_root = self.default_root.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let inbound = request.into_inner();
+        let metrics = Arc::clone(&self.metrics);
+        metrics.inc_push();
+        let guard = Arc::clone(&metrics).enter_transfer();
+        // Jobs row: registered with an empty endpoint (the module/path
+        // arrive in the SessionOpen, mid-handshake inside the session).
+        // Populating the row's endpoint from the open is a follow-up —
+        // the row still supports CancelJob and appears in GetState, and
+        // reuses ActiveJobKind::Push (daemon-receive = push-equivalent)
+        // until the kind taxonomy is revisited at cutover.
+        let job = self.active_jobs.register(
+            ActiveJobKind::Push,
+            peer.clone(),
+            String::new(),
+            String::new(),
+        );
+        self.emit_transfer_started(&job, ActiveJobKind::Push, &peer, "", "");
+        let started = std::time::Instant::now();
+        let events_tx = self.events_tx();
+
+        tokio::spawn(async move {
+            let guard = guard;
+            let job = job;
+            let cancel_token = job.cancellation_token().clone();
+            let (ok, err_msg) = resolve_streaming_outcome(
+                super::transfer::run_transfer_session(modules, default_root, inbound, tx.clone()),
+                &tx,
+                &cancel_token,
+                &metrics,
+            )
+            .await;
+            job.record_outcome(ok, err_msg.clone());
+            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
+            drop(job);
+            drop(guard);
+            let _ = events_tx.send(finished_event);
+            metrics.log_completion("transfer", started.elapsed(), ok);
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn subscribe(

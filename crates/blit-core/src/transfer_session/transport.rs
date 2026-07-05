@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 use eyre::{eyre, Result};
 use tokio::sync::mpsc;
+use tonic::{Status, Streaming};
 
 use crate::generated::TransferFrame;
 
@@ -103,6 +104,114 @@ pub fn in_process_pair() -> (FrameTransport, FrameTransport) {
             Box::new(MpscFrameTx { tx: b_tx }),
             Box::new(MpscFrameRx { rx: b_rx }),
         ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// gRPC-backed transport (otp-4)
+// ---------------------------------------------------------------------------
+//
+// The unified `Transfer` RPC is bidi-streaming and carries `TransferFrame`
+// both directions, so a session end reads its inbound `tonic::Streaming`
+// as a `FrameRx` and writes its outbound frames through an mpsc whose
+// receiver becomes the peer's stream. Two `FrameTx` impls exist only
+// because the client's outbound stream item is a bare `TransferFrame`
+// (what `BlitClient::transfer` wants) while the daemon's outbound item is
+// `Result<TransferFrame, Status>` (what its `ReceiverStream` response
+// yields). Session-level refusals travel as `SessionError` *frames*
+// (`Ok`); the gRPC `Status` channel is reserved for terminal transport
+// faults.
+
+/// Inbound half over a tonic server/response stream — shared by both
+/// ends (client reads the response stream, daemon reads the request
+/// stream). `message()`'s `Ok(None)`/`Err(Status)` map directly onto the
+/// `FrameRx` clean-close / transport-error contract.
+struct GrpcFrameRx {
+    stream: Streaming<TransferFrame>,
+}
+
+#[async_trait]
+impl FrameRx for GrpcFrameRx {
+    async fn recv(&mut self) -> Result<Option<TransferFrame>> {
+        self.stream
+            .message()
+            .await
+            // Preserve the gRPC code in the message — the FrameRx trait
+            // carries only eyre, and the session's own SessionError
+            // frames are the semantic error channel; this Err is a raw
+            // transport failure the drivers surface as INTERNAL.
+            .map_err(|status| {
+                eyre!(
+                    "gRPC transport error ({:?}): {}",
+                    status.code(),
+                    status.message()
+                )
+            })
+    }
+}
+
+/// Client outbound half: frames go into the mpsc whose `ReceiverStream`
+/// was handed to `BlitClient::transfer` as the request stream.
+struct GrpcClientFrameTx {
+    tx: mpsc::Sender<TransferFrame>,
+}
+
+#[async_trait]
+impl FrameTx for GrpcClientFrameTx {
+    async fn send(&mut self, frame: TransferFrame) -> Result<()> {
+        self.tx
+            .send(frame)
+            .await
+            .map_err(|_| eyre!("transfer transport peer closed"))
+    }
+}
+
+/// Daemon outbound half: the session's frames ride the RPC response
+/// stream, whose item type is `Result<TransferFrame, Status>`. Frames
+/// are always `Ok` — the `Status` variant is used by the handler for a
+/// terminal transport fault, not by the session.
+struct GrpcDaemonFrameTx {
+    tx: mpsc::Sender<Result<TransferFrame, Status>>,
+}
+
+#[async_trait]
+impl FrameTx for GrpcDaemonFrameTx {
+    async fn send(&mut self, frame: TransferFrame) -> Result<()> {
+        self.tx
+            .send(Ok(frame))
+            .await
+            .map_err(|_| eyre!("transfer transport peer closed"))
+    }
+}
+
+/// Bounded capacity of the mpsc feeding a gRPC stream direction — the
+/// session leans on transport backpressure (this channel plus HTTP/2
+/// flow control), matching the push handler's `mpsc::channel(32)`.
+pub const GRPC_CHANNEL_FRAMES: usize = 32;
+
+/// Assemble the CLIENT end's transport: `out_tx` feeds the request
+/// stream (build it with `ReceiverStream::new(out_rx)` and hand that to
+/// `BlitClient::transfer`), `inbound` is the response stream.
+pub fn grpc_client_transport(
+    out_tx: mpsc::Sender<TransferFrame>,
+    inbound: Streaming<TransferFrame>,
+) -> FrameTransport {
+    FrameTransport::new(
+        Box::new(GrpcClientFrameTx { tx: out_tx }),
+        Box::new(GrpcFrameRx { stream: inbound }),
+    )
+}
+
+/// Assemble the DAEMON end's transport: `out_tx` feeds the RPC response
+/// `ReceiverStream`, `inbound` is the request stream
+/// (`request.into_inner()`).
+pub fn grpc_daemon_transport(
+    out_tx: mpsc::Sender<Result<TransferFrame, Status>>,
+    inbound: Streaming<TransferFrame>,
+) -> FrameTransport {
+    FrameTransport::new(
+        Box::new(GrpcDaemonFrameTx { tx: out_tx }),
+        Box::new(GrpcFrameRx { stream: inbound }),
     )
 }
 

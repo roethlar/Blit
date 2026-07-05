@@ -4,6 +4,8 @@ pub(crate) mod delegated_pull;
 mod pull_sync;
 mod push;
 mod transfer;
+#[cfg(test)]
+mod transfer_session_e2e;
 mod util;
 
 pub use core::{spawn_progress_ticker, BlitServer, BlitService};

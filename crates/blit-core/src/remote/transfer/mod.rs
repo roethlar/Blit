@@ -6,6 +6,7 @@ pub mod operation_spec;
 pub mod payload;
 pub mod pipeline;
 pub mod progress;
+pub mod session_client;
 pub mod sink;
 pub mod socket;
 pub mod source;

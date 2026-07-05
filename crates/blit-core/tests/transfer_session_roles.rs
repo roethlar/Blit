@@ -24,8 +24,8 @@ use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::transfer_plan::PlanOptions;
 use blit_core::transfer_session::transport::{in_process_pair, FrameTransport};
 use blit_core::transfer_session::{
-    run_destination, run_source, DestinationOutcome, DestinationSessionConfig, HelloConfig,
-    SessionEndpoint, SessionFault, SourceSessionConfig, CONTRACT_VERSION,
+    run_destination, run_source, DestinationOutcome, DestinationSessionConfig, DestinationTarget,
+    HelloConfig, SessionEndpoint, SessionFault, SourceSessionConfig, CONTRACT_VERSION,
 };
 
 const SUITE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -130,7 +130,11 @@ async fn run_session(
     tokio::time::timeout(SUITE_TIMEOUT, async {
         tokio::join!(
             run_source(source_cfg, a, source),
-            run_destination(dest_cfg, b, dst_root.to_path_buf()),
+            run_destination(
+                dest_cfg,
+                b,
+                DestinationTarget::Fixed(dst_root.to_path_buf())
+            ),
         )
     })
     .await
@@ -380,7 +384,7 @@ async fn build_mismatch_refused_under_both_initiators() {
         let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
             tokio::join!(
                 run_source(source_cfg, a, source),
-                run_destination(dest_cfg, b, dst_root.clone()),
+                run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
             )
         })
         .await
@@ -433,7 +437,7 @@ async fn contract_version_mismatch_is_refused() {
     let source = Arc::new(FsTransferSource::new(src_root));
     let (source_result, dest_result) = tokio::join!(
         run_source(source_cfg, a, source),
-        run_destination(dest_cfg, b, dst_root),
+        run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root)),
     );
     assert_eq!(
         fault_of(&source_result.unwrap_err()).code,
@@ -472,7 +476,7 @@ async fn mirror_request_is_refused_until_its_slice_lands() {
     let source = Arc::new(FsTransferSource::new(src_root));
     let (source_result, dest_result) = tokio::join!(
         run_source(source_cfg, a, source),
-        run_destination(dest_cfg, b, dst_root),
+        run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root)),
     );
     let source_fault = fault_of(&source_result.unwrap_err()).clone();
     assert_eq!(source_fault.code, session_error::Code::Internal);
@@ -520,7 +524,11 @@ async fn payload_record_before_manifest_complete_is_protocol_violation() {
         endpoint: SessionEndpoint::Responder,
     };
     let (mut peer, dest_transport) = in_process_pair();
-    let dest = tokio::spawn(run_destination(dest_cfg, dest_transport, dst_root));
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root),
+    ));
 
     // Scripted source peer: valid handshake, then a payload record
     // while its manifest is still open — the contract's example
@@ -745,7 +753,11 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
         endpoint: SessionEndpoint::Responder,
     };
     let (mut peer, dest_transport) = in_process_pair();
-    let dest = tokio::spawn(run_destination(dest_cfg, dest_transport, dst_root));
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root),
+    ));
 
     peer.send(hello_frame()).await.unwrap();
     assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));

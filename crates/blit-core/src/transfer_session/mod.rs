@@ -17,7 +17,9 @@ pub mod transport;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -157,6 +159,18 @@ impl SessionFault {
         Self::new(session_error::Code::Internal, message)
     }
 
+    fn read_only(message: impl Into<String>) -> Self {
+        Self::new(session_error::Code::ReadOnly, message)
+    }
+
+    /// Public constructor for a caller-side refusal (e.g. the daemon's
+    /// [`OpenResolver`] mapping a `tonic::Status` to a `SessionError`
+    /// code). blit-core stays free of `tonic::Status`, so the caller
+    /// picks the wire code.
+    pub fn refusal(code: session_error::Code, message: impl Into<String>) -> Self {
+        Self::new(code, message)
+    }
+
     fn from_wire(err: SessionError) -> Self {
         Self {
             code: session_error::Code::try_from(err.code)
@@ -245,6 +259,46 @@ fn complement(role: TransferRole) -> TransferRole {
 /// silently ignoring it (fail-fast; contract §Errors).
 type OpenValidator = dyn Fn(&SessionOpen) -> std::result::Result<(), SessionFault> + Send + Sync;
 
+/// The local endpoint a Responder resolves a received `SessionOpen`
+/// to. The daemon maps the wire module name + path here; a test can
+/// hand a fixed root with no module semantics via
+/// [`DestinationTarget::Fixed`] instead.
+#[derive(Debug, Clone)]
+pub struct ResolvedEndpoint {
+    /// Absolute local root this end targets.
+    pub root: PathBuf,
+    /// Whether the resolved module forbids writes. A DESTINATION
+    /// responder refuses `READ_ONLY`; a SOURCE responder (otp-5,
+    /// daemon-send) does not care — reading a read-only module is fine.
+    pub read_only: bool,
+}
+
+/// Async callback a Responder uses to turn a received (and
+/// capability-validated) `SessionOpen` into its local endpoint. It
+/// lives caller-side — the daemon resolves modules and maps its own
+/// `tonic::Status` errors to [`SessionFault`], so blit-core stays free
+/// of module/Status types. A returned fault (unknown module,
+/// containment failure) becomes a `SessionError` at OPEN, never a
+/// silent close (contract §Phase state machine).
+pub type OpenResolver = dyn Fn(
+        &SessionOpen,
+    )
+        -> Pin<Box<dyn Future<Output = std::result::Result<ResolvedEndpoint, SessionFault>> + Send>>
+    + Send
+    + Sync;
+
+/// Where a DESTINATION driver writes. `Fixed` is a root known up front
+/// (an initiator's own local root, or a test's temp dir). `Resolve`
+/// defers to a caller callback that maps the received `SessionOpen` to
+/// a local root — the daemon path, where the root depends on the wire
+/// module name and so can only be resolved mid-handshake (after HELLO,
+/// before SessionAccept). A `Resolve` target is meaningful only on a
+/// Responder; an Initiator always knows its own root.
+pub enum DestinationTarget {
+    Fixed(PathBuf),
+    Resolve(Box<OpenResolver>),
+}
+
 fn source_open_validator(open: &SessionOpen) -> std::result::Result<(), SessionFault> {
     if open.resume.as_ref().is_some_and(|r| r.enabled) {
         return Err(SessionFault::internal(
@@ -280,8 +334,12 @@ fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), Ses
 /// Outcome of the HELLO + OPEN phases.
 struct Negotiated {
     open: SessionOpen,
-    #[allow(dead_code)] // capacity/grant consumed from otp-4 on
+    #[allow(dead_code)] // capacity/grant consumed from otp-4b (data plane) on
     accept: SessionAccept,
+    /// The write root a Responder's [`OpenResolver`] produced from the
+    /// received open, if one was supplied; `None` for an Initiator or a
+    /// fixed-root Responder (the caller supplies the root then).
+    resolved_root: Option<PathBuf>,
 }
 
 /// HELLO + OPEN/ACCEPT, one implementation both roles call (otp-3
@@ -293,6 +351,10 @@ async fn establish(
     endpoint: &SessionEndpoint,
     local_role: TransferRole,
     validate_open: &OpenValidator,
+    // Consulted only on the Responder branch, after the received open
+    // passes `validate_open` and before SessionAccept. `None` = the
+    // caller supplies the root itself (Initiator, or fixed-root test).
+    resolve_open: Option<&OpenResolver>,
 ) -> Result<Negotiated> {
     // HELLO both ways, exact match (D-2026-07-05-2). First frame each
     // direction; no ordering between the two directions.
@@ -351,7 +413,11 @@ async fn establish(
                     .await)
                 }
             };
-            Ok(Negotiated { open, accept })
+            Ok(Negotiated {
+                open,
+                accept,
+                resolved_root: None,
+            })
         }
         SessionEndpoint::Responder => {
             let open = match expect_frame(transport).await? {
@@ -387,20 +453,51 @@ async fn establish(
                 // never a silent close (contract §Phase state machine).
                 return Err(notify_and_wrap(transport, fault).await);
             }
+            // Responder endpoint resolution (otp-4): map the wire
+            // module/path to a local root and enforce read-only, both
+            // BEFORE SessionAccept so a refusal replaces the accept
+            // (never follows it). The resolver is caller-supplied
+            // (daemon module lookup); a fixed-root responder passes
+            // None and resolves nothing here.
+            let resolved_root = match resolve_open {
+                Some(resolve) => match resolve(&open).await {
+                    Ok(resolved) => {
+                        // A read-only module is fatal only for a
+                        // DESTINATION (it would write); a SOURCE
+                        // responder (otp-5, daemon-send) reads happily.
+                        if local_role == TransferRole::Destination && resolved.read_only {
+                            return Err(notify_and_wrap(
+                                transport,
+                                SessionFault::read_only(
+                                    "destination module is read-only".to_string(),
+                                ),
+                            )
+                            .await);
+                        }
+                        Some(resolved.root)
+                    }
+                    Err(fault) => return Err(notify_and_wrap(transport, fault).await),
+                },
+                None => None,
+            };
             let accept = SessionAccept {
                 // The byte RECEIVER advertises capacity at session
                 // open (D-2026-06-20-1/-2); consumed by the dial when
-                // the data plane lands (otp-4).
+                // the data plane lands (otp-4b).
                 receiver_capacity: if local_role == TransferRole::Destination {
                     Some(crate::engine::local_receiver_capacity())
                 } else {
                     None
                 },
-                // No grant = in-stream byte carrier, otp-3's only one.
+                // No grant = in-stream byte carrier, otp-4a's only one.
                 data_plane: None,
             };
             transport.send(frame(Frame::Accept(accept.clone()))).await?;
-            Ok(Negotiated { open, accept })
+            Ok(Negotiated {
+                open,
+                accept,
+                resolved_root,
+            })
         }
     }
 }
@@ -472,6 +569,10 @@ pub async fn run_source(
         &cfg.endpoint,
         TransferRole::Source,
         &source_open_validator,
+        // A SOURCE responder's endpoint resolution (module→root for a
+        // daemon-send) lands with otp-5; otp-4a's daemon is always the
+        // DESTINATION responder, so the source never resolves here.
+        None,
     )
     .await?;
 
@@ -817,13 +918,20 @@ pub struct DestinationOutcome {
 }
 
 /// Run the DESTINATION role of one transfer session over `transport`,
-/// writing under `dst_root`. Diffs the streamed manifest against its
-/// own filesystem (the destination is the one diff owner — plan
-/// §Design 3), returns the summary it computed and sent.
+/// writing under the root named by `target`. Diffs the streamed
+/// manifest against its own filesystem (the destination is the one
+/// diff owner — plan §Design 3), returns the summary it computed and
+/// sent.
+///
+/// `target` is [`DestinationTarget::Fixed`] when the root is known up
+/// front (an Initiator's own local root, or a test), or
+/// [`DestinationTarget::Resolve`] when the root must be resolved from
+/// the received `SessionOpen` mid-handshake (the daemon Responder,
+/// where the wire module name selects the root).
 pub async fn run_destination(
     cfg: DestinationSessionConfig,
     transport: FrameTransport,
-    dst_root: PathBuf,
+    target: DestinationTarget,
 ) -> Result<DestinationOutcome> {
     let mut transport = transport;
     let endpoint = match cfg.endpoint {
@@ -847,14 +955,37 @@ pub async fn run_destination(
         SessionEndpoint::Responder => SessionEndpoint::Responder,
     };
 
+    let resolve_open: Option<&OpenResolver> = match &target {
+        DestinationTarget::Resolve(resolver) => Some(resolver.as_ref()),
+        DestinationTarget::Fixed(_) => None,
+    };
+
     let negotiated = establish(
         &mut transport,
         &cfg.hello,
         &endpoint,
         TransferRole::Destination,
         &destination_open_validator,
+        resolve_open,
     )
     .await?;
+
+    // The resolver's root (Responder + Resolve) wins; otherwise the
+    // caller-supplied Fixed root.
+    let dst_root = match negotiated.resolved_root.clone() {
+        Some(root) => root,
+        None => match &target {
+            DestinationTarget::Fixed(root) => root.clone(),
+            // Unreachable: a Resolve target always yields a root on the
+            // Responder branch, and establish only skips resolution on
+            // the Initiator branch (which pairs with a Fixed root).
+            DestinationTarget::Resolve(_) => {
+                return Err(eyre::Report::new(SessionFault::internal(
+                    "resolver target produced no destination root",
+                )));
+            }
+        },
+    };
 
     match destination_session(&mut transport, &negotiated, &dst_root).await {
         Ok(outcome) => Ok(outcome),

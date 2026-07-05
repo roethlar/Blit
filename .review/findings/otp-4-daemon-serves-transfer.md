@@ -1,134 +1,159 @@
 # otp-4 — daemon serves `Transfer`, client initiates as SOURCE
 
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-4.
-**Status**: scoped — approach recorded 2026-07-05, implementation next.
-**Contract**: `docs/TRANSFER_SESSION.md` (`f861579` + otp-3 §Inv 2 annotation).
-**Builds on**: otp-3 (`ef9ffa1`+`d5796a1`) — drivers exist, in-process
-transport only; no gRPC `FrameTransport` yet.
+**Status**: otp-4a implemented — awaiting codex review. otp-4b (data
+plane + resize + sf-2 pin) pending.
+**Contract**: `docs/TRANSFER_SESSION.md`.
+**Builds on**: otp-3 (`85bf611`) — drivers exist; this slice adds the
+gRPC transport, the daemon handler, and the client SOURCE entry.
 
-## Scope (what otp-4 proves)
+## Staging
 
-The remote push-equivalent rides the unified session end-to-end: a
-real daemon serves the `Transfer` RPC by running `run_destination`
-(responder), a real client runs `run_source` (initiator, role
-SOURCE) over a gRPC-backed `FrameTransport`, with the TCP data plane
-as the default byte carrier and the sf-2 shape-corrected dial as the
-stream policy. A/B parity pins vs old push: byte-identical trees,
-summary parity, sf-2 pin ported. Old push stays fully live (cutover
-is otp-10); CLI verbs stay on old push until otp-10.
+- **otp-4a (this commit)**: serve + initiate over the **in-stream
+  carrier**. Real daemon runs `run_destination` as Responder; real
+  client runs `run_source` as SOURCE initiator over gRPC. A/B parity
+  vs old push. No data plane, no resize.
+- **otp-4b (next)**: TCP data plane grant in SessionAccept, source
+  dials + authenticates, ported `maybe_shape_resize` (frames 16/17),
+  sf-2 10k-file >1-stream pin ported to the session, cancel-mid-
+  transfer test.
 
-## Staging (two commits, each through the codex loop)
+## What otp-4a proves
 
-- **otp-4a — serve + initiate over the in-stream carrier**:
-  - `transport.rs` gains the gRPC pair: client side wraps
-    `BlitClient::transfer` (`IntoStreamingRequest<Message=TransferFrame>`
-    out / `Streaming<TransferFrame>` in); daemon side wraps
-    `Streaming<TransferFrame>` in / `mpsc → ReceiverStream` out
-    (`core.rs:351` `type TransferStream`).
-  - Daemon handler (`core.rs` `transfer()`, replacing the otp-1
-    UNIMPLEMENTED body): register `ActiveJobKind` row, race
-    `job.cancellation_token()` per the `resolve_streaming_outcome`
-    pattern → peer sees `SessionError{CANCELLED}`; responder-side
-    open validation hook does module/path resolve
-    (`MODULE_UNKNOWN`), read-only refusal (`READ_ONLY`) — refusals
-    as SessionError at OPEN, never silent close;
-    `set_endpoint(module, path)` on the jobs row;
-    `ActiveJobGuard::bytes_counter()` wired into the session sink
-    via `with_byte_progress` (old push never wired it — parity-plus,
-    same boundary the contract names). otp-4a serves the
-    SOURCE-initiator layout only: a DESTINATION-declaring initiator
-    (legal wire-wise) is refused with a clear
-    "pull-equivalent lands at otp-5" SessionError, not a
-    PROTOCOL_VIOLATION.
-  - Client entry `remote/transfer/session_client.rs` (blit-core):
-    connect via the existing `RemoteEndpoint::control_plane_uri()`
-    channel pattern, run `run_source` as initiator; returns the
-    session summary + needed count. Not wired to CLI verbs.
-  - **SizeMtime semantic decision (flagged by otp-3)**: settled here
-    because the parity pins force it. Old push's destination diff is
-    exact size+mtime equality (`file_requires_upload`); the session
-    currently inherits `manifest::compare_file`'s Default arm
-    (transfer only when src NEWER). For the push-equivalent parity
-    bar the session must match old push; direction of resolution
-    (exact-match arm for the session's SizeMtime vs changing the
-    shared Default arm, which would alter live pull_sync behavior
-    pre-cutover) is settled in-slice with codex review; the choice
-    and its blast radius get recorded in this doc + DECISIONS if the
-    shared arm changes.
-  - Parity pins (in-stream): same fixture through old push and the
-    session → byte-identical destination trees + equal
-    files/bytes counts; read-only refusal parity; unknown-module
-    parity; cancel-mid-transfer produces CANCELLED.
-- **otp-4b — TCP data plane + resize + sf-2 pin ported**:
-  - Responder binds via `bind_data_plane_listener`, mints
-    `generate_token()` + epoch-0 sub-token, arms
-    `accept_data_connection_stream_resizable` (AbortOnDrop), returns
-    `DataPlaneGrant{tcp_port, session_token, initial_streams
-    (ACCEPT CEILING = min(engine floor, local capacity)),
-    epoch0_sub_token}` inside SessionAccept. In-stream carrier
-    remains the fallback (`SessionOpen.in_stream_bytes` or
-    grant-less accept) — otp-3's record loop unchanged.
-  - Source-side byte path: `MultiStreamSender`-equivalent over
-    `DataPlaneSession::connect` (socket auth: `session_token ‖
-    sub_token`, one write), payloads through the existing pipeline;
-    `maybe_shape_resize` logic ported: `initial_stream_proposal` +
-    `TransferDial::propose_shape_resize` as the need list
-    accumulates; resize rides frames 16/17 (`DataPlaneResize`/`Ack`)
-    on the session stream — the otp-3 "resize = violation" arm
-    becomes data-plane-session behavior (in-stream sessions keep
-    refusing).
-  - Destination loop gains the data-plane carrier seam: control
-    frames stay on the RPC; payload bytes land via the accept task
-    (`TransferStats`); outstanding-set reconciliation + summary
-    composition from stats; `SourceDone` semantics per contract.
-  - sf-2 pin ported: 10k one-byte files through the SESSION on
-    loopback must open >1 data-plane stream
-    (`shape_resize_e2e.rs` pattern, real daemon + real client).
-  - Converge-guard micro-check (not the otp-12 matrix): loopback
-    wall-time of session-push within noise of old push on the
-    10k-tiny fixture, recorded in this doc (regression tripwire
-    only).
+The push-equivalent rides the unified session end to end: the daemon
+`Transfer` RPC serves a real session (no longer UNIMPLEMENTED), and a
+client pushes a tree through it that lands **byte-identically** to the
+old push path with **equal summary counters** — the converge-up bar,
+in-stream. Responder refusals (read-only, unknown module) arrive as
+`SessionError` frames.
 
-## Key integration facts (surveyed 2026-07-05, agent map)
+## Approach (as implemented)
 
-- Handler: `core.rs:356` stub; trait `blit_server::Blit`; stream
-  type `ReceiverStream<Result<TransferFrame, Status>>`.
-- Jobs: `active_jobs.rs` `register:415`, `set_endpoint:971`,
-  `cancellation_token:984`, `bytes_counter:1000`.
-- Read-only + module resolve precedent: `push/control.rs:118-126`.
-- Data plane server: `push/data_plane.rs` (`bind:45`, `token:59`,
-  `resizable accept:274`, `ResizeArm:235`, TTL `:251`); ADD arm
-  before ack (`control.rs:554-603`), ceiling
-  `local_receiver_capacity().max_streams`.
-- Client dial: `socket.rs:123 dial_data_plane` (handshake = one
-  `write_all` of token‖sub), `DataPlaneSession::connect:100`,
-  resize controller `client/mod.rs:534-551` + ack consume `:1105`.
-- sf-2 pin: `push/shape_resize_e2e.rs:30` (10k files,
-  `data_plane_streams > 1`, real loopback daemon).
-- Five Transfer test fakes return UNIMPLEMENTED and stay valid until
-  cutover (they stub the trait, not behavior).
+- **gRPC transport** (`transfer_session/transport.rs`): `GrpcFrameRx`
+  over `tonic::Streaming` (`message()` maps 1:1 to the `FrameRx`
+  clean-close/error contract); `GrpcClientFrameTx` (outbound item =
+  bare `TransferFrame`, fed to `BlitClient::transfer` via a
+  `ReceiverStream`) and `GrpcDaemonFrameTx` (outbound item =
+  `Result<TransferFrame, Status>`, the response stream). Public
+  assemblers `grpc_client_transport` / `grpc_daemon_transport`.
+  Capacity 32 (matches push); backpressure via the channel + HTTP/2
+  flow control.
+- **Responder-resolution API** (`transfer_session/mod.rs`): a
+  Responder can't know its write root until the `SessionOpen` arrives
+  mid-handshake, so `establish()` gains an async `OpenResolver`
+  (`Option<&OpenResolver>`) consulted on the Responder branch *after*
+  `validate_open` and *before* `SessionAccept` — a refusal replaces
+  the accept, never follows it. `run_destination`'s 3rd param becomes
+  `DestinationTarget::{Fixed(root), Resolve(resolver)}`; the resolved
+  root (Responder+Resolve) wins, else the Fixed root. Read-only is
+  enforced by establish for a DESTINATION responder
+  (`SessionFault::read_only` → `SessionError{READ_ONLY}`); a SOURCE
+  responder (otp-5) will not refuse read-only. New public surface:
+  `ResolvedEndpoint`, `OpenResolver`, `DestinationTarget`,
+  `SessionFault::refusal` (caller picks the wire code — blit-core
+  stays `tonic::Status`-free).
+- **Client entry** (`remote/transfer/session_client.rs`):
+  `run_push_session(endpoint, source, PushSessionOptions)` builds the
+  `BlitClient` (same bounded-connect as `RemotePushClient::connect`),
+  opens the bidi RPC, assembles the client transport, and runs
+  `run_source` as SOURCE initiator. Not wired to CLI verbs (otp-10).
+- **Daemon handler** (`service/transfer.rs` + `core.rs::transfer`):
+  `core.rs::transfer` mirrors `push` — register an `ActiveJobs` row,
+  spawn, race the session against cancel/hangup via
+  `resolve_streaming_outcome`, return the `ReceiverStream`.
+  `service/transfer.rs` owns the daemon-specific pieces:
+  `make_open_resolver` (wraps the push Header sequence —
+  `resolve_module` → path validation → F2 `resolve_contained_path` —
+  mapping `tonic::Status`→`SessionFault`) and `run_transfer_session`
+  (assembles the transport, runs `run_destination` with the resolver,
+  maps the outcome to `Result<(), Status>` for the jobs record).
 
-## Files (planned)
+## Compare-semantics decision (the SizeMtime fork, resolved)
 
-- `crates/blit-core/src/transfer_session/transport.rs` (gRPC pair)
-- `crates/blit-core/src/transfer_session/mod.rs` (responder open
-  validation hook w/ module resolve callback; 4b: carrier seam,
-  resize arms)
-- `crates/blit-core/src/remote/transfer/session_client.rs` (new)
-- `crates/blit-daemon/src/service/core.rs` (+ a
-  `service/transfer.rs` handler body next to the pin test)
-- `crates/blit-core/src/manifest.rs` (SizeMtime resolution, per the
-  in-slice decision)
-- Tests: `crates/blit-daemon/src/service/transfer.rs` (pin flips
-  from UNIMPLEMENTED to behavior), new parity e2e in blit-daemon
-  tests (old push vs session), 4b: ported sf-2 pin.
+The one push/pull compare divergence is **same-size + destination
+NEWER**: old push clobbers (re-transfers), old pull + the session
+safely SKIP. The session already inherits the pull-style safe arm
+(`manifest::compare_file` Default). This slice **keeps the safe skip**
+and encodes it in the parity pin. Justification (agent-verified, full
+evidence in the workflow journal):
 
-## Known gaps (carried)
+- **Direction-invariance (owner's prime invariant)** is satisfied the
+  moment there is one predicate; "byte-identical to BOTH old
+  directions" is *impossible* in this cell because old push and old
+  pull themselves disagree — a choice is forced.
+- **Converge UP** (plan constraint) says pick the better direction;
+  not clobbering a newer destination on a plain sync is the data-safe
+  behavior. `--force` (`CompareMode::Force`) still overwrites.
+- **Zero blast radius**: keeps the shared arm untouched, so live
+  `pull_sync` is unchanged pre-cutover and the existing pin
+  (`manifest.rs` `test_target_newer_unchanged`) stays green. No test
+  pins old push's clobber behavior (`file_requires_upload` has none).
 
-- Daemon-as-SOURCE (pull-equivalent) and the four-layout dispatch:
-  otp-5. Mirror/filters: otp-6. Resume: otp-7. Fallback-carrier
-  parity vs old gRPC fallback: otp-8. Delegated: otp-9.
-- Progress events (w6-1 DaemonEvent stream) attach where old push
-  emits them; exact emission points verified in-slice.
-- otp-1's reachability pin (UNIMPLEMENTED) is replaced by behavior
-  pins — test count must not drop.
+Pinned by `same_size_newer_destination_is_skipped_not_clobbered`
+(dest keeps its newer same-size file; a stale file still updates).
+
+**⚠ Owner ack requested (narrow)**: the plan's "byte-identical trees
+vs old push" acceptance wording is not literally achievable in this
+one cell without violating direction-invariance + data safety. The
+session encodes the safe skip there; `--force` is the overwrite escape
+hatch. Flagged as a STATE open question — not blocking (constrained by
+converge-up + data safety), reversible (one compare-mode line),
+codex-reviewed. If the owner wants old-push clobber semantics as the
+unified default instead, it's a small change.
+
+## Files
+
+- `crates/blit-core/src/transfer_session/transport.rs` (gRPC adapters)
+- `crates/blit-core/src/transfer_session/mod.rs` (resolver API)
+- `crates/blit-core/src/remote/transfer/session_client.rs` (new) +
+  `remote/transfer/mod.rs` (export)
+- `crates/blit-daemon/src/service/transfer.rs` (handler helpers;
+  replaces the otp-1 UNIMPLEMENTED pin)
+- `crates/blit-daemon/src/service/core.rs` (`transfer` handler)
+- `crates/blit-daemon/src/service/transfer_session_e2e.rs` (new) +
+  `service/mod.rs` (module decl)
+- `crates/blit-core/tests/transfer_session_roles.rs` (call sites moved
+  to `DestinationTarget::Fixed`)
+
+## Tests
+
+Suite 1501 → 1508 (+7 net: removed the 1 UNIMPLEMENTED pin, added 3
+`status_to_fault` unit tests + 5 e2e). New e2e (real loopback daemon):
+- `session_lands_bytes_and_scores_them` — a session lands the tree
+  byte-identically and scores files/bytes.
+- `old_push_and_session_produce_identical_trees_and_counts` — **A/B
+  parity**: same fixture through OLD push (rides the TCP data plane)
+  and the NEW session (in-stream) → byte-identical trees + equal
+  shared summary counters.
+- `read_only_module_refuses_the_session` — `READ_ONLY` fault, no bytes
+  land. **Guard-proven**: neutering the establish read-only check
+  makes it fail; restored, it passes.
+- `unknown_module_refuses_the_session` — `MODULE_UNKNOWN` fault.
+- `same_size_newer_destination_is_skipped_not_clobbered` — the compare
+  decision.
+
+Gate: `cargo fmt --check` ✓, `clippy --workspace --all-targets
+-D warnings` ✓, `cargo test --workspace` 1508/0 ✓.
+
+## Known gaps (carried into otp-4b / later)
+
+- **Data plane**: otp-4a is in-stream carrier only; TCP grant,
+  socket auth, resize, and the ported sf-2 pin are otp-4b.
+- **Cancel**: the jobs row + `resolve_streaming_outcome` race are
+  wired (CancelJob records + terminates), but cancel surfaces to the
+  client as a transport error, not a clean `SessionError{CANCELLED}`
+  frame; the clean frame + a deterministic mid-transfer cancel test
+  land with otp-4b (where "mid-transfer" is substantial).
+- **Jobs-row endpoint**: the row registers with an empty module/path
+  (like push before its Header); populating it from the SessionOpen
+  needs a small ActiveJobs affordance — deferred. Row still supports
+  CancelJob + GetState presence. Reuses `ActiveJobKind::Push`.
+- **Progress bytes**: `with_byte_progress` not threaded (the sink is
+  internal to `run_destination`); session rows report
+  `bytes_completed=0`, same as today's push rows — no regression.
+- **Daemon-as-SOURCE (pull-equivalent)** + the four-layout responder
+  dispatch: otp-5. A DESTINATION-declaring initiator (daemon would be
+  SOURCE) is currently refused by establish's role-complement check
+  (PROTOCOL_VIOLATION), which otp-5 replaces with the real path.
+- Mirror/filters otp-6; resume otp-7; fallback-carrier parity otp-8;
+  delegated otp-9.
