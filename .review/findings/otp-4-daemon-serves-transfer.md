@@ -1,8 +1,9 @@
 # otp-4 — daemon serves `Transfer`, client initiates as SOURCE
 
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-4.
-**Status**: otp-4a implemented — awaiting codex review. otp-4b (data
-plane + resize + sf-2 pin) pending.
+**Status**: otp-4a implemented + reviewed — codex 1/1 finding accepted
+and fixed (`.review/results/otp-4a-daemon-serves-transfer.gpt-verdict.md`).
+otp-4b (data plane + resize + sf-2 pin) pending.
 **Contract**: `docs/TRANSFER_SESSION.md`.
 **Builds on**: otp-3 (`85bf611`) — drivers exist; this slice adds the
 gRPC transport, the daemon handler, and the client SOURCE entry.
@@ -139,11 +140,14 @@ Gate: `cargo fmt --check` ✓, `clippy --workspace --all-targets
 
 - **Data plane**: otp-4a is in-stream carrier only; TCP grant,
   socket auth, resize, and the ported sf-2 pin are otp-4b.
-- **Cancel**: the jobs row + `resolve_streaming_outcome` race are
-  wired (CancelJob records + terminates), but cancel surfaces to the
-  client as a transport error, not a clean `SessionError{CANCELLED}`
-  frame; the clean frame + a deterministic mid-transfer cancel test
-  land with otp-4b (where "mid-transfer" is substantial).
+- **Cancel** (frame fixed post-review, codex F1): `CancelJob` now
+  emits a framed `SessionError{CANCELLED}` on the response stream
+  (`core.rs::resolve_transfer_session_outcome` +
+  `blit_core::transfer_session::session_error_frame`), unit-guarded by
+  `transfer_cancel_emits_framed_cancelled_error`. The deterministic
+  **mid-transfer** cancel e2e (fire CancelJob while bytes flow, assert
+  the client surfaces `SessionFault{CANCELLED}`) is still an otp-4b
+  item — it needs the data plane + a long-enough transfer.
 - **Jobs-row endpoint**: the row registers with an empty module/path
   (like push before its Header); populating it from the SessionOpen
   needs a small ActiveJobs affordance — deferred. Row still supports

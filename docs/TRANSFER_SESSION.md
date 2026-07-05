@@ -229,6 +229,12 @@ push/pull-specific message.
 At cutover (otp-10): `Push`, `PullSync`, and their message
 choreographies are deleted from the proto and the tree; the four
 per-direction drivers die with them; `DelegatedPull` shrinks to
-trigger + progress relay (no payload bytes). Until then this
-contract's surface exists compiled-but-refusing
-(`Transfer` returns `UNIMPLEMENTED`; pinned by test).
+trigger + progress relay (no payload bytes). Until then the old paths
+stay live alongside the session as migration scaffolding.
+
+Progress: otp-3 landed the role-parameterized drivers over the
+in-process transport; **otp-4a** made the daemon serve `Transfer` for
+real (runs `run_destination` as Responder; a client `run_source`s as
+SOURCE initiator over gRPC, in-stream carrier) — the RPC no longer
+returns `UNIMPLEMENTED`. The TCP data plane grant + resize land at
+otp-4b; the daemon-as-SOURCE (pull-equivalent) layout at otp-5.

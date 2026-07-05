@@ -254,6 +254,22 @@ fn complement(role: TransferRole) -> TransferRole {
     }
 }
 
+/// Build a `SessionError` frame with the given code and message — the
+/// wire form an end sends to tell its peer why it is aborting. Public
+/// so the daemon dispatcher can emit `CANCELLED` when a `CancelJob`
+/// fires mid-session (the session future is aborted by the select and
+/// cannot send it itself — otp-4a codex F1); blit-core stays the one
+/// owner of the frame grammar. The build-id fields are left empty:
+/// they are only meaningful for `BUILD_MISMATCH`.
+pub fn session_error_frame(code: session_error::Code, message: impl Into<String>) -> TransferFrame {
+    frame(Frame::Error(SessionError {
+        code: code as i32,
+        message: message.into(),
+        local_build_id: String::new(),
+        peer_build_id: String::new(),
+    }))
+}
+
 /// Per-role capability check of the operation a `SessionOpen`
 /// describes. otp-3 refuses what later slices implement rather than
 /// silently ignoring it (fail-fast; contract §Errors).
