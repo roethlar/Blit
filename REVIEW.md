@@ -47,6 +47,20 @@ sf-3b… count is set by sf-3a's analysis, rows added as filed).
 | sf-1 | Tripwire + stream-scaling harness (`scripts/bench_tripwires.sh`) — baseline re-runnable in one command. Codex NEEDS FIXES (6/6 accepted: teardown ownership, coverage-enforced verdict, external-daemon mode, ±10% flag, record accuracy) | `[x]` | `7202c1a` + review fix `80633df` |
 | sf-2 | Shape-correction stream resize — client re-runs the shape table over the accumulated need list, corrects the daemon's partial-manifest epoch-0 proposal upward via the ue-r2-2 resize wire; loopback e2e pins 10k-file push > 1 stream (guard proven by revert). Codex NEEDS FIXES (1/1 accepted: count from append-only `files_requested`, not the pruned set) | `[x]` | `c70c2ac` + review fix `7627e7b` |
 
+## One transfer path (ONE_TRANSFER_PATH) — code→GPT-review→fix loop
+
+Plan: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4).
+Same codex loop and record formats. Slice order lives in the plan;
+otp-2 (symmetric baseline) needs the 10 GbE rig and must land before
+otp-10 cutover — it may execute out of strict order when the rig is
+available.
+
+| ID | Title | Status | Commit(s) |
+|----|-------|--------|-----------|
+| otp-1 | Unified Transfer session wire+session contract — docs/TRANSFER_SESSION.md + Transfer RPC/messages + refusing stubs + reachability pin. Codex NEEDS FIXES (6/6 accepted: role-lane closing flow, accept-ceiling dial semantics, socket auth, in-stream record grammar, flow control/NeedComplete ordering, error-field drift) | `[x]` | `a3e2acb` + review fix `f861579` |
+| otp-2 | Symmetric baseline (corrected harness matrix + old-path per-cell baseline on the rig) — PENDING RIG ACCESS; must land before otp-10 | `[ ]` | |
+| otp-3 | TransferSession core (role-parameterized state machine, in-process transport) | `[ ]` | |
+
 ## Design-review queue (ratified D-2026-06-11-2, in execution order)
 
 Source: `docs/audit/AUDIT_REPORT_2026-06-11_DESIGN.md` (slice specs) +
