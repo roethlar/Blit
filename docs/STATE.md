@@ -15,9 +15,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **ONE_TRANSFER_PATH (D-2026-07-05-1) — Draft, codex review, then
-  owner Active flip** — owner directive 2026-07-05, verbatim in the
-  plan doc: ONE block of transfer code; direction/initiator/verb can
+- **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
+  D-2026-07-05-4 flip: "flip the plan and go") — otp-1 in progress**
+  — owner directive 2026-07-05, verbatim in the plan doc: ONE block of transfer code; direction/initiator/verb can
   NEVER affect wall time by blit's doing, impossible by construction
   because the per-direction drivers and the `Push`/`PullSync` RPCs
   are deleted. One `TransferSession` (roles SOURCE/DESTINATION), one
@@ -32,8 +32,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   rows only. **D-2026-07-05-2: no version compatibility, EVER —
   same-build peers only, mismatched builds refuse at session open
   (strict handshake specified in otp-1); REV4's negotiate-down
-  clause is void, annotated.** **No code until the owner flips
-  Active.**
+  clause is void, annotated.** Current slice: **otp-1 wire+session
+  contract** (doc + proto, no behavior) through the codex loop.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1 `[x]`
   sf-2 `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`, codex 1/1,
   suite 1479 → 1483/0, DEVLOG 2026-07-05 06:45); **sf-3a+ blocked**
@@ -63,12 +63,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Queue (ordered)
 
-1. **`docs/plan/ONE_TRANSFER_PATH.md` — the only work item until it
-   ships (owner directive: "do not do ANYTHING else")**: Draft
-   written 2026-07-05, codex plan review + adjudication, then STOP
-   for the owner's Active flip. After the flip: slices otp-1..13
-   through the codex loop, starting with otp-1 (wire+session
-   contract, doc+proto, no behavior).
+1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
+   the only work item until it ships**: slices otp-1..13 through the
+   codex loop per slice (owner re-affirmed). Current: otp-1
+   (wire+session contract, doc+proto, no behavior). Then otp-2
+   symmetric baseline (needs the 10 GbE rig + zoey-class endpoints).
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
    REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
@@ -113,8 +112,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Authoritative docs right now
 
-- **`docs/plan/ONE_TRANSFER_PATH.md` (Draft — governs all work; no
-  code until Active, D-2026-07-05-1)**.
+- **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
+  D-2026-07-05-4)**.
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
   sf-2, D-2026-07-05-1) and
   **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** —
@@ -135,9 +134,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **ONE_TRANSFER_PATH Draft → Active flip** (owner; after the codex
-  plan review is adjudicated). Until then no implementation anywhere
-  — the directive blocks all other work too.
 - **Three 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
   holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE),
   REV4 → Shipped. (The zero-copy revisit verdict and the a/b/c

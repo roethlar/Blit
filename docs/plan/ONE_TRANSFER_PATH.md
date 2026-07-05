@@ -1,14 +1,15 @@
 # One transfer path — direction-invariant by construction
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-07-05
 **Supersedes**: post-REV4 residue item "pull 1s-start restructuring"
 (absorbed here); pauses `docs/plan/SMALL_FILE_CEILING.md` after sf-2
 (D-2026-07-05-1). REV4's mixed-version-peers constraint is superseded
 outright by **D-2026-07-05-2 (no version compatibility, ever — same
 build only)** — annotated in REV4 §Constraints
-**Decision ref**: D-2026-07-05-1 (directive + pause); Active flip gets
-its own entry
+**Decision ref**: D-2026-07-05-1 (directive + pause);
+**D-2026-07-05-4 (Draft → Active, owner "flip the plan and go",
+2026-07-05)**
 
 ## Directive (owner, 2026-07-05, verbatim)
 
