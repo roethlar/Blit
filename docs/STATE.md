@@ -1,8 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-05 (**owner principle recorded + plan drafted**:
-perf goals are ceiling-driven, never competitor-relative —
-`docs/plan/SMALL_FILE_CEILING.md` Draft awaits the Active flip. Same
+Last updated: 2026-07-04 (**SMALL_FILE_CEILING flipped Active**,
+D-2026-07-04-4 — sf-1 is the active slice. Prior session recorded the
+owner principle: perf goals are ceiling-driven, never
+competitor-relative — and drafted the plan. Same
 session: 10 GbE benchmark ran end-to-end (wire-ceiling push/pull,
 ue-1 band holds), blit/rsync/rclone comparison measured (21/24 wire
 cells won; small-file/mixed push are the ceiling gaps the plan
@@ -16,18 +17,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **Ceiling principle + SMALL_FILE_CEILING draft (2026-07-05)** —
-  owner correction now governing all perf work: FAST/SIMPLE/RELIABLE
+- **SMALL_FILE_CEILING Active (D-2026-07-04-4) — sf-1 in progress** —
+  owner correction governing all perf work: FAST/SIMPLE/RELIABLE
   gate every change; goals are **ceiling-driven, never
   competitor-relative** (a "beat X by N%" bar embeds a stopping
   condition; a ≥25% margin answer was explicitly retracted — do not
-  re-litigate). Plan `docs/plan/SMALL_FILE_CEILING.md` (Draft,
+  re-litigate). Plan `docs/plan/SMALL_FILE_CEILING.md` (**Active**,
   `78eabfd`+`811a3f2`, codex 5/5 accepted+fixed, records `219cecf`):
   small-file/mixed cells to a NAMED hardware limiter, tools as
   tripwires only; evidence durable at `docs/bench/10gbe-2026-07-05/`
   (DIAGNOSIS.md: one-stream-for-10k-files dial gap, 215 µs/file
-  daemon cost vs 34 ms wire, CPU gate data). **No code until the
-  owner flips Active.** skippy torn down (daemons stopped, payloads
+  daemon cost vs 34 ms wire, CPU gate data). Next slice: **sf-1
+  tripwire harness** (no production code); sf-6 keeps its own wire
+  owner gate. skippy torn down (daemons stopped, payloads
   removed; binaries staged at `blit-bin/` for sf-4).
 - **Tool comparison measured (2026-07-05)** — blit vs rsyncd /
   rsync-ssh / rclone (sftp, webdav, no-hash fairness cells): blit
@@ -87,9 +89,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    is now `skippy:/mnt/generic-pool/video/blit-bin/` (binaries +
    bench.toml staged; /tmp and /home on skippy are noexec). After
    the declarations: audit Round 1, TUI rework, H10b planner.
-3. **`docs/plan/SMALL_FILE_CEILING.md` (Draft — awaiting owner
-   Active flip)**: close the measured small-file/mixed gaps to the
-   hardware ceiling. Owner principle recorded in the doc
+3. **`docs/plan/SMALL_FILE_CEILING.md` (Active, D-2026-07-04-4 —
+   sf-1 is the current slice; see Now)**: close the measured
+   small-file/mixed gaps to the hardware ceiling. Owner principle
+   recorded in the doc
    (2026-07-05): goals are ceiling-driven, never competitor-relative
    — tools like rsync are tripwires, not targets. Slices sf-1..7;
    sf-6 (wire-visible tar-shard lane) carries its own owner gate.
@@ -105,7 +108,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Authoritative docs right now
 
-- **Active plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** —
+- **Active plans: `docs/plan/SMALL_FILE_CEILING.md`**
+  (D-2026-07-04-4; sf-1 current) and
+  **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** —
   code-complete; measurement gates remain (see Active context).
 - Superseded by REV4 (history only): `UNIFIED_TRANSFER_ENGINE.md` (v1),
   `…_REV2.md`, `…_REV3.md`.
@@ -121,8 +126,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **SMALL_FILE_CEILING Draft → Active flip** (+ DECISIONS.md entry on
-  approval) — sf-1 starts on the flip, nothing before.
 - **Four 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
   holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE —
   sf-5 would give it a real trigger), zero-copy revisit verdict,
@@ -193,8 +196,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   zero-copy/REV4→Shipped); coding queue resumes at **w7-1** after
   that (or immediately if the owner defers the declarations).
   Nothing pushed — push stays owner-gated.
-- **2026-07-04 (20th)** @ `c62d15b` — **w9-3 landed and graded**
-  (harness consolidation + port-race fix; codex 1 Medium accepted →
-  `8641bc6`; details: Now bullet + DEVLOG 2026-07-04 23:35). Next
-  action was the review queue (w7-1) — superseded by the 21st/22nd
-  entries' benchmark + plan work. Nothing pushed.

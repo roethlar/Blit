@@ -1,9 +1,9 @@
 # Small-file transfer to the hardware ceiling
 
-**Status**: Draft
+**Status**: Active
 **Created**: 2026-07-05
 **Supersedes**: nothing
-**Decision ref**: (pending owner approval)
+**Decision ref**: D-2026-07-04-4 (Draft → Active, owner "go")
 
 ## Principle (owner, 2026-07-05)
 
