@@ -42,24 +42,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   competitor-relative (D-2026-07-04-4; a ≥25% margin answer was
   retracted — do not re-litigate). Evidence at
   `docs/bench/10gbe-2026-07-05/`; binaries staged at `blit-bin/`.
-- **Tool comparison measured (2026-07-05)** — blit vs rsyncd /
-  rsync-ssh / rclone (sftp, webdav, no-hash fairness cells): blit
-  fastest on all large/pull/local cells at the wire ceiling; rsyncd
-  faster on small push (1.5 s vs 2.4–3.3 s), small pull (0.37 vs
-  0.45 s), mixed push — exactly the plan's target cells. rclone has
-  no LAN config that competes (webdav smalls catastrophic: 315 s).
-  CSVs tracked in `docs/bench/10gbe-2026-07-05/`.
-- **10 GbE benchmark session DONE (2026-07-04/05)** — the REV4
-  sign-off data is in; owner declarations pending (see Blocked).
-  Headlines (digest: DEVLOG 2026-07-05 00:34; durable evidence:
-  `docs/bench/10gbe-2026-07-05/`): push/pull 1 GiB ≈ 9.5 Gbit/s
-  against a 9.88 iperf3 ceiling @ MTU 9000, first payload 14.5 ms;
-  **ue-1 loopback parity band holds** (worst spread 1.8×); reverse
-  direction validated; no organic resize anywhere (one stream
-  saturates 10 GbE) — ue-2 is an interpretation call; zero-copy
-  0 bytes at wire saturation. Bench script repaired through the
-  codex loop en route (`b9befb8`+`92d6326`, 2 High accepted;
-  methodology + disk-path follow-ups recorded in DEVLOG).
+- **Tool comparison measured (2026-07-05)** — blit fastest on all
+  large/pull/local cells at the wire ceiling; rsyncd faster on small/
+  mixed push (the paused plan's target cells). CSVs + full detail:
+  `docs/bench/10gbe-2026-07-05/`, DEVLOG 2026-07-05 00:51.
+- **10 GbE benchmark session DONE (2026-07-04/05)** — REV4 sign-off
+  data in; owner declarations pending (see Blocked). Push/pull 1 GiB
+  ≈ 9.5 of 9.88 Gbit/s; **ue-1 band holds** (1.8×); no organic
+  resize (one stream saturates 10 GbE) — ue-2 interpretation call.
+  Digest: DEVLOG 2026-07-05 00:34; evidence
+  `docs/bench/10gbe-2026-07-05/`.
 - **Earlier 2026-07-04: w9-3 test-harness consolidation (port-TOCTOU
   flake root-caused; tests 1478 → 1479), design-3, w4-4, w6-2 (filed
   w6-2a/b/c), w6-1 (+design-1), w3-1, w2-2, w4-5, W1 family, w4-1,
@@ -99,7 +91,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    runtime-selected write strategy in the unified receive sink
    (design input: eval doc §If-FAST-evidence; dead module still
    deletes in w8-1). UNAS is the measurement rig; symmetric-endpoint
-   methodology applies.
+   methodology applies. **Rig `zoey` (verified 2026-07-05)**: UNAS 8
+   Pro, 4×Cortex-A57 aarch64, Debian 11 userland (glibc 2.31), kernel
+   5.10, 15 GiB; test dir `root@zoey:/volume/a595ddbf-…/.srv/
+   .unifi-drive/michael/.data/blit-temp/`. **Build recipe** (static
+   musl — sidesteps the old glibc): rustup target
+   `aarch64-unknown-linux-musl` + `aarch64-linux-gnu-gcc` as
+   LINKER/CC/AR for that target, `RUSTFLAGS="-C
+   target-feature=+crt-static -C link-self-contained=yes"`, `cargo
+   build --release --target aarch64-unknown-linux-musl -p blit-daemon
+   -p blit-cli`. Binaries verified executing on zoey 2026-07-05.
 6. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
    (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
    epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
