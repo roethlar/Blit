@@ -4,7 +4,9 @@
 **Created**: 2026-07-05
 **Supersedes**: post-REV4 residue item "pull 1s-start restructuring"
 (absorbed here); pauses `docs/plan/SMALL_FILE_CEILING.md` after sf-2
-(D-2026-07-05-1)
+(D-2026-07-05-1); at cutover (otp-10) supersedes REV4's
+mixed-version-peers constraint ("mixed old/new peers must negotiate
+down to today's behavior") — annotated in REV4 §Constraints
 **Decision ref**: D-2026-07-05-1 (directive + pause); Active flip gets
 its own entry
 
@@ -46,7 +48,11 @@ no second code path to differ.
 - Preserving wire compatibility with pre-plan builds. The `Push` and
   `PullSync` RPCs are deleted at cutover; both ends upgrade in
   lockstep (repo precedent: the `PullSyncHeader` removal; the owner
-  operates every deployed peer).
+  operates every deployed peer). This **explicitly supersedes** REV4's
+  "mixed old/new peers must negotiate down to today's behavior"
+  constraint at the cutover slice (codex plan review F1; REV4
+  §Constraints annotated) — until cutover lands, old paths keep
+  working unchanged.
 - Making different hardware perform identically. If src and dst sit
   on different disks, the two *data directions* still differ by
   physics; the invariant is that the same data direction between the
@@ -73,6 +79,13 @@ no second code path to differ.
 - The sf-2 shape-correction behavior (stream count corrects as the
   need list accumulates) becomes the one and only stream policy —
   both directions inherit it by construction; its pins carry over.
+- **The bounded-unilateral dial contract carries unchanged**
+  (D-2026-06-20-1/-2, REV4 Design §4): the byte SENDER owns the live
+  dial, bounded by the byte RECEIVER's advertised capacity profile
+  (`ue-r2-1b` fields; 0/absent = unknown = conservative, never
+  unlimited). The session's role model must express this — profile
+  travels DESTINATION→SOURCE at setup regardless of who initiated —
+  and otp-1's contract names it explicitly.
 - Wire contract discipline (REV4 rule): the unified session's proto —
   messages, field numbers, capability negotiation, transport
   selection — is a reviewed doc+proto slice **before** any behavior
@@ -92,12 +105,19 @@ no second code path to differ.
       (large / 10k-small / mixed): wall time initiating from end A vs
       end B, and via push-verb vs pull-verb, differs only within
       run-to-run noise (±10%). Matrix committed as evidence.
+- [ ] **Converge up, measured (codex F4)**: before cutover, the
+      corrected symmetric-fs harness records a per-cell baseline of
+      the OLD paths, both directions; after cutover, every unified
+      cell must be ≤ the better of that cell's two old directions
+      + run noise (±10%). A symmetric-but-slower result fails.
 - [ ] **Deletion proof**: `remote/pull.rs` (driver), `remote/push/`
       (driver), daemon `push/control.rs` choreography, daemon
       `pull_sync.rs` choreography, the delegated-pull driver, the
       separate local orchestration path, and the `Push`/`PullSync`
       RPCs no longer exist in the tree; one `TransferSession` and one
-      `Transfer` RPC remain. Recorded file-by-file in the final
+      `Transfer` RPC remain. The `DelegatedPull` RPC may survive only
+      as trigger + progress relay — the proof must show it carries no
+      payload bytes (codex F3). Recorded file-by-file in the final
       slice's finding doc.
 - [ ] Capability parity: mirror (both mirror-kinds + scan-complete
       guard), filters, block-resume, gRPC fallback carrier, delegated
@@ -158,7 +178,23 @@ a separate transfer path. Resize keeps its controller-at-sender rule.
 **Delegated transfer**: a daemon receiving a delegated request simply
 becomes an initiator of the same session against the other daemon
 (destination role on its module fs). The bespoke delegated-pull
-driver is deleted; the delegation *gate* (authorization) stays.
+driver is deleted; the delegation *gate* (authorization) stays. The
+`DelegatedPull` RPC itself is client↔daemon trigger + progress relay
+(`DelegatedPullProgress` stream) — it never carries payload bytes;
+its handler shrinks to "authorize, spawn the session, relay the
+session's progress events." It stays wire-compatible or is folded at
+cutover — either way the deletion proof asserts no bytes flow
+through it (codex F3).
+
+**Resume ordering (RELIABLE exception, codex F5)**: resumed files use
+a strictly-ordered block-hash exchange — the DESTINATION's block map
+for a file must complete before the SOURCE sends any block of that
+file, and stale/mismatched partials fall back to full-file transfer.
+This is an explicit exception to the immediate-start rule, exactly as
+today's resume path is an explicit single-stream RELIABLE exception
+(ue-r2-1g finding note). otp-1 pins the phase ordering in the wire
+contract; otp-7 pins the stale-partial and mid-resume-failure cases
+in tests.
 
 **Local transfers**: the same session driver over an in-process
 transport (both roles in one process, no wire). The engine underneath
@@ -190,37 +226,48 @@ otp-9 deletes them.
 
 1. **otp-1 wire+session contract (doc + proto, no behavior)**: the
    `Transfer` RPC and message set — roles, phases, field numbers,
-   capability negotiation, transport selection, resume/mirror
-   phases, error/cancel semantics. Full REV4 wire-contract
+   capability negotiation (incl. the receiver capacity profile and
+   bounded-unilateral dial contract, D-2026-06-20-1/-2), transport
+   selection, resume phase ordering (the RELIABLE exception above),
+   mirror phase, error/cancel semantics. Full REV4 wire-contract
    deliverable set; codex-reviewed before any code consumes it.
-2. **otp-2 TransferSession core (blit-core)**: role-parameterized
+2. **otp-2 symmetric baseline (harness + rig, no production code)**:
+   correct the sf-1 harness matrix — same-fs disk-to-disk verdict
+   cells, cold caches, tmpfs rows re-labeled wire-reference only —
+   and record the OLD paths' per-cell, per-direction baseline on the
+   rig. This is the converge-up reference the acceptance criteria
+   compare against (codex F4).
+3. **otp-3 TransferSession core (blit-core)**: role-parameterized
    state machine over the existing engine with an in-process
    transport; unit/e2e tests run BOTH role assignments over the same
    fixtures — the invariance property enters the test suite here.
-3. **otp-3 daemon serves `Transfer`, client initiates as SOURCE**
+4. **otp-4 daemon serves `Transfer`, client initiates as SOURCE**
    (remote push-equivalent rides the session); A/B parity pins vs
    old push (byte-identical trees, summary parity, sf-2 pin ported).
-4. **otp-4 roles swapped: client initiates as DESTINATION** (pull-
+5. **otp-5 roles swapped: client initiates as DESTINATION** (pull-
    equivalent) — the same code with roles flipped; the parity suite
    reruns with no per-direction test code.
-5. **otp-5 mirror + filters** on the session (one delete rule).
-6. **otp-6 resume** block phase.
-7. **otp-7 fallback byte-carrier** (control-stream frames) as the
+6. **otp-6 mirror + filters** on the session (one delete rule).
+7. **otp-7 resume** block phase (ordering + stale-partial pins per
+   the Design's RELIABLE exception).
+8. **otp-8 fallback byte-carrier** (control-stream frames) as the
    session's alternate transport.
-8. **otp-8 delegated transfer** = daemon-initiated session; bespoke
-   delegated-pull driver retired behind the existing gate.
-9. **otp-9 cutover + deletion**: CLI/app/TUI route every remote
-   operation through the session; `Push`/`PullSync` and all four
-   drivers deleted from the tree and the proto; ported-test
-   accounting proves count never dropped. Deletion proof recorded.
-10. **otp-10 local transfers** ride the in-process transport; the
+9. **otp-9 delegated transfer** = daemon-initiated session; bespoke
+   delegated-pull driver retired behind the existing gate;
+   `DelegatedPull` RPC reduced to trigger + progress relay.
+10. **otp-10 cutover + deletion**: CLI/app/TUI route every remote
+    operation through the session; `Push`/`PullSync` and all four
+    drivers deleted from the tree and the proto (REV4 mixed-version
+    constraint superseded here, per the decision); ported-test
+    accounting proves count never dropped. Deletion proof recorded,
+    incl. the DelegatedPull no-payload-bytes assertion.
+11. **otp-11 local transfers** ride the in-process transport; the
     separate local orchestration is deleted; local perf pins hold.
-11. **otp-11 symmetric-rig acceptance run**: sf-1 harness matrix
-    corrected (same-fs disk-to-disk verdict cells, cold caches,
-    tmpfs as labeled wire-reference only) + the initiator/verb
-    invariance A/B matrix; committed as this plan's acceptance
-    evidence.
-12. **otp-12 verdict**: acceptance checklist walked with the owner;
+12. **otp-12 symmetric-rig acceptance run**: rerun the otp-2 matrix
+    on the unified path — initiator/verb invariance A/B within noise
+    AND every cell ≤ the better old direction + noise; committed as
+    this plan's acceptance evidence.
+13. **otp-13 verdict**: acceptance checklist walked with the owner;
     plan → Shipped; SMALL_FILE_CEILING resumes (or is re-derived)
     against the unified baseline — owner call at that point.
 

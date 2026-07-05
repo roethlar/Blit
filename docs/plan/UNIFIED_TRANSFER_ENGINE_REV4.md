@@ -85,7 +85,10 @@ REV3:
   byte-identical transfer tests cannot regress.
 - Wire changes are allowed (proto unfrozen, D-2026-06-11-1), but mixed
   old/new peers must negotiate down to today's behavior. New fields are
-  advisory until both peers advertise support.
+  advisory until both peers advertise support. **(Superseded at
+  ONE_TRANSFER_PATH's cutover slice by D-2026-07-05-1: the unified
+  `Transfer` session replaces `Push`/`PullSync` without back-compat,
+  lockstep upgrade. This constraint governs until that slice lands.)**
 - The 1370-test baseline must not drop.
 - Windows parity remains required unless a test is genuinely platform
   specific.

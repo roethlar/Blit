@@ -25,7 +25,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   destination diffs, sf-2 shape-corrected dial as the only stream
   policy); gRPC fallback becomes a byte-carrier option; delegated =
   daemon-initiated session; local rides an in-process transport.
-  Slices otp-1..12; converge-up constraint (unified path must match
+  Slices otp-1..13; converge-up constraint (unified path must match
   the better direction per cell ±10%); benchmark verdict cells must
   be symmetric-fs disk-to-disk (owner: "tmp on one side, spinning
   rust on the other is not a valid test"), tmpfs = wire-reference
@@ -73,14 +73,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 1. **`docs/plan/ONE_TRANSFER_PATH.md` — the only work item until it
    ships (owner directive: "do not do ANYTHING else")**: Draft
    written 2026-07-05, codex plan review + adjudication, then STOP
-   for the owner's Active flip. After the flip: slices otp-1..12
+   for the owner's Active flip. After the flip: slices otp-1..13
    through the codex loop, starting with otp-1 (wire+session
    contract, doc+proto, no behavior).
 2. **10 GbE owner declarations (unchanged, still pending)**: ue-1,
    ue-2, zero-copy a/b/c (D-2026-06-12-1), REV4 → Shipped. Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
    disk-path variants; >ARC-size push) — note the disk-path items
-   are largely absorbed by otp-11's symmetric-rig matrix. Env: bench
+   are largely absorbed by otp-2/otp-12's symmetric-rig matrices. Env: bench
    binaries staged at `skippy:/mnt/generic-pool/video/blit-bin/`
    (/tmp and /home on skippy are noexec).
 3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
@@ -88,7 +88,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
    open row; filed w6-2a/b/c + relay-1) — same directive; note w7-1
    (mirror-executor consolidation) likely lands for free inside
-   otp-5's one-delete-rule slice; re-check before picking it up.
+   otp-6's one-delete-rule slice; re-check before picking it up.
 5. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
    (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
    epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
