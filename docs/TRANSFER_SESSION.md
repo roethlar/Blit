@@ -64,7 +64,10 @@ INITIATOR                                RESPONDER
   |     responder validates module/path/read-only/gate here;
   |     refusal is a SessionError, never a silent close
   |                                        |
-  |==== manifest + need + payload phases run CONCURRENTLY =========|
+  |==== from here the lanes are ROLES, not initiator/responder ====|
+  |  (whichever end holds SOURCE sends source-lane frames,          |
+  |   regardless of which end opened the RPC)                       |
+  |                                                                 |
   |  SOURCE streams:  ManifestEntry* ... ManifestComplete          |
   |  DEST streams:    NeedBatch* ... NeedComplete                  |
   |  SOURCE streams:  payload (data plane sockets, or in-stream    |
@@ -80,9 +83,10 @@ INITIATOR                                RESPONDER
   |  source manifest (filter-scoped, scan-complete-guarded) and     |
   |  executes them itself. No delete list crosses the wire.         |
   |                                                                 |
-  |-- SourceDone (all payloads flushed) -->|   (phase: CLOSING)
-  |<---------------- TransferSummary ------|   (DEST is the scorer)
-  |     stream close                        |
+  |  CLOSING (role-directed, both initiator layouts):               |
+  |    SOURCE -> DEST:  SourceDone (all requested payloads flushed) |
+  |    DEST -> SOURCE:  TransferSummary (DEST is the scorer)        |
+  |  then the INITIATOR closes the RPC stream.                      |
 ```
 
 - Phase violations (a frame arriving in a phase where its role may
@@ -90,6 +94,16 @@ INITIATOR                                RESPONDER
   fail-fast, no tolerant parsing.
 - `NeedComplete` is DESTINATION's promise that no further need
   batches follow (SOURCE may finish after flushing what was asked).
+  It may be sent only after BOTH: the source's `ManifestComplete`
+  has been received AND the destination has finished diffing every
+  received manifest entry. Mirror deletions additionally require the
+  scan-complete guard, as above.
+- **Flow control is the transport's, deliberately:** manifest, need,
+  and in-stream payload frames ride gRPC/HTTP-2 stream flow control;
+  each end holds only bounded internal queues (the engine's existing
+  batching — 128-entry manifest check chunks, need-list batcher).
+  Nothing in the contract requires unbounded buffering of the peer's
+  stream, and implementations must not introduce it.
 - `TransferSummary` always travels DESTINATION → SOURCE (the end
   that wrote bytes and executed deletes is the end that can attest
   to them), then the initiator surfaces it to the operator.
@@ -145,13 +159,43 @@ push/pull-specific message.
   epoch0_sub_token}` inside `SessionAccept`; the INITIATOR always
   dials (NAT/firewall reality — connection topology, not
   choreography). Byte direction on the sockets is set by role:
-  SOURCE writes, DESTINATION reads. Resize ADD epochs arm one
-  accept per `sub_token`, exactly as ue-r2-2 built.
+  SOURCE writes, DESTINATION reads.
+  **`initial_streams` is an ACCEPT ceiling, not a dial order**
+  (D-2026-06-20-1/-2 preserved): it is the number of epoch-0 accept
+  slots the responder arms, computed as min(engine dial floor,
+  DESTINATION's capacity ceiling). SOURCE — wherever it sits — owns
+  the dial and may use fewer epoch-0 sockets than armed; unclaimed
+  slots expire harmlessly. Growth beyond epoch 0 happens only via
+  SOURCE-initiated resize (sf-2 shape correction / tuner), one armed
+  accept per ADD epoch, exactly as ue-r2-2 built.
+  **Socket auth, exact:** every epoch-0 socket opens with
+  `session_token` (16 bytes) immediately followed by
+  `epoch0_sub_token` (16 bytes); every resize-ADD socket opens with
+  `session_token` followed by that epoch's `sub_token` from the
+  `DataPlaneResize` frame. Tokens are single-session; each armed
+  accept slot admits exactly one socket (no replay within a
+  session); armed slots that go unclaimed expire, as today's resize
+  wiring already does. A socket presenting anything else is closed
+  without response.
 - **In-stream carrier:** requested via `SessionOpen.in_stream_bytes`
   (operator `--force-grpc` diagnostics) or granted by the responder
   when it cannot bind a data plane (`SessionAccept` with no grant).
   Payload frames 9-15 ride the RPC itself. Same choreography, same
   planner decisions, different byte carrier.
+  **Record grammar (fail-fast):** payload records on the
+  source-lane are STRICTLY SERIALIZED — after `file_begin(header)`,
+  only `file_data` frames for that file may follow on the lane until
+  the record completes; completion is inferred at exactly
+  `header.size` cumulative bytes (a `file_begin`/`tar_shard_header`/
+  `block` arriving early, or bytes overrunning `size`, is
+  `PROTOCOL_VIOLATION`). Tar-shard records run
+  `tar_shard_header … tar_shard_chunk* … tar_shard_complete`; block
+  records complete with `block_complete`. Payload records may begin
+  only AFTER the source's `ManifestComplete` — this per-transport
+  ordering rule applies identically to both roles and mirrors the
+  design-4-proven fallback ordering, so manifest frames and payload
+  records never interleave. DESTINATION-lane frames (need batches,
+  acks, summary) are unaffected — they travel the other direction.
 - **Local (in-process):** the identical session state machine runs
   with both roles in one process over an in-process frame channel —
   no RPC, no sockets (otp-11). Strategy selection (tar-shard vs
@@ -160,7 +204,8 @@ push/pull-specific message.
 
 ## Errors, cancel, stall
 
-- `SessionError{code, message, detail}` codes:
+- `SessionError{code, message}` codes (plus both build ids on
+  BUILD_MISMATCH):
   `BUILD_MISMATCH`, `MODULE_UNKNOWN`, `READ_ONLY`,
   `DELEGATION_REFUSED`, `SCAN_INCOMPLETE`, `PROTOCOL_VIOLATION`,
   `DATA_PLANE_FAILED`, `CANCELLED`, `INTERNAL`. An end that refuses
