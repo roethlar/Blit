@@ -173,7 +173,9 @@ fi
 # 4. LOCAL → REMOTE PUSH (TCP data plane)
 # ============================================================
 if [[ -n "$REMOTE_HOST" ]]; then
-    REMOTE="$REMOTE_HOST:$REMOTE_PORT:/$REMOTE_MODULE"
+    # Trailing slash is load-bearing: module endpoints parse as
+    # server:/module/ (endpoint.rs rejects the bare form).
+    REMOTE="$REMOTE_HOST:$REMOTE_PORT:/$REMOTE_MODULE/"
 
     log ""
     log "=== LOCAL → REMOTE PUSH (TCP) ==="
@@ -190,7 +192,7 @@ if [[ -n "$REMOTE_HOST" ]]; then
         eval "src=\$SRC_$(echo $workload | tr a-z A-Z)"
 
         log "--- $workload (gRPC push) ---"
-        run_timed "push_grpc_${workload}" "$BLIT" copy "$src" "$REMOTE" --yes -v --force-grpc-data
+        run_timed "push_grpc_${workload}" "$BLIT" copy "$src" "$REMOTE" --yes -v --force-grpc
     done
 
     # ============================================================
@@ -213,7 +215,7 @@ if [[ -n "$REMOTE_HOST" ]]; then
 
         log "--- $workload (gRPC pull) ---"
         cleanup_dest "$dest"
-        run_timed "pull_grpc_${workload}" "$BLIT" copy "$REMOTE" "$dest" --yes -v --force-grpc-data
+        run_timed "pull_grpc_${workload}" "$BLIT" copy "$REMOTE" "$dest" --yes -v --force-grpc
     done
 fi
 
