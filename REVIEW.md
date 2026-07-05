@@ -44,7 +44,7 @@ sf-3b… count is set by sf-3a's analysis, rows added as filed).
 
 | ID | Title | Status | Commit(s) |
 |----|-------|--------|-----------|
-| sf-1 | Tripwire + stream-scaling harness (`scripts/bench_tripwires.sh`) — baseline re-runnable in one command | `[~]` | |
+| sf-1 | Tripwire + stream-scaling harness (`scripts/bench_tripwires.sh`) — baseline re-runnable in one command. Codex NEEDS FIXES (6/6 accepted: teardown ownership, coverage-enforced verdict, external-daemon mode, ±10% flag, record accuracy) | `[x]` | `7202c1a` + review fix `80633df` |
 
 ## Design-review queue (ratified D-2026-06-11-2, in execution order)
 

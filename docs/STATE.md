@@ -1,7 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
 Last updated: 2026-07-04 (**SMALL_FILE_CEILING flipped Active**,
-D-2026-07-04-4 — sf-1 is the active slice. Prior session recorded the
+D-2026-07-04-4, and **sf-1 landed + graded** — the tripwire/scaling
+harness; sf-2 is next. Prior session recorded the
 owner principle: perf goals are ceiling-driven, never
 competitor-relative — and drafted the plan. Same
 session: 10 GbE benchmark ran end-to-end (wire-ceiling push/pull,
@@ -17,20 +18,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **SMALL_FILE_CEILING Active (D-2026-07-04-4) — sf-1 in progress** —
-  owner correction governing all perf work: FAST/SIMPLE/RELIABLE
-  gate every change; goals are **ceiling-driven, never
-  competitor-relative** (a "beat X by N%" bar embeds a stopping
+- **SMALL_FILE_CEILING Active (D-2026-07-04-4) — sf-1 `[x]`, sf-2
+  next** — owner correction governing all perf work:
+  FAST/SIMPLE/RELIABLE gate every change; goals are **ceiling-driven,
+  never competitor-relative** (a "beat X by N%" bar embeds a stopping
   condition; a ≥25% margin answer was explicitly retracted — do not
-  re-litigate). Plan `docs/plan/SMALL_FILE_CEILING.md` (**Active**,
-  `78eabfd`+`811a3f2`, codex 5/5 accepted+fixed, records `219cecf`):
+  re-litigate). Plan `docs/plan/SMALL_FILE_CEILING.md` (**Active**):
   small-file/mixed cells to a NAMED hardware limiter, tools as
-  tripwires only; evidence durable at `docs/bench/10gbe-2026-07-05/`
-  (DIAGNOSIS.md: one-stream-for-10k-files dial gap, 215 µs/file
-  daemon cost vs 34 ms wire, CPU gate data). Next slice: **sf-1
-  tripwire harness** (no production code); sf-6 keeps its own wire
-  owner gate. skippy torn down (daemons stopped, payloads
-  removed; binaries staged at `blit-bin/` for sf-4).
+  tripwires only; evidence durable at `docs/bench/10gbe-2026-07-05/`.
+  **sf-1 landed + graded** (`7202c1a`+`80633df`, codex 6/6
+  accepted+fixed; DEVLOG 2026-07-05 03:03): `scripts/bench_tripwires.sh`
+  re-runs the baseline against any daemon host in one command + the
+  stream-scaling probe (measured streams, not table streams). Probe
+  already shows the sf-2 gap on loopback: 1000-file push rides 1
+  stream where `dial.rs:429` says 2 — see the finding doc's Known
+  gaps for the sf-2 pointer (`control.rs:798` + its input manifest).
+  sf-6 keeps its own wire owner gate. skippy torn down; binaries
+  staged at `blit-bin/` for sf-4.
 - **Tool comparison measured (2026-07-05)** — blit vs rsyncd /
   rsync-ssh / rclone (sftp, webdav, no-hash fairness cells): blit
   fastest on all large/pull/local cells at the wire ceiling; rsyncd
@@ -90,9 +94,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    bench.toml staged; /tmp and /home on skippy are noexec). After
    the declarations: audit Round 1, TUI rework, H10b planner.
 3. **`docs/plan/SMALL_FILE_CEILING.md` (Active, D-2026-07-04-4 —
-   sf-1 is the current slice; see Now)**: close the measured
-   small-file/mixed gaps to the hardware ceiling. Owner principle
-   recorded in the doc
+   sf-1 `[x]`, sf-2 dial file-count weighting is the current slice;
+   see Now)**: close the measured small-file/mixed gaps to the
+   hardware ceiling. Owner principle recorded in the doc
    (2026-07-05): goals are ceiling-driven, never competitor-relative
    — tools like rsync are tripwires, not targets. Slices sf-1..7;
    sf-6 (wire-visible tar-shard lane) carries its own owner gate.
@@ -174,6 +178,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-04 (23rd)** @ `80633df`+records — **Active flip + sf-1
+  landed and graded** (owner "go" → D-2026-07-04-4 at `6ddbc68`;
+  tripwire/scaling harness `7202c1a`, codex 6/6 accepted → `80633df`;
+  verified by execution in all three modes; suite 1479/0 held).
+  In-flight: none. **Exact first action next session**: sf-2 (dial
+  file-count weighting) through the codex loop — start from the
+  finding doc's Known-gaps pointer (`control.rs:798`, measured
+  1-stream-for-1000-files loopback evidence). Owner declarations
+  (four 10 GbE gates, zero-copy a/b/c, push go) remain in Blocked.
 - **2026-07-05 (22nd)** @ `219cecf`+handoff — **ceiling principle
   recorded + SMALL_FILE_CEILING drafted through the plan procedure**
   (owner interview → correction → reframe; codex plan review 5/5
@@ -184,15 +197,4 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   the owner declarations in Blocked — above all the
   SMALL_FILE_CEILING Active flip (then sf-1); coding queue's w7-1
   remains the fallback if the owner defers everything.
-- **2026-07-05 (21st)** @ `92d6326`+records — **10 GbE benchmark
-  session ran end-to-end** (owner-called and owner-attended: MTU
-  9000 set on the client mid-session, ufw confirmed, bench area
-  designated). All REV4 measurement evidence banked — wire-ceiling
-  push/pull, ue-1 band holds, both directions, resize/zero-copy
-  datapoints (Now + DEVLOG 2026-07-05). Bench script repaired
-  through the codex loop en route (`b9befb8`+`92d6326`, 2 High
-  accepted+fixed). In-flight: none. **Exact first action next
-  session**: the four owner declarations in Blocked (ue-1/ue-2/
-  zero-copy/REV4→Shipped); coding queue resumes at **w7-1** after
-  that (or immediately if the owner defers the declarations).
-  Nothing pushed — push stays owner-gated.
+- (older entries pruned — see DEVLOG 2026-07-05 00:34 and earlier)
