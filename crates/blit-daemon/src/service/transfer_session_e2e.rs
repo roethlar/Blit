@@ -17,6 +17,12 @@
 //!   is NEWER than the source is SKIPPED (the data-safe, pull-style
 //!   converged behavior — see the finding doc's compare decision).
 //!
+//! otp-5a adds the pull-equivalent (roles flipped): the client initiates
+//! as DESTINATION and the daemon streams its module tree as the SOURCE
+//! Responder over the in-stream carrier. Those tests pin a byte-identical
+//! landing + A/B parity vs old `pull_sync`, proving the one served RPC
+//! handles both directions by the declared role, not a second code path.
+//!
 //! Harness mirrors `push/shape_resize_e2e.rs`: a real in-process
 //! `BlitService` on loopback + a real client. Only in-crate tests can
 //! build `ModuleConfig`/`BlitService::with_modules`, so this lives in
@@ -29,9 +35,12 @@ use std::sync::Arc;
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{session_error, MirrorMode};
-use blit_core::remote::transfer::session_client::{run_push_session, PushSessionOptions};
+use blit_core::remote::pull::PullSyncOptions;
+use blit_core::remote::transfer::session_client::{
+    run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
+};
 use blit_core::remote::transfer::source::FsTransferSource;
-use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePushClient};
+use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient, RemotePushClient};
 use blit_core::transfer_session::SessionFault;
 use tokio::sync::oneshot;
 
@@ -553,5 +562,110 @@ async fn same_size_newer_destination_is_skipped_not_clobbered() {
         b"new-source-here--",
         "a stale destination file must be updated"
     );
+    daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// otp-5a: pull-equivalent (client initiates as DESTINATION, daemon is SOURCE)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_lands_bytes_and_scores_them() {
+    // Roles flipped: the daemon's MODULE tree is the SOURCE; the client
+    // initiates as DESTINATION and the daemon streams its module tree
+    // (otp-5a). The SOURCE responder grants no data plane, so the carrier
+    // is the in-stream fallback. `dest_root` here is the module (source)
+    // root — the harness field name is push-oriented.
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+
+    let dest = tempfile::tempdir().unwrap();
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("session pull succeeds");
+
+    assert_eq!(outcome.summary.files_transferred, small_tree().len() as u64);
+    assert_eq!(
+        outcome.summary.bytes_transferred,
+        small_tree()
+            .iter()
+            .map(|(_, c, _)| c.len() as u64)
+            .sum::<u64>()
+    );
+    assert!(
+        outcome.summary.in_stream_carrier_used,
+        "otp-5a pull rides the in-stream carrier (no SOURCE-responder data plane yet)"
+    );
+    assert_trees_identical(&daemon.dest_root, dest.path());
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn old_pull_and_session_produce_identical_trees_and_counts() {
+    // Arm A: OLD pull_sync into a client-local dest.
+    let daemon_a = Daemon::start(false).await;
+    write_tree(&daemon_a.dest_root, &small_tree());
+    let dest_a = tempfile::tempdir().unwrap();
+    let mut pull_client = RemotePullClient::connect(daemon_a.endpoint.clone())
+        .await
+        .expect("old pull client connects");
+    let report = pull_client
+        .pull_sync(
+            dest_a.path(),
+            Vec::new(),
+            &PullSyncOptions::default(),
+            false,
+            None,
+        )
+        .await
+        .expect("old pull succeeds");
+
+    // Arm B: NEW session (client DESTINATION initiator).
+    let daemon_b = Daemon::start(false).await;
+    write_tree(&daemon_b.dest_root, &small_tree());
+    let dest_b = tempfile::tempdir().unwrap();
+    let outcome = run_pull_session(
+        &daemon_b.endpoint,
+        dest_b.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("session pull succeeds");
+
+    // Both dests equal their source module and each other.
+    assert_trees_identical(&daemon_a.dest_root, dest_a.path());
+    assert_trees_identical(&daemon_b.dest_root, dest_b.path());
+    assert_trees_identical(dest_a.path(), dest_b.path());
+
+    // Shared counters agree (transport-specific fields have no cross
+    // analog and are not compared). Old pull already SKIPs the same-size
+    // dest-NEWER cell, so this A/B is byte-identical with no caveat —
+    // unlike the push A/B where old push clobbers.
+    assert_eq!(
+        report.files_transferred as u64,
+        outcome.summary.files_transferred
+    );
+    assert_eq!(report.bytes_transferred, outcome.summary.bytes_transferred);
+
+    daemon_a.stop().await;
+    daemon_b.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_module_refuses_the_pull_session() {
+    let daemon = Daemon::start(false).await;
+    let dest = tempfile::tempdir().unwrap();
+    let err = run_pull_session(
+        &daemon.endpoint_for_missing_module(),
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect_err("unknown module must refuse the pull session");
+    assert_eq!(fault_of(&err).code, session_error::Code::ModuleUnknown);
     daemon.stop().await;
 }

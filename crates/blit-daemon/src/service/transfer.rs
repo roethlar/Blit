@@ -2,12 +2,14 @@
 //!
 //! otp-1 (D-2026-07-05-4) landed the wire surface (the RPC, the frame
 //! set, `docs/TRANSFER_SESSION.md`) with the handler refusing
-//! UNIMPLEMENTED. otp-4a lands the behavior: the daemon serves the RPC
-//! by running `blit_core::transfer_session::run_destination` as the
-//! Responder — the byte RECEIVER of a client-initiated SOURCE push.
-//! The dispatcher in `core.rs::transfer` mirrors `push`: register a
-//! jobs row, race the session against cancel/hangup via
-//! `resolve_streaming_outcome`, return the response `ReceiverStream`.
+//! UNIMPLEMENTED. otp-4a landed the behavior; otp-5a makes the daemon
+//! serve BOTH roles: it runs `blit_core::transfer_session::run_responder`,
+//! which dispatches on the client's declared initiator role — a SOURCE
+//! initiator makes the daemon the DESTINATION (push-equivalent), a
+//! DESTINATION initiator makes it the SOURCE (pull-equivalent, streaming
+//! its module tree). The dispatcher in `core.rs::transfer` mirrors
+//! `push`: register a jobs row, race the session against cancel/hangup
+//! via `resolve_streaming_outcome`, return the response `ReceiverStream`.
 //!
 //! This module owns the two daemon-specific pieces the session driver
 //! in blit-core cannot: (1) the [`OpenResolver`] that maps a wire
@@ -15,10 +17,11 @@
 //! free of module config and `tonic::Status`), and (2) the transport
 //! assembly + outcome mapping.
 //!
-//! otp-4a uses the in-stream byte carrier only; the TCP data plane
-//! grant + resize land at otp-4b. Progress-byte wiring
-//! (`with_byte_progress`) is not threaded yet — session rows report
-//! `bytes_completed=0`, matching today's push rows.
+//! Carrier: the push-equivalent (daemon DESTINATION) rides the TCP data
+//! plane (otp-4b); the pull-equivalent (daemon SOURCE) is in-stream only
+//! until otp-5b adds the SOURCE-responder data plane. Progress-byte
+//! wiring (`with_byte_progress`) is not threaded yet — session rows
+//! report `bytes_completed=0`, matching today's push rows.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,8 +34,8 @@ use blit_core::generated::session_error::Code;
 use blit_core::generated::{SessionOpen, TransferFrame};
 use blit_core::transfer_session::transport::grpc_daemon_transport;
 use blit_core::transfer_session::{
-    run_destination, DestinationSessionConfig, DestinationTarget, HelloConfig, OpenResolver,
-    ResolvedEndpoint, SessionEndpoint, SessionFault,
+    run_responder, DestinationTarget, HelloConfig, OpenResolver, ResolvedEndpoint, SessionFault,
+    SourceResponderTarget,
 };
 
 use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
@@ -90,13 +93,16 @@ pub(crate) fn make_open_resolver(
     })
 }
 
-/// Run one daemon-side transfer session to completion as the DESTINATION
-/// Responder, returning `Ok(())` on a clean transfer or `Err(Status)`
-/// carrying the session fault's message for the jobs record. The
-/// session communicates its own refusals to the peer as `SessionError`
-/// *frames* (via the response stream); this `Status` is for the
-/// daemon's outcome record and `resolve_streaming_outcome`'s terminal
-/// handling, not the primary error channel.
+/// Run one daemon-side transfer session to completion, dispatching on
+/// the client's declared initiator role via [`run_responder`]: a SOURCE
+/// initiator makes the daemon the DESTINATION (push-equivalent, otp-4);
+/// a DESTINATION initiator makes the daemon the SOURCE (pull-equivalent,
+/// otp-5). Returns `Ok(())` on a clean transfer or `Err(Status)`
+/// carrying the session fault's message for the jobs record. The session
+/// communicates its own refusals to the peer as `SessionError` *frames*
+/// (via the response stream); this `Status` is for the daemon's outcome
+/// record and `resolve_streaming_outcome`'s terminal handling, not the
+/// primary error channel.
 pub(crate) async fn run_transfer_session(
     modules: Arc<Mutex<HashMap<String, ModuleConfig>>>,
     default_root: Option<RootExport>,
@@ -104,16 +110,28 @@ pub(crate) async fn run_transfer_session(
     tx: mpsc::Sender<Result<TransferFrame, Status>>,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
-    let resolver = make_open_resolver(modules, default_root);
-    let cfg = DestinationSessionConfig {
-        hello: HelloConfig::default(),
-        endpoint: SessionEndpoint::Responder,
-    };
-    match run_destination(cfg, transport, DestinationTarget::Resolve(resolver)).await {
-        Ok(_outcome) => Ok(()),
+    // The same module→root resolver serves both roles; only the one the
+    // initiator's declared role selects is consulted. Two clones so each
+    // target owns its resolver (the closure clones its captured handles
+    // per call, so this is cheap).
+    let source_resolver = make_open_resolver(Arc::clone(&modules), default_root.clone());
+    let dest_resolver = make_open_resolver(modules, default_root);
+    let outcome = run_responder(
+        HelloConfig::default(),
+        transport,
+        SourceResponderTarget::Resolve(source_resolver),
+        DestinationTarget::Resolve(dest_resolver),
+    )
+    .await;
+    match outcome {
+        // Either role completing cleanly is a successful transfer; the
+        // daemon record does not distinguish push- from pull-equivalent
+        // (the jobs kind stays Push until the taxonomy is revisited at
+        // cutover — see the dispatcher).
+        Ok(_) => Ok(()),
         Err(report) => {
-            // run_destination already emitted a SessionError frame to
-            // the peer; surface the reason for the record.
+            // run_responder already emitted a SessionError frame to the
+            // peer; surface the reason for the record.
             let msg = report
                 .downcast_ref::<SessionFault>()
                 .map(|f| f.message.clone())

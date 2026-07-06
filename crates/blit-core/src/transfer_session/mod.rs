@@ -39,7 +39,7 @@ use crate::manifest::{header_transfer_status, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
 use crate::remote::transfer::payload::PreparedPayload;
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
-use crate::remote::transfer::source::TransferSource;
+use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
 use crate::remote::transfer::{AbortOnDrop, CONTROL_PLANE_CHUNK_SIZE};
@@ -325,6 +325,31 @@ pub enum DestinationTarget {
     Resolve(Box<OpenResolver>),
 }
 
+/// Where a SOURCE responder reads from. Symmetric with
+/// [`DestinationTarget`]: `Fixed` is a source known up front (an
+/// initiator's own tree, or a test), `Resolve` defers to the same
+/// [`OpenResolver`] the destination path uses to map a received
+/// `SessionOpen`'s module name to a local root, from which a
+/// [`FsTransferSource`] is built inside blit-core (so callers stay free
+/// of the concrete source type, exactly as `run_destination` builds its
+/// sink from `dst_root`). A `Resolve` target is meaningful only on a
+/// Responder; an Initiator always knows its own source. Used by
+/// [`run_responder`] for the daemon-as-SOURCE (pull-equivalent, otp-5).
+pub enum SourceResponderTarget {
+    Fixed(Arc<dyn TransferSource>),
+    Resolve(Box<OpenResolver>),
+}
+
+/// What a served session produced, tagged by which role the responder
+/// played. `run_responder` dispatches on the initiator's declared role,
+/// so the caller (the daemon) learns after the fact which half ran.
+pub enum ResponderOutcome {
+    /// The initiator was SOURCE; this end received (push-equivalent).
+    Destination(DestinationOutcome),
+    /// The initiator was DESTINATION; this end sent (pull-equivalent).
+    Source(TransferSummary),
+}
+
 fn source_open_validator(open: &SessionOpen) -> std::result::Result<(), SessionFault> {
     if open.resume.as_ref().is_some_and(|r| r.enabled) {
         return Err(SessionFault::internal(
@@ -374,22 +399,11 @@ struct Negotiated {
     responder_data_plane: Option<data_plane::ResponderDataPlane>,
 }
 
-/// HELLO + OPEN/ACCEPT, one implementation both roles call (otp-3
-/// scoping requirement). Sends the refusal `SessionError` itself when
-/// it detects the fault locally; returned faults are `peer_notified`.
-async fn establish(
-    transport: &mut FrameTransport,
-    hello: &HelloConfig,
-    endpoint: &SessionEndpoint,
-    local_role: TransferRole,
-    validate_open: &OpenValidator,
-    // Consulted only on the Responder branch, after the received open
-    // passes `validate_open` and before SessionAccept. `None` = the
-    // caller supplies the root itself (Initiator, or fixed-root test).
-    resolve_open: Option<&OpenResolver>,
-) -> Result<Negotiated> {
-    // HELLO both ways, exact match (D-2026-07-05-2). First frame each
-    // direction; no ordering between the two directions.
+/// HELLO both ways, exact match (D-2026-07-05-2). First frame each
+/// direction; no ordering between the two directions. Factored out so a
+/// serving end (`run_responder`) can exchange HELLO, then read the OPEN
+/// and dispatch on the declared role before running a role driver.
+async fn exchange_hello(transport: &mut FrameTransport, hello: &HelloConfig) -> Result<()> {
     transport
         .send(frame(Frame::Hello(SessionHello {
             build_id: hello.build_id.clone(),
@@ -427,6 +441,114 @@ async fn establish(
         };
         return Err(notify_and_wrap(transport, fault).await);
     }
+    Ok(())
+}
+
+/// The responder half of establish AFTER the `SessionOpen` is read:
+/// complement check, `validate_open`, endpoint resolution, data-plane
+/// prepare, and `SessionAccept`. Factored out so both `establish` (which
+/// reads the open then calls this) and `run_responder` (which reads the
+/// open, dispatches on the declared role, then calls this with the
+/// resolved local role) share one implementation. Sends the refusal
+/// `SessionError` itself; returned faults are `peer_notified`.
+async fn responder_finish(
+    transport: &mut FrameTransport,
+    open: SessionOpen,
+    local_role: TransferRole,
+    validate_open: &OpenValidator,
+    resolve_open: Option<&OpenResolver>,
+) -> Result<Negotiated> {
+    // The initiator declares ITS role; this responder end must
+    // hold the complement.
+    let declared = TransferRole::try_from(open.initiator_role).unwrap_or(TransferRole::Unspecified);
+    if declared != complement(local_role) {
+        return Err(notify_and_wrap(
+            transport,
+            SessionFault::protocol_violation(format!(
+                "initiator declared role {} but this responder is {}",
+                declared.as_str_name(),
+                local_role.as_str_name()
+            )),
+        )
+        .await);
+    }
+    if let Err(fault) = validate_open(&open) {
+        // Refusal is a SessionError instead of SessionAccept,
+        // never a silent close (contract §Phase state machine).
+        return Err(notify_and_wrap(transport, fault).await);
+    }
+    // Responder endpoint resolution (otp-4): map the wire
+    // module/path to a local root and enforce read-only, both
+    // BEFORE SessionAccept so a refusal replaces the accept
+    // (never follows it). The resolver is caller-supplied
+    // (daemon module lookup); a fixed-root responder passes
+    // None and resolves nothing here.
+    let resolved_root = match resolve_open {
+        Some(resolve) => match resolve(&open).await {
+            Ok(resolved) => {
+                // A read-only module is fatal only for a
+                // DESTINATION (it would write); a SOURCE
+                // responder (otp-5, daemon-send) reads happily.
+                if local_role == TransferRole::Destination && resolved.read_only {
+                    return Err(notify_and_wrap(
+                        transport,
+                        SessionFault::read_only("destination module is read-only".to_string()),
+                    )
+                    .await);
+                }
+                Some(resolved.root)
+            }
+            Err(fault) => return Err(notify_and_wrap(transport, fault).await),
+        },
+        None => None,
+    };
+    // Data plane (otp-4b): a DESTINATION responder binds a TCP
+    // listener and grants it, unless the initiator requested the
+    // in-stream carrier or the bind fails (grant-less accept ⇒
+    // in-stream fallback). A SOURCE responder (otp-5, daemon-send)
+    // grants no data plane in otp-5a — the transport/role decoupling
+    // that lets a SOURCE responder bind+grant lands at otp-5b.
+    let responder_data_plane = if local_role == TransferRole::Destination && !open.in_stream_bytes {
+        data_plane::prepare_responder_data_plane().await
+    } else {
+        None
+    };
+    let accept = SessionAccept {
+        // The byte RECEIVER advertises capacity at session
+        // open (D-2026-06-20-1/-2); consumed by the dial when
+        // the data plane lands (otp-4b).
+        receiver_capacity: if local_role == TransferRole::Destination {
+            Some(crate::engine::local_receiver_capacity())
+        } else {
+            None
+        },
+        // Grant present ⇒ TCP data plane; absent ⇒ in-stream.
+        data_plane: responder_data_plane.as_ref().map(|dp| dp.grant()),
+    };
+    transport.send(frame(Frame::Accept(accept.clone()))).await?;
+    Ok(Negotiated {
+        open,
+        accept,
+        resolved_root,
+        responder_data_plane,
+    })
+}
+
+/// HELLO + OPEN/ACCEPT, one implementation both roles call (otp-3
+/// scoping requirement). Sends the refusal `SessionError` itself when
+/// it detects the fault locally; returned faults are `peer_notified`.
+async fn establish(
+    transport: &mut FrameTransport,
+    hello: &HelloConfig,
+    endpoint: &SessionEndpoint,
+    local_role: TransferRole,
+    validate_open: &OpenValidator,
+    // Consulted only on the Responder branch, after the received open
+    // passes `validate_open` and before SessionAccept. `None` = the
+    // caller supplies the root itself (Initiator, or fixed-root test).
+    resolve_open: Option<&OpenResolver>,
+) -> Result<Negotiated> {
+    exchange_hello(transport, hello).await?;
 
     match endpoint {
         SessionEndpoint::Initiator { open } => {
@@ -466,84 +588,7 @@ async fn establish(
                     .await)
                 }
             };
-            // The initiator declares ITS role; this responder end must
-            // hold the complement.
-            let declared =
-                TransferRole::try_from(open.initiator_role).unwrap_or(TransferRole::Unspecified);
-            if declared != complement(local_role) {
-                return Err(notify_and_wrap(
-                    transport,
-                    SessionFault::protocol_violation(format!(
-                        "initiator declared role {} but this responder is {}",
-                        declared.as_str_name(),
-                        local_role.as_str_name()
-                    )),
-                )
-                .await);
-            }
-            if let Err(fault) = validate_open(&open) {
-                // Refusal is a SessionError instead of SessionAccept,
-                // never a silent close (contract §Phase state machine).
-                return Err(notify_and_wrap(transport, fault).await);
-            }
-            // Responder endpoint resolution (otp-4): map the wire
-            // module/path to a local root and enforce read-only, both
-            // BEFORE SessionAccept so a refusal replaces the accept
-            // (never follows it). The resolver is caller-supplied
-            // (daemon module lookup); a fixed-root responder passes
-            // None and resolves nothing here.
-            let resolved_root = match resolve_open {
-                Some(resolve) => match resolve(&open).await {
-                    Ok(resolved) => {
-                        // A read-only module is fatal only for a
-                        // DESTINATION (it would write); a SOURCE
-                        // responder (otp-5, daemon-send) reads happily.
-                        if local_role == TransferRole::Destination && resolved.read_only {
-                            return Err(notify_and_wrap(
-                                transport,
-                                SessionFault::read_only(
-                                    "destination module is read-only".to_string(),
-                                ),
-                            )
-                            .await);
-                        }
-                        Some(resolved.root)
-                    }
-                    Err(fault) => return Err(notify_and_wrap(transport, fault).await),
-                },
-                None => None,
-            };
-            // Data plane (otp-4b): a DESTINATION responder binds a TCP
-            // listener and grants it, unless the initiator requested the
-            // in-stream carrier or the bind fails (grant-less accept ⇒
-            // in-stream fallback). A SOURCE responder (otp-5,
-            // daemon-send) will bind on its own branch later; otp-4b's
-            // responder is always the DESTINATION.
-            let responder_data_plane =
-                if local_role == TransferRole::Destination && !open.in_stream_bytes {
-                    data_plane::prepare_responder_data_plane().await
-                } else {
-                    None
-                };
-            let accept = SessionAccept {
-                // The byte RECEIVER advertises capacity at session
-                // open (D-2026-06-20-1/-2); consumed by the dial when
-                // the data plane lands (otp-4b).
-                receiver_capacity: if local_role == TransferRole::Destination {
-                    Some(crate::engine::local_receiver_capacity())
-                } else {
-                    None
-                },
-                // Grant present ⇒ TCP data plane; absent ⇒ in-stream.
-                data_plane: responder_data_plane.as_ref().map(|dp| dp.grant()),
-            };
-            transport.send(frame(Frame::Accept(accept.clone()))).await?;
-            Ok(Negotiated {
-                open,
-                accept,
-                resolved_root,
-                responder_data_plane,
-            })
+            responder_finish(transport, open, local_role, validate_open, resolve_open).await
         }
     }
 }
@@ -618,13 +663,37 @@ pub async fn run_source(
         &cfg.endpoint,
         TransferRole::Source,
         &source_open_validator,
-        // A SOURCE responder's endpoint resolution (module→root for a
-        // daemon-send) lands with otp-5; otp-4a's daemon is always the
-        // DESTINATION responder, so the source never resolves here.
+        // run_source only ever resolves nothing: a SOURCE *initiator*
+        // owns its own root, and a SOURCE *responder* driven directly
+        // (the in-process role suite) is handed a Fixed source. The
+        // daemon SOURCE responder resolves module→root inside
+        // `run_responder`, not here (otp-5).
         None,
     )
     .await?;
 
+    drive_source(
+        cfg.plan_options,
+        cfg.data_plane_host,
+        &negotiated,
+        transport,
+        source,
+    )
+    .await
+}
+
+/// The SOURCE session body after establish: spawn the receive half,
+/// run the send half, and map a fault to a peer-notified report. Shared
+/// by [`run_source`] (initiator or direct-responder) and
+/// [`run_responder`] (the daemon SOURCE responder), so the send/receive
+/// choreography is single-sourced.
+async fn drive_source(
+    plan_options: PlanOptions,
+    data_plane_host: Option<String>,
+    negotiated: &Negotiated,
+    transport: FrameTransport,
+    source: Arc<dyn TransferSource>,
+) -> Result<TransferSummary> {
     let (mut tx, rx) = transport.split();
     let sent: Arc<StdMutex<HashMap<String, FileHeader>>> = Arc::default();
     // Set by the send half the moment ManifestComplete goes out. On
@@ -644,8 +713,9 @@ pub async fn run_source(
     )));
 
     match source_send_half(
-        &cfg,
-        &negotiated,
+        plan_options,
+        data_plane_host.as_deref(),
+        negotiated,
         &mut tx,
         source,
         sent,
@@ -761,8 +831,10 @@ async fn source_recv_half(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn source_send_half(
-    cfg: &SourceSessionConfig,
+    plan_options: PlanOptions,
+    data_plane_host: Option<&str>,
     negotiated: &Negotiated,
     tx: &mut Box<dyn FrameTx>,
     source: Arc<dyn TransferSource>,
@@ -782,7 +854,7 @@ async fn source_send_half(
     // carrier (fallback), which needs no early setup.
     let mut data_plane = match &negotiated.accept.data_plane {
         Some(grant) => {
-            let host = cfg.data_plane_host.as_deref().ok_or_else(|| {
+            let host = data_plane_host.ok_or_else(|| {
                 eyre::Report::new(SessionFault::internal(
                     "responder granted a TCP data plane but this initiator has no host to dial",
                 ))
@@ -884,7 +956,7 @@ async fn source_send_half(
                     maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
                         .await?;
                     let payloads =
-                        diff_planner::plan_push_payloads(batch, source.root(), cfg.plan_options)?;
+                        diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
                     // A cancel while earlier batches are actively moving
                     // closes the send pipeline under backpressure, so this
                     // queue fails with a data-plane error — prefer the
@@ -897,8 +969,7 @@ async fn source_send_half(
                     }
                 }
                 None => {
-                    send_payload_records(tx, &source, cfg.plan_options, batch, &mut read_buf)
-                        .await?;
+                    send_payload_records(tx, &source, plan_options, batch, &mut read_buf).await?;
                 }
             }
             continue;
@@ -1400,7 +1471,19 @@ pub async fn run_destination(
         },
     };
 
-    match destination_session(&mut transport, negotiated, &dst_root).await {
+    drive_destination(&mut transport, negotiated, &dst_root).await
+}
+
+/// The DESTINATION session body: run the diff/receive loop and map a
+/// fault to a peer-notified report. Shared by [`run_destination`] and
+/// [`run_responder`] (the daemon DESTINATION responder), so the receive
+/// choreography is single-sourced.
+async fn drive_destination(
+    transport: &mut FrameTransport,
+    negotiated: Negotiated,
+    dst_root: &Path,
+) -> Result<DestinationOutcome> {
+    match destination_session(transport, negotiated, dst_root).await {
         Ok(outcome) => Ok(outcome),
         Err(report) => {
             let mut fault = fault_from_report(report);
@@ -1410,6 +1493,111 @@ pub async fn run_destination(
             }
             Err(eyre::Report::new(fault))
         }
+    }
+}
+
+/// Serve one transfer session as the RESPONDER, dispatching on the
+/// initiator's declared role — the daemon's single serving entry
+/// (contract §Invariants 3: one handshake, roles not directions). A
+/// client that declares SOURCE makes this end the DESTINATION
+/// (push-equivalent, otp-4); a client that declares DESTINATION makes
+/// this end the SOURCE (pull-equivalent, otp-5). The two targets carry
+/// the endpoint resolution for each role; only the one the initiator
+/// selects is used. Returns a [`ResponderOutcome`] tagged with the role
+/// that ran.
+pub async fn run_responder(
+    hello: HelloConfig,
+    transport: FrameTransport,
+    source_target: SourceResponderTarget,
+    dest_target: DestinationTarget,
+) -> Result<ResponderOutcome> {
+    let mut transport = transport;
+    exchange_hello(&mut transport, &hello).await?;
+    let open = match expect_frame(&mut transport).await? {
+        Frame::Open(o) => o,
+        other => {
+            return Err(notify_and_wrap(
+                &mut transport,
+                SessionFault::protocol_violation(format!(
+                    "expected SessionOpen, got {}",
+                    frame_name(&Some(other))
+                )),
+            )
+            .await)
+        }
+    };
+    let declared = TransferRole::try_from(open.initiator_role).unwrap_or(TransferRole::Unspecified);
+    match declared {
+        // Initiator SOURCE ⇒ this end is DESTINATION (push-equivalent).
+        TransferRole::Source => {
+            let resolve = match &dest_target {
+                DestinationTarget::Resolve(resolver) => Some(resolver.as_ref()),
+                DestinationTarget::Fixed(_) => None,
+            };
+            let negotiated = responder_finish(
+                &mut transport,
+                open,
+                TransferRole::Destination,
+                &destination_open_validator,
+                resolve,
+            )
+            .await?;
+            let dst_root = match negotiated.resolved_root.clone() {
+                Some(root) => root,
+                None => match &dest_target {
+                    DestinationTarget::Fixed(root) => root.clone(),
+                    DestinationTarget::Resolve(_) => {
+                        return Err(eyre::Report::new(SessionFault::internal(
+                            "resolver target produced no destination root",
+                        )));
+                    }
+                },
+            };
+            let outcome = drive_destination(&mut transport, negotiated, &dst_root).await?;
+            Ok(ResponderOutcome::Destination(outcome))
+        }
+        // Initiator DESTINATION ⇒ this end is SOURCE (pull-equivalent).
+        TransferRole::Destination => {
+            let resolve = match &source_target {
+                SourceResponderTarget::Resolve(resolver) => Some(resolver.as_ref()),
+                SourceResponderTarget::Fixed(_) => None,
+            };
+            let negotiated = responder_finish(
+                &mut transport,
+                open,
+                TransferRole::Source,
+                &source_open_validator,
+                resolve,
+            )
+            .await?;
+            let source: Arc<dyn TransferSource> = match source_target {
+                SourceResponderTarget::Fixed(source) => source,
+                SourceResponderTarget::Resolve(_) => {
+                    // A Resolve target always yields a root on the
+                    // Responder branch (establish only skips resolution
+                    // on the Initiator branch, which uses Fixed).
+                    let root = negotiated.resolved_root.clone().ok_or_else(|| {
+                        eyre::Report::new(SessionFault::internal(
+                            "resolver target produced no source root",
+                        ))
+                    })?;
+                    Arc::new(FsTransferSource::new(root))
+                }
+            };
+            // The SOURCE owns its planner knobs; a daemon-served source
+            // has no client-supplied ones (§Transport selection). otp-5a
+            // is in-stream only, so there is no data-plane host to dial.
+            let summary =
+                drive_source(PlanOptions::default(), None, &negotiated, transport, source).await?;
+            Ok(ResponderOutcome::Source(summary))
+        }
+        TransferRole::Unspecified => Err(notify_and_wrap(
+            &mut transport,
+            SessionFault::protocol_violation(
+                "initiator declared no role (TRANSFER_ROLE_UNSPECIFIED)",
+            ),
+        )
+        .await),
     }
 }
 

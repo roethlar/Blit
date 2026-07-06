@@ -1,17 +1,20 @@
-//! Client-side entry for initiating a unified transfer session as the
-//! SOURCE role (otp-4a).
+//! Client-side entry for initiating a unified transfer session.
 //!
-//! Builds a gRPC-backed [`FrameTransport`] over `BlitClient::transfer`
-//! and runs [`run_source`], so a CLI push becomes "open the Transfer
-//! RPC, declare SOURCE, stream the manifest + payloads." This is the
-//! push-equivalent on the unified path; the daemon answers by running
-//! `run_destination` as the Responder.
+//! [`run_push_session`] declares the SOURCE role (push-equivalent,
+//! otp-4): open the `Transfer` RPC, stream the manifest + payloads; the
+//! daemon answers as the DESTINATION Responder. [`run_pull_session`]
+//! declares the DESTINATION role (pull-equivalent, otp-5a): the daemon
+//! answers as the SOURCE Responder and streams its module tree, which
+//! this end diffs and writes. Both build a gRPC-backed [`FrameTransport`]
+//! over `BlitClient::transfer` and run the matching role driver; role is
+//! carried in `SessionOpen.initiator_role`, never a second code path.
 //!
-//! Not yet wired to CLI verbs — the verbs keep riding the old push
-//! path until the otp-10 cutover; today the parity tests drive this.
-//! otp-4a uses the in-stream byte carrier only (`in_stream_bytes`);
-//! the TCP data plane lands at otp-4b.
+//! Not yet wired to CLI verbs — the verbs keep riding the old paths
+//! until the otp-10 cutover; today the parity tests drive this. push
+//! defaults to the TCP data plane (otp-4b); pull is in-stream only until
+//! otp-5b adds the SOURCE-responder data plane.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +29,10 @@ use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::source::TransferSource;
 use crate::transfer_plan::PlanOptions;
 use crate::transfer_session::transport::{grpc_client_transport, GRPC_CHANNEL_FRAMES};
-use crate::transfer_session::{run_source, HelloConfig, SessionEndpoint, SourceSessionConfig};
+use crate::transfer_session::{
+    run_destination, run_source, DestinationOutcome, DestinationSessionConfig, DestinationTarget,
+    HelloConfig, SessionEndpoint, SourceSessionConfig,
+};
 
 /// The push-shaped subset of session options otp-4a/4b supports. Mirror,
 /// filters, and resume are refused at OPEN until their slices land
@@ -65,19 +71,8 @@ pub async fn run_push_session(
     options: PushSessionOptions,
 ) -> Result<TransferSummary> {
     // The responder resolves module→root; the initiator's own local
-    // path never crosses the wire (contract §SessionOpen). Empty module
-    // targets the daemon's default root export.
-    let (module, path) = match &endpoint.path {
-        RemotePath::Module { module, rel_path } => {
-            (module.clone(), rel_path.to_string_lossy().into_owned())
-        }
-        RemotePath::Root { rel_path } => (String::new(), rel_path.to_string_lossy().into_owned()),
-        RemotePath::Discovery => {
-            return Err(eyre!(
-                "a transfer session needs a resolved module or root endpoint, not a discovery form"
-            ));
-        }
-    };
+    // path never crosses the wire (contract §SessionOpen).
+    let (module, path) = endpoint_module_path(endpoint)?;
 
     let mut client = connect_transfer_client(endpoint).await?;
 
@@ -115,6 +110,92 @@ pub async fn run_push_session(
         data_plane_host: Some(endpoint.host.clone()),
     };
     run_source(cfg, transport, source).await
+}
+
+/// The pull-shaped subset of session options otp-5a supports. Mirror,
+/// filters, and resume are refused at OPEN until their slices land, so
+/// they are intentionally absent here. The DESTINATION owns the compare
+/// decision; the SOURCE owns the planner knobs (none cross the wire).
+pub struct PullSessionOptions {
+    pub compare_mode: ComparisonMode,
+    pub ignore_existing: bool,
+    pub require_complete_scan: bool,
+}
+
+impl Default for PullSessionOptions {
+    fn default() -> Self {
+        Self {
+            compare_mode: ComparisonMode::SizeMtime,
+            ignore_existing: false,
+            require_complete_scan: false,
+        }
+    }
+}
+
+/// Connect to `endpoint`'s daemon and run one DESTINATION-role transfer
+/// session pulling the endpoint's module/path tree into `dest_root`
+/// (pull-equivalent, otp-5a). The client initiates and declares
+/// DESTINATION, so the daemon becomes the SOURCE Responder (streaming
+/// its module tree). Returns the [`DestinationOutcome`] this end
+/// computed (contract: the DESTINATION is the scorer).
+///
+/// otp-5a rides the in-stream byte carrier: the SOURCE responder grants
+/// no TCP data plane yet (the transport/role decoupling that lets a
+/// SOURCE responder bind+grant lands at otp-5b), so `in_stream_bytes` is
+/// set to make the carrier explicit. Not wired to CLI verbs (otp-10).
+pub async fn run_pull_session(
+    endpoint: &RemoteEndpoint,
+    dest_root: PathBuf,
+    options: PullSessionOptions,
+) -> Result<DestinationOutcome> {
+    let (module, path) = endpoint_module_path(endpoint)?;
+
+    let mut client = connect_transfer_client(endpoint).await?;
+
+    let open = SessionOpen {
+        initiator_role: TransferRole::Destination as i32,
+        module,
+        path,
+        compare_mode: options.compare_mode as i32,
+        ignore_existing: options.ignore_existing,
+        require_complete_scan: options.require_complete_scan,
+        // otp-5a is in-stream only (the SOURCE responder grants no data
+        // plane); set the flag so the carrier is explicit and stable if
+        // a data-plane grant is added at otp-5b.
+        in_stream_bytes: true,
+        ..Default::default()
+    };
+
+    let (out_tx, out_rx) = mpsc::channel(GRPC_CHANNEL_FRAMES);
+    let inbound = client
+        .transfer(ReceiverStream::new(out_rx))
+        .await
+        .map_err(|status| eyre!("opening Transfer RPC: {}", status.message()))?
+        .into_inner();
+    let transport = grpc_client_transport(out_tx, inbound);
+
+    let cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(open),
+    };
+    run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await
+}
+
+/// Derive the wire `(module, path)` from a resolved endpoint. Empty
+/// module targets the daemon's default root export; a discovery-form
+/// endpoint is not resolvable to a transfer target.
+fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
+    match &endpoint.path {
+        RemotePath::Module { module, rel_path } => {
+            Ok((module.clone(), rel_path.to_string_lossy().into_owned()))
+        }
+        RemotePath::Root { rel_path } => {
+            Ok((String::new(), rel_path.to_string_lossy().into_owned()))
+        }
+        RemotePath::Discovery => Err(eyre!(
+            "a transfer session needs a resolved module or root endpoint, not a discovery form"
+        )),
+    }
 }
 
 /// Build a `BlitClient` over `endpoint`'s control-plane URI with the
