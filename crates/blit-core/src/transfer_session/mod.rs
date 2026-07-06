@@ -1204,18 +1204,42 @@ async fn recv_peer_fault(events: &mut mpsc::UnboundedReceiver<SourceEvent>) -> S
     }
 }
 
-/// A data-plane operation failed mid-transfer. The break is usually the
-/// *symptom* of a peer abort — within `TRANSFER_STALL_TIMEOUT` the peer
-/// (which runs the same stall guard on its receive workers) always frames
-/// the real reason on the control lane. Prefer that framed fault; fall
-/// back to the raw data-plane error if none arrives in that window.
+/// A data-plane operation (`queue`/`finish`) failed mid-transfer. The
+/// break is usually the *symptom* of a peer abort — within
+/// `TRANSFER_STALL_TIMEOUT` the peer (which runs the same stall guard on
+/// its receive workers) always frames the real reason on the control
+/// lane. Prefer that framed fault; fall back to the raw data-plane error
+/// if the channel closes first or none arrives in that window.
+///
+/// Unlike `recv_peer_fault` (the finish()-drain select arm, which fails
+/// fast on any stray event), this is called from BOTH error sites,
+/// including the `queue()` error inside the payload loop — where a
+/// legitimate `Need`/`NeedComplete`/`ResizeAck` may already be queued
+/// ahead of the peer's `SessionError` (codex otp-4b-3 pass-2 F1). So it
+/// SKIPS non-fault events rather than treating them as violations: we are
+/// already unwinding on a data-plane error, and the framed fault (or the
+/// dp error) is the correct outcome, never a spurious protocol violation.
 async fn prefer_peer_fault(
     events: &mut mpsc::UnboundedReceiver<SourceEvent>,
     dp_err: eyre::Report,
 ) -> eyre::Report {
-    match tokio::time::timeout(TRANSFER_STALL_TIMEOUT, recv_peer_fault(events)).await {
-        Ok(fault) => eyre::Report::new(fault),
-        Err(_) => dp_err,
+    let framed = async {
+        loop {
+            match events.recv().await {
+                Some(SourceEvent::Fault(fault)) => break Some(fault),
+                // Skip a still-in-flight need/ack/complete: on this error
+                // path the transfer is aborting, so the framed reason (or
+                // the dp error) wins, not a stray-event violation.
+                Some(_) => continue,
+                // Receive half ended without framing a fault → the raw
+                // data-plane error is the best available cause.
+                None => break None,
+            }
+        }
+    };
+    match tokio::time::timeout(TRANSFER_STALL_TIMEOUT, framed).await {
+        Ok(Some(fault)) => eyre::Report::new(fault),
+        Ok(None) | Err(_) => dp_err,
     }
 }
 
@@ -1967,6 +1991,44 @@ mod tests {
             fault.code,
             session_error::Code::Cancelled,
             "the framed CANCELLED must win over the data-plane break"
+        );
+    }
+
+    /// otp-4b-3 pass-2 F1: on the `queue()` error path (payload phase) a
+    /// legitimate `Need` may be queued ahead of the peer's `CANCELLED`.
+    /// `prefer_peer_fault` must SKIP it and still surface CANCELLED — not
+    /// mistake the in-flight need for a protocol violation (the strict
+    /// finish()-drain `recv_peer_fault` would).
+    #[tokio::test]
+    async fn prefer_peer_fault_skips_inflight_needs_to_reach_the_fault() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SourceEvent>();
+        // A still-in-flight need queued before the abort frame.
+        tx.send(SourceEvent::Need(FileHeader {
+            relative_path: "still-needed.bin".into(),
+            ..Default::default()
+        }))
+        .expect("send need");
+        tx.send(SourceEvent::Fault(SessionFault {
+            code: session_error::Code::Cancelled,
+            message: "transfer cancelled via CancelJob".into(),
+            local_build_id: String::new(),
+            peer_build_id: String::new(),
+            peer_notified: true,
+        }))
+        .expect("send fault");
+
+        let dp_err = eyre::Report::new(SessionFault::refusal(
+            session_error::Code::DataPlaneFailed,
+            "pipeline closed",
+        ));
+        let chosen = prefer_peer_fault(&mut rx, dp_err).await;
+        let fault = chosen
+            .downcast_ref::<SessionFault>()
+            .expect("a SessionFault");
+        assert_eq!(
+            fault.code,
+            session_error::Code::Cancelled,
+            "an in-flight need must be skipped, not surfaced as a violation"
         );
     }
 
