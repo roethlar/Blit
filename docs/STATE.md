@@ -1,12 +1,13 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-06 (**otp-5a landed + graded (codex PASS, no
-findings)** — the one served `Transfer` RPC now handles BOTH directions
-by the client's declared role; a DESTINATION initiator makes the daemon
-the SOURCE (pull-equivalent), in-stream carrier. ONE_TRANSFER_PATH
-otp-1 + otp-3 + otp-4a + otp-4b (1/2/3) + otp-5a `[x]`, current slice
-**otp-5b** (SOURCE-responder data plane). SMALL_FILE_CEILING stays
-paused, D-2026-07-05-1.)
+Last updated: 2026-07-06 (**otp-5b-1 landed + graded (codex FAIL → 1
+Medium accepted + fixed)** — the pull-equivalent now rides the TCP data
+plane: the data plane decouples connection role (RESPONDER binds+accepts,
+INITIATOR dials) from byte role (SOURCE sends, DESTINATION receives).
+Single-stream; resize is otp-5b-2. ONE_TRANSFER_PATH otp-1 + otp-3 +
+otp-4a + otp-4b (1/2/3) + otp-5a + otp-5b-1 `[x]`, current slice
+**otp-5b-2** (pull data-plane resize). SMALL_FILE_CEILING stays paused,
+D-2026-07-05-1.)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -33,47 +34,46 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     byte-identical vs old push; SizeMtime = data-safe skip (owner-ack
     open question, below).
   - **otp-4b (1/2/3) `[x]` — data plane fully on the session, closed**:
-    4b-1 single-stream TCP data plane; 4b-2 mid-transfer resize/
-    multi-stream + sf-2 shape correction; 4b-3 deterministic mid-transfer
-    cancel (`CancelJob`→`SessionFault{CANCELLED}` over the data plane, no
-    hang). Detail: DEVLOG + `.review/results/otp-4b*`. Suite → 1516/0.
+    single-stream TCP data plane, mid-transfer resize/multi-stream + sf-2
+    shape correction, deterministic mid-transfer cancel
+    (`CancelJob`→`SessionFault{CANCELLED}`, no hang). Detail: DEVLOG +
+    `.review/results/otp-4b*`. Suite → 1516/0.
   - **otp-5a `[x]`** (`84be1cc`, codex PASS no findings) — the one served
-    `Transfer` RPC serves BOTH roles: new `run_responder` reads the open
-    and dispatches on declared `initiator_role` (SOURCE-init→daemon
-    DESTINATION = otp-4 push; DESTINATION-init→daemon SOURCE =
-    pull-equivalent, streams its module tree, in-stream). `establish` →
-    `exchange_hello`+`responder_finish`; bodies → `drive_source`/
-    `drive_destination`; new `SourceResponderTarget`; client
-    `run_pull_session`. A/B byte-identical vs old `pull_sync`. Suite →
-    **1519/0**. (DEVLOG 07:30.)
-  - Current: **otp-5b** (SOURCE-responder data plane — the transport/role
-    decoupling: the *responder* binds+grants+accepts while the SOURCE
-    *sends*, and the *initiator* dials while the DESTINATION *receives*;
-    today the data plane is keyed to role, so this is genuine new work,
-    not just "roles flipped"). (otp-2 symmetric baseline is rig-gated;
-    before otp-10.)
+    `Transfer` RPC serves BOTH roles: `run_responder` dispatches on
+    declared `initiator_role` (SOURCE-init→daemon DESTINATION = otp-4 push;
+    DESTINATION-init→daemon SOURCE = pull, in-stream). A/B byte-identical
+    vs old `pull_sync`. Detail: handoff log + DEVLOG 07:30. Suite → 1519/0.
+  - **otp-5b-1 `[x]`** (`e6a0b3b`+`13485ee`, codex FAIL→1 Med accepted+
+    fixed) — the SOURCE-responder data plane, single stream: decouples
+    connection role (RESPONDER binds+accepts, INITIATOR dials) from byte
+    role (SOURCE sends, DESTINATION receives). `run_pull_session` defaults
+    to TCP; A/B byte-identical vs old `pull_sync`. Detail: handoff log +
+    DEVLOG 18:32. Suite → **1521**.
+  - Current: **otp-5b-2** (pull data-plane resize — the accept-based
+    epoch-N socket; lifts otp-5b-1's `resizable=false` cap; choreography
+    in the handoff log). (otp-2 symmetric baseline is rig-gated; before
+    otp-10.)
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
-  `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+
-  blocked** until ONE_TRANSFER_PATH ships, then resume/re-derive on
-  the unified baseline. Principle stands: ceiling-driven, never
-  competitor-relative (D-2026-07-04-4; a ≥25% margin answer was
-  retracted — do not re-litigate). Evidence `docs/bench/10gbe-2026-07-05/`.
+  `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
+  until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
+  baseline. Principle stands: ceiling-driven, never competitor-relative
+  (D-2026-07-04-4; a ≥25% margin answer was retracted — do not
+  re-litigate). Evidence `docs/bench/10gbe-2026-07-05/`.
 - **Background (2026-07-04/05, all `[x]`)**: REV4 code-complete +
   measurement gates DATA-COMPLETE (push/pull ≈ 9.5 of 9.88 Gbit/s; owner
-  declarations pending in Blocked); 10 GbE session done; w9-3 + eleven
-  review-queue rows landed. Codex loop governs all code + plan changes
-  (D-2026-07-04-1). Details: DEVLOG 2026-07-04/05.
+  declarations pending in Blocked); 10 GbE session done; w9-3 + review rows
+  landed. Codex loop governs all changes (D-2026-07-04-1; DEVLOG 07-04/05).
 
 ## Queue (ordered)
 
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
-   otp-4b (1/2/3), otp-5a `[x]`. Current: **otp-5b** (SOURCE-responder
-   data plane — the responder binds+grants+accepts while SENDING and the
-   initiator dials while RECEIVING; the transport/role decoupling the
-   in-stream otp-5a deferred). otp-2 (symmetric baseline) is RIG-GATED —
-   before otp-10 cutover.
+   otp-4b (1/2/3), otp-5a, otp-5b-1 `[x]`. Current: **otp-5b-2** (pull
+   data-plane resize — the accept-based epoch-N socket: SOURCE responder
+   proposes + arms its own accept credential, DESTINATION initiator dials
+   the epoch-N socket + acks; lifts otp-5b-1's single-stream cap). otp-2
+   (symmetric baseline) is RIG-GATED — before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
    REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
@@ -174,27 +174,27 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-06 (32nd)** @ `e6a0b3b`+`13485ee` — **otp-5b-1 landed and
+  graded (codex FAIL → 1 Medium accepted + fixed)** (DEVLOG 18:32, finding
+  + verdict `.review/…/otp-5b-source-responder-data-plane.{md,gpt-verdict.md}`).
+  The pull data plane, single stream: decouples connection role (RESPONDER
+  binds+accepts, INITIATOR dials) from byte role (SOURCE sends, DESTINATION
+  receives) — new `accept_source_data_plane` + `dial_destination_data_plane`,
+  `DestRecvPlane` enum; `responder_finish` binds for either role;
+  `run_pull_session` defaults to TCP. `resizable=false` ⇒ no resize (5b-2).
+  Codex F1 (Med, `13485ee`): DEST initiator with a grant but no host now
+  fails fast (mirrors the SOURCE guard). Guard proof live (revert the bind
+  → data-plane tests fall back to in-stream + FAIL). Suite 1519 →
+  **1521/0**. **Exact first action next session**: otp-5b-2 (pull
+  data-plane resize — the accept-based epoch-N socket: SOURCE responder
+  proposes `DataPlaneResize{ADD}` + arms its own accept credential, DEST
+  initiator dials + acks; control-lane frames identical to push, only the
+  transport action flips; lift the cap). In-flight: none. Owner
+  declarations: three 10 GbE gates + push go remain in Blocked;
+  `f6e592e`..HEAD (incl. otp-5b-1) unpushed. (`Cargo.lock` drift unstaged.)
 - **2026-07-06 (31st)** @ `84be1cc` — **otp-5a landed and graded (codex
-  PASS, no findings)** (DEVLOG 07:30, finding
-  `.review/findings/otp-5-daemon-as-source.md`, verdict
-  `…/otp-5a-daemon-as-source.gpt-verdict.md`). The one served `Transfer`
-  RPC handles BOTH directions by declared role: `run_responder` reads the
-  open and dispatches (SOURCE-init→daemon DESTINATION = push;
-  DESTINATION-init→daemon SOURCE = pull, streams its module tree,
-  in-stream). `establish`→`exchange_hello`+`responder_finish`; bodies→
-  `drive_source`/`drive_destination`; `SourceResponderTarget`; client
-  `run_pull_session`. A/B byte-identical vs old `pull_sync`; guard proven
-  live. Suite 1516 → **1519/0**; role suite green. Also fixed a review
-  gotcha: `codex exec` hangs on open stdin (0.142) — loop doc §4 gained
-  `</dev/null`. **Exact first action next session**: otp-5b
-  (SOURCE-responder data plane — responder binds+grants+accepts while
-  SENDING, initiator dials while RECEIVING; data plane is keyed to role
-  today, so real work). In-flight: none. Owner declarations: three 10 GbE
-  gates + push go remain in Blocked; `f6e592e`..HEAD unpushed. (Unrelated
-  `Cargo.lock` transitive drift left unstaged.)
-- **2026-07-06 (30th)** @ `3ae0a5f`+`a530005`+`46cc4bb`+`db9b63d` —
-  **otp-4b-3 landed and graded (codex 3 passes, PASS); otp-4b fully
-  closed** (DEVLOG 05:37, `.review/results/otp-4b3-*`). Mid-transfer
-  `CancelJob`→`SessionFault{CANCELLED}` over the data plane, no
-  blocked-reader hang. Suite 1513 → 1516/0. (Older graded slices —
-  otp-4b-2 `dce56de`, otp-4b-1 `777dfc5`, otp-4a `fe4ad6d` — in DEVLOG.)
+  PASS, no findings)** (DEVLOG 07:30): the one served `Transfer` RPC serves
+  BOTH roles via `run_responder` (in-stream pull-equivalent); A/B
+  byte-identical vs old `pull_sync`. Also fixed a loop gotcha: `codex exec`
+  hangs on open stdin (0.142) — loop doc §4 gained `</dev/null`. (Older
+  graded slices — otp-4b-3/-2/-1, otp-4a — in DEVLOG.)
