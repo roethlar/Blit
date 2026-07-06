@@ -17,11 +17,15 @@
 //!   is NEWER than the source is SKIPPED (the data-safe, pull-style
 //!   converged behavior — see the finding doc's compare decision).
 //!
-//! otp-5a adds the pull-equivalent (roles flipped): the client initiates
+//! otp-5a/5b add the pull-equivalent (roles flipped): the client initiates
 //! as DESTINATION and the daemon streams its module tree as the SOURCE
-//! Responder over the in-stream carrier. Those tests pin a byte-identical
-//! landing + A/B parity vs old `pull_sync`, proving the one served RPC
-//! handles both directions by the declared role, not a second code path.
+//! Responder. otp-5b makes the default carrier the TCP data plane too — the
+//! daemon (SOURCE responder) binds+grants+accepts sockets while sending and
+//! the client (DESTINATION initiator) dials + receives — with the in-stream
+//! carrier as the requested fallback. Those tests pin a byte-identical
+//! landing over both carriers + A/B parity vs old `pull_sync`, proving the
+//! one served RPC handles both directions by the declared role, not a
+//! second code path.
 //!
 //! Harness mirrors `push/shape_resize_e2e.rs`: a real in-process
 //! `BlitService` on loopback + a real client. Only in-crate tests can
@@ -570,12 +574,13 @@ async fn same_size_newer_destination_is_skipped_not_clobbered() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pull_session_lands_bytes_and_scores_them() {
+async fn pull_session_lands_bytes_over_the_data_plane() {
     // Roles flipped: the daemon's MODULE tree is the SOURCE; the client
-    // initiates as DESTINATION and the daemon streams its module tree
-    // (otp-5a). The SOURCE responder grants no data plane, so the carrier
-    // is the in-stream fallback. `dest_root` here is the module (source)
-    // root — the harness field name is push-oriented.
+    // initiates as DESTINATION and the daemon streams its module tree. With
+    // otp-5b the default carrier is the TCP data plane — the daemon (SOURCE
+    // responder) binds+grants+accepts sockets while sending, and the client
+    // (DESTINATION initiator) dials + receives over them. `dest_root` here
+    // is the module (source) root — the harness field name is push-oriented.
     let daemon = Daemon::start(false).await;
     write_tree(&daemon.dest_root, &small_tree());
 
@@ -597,8 +602,42 @@ async fn pull_session_lands_bytes_and_scores_them() {
             .sum::<u64>()
     );
     assert!(
+        !outcome.summary.in_stream_carrier_used,
+        "otp-5b pull default rides the TCP data plane, not the in-stream carrier"
+    );
+    assert_eq!(
+        outcome.data_plane_streams,
+        Some(1),
+        "otp-5b-1 pull is single-stream (no resize until otp-5b-2)"
+    );
+    assert_trees_identical(&daemon.dest_root, dest.path());
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_lands_bytes_over_in_stream_carrier() {
+    // The in-stream carrier is the pull fallback (diagnostics / unreachable
+    // data plane). Requesting it must still land bytes byte-identically and
+    // score them — the otp-5a path stays live under otp-5b.
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+
+    let dest = tempfile::tempdir().unwrap();
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            in_stream_bytes: true,
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("in-stream session pull succeeds");
+
+    assert_eq!(outcome.summary.files_transferred, small_tree().len() as u64);
+    assert!(
         outcome.summary.in_stream_carrier_used,
-        "otp-5a pull rides the in-stream carrier (no SOURCE-responder data plane yet)"
+        "an in_stream_bytes request rides the in-stream carrier"
     );
     assert_trees_identical(&daemon.dest_root, dest.path());
     daemon.stop().await;

@@ -10,9 +10,9 @@
 //! carried in `SessionOpen.initiator_role`, never a second code path.
 //!
 //! Not yet wired to CLI verbs — the verbs keep riding the old paths
-//! until the otp-10 cutover; today the parity tests drive this. push
-//! defaults to the TCP data plane (otp-4b); pull is in-stream only until
-//! otp-5b adds the SOURCE-responder data plane.
+//! until the otp-10 cutover; today the parity tests drive this. Both push
+//! (otp-4b) and pull (otp-5b) default to the TCP data plane; the in-stream
+//! carrier is the requested fallback either direction.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -120,6 +120,12 @@ pub struct PullSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
     pub require_complete_scan: bool,
+    /// Force the in-stream byte carrier instead of the TCP data plane
+    /// (otp-5b). Default `false` = the SOURCE responder grants a data
+    /// plane and this DESTINATION initiator dials + receives over TCP
+    /// sockets; `true` is the diagnostics / unreachable data-plane
+    /// fallback. Symmetric with [`PushSessionOptions::in_stream_bytes`].
+    pub in_stream_bytes: bool,
 }
 
 impl Default for PullSessionOptions {
@@ -128,6 +134,7 @@ impl Default for PullSessionOptions {
             compare_mode: ComparisonMode::SizeMtime,
             ignore_existing: false,
             require_complete_scan: false,
+            in_stream_bytes: false,
         }
     }
 }
@@ -139,10 +146,12 @@ impl Default for PullSessionOptions {
 /// its module tree). Returns the [`DestinationOutcome`] this end
 /// computed (contract: the DESTINATION is the scorer).
 ///
-/// otp-5a rides the in-stream byte carrier: the SOURCE responder grants
-/// no TCP data plane yet (the transport/role decoupling that lets a
-/// SOURCE responder bind+grant lands at otp-5b), so `in_stream_bytes` is
-/// set to make the carrier explicit. Not wired to CLI verbs (otp-10).
+/// otp-5b: the default carrier is the TCP data plane — the SOURCE
+/// responder binds+grants+accepts sockets while sending, and this
+/// DESTINATION initiator dials + receives over them (the transport/role
+/// decoupling). `PullSessionOptions::in_stream_bytes` forces the in-stream
+/// fallback (diagnostics / unreachable data plane). Not wired to CLI verbs
+/// (otp-10).
 pub async fn run_pull_session(
     endpoint: &RemoteEndpoint,
     dest_root: PathBuf,
@@ -159,10 +168,10 @@ pub async fn run_pull_session(
         compare_mode: options.compare_mode as i32,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
-        // otp-5a is in-stream only (the SOURCE responder grants no data
-        // plane); set the flag so the carrier is explicit and stable if
-        // a data-plane grant is added at otp-5b.
-        in_stream_bytes: true,
+        // otp-5b: default to the TCP data plane; the SOURCE responder
+        // grants it in SessionAccept unless this asks for the in-stream
+        // fallback.
+        in_stream_bytes: options.in_stream_bytes,
         ..Default::default()
     };
 
@@ -177,6 +186,9 @@ pub async fn run_pull_session(
     let cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
+        // The initiator dials the data plane on the same host it reached
+        // the control plane on (contract §Transport: initiator dials).
+        data_plane_host: Some(endpoint.host.clone()),
     };
     run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await
 }

@@ -125,6 +125,7 @@ async fn run_session(
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: dest_endpoint,
+        data_plane_host: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root.to_path_buf()));
@@ -354,6 +355,7 @@ async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -380,6 +382,81 @@ async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
         streams > 1,
         "a {FILE_COUNT}-file transfer must correct the single-stream grant \
          upward via shape resize; settled at {streams}"
+    );
+    assert_trees_identical(&src_root, &dst_root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_data_plane_single_stream_lands_bytes() {
+    // otp-5b-1: the transport/role decoupling in the PULL direction — the
+    // mirror of the push data-plane test above. Here the DESTINATION is the
+    // *initiator* (dials + receives) and the SOURCE is the *responder*
+    // (binds + accepts + sends). Control frames ride the in-process
+    // transport; the data-plane socket rides loopback TCP (the SOURCE
+    // responder binds 0.0.0.0:0, the DESTINATION initiator dials
+    // 127.0.0.1). Single-stream by construction: the SOURCE responder's
+    // dial is non-resizable, so no `DataPlaneResize` flows (otp-5b-2 adds
+    // the accept-based epoch-N socket).
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(
+        &src_root,
+        &[
+            ("a.txt", b"alpha".to_vec(), 1_600_000_001),
+            ("empty.bin", b"".to_vec(), 1_600_000_002),
+            ("dir/b.log", b"beta beta beta".to_vec(), 1_600_000_003),
+            ("dir/deep/c.dat", b"gamma-content".to_vec(), 1_600_000_004),
+        ],
+    );
+
+    // DESTINATION initiator; SOURCE responder — the roles flipped from the
+    // push data-plane test, the data plane following connection role.
+    let open = SessionOpen {
+        initiator_role: TransferRole::Destination as i32,
+        compare_mode: ComparisonMode::SizeMtime as i32,
+        in_stream_bytes: false,
+        ..Default::default()
+    };
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder, // binds + accepts + sends
+        plan_options: PlanOptions::default(),
+        data_plane_host: None, // a responder never dials
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(open), // dials + receives
+        data_plane_host: Some("127.0.0.1".into()),
+    };
+    let (a, b) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root.clone()));
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, a, source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        )
+    })
+    .await
+    .expect("session run timed out");
+
+    let summary = source_result.expect("source responder succeeds");
+    let outcome = dest_result.expect("destination initiator succeeds");
+    assert!(
+        !summary.in_stream_carrier_used,
+        "the pull data plane must ride TCP, not the in-stream carrier"
+    );
+    assert_eq!(
+        summary, outcome.summary,
+        "both ends must hold the same summary"
+    );
+    assert_eq!(outcome.summary.files_transferred, 4);
+    assert_eq!(
+        outcome.data_plane_streams,
+        Some(1),
+        "otp-5b-1 pull is single-stream (no resize until otp-5b-2)"
     );
     assert_trees_identical(&src_root, &dst_root);
 }
@@ -447,6 +524,7 @@ async fn build_mismatch_refused_under_both_initiators() {
                 contract_version: CONTRACT_VERSION,
             },
             endpoint: dest_endpoint,
+            data_plane_host: None,
         };
         let (a, b) = in_process_pair();
         let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -502,6 +580,7 @@ async fn contract_version_mismatch_is_refused() {
             contract_version: CONTRACT_VERSION + 1,
         },
         endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
@@ -542,6 +621,7 @@ async fn mirror_request_is_refused_until_its_slice_lands() {
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
@@ -593,6 +673,7 @@ async fn payload_record_before_manifest_complete_is_protocol_violation() {
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(
@@ -825,6 +906,7 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(

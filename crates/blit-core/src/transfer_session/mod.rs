@@ -130,6 +130,14 @@ pub struct SourceSessionConfig {
 pub struct DestinationSessionConfig {
     pub hello: HelloConfig,
     pub endpoint: SessionEndpoint,
+    /// Host to dial the granted TCP data plane on when this end is the
+    /// **initiator** (pull-equivalent, otp-5b): the DESTINATION initiator
+    /// dials the SOURCE responder's granted sockets on the same host it
+    /// reached the control plane on (contract §Transport: the initiator
+    /// always dials). `None` — or a DESTINATION responder, which binds
+    /// rather than dials — falls back to the in-stream carrier. Symmetric
+    /// with [`SourceSessionConfig::data_plane_host`].
+    pub data_plane_host: Option<String>,
 }
 
 /// A session-terminating fault: either end refusing, aborting, or
@@ -502,16 +510,18 @@ async fn responder_finish(
         },
         None => None,
     };
-    // Data plane (otp-4b): a DESTINATION responder binds a TCP
-    // listener and grants it, unless the initiator requested the
-    // in-stream carrier or the bind fails (grant-less accept ⇒
-    // in-stream fallback). A SOURCE responder (otp-5, daemon-send)
-    // grants no data plane in otp-5a — the transport/role decoupling
-    // that lets a SOURCE responder bind+grant lands at otp-5b.
-    let responder_data_plane = if local_role == TransferRole::Destination && !open.in_stream_bytes {
-        data_plane::prepare_responder_data_plane().await
-    } else {
+    // Data plane (otp-4b/5b): a responder binds a TCP listener and grants
+    // it, unless the initiator requested the in-stream carrier or the bind
+    // fails (grant-less accept ⇒ in-stream fallback). This is role-agnostic
+    // (otp-5b): the RESPONDER binds+accepts and the INITIATOR dials, while
+    // byte direction is set by role — a DESTINATION responder accepts+
+    // receives (push, otp-4b), a SOURCE responder accepts+sends (pull,
+    // otp-5b). The bound listener travels in `Negotiated.responder_data_plane`
+    // and is consumed by whichever role's driver runs.
+    let responder_data_plane = if open.in_stream_bytes {
         None
+    } else {
+        data_plane::prepare_responder_data_plane().await
     };
     let accept = SessionAccept {
         // The byte RECEIVER advertises capacity at session
@@ -675,7 +685,7 @@ pub async fn run_source(
     drive_source(
         cfg.plan_options,
         cfg.data_plane_host,
-        &negotiated,
+        negotiated,
         transport,
         source,
     )
@@ -690,10 +700,14 @@ pub async fn run_source(
 async fn drive_source(
     plan_options: PlanOptions,
     data_plane_host: Option<String>,
-    negotiated: &Negotiated,
+    mut negotiated: Negotiated,
     transport: FrameTransport,
     source: Arc<dyn TransferSource>,
 ) -> Result<TransferSummary> {
+    // A SOURCE responder (pull, otp-5b) carries a bound listener to accept
+    // its send sockets on; a SOURCE initiator (push) has none and dials the
+    // grant it received instead. Take it here so the send half owns it.
+    let responder_data_plane = negotiated.responder_data_plane.take();
     let (mut tx, rx) = transport.split();
     let sent: Arc<StdMutex<HashMap<String, FileHeader>>> = Arc::default();
     // Set by the send half the moment ManifestComplete goes out. On
@@ -715,7 +729,8 @@ async fn drive_source(
     match source_send_half(
         plan_options,
         data_plane_host.as_deref(),
-        negotiated,
+        &negotiated,
+        responder_data_plane,
         &mut tx,
         source,
         sent,
@@ -836,6 +851,7 @@ async fn source_send_half(
     plan_options: PlanOptions,
     data_plane_host: Option<&str>,
     negotiated: &Negotiated,
+    responder_data_plane: Option<data_plane::ResponderDataPlane>,
     tx: &mut Box<dyn FrameTx>,
     source: Arc<dyn TransferSource>,
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
@@ -845,31 +861,49 @@ async fn source_send_half(
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut need_complete = false;
 
-    // Data plane (otp-4b): dial the granted TCP sockets up front —
-    // BEFORE streaming the manifest — so the destination's accept loop
-    // (armed the moment it sent SessionAccept) sees the connections
-    // promptly rather than waiting out its bounded-accept timeout while
-    // a long manifest streams. The sockets sit idle (keepalive covers
-    // that) until payloads are queued below. `None` = the in-stream
-    // carrier (fallback), which needs no early setup.
-    let mut data_plane = match &negotiated.accept.data_plane {
-        Some(grant) => {
-            let host = data_plane_host.ok_or_else(|| {
-                eyre::Report::new(SessionFault::internal(
-                    "responder granted a TCP data plane but this initiator has no host to dial",
-                ))
-            })?;
-            Some(
-                data_plane::dial_source_data_plane(
-                    host,
-                    grant,
-                    negotiated.accept.receiver_capacity.as_ref(),
-                    Arc::clone(&source),
-                )
-                .await?,
+    // Data plane (otp-4b/5b): set up the send sockets up front — BEFORE
+    // streaming the manifest — so the peer sees the connections promptly
+    // rather than waiting out a bounded-accept/connect timeout while a long
+    // manifest streams. Which end connects depends on connection role
+    // (otp-5b): a SOURCE **responder** (pull) accepts sockets off its bound
+    // listener; a SOURCE **initiator** (push) dials the grant it received.
+    // Byte direction is the same either way (SOURCE sends), so both yield a
+    // `SourceDataPlane` driven identically below. `None` on both ⇒ the
+    // in-stream carrier (fallback), which needs no early setup.
+    let mut data_plane = match responder_data_plane {
+        // SOURCE responder (pull, otp-5b): accept + send. The DESTINATION
+        // initiator advertised its capacity in the open (byte RECEIVER
+        // advertises, wherever it initiates); the accept plane is single-
+        // stream (otp-5b-1).
+        Some(bound) => Some(
+            data_plane::accept_source_data_plane(
+                bound,
+                negotiated.open.receiver_capacity.as_ref(),
+                Arc::clone(&source),
             )
-        }
-        None => None,
+            .await?,
+        ),
+        // SOURCE initiator (push, otp-4b): dial the grant if the responder
+        // granted a data plane; else in-stream.
+        None => match &negotiated.accept.data_plane {
+            Some(grant) => {
+                let host = data_plane_host.ok_or_else(|| {
+                    eyre::Report::new(SessionFault::internal(
+                        "responder granted a TCP data plane but this initiator has no host to dial",
+                    ))
+                })?;
+                Some(
+                    data_plane::dial_source_data_plane(
+                        host,
+                        grant,
+                        negotiated.accept.receiver_capacity.as_ref(),
+                        Arc::clone(&source),
+                    )
+                    .await?,
+                )
+            }
+            None => None,
+        },
     };
 
     // sf-2 shape correction (otp-4b-2): running totals of the need list,
@@ -1471,7 +1505,13 @@ pub async fn run_destination(
         },
     };
 
-    drive_destination(&mut transport, negotiated, &dst_root).await
+    drive_destination(
+        &mut transport,
+        negotiated,
+        &dst_root,
+        cfg.data_plane_host.as_deref(),
+    )
+    .await
 }
 
 /// The DESTINATION session body: run the diff/receive loop and map a
@@ -1482,8 +1522,9 @@ async fn drive_destination(
     transport: &mut FrameTransport,
     negotiated: Negotiated,
     dst_root: &Path,
+    data_plane_host: Option<&str>,
 ) -> Result<DestinationOutcome> {
-    match destination_session(transport, negotiated, dst_root).await {
+    match destination_session(transport, negotiated, dst_root, data_plane_host).await {
         Ok(outcome) => Ok(outcome),
         Err(report) => {
             let mut fault = fault_from_report(report);
@@ -1553,7 +1594,9 @@ pub async fn run_responder(
                     }
                 },
             };
-            let outcome = drive_destination(&mut transport, negotiated, &dst_root).await?;
+            // A DESTINATION responder (push) binds+accepts its receive
+            // sockets — it never dials, so it needs no data-plane host.
+            let outcome = drive_destination(&mut transport, negotiated, &dst_root, None).await?;
             Ok(ResponderOutcome::Destination(outcome))
         }
         // Initiator DESTINATION ⇒ this end is SOURCE (pull-equivalent).
@@ -1585,10 +1628,11 @@ pub async fn run_responder(
                 }
             };
             // The SOURCE owns its planner knobs; a daemon-served source
-            // has no client-supplied ones (§Transport selection). otp-5a
-            // is in-stream only, so there is no data-plane host to dial.
+            // has no client-supplied ones (§Transport selection). A SOURCE
+            // responder binds+accepts its send sockets (otp-5b) — it never
+            // dials, so it needs no data-plane host.
             let summary =
-                drive_source(PlanOptions::default(), None, &negotiated, transport, source).await?;
+                drive_source(PlanOptions::default(), None, negotiated, transport, source).await?;
             Ok(ResponderOutcome::Source(summary))
         }
         TransferRole::Unspecified => Err(notify_and_wrap(
@@ -1609,6 +1653,7 @@ async fn destination_session(
     transport: &mut FrameTransport,
     negotiated: Negotiated,
     dst_root: &Path,
+    data_plane_host: Option<&str>,
 ) -> Result<DestinationOutcome> {
     let compare_mode = ComparisonMode::try_from(negotiated.open.compare_mode)
         .unwrap_or(ComparisonMode::Unspecified);
@@ -1651,31 +1696,56 @@ async fn destination_session(
     let mut granted: HashSet<String> = HashSet::new();
     let outstanding: data_plane::OutstandingNeeds = Arc::new(StdMutex::new(HashSet::new()));
 
-    // Data plane (otp-4b): when the responder granted a TCP data plane,
-    // payload bytes arrive on sockets (not the control lane). Arm the
-    // accept+receive task NOW — concurrent with the diff loop below, and
-    // before the source dials — so the connections are accepted promptly.
-    // The NeedListSink gives the socket receive the same need-list
-    // strictness the in-stream control loop applies inline. AbortOnDrop
-    // bounds it to this future: a control-lane fault that returns from
-    // this fn aborts the receive task instead of leaking it.
-    // `resize_live` tracks the stream count this end has granted (epoch-0
-    // plus each accepted resize ADD); `resize_ceiling` is the receiver's
-    // advertised max_streams, the cumulative bound a resize may not cross.
-    let (mut data_plane_recv, mut resize_live, resize_ceiling) =
-        match negotiated.responder_data_plane {
-            Some(rdp) => {
-                let initial = rdp.initial_streams() as usize;
-                let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
-                    Arc::clone(&sink) as Arc<dyn TransferSink>,
-                    Arc::clone(&outstanding),
-                ));
-                let run = rdp.spawn(recv_sink);
-                let ceiling = run.ceiling;
-                (Some(run), initial, ceiling)
+    // Data plane (otp-4b/5b): when a TCP data plane is in play, payload
+    // bytes arrive on sockets (not the control lane). Set it up NOW —
+    // concurrent with the diff loop below, and before the peer sends — so
+    // the connections are established promptly. Which end connects depends
+    // on connection role (otp-5b): a DESTINATION **responder** (push)
+    // accepts sockets off its bound listener; a DESTINATION **initiator**
+    // (pull) dials the grant it received on `data_plane_host`. Byte
+    // direction is the same either way (DESTINATION receives). The
+    // NeedListSink gives the socket receive the same need-list strictness
+    // the in-stream control loop applies inline; AbortOnDrop (inside the
+    // responder run) bounds the accept task to this future. `resize_live`
+    // tracks the stream count this end has granted (epoch-0 plus each
+    // accepted resize ADD) and `resize_ceiling` the receiver's advertised
+    // max_streams — both meaningful only for the resize-armable responder
+    // path (push); the pull initiator path is single-stream (otp-5b-1).
+    let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
+        Arc::clone(&sink) as Arc<dyn TransferSink>,
+        Arc::clone(&outstanding),
+    ));
+    let (mut data_plane_recv, mut resize_live, resize_ceiling) = match negotiated
+        .responder_data_plane
+    {
+        // DESTINATION responder (push, otp-4b): accept + receive.
+        Some(rdp) => {
+            let initial = rdp.initial_streams() as usize;
+            let run = rdp.spawn(recv_sink);
+            let ceiling = run.ceiling;
+            (
+                Some(data_plane::DestRecvPlane::Responder(run)),
+                initial,
+                ceiling,
+            )
+        }
+        // DESTINATION initiator (pull, otp-5b): dial + receive when the
+        // SOURCE responder granted a data plane and we have a host to
+        // dial; otherwise the in-stream carrier.
+        None => match (&negotiated.accept.data_plane, data_plane_host) {
+            (Some(grant), Some(host)) => {
+                let run = data_plane::dial_destination_data_plane(host, grant, recv_sink).await?;
+                // Single-stream (otp-5b-1): no resize is accepted, so
+                // the ceiling stays 0 and a Resize frame is a violation.
+                (
+                    Some(data_plane::DestRecvPlane::Initiator(run)),
+                    0usize,
+                    0usize,
+                )
             }
-            None => (None, 0usize, 0usize),
-        };
+            _ => (None, 0usize, 0usize),
+        },
+    };
 
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut needed_paths: Vec<String> = Vec::new();
@@ -1802,9 +1872,24 @@ async fn destination_session(
                 // and ack so the SOURCE dials the epoch-N socket. Only ADD
                 // occurs on the session (REMOVE is a tuner concern, future
                 // work); anything else fails fast.
-                let run = data_plane_recv.as_ref().ok_or_else(|| {
-                    violation("DataPlaneResize on a session with no data plane".into())
-                })?;
+                let run = match data_plane_recv.as_ref() {
+                    Some(data_plane::DestRecvPlane::Responder(run)) => run,
+                    // The pull data plane is single-stream (otp-5b-1): the
+                    // SOURCE responder never proposes a resize, so one here
+                    // is a protocol violation (otp-5b-2 adds the accept-based
+                    // epoch-N socket + dial).
+                    Some(data_plane::DestRecvPlane::Initiator(_)) => {
+                        return Err(violation(
+                            "DataPlaneResize on the single-stream pull data plane (otp-5b-1)"
+                                .into(),
+                        ))
+                    }
+                    None => {
+                        return Err(violation(
+                            "DataPlaneResize on a session with no data plane".into(),
+                        ))
+                    }
+                };
                 let op = DataPlaneResizeOp::try_from(resize.op)
                     .unwrap_or(DataPlaneResizeOp::Unspecified);
                 if op != DataPlaneResizeOp::Add {
