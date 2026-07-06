@@ -126,6 +126,34 @@ explicitly-deferred logging epic (F15).
       auto-enabling on TTY regardless of the flag is
       `docs/audit/findings/drift-principles.md`
       (`drift-spinner-vs-quiet-default-decision-conflict`).
+- [ ] **audit-17** Local `copy` aborts the entire transfer on one
+      filename the destination filesystem rejects, instead of
+      skipping/warning and continuing. Reported: `blit copy
+      /home/michael/ /run/media/michael/8247-7E92/michael -ypv`
+      failed enumerating ~88k entries in, at
+      `crates/blit-core/src/remote/transfer/sink.rs:605`
+      (`write_tar_shard_payload`'s parallel-write closure) —
+      `std::fs::create_dir_all` on a NuGet http-cache path whose
+      final component is `670c1461c...$ps:_api.nuget.org_v3_index.json`
+      returned `Invalid argument (os error 22)`. The source filename
+      is valid on the source (Linux/ext4) fs but contains a `:`,
+      which is illegal on FAT/exFAT/NTFS-strict destinations.
+      *Assumption, unverified — drive wasn't mounted to confirm:*
+      the destination (`/run/media/...`, hex volume label
+      `8247-7E92`, the classic Linux label format for an
+      unlabeled FAT-family volume) is exFAT or FAT32. Grepped
+      `crates/blit-core/src` for existing invalid-filename handling
+      (`os error 22`, `sanitize_name`, `illegal.*char`, etc.) — none
+      found; this is a real gap, not a regression. One bad name
+      currently kills the whole run rather than being
+      skipped/reported/renamed. Fix needs a design call (owner
+      input required, `plan` this before coding): per-file
+      skip-and-report vs. optional name-sanitization vs. fail-fast
+      with a clear top-level error instead of a raw `os error 22` +
+      internal path/line. Whatever is chosen must apply uniformly
+      to both the local-mirror and remote tar-shard receive paths
+      (same `write_tar_shard_payload` helper backs both, per
+      audit-16 above).
 
 ### Deferred design calls
 
