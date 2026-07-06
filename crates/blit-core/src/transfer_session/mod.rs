@@ -13,6 +13,7 @@
 //! progress wiring land at otp-4; mirror otp-6; resume otp-7;
 //! delegated otp-9 (see the slice list in the plan).
 
+mod data_plane;
 pub mod transport;
 
 use std::collections::{HashMap, HashSet};
@@ -115,6 +116,13 @@ pub struct SourceSessionConfig {
     /// source end — strategy selection is planner-owned and never
     /// crosses the wire (contract §Transport selection).
     pub plan_options: PlanOptions,
+    /// Host to dial the granted TCP data plane on (otp-4b). The
+    /// initiator connected the control plane to this host; the data
+    /// plane rides the same host on the granted port (contract
+    /// §Transport: the initiator always dials). `None` disables the
+    /// data plane at this end — a grant then faults, since the responder
+    /// is waiting to accept sockets that would never arrive.
+    pub data_plane_host: Option<String>,
 }
 
 pub struct DestinationSessionConfig {
@@ -350,12 +358,18 @@ fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), Ses
 /// Outcome of the HELLO + OPEN phases.
 struct Negotiated {
     open: SessionOpen,
-    #[allow(dead_code)] // capacity/grant consumed from otp-4b (data plane) on
+    /// The responder's reply. The SOURCE initiator reads
+    /// `accept.data_plane` to decide dial-vs-in-stream (otp-4b).
     accept: SessionAccept,
     /// The write root a Responder's [`OpenResolver`] produced from the
     /// received open, if one was supplied; `None` for an Initiator or a
     /// fixed-root Responder (the caller supplies the root then).
     resolved_root: Option<PathBuf>,
+    /// The bound data-plane listener + credentials a DESTINATION
+    /// Responder prepared before its `SessionAccept` (otp-4b). `None`
+    /// on an Initiator, or when the responder granted no data plane
+    /// (in-stream carrier). Consumed by the DESTINATION accept loop.
+    responder_data_plane: Option<data_plane::ResponderDataPlane>,
 }
 
 /// HELLO + OPEN/ACCEPT, one implementation both roles call (otp-3
@@ -433,6 +447,7 @@ async fn establish(
                 open,
                 accept,
                 resolved_root: None,
+                responder_data_plane: None,
             })
         }
         SessionEndpoint::Responder => {
@@ -496,6 +511,18 @@ async fn establish(
                 },
                 None => None,
             };
+            // Data plane (otp-4b): a DESTINATION responder binds a TCP
+            // listener and grants it, unless the initiator requested the
+            // in-stream carrier or the bind fails (grant-less accept ⇒
+            // in-stream fallback). A SOURCE responder (otp-5,
+            // daemon-send) will bind on its own branch later; otp-4b's
+            // responder is always the DESTINATION.
+            let responder_data_plane =
+                if local_role == TransferRole::Destination && !open.in_stream_bytes {
+                    data_plane::prepare_responder_data_plane().await
+                } else {
+                    None
+                };
             let accept = SessionAccept {
                 // The byte RECEIVER advertises capacity at session
                 // open (D-2026-06-20-1/-2); consumed by the dial when
@@ -505,14 +532,15 @@ async fn establish(
                 } else {
                     None
                 },
-                // No grant = in-stream byte carrier, otp-4a's only one.
-                data_plane: None,
+                // Grant present ⇒ TCP data plane; absent ⇒ in-stream.
+                data_plane: responder_data_plane.as_ref().map(|dp| dp.grant()),
             };
             transport.send(frame(Frame::Accept(accept.clone()))).await?;
             Ok(Negotiated {
                 open,
                 accept,
                 resolved_root,
+                responder_data_plane,
             })
         }
     }
@@ -734,6 +762,25 @@ async fn source_send_half(
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut need_complete = false;
 
+    // Data plane (otp-4b): dial the granted TCP sockets up front —
+    // BEFORE streaming the manifest — so the destination's accept loop
+    // (armed the moment it sent SessionAccept) sees the connections
+    // promptly rather than waiting out its bounded-accept timeout while
+    // a long manifest streams. The sockets sit idle (keepalive covers
+    // that) until payloads are queued below. `None` = the in-stream
+    // carrier (fallback), which needs no early setup.
+    let mut data_plane = match &negotiated.accept.data_plane {
+        Some(grant) => {
+            let host = cfg.data_plane_host.as_deref().ok_or_else(|| {
+                eyre::Report::new(SessionFault::internal(
+                    "responder granted a TCP data plane but this initiator has no host to dial",
+                ))
+            })?;
+            Some(data_plane::dial_source_data_plane(host, grant, Arc::clone(&source)).await?)
+        }
+        None => None,
+    };
+
     // Streaming manifest: entries go out as enumeration produces them
     // (immediate start in every direction — plan §Design 2). The open
     // carries no source path: the source end owns its local endpoint.
@@ -763,16 +810,33 @@ async fn source_send_half(
     .await?;
     manifest_sent.store(true, Ordering::Release);
 
-    // Payload phase. In-stream record grammar: payload records only
-    // after ManifestComplete, strictly serialized per record
-    // (contract §Transport selection). Needs accumulated while a
-    // record batch was being sent become the next planner batch.
-    let mut read_buf = vec![0u8; IN_STREAM_CHUNK];
+    // Payload phase. The byte carrier is either the TCP data plane
+    // (dialed above) or the in-stream record grammar (fallback). Needs
+    // accumulated while a batch was being sent become the next planner
+    // batch (contract §Transport selection); payloads only flow after
+    // ManifestComplete.
+    // The in-stream carrier reuses one read buffer across records; the
+    // data plane owns its own pooled buffers, so skip that allocation.
+    let mut read_buf = if data_plane.is_none() {
+        vec![0u8; IN_STREAM_CHUNK]
+    } else {
+        Vec::new()
+    };
     loop {
         drain_source_events(&mut events, &mut pending, &mut need_complete)?;
         if !pending.is_empty() {
             let batch = std::mem::take(&mut pending);
-            send_payload_records(tx, &source, cfg.plan_options, batch, &mut read_buf).await?;
+            match &mut data_plane {
+                Some(dp) => {
+                    let payloads =
+                        diff_planner::plan_push_payloads(batch, source.root(), cfg.plan_options)?;
+                    dp.queue(payloads).await?;
+                }
+                None => {
+                    send_payload_records(tx, &source, cfg.plan_options, batch, &mut read_buf)
+                        .await?;
+                }
+            }
             continue;
         }
         if need_complete {
@@ -788,6 +852,13 @@ async fn source_send_half(
                 )))
             }
         }
+    }
+
+    // Close the data plane BEFORE SourceDone so the destination's receive
+    // pipeline sees each socket's END record and completes; SourceDone on
+    // the control lane then lets the destination score and summarize.
+    if let Some(dp) = data_plane.take() {
+        dp.finish().await?;
     }
 
     tx.send(frame(Frame::SourceDone(SourceDone {}))).await?;
@@ -1003,7 +1074,7 @@ pub async fn run_destination(
         },
     };
 
-    match destination_session(&mut transport, &negotiated, &dst_root).await {
+    match destination_session(&mut transport, negotiated, &dst_root).await {
         Ok(outcome) => Ok(outcome),
         Err(report) => {
             let mut fault = fault_from_report(report);
@@ -1022,7 +1093,7 @@ fn violation(message: String) -> eyre::Report {
 
 async fn destination_session(
     transport: &mut FrameTransport,
-    negotiated: &Negotiated,
+    negotiated: Negotiated,
     dst_root: &Path,
 ) -> Result<DestinationOutcome> {
     let compare_mode = ComparisonMode::try_from(negotiated.open.compare_mode)
@@ -1034,8 +1105,9 @@ async fn destination_session(
     };
     // src_root is only consumed by local File payloads, which never
     // occur on a session destination (payload bytes arrive as records
-    // and go through the stream/tar write paths).
-    let sink = FsTransferSink::new(
+    // and go through the stream/tar write paths). `Arc` so the data-plane
+    // receive task (otp-4b) can share the one sink across sockets.
+    let sink = Arc::new(FsTransferSink::new(
         PathBuf::new(),
         dst_root.to_path_buf(),
         FsSinkConfig {
@@ -1045,11 +1117,22 @@ async fn destination_session(
             resume: false,
             compare_mode,
         },
-    );
+    ));
     // Same canonical-containment chokepoint the sink write paths use
     // (R46-F3), applied to diff stats so a hostile manifest path can't
     // make the destination stat outside its root.
     let canonical_dst_root = crate::path_safety::canonical_dest_root(dst_root).ok();
+
+    // Data plane (otp-4b): when the responder granted a TCP data plane,
+    // payload bytes arrive on sockets (not the control lane). Arm the
+    // accept+receive task NOW — concurrent with the diff loop below, and
+    // before the source dials — so the connections are accepted promptly.
+    // AbortOnDrop bounds it to this future: a control-lane fault that
+    // returns from this fn aborts the receive task instead of leaking it.
+    let mut data_plane_recv = negotiated.responder_data_plane.map(|rdp| {
+        let sink: Arc<dyn TransferSink> = Arc::clone(&sink) as Arc<dyn TransferSink>;
+        AbortOnDrop::new(tokio::spawn(rdp.accept_and_receive(sink)))
+    });
 
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut outstanding: HashSet<String> = HashSet::new();
@@ -1115,6 +1198,15 @@ async fn destination_session(
                 manifest_complete = true;
             }
             Some(Frame::FileBegin(header)) => {
+                // Payload records ride the control lane only under the
+                // in-stream carrier; with a TCP data plane active they
+                // flow over the sockets, so one here is a violation.
+                if data_plane_recv.is_some() {
+                    return Err(violation(format!(
+                        "file record '{}' on the control lane while a TCP data plane is active",
+                        header.relative_path
+                    )));
+                }
                 if !manifest_complete {
                     return Err(violation(format!(
                         "payload record for '{}' before ManifestComplete",
@@ -1132,6 +1224,12 @@ async fn destination_session(
                 bytes_written += outcome.bytes_written;
             }
             Some(Frame::TarShardHeader(shard)) => {
+                if data_plane_recv.is_some() {
+                    return Err(violation(
+                        "tar shard record on the control lane while a TCP data plane is active"
+                            .into(),
+                    ));
+                }
                 if !manifest_complete {
                     return Err(violation("tar shard record before ManifestComplete".into()));
                 }
@@ -1151,17 +1249,45 @@ async fn destination_session(
                 if !manifest_complete {
                     return Err(violation("SourceDone before ManifestComplete".into()));
                 }
-                if !outstanding.is_empty() {
-                    return Err(violation(format!(
-                        "SourceDone with {} needed file(s) never sent",
-                        outstanding.len()
-                    )));
-                }
+                // Carrier-specific completion. In-stream: every payload
+                // was consumed inline, so the need set must be fully
+                // drained. Data plane: payloads rode the sockets (the
+                // control lane never removed them from `outstanding`), so
+                // join the receive task for the authoritative counts and
+                // verify it delivered exactly the need list.
+                let in_stream_carrier_used = match data_plane_recv.take() {
+                    Some(recv) => {
+                        let outcome = recv.join().await.map_err(|err| {
+                            eyre::Report::new(SessionFault::internal(format!(
+                                "data-plane receive task panicked: {err}"
+                            )))
+                        })??;
+                        files_written = outcome.files_written as u64;
+                        bytes_written = outcome.bytes_written;
+                        if files_written != needed_paths.len() as u64 {
+                            return Err(violation(format!(
+                                "data plane delivered {} of {} needed file(s) before SourceDone",
+                                files_written,
+                                needed_paths.len()
+                            )));
+                        }
+                        false
+                    }
+                    None => {
+                        if !outstanding.is_empty() {
+                            return Err(violation(format!(
+                                "SourceDone with {} needed file(s) never sent",
+                                outstanding.len()
+                            )));
+                        }
+                        true
+                    }
+                };
                 let summary = TransferSummary {
                     files_transferred: files_written,
                     bytes_transferred: bytes_written,
                     entries_deleted: 0, // mirror lands at otp-6
-                    in_stream_carrier_used: true,
+                    in_stream_carrier_used,
                     files_resumed: 0, // resume lands at otp-7
                 };
                 transport.send(frame(Frame::Summary(summary))).await?;

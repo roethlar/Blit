@@ -28,7 +28,7 @@ use crate::transfer_plan::PlanOptions;
 use crate::transfer_session::transport::{grpc_client_transport, GRPC_CHANNEL_FRAMES};
 use crate::transfer_session::{run_source, HelloConfig, SessionEndpoint, SourceSessionConfig};
 
-/// The push-shaped subset of session options otp-4a supports. Mirror,
+/// The push-shaped subset of session options otp-4a/4b supports. Mirror,
 /// filters, and resume are refused at OPEN until their slices land
 /// (otp-6/otp-7), so they are intentionally absent here.
 pub struct PushSessionOptions {
@@ -36,6 +36,11 @@ pub struct PushSessionOptions {
     pub ignore_existing: bool,
     pub require_complete_scan: bool,
     pub plan_options: PlanOptions,
+    /// Force the in-stream byte carrier instead of the TCP data plane
+    /// (otp-4b). Default `false` = the responder grants a data plane and
+    /// payloads ride TCP sockets; `true` is the diagnostics / unreachable
+    /// data-plane fallback (`--force-grpc`-shaped).
+    pub in_stream_bytes: bool,
 }
 
 impl Default for PushSessionOptions {
@@ -45,6 +50,7 @@ impl Default for PushSessionOptions {
             ignore_existing: false,
             require_complete_scan: false,
             plan_options: PlanOptions::default(),
+            in_stream_bytes: false,
         }
     }
 }
@@ -82,9 +88,9 @@ pub async fn run_push_session(
         compare_mode: options.compare_mode as i32,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
-        // otp-4a: in-stream byte carrier only; the TCP data plane
-        // grant lands at otp-4b.
-        in_stream_bytes: true,
+        // otp-4b: default to the TCP data plane; the responder grants it
+        // in SessionAccept unless this asks for the in-stream fallback.
+        in_stream_bytes: options.in_stream_bytes,
         ..Default::default()
     };
 
@@ -104,6 +110,9 @@ pub async fn run_push_session(
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
         plan_options: options.plan_options,
+        // The initiator dials the data plane on the same host it reached
+        // the control plane on (contract §Transport: initiator dials).
+        data_plane_host: Some(endpoint.host.clone()),
     };
     run_source(cfg, transport, source).await
 }

@@ -1,12 +1,16 @@
-//! ONE_TRANSFER_PATH otp-4a loopback e2e: the daemon serves the unified
-//! `Transfer` session and a real client initiates it as SOURCE over
-//! gRPC (in-stream carrier). These tests replace the otp-1 UNIMPLEMENTED
-//! pin — the RPC now serves — and pin the push-equivalent behavior:
+//! ONE_TRANSFER_PATH otp-4a/4b loopback e2e: the daemon serves the
+//! unified `Transfer` session and a real client initiates it as SOURCE
+//! over gRPC. otp-4b makes the default carrier the **TCP data plane**
+//! (the responder grants it in `SessionAccept`, the client dials +
+//! authenticates + sends payloads over sockets); the in-stream carrier
+//! stays live as the requested fallback. These tests pin the
+//! push-equivalent behavior over both carriers:
 //!
-//! - a session lands bytes byte-identically and scores them correctly;
+//! - a session lands bytes byte-identically and scores them correctly,
+//!   over the data plane and over the in-stream fallback;
 //! - **A/B parity**: the same fixture through OLD push and the NEW
-//!   session yields byte-identical destination trees + equal shared
-//!   summary counters (the converge-up bar, in-stream);
+//!   session (data plane) yields byte-identical destination trees +
+//!   equal shared summary counters (the converge-up bar);
 //! - responder refusals (read-only module, unknown module) arrive as
 //!   `SessionError` frames, surfaced to the client as faults;
 //! - the unified SizeMtime semantic: a same-size destination file that
@@ -193,11 +197,13 @@ fn fault_of(err: &eyre::Report) -> &SessionFault {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn session_lands_bytes_and_scores_them() {
+async fn session_lands_bytes_over_the_data_plane() {
     let daemon = Daemon::start(false).await;
     let src = tempfile::tempdir().unwrap();
     write_tree(src.path(), &small_tree());
 
+    // Default options ⇒ TCP data plane: the responder grants it and the
+    // client dials + sends payloads over sockets (otp-4b).
     let source = Arc::new(FsTransferSource::new(src.path().to_path_buf()));
     let summary = run_push_session(&daemon.endpoint, source, PushSessionOptions::default())
         .await
@@ -212,8 +218,38 @@ async fn session_lands_bytes_and_scores_them() {
             .sum::<u64>()
     );
     assert!(
+        !summary.in_stream_carrier_used,
+        "otp-4b default rides the TCP data plane, not the in-stream carrier"
+    );
+    assert_trees_identical(src.path(), &daemon.dest_root);
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_lands_bytes_over_in_stream_carrier() {
+    // The in-stream carrier is the fallback (diagnostics / unreachable
+    // data plane). Requesting it must still land bytes byte-identically
+    // and score them — the otp-4a path stays live under otp-4b.
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &small_tree());
+
+    let source = Arc::new(FsTransferSource::new(src.path().to_path_buf()));
+    let summary = run_push_session(
+        &daemon.endpoint,
+        source,
+        PushSessionOptions {
+            in_stream_bytes: true,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("in-stream session push succeeds");
+
+    assert_eq!(summary.files_transferred, small_tree().len() as u64);
+    assert!(
         summary.in_stream_carrier_used,
-        "otp-4a rides the in-stream carrier"
+        "an in_stream_bytes request rides the in-stream carrier"
     );
     assert_trees_identical(src.path(), &daemon.dest_root);
     daemon.stop().await;

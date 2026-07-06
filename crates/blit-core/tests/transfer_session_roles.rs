@@ -120,6 +120,7 @@ async fn run_session(
         hello: HelloConfig::default(),
         endpoint: source_endpoint,
         plan_options,
+        data_plane_host: None,
     };
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
@@ -371,6 +372,7 @@ async fn build_mismatch_refused_under_both_initiators() {
             },
             endpoint: source_endpoint,
             plan_options: PlanOptions::default(),
+            data_plane_host: None,
         };
         let dest_cfg = DestinationSessionConfig {
             hello: HelloConfig {
@@ -425,6 +427,7 @@ async fn contract_version_mismatch_is_refused() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
+        data_plane_host: None,
     };
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig {
@@ -467,6 +470,7 @@ async fn mirror_request_is_refused_until_its_slice_lands() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
         plan_options: PlanOptions::default(),
+        data_plane_host: None,
     };
     let dest_cfg = DestinationSessionConfig {
         hello: HelloConfig::default(),
@@ -588,6 +592,7 @@ async fn need_for_unknown_path_faults_the_source() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
+        data_plane_host: None,
     };
     let (source_transport, mut peer) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
@@ -641,6 +646,7 @@ async fn resume_flagged_need_is_refused_in_non_resume_session() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
+        data_plane_host: None,
     };
     let (source_transport, mut peer) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
@@ -699,6 +705,7 @@ async fn need_complete_before_manifest_complete_faults_the_source() {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
+        data_plane_host: None,
     };
     let (source_transport, mut peer) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
