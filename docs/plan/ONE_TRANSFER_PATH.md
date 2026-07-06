@@ -273,7 +273,8 @@ otp-9 deletes them.
    reruns with no per-direction test code.
 6. **otp-6 mirror + filters** on the session (one delete rule).
 7. **otp-7 resume** block phase (ordering + stale-partial pins per
-   the Design's RELIABLE exception).
+   the Design's RELIABLE exception). Slice design: `docs/plan/OTP7_RESUME.md`
+   (staged 7a in-stream / 7b data-plane).
 8. **otp-8 fallback byte-carrier** (control-stream frames) as the
    session's alternate transport.
 9. **otp-9 delegated transfer** = daemon-initiated session; bespoke
