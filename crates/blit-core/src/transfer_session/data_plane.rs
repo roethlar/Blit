@@ -17,9 +17,11 @@
 //! data plane always starts single-stream and grows only via
 //! SOURCE-driven resize, which lands at otp-4b-2.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 
+use async_trait::async_trait;
 use eyre::Result;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -30,19 +32,27 @@ use crate::buffer::BufferPool;
 use crate::engine::{
     initial_stream_proposal, local_receiver_capacity, DIAL_FLOOR_CHUNK_BYTES, DIAL_FLOOR_PREFETCH,
 };
-use crate::generated::{session_error::Code, DataPlaneGrant};
-use crate::remote::transfer::payload::TransferPayload;
+use crate::generated::{session_error::Code, DataPlaneGrant, FileHeader};
+use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
 use crate::remote::transfer::pipeline::execute_receive_pipeline;
 use crate::remote::transfer::sink::{DataPlaneSink, SinkOutcome, TransferSink};
 use crate::remote::transfer::socket::{
     configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT,
 };
 use crate::remote::transfer::source::TransferSource;
+use crate::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::{
     execute_sink_pipeline_streaming, generate_sub_token, AbortOnDrop, DataPlaneSession,
 };
 
 use super::SessionFault;
+
+/// The set of granted-but-not-yet-received needs, shared between the
+/// destination's control loop (which inserts each path before sending
+/// its `NeedBatch`) and the data-plane receive (which claims each path
+/// as its payload lands). Completion is an empty set — the same signal
+/// the in-stream carrier uses via its inline `outstanding.remove`.
+pub(super) type OutstandingNeeds = Arc<StdMutex<HashSet<String>>>;
 
 /// Dial values for the session data plane. otp-4b-1 has no live dial
 /// tuner, so it runs at the engine floor — the conservative start the
@@ -148,9 +158,16 @@ impl ResponderDataPlane {
 
         let mut receives: JoinSet<Result<SinkOutcome>> = JoinSet::new();
         for _ in 0..self.initial_streams {
-            let mut socket = accept_authenticated(&self.listener, &expected).await?;
+            let socket = accept_authenticated(&self.listener, &expected).await?;
             let sink = Arc::clone(&sink);
-            receives.spawn(async move { execute_receive_pipeline(&mut socket, sink, None).await });
+            receives.spawn(async move {
+                // Read-side StallGuard (carried REV4 RELIABLE invariant,
+                // matching the old push receive): a peer that authenticates
+                // then stalls mid-record trips the transfer stall timeout
+                // instead of pinning this task until TCP keepalive.
+                let mut guarded = StallGuard::new(socket, TRANSFER_STALL_TIMEOUT);
+                execute_receive_pipeline(&mut guarded, sink, None).await
+            });
         }
 
         let mut total = SinkOutcome::default();
@@ -308,6 +325,91 @@ impl SourceDataPlane {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Need-list enforcement for the data-plane receive
+// ---------------------------------------------------------------------------
+
+/// Sink decorator that enforces the session's need-list contract on the
+/// data-plane receive, giving it the SAME strictness the in-stream
+/// carrier applies inline in the control loop (`outstanding.remove`).
+/// `execute_receive_pipeline` writes socket-provided paths directly, so
+/// without this a peer could substitute an off-need-list path for a
+/// needed one (count-preserving), duplicate one, or send resume block
+/// records the non-resume session never negotiated (codex otp-4b-1 F1).
+/// Every written path must be a granted, not-yet-received need; resume
+/// block records are rejected outright. The shared [`OutstandingNeeds`]
+/// set makes completion `is_empty()` for both carriers.
+pub(super) struct NeedListSink {
+    inner: Arc<dyn TransferSink>,
+    outstanding: OutstandingNeeds,
+}
+
+impl NeedListSink {
+    pub(super) fn new(inner: Arc<dyn TransferSink>, outstanding: OutstandingNeeds) -> Self {
+        Self { inner, outstanding }
+    }
+
+    /// Remove `path` from the outstanding set, or fault: a path that is
+    /// not present is either off the need list or a duplicate delivery.
+    fn claim(&self, path: &str) -> Result<()> {
+        if self
+            .outstanding
+            .lock()
+            .expect("outstanding-needs lock poisoned")
+            .remove(path)
+        {
+            Ok(())
+        } else {
+            Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!(
+                    "data-plane payload for '{path}' which is not an outstanding need \
+                 (off the need list, or a duplicate delivery)"
+                ),
+            )))
+        }
+    }
+}
+
+#[async_trait]
+impl TransferSink for NeedListSink {
+    async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
+        match &payload {
+            PreparedPayload::File(header) => self.claim(&header.relative_path)?,
+            PreparedPayload::TarShard { headers, .. } => {
+                for header in headers {
+                    self.claim(&header.relative_path)?;
+                }
+            }
+            // The session did not negotiate resume (otp-7), so a block
+            // record on the data plane is a protocol violation, not a
+            // silently-applied patch.
+            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    "resume block record on the data plane of a non-resume session",
+                )));
+            }
+        }
+        self.inner.write_payload(payload).await
+    }
+
+    async fn write_file_stream(
+        &self,
+        header: &FileHeader,
+        reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<SinkOutcome> {
+        self.claim(&header.relative_path)?;
+        self.inner.write_file_stream(header, reader).await
+    }
+
+    async fn finish(&self) -> Result<()> {
+        self.inner.finish().await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +437,59 @@ mod tests {
             "session token and epoch-0 sub-token are independent credentials"
         );
         assert_ne!(grant.tcp_port, 0, "a real ephemeral port is granted");
+    }
+
+    /// codex otp-4b-1 F1: the data-plane receive must enforce the same
+    /// need-list contract the in-stream carrier does inline. A path not
+    /// on the outstanding set, a duplicate delivery, and a resume block
+    /// record (non-resume session) all fault; a granted path claims once.
+    #[tokio::test]
+    async fn need_list_sink_enforces_membership_and_rejects_blocks() {
+        use crate::remote::transfer::sink::NullSink;
+
+        let outstanding: OutstandingNeeds =
+            Arc::new(StdMutex::new(HashSet::from(["a.txt".to_string()])));
+        let sink = NeedListSink::new(Arc::new(NullSink::new()), Arc::clone(&outstanding));
+
+        let file = |path: &str| {
+            PreparedPayload::File(FileHeader {
+                relative_path: path.to_string(),
+                ..Default::default()
+            })
+        };
+
+        // Off-need-list path faults with a SessionFault.
+        let err = sink
+            .write_payload(file("evil.txt"))
+            .await
+            .expect_err("off-need-list path must fault");
+        assert!(
+            err.downcast_ref::<SessionFault>().is_some(),
+            "off-list rejection is a SessionFault: {err:#}"
+        );
+
+        // Granted need claims exactly once; a duplicate then faults.
+        sink.write_payload(file("a.txt"))
+            .await
+            .expect("granted need writes");
+        assert!(
+            outstanding.lock().expect("lock").is_empty(),
+            "claimed need is removed from the outstanding set"
+        );
+        let _ = sink
+            .write_payload(file("a.txt"))
+            .await
+            .expect_err("duplicate delivery must fault");
+
+        // Resume block records are rejected in a non-resume session.
+        let _ = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "a.txt".to_string(),
+                total_size: 0,
+                mtime_seconds: 0,
+                permissions: 0,
+            })
+            .await
+            .expect_err("resume block on a non-resume session must fault");
     }
 }

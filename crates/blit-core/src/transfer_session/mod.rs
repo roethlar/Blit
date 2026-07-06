@@ -1123,19 +1123,31 @@ async fn destination_session(
     // make the destination stat outside its root.
     let canonical_dst_root = crate::path_safety::canonical_dest_root(dst_root).ok();
 
+    // Granted-but-not-yet-received needs, shared across both carriers:
+    // the control loop inserts each path before sending its NeedBatch,
+    // the in-stream arms claim inline, and the data-plane NeedListSink
+    // claims as payloads land. Completion is `is_empty()` for both
+    // (codex otp-4b-1 F1: a count proxy let a peer substitute or
+    // duplicate paths — set membership is the real contract).
+    let outstanding: data_plane::OutstandingNeeds = Arc::new(StdMutex::new(HashSet::new()));
+
     // Data plane (otp-4b): when the responder granted a TCP data plane,
     // payload bytes arrive on sockets (not the control lane). Arm the
     // accept+receive task NOW — concurrent with the diff loop below, and
     // before the source dials — so the connections are accepted promptly.
-    // AbortOnDrop bounds it to this future: a control-lane fault that
-    // returns from this fn aborts the receive task instead of leaking it.
+    // The NeedListSink gives the socket receive the same need-list
+    // strictness the in-stream control loop applies inline. AbortOnDrop
+    // bounds it to this future: a control-lane fault that returns from
+    // this fn aborts the receive task instead of leaking it.
     let mut data_plane_recv = negotiated.responder_data_plane.map(|rdp| {
-        let sink: Arc<dyn TransferSink> = Arc::clone(&sink) as Arc<dyn TransferSink>;
-        AbortOnDrop::new(tokio::spawn(rdp.accept_and_receive(sink)))
+        let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
+            Arc::clone(&sink) as Arc<dyn TransferSink>,
+            Arc::clone(&outstanding),
+        ));
+        AbortOnDrop::new(tokio::spawn(rdp.accept_and_receive(recv_sink)))
     });
 
     let mut pending: Vec<FileHeader> = Vec::new();
-    let mut outstanding: HashSet<String> = HashSet::new();
     let mut needed_paths: Vec<String> = Vec::new();
     let mut manifest_complete = false;
     let mut files_written: u64 = 0;
@@ -1167,7 +1179,7 @@ async fn destination_session(
                         dst_root,
                         canonical_dst_root.as_deref(),
                         &compare_opts,
-                        &mut outstanding,
+                        &outstanding,
                         &mut needed_paths,
                     )
                     .await?;
@@ -1186,7 +1198,7 @@ async fn destination_session(
                     dst_root,
                     canonical_dst_root.as_deref(),
                     &compare_opts,
-                    &mut outstanding,
+                    &outstanding,
                     &mut needed_paths,
                 )
                 .await?;
@@ -1213,7 +1225,11 @@ async fn destination_session(
                         header.relative_path
                     )));
                 }
-                if !outstanding.remove(&header.relative_path) {
+                if !outstanding
+                    .lock()
+                    .expect("outstanding-needs lock poisoned")
+                    .remove(&header.relative_path)
+                {
                     return Err(violation(format!(
                         "payload for '{}' which is not on the need list",
                         header.relative_path
@@ -1233,12 +1249,15 @@ async fn destination_session(
                 if !manifest_complete {
                     return Err(violation("tar shard record before ManifestComplete".into()));
                 }
-                for h in &shard.files {
-                    if !outstanding.remove(&h.relative_path) {
-                        return Err(violation(format!(
-                            "tar shard entry '{}' which is not on the need list",
-                            h.relative_path
-                        )));
+                {
+                    let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
+                    for h in &shard.files {
+                        if !out.remove(&h.relative_path) {
+                            return Err(violation(format!(
+                                "tar shard entry '{}' which is not on the need list",
+                                h.relative_path
+                            )));
+                        }
                     }
                 }
                 let outcome = receive_tar_record(transport, &sink, shard).await?;
@@ -1249,12 +1268,14 @@ async fn destination_session(
                 if !manifest_complete {
                     return Err(violation("SourceDone before ManifestComplete".into()));
                 }
-                // Carrier-specific completion. In-stream: every payload
-                // was consumed inline, so the need set must be fully
-                // drained. Data plane: payloads rode the sockets (the
-                // control lane never removed them from `outstanding`), so
-                // join the receive task for the authoritative counts and
-                // verify it delivered exactly the need list.
+                // Completion, both carriers: the shared `outstanding`
+                // set must be empty (every granted need claimed exactly
+                // once). In-stream claims inline above; the data-plane
+                // NeedListSink claims as payloads land, so joining the
+                // receive task first drains the last of them (and
+                // surfaces any receive error / stall). Set membership —
+                // not a file count — is the contract (codex F1: a count
+                // proxy let a peer substitute or duplicate paths).
                 let in_stream_carrier_used = match data_plane_recv.take() {
                     Some(recv) => {
                         let outcome = recv.join().await.map_err(|err| {
@@ -1264,25 +1285,19 @@ async fn destination_session(
                         })??;
                         files_written = outcome.files_written as u64;
                         bytes_written = outcome.bytes_written;
-                        if files_written != needed_paths.len() as u64 {
-                            return Err(violation(format!(
-                                "data plane delivered {} of {} needed file(s) before SourceDone",
-                                files_written,
-                                needed_paths.len()
-                            )));
-                        }
                         false
                     }
-                    None => {
-                        if !outstanding.is_empty() {
-                            return Err(violation(format!(
-                                "SourceDone with {} needed file(s) never sent",
-                                outstanding.len()
-                            )));
-                        }
-                        true
-                    }
+                    None => true,
                 };
+                let unfulfilled = outstanding
+                    .lock()
+                    .expect("outstanding-needs lock poisoned")
+                    .len();
+                if unfulfilled != 0 {
+                    return Err(violation(format!(
+                        "SourceDone with {unfulfilled} needed file(s) never delivered"
+                    )));
+                }
                 let summary = TransferSummary {
                     files_transferred: files_written,
                     bytes_transferred: bytes_written,
@@ -1324,7 +1339,7 @@ async fn diff_chunk_and_send_needs(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     compare_opts: &CompareOptions,
-    outstanding: &mut HashSet<String>,
+    outstanding: &data_plane::OutstandingNeeds,
     needed_paths: &mut Vec<String>,
 ) -> Result<()> {
     if chunk.is_empty() {
@@ -1345,19 +1360,26 @@ async fn diff_chunk_and_send_needs(
     .await
     .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
 
-    let entries: Vec<NeedEntry> = needed
-        .into_iter()
-        // A path the source manifests twice is diffed twice but
-        // needed at most once.
-        .filter(|path| outstanding.insert(path.clone()))
-        .map(|relative_path| {
-            needed_paths.push(relative_path.clone());
-            NeedEntry {
-                relative_path,
-                resume: false, // resume lands at otp-7
-            }
-        })
-        .collect();
+    // Insert each granted path BEFORE the NeedBatch goes out: the source
+    // can only send a payload after receiving its need, so this
+    // insert-before-send orders the data-plane receive's `claim` after
+    // the insert (no race on the shared set).
+    let entries: Vec<NeedEntry> = {
+        let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
+        needed
+            .into_iter()
+            // A path the source manifests twice is diffed twice but
+            // needed at most once.
+            .filter(|path| out.insert(path.clone()))
+            .map(|relative_path| {
+                needed_paths.push(relative_path.clone());
+                NeedEntry {
+                    relative_path,
+                    resume: false, // resume lands at otp-7
+                }
+            })
+            .collect()
+    };
     if entries.is_empty() {
         return Ok(());
     }
