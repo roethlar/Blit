@@ -58,3 +58,32 @@ gate green (fmt/clippy/test **1512/0**); guard proof on the F1 test
 (`need_list_sink_enforces_membership_and_rejects_blocks` fails with
 `claim()` neutered). Re-review of `e1aafcc` requested (the fix added
 shared-set concurrency + a sink decorator — non-trivial).
+
+## Re-review of `e1aafcc` — 1 High — ACCEPTED (real)
+
+raw: `.review/results/otp-4b1-data-plane.fix-review.codex.md`.
+
+Codex: `outstanding` now serves double duty — ever-granted DEDUP (the
+`insert` filter in `diff_chunk_and_send_needs`) AND not-yet-delivered
+COMPLETION (claimed by `NeedListSink`). On the data plane the source
+sends payloads for earlier NeedBatches while the destination is still
+diffing later manifest chunks, so a `claim` (remove) races an `insert`
+(grant): for a DUPLICATED manifest path, the claim can remove the first
+grant before the second chunk's `insert` runs, letting it re-grant the
+same path — breaking "needed at most once" (duplicate delivery / false
+unfulfilled need, timing-dependent).
+
+Verified: real. The in-stream carrier is safe only because its phase
+ordering sends every need before any payload (grant and claim never
+overlap); the data plane's immediate-start payloads break that, which my
+shared-set fix did not account for.
+
+Fix (codex option a): split the concerns. A monotonic, control-loop-LOCAL
+`granted` set does dedup (insert-only, never removed → a concurrent claim
+cannot re-open a grant); the shared `outstanding` set is purely
+completion (inserted for freshly-granted paths before the NeedBatch,
+claimed by both carriers, `is_empty()` at SourceDone). `granted` is
+touched only by the single control-loop task, so it needs no lock.
+
+## Fix-of-fix commit
+(sha appended after the fix lands + re-gate.)

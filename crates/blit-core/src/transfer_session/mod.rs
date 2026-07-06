@@ -1123,12 +1123,18 @@ async fn destination_session(
     // make the destination stat outside its root.
     let canonical_dst_root = crate::path_safety::canonical_dest_root(dst_root).ok();
 
-    // Granted-but-not-yet-received needs, shared across both carriers:
-    // the control loop inserts each path before sending its NeedBatch,
-    // the in-stream arms claim inline, and the data-plane NeedListSink
-    // claims as payloads land. Completion is `is_empty()` for both
-    // (codex otp-4b-1 F1: a count proxy let a peer substitute or
-    // duplicate paths — set membership is the real contract).
+    // Two sets, deliberately separate (codex otp-4b-1 fix-review F1):
+    // `granted` is the ever-granted DEDUP set — control-loop-local,
+    // insert-only, never removed, so a concurrent data-plane claim can
+    // never re-open a grant (a duplicate manifest path is granted at
+    // most once regardless of delivery timing). `outstanding` is the
+    // not-yet-delivered COMPLETION set — inserted for each freshly
+    // granted path before its NeedBatch, claimed by both carriers (the
+    // in-stream arms inline, the data-plane NeedListSink as payloads
+    // land), and empty at SourceDone. A count proxy was insufficient
+    // (F1); merging the two into one set raced the data-plane claim
+    // against the diff (fix-review F1).
+    let mut granted: HashSet<String> = HashSet::new();
     let outstanding: data_plane::OutstandingNeeds = Arc::new(StdMutex::new(HashSet::new()));
 
     // Data plane (otp-4b): when the responder granted a TCP data plane,
@@ -1179,6 +1185,7 @@ async fn destination_session(
                         dst_root,
                         canonical_dst_root.as_deref(),
                         &compare_opts,
+                        &mut granted,
                         &outstanding,
                         &mut needed_paths,
                     )
@@ -1198,6 +1205,7 @@ async fn destination_session(
                     dst_root,
                     canonical_dst_root.as_deref(),
                     &compare_opts,
+                    &mut granted,
                     &outstanding,
                     &mut needed_paths,
                 )
@@ -1339,6 +1347,12 @@ async fn diff_chunk_and_send_needs(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     compare_opts: &CompareOptions,
+    // Ever-granted DEDUP set (control-loop-local, insert-only): a path
+    // the source manifests twice is granted at most once, and because it
+    // is never removed, a concurrent data-plane claim can't re-open the
+    // grant (fix-review F1).
+    granted: &mut HashSet<String>,
+    // Not-yet-delivered COMPLETION set (shared with the receive).
     outstanding: &data_plane::OutstandingNeeds,
     needed_paths: &mut Vec<String>,
 ) -> Result<()> {
@@ -1360,19 +1374,22 @@ async fn diff_chunk_and_send_needs(
     .await
     .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
 
-    // Insert each granted path BEFORE the NeedBatch goes out: the source
-    // can only send a payload after receiving its need, so this
-    // insert-before-send orders the data-plane receive's `claim` after
-    // the insert (no race on the shared set).
+    // Dedup on the ever-granted set (no lock — control-loop-local), then
+    // insert the freshly granted paths into the shared `outstanding`
+    // completion set BEFORE the NeedBatch goes out. The source can only
+    // send a payload after receiving its need, so insert-before-send
+    // orders the data-plane receive's `claim` strictly after this insert.
+    let fresh: Vec<String> = needed
+        .into_iter()
+        .filter(|path| granted.insert(path.clone()))
+        .collect();
     let entries: Vec<NeedEntry> = {
         let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
-        needed
+        fresh
             .into_iter()
-            // A path the source manifests twice is diffed twice but
-            // needed at most once.
-            .filter(|path| out.insert(path.clone()))
             .map(|relative_path| {
                 needed_paths.push(relative_path.clone());
+                out.insert(relative_path.clone());
                 NeedEntry {
                     relative_path,
                     resume: false, // resume lands at otp-7
