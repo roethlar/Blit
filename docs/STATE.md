@@ -1,11 +1,13 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-07 (**otp-6 CLOSED; otp-7 in DESIGN**. otp-6 (a/b)
+Last updated: 2026-07-06 (**otp-6 CLOSED; otp-7 in DESIGN**. otp-6 (a/b)
 mirror + filters landed + graded. Current slice **otp-7** (resume block
 phase, the plan's RELIABLE exception): owner chose "plan doc first" — slice
 design drafted at `docs/plan/OTP7_RESUME.md` (**Draft**), NO CODE until the
 owner answers its Q1–Q3 and flips it to Active. ONE_TRANSFER_PATH otp-1..6
-`[x]`. SMALL_FILE_CEILING stays paused, D-2026-07-05-1.)
+`[x]`. SMALL_FILE_CEILING stays paused, D-2026-07-05-1. This session: filed
+`audit-17`/`audit-18` to `TODO.md` only — no code, no Queue change
+(D-2026-07-05-4).)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -131,9 +133,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   recorded in DEVLOG + DIAGNOSIS.md.)
 - **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
   approval flow; windows-latest CI on the w9-3 harness fix rides it.
-- `Cargo.lock`: dependency-refresh drift committed at `04c9c6d` (was
-  unavoidable — blit-core gained `rand`); revert selectively if
-  unwanted, otherwise settled.
+- `Cargo.lock`: fresh transitive-dependency drift (crossbeam-*, cc, etc.)
+  sits uncommitted, same class as `04c9c6d` — not from this session;
+  owner's call to commit or revert.
 
 ## Open questions
 
@@ -172,6 +174,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-06 (37th)** @ `deb3800` — **Two owner bug reports triaged,
+  filed as `audit-17`/`audit-18` (TODO.md only, D-2026-07-05-4); no
+  code, otp-7 untouched.** Both: a `blit copy` that aborted entirely on
+  one bad filename mid-copy. `audit-17` (`5628c03`): dest FAT-family fs
+  rejects a `:` in a NuGet cache path (`sink.rs:605`, `os error 22`) — no
+  invalid-filename handling exists. `audit-18` (`deb3800`): a non-UTF-8
+  filename is irreversibly mangled by `relative_path_to_posix`'s
+  `to_string_lossy()` before I/O (`payload.rs:360`) — shared by local
+  mirror + remote push. Both need an owner `plan` before code.
+  **Exact first action next session**: otp-7 — owner's Q1–Q3 on
+  `docs/plan/OTP7_RESUME.md`, flip Active, codex-review, implement
+  otp-7a. In-flight: none. Done since 36th: nothing on
+  ONE_TRANSFER_PATH — pure bug triage.
 - **2026-07-07 (36th)** @ `9fb5e4a` — **otp-7 slice design drafted; owner
   review pending (NO CODE)**. Owner picked "plan doc first" for the RELIABLE
   resume slice; `docs/plan/OTP7_RESUME.md` (Draft) records the strict-ordering
@@ -182,18 +197,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   Active, then codex-review the plan change (D-2026-07-04-1) and implement
   otp-7a. In-flight: none. Done since 35th: otp-6 fully closed; `f6e592e`..HEAD
   unpushed (incl. otp-6a/6b + this design doc).
-- **2026-07-07 (35th)** @ `01d9c41`+`3c99557` — **otp-6b mirror (codex
-  NEEDS FIXES → 1 High + 1 Med accepted + fixed); otp-6 CLOSED** (DEVLOG
-  00:45; `.review/…/otp-6b-session-mirror.md`, `.review/results/otp-6b.*`).
-  The DESTINATION accumulates the complete source manifest and at SourceDone
-  deletes extraneous entries locally (the one delete rule), scan-complete-
-  guarded + filter-scoped; `entries_deleted` filled (new
-  `plan_session_deletions` + `mirror_delete_pass`). F1 (High): the keep-set
-  `CasefoldKey` folded case only on Windows, so on APFS a wire `Foo.txt` vs
-  dest `foo.txt` deleted the just-written file — now folds on macOS too. F2
-  (Med): missing Windows readonly-clear before delete. Both fixes are
-  macOS/Windows-only — NOT guard-provable on Linux (cfg-gated fold test on
-  those CIs; Linux exact test pins no-regression). Suite 1524 → **1529/0**.
-  **Exact first action next session**: otp-7 (resume block phase; resume is
-  refused at OPEN until it lands). In-flight: none. 10 GbE gates + push go
-  remain in Blocked; `f6e592e`..HEAD unpushed. (`Cargo.lock` drift unstaged.)
