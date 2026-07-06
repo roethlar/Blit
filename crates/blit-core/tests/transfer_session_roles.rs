@@ -17,8 +17,9 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, ComparisonMode, FileHeader, ManifestComplete, NeedBatch, NeedComplete,
-    NeedEntry, SessionHello, SessionOpen, TransferFrame, TransferRole, TransferSummary,
+    session_error, ComparisonMode, FileHeader, FilterSpec, ManifestComplete, NeedBatch,
+    NeedComplete, NeedEntry, SessionHello, SessionOpen, TransferFrame, TransferRole,
+    TransferSummary,
 };
 use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::transfer_plan::PlanOptions;
@@ -110,7 +111,23 @@ async fn run_session(
     eyre::Result<TransferSummary>,
     eyre::Result<DestinationOutcome>,
 ) {
-    let open = basic_open(initiator_role);
+    run_session_with_open(basic_open(initiator_role), src_root, dst_root, plan_options).await
+}
+
+/// Like [`run_session`] but with a caller-supplied open, so a fixture
+/// can exercise filter/mirror fields. The initiator role is read from
+/// the open itself.
+async fn run_session_with_open(
+    open: SessionOpen,
+    src_root: &Path,
+    dst_root: &Path,
+    plan_options: PlanOptions,
+) -> (
+    eyre::Result<TransferSummary>,
+    eyre::Result<DestinationOutcome>,
+) {
+    let initiator_role = TransferRole::try_from(open.initiator_role)
+        .unwrap_or_else(|_| panic!("open carries a valid initiator role"));
     let (source_endpoint, dest_endpoint) = match initiator_role {
         TransferRole::Source => (SessionEndpoint::initiator(open), SessionEndpoint::Responder),
         TransferRole::Destination => (SessionEndpoint::Responder, SessionEndpoint::initiator(open)),
@@ -706,6 +723,64 @@ async fn mirror_request_is_refused_until_its_slice_lands() {
         source_fault.message
     );
     assert!(dest_result.is_err());
+}
+
+#[tokio::test]
+async fn source_filter_limits_manifest_under_both_initiators() {
+    // otp-6a: an include filter on the open restricts the source scan to
+    // matching files; non-matching files are neither manifested nor
+    // transferred, whichever end initiates. `*.txt` matches by basename,
+    // so the nested keep2.txt is included and the .log / .bin are not.
+    let src = vec![
+        ("keep.txt", b"a".to_vec(), 1_600_000_001),
+        ("drop.log", b"b".to_vec(), 1_600_000_002),
+        ("dir/keep2.txt", b"c".to_vec(), 1_600_000_003),
+        ("dir/skip.bin", b"d".to_vec(), 1_600_000_004),
+    ];
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &src);
+
+        let mut open = basic_open(initiator_role);
+        open.filter = Some(FilterSpec {
+            include: vec!["*.txt".to_string()],
+            ..Default::default()
+        });
+        let (source_result, dest_result) =
+            run_session_with_open(open, &src_root, &dst_root, PlanOptions::default()).await;
+        let summary = source_result
+            .unwrap_or_else(|e| panic!("source failed under initiator {initiator_role:?}: {e:#}"));
+        let dest = dest_result.unwrap_or_else(|e| {
+            panic!("destination failed under initiator {initiator_role:?}: {e:#}")
+        });
+
+        assert_eq!(
+            summary, dest.summary,
+            "both ends agree (init {initiator_role:?})"
+        );
+        assert_eq!(
+            summary.files_transferred, 2,
+            "only the two .txt files (init {initiator_role:?})"
+        );
+        let mut needed = dest.needed_paths.clone();
+        needed.sort();
+        assert_eq!(
+            needed,
+            vec!["dir/keep2.txt".to_string(), "keep.txt".to_string()],
+            "need list is the filtered set (init {initiator_role:?})"
+        );
+        assert!(dst_root.join("keep.txt").exists());
+        assert!(dst_root.join("dir/keep2.txt").exists());
+        assert!(
+            !dst_root.join("drop.log").exists(),
+            "filtered-out file must not transfer (init {initiator_role:?})"
+        );
+        assert!(!dst_root.join("dir/skip.bin").exists());
+    }
 }
 
 // ---------------------------------------------------------------------------

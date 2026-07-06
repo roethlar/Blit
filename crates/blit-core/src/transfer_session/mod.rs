@@ -364,14 +364,15 @@ fn source_open_validator(open: &SessionOpen) -> std::result::Result<(), SessionF
             "resume is not implemented on the unified session yet (otp-7)",
         ));
     }
-    if open
-        .filter
-        .as_ref()
-        .is_some_and(|f| *f != FilterSpec::default())
-    {
-        return Err(SessionFault::internal(
-            "filters are not implemented on the unified session yet (otp-6)",
-        ));
+    // otp-6a: filters are honored on the source scan (see
+    // `source_send_half`). Validate the globs here so a malformed pattern
+    // from a peer is refused at OPEN — peer-notified on the responder —
+    // rather than faulting mid-scan once bytes are already moving.
+    if let Some(filter) = open.filter.as_ref() {
+        if *filter != FilterSpec::default() {
+            crate::remote::transfer::operation_spec::filter_from_spec(filter.clone())
+                .map_err(|e| SessionFault::protocol_violation(format!("invalid filter: {e:#}")))?;
+        }
     }
     Ok(())
 }
@@ -917,10 +918,22 @@ async fn source_send_half(
 
     // Streaming manifest: entries go out as enumeration produces them
     // (immediate start in every direction — plan §Design 2). The open
-    // carries no source path: the source end owns its local endpoint.
-    let _ = &negotiated.open;
+    // carries no source path (the source end owns its local endpoint) but
+    // does carry the include/exclude/size/age filter (otp-6a): the scan
+    // applies it so only matching files are manifested and transferred. A
+    // default/absent filter scans everything (unchanged from otp-3). Globs
+    // were validated at OPEN (`source_open_validator`), so this conversion
+    // cannot fail on a validated open; map any error to a fault regardless.
+    let scan_filter = match negotiated.open.filter.as_ref() {
+        Some(spec) if *spec != FilterSpec::default() => Some(
+            crate::remote::transfer::operation_spec::filter_from_spec(spec.clone()).map_err(
+                |e| eyre::Report::new(SessionFault::internal(format!("invalid filter: {e:#}"))),
+            )?,
+        ),
+        _ => None,
+    };
     let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
-    let (mut header_rx, scan_handle) = source.scan(None, Arc::clone(&unreadable));
+    let (mut header_rx, scan_handle) = source.scan(scan_filter, Arc::clone(&unreadable));
     while let Some(header) = header_rx.recv().await {
         sent.lock()
             .expect("sent-manifest lock poisoned")
