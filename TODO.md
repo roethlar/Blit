@@ -106,6 +106,27 @@ explicitly-deferred logging epic (F15).
 - [x] **audit-14** Redundant `seek` system calls in sequential block-level resume copies.
 - [x] **audit-15** Missing request/idle timeouts on tonic gRPC server control plane.
 
+### New audit findings (2026-07-06)
+
+- [ ] **audit-16** `spawn_manifest_task`'s "Enumerated N entries… (streaming
+      manifest)" heartbeat (`crates/blit-core/src/remote/push/client/helpers.rs:114-183`)
+      prints unconditionally on a 1s wall-clock timer — no `--verbose` gate.
+      `docs/plan/LOCAL_TRANSFER_HEURISTICS.md:42` (Status: Historical)
+      documents the original intent as verbose-gated ("`--verbose` shows
+      real-time heartbeat messages… Default mode remains quiet unless a
+      stall occurs"); the shipped code never wired that check in, so every
+      `copy`/`mirror` run spams the heartbeat regardless of verbosity — local
+      mirror hits this same manifest-scan path too, per
+      `engine/strategy.rs:81` (mirror/checksum/force-tar always take the
+      streaming path, which is unified with remote push). Fix: gate the
+      print in `spawn_manifest_task` behind the caller's verbose option
+      (the function has no visibility into CLI args today — thread a flag
+      through `LocalMirrorOptions`/the equivalent remote-push options).
+      Related, already filed, do not re-file: `--progress` (`-p`)
+      auto-enabling on TTY regardless of the flag is
+      `docs/audit/findings/drift-principles.md`
+      (`drift-spinner-vs-quiet-default-decision-conflict`).
+
 ### Deferred design calls
 
 These are intentionally not next-actionable. Don't pick them up
