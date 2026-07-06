@@ -86,4 +86,20 @@ claimed by both carriers, `is_empty()` at SourceDone). `granted` is
 touched only by the single control-loop task, so it needs no lock.
 
 ## Fix-of-fix commit
-(sha appended after the fix lands + re-gate.)
+`777dfc5` — otp-4b-1: fix the dedup/claim race. Two-set split (local
+monotonic `granted` for dedup + shared `outstanding` for completion).
+Gate green, suite 1512/0, no regression.
+
+## Confirming re-review of `777dfc5` — PASS (no findings)
+raw: `.review/results/otp-4b1-data-plane.race-fix-review.codex.md`.
+Codex confirmed the split is correct and complete: `granted` is
+control-loop-local, insert-only, touched only via
+`diff_chunk_and_send_needs`; `outstanding` is populated only from freshly
+deduped grants before the NeedBatch and claimed by both carriers; no
+lock-across-await, deadlock, poisoning, or in-stream regression.
+
+## otp-4b-1 CLOSED
+3 review passes: `881d412` (2 High → fixed `e1aafcc`), fix-review
+(1 High race → fixed `777dfc5`), confirming re-review PASS. Suite
+1509 → **1512/0**. otp-4b-2 (resize + sf-2) and otp-4b-3 (cancel e2e)
+remain.

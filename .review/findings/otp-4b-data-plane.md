@@ -4,8 +4,10 @@
 **Contract**: `docs/TRANSFER_SESSION.md` §Transport selection.
 **Builds on**: otp-4a (`4b07bbb`+`25f538b`) — daemon serves `Transfer`,
 client `run_source`s as SOURCE over the **in-stream** carrier.
-**Status**: 4b-1 (single-stream data plane) implemented + validated;
-codex review pending. 4b-2 (resize + sf-2) and 4b-3 (cancel e2e) queued.
+**Status**: 4b-1 (single-stream data plane) **CLOSED** — codex loop, 3
+passes (`881d412`; fix `e1aafcc` for 2 High; fix `777dfc5` for the race
+that fix introduced; confirming re-review PASS). Suite 1509 → **1512/0**.
+4b-2 (resize + multi-stream + sf-2 pin) and 4b-3 (cancel e2e) queued.
 
 ## Goal (this slice)
 
@@ -183,4 +185,11 @@ the byte identity of the data-plane path.
   rows report `bytes_completed=0`, as today's push rows).
 
 ## Reviewer comments
-(filled after codex review per `docs/agent/GPT_REVIEW_LOOP.md`.)
+codex (gpt-5.5) — 3 passes, all findings adjudicated in
+`.review/results/otp-4b1-data-plane.gpt-verdict.md`:
+- pass 1 (`881d412`): F1 weak count-proxy completion + F2 missing
+  read-side StallGuard — both Accepted, fixed in `e1aafcc`.
+- pass 2 (fix `e1aafcc`): a real dedup/claim race from conflating dedup
+  and completion in one set — Accepted, fixed in `777dfc5` (two-set
+  split: local monotonic `granted` + shared `outstanding`).
+- pass 3 (`777dfc5`): PASS, no findings.

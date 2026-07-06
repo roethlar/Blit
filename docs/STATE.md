@@ -1,9 +1,9 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-05 (**otp-4a landed + graded** — the daemon now
-SERVES the unified `Transfer` RPC and a client pushes through it over
-gRPC, byte-identical to old push; ONE_TRANSFER_PATH otp-1 + otp-3 +
-otp-4a `[x]`, current slice otp-4b. SMALL_FILE_CEILING stays paused,
+Last updated: 2026-07-05 (**otp-4b-1 landed + graded** — the TCP data
+plane now rides the unified session, byte-identical to old push over the
+data plane; ONE_TRANSFER_PATH otp-1 + otp-3 + otp-4a + otp-4b-1 `[x]`,
+current slice otp-4b-2 (resize + sf-2). SMALL_FILE_CEILING stays paused,
 D-2026-07-05-1.)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
@@ -35,9 +35,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     gRPC `FrameTransport` (in-stream carrier); A/B parity byte-
     identical vs old push; SizeMtime = data-safe skip (owner-ack
     open question). Suite 1484 → **1509/0**.
-  - Current: **otp-4b** — port the TCP data plane onto the session +
-    resize + the sf-2 pin + the mid-transfer cancel e2e. (otp-2
-    symmetric baseline is rig-gated; must land before otp-10.)
+  - **otp-4b-1 `[x]`** (`881d412` + fixes `e1aafcc`/`777dfc5`, codex 3
+    passes, PASS) — single-stream TCP data plane rides the session
+    (responder binds + grants + receives; source dials + auths + sends
+    over `DataPlaneSession`; in-stream stays the fallback). A/B parity
+    over the data plane byte-identical vs old push; session-owned
+    orchestration in `transfer_session/data_plane.rs`. Suite → **1512/0**.
+  - Current: **otp-4b-2** (resize on frames 16/17 + multi-stream via
+    `SinkControl::Add` + sf-2 >1-stream pin), then **otp-4b-3**
+    (mid-transfer cancel e2e). (otp-2 symmetric baseline is rig-gated;
+    before otp-10.)
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+
   blocked** until ONE_TRANSFER_PATH ships, then resume/re-derive on
@@ -56,14 +63,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
-   codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a
-   `[x]`. Current: **otp-4b** — port the TCP data plane onto the
-   session (responder binds + grants tcp_port/tokens in SessionAccept;
-   source dials + authenticates; `maybe_shape_resize` controller on
-   frames 16/17), port the sf-2 10k-file >1-stream pin to the session,
-   add the deterministic mid-transfer cancel e2e. Then otp-5
-   (daemon-as-SOURCE / pull-equivalent). otp-2 (symmetric baseline) is
-   RIG-GATED — runs when the 10 GbE rig is available, must land before
+   codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
+   otp-4b-1 `[x]`. Current: **otp-4b-2** (resize controller on frames
+   16/17 via `TransferDial::propose_shape_resize` + multi-stream
+   `SinkControl::Add` + sf-2 >1-stream pin), then **otp-4b-3**
+   (mid-transfer cancel e2e), then otp-5 (daemon-as-SOURCE /
+   pull-equivalent). otp-2 (symmetric baseline) is RIG-GATED — before
    otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
    REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
@@ -173,28 +178,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-05 (27th)** @ `fe4ad6d` — **otp-4a landed and graded**:
-  daemon serves `Transfer` (runs `run_destination` as Responder — no
-  longer UNIMPLEMENTED); client `run_source`s as SOURCE initiator over
-  a gRPC `FrameTransport`; `run_destination` gained `DestinationTarget`
-  + an async `OpenResolver` (daemon resolves module→root mid-handshake,
-  before SessionAccept). Details: Now bullet 1, DEVLOG 21:30, finding
-  doc. Codex FAIL 1/1 accepted+fixed (`4b07bbb`, fix `25f538b`): cancel
-  emits a framed `SessionError{CANCELLED}` (guard proven by revert).
-  A/B parity byte-identical vs old push. SizeMtime = safe-skip; **new
-  owner-ack open question** logged. Suite 1501 → **1509/0**. In-flight:
-  none. **Exact first action next session**: otp-4b (port the TCP data
-  plane onto the session — grant in SessionAccept, source dials +
-  auth, `maybe_shape_resize` on frames 16/17 — port the sf-2
-  10k->1-stream pin, add the deterministic mid-transfer cancel e2e)
-  through the codex loop. otp-2 stays rig-gated (before otp-10). Owner
-  declarations: three 10 GbE gates + push go remain in Blocked.
+- **2026-07-05 (28th)** @ `777dfc5`+records — **otp-4b-1 landed and
+  graded** (single-stream TCP data plane on the session; details: DEVLOG
+  23:00, finding doc, `.review/results/otp-4b1-*`). Session-owned
+  orchestration in `transfer_session/data_plane.rs`, no
+  `remote::push`/daemon-push dep. **Codex 3 passes**: `881d412` FAIL 2/2
+  (weak-completion + StallGuard) fixed `e1aafcc`; fix-review found a real
+  dedup/claim race → two-set split fixed `777dfc5`; confirming re-review
+  **PASS**. Suite 1509 → **1512/0**. In-flight: none. **Exact first
+  action next session**: otp-4b-2 (resize on frames 16/17 + multi-stream
+  `SinkControl::Add` + port the sf-2 >1-stream pin) through the codex
+  loop; then otp-4b-3 (mid-transfer cancel e2e). Owner declarations:
+  three 10 GbE gates + push go remain in Blocked.
+- **2026-07-05 (27th)** @ `fe4ad6d` — otp-4a landed and graded: daemon
+  serves `Transfer`, client `run_source`s as SOURCE over gRPC (in-stream
+  carrier); `DestinationTarget` + async `OpenResolver`. Codex FAIL 1/1
+  (`4b07bbb`, fix `25f538b`). Suite 1501 → 1509/0. Details: DEVLOG 21:30.
 - **2026-07-05 (26th)** @ `85bf611` — otp-3 landed and graded (details:
   DEVLOG 18:30, finding doc). Codex FAIL 2/2 accepted+fixed (`ef9ffa1`,
   fix `d5796a1`). Suite 1501/0.
-- **2026-07-05 (25th)** @ `cb96e91`+records — plan Active
-  (D-2026-07-05-4) + otp-1 landed/graded (`a3e2acb` → `f861579`,
-  contract `docs/TRANSFER_SESSION.md`); D-2026-07-05-2 (same-build
-  only); D-2026-07-05-3 (zero-copy unparked; zoey rig + musl recipe:
-  queue item 5). Details: DEVLOG 2026-07-05 10:00.
-- (older entries pruned — see DEVLOG 2026-07-05 06:45 and earlier)
+- (older entries pruned — see DEVLOG 2026-07-05 10:00 and earlier)
