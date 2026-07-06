@@ -159,6 +159,17 @@ explicitly-deferred logging epic (F15).
       (`/run/media/michael/USB_DRIVE/michael`) — not a one-off fluke;
       the FAT-family-destination assumption above is now corroborated
       by a second independent mount exhibiting the same `:`-rejection.
+      **Second manifestation, same closure, one line down**: after
+      that NuGet-cache directory issue was worked past (retried on a
+      cleared destination), the identical `os error 22` recurred at
+      `sink.rs:608` — this time `std::fs::write` on a regular file
+      whose name is `frostfell06.dds:crc` (unrelated content, a game
+      asset tree, not NuGet). Confirms the bug is general to any path
+      component containing an illegal character, not create_dir_all-
+      specific or NuGet-cache-specific — the fix must cover both the
+      `create_dir_all` (line 605) and `write` (line 608) call sites in
+      the same closure (and their mirror in the local-mirror path, per
+      the note above).
 - [ ] **audit-18** Non-UTF-8 source filenames are silently corrupted
       during enumeration, then fail to open, aborting the whole
       transfer. Reported: `blit copy /home/michael/
