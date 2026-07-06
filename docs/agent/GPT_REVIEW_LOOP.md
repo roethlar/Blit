@@ -66,10 +66,15 @@ owner whether the code "looks good" — that is theater (D-2026-06-20-6).
       not drop. Output a concise markdown findings list — each finding
       with file:line, severity, rationale — then a final VERDICT line. Be
       concise; do not invoke skills." \
-     > .review/results/<id>.codex.md 2>&1
+     </dev/null > .review/results/<id>.codex.md 2>&1
    ```
-   (`codex review --commit <SHA>` is the promptless alternative — it can't
-   take a custom prompt, so it can't be pointed at the slice criteria.)
+   **The `</dev/null` is load-bearing** on codex-cli ≥ 0.142: with a prompt
+   arg AND an open stdin, `codex exec` appends stdin as a `<stdin>` block and
+   blocks on EOF — a backgrounded review then hangs at 0 CPU indefinitely
+   (observed otp-5a, 2026-07-06). Redirecting stdin from `/dev/null` closes it
+   so the review starts. (`codex review --commit <SHA>` is the promptless
+   alternative — it can't take a custom prompt, so it can't be pointed at the
+   slice criteria.)
 5. **Adjudicate — the load-bearing step.** GPT is a claim source, not an
    authority: a 60k-token codex-class review this very day produced a
    confident-but-false "two static tables, not three" finding. For each

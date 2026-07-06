@@ -1,8 +1,9 @@
 # otp-5 — roles swapped: client initiates as DESTINATION (pull-equivalent)
 
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-5.
-**Status**: otp-5a implementing — in-stream pull-equivalent (daemon-as-SOURCE
-responder, client DESTINATION initiator). otp-5b (data plane) pending.
+**Status**: otp-5a landed + graded (`84be1cc`; codex PASS, no findings —
+`.review/results/otp-5a-daemon-as-source.{codex,gpt-verdict}.md`). Suite
+1516 → 1519. otp-5b (data plane) pending.
 **Contract**: `docs/TRANSFER_SESSION.md`.
 **Builds on**: otp-4 (daemon serves `Transfer`, client SOURCE initiator). The
 role-parameterized state machine (`run_source`/`run_destination`) already runs
