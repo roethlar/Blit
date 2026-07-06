@@ -80,3 +80,17 @@ non-fault event is legitimate (F3 scope preserved). New guard test
 `prefer_peer_fault_skips_inflight_needs_to_reach_the_fault`.
 
 Gate: fmt + clippy -D warnings clean; `cargo test --workspace` **1516/0**.
+
+---
+
+## codex pass 3 (fix commit `46cc4bb`) — PASS
+
+No findings. Confirmed `prefer_peer_fault` is bounded by
+`TRANSFER_STALL_TIMEOUT` (lenient skipping cannot mask a local/data-plane
+error indefinitely) and `recv_peer_fault`'s remaining strict use is only
+the finish-drain select arm, where non-fault events are illegitimate after
+resize resolution and before `SourceDone`. Test count 1516 (baseline 1515
+for this slice + 1 new tokio test), none removed. **VERDICT: PASS.**
+
+otp-4b-3 CLOSED (codex 3 passes: pass1 3 findings fixed, pass2 1 regression
+fixed, pass3 PASS). Raw: `.review/results/otp-4b3-data-plane.{codex,fix-review.codex,pass3.codex}.md`.
