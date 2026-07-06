@@ -1727,6 +1727,11 @@ fn mirror_delete_pass(
     let mut deleted = 0u64;
     for file in &plan.files {
         contained(file)?;
+        // Windows refuses to delete a read-only file; clear the attribute
+        // first, matching the daemon purge (admin.rs) and local mirror
+        // (engine/mirror.rs) executors (codex otp-6b F2).
+        #[cfg(windows)]
+        crate::win_fs::clear_readonly_recursive(file);
         match std::fs::remove_file(file) {
             Ok(()) => deleted += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1735,6 +1740,8 @@ fn mirror_delete_pass(
     }
     for dir in &plan.dirs {
         contained(dir)?;
+        #[cfg(windows)]
+        crate::win_fs::clear_readonly_recursive(dir);
         match std::fs::remove_dir(dir) {
             Ok(()) => deleted += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

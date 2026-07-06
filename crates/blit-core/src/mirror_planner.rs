@@ -30,11 +30,23 @@ pub struct MirrorDeletionPlan {
     pub dirs: Vec<PathBuf>,
 }
 
-#[cfg(windows)]
+// Case-sensitivity is a property of the platform's default filesystem, and
+// this key exists to model it so a mirror never deletes a file the source
+// kept under a different case. Windows (NTFS) and macOS (APFS) are
+// case-insensitive by default → fold (posix-normalize + ASCII-lowercase);
+// Linux (ext4/xfs) is case-sensitive → exact. This matters most for the
+// unified session, the first mirror path that diffs a WIRE source set (the
+// source's on-disk case) against the DEST filesystem: on a case-insensitive
+// dest the two cases can diverge, and an exact key would delete the
+// just-written file (codex otp-6b F1). Case-insensitive Linux mounts and
+// case-sensitive macOS volumes are rare misconfigurations a compile-time cfg
+// cannot detect; ASCII-only folding leaves Unicode case variants approximate
+// (a known gap, same as the pre-existing Windows behavior).
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct CasefoldKey(String);
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl CasefoldKey {
     fn new(path: &Path) -> Self {
         let normalized = crate::path_posix::relative_path_to_posix(path).to_ascii_lowercase();
@@ -42,11 +54,11 @@ impl CasefoldKey {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct CasefoldKey(PathBuf);
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl CasefoldKey {
     fn new(path: &Path) -> Self {
         CasefoldKey(path.to_path_buf())
@@ -342,4 +354,37 @@ fn plan_from_sets(
     dirs.reverse();
 
     MirrorDeletionPlan { files, dirs }
+}
+
+#[cfg(test)]
+mod casefold_tests {
+    use super::CasefoldKey;
+    use std::path::Path;
+
+    // On NTFS/APFS the mirror keep-set must treat `Foo.txt` and `foo.txt` as
+    // the same file, or the session mirror deletes a just-written file whose
+    // wire case differs from the dest-FS case (codex otp-6b F1). Runs on
+    // Windows/macOS CI (the case-insensitive-default platforms); a Linux dev
+    // box cannot exercise it — see the exact-match test below.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn casefold_folds_case_on_case_insensitive_platforms() {
+        assert_eq!(
+            CasefoldKey::new(Path::new("Dir/Foo.TXT")),
+            CasefoldKey::new(Path::new("dir/foo.txt"))
+        );
+    }
+
+    // On ext4/xfs the wire case and dest-FS case always agree, so the key
+    // stays exact: `Foo.txt` and `foo.txt` are distinct files and a mirror
+    // deletes the one absent from the source. Pins that the macOS fold above
+    // did not leak into the case-sensitive default.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn casefold_is_exact_on_case_sensitive_platforms() {
+        assert_ne!(
+            CasefoldKey::new(Path::new("Foo.txt")),
+            CasefoldKey::new(Path::new("foo.txt"))
+        );
+    }
 }
