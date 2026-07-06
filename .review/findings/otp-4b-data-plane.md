@@ -7,8 +7,11 @@ client `run_source`s as SOURCE over the **in-stream** carrier.
 **Status**: 4b-1 (single-stream data plane) **CLOSED** — codex loop, 3
 passes (`881d412`; fix `e1aafcc` for 2 High; fix `777dfc5` for the race
 that fix introduced; confirming re-review PASS). Suite 1509 → **1512/0**.
-4b-2 (resize + multi-stream + sf-2 pin) **implemented, in review**; 4b-3
-(cancel e2e) queued.
+4b-2 (resize + multi-stream + sf-2 pin) **CLOSED** — `dce56de`, codex
+**PASS** (no findings; the one load-bearing busy-spin bug was caught in
+the author's pre-commit e2e and fixed before the reviewed commit —
+verdict `.review/results/otp-4b2-data-plane.gpt-verdict.md`). Suite 1512
+→ **1513/0**. 4b-3 (cancel e2e) queued.
 
 ---
 

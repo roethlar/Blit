@@ -1,10 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-05 (**otp-4b-1 landed + graded** — the TCP data
-plane now rides the unified session, byte-identical to old push over the
-data plane; ONE_TRANSFER_PATH otp-1 + otp-3 + otp-4a + otp-4b-1 `[x]`,
-current slice otp-4b-2 (resize + sf-2). SMALL_FILE_CEILING stays paused,
-D-2026-07-05-1.)
+Last updated: 2026-07-06 (**otp-4b-2 landed + graded** — the session
+data plane now shape-corrects upward (sf-2) mid-transfer over real
+sockets; ONE_TRANSFER_PATH otp-1 + otp-3 + otp-4a + otp-4b-1 + otp-4b-2
+`[x]`, current slice otp-4b-3 (mid-transfer cancel e2e).
+SMALL_FILE_CEILING stays paused, D-2026-07-05-1.)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -41,10 +41,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     over `DataPlaneSession`; in-stream stays the fallback). A/B parity
     over the data plane byte-identical vs old push; session-owned
     orchestration in `transfer_session/data_plane.rs`. Suite → **1512/0**.
-  - Current: **otp-4b-2** (resize on frames 16/17 + multi-stream via
-    `SinkControl::Add` + sf-2 >1-stream pin), then **otp-4b-3**
-    (mid-transfer cancel e2e). (otp-2 symmetric baseline is rig-gated;
-    before otp-10.)
+  - **otp-4b-2 `[x]`** (`dce56de`, codex PASS) — mid-transfer stream
+    growth: SOURCE owns the live dial, re-runs the shape table over the
+    accumulated need list and proposes `DataPlaneResize{ADD}` (frames
+    16/17, one per epoch); DESTINATION arms + acks + accepts one more
+    socket; `SinkControl::Add` into the elastic pipeline. sf-2 pin
+    (10k tiny files settle `data_plane_streams > 1`, guard-proven).
+    Resize-dial failure fatal (orphan-free, vs old push's arm-TTL).
+    Suite → **1513/0**.
+  - Current: **otp-4b-3** (deterministic mid-transfer cancel e2e), then
+    otp-5 (daemon-as-SOURCE / pull-equivalent). (otp-2 symmetric
+    baseline is rig-gated; before otp-10.)
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+
   blocked** until ONE_TRANSFER_PATH ships, then resume/re-derive on
@@ -52,22 +59,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   competitor-relative (D-2026-07-04-4; a ≥25% margin answer was
   retracted — do not re-litigate). Evidence `docs/bench/10gbe-2026-07-05/`.
 - **Background (2026-07-04/05, all `[x]`)**: REV4 code-complete +
-  measurement gates DATA-COMPLETE (push/pull ≈ 9.5 of 9.88 Gbit/s,
-  ue-1 band holds, no organic resize → ue-2 call; owner declarations
-  pending in Blocked); 10 GbE session done; w9-3 + eleven review-queue
-  rows landed. Details: DEVLOG 2026-07-04/05, commit map in REVIEW.md.
-  Codex loop governs all code + plan changes (D-2026-07-04-1); REVIEW.md
-  is the queue/status index.
+  measurement gates DATA-COMPLETE (push/pull ≈ 9.5 of 9.88 Gbit/s;
+  owner declarations pending in Blocked); 10 GbE session done; w9-3 +
+  eleven review-queue rows landed. Codex loop governs all code + plan
+  changes (D-2026-07-04-1); REVIEW.md is the queue/status index.
+  Details: DEVLOG 2026-07-04/05.
 
 ## Queue (ordered)
 
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
-   otp-4b-1 `[x]`. Current: **otp-4b-2** (resize controller on frames
-   16/17 via `TransferDial::propose_shape_resize` + multi-stream
-   `SinkControl::Add` + sf-2 >1-stream pin), then **otp-4b-3**
-   (mid-transfer cancel e2e), then otp-5 (daemon-as-SOURCE /
+   otp-4b-1, otp-4b-2 `[x]`. Current: **otp-4b-3** (deterministic
+   mid-transfer cancel e2e — fire `CancelJob` while bytes flow over the
+   data plane; assert client surfaces `SessionFault{CANCELLED}` +
+   daemon tears down cleanly), then otp-5 (daemon-as-SOURCE /
    pull-equivalent). otp-2 (symmetric baseline) is RIG-GATED — before
    otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
@@ -135,19 +141,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(OPEN — owner ack requested, new 2026-07-05, otp-4a)** Unified
-  SizeMtime semantic: old push and old pull DISAGREE on same-size +
-  destination-NEWER — push re-transfers (clobbers the newer dest with
-  older source), pull/session safely SKIP. The unified session adopts
-  the **data-safe SKIP** (converge-up: pick the better direction;
-  shared arm untouched so live pull_sync is unchanged; no test pinned
-  push's clobber). This means the plan's "byte-identical trees vs old
-  push" criterion is NOT literally achievable in that one cell —
-  intentional. `--force` still overwrites. Agent rec: keep the safe
-  skip (pinned by `same_size_newer_destination_is_skipped_not_clobbered`).
-  Owner: confirm, or say you want old-push clobber as the unified
-  default (a one-line compare change). Full reasoning:
-  `.review/findings/otp-4-daemon-serves-transfer.md` compare section.
+- **(OPEN — owner ack requested, 2026-07-05, otp-4a)** Unified
+  SizeMtime semantic: same-size + dest-NEWER — old push clobbers, the
+  session adopts the **data-safe SKIP** (converge-up; `--force` still
+  overwrites; pinned by
+  `same_size_newer_destination_is_skipped_not_clobbered`). So "byte-
+  identical trees vs old push" is intentionally not literal in that one
+  cell. Owner: confirm, or ask for old-push clobber (one-line change).
+  Full reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
 - **(OPEN)** Historical docs embed `/Users/...` paths — agent rec: leave.
 - **(OPEN, new 2026-07-04)** `725aa07` tracked a 236-file stale
   worktree snapshot (`.claude/worktrees/vigilant-mayer/`, incl. a
@@ -169,32 +170,31 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   discovery interpretation, or at least improve the error? Candidate
   review-queue row; owner to slot.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: full suite green
-  locally across three sessions (clippy baseline + win-1 fixed). The
-  daemon-spawn e2e load-flakiness is now root-caused and fixed on
-  Linux (w9-3: port-TOCTOU wrong-daemon race + cargo-lock contention;
-  claimed-port set + OnceLock build + child-death check). Remaining
-  check: windows-latest CI on the next push (10d89e0 predates the
-  w9-3 fix, so daemon-spawn flakes there would not be news).
+  locally; daemon-spawn e2e flakiness root-caused + fixed on Linux (w9-3:
+  port-TOCTOU race + cargo-lock contention). Remaining: windows-latest CI
+  on the next push (10d89e0 predates the w9-3 fix).
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-05 (28th)** @ `777dfc5`+records — **otp-4b-1 landed and
-  graded** (single-stream TCP data plane on the session; details: DEVLOG
-  23:00, finding doc, `.review/results/otp-4b1-*`). Session-owned
-  orchestration in `transfer_session/data_plane.rs`, no
-  `remote::push`/daemon-push dep. **Codex 3 passes**: `881d412` FAIL 2/2
-  (weak-completion + StallGuard) fixed `e1aafcc`; fix-review found a real
-  dedup/claim race → two-set split fixed `777dfc5`; confirming re-review
-  **PASS**. Suite 1509 → **1512/0**. In-flight: none. **Exact first
-  action next session**: otp-4b-2 (resize on frames 16/17 + multi-stream
-  `SinkControl::Add` + port the sf-2 >1-stream pin) through the codex
-  loop; then otp-4b-3 (mid-transfer cancel e2e). Owner declarations:
-  three 10 GbE gates + push go remain in Blocked.
-- **2026-07-05 (27th)** @ `fe4ad6d` — otp-4a landed and graded: daemon
-  serves `Transfer`, client `run_source`s as SOURCE over gRPC (in-stream
-  carrier); `DestinationTarget` + async `OpenResolver`. Codex FAIL 1/1
-  (`4b07bbb`, fix `25f538b`). Suite 1501 → 1509/0. Details: DEVLOG 21:30.
-- **2026-07-05 (26th)** @ `85bf611` — otp-3 landed and graded (details:
-  DEVLOG 18:30, finding doc). Codex FAIL 2/2 accepted+fixed (`ef9ffa1`,
-  fix `d5796a1`). Suite 1501/0.
-- (older entries pruned — see DEVLOG 2026-07-05 10:00 and earlier)
+- **2026-07-06 (29th)** @ `dce56de`+records — **otp-4b-2 landed and
+  graded** (mid-transfer stream growth / sf-2 shape correction on the
+  session data plane; details: DEVLOG 00:30, finding doc,
+  `.review/results/otp-4b2-*`). SOURCE owns the live dial + proposes
+  `DataPlaneResize{ADD}` per epoch → dials epoch-N socket →
+  `SinkControl::Add` into the elastic pipeline; DESTINATION arms + acks +
+  accepts one more socket; settled count on
+  `DestinationOutcome.data_plane_streams`. Resize-dial failure fatal
+  (orphan-free vs old push's arm-TTL). **A load-bearing busy-spin bug
+  (closed-`mpsc` starving the biased select's `join_next`, hanging
+  `finish()`) was caught in pre-commit e2e and fixed before the reviewed
+  commit.** **Codex PASS, no findings.** Suite 1512 → **1513/0**.
+  In-flight: none. **Exact first action next session**: otp-4b-3
+  (deterministic mid-transfer cancel e2e) through the codex loop, then
+  otp-5 (daemon-as-SOURCE). Owner declarations: three 10 GbE gates +
+  push go remain in Blocked.
+- **2026-07-05 (28th)** @ `777dfc5` — otp-4b-1 landed + graded
+  (single-stream TCP data plane on the session; codex 3 passes, PASS;
+  `881d412`+`e1aafcc`+`777dfc5`). Suite → 1512/0. Details: DEVLOG 23:00.
+- **2026-07-05 (27th)** @ `fe4ad6d` — otp-4a landed + graded (daemon
+  serves `Transfer`, client SOURCE over gRPC; codex FAIL 1/1 fixed).
+  Suite → 1509/0. Details: DEVLOG 21:30. (Older: DEVLOG 18:30 & earlier.)
