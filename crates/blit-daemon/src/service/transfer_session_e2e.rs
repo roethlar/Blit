@@ -242,9 +242,12 @@ impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChun
         header: &blit_core::generated::FileHeader,
     ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
         let mut inner = self.inner.open_file(header).await?;
-        // A generous duplex buffer so the one chunk lands without the
-        // writer parking on backpressure.
-        let (mut w, r) = tokio::io::duplex(256 * 1024);
+        // Small duplex buffer (< one chunk) so `write_all` of the chunk
+        // only completes once the data-plane send pipeline has DRAINED it
+        // out to the TCP socket — i.e. `started` fires after payload bytes
+        // have actually flowed over the data plane, not merely into a
+        // local buffer (codex otp-4b-3 F2).
+        let (mut w, r) = tokio::io::duplex(4 * 1024);
         let started = Arc::clone(&self.started);
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};

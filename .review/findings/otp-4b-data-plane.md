@@ -58,7 +58,17 @@ fault on the control lane, covering both orderings:
   lane delivers one within `TRANSFER_STALL_TIMEOUT` (the peer runs the
   same stall guard on its receive workers, so within that window it
   always frames the real reason); otherwise fall back to the raw
-  data-plane error.
+  data-plane error. The same helper wraps `dp.queue()` errors in the
+  payload loop (codex F1): a cancel while earlier batches are actively
+  moving closes the pipeline under backpressure → `queue()` errors → the
+  peer's `CANCELLED` is preferred. `queue()` is NOT raced against the
+  events channel (unlike `finish()`) because live `Need`s still arrive
+  during the payload loop and `recv_peer_fault` would consume them.
+- `recv_peer_fault` surfaces any non-fault event that arrives during the
+  drain as a specific protocol-violation fault rather than dropping it
+  (codex F3): after `resolve_in_flight_resize` and before `SourceDone`
+  no `Need`/`NeedComplete`/`ResizeAck`/`Summary` is legitimate, so a
+  buggy peer's stray frame fails fast instead of being deferred or lost.
 
 ### Files
 - `crates/blit-core/src/transfer_session/mod.rs` — `recv_peer_fault` +
@@ -73,10 +83,12 @@ fault on the control lane, covering both orderings:
 Suite 1513 → **1515** (+2):
 - `mid_transfer_cancel_surfaces_cancelled_over_the_data_plane`
   (blit-daemon e2e) — a `StuckAfterFirstChunkSource` writes one 64 KiB
-  chunk over the data plane then blocks; the test waits for that chunk
-  (bytes provably flowed), fires the row's cancel token, and asserts the
-  client returns `SessionFault{CANCELLED}` within 10 s (no hang) and the
-  daemon drains the row from `active[]`.
+  chunk through a small (4 KiB) duplex so `started` fires only after the
+  send pipeline has drained the chunk out to the TCP socket (bytes
+  provably flowed over the data plane, codex F2), then blocks; the test
+  fires the row's cancel token and asserts the client returns
+  `SessionFault{CANCELLED}` within 10 s (no hang) and the daemon drains
+  the row from `active[]`.
 - `prefer_peer_fault_prefers_a_framed_fault` (blit-core unit) — a framed
   `CANCELLED` on the events channel wins over a `DATA_PLANE_FAILED`
   data-plane error.
@@ -91,17 +103,23 @@ Suite 1513 → **1515** (+2):
   Restored → passes.
 
 ### Known gaps (new)
-- A cancel while an *earlier* `dp.queue()` batch is blocked on pipeline
-  backpressure (multi-file, sustained) still surfaces the data-plane
-  error rather than CANCELLED — `queue()` is not raced (racing it would
-  consume live `Need` events on the happy path). The drain (`finish()`)
-  is where a push spends its transfer wall time, so this is the dominant
-  path; the queue-backpressure edge is a follow-up. The peer's stall
-  guard still bounds it.
+- A cancel while a worker is blocked *reading a slow local file inside*
+  an earlier `dp.queue()` (channel full, nothing draining) can still
+  hang until the peer's stall guard fires — `queue()` is error-wrapped
+  (codex F1) but not raced (racing would consume live `Need`s). This is
+  the pre-existing slow-local-read pathology, not cancel-specific; the
+  common "actively moving" backpressure cancel now surfaces CANCELLED.
 - The RPC-level `CancelJob` mapping (auth via `cancel_authorized`,
   gRPC outcome codes) is exercised by its own unit tests; this e2e fires
   the same cancellation token directly to keep the session-propagation
   assertion deterministic.
+
+### Reviewer comments (otp-4b-3)
+codex (gpt-5.5) pass 1 (`3ae0a5f`): NEEDS FIXES — F1 (High, `queue()` not
+fault-preferred), F2 (Medium, e2e bytes-flowed gate fired before TCP),
+F3 (Medium, `recv_peer_fault` dropped non-fault events). All three
+Accepted and fixed; adjudication +
+fixes in `.review/results/otp-4b3-data-plane.gpt-verdict.md`.
 
 ## otp-4b-2 (resize + multi-stream + sf-2 pin) — implemented
 

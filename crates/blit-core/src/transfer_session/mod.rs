@@ -885,7 +885,16 @@ async fn source_send_half(
                         .await?;
                     let payloads =
                         diff_planner::plan_push_payloads(batch, source.root(), cfg.plan_options)?;
-                    dp.queue(payloads).await?;
+                    // A cancel while earlier batches are actively moving
+                    // closes the send pipeline under backpressure, so this
+                    // queue fails with a data-plane error — prefer the
+                    // peer's framed reason (CANCELLED) the same way the
+                    // finish() drain does (otp-4b-3 codex F1). Not raced
+                    // against events like finish(): live `Need`s still
+                    // arrive here, and `recv_peer_fault` would consume them.
+                    if let Err(dp_err) = dp.queue(payloads).await {
+                        return Err(prefer_peer_fault(&mut events, dp_err).await);
+                    }
                 }
                 None => {
                     send_payload_records(tx, &source, cfg.plan_options, batch, &mut read_buf)
@@ -1161,21 +1170,37 @@ async fn resolve_in_flight_resize(
     }
 }
 
-/// Await the next peer-framed fault the receive half forwards on the
-/// control lane, ignoring any non-fault event. Used to race the
-/// data-plane drain (otp-4b-3): a mid-transfer `SessionError` (e.g. a
-/// `CancelJob` → `CANCELLED`) must abort the send and surface as the
-/// fault. Parks forever once the channel closes with no fault so the
-/// data-plane future it races decides the outcome instead — during the
-/// drain the receive half only ever forwards a fault (SourceDone has not
-/// gone out, so no summary; the resize was already resolved).
+/// Await the next terminal signal the receive half forwards while the
+/// data-plane drain is in progress (otp-4b-3). Used to race the drain: a
+/// mid-transfer `SessionError` (e.g. a `CancelJob` → `CANCELLED`) must
+/// abort the send and surface as the fault.
+///
+/// The drain runs after `resolve_in_flight_resize` and before `SourceDone`
+/// goes out, so the event channel is drained and the peer sends nothing
+/// but (possibly) an abort frame — no `Need`, `NeedComplete`, `ResizeAck`,
+/// or `Summary` is legitimate here. So a `Fault` is returned as-is and any
+/// OTHER event is surfaced as a protocol violation rather than silently
+/// dropped (codex otp-4b-3 F3): dropping it would defer or lose a
+/// fail-fast error and, if the drain is itself stuck, hang. Parks forever
+/// once the channel closes with no event so the data-plane future it
+/// races decides the outcome instead.
 async fn recv_peer_fault(events: &mut mpsc::UnboundedReceiver<SourceEvent>) -> SessionFault {
-    loop {
-        match events.recv().await {
-            Some(SourceEvent::Fault(fault)) => return fault,
-            Some(_) => continue,
-            None => std::future::pending().await,
+    match events.recv().await {
+        Some(SourceEvent::Fault(fault)) => fault,
+        Some(SourceEvent::Need(h)) => SessionFault::protocol_violation(format!(
+            "need for '{}' during the data-plane drain (after NeedComplete)",
+            h.relative_path
+        )),
+        Some(SourceEvent::NeedComplete) => {
+            SessionFault::protocol_violation("duplicate NeedComplete during the data-plane drain")
         }
+        Some(SourceEvent::ResizeAck(_)) => SessionFault::protocol_violation(
+            "DataPlaneResizeAck during the data-plane drain (no resize is in flight)",
+        ),
+        Some(SourceEvent::Summary(_)) => {
+            SessionFault::protocol_violation("TransferSummary before SourceDone")
+        }
+        None => std::future::pending().await,
     }
 }
 
