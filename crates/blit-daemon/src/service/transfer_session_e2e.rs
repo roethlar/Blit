@@ -50,6 +50,7 @@ struct Daemon {
     server: Option<tokio::task::JoinHandle<()>>,
     _dest: tempfile::TempDir,
     dest_root: PathBuf,
+    active_jobs: crate::active_jobs::ActiveJobs,
 }
 
 impl Daemon {
@@ -69,6 +70,7 @@ impl Daemon {
             },
         );
         let service = BlitService::with_modules(modules, false);
+        let active_jobs = service.active_jobs.clone();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind loopback listener");
@@ -100,6 +102,7 @@ impl Daemon {
             server: Some(server),
             _dest: dest,
             dest_root: canonical,
+            active_jobs,
         }
     }
 
@@ -190,6 +193,158 @@ fn small_tree() -> Vec<FileSpec> {
 fn fault_of(err: &eyre::Report) -> &SessionFault {
     err.downcast_ref::<SessionFault>()
         .unwrap_or_else(|| panic!("expected a SessionFault, got: {err:#}"))
+}
+
+// --- otp-4b-3: deterministic mid-transfer cancel over the data plane ---
+
+/// A `TransferSource` that puts a transfer into a provably-stuck
+/// mid-payload state: `open_file` writes exactly one 64 KiB chunk over
+/// the data plane (so bytes have demonstrably flowed), signals `started`,
+/// then blocks forever without emitting the rest of the file. The
+/// transfer therefore cannot complete on its own — the only exits are the
+/// cancel under test or the reader being dropped when the session aborts.
+/// Everything else delegates to the real filesystem source.
+struct StuckAfterFirstChunkSource {
+    inner: FsTransferSource,
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl blit_core::remote::transfer::source::TransferSource for StuckAfterFirstChunkSource {
+    fn scan(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
+        tokio::task::JoinHandle<eyre::Result<u64>>,
+    ) {
+        self.inner.scan(filter, unreadable)
+    }
+
+    async fn prepare_payload(
+        &self,
+        payload: blit_core::remote::transfer::payload::TransferPayload,
+    ) -> eyre::Result<blit_core::remote::transfer::payload::PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<blit_core::generated::FileHeader>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> eyre::Result<Vec<blit_core::generated::FileHeader>> {
+        self.inner.check_availability(headers, unreadable).await
+    }
+
+    async fn open_file(
+        &self,
+        header: &blit_core::generated::FileHeader,
+    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        let mut inner = self.inner.open_file(header).await?;
+        // A generous duplex buffer so the one chunk lands without the
+        // writer parking on backpressure.
+        let (mut w, r) = tokio::io::duplex(256 * 1024);
+        let started = Arc::clone(&self.started);
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = vec![0u8; 64 * 1024];
+            if let Ok(n) = inner.read(&mut buf).await {
+                if n > 0 && w.write_all(&buf[..n]).await.is_ok() {
+                    started.notify_one();
+                }
+            }
+            // Hold the write half open (no EOF) and never write again:
+            // the transfer is now stuck mid-payload until the session is
+            // aborted (which drops this task) or cancelled.
+            std::future::pending::<()>().await;
+            drop(w);
+        });
+        Ok(Box::new(r))
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// otp-4b-3: fire a `CancelJob`-equivalent (the row's cancellation token,
+/// exactly what the RPC handler fires) while a payload is stuck mid-flight
+/// over the TCP data plane. The client must surface
+/// `SessionFault{CANCELLED}` — the peer's framed abort reason — rather
+/// than the data-plane transport break it also causes, and it must not
+/// hang. The daemon must then tear the job down cleanly (the active row
+/// drains).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mid_transfer_cancel_surfaces_cancelled_over_the_data_plane() {
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    // One file larger than a single chunk, so the stuck reader keeps the
+    // transfer provably incomplete after its first 64 KiB.
+    std::fs::write(src.path().join("big.bin"), vec![0xABu8; 4 * 1024 * 1024]).unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let source = Arc::new(StuckAfterFirstChunkSource {
+        inner: FsTransferSource::new(src.path().to_path_buf()),
+        started: Arc::clone(&started),
+    });
+
+    let ep = daemon.endpoint.clone();
+    let client =
+        tokio::spawn(
+            async move { run_push_session(&ep, source, PushSessionOptions::default()).await },
+        );
+
+    // Bytes have flowed over the data plane and the transfer is now stuck
+    // mid-payload — a deterministic mid-transfer point.
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("payload bytes should flow over the data plane before cancel");
+
+    // Fire the row's cancellation token — exactly what the `CancelJob` RPC
+    // handler does via `cancel_authorized` (audit-9). The RPC-level
+    // mapping (auth, outcome codes) is unit-tested separately; this pins
+    // the end-to-end propagation through the served session.
+    let transfer_id = daemon
+        .active_jobs
+        .snapshot()
+        .into_iter()
+        .next()
+        .expect("an active transfer row")
+        .transfer_id;
+    assert_eq!(
+        daemon.active_jobs.cancel(&transfer_id),
+        crate::active_jobs::CancelOutcome::Cancelled,
+        "the served session's row honors cancellation"
+    );
+
+    // The client must surface CANCELLED promptly (no hang).
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), client)
+        .await
+        .expect("client must not hang on a mid-transfer cancel")
+        .expect("client task joins");
+    let err = result.expect_err("a cancelled transfer fails");
+    assert_eq!(
+        fault_of(&err).code,
+        session_error::Code::Cancelled,
+        "the client surfaces the peer's framed CANCELLED, not the data-plane break: {err:#}"
+    );
+
+    // Daemon tears down cleanly: the active row drains.
+    let mut drained = false;
+    for _ in 0..200 {
+        if daemon.active_jobs.snapshot().is_empty() {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        drained,
+        "the daemon must drain the cancelled job from active[]"
+    );
+
+    daemon.stop().await;
 }
 
 // ---------------------------------------------------------------------------

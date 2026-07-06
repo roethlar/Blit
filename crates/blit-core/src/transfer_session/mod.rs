@@ -40,6 +40,7 @@ use crate::remote::transfer::diff_planner;
 use crate::remote::transfer::payload::PreparedPayload;
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 use crate::remote::transfer::source::TransferSource;
+use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
 use crate::remote::transfer::{AbortOnDrop, CONTROL_PLANE_CHUNK_SIZE};
 use crate::transfer_plan::PlanOptions;
@@ -932,8 +933,33 @@ async fn source_send_half(
     // Close the data plane BEFORE SourceDone so the destination's receive
     // pipeline sees each socket's END record and completes; SourceDone on
     // the control lane then lets the destination score and summarize.
+    //
+    // The drain is the byte-transfer phase's wall-time sink, so a
+    // mid-transfer cancel almost always lands here. Race it against a
+    // peer-framed fault on the control lane (otp-4b-3): a `CancelJob` on
+    // the served session frames `SessionError{CANCELLED}`, and the source
+    // must surface THAT — not the data-plane transport break it also
+    // causes. Two orderings, both covered:
+    //   * fault arrives while the drain is still pending (e.g. a worker
+    //     blocked reading a slow file, so the socket break never unblocks
+    //     it) → the `recv_peer_fault` arm wins; dropping the unfinished
+    //     `finish()` future drops the data plane, and its `AbortOnDrop`
+    //     stops the in-flight workers.
+    //   * the socket break makes `finish()` return `Err` first → prefer
+    //     the framed reason if the control lane delivers one within the
+    //     stall window (`prefer_peer_fault`).
     if let Some(dp) = data_plane.take() {
-        dp.finish().await?;
+        tokio::select! {
+            biased;
+            fault = recv_peer_fault(&mut events) => {
+                return Err(eyre::Report::new(fault));
+            }
+            res = dp.finish() => {
+                if let Err(dp_err) = res {
+                    return Err(prefer_peer_fault(&mut events, dp_err).await);
+                }
+            }
+        }
     }
 
     tx.send(frame(Frame::SourceDone(SourceDone {}))).await?;
@@ -1132,6 +1158,39 @@ async fn resolve_in_flight_resize(
                 )))
             }
         }
+    }
+}
+
+/// Await the next peer-framed fault the receive half forwards on the
+/// control lane, ignoring any non-fault event. Used to race the
+/// data-plane drain (otp-4b-3): a mid-transfer `SessionError` (e.g. a
+/// `CancelJob` → `CANCELLED`) must abort the send and surface as the
+/// fault. Parks forever once the channel closes with no fault so the
+/// data-plane future it races decides the outcome instead — during the
+/// drain the receive half only ever forwards a fault (SourceDone has not
+/// gone out, so no summary; the resize was already resolved).
+async fn recv_peer_fault(events: &mut mpsc::UnboundedReceiver<SourceEvent>) -> SessionFault {
+    loop {
+        match events.recv().await {
+            Some(SourceEvent::Fault(fault)) => return fault,
+            Some(_) => continue,
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// A data-plane operation failed mid-transfer. The break is usually the
+/// *symptom* of a peer abort — within `TRANSFER_STALL_TIMEOUT` the peer
+/// (which runs the same stall guard on its receive workers) always frames
+/// the real reason on the control lane. Prefer that framed fault; fall
+/// back to the raw data-plane error if none arrives in that window.
+async fn prefer_peer_fault(
+    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
+    dp_err: eyre::Report,
+) -> eyre::Report {
+    match tokio::time::timeout(TRANSFER_STALL_TIMEOUT, recv_peer_fault(events)).await {
+        Ok(fault) => eyre::Report::new(fault),
+        Err(_) => dp_err,
     }
 }
 
@@ -1850,6 +1909,40 @@ mod tests {
         let (version, git) = id.split_once('+').expect("build id must be version+git");
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
         assert!(!git.is_empty(), "git component must be non-empty");
+    }
+
+    /// otp-4b-3: a data-plane break during the drain prefers the peer's
+    /// framed reason. When the receive half has forwarded a
+    /// `SessionError{CANCELLED}` on the control lane, `prefer_peer_fault`
+    /// returns THAT fault, not the raw data-plane transport error — the
+    /// non-timeout half of the mid-transfer-cancel guard (the e2e in
+    /// `blit-daemon` guards the still-pending-drain half).
+    #[tokio::test]
+    async fn prefer_peer_fault_prefers_a_framed_fault() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SourceEvent>();
+        // The peer framed CANCELLED on the control lane before we ask.
+        tx.send(SourceEvent::Fault(SessionFault {
+            code: session_error::Code::Cancelled,
+            message: "transfer cancelled via CancelJob".into(),
+            local_build_id: String::new(),
+            peer_build_id: String::new(),
+            peer_notified: true,
+        }))
+        .expect("send fault");
+
+        let dp_err = eyre::Report::new(SessionFault::refusal(
+            session_error::Code::DataPlaneFailed,
+            "Broken pipe (os error 32)",
+        ));
+        let chosen = prefer_peer_fault(&mut rx, dp_err).await;
+        let fault = chosen
+            .downcast_ref::<SessionFault>()
+            .expect("a SessionFault");
+        assert_eq!(
+            fault.code,
+            session_error::Code::Cancelled,
+            "the framed CANCELLED must win over the data-plane break"
+        );
     }
 
     #[test]

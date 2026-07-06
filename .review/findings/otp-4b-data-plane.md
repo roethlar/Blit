@@ -11,9 +11,97 @@ that fix introduced; confirming re-review PASS). Suite 1509 → **1512/0**.
 **PASS** (no findings; the one load-bearing busy-spin bug was caught in
 the author's pre-commit e2e and fixed before the reviewed commit —
 verdict `.review/results/otp-4b2-data-plane.gpt-verdict.md`). Suite 1512
-→ **1513/0**. 4b-3 (cancel e2e) queued.
+→ **1513/0**. 4b-3 (deterministic mid-transfer cancel e2e + source-side
+cancel responsiveness) **implemented** — suite 1513 → **1515/0**; codex
+review pending.
 
 ---
+
+## otp-4b-3 (deterministic mid-transfer cancel e2e) — implemented
+
+### What
+Pin, deterministically, that a `CancelJob` fired while payload bytes are
+in flight over the TCP data plane surfaces to the client as
+`SessionFault{CANCELLED}` (the peer's framed abort reason) — not the
+data-plane transport break the cancel also causes — and that the daemon
+tears the job down cleanly. Building the e2e surfaced that the current
+source could **not** meet that contract, so this slice is a small
+source-side reliability fix plus its guard tests.
+
+### Problem found (empirically, before the fix)
+The daemon side was already correct: on a `CancelJob` the served
+`Transfer` dispatcher (`core.rs::resolve_transfer_session_outcome`,
+otp-4a codex F1) drops the `run_destination` future and frames
+`SessionError{CANCELLED}` on the control lane. But the SOURCE only
+consulted the control lane when it happened to be parked at
+`events.recv()`. During the **payload drain** (`SourceDataPlane::finish`,
+where a push spends its byte-transfer wall time) the send half awaited
+only the data-plane pipeline. So a mid-transfer cancel dropped the
+destination → the source's socket write hit `Broken pipe` first → the
+client surfaced `SessionFault{INTERNAL}` "Broken pipe", and if a worker
+was blocked reading a slow file (never writing) the socket break never
+unblocked it and the client **hung**. (Both observed with a throwaway
+gated-source experiment.)
+
+### Approach (source-side fix, `transfer_session/mod.rs`)
+`source_send_half` now races the data-plane drain against a peer-framed
+fault on the control lane, covering both orderings:
+- `recv_peer_fault(events)` — awaits the next `SourceEvent::Fault` the
+  receive half forwards. In a `biased` `select!` against `dp.finish()`,
+  if the framed fault arrives while the drain is still pending (e.g. a
+  worker blocked reading), it wins; dropping the unfinished `finish()`
+  future drops the `SourceDataPlane`, whose `AbortOnDrop` stops the
+  in-flight workers. This is the fix that makes the blocked-reader case
+  terminate as CANCELLED instead of hanging.
+- `prefer_peer_fault(events, dp_err)` — when the socket break makes
+  `finish()` return `Err` first, prefer the framed reason if the control
+  lane delivers one within `TRANSFER_STALL_TIMEOUT` (the peer runs the
+  same stall guard on its receive workers, so within that window it
+  always frames the real reason); otherwise fall back to the raw
+  data-plane error.
+
+### Files
+- `crates/blit-core/src/transfer_session/mod.rs` — `recv_peer_fault` +
+  `prefer_peer_fault` helpers; `source_send_half`'s finish() drain wrapped
+  in the `select!`; `use …stall_guard::TRANSFER_STALL_TIMEOUT`.
+- `crates/blit-daemon/src/service/transfer_session_e2e.rs` — the harness
+  now retains an `ActiveJobs` clone (to fire the row's cancel token, which
+  is exactly what `cancel_authorized` fires); `StuckAfterFirstChunkSource`;
+  the cancel e2e.
+
+### Tests
+Suite 1513 → **1515** (+2):
+- `mid_transfer_cancel_surfaces_cancelled_over_the_data_plane`
+  (blit-daemon e2e) — a `StuckAfterFirstChunkSource` writes one 64 KiB
+  chunk over the data plane then blocks; the test waits for that chunk
+  (bytes provably flowed), fires the row's cancel token, and asserts the
+  client returns `SessionFault{CANCELLED}` within 10 s (no hang) and the
+  daemon drains the row from `active[]`.
+- `prefer_peer_fault_prefers_a_framed_fault` (blit-core unit) — a framed
+  `CANCELLED` on the events channel wins over a `DATA_PLANE_FAILED`
+  data-plane error.
+
+### Guard proof
+- e2e: reverting the `select!` to `dp.finish().await?` makes the blocked
+  reader hang → the client's 10 s timeout trips → test FAILS
+  ("client must not hang on a mid-transfer cancel: Elapsed"). Restored →
+  passes.
+- unit: reverting `prefer_peer_fault` to return `dp_err` yields
+  `DataPlaneFailed` and the assert FAILS ("framed CANCELLED must win").
+  Restored → passes.
+
+### Known gaps (new)
+- A cancel while an *earlier* `dp.queue()` batch is blocked on pipeline
+  backpressure (multi-file, sustained) still surfaces the data-plane
+  error rather than CANCELLED — `queue()` is not raced (racing it would
+  consume live `Need` events on the happy path). The drain (`finish()`)
+  is where a push spends its transfer wall time, so this is the dominant
+  path; the queue-backpressure edge is a follow-up. The peer's stall
+  guard still bounds it.
+- The RPC-level `CancelJob` mapping (auth via `cancel_authorized`,
+  gRPC outcome codes) is exercised by its own unit tests; this e2e fires
+  the same cancellation token directly to keep the session-propagation
+  assertion deterministic.
 
 ## otp-4b-2 (resize + multi-stream + sf-2 pin) — implemented
 
