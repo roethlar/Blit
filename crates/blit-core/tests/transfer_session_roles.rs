@@ -21,7 +21,8 @@ use blit_core::generated::{
     NeedComplete, NeedEntry, SessionHello, SessionOpen, TransferFrame, TransferRole,
     TransferSummary,
 };
-use blit_core::remote::transfer::source::FsTransferSource;
+use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
+use blit_core::remote::transfer::{PreparedPayload, TransferPayload};
 use blit_core::transfer_plan::PlanOptions;
 use blit_core::transfer_session::transport::{in_process_pair, FrameTransport};
 use blit_core::transfer_session::{
@@ -781,6 +782,112 @@ async fn source_filter_limits_manifest_under_both_initiators() {
         );
         assert!(!dst_root.join("dir/skip.bin").exists());
     }
+}
+
+/// A source that delegates everything to an inner `FsTransferSource` but
+/// deliberately IGNORES the `scan` filter argument (calls `inner.scan(None)`)
+/// — exactly how the real `RemoteTransferSource` behaves. Used to prove the
+/// session applies filters via the universal `FilteredSource` chokepoint, not
+/// via the per-impl `scan(filter)` arg (codex otp-6a F1). If the session ever
+/// reverts to threading the filter through `scan`, this source drops it and
+/// every file transfers.
+struct FilterIgnoringSource {
+    inner: FsTransferSource,
+}
+
+#[async_trait::async_trait]
+impl TransferSource for FilterIgnoringSource {
+    fn scan(
+        &self,
+        _filter: Option<blit_core::fs_enum::FileFilter>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<FileHeader>,
+        tokio::task::JoinHandle<eyre::Result<u64>>,
+    ) {
+        // The filter arg is discarded on purpose (models RemoteTransferSource).
+        self.inner.scan(None, unreadable)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> eyre::Result<Vec<FileHeader>> {
+        self.inner.check_availability(headers, unreadable).await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+#[tokio::test]
+async fn session_filters_via_chokepoint_not_scan_arg() {
+    // otp-6a F1 (codex): filtering must not depend on the inner source
+    // honoring the scan(filter) argument — RemoteTransferSource ignores it.
+    // Drive a push session whose source ignores the scan arg; the filter
+    // must still apply because the session wraps it in FilteredSource.
+    let src = vec![
+        ("keep.txt", b"a".to_vec(), 1_600_000_001),
+        ("drop.log", b"b".to_vec(), 1_600_000_002),
+    ];
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(&src_root, &src);
+
+    let mut open = basic_open(TransferRole::Source);
+    open.filter = Some(FilterSpec {
+        include: vec!["*.txt".to_string()],
+        ..Default::default()
+    });
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(open),
+        plan_options: PlanOptions::default(),
+        data_plane_host: None,
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+    };
+    let (a, b) = in_process_pair();
+    let source = Arc::new(FilterIgnoringSource {
+        inner: FsTransferSource::new(src_root.clone()),
+    });
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, a, source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        )
+    })
+    .await
+    .expect("session run timed out");
+
+    let summary = source_result.expect("source session");
+    let _ = dest_result.expect("destination session");
+    assert_eq!(
+        summary.files_transferred, 1,
+        "filter must apply via the FilteredSource chokepoint even when the \
+         inner source ignores the scan arg"
+    );
+    assert!(dst_root.join("keep.txt").exists());
+    assert!(!dst_root.join("drop.log").exists());
 }
 
 // ---------------------------------------------------------------------------

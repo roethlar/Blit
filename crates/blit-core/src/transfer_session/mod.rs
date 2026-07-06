@@ -919,21 +919,32 @@ async fn source_send_half(
     // Streaming manifest: entries go out as enumeration produces them
     // (immediate start in every direction — plan §Design 2). The open
     // carries no source path (the source end owns its local endpoint) but
-    // does carry the include/exclude/size/age filter (otp-6a): the scan
-    // applies it so only matching files are manifested and transferred. A
+    // does carry the include/exclude/size/age filter (otp-6a): only
+    // matching files are manifested and transferred. The filter MUST ride
+    // the wire (not be pre-wrapped by a local caller) because for pull the
+    // SOURCE is the remote daemon responder — it, not the client, owns the
+    // scan. Apply it through the universal `FilteredSource` decorator, the
+    // single filter chokepoint every source impl routes through, rather
+    // than the per-impl `scan(filter)` arg which only `FsTransferSource`
+    // honors (`RemoteTransferSource` ignores it — codex otp-6a F1). A
     // default/absent filter scans everything (unchanged from otp-3). Globs
-    // were validated at OPEN (`source_open_validator`), so this conversion
+    // were validated at OPEN (`source_open_validator`), so the conversion
     // cannot fail on a validated open; map any error to a fault regardless.
-    let scan_filter = match negotiated.open.filter.as_ref() {
-        Some(spec) if *spec != FilterSpec::default() => Some(
-            crate::remote::transfer::operation_spec::filter_from_spec(spec.clone()).map_err(
-                |e| eyre::Report::new(SessionFault::internal(format!("invalid filter: {e:#}"))),
-            )?,
-        ),
-        _ => None,
+    let scan_source: Arc<dyn TransferSource> = match negotiated.open.filter.as_ref() {
+        Some(spec) if *spec != FilterSpec::default() => {
+            let filter = crate::remote::transfer::operation_spec::filter_from_spec(spec.clone())
+                .map_err(|e| {
+                    eyre::Report::new(SessionFault::internal(format!("invalid filter: {e:#}")))
+                })?;
+            Arc::new(crate::remote::transfer::source::FilteredSource::new(
+                Arc::clone(&source),
+                filter,
+            ))
+        }
+        _ => Arc::clone(&source),
     };
     let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
-    let (mut header_rx, scan_handle) = source.scan(scan_filter, Arc::clone(&unreadable));
+    let (mut header_rx, scan_handle) = scan_source.scan(None, Arc::clone(&unreadable));
     while let Some(header) = header_rx.recv().await {
         sent.lock()
             .expect("sent-manifest lock poisoned")
