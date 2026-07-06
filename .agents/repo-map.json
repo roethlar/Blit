@@ -1,7 +1,7 @@
 {
   "validated_against": {
-    "commit": "5bb12fb803b98ff273d1c76404fb8034b650a739",
-    "date": "2026-07-04"
+    "commit": "1ff36c712de9f8372238b5608227a0cd6f9ad232",
+    "date": "2026-07-05"
   },
   "projects": [
     {
@@ -59,6 +59,6 @@
     "As of the 2026-07-03 governance reconciliation, AGENTS.md is a byte-identical copy of the toolkit template; every repo-specific rule (project map, style, git safety, source-of-truth order, operator procedures) lives in .agents/repo-guidance.md instead.",
     "DEVLOG.md is an append-only journal: write to it, never read it for current state. TODO.md is backlog-only.",
     "Verification commands confirmed against .agents/repo-guidance.md, .review/README.md, and the CI workflows; not executed during the bootstrap run itself (docs-only change).",
-    "2026-07-04 update-governance run: re-confirmed workspace members against Cargo.toml, script paths, and CI branch triggers against master with no drift found; only this stamp changed."
+    "2026-07-05 update-governance run: re-confirmed workspace members against Cargo.toml, script paths, and CI branch triggers against master with no drift found; updated template to 2026-07-04.1 and added hooks/playbooks."
   ]
 }
