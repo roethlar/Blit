@@ -1707,10 +1707,10 @@ async fn destination_session(
     // NeedListSink gives the socket receive the same need-list strictness
     // the in-stream control loop applies inline; AbortOnDrop (inside the
     // responder run) bounds the accept task to this future. `resize_live`
-    // tracks the stream count this end has granted (epoch-0 plus each
+    // tracks the stream count this end has grown to (epoch-0 plus each
     // accepted resize ADD) and `resize_ceiling` the receiver's advertised
-    // max_streams — both meaningful only for the resize-armable responder
-    // path (push); the pull initiator path is single-stream (otp-5b-1).
+    // max_streams — both directions resize (push arms+accepts, otp-4b-2;
+    // pull dials, otp-5b-2), so both seed these from their epoch-0 streams.
     let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
         Arc::clone(&sink) as Arc<dyn TransferSink>,
         Arc::clone(&outstanding),
@@ -1733,13 +1733,19 @@ async fn destination_session(
         // SOURCE responder granted a data plane and we have a host to dial.
         None => match (&negotiated.accept.data_plane, data_plane_host) {
             (Some(grant), Some(host)) => {
+                let initial = grant.initial_streams.max(1) as usize;
                 let run = data_plane::dial_destination_data_plane(host, grant, recv_sink).await?;
-                // Single-stream (otp-5b-1): no resize is accepted, so
-                // the ceiling stays 0 and a Resize frame is a violation.
+                // otp-5b-2: the pull data plane resizes too. Seed
+                // `resize_live` from the epoch-0 streams dialed and bound
+                // growth by this end's OWN advertised capacity (it is the
+                // byte receiver) — the same ceiling the SOURCE responder's
+                // dial already clamps to. On a Resize frame the initiator
+                // dials the epoch-N socket (vs the responder path's arm).
+                let ceiling = crate::engine::local_receiver_capacity().max_streams.max(1) as usize;
                 (
                     Some(data_plane::DestRecvPlane::Initiator(run)),
-                    0usize,
-                    0usize,
+                    initial,
+                    ceiling,
                 )
             }
             // A grant with no host to dial is an inconsistent initiator
@@ -1882,29 +1888,21 @@ async fn destination_session(
                 bytes_written += outcome.bytes_written;
             }
             Some(Frame::Resize(resize)) => {
-                // sf-2 shape correction (otp-4b-2): the SOURCE proposes
-                // one ADD; arm the credential, grant it (bump `resize_live`),
-                // and ack so the SOURCE dials the epoch-N socket. Only ADD
-                // occurs on the session (REMOVE is a tuner concern, future
-                // work); anything else fails fast.
-                let run = match data_plane_recv.as_ref() {
-                    Some(data_plane::DestRecvPlane::Responder(run)) => run,
-                    // The pull data plane is single-stream (otp-5b-1): the
-                    // SOURCE responder never proposes a resize, so one here
-                    // is a protocol violation (otp-5b-2 adds the accept-based
-                    // epoch-N socket + dial).
-                    Some(data_plane::DestRecvPlane::Initiator(_)) => {
-                        return Err(violation(
-                            "DataPlaneResize on the single-stream pull data plane (otp-5b-1)"
-                                .into(),
-                        ))
-                    }
-                    None => {
-                        return Err(violation(
-                            "DataPlaneResize on a session with no data plane".into(),
-                        ))
-                    }
-                };
+                // sf-2 shape correction (otp-4b-2 push, otp-5b-2 pull): the
+                // SOURCE proposes one ADD; the DESTINATION grows its receive
+                // set (bump `resize_live`) and acks so the SOURCE completes
+                // the epoch-N socket. The control-lane frames are identical
+                // in both directions — only the transport action flips: a
+                // DESTINATION **responder** (push) ARMS a credential its
+                // accept loop then accepts; a DESTINATION **initiator**
+                // (pull) DIALS the epoch-N socket itself. Only ADD occurs
+                // (REMOVE is a tuner concern, future work); anything else
+                // fails fast.
+                if data_plane_recv.is_none() {
+                    return Err(violation(
+                        "DataPlaneResize on a session with no data plane".into(),
+                    ));
+                }
                 let op = DataPlaneResizeOp::try_from(resize.op)
                     .unwrap_or(DataPlaneResizeOp::Unspecified);
                 if op != DataPlaneResizeOp::Add {
@@ -1918,9 +1916,30 @@ async fn destination_session(
                         "DataPlaneResize sub_token must be 16 bytes".into(),
                     ));
                 }
-                // Cumulative ceiling bound (defense in depth — the
-                // source's dial already clamps to the same profile).
-                let accepted = resize_live < resize_ceiling && run.arm(resize.sub_token.clone());
+                // Cumulative ceiling bound (defense in depth — the source's
+                // dial already clamps to the same profile). Under the
+                // ceiling, grow per connection role: arm the credential
+                // (responder) or dial the epoch-N socket (initiator). A
+                // dial failure is fatal (`add_dialed_stream`); a gone accept
+                // loop returns false (arm). The initiator dials BEFORE the
+                // ack so the SOURCE responder — which accepts on the ack —
+                // never commits to an accept the DESTINATION did not dial.
+                let accepted = if resize_live < resize_ceiling {
+                    match data_plane_recv
+                        .as_mut()
+                        .expect("data plane present (checked above)")
+                    {
+                        data_plane::DestRecvPlane::Responder(run) => {
+                            run.arm(resize.sub_token.clone())
+                        }
+                        data_plane::DestRecvPlane::Initiator(run) => {
+                            run.add_dialed_stream(&resize.sub_token).await?;
+                            true
+                        }
+                    }
+                } else {
+                    false
+                };
                 if accepted {
                     resize_live += 1;
                 }

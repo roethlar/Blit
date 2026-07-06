@@ -394,9 +394,10 @@ async fn pull_data_plane_single_stream_lands_bytes() {
     // (binds + accepts + sends). Control frames ride the in-process
     // transport; the data-plane socket rides loopback TCP (the SOURCE
     // responder binds 0.0.0.0:0, the DESTINATION initiator dials
-    // 127.0.0.1). Single-stream by construction: the SOURCE responder's
-    // dial is non-resizable, so no `DataPlaneResize` flows (otp-5b-2 adds
-    // the accept-based epoch-N socket).
+    // 127.0.0.1). Single-stream because this 4-file tree's shape wants only
+    // one stream — the pull data plane CAN resize (otp-5b-2), but a small
+    // need list never crosses the shape threshold; the resize itself is
+    // pinned by `pull_data_plane_shape_corrects_to_more_than_one_stream`.
     let tmp = tempfile::tempdir().unwrap();
     let src_root = tmp.path().join("src");
     let dst_root = tmp.path().join("dst");
@@ -456,7 +457,75 @@ async fn pull_data_plane_single_stream_lands_bytes() {
     assert_eq!(
         outcome.data_plane_streams,
         Some(1),
-        "otp-5b-1 pull is single-stream (no resize until otp-5b-2)"
+        "a 4-file need list stays single-stream (below the shape threshold)"
+    );
+    assert_trees_identical(&src_root, &dst_root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_data_plane_shape_corrects_to_more_than_one_stream() {
+    // otp-5b-2: the sf-2 shape correction in the PULL direction — the
+    // mirror of `many_tiny_files_shape_correct_to_more_than_one_stream`
+    // (push). Here the DESTINATION is the *initiator* (dials the epoch-N
+    // sockets it grows to) and the SOURCE is the *responder* (accepts them
+    // off its bound listener). The control-lane `DataPlaneResize{ADD}` /
+    // `DataPlaneResizeAck` frames are identical to push; only the transport
+    // action flips. A 10k-tiny-file transfer must re-run the shape table
+    // over the accumulated need list and grow the stream count past 1.
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    const FILE_COUNT: usize = 10_000;
+    for i in 0..FILE_COUNT {
+        std::fs::write(src_root.join(format!("f{i:05}.bin")), b"x").unwrap();
+    }
+
+    // DESTINATION initiator; SOURCE responder — roles flipped from the push
+    // shape test, the data plane following connection role.
+    let open = SessionOpen {
+        initiator_role: TransferRole::Destination as i32,
+        compare_mode: ComparisonMode::SizeMtime as i32,
+        in_stream_bytes: false,
+        ..Default::default()
+    };
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder, // binds + accepts + sends
+        plan_options: PlanOptions::default(),
+        data_plane_host: None, // a responder never dials
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(open), // dials + receives
+        data_plane_host: Some("127.0.0.1".into()),
+    };
+    let (a, b) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root.clone()));
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, a, source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        )
+    })
+    .await
+    .expect("session run timed out");
+
+    let summary = source_result.expect("source responder succeeds");
+    let outcome = dest_result.expect("destination initiator succeeds");
+    assert!(
+        !summary.in_stream_carrier_used,
+        "the pull sf-2 pin must ride the TCP data plane"
+    );
+    assert_eq!(summary.files_transferred, FILE_COUNT as u64);
+    let streams = outcome
+        .data_plane_streams
+        .expect("data plane ran, stream count recorded");
+    assert!(
+        streams > 1,
+        "a {FILE_COUNT}-file PULL transfer must correct the single-stream \
+         grant upward via shape resize; settled at {streams}"
     );
     assert_trees_identical(&src_root, &dst_root);
 }

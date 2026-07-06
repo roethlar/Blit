@@ -19,19 +19,23 @@
 //! pipeline, receive is `execute_receive_pipeline` — only socket
 //! acquisition differs per byte role. Because the grant is issued before
 //! any manifest is seen, the zero-knowledge `initial_stream_proposal` is
-//! 1 — the session data plane always starts single-stream (otp-4b-1); the
-//! pull data plane stays single-stream through otp-5b-1 (resize is
-//! otp-5b-2).
+//! 1 — the session data plane always starts single-stream (otp-4b-1) and
+//! grows via resize in BOTH directions (push otp-4b-2, pull otp-5b-2).
 //!
-//! otp-4b-2 adds mid-transfer growth: the SOURCE owns a [`TransferDial`]
-//! (bounded by the receiver's advertised capacity) and drives the sf-2
-//! shape correction — as the need list accumulates it re-runs the shape
-//! table and proposes `DataPlaneResize{ADD}` (one stream per epoch) on
-//! the control lane; the DESTINATION arms the credential, replies
-//! `DataPlaneResizeAck`, and accepts one more socket; the SOURCE dials
-//! the epoch-N socket and hands it to the running elastic pipeline via
-//! [`SinkControl::Add`]. The cheap-dial live tuner (chunk/prefetch) is
-//! still future work — otp-4b-2 moves only the stream count.
+//! Mid-transfer growth (otp-4b-2 push, otp-5b-2 pull): the SOURCE owns a
+//! [`TransferDial`] (bounded by the receiver's advertised capacity) and
+//! drives the sf-2 shape correction — as the need list accumulates it
+//! re-runs the shape table and proposes `DataPlaneResize{ADD}` (one stream
+//! per epoch) on the control lane; the DESTINATION replies
+//! `DataPlaneResizeAck` and grows its receive set. The control-lane frames
+//! are identical in both directions — only the transport action flips
+//! (the connection-initiating end always dials, the responder always
+//! accepts): in push the SOURCE **initiator** dials the epoch-N socket and
+//! the DESTINATION **responder** arms+accepts it; in pull the DESTINATION
+//! **initiator** dials and the SOURCE **responder** accepts. Either way
+//! the SOURCE hands its new send socket to the running elastic pipeline
+//! via [`SinkControl::Add`]. The cheap-dial live tuner (chunk/prefetch) is
+//! still future work — the resize moves only the stream count.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -422,17 +426,26 @@ async fn authenticate_resize(
 // Initiator (DESTINATION) — dial, receive (otp-5b-1)
 // ---------------------------------------------------------------------------
 
-/// Live handle to a DESTINATION **initiator** receive data plane
-/// (otp-5b-1, the pull direction): the initiator dials the granted
-/// epoch-0 socket(s) and drains each into the sink through the shared
-/// receive pipeline — the same byte machinery the DESTINATION responder
-/// uses, only the socket is dialed instead of accepted. Single-stream: no
-/// resize arming (otp-5b-2 adds the accept-based epoch-N socket + dial).
-/// [`Self::finish`] joins the workers for the aggregated write outcome +
-/// settled stream count.
+/// Live handle to a DESTINATION **initiator** receive data plane (the
+/// pull direction): the initiator dials the granted epoch-0 socket(s) and
+/// drains each into the sink through the shared receive pipeline — the
+/// same byte machinery the DESTINATION responder uses, only the socket is
+/// dialed instead of accepted. Resize (otp-5b-2): on a `DataPlaneResize`
+/// the control loop dials one more epoch-N socket via
+/// [`Self::add_dialed_stream`] (the pull mirror of the SOURCE responder's
+/// accept). [`Self::finish`] joins the workers for the aggregated write
+/// outcome + settled stream count.
 pub(super) struct InitiatorReceivePlaneRun {
     receives: JoinSet<Result<SinkOutcome>>,
     streams: usize,
+    /// The responder host+port and session token, retained so a resize can
+    /// dial another receive socket to the same listener (otp-5b-2). The
+    /// DESTINATION initiator always dials; the SOURCE responder accepts.
+    host: String,
+    tcp_port: u32,
+    session_token: Vec<u8>,
+    /// The shared need-list receive sink each dialed worker drains into.
+    sink: Arc<dyn TransferSink>,
 }
 
 /// Dial the granted epoch-0 socket(s) and spawn one receive worker per
@@ -465,10 +478,37 @@ pub(super) async fn dial_destination_data_plane(
         streams += 1;
         spawn_receive(&mut receives, socket, &sink);
     }
-    Ok(InitiatorReceivePlaneRun { receives, streams })
+    Ok(InitiatorReceivePlaneRun {
+        receives,
+        streams,
+        host: host.to_string(),
+        tcp_port: grant.tcp_port,
+        session_token: grant.session_token.clone(),
+        sink,
+    })
 }
 
 impl InitiatorReceivePlaneRun {
+    /// Dial one epoch-N resize socket to the responder and spawn its
+    /// receive worker (otp-5b-2 — the pull mirror of the SOURCE
+    /// responder's accept). Credential `session_token ‖ sub_token`. A dial
+    /// failure is FATAL, matching the SOURCE initiator's `add_stream`: a
+    /// same-build peer that granted+bound epoch-0 failing an epoch-N dial
+    /// is a transport fault worth surfacing (the DESTINATION dials before
+    /// it acks, so a failure faults the session before the SOURCE
+    /// responder commits to accepting the socket).
+    pub(super) async fn add_dialed_stream(&mut self, sub_token: &[u8]) -> Result<()> {
+        let mut handshake = self.session_token.clone();
+        handshake.extend_from_slice(sub_token);
+        let addr = format!("{}:{}", self.host, self.tcp_port);
+        let socket = dial_data_plane(&addr, &handshake, None)
+            .await
+            .map_err(|err| dp_fault(format!("dialing resize data plane (receive): {err:#}")))?;
+        self.streams += 1;
+        spawn_receive(&mut self.receives, socket, &self.sink);
+        Ok(())
+    }
+
     /// Join every receive worker for the aggregated write totals. A worker
     /// error (receive failure / stall) surfaces here; each drains to its
     /// socket's END record on a clean transfer.
@@ -492,11 +532,11 @@ impl InitiatorReceivePlaneRun {
 /// pipeline; they differ only in how sockets are obtained (accept vs dial)
 /// and whether resize is armable (push only, otp-4b-2).
 pub(super) enum DestRecvPlane {
-    /// DESTINATION **responder** (push, otp-4b): accepts sockets, resize-
-    /// armable via the control loop.
+    /// DESTINATION **responder** (push, otp-4b): accepts sockets; resize
+    /// grows the set by arming a credential its accept loop then accepts.
     Responder(ResponderDataPlaneRun),
-    /// DESTINATION **initiator** (pull, otp-5b-1): dialed single-stream
-    /// receive, no resize.
+    /// DESTINATION **initiator** (pull, otp-5b): dials sockets; resize grows
+    /// the set by dialing one more epoch-N socket (otp-5b-2).
     Initiator(InitiatorReceivePlaneRun),
 }
 
@@ -527,9 +567,23 @@ pub(super) struct PendingResize {
     pub(super) sub_token: Vec<u8>,
 }
 
-/// A running source-side data plane: the dialed socket(s) wrapped as an
-/// ELASTIC sink pipeline that `SinkControl::Add` grows mid-run (the sf-2
-/// shape correction). Planned payloads are fed via [`Self::queue`];
+/// How the SOURCE acquires each epoch-N data socket for a shape resize —
+/// the two connection roles of otp-5b. Byte direction is identical (the
+/// SOURCE sends), and `propose_resize` is the same either way; only socket
+/// acquisition flips.
+enum SourceSockets {
+    /// SOURCE **initiator** (push, otp-4b-2): dials each epoch-N socket to
+    /// the granted host:port.
+    Dial { host: String, tcp_port: u32 },
+    /// SOURCE **responder** (pull, otp-5b-2): accepts each epoch-N socket
+    /// off the listener it already bound for epoch-0, credential
+    /// `session_token ‖ sub_token`.
+    Accept { listener: TcpListener },
+}
+
+/// A running source-side data plane: the dialed/accepted socket(s) wrapped
+/// as an ELASTIC sink pipeline that `SinkControl::Add` grows mid-run (the
+/// sf-2 shape correction). Planned payloads are fed via [`Self::queue`];
 /// closing via [`Self::finish`] drains the pipeline, emits each socket's
 /// END record, and returns the bytes this end sent.
 pub(super) struct SourceDataPlane {
@@ -539,22 +593,18 @@ pub(super) struct SourceDataPlane {
     // `Result<SinkOutcome>`, so `T` is that (not the JoinHandle).
     pipeline: Option<AbortOnDrop<Result<SinkOutcome>>>,
     // The byte SENDER owns the live dial, bounded by the byte RECEIVER's
-    // advertised capacity (contract §Invariants 5). otp-4b-2 drives only
+    // advertised capacity (contract §Invariants 5). The resize drives only
     // its shape-correction stream count; the cheap-dial tuner is future
     // work, so `chunk_bytes()`/`prefetch_count()` stay at the floor.
     dial: Arc<TransferDial>,
     source: Arc<dyn TransferSource>,
-    host: String,
-    tcp_port: u32,
     session_token: Vec<u8>,
     pool: Arc<BufferPool>,
-    /// Whether this data plane grows mid-transfer via `DataPlaneResize`.
-    /// True for the SOURCE **initiator** (push, otp-4b-2: it dials each
-    /// epoch-N socket on the ack). False for the SOURCE **responder**
-    /// (pull, otp-5b-1): the accept-based epoch-N socket + ack→accept
-    /// choreography is otp-5b-2, so this slice stays single-stream and
-    /// `propose_resize` returns `None` regardless of the need list.
-    resizable: bool,
+    /// How each epoch-N resize socket is acquired (dial for the SOURCE
+    /// initiator, accept for the SOURCE responder). The data plane grows
+    /// mid-transfer in both cases; the control-lane resize choreography is
+    /// identical — only this transport action flips (otp-5b-2).
+    sockets: SourceSockets,
 }
 
 /// Dial the granted data plane and start the elastic send pipeline.
@@ -634,11 +684,14 @@ pub(super) async fn dial_source_data_plane(
         pipeline: Some(pipeline),
         dial,
         source,
-        host: host.to_string(),
-        tcp_port: grant.tcp_port,
         session_token: grant.session_token.clone(),
         pool,
-        resizable: true,
+        // SOURCE initiator: each epoch-N resize socket is dialed to the
+        // granted host:port.
+        sockets: SourceSockets::Dial {
+            host: host.to_string(),
+            tcp_port: grant.tcp_port,
+        },
     })
 }
 
@@ -652,8 +705,9 @@ pub(super) async fn dial_source_data_plane(
 /// accepted socket — the same primitive the old `pull_sync` daemon-send
 /// path uses. `receiver_capacity` is the DESTINATION initiator's advertised
 /// profile from its `SessionOpen` (the byte RECEIVER advertises capacity,
-/// wherever it initiates). Single-stream: `resizable: false`, so no
-/// `DataPlaneResize` is ever proposed on the pull data plane in this slice.
+/// wherever it initiates). The bound listener is retained so each epoch-N
+/// resize socket is accepted off it (otp-5b-2): the DESTINATION initiator
+/// dials, this end accepts, the control-lane frames identical to push.
 pub(super) async fn accept_source_data_plane(
     bound: ResponderDataPlane,
     receiver_capacity: Option<&CapacityProfile>,
@@ -662,7 +716,8 @@ pub(super) async fn accept_source_data_plane(
     let initial = bound.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
     // capacity; seed the live count to the granted epoch-0 streams. Growth
-    // is disabled below (resizable=false), so the count stays here.
+    // is via resize (otp-5b-2): the accept-based epoch-N socket steps from
+    // here, one stream per epoch, same as the SOURCE initiator.
     let dial = TransferDial::conservative_within(receiver_capacity).shared();
     dial.set_negotiated_streams(initial);
 
@@ -714,14 +769,13 @@ pub(super) async fn accept_source_data_plane(
         pipeline: Some(pipeline),
         dial,
         source,
-        // Accept-based: this end never dials an epoch-N socket, so the
-        // dial-target fields are unused (add_stream is unreachable while
-        // resizable is false).
-        host: String::new(),
-        tcp_port: 0,
         session_token: bound.session_token,
         pool,
-        resizable: false,
+        // SOURCE responder: each epoch-N resize socket is accepted off the
+        // same listener epoch-0 came in on (otp-5b-2).
+        sockets: SourceSockets::Accept {
+            listener: bound.listener,
+        },
     })
 }
 
@@ -743,11 +797,6 @@ impl SourceDataPlane {
         needed_bytes: u64,
         needed_count: usize,
     ) -> Result<Option<PendingResize>> {
-        // A non-resizable data plane (the SOURCE responder, otp-5b-1)
-        // never grows: the accept-based epoch-N socket is otp-5b-2.
-        if !self.resizable {
-            return Ok(None);
-        }
         let desired =
             initial_stream_proposal(needed_bytes, needed_count, self.dial.ceiling_max_streams())
                 as usize;
@@ -763,31 +812,56 @@ impl SourceDataPlane {
         }))
     }
 
-    /// Dial the epoch-N data socket for an accepted resize and hand it to
-    /// the running pipeline (`SinkControl::Add`). A dial failure is FATAL
-    /// (fail-fast): a same-build peer whose listener already accepted
-    /// epoch-0 failing an epoch-N dial is a transport fault worth
-    /// surfacing — and faulting the session aborts the peer's accept loop
-    /// via AbortOnDrop, so its armed slot never orphans. (Old push
-    /// recovers non-fatally via an arm TTL; the session trades that for
-    /// simplicity — noted in the finding doc.) If the pipeline is already
-    /// gone (transfer completing under the ADD), the just-dialed socket
-    /// is closed cleanly so the peer's worker sees its END, not a reset.
+    /// Acquire the epoch-N data socket for an accepted resize and hand it
+    /// to the running pipeline (`SinkControl::Add`). The SOURCE initiator
+    /// (push) DIALS it; the SOURCE responder (pull, otp-5b-2) ACCEPTS the
+    /// socket the DESTINATION initiator dials after its ack, off the same
+    /// listener epoch-0 came in on. A dial/accept failure is FATAL
+    /// (fail-fast): a same-build peer that established epoch-0 failing an
+    /// epoch-N socket is a transport fault worth surfacing — and faulting
+    /// the session aborts the peer's counterpart via AbortOnDrop, so no
+    /// slot orphans. (Old push recovers non-fatally via an arm TTL; the
+    /// session trades that for simplicity — noted in the finding doc.) If
+    /// the pipeline is already gone (transfer completing under the ADD),
+    /// the just-acquired socket is closed cleanly so the peer's worker sees
+    /// its END, not a reset.
+    ///
+    /// The accept is bounded and unambiguous: at most one resize is in
+    /// flight (the driver's `pending_resize`) and epoch-0 is already
+    /// accepted, so the next connection off the listener is exactly this
+    /// resize's socket — verified against `session_token ‖ sub_token`.
     pub(super) async fn add_stream(&self, sub_token: &[u8]) -> Result<()> {
-        let mut handshake = self.session_token.clone();
-        handshake.extend_from_slice(sub_token);
-        let session = DataPlaneSession::connect(
-            &self.host,
-            self.tcp_port,
-            &handshake,
-            self.dial.chunk_bytes(),
-            self.dial.prefetch_count(),
-            false,
-            self.dial.tcp_buffer_bytes(),
-            Arc::clone(&self.pool),
-        )
-        .await
-        .map_err(|err| dp_fault(format!("dialing resize data socket: {err:#}")))?;
+        let session = match &self.sockets {
+            SourceSockets::Dial { host, tcp_port } => {
+                let mut handshake = self.session_token.clone();
+                handshake.extend_from_slice(sub_token);
+                DataPlaneSession::connect(
+                    host,
+                    *tcp_port,
+                    &handshake,
+                    self.dial.chunk_bytes(),
+                    self.dial.prefetch_count(),
+                    false,
+                    self.dial.tcp_buffer_bytes(),
+                    Arc::clone(&self.pool),
+                )
+                .await
+                .map_err(|err| dp_fault(format!("dialing resize data socket: {err:#}")))?
+            }
+            SourceSockets::Accept { listener } => {
+                let mut expected = self.session_token.clone();
+                expected.extend_from_slice(sub_token);
+                let socket = accept_authenticated(listener, &expected).await?;
+                DataPlaneSession::from_stream(
+                    socket,
+                    false,
+                    self.dial.chunk_bytes(),
+                    self.dial.prefetch_count(),
+                    Arc::clone(&self.pool),
+                )
+                .await
+            }
+        };
         let sink: Arc<dyn TransferSink> = Arc::new(DataPlaneSink::new(
             session,
             Arc::clone(&self.source),
