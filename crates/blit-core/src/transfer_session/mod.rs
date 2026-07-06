@@ -1737,11 +1737,20 @@ async fn destination_session(
                 let run = data_plane::dial_destination_data_plane(host, grant, recv_sink).await?;
                 // otp-5b-2: the pull data plane resizes too. Seed
                 // `resize_live` from the epoch-0 streams dialed and bound
-                // growth by this end's OWN advertised capacity (it is the
-                // byte receiver) — the same ceiling the SOURCE responder's
-                // dial already clamps to. On a Resize frame the initiator
-                // dials the epoch-N socket (vs the responder path's arm).
-                let ceiling = crate::engine::local_receiver_capacity().max_streams.max(1) as usize;
+                // growth by the capacity THIS end advertised in its open
+                // (it is the byte receiver) — the exact ceiling the SOURCE
+                // responder's dial already clamps to, so both ends agree
+                // even when the caller advertised a max_streams below this
+                // host's fresh local reading (codex otp-5b-2 F1). On a
+                // Resize frame the initiator dials the epoch-N socket (vs
+                // the responder path's arm).
+                let ceiling = negotiated
+                    .open
+                    .receiver_capacity
+                    .as_ref()
+                    .map(|c| c.max_streams)
+                    .unwrap_or(0)
+                    .max(1) as usize;
                 (
                     Some(data_plane::DestRecvPlane::Initiator(run)),
                     initial,
