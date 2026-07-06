@@ -1,14 +1,14 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-06 (**otp-6a landed + graded (codex FAIL → 1
-Medium accepted + fixed)** — the unified session now honors
-`SessionOpen.filter` on the SOURCE scan, applied through the universal
-`FilteredSource` chokepoint so filtering is impl-independent (the fix
-closed a latent gap for otp-9's remote source). otp-6 split into 6a
-(filters, done) + 6b (mirror, next). ONE_TRANSFER_PATH otp-1 + otp-3 +
-otp-4a + otp-4b (1/2/3) + otp-5a + otp-5b (1/2) + otp-6a `[x]`, current
-slice **otp-6b** (mirror on the session, one delete rule).
-SMALL_FILE_CEILING stays paused, D-2026-07-05-1.)
+Last updated: 2026-07-07 (**otp-6 CLOSED — 6b mirror landed + graded
+(codex NEEDS FIXES → 1 High + 1 Med accepted + fixed)**. The session
+MIRRORS: the DESTINATION accumulates the complete source manifest and,
+at SourceDone, deletes extraneous entries locally (the one delete rule),
+scan-complete-guarded + filter-scoped. High fix: case-insensitive-FS
+data-loss — the keep-set now folds case on macOS too, not just Windows.
+ONE_TRANSFER_PATH otp-1 + otp-3 + otp-4a + otp-4b (1/2/3) + otp-5a +
+otp-5b (1/2) + otp-6 (a/b) `[x]`, current slice **otp-7** (resume block
+phase). SMALL_FILE_CEILING stays paused, D-2026-07-05-1.)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -45,13 +45,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     `773a877`) lifted the single-stream cap — the pull data plane resizes
     via sf-2 (same resize frames as push). Defaults to TCP; A/B
     byte-identical vs old `pull_sync`. Suite → **1522**.
-  - **otp-6a `[x]`** (`c026692`+`0bb27f5`, codex FAIL→1 Med fixed) — the
-    session honors `SessionOpen.filter` on the SOURCE scan, applied via the
-    universal `FilteredSource` chokepoint (not the per-impl `scan` arg, which
-    only `FsTransferSource` honors). Bad peer globs refused at OPEN. → 1524.
-  - Current: **otp-6b** (mirror on the session — the one delete rule).
-    otp-5b-3 (pull mid-transfer cancel) is optional — the CANCELLED framing
-    is role-agnostic. (otp-2 symmetric baseline is rig-gated; before otp-10.)
+  - **otp-6 (a/b) `[x]`** — mirror + filters on the session, closed.
+    6a (`c026692`+`0bb27f5`) honors `SessionOpen.filter` via the universal
+    `FilteredSource` chokepoint. 6b (`01d9c41`+`3c99557`) is the one delete
+    rule: DESTINATION diffs the complete source manifest at SourceDone,
+    scan-complete-guarded + filter-scoped. Codex High: keep-set now folds
+    case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
+  - Current: **otp-7** (resume block phase). otp-5b-3 (pull mid-transfer
+    cancel) is optional — the CANCELLED framing is role-agnostic. (otp-2
+    symmetric baseline is rig-gated; before otp-10.)
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -68,12 +70,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
-   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6a `[x]`. Current: **otp-6b**
-   (mirror on the session — the one delete rule: the DESTINATION computes
-   deletions from the completed source manifest, filter-scoped +
-   scan-complete-guarded, and executes them locally; `entries_deleted` in
-   the summary). otp-2 (symmetric baseline) is RIG-GATED — before otp-10
-   cutover.
+   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b) `[x]`. Current:
+   **otp-7** (resume block phase — ordering + stale-partial pins per the
+   Design's RELIABLE exception; resume is still refused at OPEN until this
+   lands). otp-2 (symmetric baseline) is RIG-GATED — before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
    REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
@@ -174,27 +174,27 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-07 (35th)** @ `01d9c41`+`3c99557` — **otp-6b mirror (codex
+  NEEDS FIXES → 1 High + 1 Med accepted + fixed); otp-6 CLOSED** (DEVLOG
+  00:45; `.review/…/otp-6b-session-mirror.md`, `.review/results/otp-6b.*`).
+  The DESTINATION accumulates the complete source manifest and at SourceDone
+  deletes extraneous entries locally (the one delete rule), scan-complete-
+  guarded + filter-scoped; `entries_deleted` filled (new
+  `plan_session_deletions` + `mirror_delete_pass`). F1 (High): the keep-set
+  `CasefoldKey` folded case only on Windows, so on APFS a wire `Foo.txt` vs
+  dest `foo.txt` deleted the just-written file — now folds on macOS too. F2
+  (Med): missing Windows readonly-clear before delete. Both fixes are
+  macOS/Windows-only — NOT guard-provable on Linux (cfg-gated fold test on
+  those CIs; Linux exact test pins no-regression). Suite 1524 → **1529/0**.
+  **Exact first action next session**: otp-7 (resume block phase; resume is
+  refused at OPEN until it lands). In-flight: none. 10 GbE gates + push go
+  remain in Blocked; `f6e592e`..HEAD unpushed. (`Cargo.lock` drift unstaged.)
 - **2026-07-06 (34th)** @ `c026692`+`0bb27f5` — **otp-6a (filters on the
   session, codex FAIL → 1 Medium accepted + fixed)** (DEVLOG 22:30;
   `.review/…/otp-6a-session-filters.md`, `.review/results/otp-6a.*`). The
-  session honors `SessionOpen.filter` on the SOURCE scan:
-  `source_open_validator` validates globs (peer-notified refusal at OPEN)
-  instead of refusing all filters. F1 (Med, `0bb27f5`): routed filtering
-  through the universal `FilteredSource` decorator, not the per-impl
-  `scan(filter)` arg — only `FsTransferSource` honored the arg;
-  `RemoteTransferSource` ignores it (latent silent-no-filter for otp-9's
-  remote relay). Two guard tests. Suite 1522 → **1524/0**. **Exact first
-  action next session**: otp-6b (mirror — DESTINATION accumulates the
-  complete source manifest, scan-complete-guarded, filter-scoped extraneous
-  delete, `entries_deleted`; relax `destination_open_validator`'s mirror
-  refusal, the `mirror_request_is_refused_until_its_slice_lands` test flips).
-  In-flight: none. 10 GbE gates + push go remain in Blocked;
-  `f6e592e`..HEAD unpushed. (`Cargo.lock` drift unstaged.)
-- **2026-07-06 (33rd)** @ `d579365`+`773a877` — **otp-5b-2 (pull data-plane
-  resize, codex NEEDS FIXES → 1 Low accepted + fixed)** (DEVLOG 20:15;
-  `.review/…/otp-5b-2-pull-data-plane-resize.{md,gpt-verdict.md}`). The pull
-  data plane grows mid-transfer via the same sf-2 shape correction as push;
-  resize frames identical both ways, only socket acquisition flips (SOURCE
-  responder accepts each epoch-N socket, DEST initiator dials it). F1 (Low):
-  ceiling reads the advertised `receiver_capacity`, not a fresh local read.
-  Suite → **1522**.
+  session honors `SessionOpen.filter` on the SOURCE scan;
+  `source_open_validator` validates globs (peer-notified refusal at OPEN).
+  F1 (Med, `0bb27f5`): routed filtering through the universal `FilteredSource`
+  decorator, not the per-impl `scan(filter)` arg — only `FsTransferSource`
+  honored the arg; `RemoteTransferSource` ignores it (latent silent-no-filter
+  for otp-9's remote relay). Two guard tests. Suite 1522 → **1524**.
