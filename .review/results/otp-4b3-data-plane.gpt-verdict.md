@@ -56,4 +56,27 @@ dropped while parked on `recv()` having consumed nothing.
 commit still hold (e2e select revert → hang→timeout FAIL; unit
 prefer_peer_fault revert → wrong code FAIL).
 
-**Fix sha**: `__FIXSHA__` (to be filled after commit).
+**Fix sha**: `a530005` (otp-4b-3: address review (3 findings)).
+**Re-review**: codex pass 2 on `a530005` — see below.
+
+---
+
+## codex pass 2 (fix commit `a530005`) — 1 finding, Accepted
+
+**F1-p2 (High)** — `mod.rs` `dp.queue()` error → `prefer_peer_fault` →
+`recv_peer_fault`, whose F3 strictness treats any non-fault event as a
+protocol violation. But at the `queue()` site (payload loop) a legitimate
+`Need`/`NeedComplete`/`ResizeAck` can be queued ahead of the peer's
+`CANCELLED`, so the fix could surface a spurious `PROTOCOL_VIOLATION`
+instead of `CANCELLED`. **Accepted** — a real regression the F1+F3 pair
+introduced together.
+
+**Fix** (`46cc4bb`): decouple `prefer_peer_fault` from the strict
+`recv_peer_fault`. `prefer_peer_fault` (both error sites) now runs its own
+lenient loop — SKIP still-in-flight non-fault events, return the framed
+fault, else the dp error on channel close/timeout. `recv_peer_fault` stays
+strict but is now used ONLY by the finish()-drain select arm, where no
+non-fault event is legitimate (F3 scope preserved). New guard test
+`prefer_peer_fault_skips_inflight_needs_to_reach_the_fault`.
+
+Gate: fmt + clippy -D warnings clean; `cargo test --workspace` **1516/0**.

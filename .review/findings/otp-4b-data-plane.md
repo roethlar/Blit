@@ -64,11 +64,17 @@ fault on the control lane, covering both orderings:
   peer's `CANCELLED` is preferred. `queue()` is NOT raced against the
   events channel (unlike `finish()`) because live `Need`s still arrive
   during the payload loop and `recv_peer_fault` would consume them.
-- `recv_peer_fault` surfaces any non-fault event that arrives during the
-  drain as a specific protocol-violation fault rather than dropping it
-  (codex F3): after `resolve_in_flight_resize` and before `SourceDone`
-  no `Need`/`NeedComplete`/`ResizeAck`/`Summary` is legitimate, so a
-  buggy peer's stray frame fails fast instead of being deferred or lost.
+- `recv_peer_fault` (the finish()-drain **select arm** only) surfaces any
+  non-fault event as a specific protocol-violation fault rather than
+  dropping it (codex F3): after `resolve_in_flight_resize` and before
+  `SourceDone` no `Need`/`NeedComplete`/`ResizeAck`/`Summary` is
+  legitimate, so a buggy peer's stray frame fails fast. `prefer_peer_fault`
+  (the error path at BOTH `queue()` and `finish()`) is instead **lenient**
+  — it SKIPS still-in-flight non-fault events (a `Need` can be queued
+  ahead of the peer's `CANCELLED` during the payload loop) and returns the
+  framed fault, or the dp error on channel close/timeout (codex pass-2 F1).
+  Strict-during-live-drain vs lenient-while-unwinding is the deliberate
+  split between the two helpers.
 
 ### Files
 - `crates/blit-core/src/transfer_session/mod.rs` — `recv_peer_fault` +
@@ -92,6 +98,10 @@ Suite 1513 → **1515** (+2):
 - `prefer_peer_fault_prefers_a_framed_fault` (blit-core unit) — a framed
   `CANCELLED` on the events channel wins over a `DATA_PLANE_FAILED`
   data-plane error.
+- `prefer_peer_fault_skips_inflight_needs_to_reach_the_fault` (blit-core
+  unit, codex pass-2 F1 guard) — a legitimate `Need` queued ahead of the
+  `CANCELLED` is skipped, so the client still surfaces CANCELLED, not a
+  spurious protocol violation.
 
 ### Guard proof
 - e2e: reverting the `select!` to `dp.finish().await?` makes the blocked
