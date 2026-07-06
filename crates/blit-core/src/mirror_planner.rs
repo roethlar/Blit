@@ -179,6 +179,57 @@ impl MirrorPlanner {
         Ok(plan_from_sets(dest_root, source_keys, dest_set))
     }
 
+    /// otp-6: the unified session's single mirror-delete rule. Given the
+    /// COMPLETE set of source-side relative file paths (posix, exactly as
+    /// they arrived on the wire) and the enumeration `filter`, enumerate
+    /// `dest_root` and return the extraneous entries — dest paths absent
+    /// from the source set — dirs deepest-first.
+    ///
+    /// The session manifest lists files only (directories are implicit, see
+    /// `spawn_manifest_task`), so a directory's survival is derived here from
+    /// the parent chains of the kept files: a dir is extraneous iff no kept
+    /// source file lives under it. This is the same derivation the daemon's
+    /// `plan_extraneous_entries` does; centralizing it here is the session's
+    /// "one delete rule" that replaces the three per-direction purges at
+    /// cutover.
+    ///
+    /// `filter` scopes the dest enumeration: for `MirrorMode::FilteredSubset`
+    /// it is the user's filter (so out-of-scope dest entries are never
+    /// candidates); for `MirrorMode::All` it is `FileFilter::default()` (the
+    /// whole dest tree is in scope).
+    pub fn plan_session_deletions(
+        &self,
+        dest_root: &Path,
+        source_files: &HashSet<String>,
+        filter: &FileFilter,
+    ) -> Result<MirrorDeletionPlan> {
+        let enumerator = FileEnumerator::new(filter.clone_without_cache());
+        let dest_entries = enumerator.enumerate_local(dest_root)?;
+
+        // Kept set = every source file plus each of its ancestor dirs, so a
+        // directory holding a kept file is itself kept (never deleted).
+        let mut source_set: HashSet<CasefoldKey> = HashSet::new();
+        for rel in source_files {
+            let path = Path::new(rel);
+            source_set.insert(CasefoldKey::new(path));
+            let mut current = path.parent();
+            while let Some(parent) = current {
+                if parent.as_os_str().is_empty() {
+                    break;
+                }
+                source_set.insert(CasefoldKey::new(parent));
+                current = parent.parent();
+            }
+        }
+
+        let dest_set = dest_entries
+            .into_iter()
+            .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
+            .collect::<Vec<_>>();
+
+        Ok(plan_from_sets(dest_root, source_set, dest_set))
+    }
+
     pub fn should_copy_remote_entry(
         &self,
         entry: &EnumeratedEntry,

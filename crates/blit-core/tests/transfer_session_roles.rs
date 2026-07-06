@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, ComparisonMode, FileHeader, FilterSpec, ManifestComplete, NeedBatch,
+    session_error, ComparisonMode, FileHeader, FilterSpec, ManifestComplete, MirrorMode, NeedBatch,
     NeedComplete, NeedEntry, SessionHello, SessionOpen, TransferFrame, TransferRole,
     TransferSummary,
 };
@@ -686,11 +686,10 @@ async fn contract_version_mismatch_is_refused() {
 }
 
 #[tokio::test]
-async fn mirror_request_is_refused_until_its_slice_lands() {
-    // otp-3 refuses what it does not implement rather than silently
-    // ignoring it: a mirror-enabled open must fail the session at the
-    // OPEN phase, from the destination (the end that would execute
-    // deletions).
+async fn mirror_enabled_without_scope_is_refused() {
+    // otp-6b: a mirror-enabled open with no concrete scope (kind defaults to
+    // UNSPECIFIED) is a contradiction — refuse it at OPEN with a protocol
+    // violation, from the destination (the end that executes deletions).
     let tmp = tempfile::tempdir().unwrap();
     let src_root = tmp.path().join("src");
     let dst_root = tmp.path().join("dst");
@@ -698,7 +697,7 @@ async fn mirror_request_is_refused_until_its_slice_lands() {
     std::fs::create_dir_all(&dst_root).unwrap();
 
     let mut open = basic_open(TransferRole::Source);
-    open.mirror_enabled = true;
+    open.mirror_enabled = true; // no mirror_kind set → UNSPECIFIED
     let source_cfg = SourceSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
@@ -716,14 +715,239 @@ async fn mirror_request_is_refused_until_its_slice_lands() {
         run_source(source_cfg, a, source),
         run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root)),
     );
-    let source_fault = fault_of(&source_result.unwrap_err()).clone();
-    assert_eq!(source_fault.code, session_error::Code::Internal);
-    assert!(
-        source_fault.message.contains("otp-6"),
-        "refusal must say when mirror lands, got: {}",
-        source_fault.message
+    assert_eq!(
+        fault_of(&source_result.unwrap_err()).code,
+        session_error::Code::ProtocolViolation
     );
     assert!(dest_result.is_err());
+}
+
+/// Drive one mirror session (fixed direction src→dst) with the given
+/// initiator role, mirror kind, and optional include filter, over
+/// pre-populated trees. Returns the source summary and dest outcome.
+async fn run_mirror_session(
+    initiator_role: TransferRole,
+    src_root: &Path,
+    dst_root: &Path,
+    mirror_kind: MirrorMode,
+    include: Option<&str>,
+) -> (
+    eyre::Result<TransferSummary>,
+    eyre::Result<DestinationOutcome>,
+) {
+    let mut open = basic_open(initiator_role);
+    open.mirror_enabled = true;
+    open.mirror_kind = mirror_kind as i32;
+    if let Some(pat) = include {
+        open.filter = Some(FilterSpec {
+            include: vec![pat.to_string()],
+            ..Default::default()
+        });
+    }
+    run_session_with_open(open, src_root, dst_root, PlanOptions::default()).await
+}
+
+#[tokio::test]
+async fn mirror_all_purges_extraneous_under_both_initiators() {
+    // otp-6b: MirrorMode::All deletes every dest entry absent from the
+    // source set — files and the now-empty dirs that held them — whichever
+    // end initiates. The delete count includes the pruned directory.
+    let src = vec![
+        ("keep.txt", b"new".to_vec(), 1_600_000_001),
+        ("sub/keep2.txt", b"new".to_vec(), 1_600_000_002),
+    ];
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, &src);
+        write_tree(
+            &dst_root,
+            &[
+                ("keep.txt", b"old".to_vec(), 1_500_000_000),
+                ("sub/keep2.txt", b"old".to_vec(), 1_500_000_000),
+                ("stale.txt", b"gone".to_vec(), 1_500_000_000),
+                ("dead/old.bin", b"gone".to_vec(), 1_500_000_000),
+            ],
+        );
+
+        let (sr, dr) =
+            run_mirror_session(initiator_role, &src_root, &dst_root, MirrorMode::All, None).await;
+        let summary =
+            sr.unwrap_or_else(|e| panic!("source failed (init {initiator_role:?}): {e:#}"));
+        let dest =
+            dr.unwrap_or_else(|e| panic!("destination failed (init {initiator_role:?}): {e:#}"));
+
+        assert_eq!(
+            summary, dest.summary,
+            "both ends agree (init {initiator_role:?})"
+        );
+        // stale.txt + dead/old.bin + the dead/ dir = 3.
+        assert_eq!(
+            summary.entries_deleted, 3,
+            "extraneous file + nested file + pruned dir (init {initiator_role:?})"
+        );
+        assert!(!dst_root.join("stale.txt").exists());
+        assert!(!dst_root.join("dead").exists());
+        assert!(dst_root.join("keep.txt").exists());
+        // After an All mirror the dest tree equals the source tree exactly.
+        assert_trees_identical(&src_root, &dst_root);
+    }
+}
+
+#[tokio::test]
+async fn mirror_filtered_subset_preserves_out_of_scope() {
+    // otp-6b: FilteredSubset deletes only extraneous entries WITHIN the
+    // filter's scope. An out-of-scope dest file (not matching the include
+    // filter) is left alone — the scope contract.
+    let src = vec![("keep.txt", b"new".to_vec(), 1_600_000_001)];
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(&src_root, &src);
+    write_tree(
+        &dst_root,
+        &[
+            ("keep.txt", b"old".to_vec(), 1_500_000_000),
+            ("stale.txt", b"gone".to_vec(), 1_500_000_000), // in scope, extraneous → deleted
+            ("keep.log", b"safe".to_vec(), 1_500_000_000),  // out of scope → kept
+        ],
+    );
+
+    let (sr, dr) = run_mirror_session(
+        TransferRole::Source,
+        &src_root,
+        &dst_root,
+        MirrorMode::FilteredSubset,
+        Some("*.txt"),
+    )
+    .await;
+    let summary = sr.expect("source session");
+    let _ = dr.expect("destination session");
+
+    assert_eq!(summary.entries_deleted, 1, "only the in-scope stale.txt");
+    assert!(!dst_root.join("stale.txt").exists());
+    assert!(
+        dst_root.join("keep.log").exists(),
+        "out-of-scope file must be preserved"
+    );
+    assert!(dst_root.join("keep.txt").exists());
+}
+
+#[tokio::test]
+async fn mirror_all_purges_out_of_scope_even_when_filtered() {
+    // otp-6b: MirrorMode::All ignores the filter for the deletion scope
+    // (the filter only shapes the source set). An out-of-scope dest file
+    // absent from the filtered source set IS deleted.
+    let src = vec![("keep.txt", b"new".to_vec(), 1_600_000_001)];
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(&src_root, &src);
+    write_tree(
+        &dst_root,
+        &[
+            ("keep.txt", b"old".to_vec(), 1_500_000_000),
+            ("stale.txt", b"gone".to_vec(), 1_500_000_000),
+            ("keep.log", b"gone".to_vec(), 1_500_000_000), // out of scope but All → deleted
+        ],
+    );
+
+    let (sr, dr) = run_mirror_session(
+        TransferRole::Source,
+        &src_root,
+        &dst_root,
+        MirrorMode::All,
+        Some("*.txt"),
+    )
+    .await;
+    let summary = sr.expect("source session");
+    let _ = dr.expect("destination session");
+
+    assert_eq!(
+        summary.entries_deleted, 2,
+        "stale.txt and out-of-scope keep.log"
+    );
+    assert!(!dst_root.join("stale.txt").exists());
+    assert!(!dst_root.join("keep.log").exists());
+    assert!(dst_root.join("keep.txt").exists());
+}
+
+#[tokio::test]
+async fn mirror_refused_when_source_scan_incomplete() {
+    // otp-6b: mirroring on an incomplete source scan could delete files the
+    // source still has (they were merely unreadable mid-scan). The
+    // destination must refuse at ManifestComplete{scan_complete=false} and
+    // delete nothing. Scripted source peer so we control the flag.
+    let tmp = tempfile::tempdir().unwrap();
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst_root).unwrap();
+    write_tree(
+        &dst_root,
+        &[("victim.txt", b"keep".to_vec(), 1_500_000_000)],
+    );
+
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+    };
+    let (mut peer, dest_transport) = in_process_pair();
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root.clone()),
+    ));
+
+    let mut open = basic_open(TransferRole::Source);
+    open.mirror_enabled = true;
+    open.mirror_kind = MirrorMode::All as i32;
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(wire(Frame::Open(open))).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Accept(_)));
+
+    // A manifest entry, then declare the scan INCOMPLETE.
+    peer.send(wire(Frame::ManifestEntry(FileHeader {
+        relative_path: "present.txt".into(),
+        size: 1,
+        mtime_seconds: 1_600_000_000,
+        permissions: 0o644,
+        checksum: vec![],
+    })))
+    .await
+    .unwrap();
+    peer.send(wire(Frame::ManifestComplete(ManifestComplete {
+        scan_complete: false,
+    })))
+    .await
+    .unwrap();
+
+    let refusal = loop {
+        match recv_or_panic(&mut peer).await {
+            Frame::Error(e) => break e,
+            Frame::NeedBatch(_) | Frame::NeedComplete(_) => continue,
+            other => panic!("expected SessionError, got {other:?}"),
+        }
+    };
+    assert_eq!(refusal.code, session_error::Code::Internal as i32);
+    assert!(
+        refusal.message.contains("scan"),
+        "refusal must cite the incomplete scan, got: {}",
+        refusal.message
+    );
+    let dest_err = dest.await.unwrap().unwrap_err();
+    assert_eq!(fault_of(&dest_err).code, session_error::Code::Internal);
+    assert!(
+        dst_root.join("victim.txt").exists(),
+        "nothing may be deleted on a refused mirror"
+    );
 }
 
 #[tokio::test]

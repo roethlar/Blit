@@ -31,9 +31,9 @@ use tokio::sync::mpsc;
 use crate::generated::transfer_frame::Frame;
 use crate::generated::{
     session_error, ComparisonMode, DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp,
-    FileData, FileHeader, FilterSpec, ManifestComplete, NeedBatch, NeedComplete, NeedEntry,
-    SessionAccept, SessionError, SessionHello, SessionOpen, SourceDone, TarShardComplete,
-    TarShardHeader, TransferFrame, TransferRole, TransferSummary,
+    FileData, FileHeader, FilterSpec, ManifestComplete, MirrorMode, NeedBatch, NeedComplete,
+    NeedEntry, SessionAccept, SessionError, SessionHello, SessionOpen, SourceDone,
+    TarShardComplete, TarShardHeader, TransferFrame, TransferRole, TransferSummary,
 };
 use crate::manifest::{header_transfer_status, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
@@ -378,10 +378,25 @@ fn source_open_validator(open: &SessionOpen) -> std::result::Result<(), SessionF
 }
 
 fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), SessionFault> {
+    // otp-6b: mirror is executed on the DESTINATION (the end that owns the
+    // dest tree). An enabled mirror needs a concrete scope; reject the
+    // contradictory "enabled but OFF/unspecified kind" combination here.
     if open.mirror_enabled {
-        return Err(SessionFault::internal(
-            "mirror is not implemented on the unified session yet (otp-6)",
-        ));
+        let kind = MirrorMode::try_from(open.mirror_kind).unwrap_or(MirrorMode::Unspecified);
+        if !matches!(kind, MirrorMode::FilteredSubset | MirrorMode::All) {
+            return Err(SessionFault::protocol_violation(
+                "mirror_enabled requires mirror_kind FILTERED_SUBSET or ALL",
+            ));
+        }
+    }
+    // The dest enumerates its tree through this filter when scoping a
+    // FilteredSubset mirror, so its globs must be valid — validate at OPEN
+    // (peer-notified refusal), symmetric with `source_open_validator`.
+    if let Some(filter) = open.filter.as_ref() {
+        if *filter != FilterSpec::default() {
+            crate::remote::transfer::operation_spec::filter_from_spec(filter.clone())
+                .map_err(|e| SessionFault::protocol_violation(format!("invalid filter: {e:#}")))?;
+        }
     }
     if open.resume.as_ref().is_some_and(|r| r.enabled) {
         return Err(SessionFault::internal(
@@ -1673,6 +1688,70 @@ fn violation(message: String) -> eyre::Report {
     eyre::Report::new(SessionFault::protocol_violation(message))
 }
 
+/// otp-6b: the DESTINATION's mirror delete pass — the session's single
+/// delete rule. Plans (enumerate dest + diff against the complete source
+/// file set) and executes the extraneous deletions, all blocking FS work,
+/// so it runs on the blocking pool. Returns the count deleted.
+///
+/// Every target is containment-checked against the canonical destination
+/// root before any filesystem op (the same chokepoint the sink write paths
+/// use). Missing entries are tolerated — the pass is idempotent. Deletion
+/// order is files then dirs deepest-first (the plan sorts them). `remove_dir`
+/// (not `remove_dir_all`) is used so out-of-scope content is never removed:
+/// under `FilteredSubset` an extraneous dir that still holds filter-excluded
+/// files fails with ENOTEMPTY and is left alone; under `All` the tree was
+/// enumerated unfiltered, so a dir reaching here is empty and a non-empty one
+/// is a genuine error.
+fn mirror_delete_pass(
+    dst_root: &Path,
+    source_files: &HashSet<String>,
+    filter: &crate::fs_enum::FileFilter,
+    tolerate_nonempty_dirs: bool,
+    canonical_dst_root: Option<&Path>,
+) -> Result<u64> {
+    let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
+        dst_root,
+        source_files,
+        filter,
+    )?;
+
+    let contained = |target: &Path| -> Result<()> {
+        if let Some(root) = canonical_dst_root {
+            crate::path_safety::verify_contained(root, target).map_err(|e| {
+                eyre::eyre!("mirror delete containment {}: {e:#}", target.display())
+            })?;
+        }
+        Ok(())
+    };
+
+    let mut deleted = 0u64;
+    for file in &plan.files {
+        contained(file)?;
+        match std::fs::remove_file(file) {
+            Ok(()) => deleted += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(eyre::eyre!("mirror delete {}: {e}", file.display())),
+        }
+    }
+    for dir in &plan.dirs {
+        contained(dir)?;
+        match std::fs::remove_dir(dir) {
+            Ok(()) => deleted += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // FilteredSubset: the dir still holds out-of-scope files the
+            // filter excluded from enumeration; leaving it is the scope
+            // contract, not a failure (engine/mirror.rs R58-F6). `Some(66)`
+            // is ENOTEMPTY on macOS/BSD, which maps to a different ErrorKind.
+            Err(e)
+                if tolerate_nonempty_dirs
+                    && (e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                        || e.raw_os_error() == Some(66)) => {}
+            Err(e) => return Err(eyre::eyre!("mirror delete dir {}: {e}", dir.display())),
+        }
+    }
+    Ok(deleted)
+}
+
 async fn destination_session(
     transport: &mut FrameTransport,
     negotiated: Negotiated,
@@ -1684,7 +1763,9 @@ async fn destination_session(
     let compare_opts = CompareOptions {
         mode: compare_mode.into(),
         ignore_existing: negotiated.open.ignore_existing,
-        include_deletions: false, // mirror lands at otp-6
+        // Session deletions run via the otp-6b mirror pass (a whole-tree diff
+        // at SourceDone), not the per-entry transfer-status diff below.
+        include_deletions: false,
     };
     // src_root is only consumed by local File payloads, which never
     // occur on a session destination (payload bytes arrive as records
@@ -1705,6 +1786,30 @@ async fn destination_session(
     // (R46-F3), applied to diff stats so a hostile manifest path can't
     // make the destination stat outside its root.
     let canonical_dst_root = crate::path_safety::canonical_dest_root(dst_root).ok();
+
+    // otp-6b: mirror config. The DESTINATION owns the delete pass (it holds
+    // the tree). `mirror_filter` scopes the dest enumeration — the user
+    // filter for FilteredSubset (out-of-scope dest entries are never
+    // candidates), the whole-tree default for All. Globs were validated at
+    // OPEN. `source_files` accumulates the COMPLETE source file set (only
+    // when mirroring) so the pass can diff it against the dest at SourceDone.
+    let mirror_enabled = negotiated.open.mirror_enabled;
+    let mirror_kind = MirrorMode::try_from(negotiated.open.mirror_kind).unwrap_or(MirrorMode::Off);
+    let mirror_filter: crate::fs_enum::FileFilter = if mirror_enabled
+        && mirror_kind == MirrorMode::FilteredSubset
+    {
+        match negotiated.open.filter.as_ref() {
+            Some(spec) if *spec != FilterSpec::default() => {
+                crate::remote::transfer::operation_spec::filter_from_spec(spec.clone()).map_err(
+                    |e| eyre::Report::new(SessionFault::internal(format!("invalid filter: {e:#}"))),
+                )?
+            }
+            _ => crate::fs_enum::FileFilter::default(),
+        }
+    } else {
+        crate::fs_enum::FileFilter::default()
+    };
+    let mut source_files: HashSet<String> = HashSet::new();
 
     // Two sets, deliberately separate (codex otp-4b-1 fix-review F1):
     // `granted` is the ever-granted DEDUP set — control-loop-local,
@@ -1824,6 +1929,11 @@ async fn destination_session(
                         header.relative_path
                     )));
                 }
+                // otp-6b: retain the full source path set for the mirror
+                // diff (the need list keeps only files needing transfer).
+                if mirror_enabled {
+                    source_files.insert(header.relative_path.clone());
+                }
                 pending.push(header);
                 if pending.len() >= DEST_DIFF_CHUNK {
                     let chunk = std::mem::take(&mut pending);
@@ -1840,12 +1950,23 @@ async fn destination_session(
                     .await?;
                 }
             }
-            Some(Frame::ManifestComplete(_complete)) => {
+            Some(Frame::ManifestComplete(complete)) => {
                 if manifest_complete {
                     return Err(violation("duplicate ManifestComplete".into()));
                 }
-                // (scan_complete gates mirror purges from otp-6 on;
-                // nothing consumes it in otp-3.)
+                // otp-6b: mirror deletions are data-loss-dangerous when the
+                // source scan was incomplete — a source file missing from an
+                // aborted scan would be misclassified extraneous and deleted
+                // at the dest. Refuse here (before any transfer or deletion)
+                // rather than partial-mirror. Matches the old paths'
+                // require-complete-scan guard.
+                if mirror_enabled && !complete.scan_complete {
+                    return Err(eyre::Report::new(SessionFault::internal(
+                        "mirror refused: the source scan did not complete \
+                         (unreadable paths) — deleting now could remove files \
+                         the source still has",
+                    )));
+                }
                 let chunk = std::mem::take(&mut pending);
                 diff_chunk_and_send_needs(
                     transport,
@@ -2021,10 +2142,43 @@ async fn destination_session(
                         "SourceDone with {unfulfilled} needed file(s) never delivered"
                     )));
                 }
+                // otp-6b: run the mirror delete pass now — after every payload
+                // is written, so the dest tree is final and no about-to-arrive
+                // file is misjudged extraneous. All blocking FS work (enumerate
+                // + delete) runs on the blocking pool.
+                let entries_deleted: u64 = if mirror_enabled {
+                    let dst = dst_root.to_path_buf();
+                    let canonical = canonical_dst_root.clone();
+                    let files = std::mem::take(&mut source_files);
+                    let filter = mirror_filter.clone_without_cache();
+                    let tolerate_nonempty = mirror_kind == MirrorMode::FilteredSubset;
+                    tokio::task::spawn_blocking(move || {
+                        mirror_delete_pass(
+                            &dst,
+                            &files,
+                            &filter,
+                            tolerate_nonempty,
+                            canonical.as_deref(),
+                        )
+                    })
+                    .await
+                    .map_err(|e| {
+                        eyre::Report::new(SessionFault::internal(format!(
+                            "mirror delete task panicked: {e}"
+                        )))
+                    })?
+                    .map_err(|e| {
+                        eyre::Report::new(SessionFault::internal(format!(
+                            "mirror delete failed: {e:#}"
+                        )))
+                    })?
+                } else {
+                    0
+                };
                 let summary = TransferSummary {
                     files_transferred: files_written,
                     bytes_transferred: bytes_written,
-                    entries_deleted: 0, // mirror lands at otp-6
+                    entries_deleted,
                     in_stream_carrier_used,
                     files_resumed: 0, // resume lands at otp-7
                 };
