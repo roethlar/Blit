@@ -1730,8 +1730,7 @@ async fn destination_session(
             )
         }
         // DESTINATION initiator (pull, otp-5b): dial + receive when the
-        // SOURCE responder granted a data plane and we have a host to
-        // dial; otherwise the in-stream carrier.
+        // SOURCE responder granted a data plane and we have a host to dial.
         None => match (&negotiated.accept.data_plane, data_plane_host) {
             (Some(grant), Some(host)) => {
                 let run = data_plane::dial_destination_data_plane(host, grant, recv_sink).await?;
@@ -1743,7 +1742,23 @@ async fn destination_session(
                     0usize,
                 )
             }
-            _ => (None, 0usize, 0usize),
+            // A grant with no host to dial is an inconsistent initiator
+            // config: fail fast, mirroring the SOURCE initiator
+            // (`source_send_half`). The SOURCE responder has already bound
+            // and blocks accepting the socket this end would dial, so
+            // silently taking the in-stream branch cannot fall back — it
+            // would deadlock until the responder's accept times out. A
+            // grant means the initiator MUST dial (contract §Transport).
+            // (codex otp-5b-1 finding.)
+            (Some(_), None) => {
+                return Err(eyre::Report::new(SessionFault::internal(
+                    "responder granted a TCP data plane but this DESTINATION \
+                     initiator has no host to dial",
+                )))
+            }
+            // No grant (the responder could not bind, or the initiator
+            // asked for in-stream): the in-stream carrier.
+            (None, _) => (None, 0usize, 0usize),
         },
     };
 
