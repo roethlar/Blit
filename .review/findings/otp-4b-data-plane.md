@@ -7,7 +7,88 @@ client `run_source`s as SOURCE over the **in-stream** carrier.
 **Status**: 4b-1 (single-stream data plane) **CLOSED** — codex loop, 3
 passes (`881d412`; fix `e1aafcc` for 2 High; fix `777dfc5` for the race
 that fix introduced; confirming re-review PASS). Suite 1509 → **1512/0**.
-4b-2 (resize + multi-stream + sf-2 pin) and 4b-3 (cancel e2e) queued.
+4b-2 (resize + multi-stream + sf-2 pin) **implemented, in review**; 4b-3
+(cancel e2e) queued.
+
+---
+
+## otp-4b-2 (resize + multi-stream + sf-2 pin) — implemented
+
+### What
+Port mid-transfer stream growth onto the unified session so the
+zero-knowledge single-stream grant shape-corrects upward as the need
+list accumulates (the sf-2 mechanism), over real data-plane sockets.
+No proto change — consumes the frames otp-1 froze (`DataPlaneResize`
+16, `DataPlaneResizeAck` 17).
+
+### Approach
+- **SOURCE owns the live dial** (`TransferDial::conservative_within(
+  receiver_capacity)`, seeded to the granted epoch-0 count). As needs
+  accumulate it re-runs the shape table
+  (`initial_stream_proposal(needed_bytes, needed_count, ceiling)`) and
+  calls `propose_shape_resize` — one ADD per epoch, one in flight. The
+  driver mints a 16-byte sub-token, sends `DataPlaneResize{ADD}` on the
+  control lane, and on the `DataPlaneResizeAck` dials the epoch-N socket
+  (`session_token ‖ sub_token`) and hands it to the running elastic
+  pipeline via `SinkControl::Add`. `resize_settled` advances the live
+  count. (`transfer_session/data_plane.rs`: `SourceDataPlane` +
+  `dial_source_data_plane` now build the dial and an
+  `execute_sink_pipeline_elastic` with a `SinkControl` channel;
+  `mod.rs`: `source_send_half` accumulates `needed_bytes/count`,
+  `maybe_propose_resize`, `process_source_event` handles `ResizeAck`,
+  `resolve_in_flight_resize` drains the last proposal before finish.)
+- **DESTINATION** runs a resize-aware accept loop
+  (`ResponderDataPlane::spawn` → `accept_loop`): accepts epoch-0, then a
+  `select!` that arms resize credentials (an `mpsc` fed by the control
+  loop), accepts one socket per arm (authenticating `session_token ‖
+  sub_token`), and joins receive workers. The control loop
+  (`destination_session`) handles `Frame::Resize`: ceiling-checks, arms,
+  bumps `resize_live`, and replies `DataPlaneResizeAck`. At `SourceDone`
+  it `finish()`es the run (drops the arm sender = "no more"), joining the
+  loop for the settled stream count, surfaced on
+  `DestinationOutcome.data_plane_streams`.
+- **Orphan-free termination**: a source resize-dial failure is FATAL
+  (the session faults and AbortOnDrop kills the dest accept loop), and
+  the source drains its one in-flight proposal before finishing, so a
+  dest armed slot is always consumed — the accept loop never waits on a
+  socket that will not arrive. (Trade vs old push's non-fatal arm-TTL
+  recovery — see Known gaps.)
+
+### Bug caught in self-test (pre-commit)
+The dest accept loop busy-spun once `arm_tx` dropped: a closed `mpsc`
+resolves `recv()` to `None` instantly every poll, and as the biased-first
+select arm it starved `join_next`, so finished receive workers were never
+collected and `finish()` hung (reproduced on the gRPC data-plane e2e).
+Fixed by parking the arm branch on `pending()` once the channel closes
+(the same guard `execute_sink_pipeline_elastic` uses for its control_rx).
+
+### Files
+- `crates/blit-core/src/transfer_session/data_plane.rs` — dial-owning
+  `SourceDataPlane` (propose/add_stream/dial); `ResponderDataPlaneRun` +
+  `accept_loop` (select-driven, arm channel); `ReceiveTotals`;
+  `accept_raw`/`authenticate_resize`/`spawn_receive` helpers.
+- `crates/blit-core/src/transfer_session/mod.rs` — `SourceEvent::ResizeAck`;
+  `source_recv_half` forwards it; `source_send_half` shape-correction +
+  in-flight drain; `destination_session` `Frame::Resize` arm +
+  `resize_live`/ceiling + `finish()`; `DestinationOutcome.data_plane_streams`.
+- `crates/blit-core/tests/transfer_session_roles.rs` — the sf-2 pin.
+
+### Tests
+- `many_tiny_files_shape_correct_to_more_than_one_stream` (role suite):
+  10k tiny files over the TCP data plane settle `data_plane_streams > 1`.
+  **Guard proof**: neutering `maybe_propose_resize` settles at 1 and the
+  pin fails ("settled at 1"); restored → passes.
+
+### Known gaps (carried / new)
+- Mid-transfer cancel e2e → otp-4b-3.
+- Cheap-dial live tuner (chunk/prefetch growth) still deferred; otp-4b-2
+  moves only the stream count.
+- Resize-dial failure is fatal (vs old push's arm-TTL non-fatal recovery)
+  — deliberate simplification; a same-build LAN/loopback epoch-N dial to
+  an already-accepting listener essentially never fails, and fatal
+  fail-fast keeps the dest accept loop orphan-free with no TTL reaper.
+- Progress-byte threading still deferred (session rows report
+  `bytes_completed=0`, as today's push rows).
 
 ## Goal (this slice)
 

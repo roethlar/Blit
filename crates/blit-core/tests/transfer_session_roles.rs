@@ -317,6 +317,73 @@ async fn preexisting_identical_tree_yields_empty_need_list() {
     assert_eq!(summary.bytes_transferred, 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
+    // sf-2 pin ported onto the unified session (otp-4b-2). The responder
+    // grants the zero-knowledge single stream (no manifest seen at
+    // SessionAccept); a 10k-tiny-file transfer over the TCP data plane
+    // must re-run the shape table over the accumulated need list and grow
+    // the stream count past 1 via `DataPlaneResize{ADD}`. Mirrors the old
+    // push sf-2 pin (`shape_resize_e2e.rs`), now on the session: the
+    // settled count is read from the destination's `data_plane_streams`.
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&src_root).unwrap();
+    std::fs::create_dir_all(&dst_root).unwrap();
+    const FILE_COUNT: usize = 10_000;
+    for i in 0..FILE_COUNT {
+        std::fs::write(src_root.join(format!("f{i:05}.bin")), b"x").unwrap();
+    }
+
+    // SOURCE initiator over the TCP data plane: the control lane rides the
+    // in-process transport; the data-plane sockets ride loopback TCP (the
+    // responder binds 0.0.0.0:0 and the source dials 127.0.0.1).
+    let open = SessionOpen {
+        initiator_role: TransferRole::Source as i32,
+        compare_mode: ComparisonMode::SizeMtime as i32,
+        in_stream_bytes: false,
+        ..Default::default()
+    };
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(open),
+        plan_options: PlanOptions::default(),
+        data_plane_host: Some("127.0.0.1".into()),
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+    };
+    let (a, b) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root.clone()));
+    let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+        tokio::join!(
+            run_source(source_cfg, a, source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        )
+    })
+    .await
+    .expect("session run timed out");
+
+    let summary = source_result.expect("source succeeds");
+    let outcome = dest_result.expect("destination succeeds");
+    assert!(
+        !summary.in_stream_carrier_used,
+        "the sf-2 pin must ride the TCP data plane"
+    );
+    assert_eq!(summary.files_transferred, FILE_COUNT as u64);
+    let streams = outcome
+        .data_plane_streams
+        .expect("data plane ran, stream count recorded");
+    assert!(
+        streams > 1,
+        "a {FILE_COUNT}-file transfer must correct the single-stream grant \
+         upward via shape resize; settled at {streams}"
+    );
+    assert_trees_identical(&src_root, &dst_root);
+}
+
 #[tokio::test]
 async fn preserves_mtime_on_streamed_files() {
     // Not part of the role matrix — pins that the file-record write

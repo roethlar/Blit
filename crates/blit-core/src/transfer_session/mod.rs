@@ -30,9 +30,10 @@ use tokio::sync::mpsc;
 
 use crate::generated::transfer_frame::Frame;
 use crate::generated::{
-    session_error, ComparisonMode, FileData, FileHeader, FilterSpec, ManifestComplete, NeedBatch,
-    NeedComplete, NeedEntry, SessionAccept, SessionError, SessionHello, SessionOpen, SourceDone,
-    TarShardComplete, TarShardHeader, TransferFrame, TransferRole, TransferSummary,
+    session_error, ComparisonMode, DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp,
+    FileData, FileHeader, FilterSpec, ManifestComplete, NeedBatch, NeedComplete, NeedEntry,
+    SessionAccept, SessionError, SessionHello, SessionOpen, SourceDone, TarShardComplete,
+    TarShardHeader, TransferFrame, TransferRole, TransferSummary,
 };
 use crate::manifest::{header_transfer_status, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
@@ -583,6 +584,9 @@ async fn notify_and_wrap(transport: &mut FrameTransport, mut fault: SessionFault
 enum SourceEvent {
     Need(FileHeader),
     NeedComplete,
+    /// The destination's ack of a `DataPlaneResize{ADD}` (otp-4b-2). The
+    /// send half dials the epoch-N socket on `accepted`.
+    ResizeAck(DataPlaneResizeAck),
     Summary(TransferSummary),
     Fault(SessionFault),
 }
@@ -732,6 +736,12 @@ async fn source_recv_half(
                 }
                 let _ = events.send(SourceEvent::NeedComplete);
             }
+            Some(Frame::ResizeAck(ack)) => {
+                // The destination's response to a shape-resize proposal
+                // (otp-4b-2). Forward it to the send half, which owns the
+                // dial and dials the epoch-N socket on `accepted`.
+                let _ = events.send(SourceEvent::ResizeAck(ack));
+            }
             Some(Frame::Summary(summary)) => {
                 let _ = events.send(SourceEvent::Summary(summary));
                 return;
@@ -776,10 +786,27 @@ async fn source_send_half(
                     "responder granted a TCP data plane but this initiator has no host to dial",
                 ))
             })?;
-            Some(data_plane::dial_source_data_plane(host, grant, Arc::clone(&source)).await?)
+            Some(
+                data_plane::dial_source_data_plane(
+                    host,
+                    grant,
+                    negotiated.accept.receiver_capacity.as_ref(),
+                    Arc::clone(&source),
+                )
+                .await?,
+            )
         }
         None => None,
     };
+
+    // sf-2 shape correction (otp-4b-2): running totals of the need list,
+    // fed to the shape table so the SOURCE grows the data-plane stream
+    // count as the workload's shape becomes known. Append-only (a need is
+    // counted once, when it arrives), and the in-flight resize record the
+    // ack is matched against (at most one — the dial enforces it).
+    let mut needed_bytes: u64 = 0;
+    let mut needed_count: usize = 0;
+    let mut pending_resize: Option<data_plane::PendingResize> = None;
 
     // Streaming manifest: entries go out as enumeration produces them
     // (immediate start in every direction — plan §Design 2). The open
@@ -793,8 +820,19 @@ async fn source_send_half(
             .insert(header.relative_path.clone(), header.clone());
         tx.send(frame(Frame::ManifestEntry(header))).await?;
         // Faults detected by the receive half abort the stream now,
-        // not after the full scan; needs just accumulate.
-        drain_source_events(&mut events, &mut pending, &mut need_complete)?;
+        // not after the full scan; needs just accumulate. (Resize acks
+        // cannot arrive yet — none is proposed before the payload phase.)
+        drain_ready_source_events(
+            &mut events,
+            &mut pending,
+            &mut need_complete,
+            &mut needed_bytes,
+            &mut needed_count,
+            data_plane.as_ref(),
+            tx,
+            &mut pending_resize,
+        )
+        .await?;
     }
     let scanned = scan_handle
         .await
@@ -823,11 +861,27 @@ async fn source_send_half(
         Vec::new()
     };
     loop {
-        drain_source_events(&mut events, &mut pending, &mut need_complete)?;
+        drain_ready_source_events(
+            &mut events,
+            &mut pending,
+            &mut need_complete,
+            &mut needed_bytes,
+            &mut needed_count,
+            data_plane.as_ref(),
+            tx,
+            &mut pending_resize,
+        )
+        .await?;
         if !pending.is_empty() {
             let batch = std::mem::take(&mut pending);
             match &mut data_plane {
                 Some(dp) => {
+                    // sf-2: correct the stream count toward the shape the
+                    // accumulated need list implies before queueing this
+                    // batch (one ADD per epoch; a no-op while one is in
+                    // flight or the shape wants no more).
+                    maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
+                        .await?;
                     let payloads =
                         diff_planner::plan_push_payloads(batch, source.root(), cfg.plan_options)?;
                     dp.queue(payloads).await?;
@@ -844,13 +898,34 @@ async fn source_send_half(
         }
         match events.recv().await {
             Some(event) => {
-                handle_source_event(event, &mut pending, &mut need_complete)?;
+                process_source_event(
+                    event,
+                    &mut pending,
+                    &mut need_complete,
+                    &mut needed_bytes,
+                    &mut needed_count,
+                    data_plane.as_ref(),
+                    tx,
+                    &mut pending_resize,
+                )
+                .await?;
             }
             None => {
                 return Err(eyre::Report::new(SessionFault::internal(
                     "source receive half ended before NeedComplete",
                 )))
             }
+        }
+    }
+
+    // A resize proposed on the last batch may still be in flight. Resolve
+    // it BEFORE finishing so the destination's armed slot is consumed by
+    // the dialed socket — an armed-but-never-dialed credential would hang
+    // its accept loop (which waits for every arm to be claimed). We do not
+    // propose further here: exactly the one in-flight resize is drained.
+    if let Some(dp) = &data_plane {
+        if let Some(pending) = pending_resize.take() {
+            resolve_in_flight_resize(&mut events, dp, pending).await?;
         }
     }
 
@@ -874,27 +949,58 @@ async fn source_send_half(
         Some(SourceEvent::NeedComplete) => Err(eyre::Report::new(
             SessionFault::protocol_violation("duplicate NeedComplete"),
         )),
+        Some(SourceEvent::ResizeAck(_)) => Err(eyre::Report::new(
+            SessionFault::protocol_violation("DataPlaneResizeAck after SourceDone"),
+        )),
         None => Err(eyre::Report::new(SessionFault::internal(
             "source receive half ended before TransferSummary",
         ))),
     }
 }
 
-fn drain_source_events(
+/// Process every event ready right now (needs accumulating, resize acks
+/// dialing their epoch-N socket) without blocking. Called between
+/// manifest sends and at the top of the payload loop.
+#[allow(clippy::too_many_arguments)]
+async fn drain_ready_source_events(
     events: &mut mpsc::UnboundedReceiver<SourceEvent>,
     pending: &mut Vec<FileHeader>,
     need_complete: &mut bool,
+    needed_bytes: &mut u64,
+    needed_count: &mut usize,
+    data_plane: Option<&data_plane::SourceDataPlane>,
+    tx: &mut Box<dyn FrameTx>,
+    pending_resize: &mut Option<data_plane::PendingResize>,
 ) -> Result<()> {
     while let Ok(event) = events.try_recv() {
-        handle_source_event(event, pending, need_complete)?;
+        process_source_event(
+            event,
+            pending,
+            need_complete,
+            needed_bytes,
+            needed_count,
+            data_plane,
+            tx,
+            pending_resize,
+        )
+        .await?;
     }
     Ok(())
 }
 
-fn handle_source_event(
+/// Handle one source event. Needs accumulate into `pending` and the
+/// shape totals; a resize ack dials its epoch-N socket and proposes the
+/// next ADD (the one-per-epoch ramp).
+#[allow(clippy::too_many_arguments)]
+async fn process_source_event(
     event: SourceEvent,
     pending: &mut Vec<FileHeader>,
     need_complete: &mut bool,
+    needed_bytes: &mut u64,
+    needed_count: &mut usize,
+    data_plane: Option<&data_plane::SourceDataPlane>,
+    tx: &mut Box<dyn FrameTx>,
+    pending_resize: &mut Option<data_plane::PendingResize>,
 ) -> Result<()> {
     match event {
         SourceEvent::Need(header) => {
@@ -903,6 +1009,8 @@ fn handle_source_event(
                     format!("need for '{}' after NeedComplete", header.relative_path),
                 )));
             }
+            *needed_bytes = needed_bytes.saturating_add(header.size);
+            *needed_count += 1;
             pending.push(header);
             Ok(())
         }
@@ -915,10 +1023,115 @@ fn handle_source_event(
             *need_complete = true;
             Ok(())
         }
+        SourceEvent::ResizeAck(ack) => {
+            let dp = data_plane.ok_or_else(|| {
+                eyre::Report::new(SessionFault::protocol_violation(
+                    "DataPlaneResizeAck on a session with no data plane",
+                ))
+            })?;
+            // Match the ack to the in-flight proposal; stale/unsolicited
+            // acks (wrong epoch, or none pending) are ignored, matching
+            // old push. `take()` + restore keeps the borrow simple.
+            let pending_r = match pending_resize.take() {
+                Some(p) if p.epoch == ack.epoch => p,
+                restored => {
+                    *pending_resize = restored;
+                    return Ok(());
+                }
+            };
+            if ack.accepted {
+                dp.add_stream(&pending_r.sub_token).await?;
+                dp.dial()
+                    .resize_settled(pending_r.epoch, pending_r.target_streams as usize, true);
+            } else {
+                dp.dial()
+                    .resize_settled(pending_r.epoch, dp.dial().live_streams(), false);
+            }
+            // Ramp one stream per accepted epoch: propose the next ADD.
+            maybe_propose_resize(dp, tx, *needed_bytes, *needed_count, pending_resize).await
+        }
         SourceEvent::Summary(_) => Err(eyre::Report::new(SessionFault::protocol_violation(
             "TransferSummary before SourceDone",
         ))),
         SourceEvent::Fault(fault) => Err(eyre::Report::new(fault)),
+    }
+}
+
+/// Propose one shape-correction resize (`DataPlaneResize{ADD}`) toward
+/// the stream count the accumulated need list implies, if none is in
+/// flight. A no-op when the shape wants no more than the live count (the
+/// dial returns `None`). Sends the frame and records the in-flight
+/// proposal for the ack to match.
+async fn maybe_propose_resize(
+    dp: &data_plane::SourceDataPlane,
+    tx: &mut Box<dyn FrameTx>,
+    needed_bytes: u64,
+    needed_count: usize,
+    pending_resize: &mut Option<data_plane::PendingResize>,
+) -> Result<()> {
+    if pending_resize.is_some() {
+        return Ok(());
+    }
+    if let Some(proposal) = dp.propose_resize(needed_bytes, needed_count)? {
+        tx.send(frame(Frame::Resize(DataPlaneResize {
+            op: DataPlaneResizeOp::Add as i32,
+            epoch: proposal.epoch,
+            target_stream_count: proposal.target_streams,
+            sub_token: proposal.sub_token.clone(),
+        })))
+        .await?;
+        *pending_resize = Some(proposal);
+    }
+    Ok(())
+}
+
+/// Block for the ack of the one in-flight resize and dial its socket (or
+/// settle it refused). Does NOT propose further — it resolves exactly the
+/// pending proposal so the destination's armed slot is consumed before we
+/// finish the data plane.
+async fn resolve_in_flight_resize(
+    events: &mut mpsc::UnboundedReceiver<SourceEvent>,
+    dp: &data_plane::SourceDataPlane,
+    pending: data_plane::PendingResize,
+) -> Result<()> {
+    loop {
+        match events.recv().await {
+            Some(SourceEvent::ResizeAck(ack)) if ack.epoch == pending.epoch => {
+                if ack.accepted {
+                    dp.add_stream(&pending.sub_token).await?;
+                    dp.dial()
+                        .resize_settled(pending.epoch, pending.target_streams as usize, true);
+                } else {
+                    dp.dial()
+                        .resize_settled(pending.epoch, dp.dial().live_streams(), false);
+                }
+                return Ok(());
+            }
+            // A stale ack for an already-settled epoch: ignore, keep
+            // waiting for ours.
+            Some(SourceEvent::ResizeAck(_)) => continue,
+            Some(SourceEvent::Fault(fault)) => return Err(eyre::Report::new(fault)),
+            Some(SourceEvent::Need(h)) => {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!("need for '{}' after NeedComplete", h.relative_path),
+                )))
+            }
+            Some(SourceEvent::NeedComplete) => {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    "duplicate NeedComplete",
+                )))
+            }
+            Some(SourceEvent::Summary(_)) => {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    "TransferSummary before SourceDone",
+                )))
+            }
+            None => {
+                return Err(eyre::Report::new(SessionFault::internal(
+                    "source receive half ended with a resize in flight",
+                )))
+            }
+        }
     }
 }
 
@@ -1002,6 +1215,11 @@ pub struct DestinationOutcome {
     /// role suite pins these identical across role assignments — the
     /// executable form of the owner's invariance requirement.
     pub needed_paths: Vec<String>,
+    /// The settled data-plane stream count this end observed (epoch-0 +
+    /// accepted resizes), or `None` for the in-stream carrier. The sf-2
+    /// pin (otp-4b-2) reads it to assert shape correction grew the
+    /// stream set past the zero-knowledge single-stream grant.
+    pub data_plane_streams: Option<usize>,
 }
 
 /// Run the DESTINATION role of one transfer session over `transport`,
@@ -1145,13 +1363,23 @@ async fn destination_session(
     // strictness the in-stream control loop applies inline. AbortOnDrop
     // bounds it to this future: a control-lane fault that returns from
     // this fn aborts the receive task instead of leaking it.
-    let mut data_plane_recv = negotiated.responder_data_plane.map(|rdp| {
-        let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
-            Arc::clone(&sink) as Arc<dyn TransferSink>,
-            Arc::clone(&outstanding),
-        ));
-        AbortOnDrop::new(tokio::spawn(rdp.accept_and_receive(recv_sink)))
-    });
+    // `resize_live` tracks the stream count this end has granted (epoch-0
+    // plus each accepted resize ADD); `resize_ceiling` is the receiver's
+    // advertised max_streams, the cumulative bound a resize may not cross.
+    let (mut data_plane_recv, mut resize_live, resize_ceiling) =
+        match negotiated.responder_data_plane {
+            Some(rdp) => {
+                let initial = rdp.initial_streams() as usize;
+                let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
+                    Arc::clone(&sink) as Arc<dyn TransferSink>,
+                    Arc::clone(&outstanding),
+                ));
+                let run = rdp.spawn(recv_sink);
+                let ceiling = run.ceiling;
+                (Some(run), initial, ceiling)
+            }
+            None => (None, 0usize, 0usize),
+        };
 
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut needed_paths: Vec<String> = Vec::new();
@@ -1272,6 +1500,47 @@ async fn destination_session(
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
             }
+            Some(Frame::Resize(resize)) => {
+                // sf-2 shape correction (otp-4b-2): the SOURCE proposes
+                // one ADD; arm the credential, grant it (bump `resize_live`),
+                // and ack so the SOURCE dials the epoch-N socket. Only ADD
+                // occurs on the session (REMOVE is a tuner concern, future
+                // work); anything else fails fast.
+                let run = data_plane_recv.as_ref().ok_or_else(|| {
+                    violation("DataPlaneResize on a session with no data plane".into())
+                })?;
+                let op = DataPlaneResizeOp::try_from(resize.op)
+                    .unwrap_or(DataPlaneResizeOp::Unspecified);
+                if op != DataPlaneResizeOp::Add {
+                    return Err(violation(format!(
+                        "unsupported data-plane resize op {}",
+                        op.as_str_name()
+                    )));
+                }
+                if resize.sub_token.len() != crate::remote::transfer::SUB_TOKEN_LEN {
+                    return Err(violation(
+                        "DataPlaneResize sub_token must be 16 bytes".into(),
+                    ));
+                }
+                // Cumulative ceiling bound (defense in depth — the
+                // source's dial already clamps to the same profile).
+                let accepted = resize_live < resize_ceiling && run.arm(resize.sub_token.clone());
+                if accepted {
+                    resize_live += 1;
+                }
+                let effective = if accepted {
+                    resize.target_stream_count
+                } else {
+                    resize_live as u32
+                };
+                transport
+                    .send(frame(Frame::ResizeAck(DataPlaneResizeAck {
+                        epoch: resize.epoch,
+                        effective_stream_count: effective,
+                        accepted,
+                    })))
+                    .await?;
+            }
             Some(Frame::SourceDone(_)) => {
                 if !manifest_complete {
                     return Err(violation("SourceDone before ManifestComplete".into()));
@@ -1284,18 +1553,16 @@ async fn destination_session(
                 // surfaces any receive error / stall). Set membership —
                 // not a file count — is the contract (codex F1: a count
                 // proxy let a peer substitute or duplicate paths).
-                let in_stream_carrier_used = match data_plane_recv.take() {
-                    Some(recv) => {
-                        let outcome = recv.join().await.map_err(|err| {
-                            eyre::Report::new(SessionFault::internal(format!(
-                                "data-plane receive task panicked: {err}"
-                            )))
-                        })??;
-                        files_written = outcome.files_written as u64;
-                        bytes_written = outcome.bytes_written;
-                        false
+                // `finish()` drops the arm sender (no more resizes), joins
+                // the accept loop, and reports the settled stream count.
+                let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.take() {
+                    Some(run) => {
+                        let totals = run.finish().await?;
+                        files_written = totals.outcome.files_written as u64;
+                        bytes_written = totals.outcome.bytes_written;
+                        (false, Some(totals.streams))
                     }
-                    None => true,
+                    None => (true, None),
                 };
                 let unfulfilled = outstanding
                     .lock()
@@ -1317,6 +1584,7 @@ async fn destination_session(
                 return Ok(DestinationOutcome {
                     summary,
                     needed_paths,
+                    data_plane_streams,
                 });
             }
             Some(Frame::Error(err)) => {
@@ -1324,11 +1592,11 @@ async fn destination_session(
             }
             other => {
                 // Everything else is off-lane or off-phase here:
-                // destination-lane frames echoed back, resume frames
-                // in a non-resume session (otp-7), resize with no
-                // data plane to resize (otp-4), stray handshake
-                // frames, bare FileData/TarShardChunk outside a
-                // record. Fail fast, no tolerant parsing.
+                // destination-lane frames echoed back (a ResizeAck the
+                // destination would never receive), resume frames in a
+                // non-resume session (otp-7), stray handshake frames,
+                // bare FileData/TarShardChunk outside a record. Fail
+                // fast, no tolerant parsing.
                 return Err(violation(format!(
                     "{} not valid on the destination's receive lane in this phase",
                     frame_name(&other)
