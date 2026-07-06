@@ -53,4 +53,8 @@ before `execute_receive_pipeline`, matching old push.
   otp-10-deleted drivers) — boundary clean.
 
 ## Fix commit
-(sha appended after the fix lands + re-gate.)
+`e1aafcc` — otp-4b-1: address review (2 findings). Both F1 + F2 fixed;
+gate green (fmt/clippy/test **1512/0**); guard proof on the F1 test
+(`need_list_sink_enforces_membership_and_rejects_blocks` fails with
+`claim()` neutered). Re-review of `e1aafcc` requested (the fix added
+shared-set concurrency + a sink decorator — non-trivial).
