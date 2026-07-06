@@ -153,7 +153,12 @@ explicitly-deferred logging epic (F15).
       internal path/line. Whatever is chosen must apply uniformly
       to both the local-mirror and remote tar-shard receive paths
       (same `write_tar_shard_payload` helper backs both, per
-      audit-16 above).
+      audit-16 above). **Confirmed reproducible**: identical failure
+      (same path, same error, same line, same ~88129-entry offset)
+      recurred verbatim on a second run targeting a different mount
+      (`/run/media/michael/USB_DRIVE/michael`) — not a one-off fluke;
+      the FAT-family-destination assumption above is now corroborated
+      by a second independent mount exhibiting the same `:`-rejection.
 - [ ] **audit-18** Non-UTF-8 source filenames are silently corrupted
       during enumeration, then fail to open, aborting the whole
       transfer. Reported: `blit copy /home/michael/
