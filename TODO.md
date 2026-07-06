@@ -154,6 +154,46 @@ explicitly-deferred logging epic (F15).
       to both the local-mirror and remote tar-shard receive paths
       (same `write_tar_shard_payload` helper backs both, per
       audit-16 above).
+- [ ] **audit-18** Non-UTF-8 source filenames are silently corrupted
+      during enumeration, then fail to open, aborting the whole
+      transfer. Reported: `blit copy /home/michael/
+      /run/media/michael/USB_DRIVE/michael -ypv` (same host as
+      audit-17, later re-run) failed ~377k entries in at
+      `crates/blit-core/src/remote/transfer/payload.rs:360`
+      (`build_tar_shard`'s `std::fs::File::open(&full_path)`) with
+      `No such file or directory (os error 2)` opening
+      `.../Claudia-by-Choice-codex_1.0<U+FFFD>` — the trailing
+      replacement character is the tell. Root cause:
+      `crate::path_posix::relative_path_to_posix` (`path_posix.rs:36-44`)
+      builds the canonical relative-path `String` with
+      `c.as_os_str().to_string_lossy()` per component — on Linux/ext4
+      a filename can be any non-`/`/non-NUL byte sequence, and a
+      non-UTF-8 one gets its invalid bytes replaced with U+FFFD
+      *irreversibly*. `build_tar_shard` then does
+      `source_root.join(rel)` on that corrupted string, which no
+      longer names the real file → `ENOENT`. `FileEntry.path` itself
+      (`fs_enum.rs:14`) is a real `PathBuf` (exact bytes preserved),
+      so the corruption happens specifically at the `PathBuf → String`
+      relative-path conversion, not at enumeration. `relative_path_to_posix`
+      is the single canonical helper for this and is called from
+      `engine/mirror.rs`, `mirror_planner.rs`, `remote/transfer/{payload,tar_safety}.rs`,
+      `remote/endpoint.rs`, and `remote/push/client/helpers.rs` — i.e.
+      local mirror and remote push both go through the lossy path, so
+      this isn't a remote-only/proto-only constraint. Fix needs a
+      design call (owner input required, `plan` this before coding):
+      the wire `FileHeader.relative_path`/`FileBlock.relative_path`
+      fields are proto3 `string`, which is UTF-8-only at the gRPC
+      layer, so a full fix for the remote path needs an encoding
+      scheme that round-trips arbitrary bytes through a UTF-8-safe
+      string (e.g. percent-encode invalid bytes, or WTF-8) — local
+      mirror has no such wire constraint and could preserve raw
+      `OsString`/`PathBuf` throughout instead. Same failure class as
+      audit-17 (one bad filename kills the entire run instead of
+      being skipped/reported) — whatever skip/report/fail-fast
+      behavior gets designed for audit-17 should likely cover this
+      case too, but the root cause here is enumeration-side path
+      corruption, not destination-fs charset rejection, so treat as
+      a separate fix even if the error-handling policy ends up shared.
 
 ### Deferred design calls
 
