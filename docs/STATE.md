@@ -1,14 +1,11 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-07 (**otp-6 CLOSED — 6b mirror landed + graded
-(codex NEEDS FIXES → 1 High + 1 Med accepted + fixed)**. The session
-MIRRORS: the DESTINATION accumulates the complete source manifest and,
-at SourceDone, deletes extraneous entries locally (the one delete rule),
-scan-complete-guarded + filter-scoped. High fix: case-insensitive-FS
-data-loss — the keep-set now folds case on macOS too, not just Windows.
-ONE_TRANSFER_PATH otp-1 + otp-3 + otp-4a + otp-4b (1/2/3) + otp-5a +
-otp-5b (1/2) + otp-6 (a/b) `[x]`, current slice **otp-7** (resume block
-phase). SMALL_FILE_CEILING stays paused, D-2026-07-05-1.)
+Last updated: 2026-07-07 (**otp-6 CLOSED; otp-7 in DESIGN**. otp-6 (a/b)
+mirror + filters landed + graded. Current slice **otp-7** (resume block
+phase, the plan's RELIABLE exception): owner chose "plan doc first" — slice
+design drafted at `docs/plan/OTP7_RESUME.md` (**Draft**), NO CODE until the
+owner answers its Q1–Q3 and flips it to Active. ONE_TRANSFER_PATH otp-1..6
+`[x]`. SMALL_FILE_CEILING stays paused, D-2026-07-05-1.)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -51,9 +48,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     rule: DESTINATION diffs the complete source manifest at SourceDone,
     scan-complete-guarded + filter-scoped. Codex High: keep-set now folds
     case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
-  - Current: **otp-7** (resume block phase). otp-5b-3 (pull mid-transfer
-    cancel) is optional — the CANCELLED framing is role-agnostic. (otp-2
-    symmetric baseline is rig-gated; before otp-10.)
+  - Current: **otp-7 IN DESIGN** — Draft `docs/plan/OTP7_RESUME.md`
+    (`9fb5e4a`) awaiting owner review (see Open questions); no code until
+    Active. otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -71,9 +68,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b) `[x]`. Current:
-   **otp-7** (resume block phase — ordering + stale-partial pins per the
-   Design's RELIABLE exception; resume is still refused at OPEN until this
-   lands). otp-2 (symmetric baseline) is RIG-GATED — before otp-10 cutover.
+   **otp-7 IN DESIGN** (`docs/plan/OTP7_RESUME.md` Draft, owner review;
+   no code until Active). otp-2 (symmetric baseline) is RIG-GATED —
+   before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
    REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
    owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
@@ -106,7 +103,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Authoritative docs right now
 
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
-  D-2026-07-05-4)**.
+  D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Draft** — otp-7 slice
+  design, awaiting owner review before any code).
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
@@ -139,23 +137,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(OPEN — owner ack requested, 2026-07-05, otp-4a)** Unified
-  SizeMtime semantic: same-size + dest-NEWER — old push clobbers, the
-  session adopts the **data-safe SKIP** (converge-up; `--force` still
-  overwrites; pinned by
-  `same_size_newer_destination_is_skipped_not_clobbered`). So "byte-
-  identical trees vs old push" is intentionally not literal in that one
-  cell. Owner: confirm, or ask for old-push clobber (one-line change).
-  Full reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
+- **(OPEN — owner review, 2026-07-07, otp-7)** `docs/plan/OTP7_RESUME.md`
+  (Draft) awaits the owner's Q1–Q3 (graceful stale fallback; in-place-patch
+  mid-failure model; 7a-then-7b staging — all agent-rec yes) and the flip to
+  Active. That flip unblocks otp-7 implementation.
+- **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
+  same-size + dest-NEWER — old push clobbers, the session adopts the
+  **data-safe SKIP** (converge-up; `--force` still overwrites; pinned by
+  `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm,
+  or ask for old-push clobber. Reasoning:
+  `.review/findings/otp-4-daemon-serves-transfer.md`.
 - **(OPEN)** Historical docs embed `/Users/...` paths — agent rec: leave.
-- **(OPEN, new 2026-07-04)** `725aa07` tracked a 236-file stale
-  worktree snapshot (`.claude/worktrees/vigilant-mayer/`, incl. a
-  full `crates/` copy). Keep or `git rm -r`? Agent rec: remove;
-  deletion awaits an owner go.
-- **(OPEN, new 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 still
-  describe `determine_remote_tuning`/`TuningParams` (stale since
-  ue-r2-1e, `TuningParams` now deleted) — fold into w10-docs-batch or
-  rewrite sooner? Agent rec: w10.
+- **(OPEN, 2026-07-04)** `725aa07` tracked a 236-file stale worktree
+  snapshot (`.claude/worktrees/vigilant-mayer/`). Agent rec: `git rm -r`;
+  awaits owner go.
+- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 still describe
+  the deleted `determine_remote_tuning`/`TuningParams` — fold into
+  w10-docs-batch (agent rec) or rewrite sooner?
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: the 10 GbE
   session delivered the measurement evidence; flip awaits the three
   declarations in Blocked (was four — zero-copy resolved,
@@ -174,6 +172,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-07 (36th)** @ `9fb5e4a` — **otp-7 slice design drafted; owner
+  review pending (NO CODE)**. Owner picked "plan doc first" for the RELIABLE
+  resume slice; `docs/plan/OTP7_RESUME.md` (Draft) records the strict-ordering
+  block-hash choreography, the reuse map, design decisions (graceful stale
+  fallback, source block-diff as a session helper, in-place-patch mid-failure),
+  7a-in-stream/7b-data-plane staging, and the four guard-proof targets.
+  **Exact first action next session**: get the owner's Q1–Q3 answers + flip to
+  Active, then codex-review the plan change (D-2026-07-04-1) and implement
+  otp-7a. In-flight: none. Done since 35th: otp-6 fully closed; `f6e592e`..HEAD
+  unpushed (incl. otp-6a/6b + this design doc).
 - **2026-07-07 (35th)** @ `01d9c41`+`3c99557` — **otp-6b mirror (codex
   NEEDS FIXES → 1 High + 1 Med accepted + fixed); otp-6 CLOSED** (DEVLOG
   00:45; `.review/…/otp-6b-session-mirror.md`, `.review/results/otp-6b.*`).
@@ -189,12 +197,3 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   **Exact first action next session**: otp-7 (resume block phase; resume is
   refused at OPEN until it lands). In-flight: none. 10 GbE gates + push go
   remain in Blocked; `f6e592e`..HEAD unpushed. (`Cargo.lock` drift unstaged.)
-- **2026-07-06 (34th)** @ `c026692`+`0bb27f5` — **otp-6a (filters on the
-  session, codex FAIL → 1 Medium accepted + fixed)** (DEVLOG 22:30;
-  `.review/…/otp-6a-session-filters.md`, `.review/results/otp-6a.*`). The
-  session honors `SessionOpen.filter` on the SOURCE scan;
-  `source_open_validator` validates globs (peer-notified refusal at OPEN).
-  F1 (Med, `0bb27f5`): routed filtering through the universal `FilteredSource`
-  decorator, not the per-impl `scan(filter)` arg — only `FsTransferSource`
-  honored the arg; `RemoteTransferSource` ignores it (latent silent-no-filter
-  for otp-9's remote relay). Two guard tests. Suite 1522 → **1524**.
