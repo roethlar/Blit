@@ -210,6 +210,65 @@ explicitly-deferred logging epic (F15).
       case too, but the root cause here is enumeration-side path
       corruption, not destination-fs charset rejection, so treat as
       a separate fix even if the error-handling policy ends up shared.
+- [ ] **audit-19** `--exclude` silently matches nothing for the path
+      forms users actually type (absolute paths, and bare directory
+      names), so an exclude that looks correct transfers the excluded
+      tree anyway. Reported: `blit mirror /home/michael/
+      /run/media/michael/USB_DRIVE -pvy --force --exclude
+      /home/michael/.java` still descended into `.java/` and tried to
+      write `.java/fonts/1.8.0_472/fcinfo-…-en.properties` — that write
+      then hit `audit-17`'s `os error 22` (`sink.rs:608`) on the
+      FAT-family destination, i.e. a working `--exclude` would also have
+      side-stepped that crash. The filter *is* plumbed (local mirror
+      enumerates via `FileFilter`, `transfers/local.rs:191` →
+      `enumerate_directory_filtered`); this is a matching-semantics bug,
+      not a dropped-filter plumbing bug. Two compounding root causes in
+      `FileFilter::allows_entry` (`crates/blit-core/src/fs_enum.rs:194-240`):
+      (1) **excludes are matched against the source-root-relative path
+      and the bare filename, never the absolute path** — `path_str` is
+      `rel_path` (`fs_enum.rs:211-213`), `filename` is
+      `abs_path.file_name()` (`fs_enum.rs:207-210`). The candidate
+      strings for this entry are `.java/fonts/…` (relative) and
+      `fcinfo-…properties` (filename); a literal `/home/michael/.java`
+      glob equals neither (globset needs a whole-string match, and
+      `glob_match` with no `*` falls through to exact equality,
+      `fs_enum.rs:399-417`). `--exclude` maps only to `exclude_files`
+      (`crates/blit-app/src/transfers/filter.rs:42`); nothing strips the
+      source prefix to make an absolute pattern relative, so an absolute
+      exclude under the source root is structurally unmatchable.
+      (2) **a directory pattern does not prune its subtree.** Even the
+      "correct" relative form `--exclude .java` only drops an entry
+      whose relative path or filename is exactly `.java`; the files
+      under it are `.java/fonts/…` and globset `*` does not cross `/`,
+      so the whole subtree still transfers. There is **no `--exclude-dir`
+      flag** (verified: no CLI arg in `blit-cli`/`blit-app`, and
+      `FileFilter::exclude_dirs` / `dir_globs` / `should_include_dir`
+      at `fs_enum.rs:274-295` is never assigned anywhere in `crates/`),
+      so the only incantation that works today is
+      `--exclude '.java/**'` (and likely `--exclude .java` too, for the
+      dir entry itself). Nothing warns that a pattern matched zero of
+      the configured globs — a silent no-op, same foot-gun class as the
+      endpoint-parse open question in `docs/STATE.md`. Docs gap:
+      `--help` says only "Exclude files matching this glob pattern"
+      (`crates/blit-cli/src/cli.rs:292`) with no hint that matching is
+      source-relative (not absolute) or that a directory needs `/**`;
+      rsync users reasonably expect leading-`/`-anchors-to-transfer-root
+      and trailing-`/`-matches-dir semantics, none of which blit
+      implements. Confirmed by reading the matcher end-to-end, not run.
+      Fix needs a design call (owner input required, `plan` this before
+      coding): options span (a) accept absolute patterns under the
+      source root by stripping the source prefix before matching;
+      (b) give directory patterns rsync-like subtree semantics and/or
+      add a real `--exclude-dir`; (c) at minimum, warn when a pattern is
+      structurally unmatchable (absolute but not under the source, or
+      literal with no possible relative/filename match) instead of
+      silently transferring everything. Whatever is chosen must apply
+      uniformly across local-mirror, push, pull, and remote-remote (all
+      route through the one `FileFilter`/`FilterInputs` chokepoint,
+      `cli.rs:288-291`) and ship `--help`/manpage/README updates in the
+      same change (docs-after-behavior rule). Distinct from `audit-17`
+      (destination-fs charset rejection) — that crash is only a
+      *symptom* here; the exclude no-op is the reported bug.
 - [ ] **CLI transfer output redesign** (owner, 2026-07-06): current
       `blit copy`/`mirror` output "doesn't convey any useful information
       at all" — owner wants something closer to `rclone`/`cargo`: a
