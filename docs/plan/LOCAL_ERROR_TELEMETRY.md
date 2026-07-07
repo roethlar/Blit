@@ -3,18 +3,20 @@
 **Status**: Draft
 **Created**: 2026-07-06
 **Supersedes**: nothing
-**Decision ref**: pending — Q1-Q4 owner-confirmed 2026-07-06 (folded into
-this doc below); Q5 (Draft→Active gate vs. D-2026-07-05-4) pending final
-confirmation, see bottom.
+**Decision ref**: nothing recorded in `docs/DECISIONS.md` — Q1-Q4
+owner-confirmed 2026-07-06 (folded into this doc below); Q5 also resolved
+2026-07-06 (owner chose "next natural pause," no formal exception — see
+Q5 section at the bottom for the full resolution and its acknowledged
+tension with D-2026-07-05-4). No further confirmation is pending; this doc
+stays Draft/unqueued until that pause point, per Q5, not because anything
+here is still open.
 
-**Held, not queued (pending confirmation)**: `docs/STATE.md`'s Queue is
-pinned to ONE_TRANSFER_PATH exclusively (**D-2026-07-05-4**, "the only work
-item until it ships"). The owner initially chose Draft-only/hold, then on
-review of these open questions said "we need to start collecting errors
-sooner than later to aid in dev" — signaling urgency, but the exact
-mechanism (a recorded exception to D-2026-07-05-4 now vs. some other
-sequencing) still needs one explicit confirmation before this doc enters
-the Queue, flips Active, or any code lands (see **Q5** at the bottom).
+**Held, not queued**: `docs/STATE.md`'s Queue is pinned to
+ONE_TRANSFER_PATH exclusively (**D-2026-07-05-4**, "the only work item
+until it ships"). Per the resolved **Q5** (bottom of this doc), this plan
+does not enter the Queue and no code lands until the current otp-7 slice
+reaches a natural pause — that is a settled timing decision, not an open
+question.
 
 ## Why this doc
 
@@ -29,9 +31,11 @@ itself, across whichever route each failure came from.
 
 Today's "telemetry" (`perf_history.rs` → `perf_local.jsonl`, read via
 `blit diagnostics perf`) only records **successful** transfers. Its schema
-has an `error_count` field, but every writer hardcodes it to `0`
-(`engine/history.rs`, `auto_tune/mod.rs`, `perf_predictor.rs`,
-`engine/tuning.rs`) — dead. Worse, `record_performance_history` is only
+has an `error_count` field, but the one production write path
+(`engine/history.rs:87-96`, `build_performance_record`) passes a literal
+`0` for it — dead in practice (the other `error_count` references in
+`auto_tune/mod.rs`/`engine/tuning.rs`/`perf_predictor.rs` are test-only
+record constructors, not writers). Worse, `record_performance_history` is only
 reached from the success path inside `run_local_mirror` (`engine/mod.rs:220,
 277, 314, 350, 792`, `engine/single_file.rs:42`); a top-level `Err` (exactly
 the `os error 22` case) writes nothing. Hard failures leave zero trace

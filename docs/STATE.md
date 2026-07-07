@@ -157,10 +157,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   session delivered the measurement evidence; flip awaits the three
   declarations in Blocked (was four — zero-copy resolved,
   D-2026-07-05-3).
-- **(OPEN, 2026-07-06, timing not scope)** `docs/plan/LOCAL_ERROR_TELEMETRY.md`
-  (Draft, reviewed+fixed) — owner: pick up at ONE_TRANSFER_PATH's next
-  natural pause (not a D-2026-07-05-4 exception); trigger = current
-  otp-7 slice done.
+- **(RESOLVED, 2026-07-06)** `docs/plan/LOCAL_ERROR_TELEMETRY.md` (Draft,
+  reviewed+fixed) — owner: pick up at ONE_TRANSFER_PATH's next natural
+  pause; trigger = current otp-7 slice done. No `D-2026-07-06-n` recorded
+  for this — an informal, owner-chosen, acknowledged exception to
+  D-2026-07-05-4's wording, not a claim of zero conflict (see the plan
+  doc's own Q5 section for the full tension).
 - **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
   `blit copy src_large dst` with an existing local dir, no `./`,
   parses the bare name as an mDNS discovery endpoint and errors
@@ -175,26 +177,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-06 (37th)** @ `deb3800` — **Two owner bug reports triaged,
-  filed as `audit-17`/`audit-18` (TODO.md only, D-2026-07-05-4); no
-  code, otp-7 untouched.** Both: a `blit copy` that aborted entirely on
-  one bad filename mid-copy. `audit-17` (`5628c03`): dest FAT-family fs
-  rejects a `:` in a NuGet cache path (`sink.rs:605`, `os error 22`) — no
-  invalid-filename handling exists. `audit-18` (`deb3800`): a non-UTF-8
-  filename is irreversibly mangled by `relative_path_to_posix`'s
-  `to_string_lossy()` before I/O (`payload.rs:360`) — shared by local
-  mirror + remote push. Both need an owner `plan` before code.
+- **2026-07-06 (38th)** @ `44de868` — **`LOCAL_ERROR_TELEMETRY.md` drafted,
+  reviewed twice by codex (3+3 findings, all fixed), Q1-Q5 all resolved;
+  still Draft, no code, otp-7 untouched.** Owner asked for durable
+  failure-log telemetry after hitting `audit-17` repeatedly; design covers
+  every `TransferRoute` (Q3: both local+remote, not local-only as first
+  scoped), no size cap for now (Q4: dev-mode, manual `--clear`), and Q5
+  timing resolved as an informal, acknowledged (not formally recorded)
+  exception to D-2026-07-05-4 — pick up at ONE_TRANSFER_PATH's next
+  natural pause. Verdicts: `.review/results/local-error-telemetry-plan{,-v2}.gpt-verdict.md`.
+  A session-wide codex pass then caught 3 staleness/contradiction bugs
+  across this doc + STATE.md + DEVLOG.md from mid-session edits not being
+  propagated everywhere — fixed same pass (this entry included).
   **Exact first action next session**: otp-7 — owner's Q1–Q3 on
   `docs/plan/OTP7_RESUME.md`, flip Active, codex-review, implement
-  otp-7a. In-flight: none. Done since 36th: nothing on
-  ONE_TRANSFER_PATH — pure bug triage.
-- **2026-07-07 (36th)** @ `9fb5e4a` — **otp-7 slice design drafted; owner
-  review pending (NO CODE)**. Owner picked "plan doc first" for the RELIABLE
-  resume slice; `docs/plan/OTP7_RESUME.md` (Draft) records the strict-ordering
-  block-hash choreography, the reuse map, design decisions (graceful stale
-  fallback, source block-diff as a session helper, in-place-patch mid-failure),
-  7a-in-stream/7b-data-plane staging, and the four guard-proof targets.
-  **Exact first action next session**: get the owner's Q1–Q3 answers + flip to
-  Active, then codex-review the plan change (D-2026-07-04-1) and implement
-  otp-7a. In-flight: none. Done since 35th: otp-6 fully closed; `f6e592e`..HEAD
-  unpushed (incl. otp-6a/6b + this design doc).
+  otp-7a; LOCAL_ERROR_TELEMETRY.md picked up only at that slice's natural
+  pause. In-flight: none. Done since 37th: audit-17/18 filed (`5628c03`,
+  `deb3800`); the telemetry plan end-to-end.
