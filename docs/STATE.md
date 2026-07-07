@@ -6,9 +6,10 @@ phase, the plan's RELIABLE exception): owner chose "plan doc first" — slice
 design drafted at `docs/plan/OTP7_RESUME.md` (**Draft**), NO CODE until the
 owner answers its Q1–Q3 and flips it to Active. ONE_TRANSFER_PATH otp-1..6
 `[x]`. SMALL_FILE_CEILING stays paused, D-2026-07-05-1. This session: filed
-`audit-17`/`audit-18` (`TODO.md` only); drafted+reviewed
-`docs/plan/LOCAL_ERROR_TELEMETRY.md` (Draft, held — see Open questions).
-No code, no Queue change (D-2026-07-05-4).)
+`audit-17`/`audit-18` + a CLI-output-redesign item (`TODO.md` only);
+drafted+reviewed `docs/plan/LOCAL_ERROR_TELEMETRY.md` (Draft, held); a
+session-wide codex pass fixed 5 resulting cross-doc staleness bugs. No
+code, no Queue change (D-2026-07-05-4).)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -157,12 +158,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   session delivered the measurement evidence; flip awaits the three
   declarations in Blocked (was four — zero-copy resolved,
   D-2026-07-05-3).
-- **(RESOLVED, 2026-07-06)** `docs/plan/LOCAL_ERROR_TELEMETRY.md` (Draft,
-  reviewed+fixed) — owner: pick up at ONE_TRANSFER_PATH's next natural
-  pause; trigger = current otp-7 slice done. No `D-2026-07-06-n` recorded
-  for this — an informal, owner-chosen, acknowledged exception to
-  D-2026-07-05-4's wording, not a claim of zero conflict (see the plan
-  doc's own Q5 section for the full tension).
 - **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
   `blit copy src_large dst` with an existing local dir, no `./`,
   parses the bare name as an mDNS discovery endpoint and errors
@@ -177,20 +172,27 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-06 (38th)** @ `44de868` — **`LOCAL_ERROR_TELEMETRY.md` drafted,
-  reviewed twice by codex (3+3 findings, all fixed), Q1-Q5 all resolved;
-  still Draft, no code, otp-7 untouched.** Owner asked for durable
-  failure-log telemetry after hitting `audit-17` repeatedly; design covers
-  every `TransferRoute` (Q3: both local+remote, not local-only as first
-  scoped), no size cap for now (Q4: dev-mode, manual `--clear`), and Q5
-  timing resolved as an informal, acknowledged (not formally recorded)
-  exception to D-2026-07-05-4 — pick up at ONE_TRANSFER_PATH's next
-  natural pause. Verdicts: `.review/results/local-error-telemetry-plan{,-v2}.gpt-verdict.md`.
-  A session-wide codex pass then caught 3 staleness/contradiction bugs
-  across this doc + STATE.md + DEVLOG.md from mid-session edits not being
-  propagated everywhere — fixed same pass (this entry included).
-  **Exact first action next session**: otp-7 — owner's Q1–Q3 on
-  `docs/plan/OTP7_RESUME.md`, flip Active, codex-review, implement
-  otp-7a; LOCAL_ERROR_TELEMETRY.md picked up only at that slice's natural
-  pause. In-flight: none. Done since 37th: audit-17/18 filed (`5628c03`,
-  `deb3800`); the telemetry plan end-to-end.
+- **2026-07-06 (39th)** @ `598f102` — **Session-wide codex review (5
+  findings, all fixed); one new backlog item filed; otp-7 still
+  untouched.** `/playbook reviewloop` named a generic template this repo's
+  own guidance says isn't the operative loop here (branch-per-finding
+  conflicts with no-agent-branches) — ran `GPT_REVIEW_LOOP.md`'s mechanism
+  instead over the whole session diff (`9876687..44de868`). 3 Medium + 2
+  Low, all cross-doc staleness/contradictions from mid-session edits not
+  propagating everywhere (stale Q5 header, a STATE/plan-doc contradiction,
+  a stale handoff entry, a date-drift note, an overstated claim) — fixed
+  `419f5d1`, verdict `.review/results/session-2026-07-06.gpt-verdict.md`.
+  Also: owner asked for a CLI transfer-output redesign (rclone/cargo-style
+  static stat block + file list; current output is bare scrolling
+  `println!`s, `helpers.rs:176`/`transfers/remote.rs:33-140`) — filed to
+  `TODO.md` only (`598f102`), needs its own `plan` when picked up.
+  **Exact first action next
+  session**: otp-7 — owner's Q1–Q3 on `docs/plan/OTP7_RESUME.md`, flip
+  Active, codex-review, implement otp-7a. In-flight: none. Done since
+  38th: the session-wide review pass; the CLI-output-redesign TODO item.
+- **2026-07-06 (38th)** @ `44de868` — **`LOCAL_ERROR_TELEMETRY.md` drafted
+  + reviewed twice (3+3 findings fixed), Q1-Q5 resolved; still Draft, no
+  code.** Full detail: DEVLOG 20:15Z/21:00Z entries and the plan doc's own
+  Q5 section (pickup timing); the 39th entry above covers the staleness
+  bugs this left behind, since fixed. Done since 37th: audit-17/18 filed
+  (`5628c03`, `deb3800`); the telemetry plan end-to-end.
