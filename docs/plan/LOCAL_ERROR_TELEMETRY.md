@@ -74,7 +74,9 @@ pasting terminal output.
   code needed.
 - The recorder itself must be failure-tolerant: a broken/unwritable config
   dir must never mask or replace the original error — recording is
-  best-effort (log a `log::warn!` and proceed) around the real `Result`
+  best-effort, silent by default (matching `engine/history.rs`'s existing
+  `--verbose`-gated `eprintln!` convention for `perf_local.jsonl` write
+  failures, not the `log` facade — see Design), around the real `Result`
   that still propagates to the process exit code and stderr exactly as
   today.
 
@@ -94,7 +96,11 @@ pasting terminal output.
       unbounded.
 - [ ] `perf_local.jsonl` and its reader/predictor are completely unaffected
       — this is an additive, separate file, not a schema change to the
-      existing one (see D1).
+      existing one (see Q1 below).
+- [ ] Only the `TransferRoute::LocalToLocal` path records failures — a
+      failing `LocalToRemote`/`RemoteToLocal`/`RemoteToRemote*` route (or a
+      pre-dispatch argument-validation bail) must **not** write to
+      `errors_local.jsonl` (see Design — chokepoint placement).
 - [ ] Process exit code and stderr output for a failing command are
       **byte-identical** to today's — the recorder taps the `Result`, it
       never changes what the user sees or the exit code.
@@ -109,7 +115,7 @@ New module `blit-core/src/error_history.rs`, mirroring `perf_history.rs`'s
 shape (`FailureRecord` struct, `record_failure(...)`, `read_failures(limit)`,
 `clear_failures()`), writing to `errors_local.jsonl` in the same
 `config::config_dir()` as `perf_local.jsonl` — a sibling file, not a shared
-schema (see D1).
+schema (see Q1 below).
 
 Draft schema (`FailureRecord`):
 - `schema_version: u32`
@@ -125,17 +131,34 @@ Draft schema (`FailureRecord`):
   cleanly capturable without touching how `color_eyre::install()` is set
   up, and may ship as `None` in the first slice.
 
-Wiring: `crates/blit-cli/src/main.rs`'s `Commands::Copy`/`Commands::Mirror`
-arms currently call `run_with_retries(..., || run_transfer(...)).await?` —
-the `?` bubbles straight out of the `match`, so there is no single point
-inside `main` today that sees the `Result` before it becomes the function's
-return value. The fix is the same "single chokepoint" shape this repo
-already favors elsewhere (`FilteredSource`, `safe_join`,
-`contained_join`): change those two arms to bind the `Result` instead of
-`?`-ing it immediately, call `error_history::record_failure(...)` when it's
-`Err` (best-effort — a recorder failure is logged via `log::warn!` and
-never replaces the original error), then return/`?` the *original,
-untouched* `Result` so behavior for the user is identical to today.
+**Wiring — corrected chokepoint** (codex High finding: the doc's first
+draft wired this at `crates/blit-cli/src/main.rs`'s `Commands::Copy`/
+`Commands::Mirror` arms, but `run_transfer` — called from both — dispatches
+`LocalToLocal`/`LocalToRemote`/`RemoteToLocal`/`RemoteToRemoteRelay`/
+`RemoteToRemoteDelegated` from ONE function via `select_transfer_route`
+(`crates/blit-cli/src/transfers/mod.rs:101-287`); wiring at `main.rs` would
+record every route's failures, including remote ones and pre-dispatch
+argument bails (e.g. the `!src.exists()` bail per route arm), contradicting
+this plan's local-only scope). The corrected chokepoint is inside
+`run_transfer`'s `TransferRoute::LocalToLocal` arm specifically
+(`transfers/mod.rs:235-241`): wrap that arm's `run_local_transfer(...)`
+call (plus its local `!src.exists()` bail, which is legitimately
+in-scope — it's still a local-route failure) to record on `Err`, leaving
+every other route arm untouched.
+
+**Recorder-failure handling — corrected** (codex Medium finding: the first
+draft said a recorder failure logs via `log::warn!`, but `blit` installs a
+real stderr backend for the `log` facade (`stderr_log.rs`, wired in
+`main.rs:35`), so an unconditional `log::warn!` would itself add a new
+stderr line whenever recording fails — contradicting the byte-identical
+stderr acceptance criterion above). Match the existing precedent instead:
+`engine/history.rs::record_performance_history` (`history.rs:36-40`)
+already solves this exact problem for `perf_local.jsonl` — a failed
+history write is silently dropped unless `--verbose`, via a direct
+`eprintln!` gated on `options.verbose`, not the `log` facade. The new
+recorder follows the same convention: silent by default, an
+`eprintln!` only under `--verbose`, so default-mode stderr is unaffected
+either way.
 
 New CLI verb: `blit diagnostics errors` alongside the existing
 `run_diagnostics_perf` in `crates/blit-cli/src/diagnostics.rs`, same flag
@@ -148,12 +171,15 @@ shape (`--limit`, `--json`, `--clear`).
    logic), unit tests (round-trip, cap eviction, tolerant read of a
    corrupted/partial last line — matching `perf_history.rs`'s existing
    tolerance).
-2. **Wire the `Copy`/`Mirror` CLI arms** in `main.rs` to call
-   `record_failure` on `Err` before propagating, unchanged exit
-   code/stderr. Integration test: force a failure (e.g. destination path
-   that can't be created), assert exactly one record lands with the
-   expected `source`/`dest`/`mode`/non-empty `error_chain`, and assert
-   stderr/exit-code parity with the no-recorder baseline.
+2. **Wire the `TransferRoute::LocalToLocal` arm** of `run_transfer`
+   (`transfers/mod.rs:235-241`) to call `record_failure` on `Err`, before
+   propagating, unchanged exit code/stderr. Integration test: force a
+   local-route failure (e.g. destination path that can't be created),
+   assert exactly one record lands with the expected
+   `source`/`dest`/`mode`/non-empty `error_chain`; a second test forces a
+   `LocalToRemote` (or other non-`LocalToLocal`) route failure and asserts
+   **no** record lands, pinning the scope boundary codex flagged; a third
+   asserts stderr/exit-code parity with the no-recorder baseline.
 3. **`blit diagnostics errors` read-back verb** — list/limit/json/clear,
    unit + CLI-level tests.
 
