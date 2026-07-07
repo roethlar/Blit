@@ -210,6 +210,37 @@ explicitly-deferred logging epic (F15).
       case too, but the root cause here is enumeration-side path
       corruption, not destination-fs charset rejection, so treat as
       a separate fix even if the error-handling policy ends up shared.
+- [ ] **CLI transfer output redesign** (owner, 2026-07-06): current
+      `blit copy`/`mirror` output "doesn't convey any useful information
+      at all" — owner wants something closer to `rclone`/`cargo`: a
+      persistent stat block at a static screen location, plus a scrolling
+      list of in-flight/recent filenames, instead of what exists today.
+      Confirmed by reading the actual code — there is no persistent/redraw
+      rendering anywhere in the transfer output path, only plain
+      scrolling `println!`/`eprintln!` lines: (1) the local/streaming-manifest
+      path's spinner + `"Enumerated N entries… (streaming manifest)"`
+      heartbeat (`crates/blit-core/src/remote/push/client/helpers.rs:176`,
+      the same call site audit-16 already flagged for its own separate
+      `--verbose`-gating bug); (2) the remote-transfer progress path's
+      once-a-second `"[progress] N/M files • X MiB copied • Y MiB/s avg •
+      Z MiB/s current"` line (`crates/blit-cli/src/transfers/remote.rs:33-140`,
+      `spawn_progress_monitor_with_options`), which just reprints a new
+      line every tick rather than redrawing in place. Neither path shows
+      a file list, a static stat panel, or does any cursor
+      repositioning — every line is transient and scrolls off, which
+      matches the owner's complaint exactly. This is a real UX/design
+      project, not a bug fix: likely needs a terminal-rendering approach
+      (raw ANSI cursor save/restore, or a crate like `indicatif`), has to
+      cover both the local and remote transfer paths above, has to decide
+      a fallback for non-TTY/`--json`/piped output (today's plain-line
+      output is presumably what scripts already parse — a redesign must
+      not break `--json` consumers), and touches `blit-cli`+`blit-app`.
+      Not designed here — needs its own `plan` before any code, per this
+      repo's governance (code changes require an approved plan) and the
+      Review policy (D-2026-07-04-1, all code through the codex loop).
+      Distinct from `docs/plan/TUI_REWORK.md` (Active), which is about
+      the separate interactive `blit-tui` navigation app, not this
+      inline CLI progress output during a transfer.
 
 ### Deferred design calls
 
