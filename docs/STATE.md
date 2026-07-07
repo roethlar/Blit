@@ -6,8 +6,9 @@ phase, the plan's RELIABLE exception): owner chose "plan doc first" — slice
 design drafted at `docs/plan/OTP7_RESUME.md` (**Draft**), NO CODE until the
 owner answers its Q1–Q3 and flips it to Active. ONE_TRANSFER_PATH otp-1..6
 `[x]`. SMALL_FILE_CEILING stays paused, D-2026-07-05-1. This session: filed
-`audit-17`/`audit-18` to `TODO.md` only — no code, no Queue change
-(D-2026-07-05-4).)
+`audit-17`/`audit-18` (`TODO.md` only); drafted+reviewed
+`docs/plan/LOCAL_ERROR_TELEMETRY.md` (Draft, held — see Open questions).
+No code, no Queue change (D-2026-07-05-4).)
 **Owner pushed `master` → GitHub at `10d89e0`**; `f6e592e`..HEAD are
 local on top, unpushed — windows-latest CI check rides the next push.
 
@@ -73,13 +74,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    **otp-7 IN DESIGN** (`docs/plan/OTP7_RESUME.md` Draft, owner review;
    no code until Active). otp-2 (symmetric baseline) is RIG-GATED —
    before otp-10 cutover.
-2. **10 GbE owner declarations (still pending)**: ue-1, ue-2,
-   REV4 → Shipped (zero-copy resolved — D-2026-07-05-3). Optional
-   owner-gated measurement follow-ups (Win 11 bare-metal datapoint;
-   disk-path variants; >ARC-size push) — note the disk-path items
-   are largely absorbed by otp-2/otp-12's symmetric-rig matrices. Env: bench
-   binaries staged at `skippy:/mnt/generic-pool/video/blit-bin/`
-   (/tmp and /home on skippy are noexec).
+2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
+   Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
+   measurement follow-ups (Win 11 bare-metal; disk-path variants;
+   >ARC-size push) — disk-path items largely absorbed by otp-2/otp-12's
+   symmetric-rig matrices. Env: bench binaries at
+   `skippy:/mnt/generic-pool/video/blit-bin/` (/tmp, /home noexec there).
 3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
 4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
@@ -133,9 +133,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   recorded in DEVLOG + DIAGNOSIS.md.)
 - **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
   approval flow; windows-latest CI on the w9-3 harness fix rides it.
-- `Cargo.lock`: fresh transitive-dependency drift (crossbeam-*, cc, etc.)
-  sits uncommitted, same class as `04c9c6d` — not from this session;
-  owner's call to commit or revert.
+- `Cargo.lock`: fresh transitive drift (crossbeam-*, cc, etc.), same class
+  as `04c9c6d` — not this session's; owner's call to commit or revert.
 
 ## Open questions
 
@@ -144,15 +143,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   mid-failure model; 7a-then-7b staging — all agent-rec yes) and the flip to
   Active. That flip unblocks otp-7 implementation.
 - **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
-  same-size + dest-NEWER — old push clobbers, the session adopts the
-  **data-safe SKIP** (converge-up; `--force` still overwrites; pinned by
-  `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm,
-  or ask for old-push clobber. Reasoning:
-  `.review/findings/otp-4-daemon-serves-transfer.md`.
+  same-size + dest-NEWER — old push clobbers, session adopts **data-safe
+  SKIP** (converge-up; `--force` still overwrites; pinned by
+  `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm
+  or ask for old-push clobber. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
 - **(OPEN)** Historical docs embed `/Users/...` paths — agent rec: leave.
-- **(OPEN, 2026-07-04)** `725aa07` tracked a 236-file stale worktree
-  snapshot (`.claude/worktrees/vigilant-mayer/`). Agent rec: `git rm -r`;
-  awaits owner go.
+- **(OPEN, 2026-07-04)** `725aa07` tracked a 236-file stale worktree snapshot
+  (`.claude/worktrees/vigilant-mayer/`). Agent rec: `git rm -r`; awaits go.
 - **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 still describe
   the deleted `determine_remote_tuning`/`TuningParams` — fold into
   w10-docs-batch (agent rec) or rewrite sooner?
@@ -160,6 +157,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   session delivered the measurement evidence; flip awaits the three
   declarations in Blocked (was four — zero-copy resolved,
   D-2026-07-05-3).
+- **(OPEN, 2026-07-06, timing not scope)** `docs/plan/LOCAL_ERROR_TELEMETRY.md`
+  (Draft, reviewed+fixed) — owner: pick up at ONE_TRANSFER_PATH's next
+  natural pause (not a D-2026-07-05-4 exception); trigger = current
+  otp-7 slice done.
 - **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
   `blit copy src_large dst` with an existing local dir, no `./`,
   parses the bare name as an mDNS discovery endpoint and errors
