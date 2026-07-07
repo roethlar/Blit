@@ -8,21 +8,15 @@
 //! read-only module, so a dropped gate (mirror-deletion blast
 //! radius) would have passed the full validation suite.
 //!
-//! The dual-daemon mini-harness for the delegated case is another
-//! clone of the remote_remote.rs pattern; consolidation is w9-3.
+//! The dual-daemon delegated case runs on the shared `common` spawn
+//! primitives (consolidated by w9-3).
 
 use std::fs;
-use std::net::TcpStream;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
+use std::process::Command;
 use std::time::Duration;
 
-use serde::Serialize;
-use tempfile::tempdir;
-
 mod common;
-use common::{run_with_timeout, ChildGuard, TestContext};
+use common::{run_with_timeout, DaemonOptions, TestContext};
 
 fn assert_read_only_rejection(output: &std::process::Output, what: &str) {
     assert!(
@@ -136,157 +130,28 @@ fn purge_on_read_only_module_is_rejected_and_file_survives() {
 // honest about ordering.
 // ---------------------------------------------------------------
 
-#[derive(Serialize)]
-struct DaemonConfig {
-    daemon: DaemonSection,
-    #[serde(rename = "module")]
-    modules: Vec<ModuleSection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    delegation: Option<DelegationSection>,
-}
-
-#[derive(Serialize)]
-struct DaemonSection {
-    bind: String,
-    port: u16,
-    no_mdns: bool,
-}
-
-#[derive(Serialize)]
-struct ModuleSection {
-    name: String,
-    path: PathBuf,
-    comment: Option<String>,
-    read_only: bool,
-    delegation_allowed: bool,
-}
-
-#[derive(Serialize)]
-struct DelegationSection {
-    allow_delegated_pull: bool,
-    allowed_source_hosts: Vec<String>,
-}
-
-fn wait_for_port(port: u16, label: &str) {
-    let mut ready = false;
-    for _ in 0..50 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert!(ready, "{label} failed to listen on {port}");
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_daemon(
-    workspace: &Path,
-    bin: &Path,
-    port: u16,
-    name: &str,
-    module_path: &Path,
-    read_only: bool,
-    delegation_enabled: bool,
-) -> ChildGuard {
-    let config = DaemonConfig {
-        daemon: DaemonSection {
-            bind: "127.0.0.1".into(),
-            port,
-            no_mdns: true,
-        },
-        modules: vec![ModuleSection {
-            name: "test".into(),
-            path: module_path.to_path_buf(),
-            comment: None,
-            read_only,
-            delegation_allowed: true,
-        }],
-        delegation: delegation_enabled.then(|| DelegationSection {
-            allow_delegated_pull: true,
-            allowed_source_hosts: vec!["127.0.0.1".to_string()],
-        }),
-    };
-
-    let config_path = workspace.join(format!("{name}.toml"));
-    let toml = toml::to_string(&config).expect("serialize config");
-    fs::write(&config_path, toml).expect("write config");
-
-    let child = Command::new(bin)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--bind")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn daemon");
-
-    wait_for_port(port, &format!("daemon {name}"));
-    ChildGuard::new(child)
-}
-
 #[test]
 fn delegated_pull_to_read_only_destination_is_rejected() {
-    let work = tempdir().expect("tempdir");
-    let workspace = work.path().to_path_buf();
-
-    let module_src = workspace.join("module_src");
-    let module_dst = workspace.join("module_dst");
-    fs::create_dir_all(&module_src).expect("src module");
-    fs::create_dir_all(&module_dst).expect("dst module");
-    fs::write(module_src.join("payload.txt"), b"must-not-land").expect("seed src");
-
-    let config_dir = workspace.join("cli-config");
-    fs::create_dir_all(&config_dir).expect("cli config");
-
-    let exe_path = std::env::current_exe().expect("current_exe");
-    let bin_dir = exe_path
-        .parent()
-        .expect("deps dir")
-        .parent()
-        .expect("bin dir")
-        .to_path_buf();
-    let cli_bin = bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" });
-    let daemon_bin = bin_dir.join(if cfg!(windows) {
-        "blit-daemon.exe"
-    } else {
-        "blit-daemon"
-    });
-
-    let src_port = common::pick_unused_port();
-    let dst_port = common::pick_unused_port();
-    assert_ne!(src_port, dst_port);
-
-    let _src = spawn_daemon(
-        &workspace,
-        &daemon_bin,
-        src_port,
-        "daemon_src",
-        &module_src,
-        false,
-        false,
-    );
-    // Destination: delegation enabled, module read-only — the
+    // The context's own daemon is the plain source; the destination
+    // has delegation enabled and a read-only module — the
     // delegated_pull read-only gate is what must fire.
-    let _dst = spawn_daemon(
-        &workspace,
-        &daemon_bin,
-        dst_port,
+    let ctx = TestContext::new();
+    fs::write(ctx.module_dir.join("payload.txt"), b"must-not-land").expect("seed src");
+
+    let dst = ctx.spawn_second_daemon(
         "daemon_dst",
-        &module_dst,
-        true,
-        true,
+        &DaemonOptions {
+            read_only: true,
+            delegation: true,
+            ..Default::default()
+        },
     );
 
-    let src_remote = format!("127.0.0.1:{src_port}:/test/");
-    let dst_remote = format!("127.0.0.1:{dst_port}:/test/");
-    let mut cmd = Command::new(&cli_bin);
+    let src_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let dst_remote = format!("127.0.0.1:{}:/test/", dst.port);
+    let mut cmd = Command::new(&ctx.cli_bin);
     cmd.arg("--config-dir")
-        .arg(&config_dir)
+        .arg(&ctx.config_dir)
         .arg("copy")
         .arg(&src_remote)
         .arg(&dst_remote);
@@ -294,7 +159,7 @@ fn delegated_pull_to_read_only_destination_is_rejected() {
 
     assert_read_only_rejection(&output, "delegated pull");
     assert!(
-        fs::read_dir(&module_dst)
+        fs::read_dir(&dst.module_dir)
             .expect("dst module readable")
             .next()
             .is_none(),

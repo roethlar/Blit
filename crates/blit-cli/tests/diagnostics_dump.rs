@@ -5,37 +5,18 @@
 //! load-bearing ones.
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
-use wait_timeout::ChildExt;
-
-fn cli_bin() -> PathBuf {
-    let exe_path = std::env::current_exe().expect("current_exe");
-    let deps_dir = exe_path.parent().expect("test binary directory");
-    let bin_dir = deps_dir
-        .parent()
-        .expect("deps parent directory")
-        .to_path_buf();
-    let name = if cfg!(windows) { "blit.exe" } else { "blit" };
-    bin_dir.join(name)
-}
+mod common;
+use common::{cli_bin, run_with_timeout};
 
 fn run_dump(args: &[&str]) -> std::process::Output {
     let bin = cli_bin();
     let mut cmd = Command::new(&bin);
     cmd.arg("diagnostics").arg("dump");
     cmd.args(args);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn");
-    match child
-        .wait_timeout(Duration::from_secs(10))
-        .expect("wait_timeout")
-    {
-        Some(_) => child.wait_with_output().expect("wait_with_output"),
-        None => panic!("diagnostics dump timed out"),
-    }
+    run_with_timeout(cmd, Duration::from_secs(10))
 }
 
 #[test]

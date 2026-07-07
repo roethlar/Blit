@@ -30,11 +30,23 @@ pub struct MirrorDeletionPlan {
     pub dirs: Vec<PathBuf>,
 }
 
-#[cfg(windows)]
+// Case-sensitivity is a property of the platform's default filesystem, and
+// this key exists to model it so a mirror never deletes a file the source
+// kept under a different case. Windows (NTFS) and macOS (APFS) are
+// case-insensitive by default → fold (posix-normalize + ASCII-lowercase);
+// Linux (ext4/xfs) is case-sensitive → exact. This matters most for the
+// unified session, the first mirror path that diffs a WIRE source set (the
+// source's on-disk case) against the DEST filesystem: on a case-insensitive
+// dest the two cases can diverge, and an exact key would delete the
+// just-written file (codex otp-6b F1). Case-insensitive Linux mounts and
+// case-sensitive macOS volumes are rare misconfigurations a compile-time cfg
+// cannot detect; ASCII-only folding leaves Unicode case variants approximate
+// (a known gap, same as the pre-existing Windows behavior).
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct CasefoldKey(String);
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 impl CasefoldKey {
     fn new(path: &Path) -> Self {
         let normalized = crate::path_posix::relative_path_to_posix(path).to_ascii_lowercase();
@@ -42,11 +54,11 @@ impl CasefoldKey {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct CasefoldKey(PathBuf);
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 impl CasefoldKey {
     fn new(path: &Path) -> Self {
         CasefoldKey(path.to_path_buf())
@@ -179,6 +191,57 @@ impl MirrorPlanner {
         Ok(plan_from_sets(dest_root, source_keys, dest_set))
     }
 
+    /// otp-6: the unified session's single mirror-delete rule. Given the
+    /// COMPLETE set of source-side relative file paths (posix, exactly as
+    /// they arrived on the wire) and the enumeration `filter`, enumerate
+    /// `dest_root` and return the extraneous entries — dest paths absent
+    /// from the source set — dirs deepest-first.
+    ///
+    /// The session manifest lists files only (directories are implicit, see
+    /// `spawn_manifest_task`), so a directory's survival is derived here from
+    /// the parent chains of the kept files: a dir is extraneous iff no kept
+    /// source file lives under it. This is the same derivation the daemon's
+    /// `plan_extraneous_entries` does; centralizing it here is the session's
+    /// "one delete rule" that replaces the three per-direction purges at
+    /// cutover.
+    ///
+    /// `filter` scopes the dest enumeration: for `MirrorMode::FilteredSubset`
+    /// it is the user's filter (so out-of-scope dest entries are never
+    /// candidates); for `MirrorMode::All` it is `FileFilter::default()` (the
+    /// whole dest tree is in scope).
+    pub fn plan_session_deletions(
+        &self,
+        dest_root: &Path,
+        source_files: &HashSet<String>,
+        filter: &FileFilter,
+    ) -> Result<MirrorDeletionPlan> {
+        let enumerator = FileEnumerator::new(filter.clone_without_cache());
+        let dest_entries = enumerator.enumerate_local(dest_root)?;
+
+        // Kept set = every source file plus each of its ancestor dirs, so a
+        // directory holding a kept file is itself kept (never deleted).
+        let mut source_set: HashSet<CasefoldKey> = HashSet::new();
+        for rel in source_files {
+            let path = Path::new(rel);
+            source_set.insert(CasefoldKey::new(path));
+            let mut current = path.parent();
+            while let Some(parent) = current {
+                if parent.as_os_str().is_empty() {
+                    break;
+                }
+                source_set.insert(CasefoldKey::new(parent));
+                current = parent.parent();
+            }
+        }
+
+        let dest_set = dest_entries
+            .into_iter()
+            .map(|e| (e.relative_path, matches!(e.kind, EntryKind::Directory)))
+            .collect::<Vec<_>>();
+
+        Ok(plan_from_sets(dest_root, source_set, dest_set))
+    }
+
     pub fn should_copy_remote_entry(
         &self,
         entry: &EnumeratedEntry,
@@ -291,4 +354,37 @@ fn plan_from_sets(
     dirs.reverse();
 
     MirrorDeletionPlan { files, dirs }
+}
+
+#[cfg(test)]
+mod casefold_tests {
+    use super::CasefoldKey;
+    use std::path::Path;
+
+    // On NTFS/APFS the mirror keep-set must treat `Foo.txt` and `foo.txt` as
+    // the same file, or the session mirror deletes a just-written file whose
+    // wire case differs from the dest-FS case (codex otp-6b F1). Runs on
+    // Windows/macOS CI (the case-insensitive-default platforms); a Linux dev
+    // box cannot exercise it — see the exact-match test below.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn casefold_folds_case_on_case_insensitive_platforms() {
+        assert_eq!(
+            CasefoldKey::new(Path::new("Dir/Foo.TXT")),
+            CasefoldKey::new(Path::new("dir/foo.txt"))
+        );
+    }
+
+    // On ext4/xfs the wire case and dest-FS case always agree, so the key
+    // stays exact: `Foo.txt` and `foo.txt` are distinct files and a mirror
+    // deletes the one absent from the source. Pins that the macOS fold above
+    // did not leak into the case-sensitive default.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn casefold_is_exact_on_case_sensitive_platforms() {
+        assert_ne!(
+            CasefoldKey::new(Path::new("Foo.txt")),
+            CasefoldKey::new(Path::new("foo.txt"))
+        );
+    }
 }

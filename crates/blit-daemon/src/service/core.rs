@@ -348,6 +348,68 @@ impl Blit for BlitService {
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
     type SubscribeStream =
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<DaemonEvent, Status>> + Send>>;
+    type TransferStream = ReceiverStream<Result<blit_core::generated::TransferFrame, Status>>;
+
+    /// ONE_TRANSFER_PATH otp-4a: the daemon serves the unified session
+    /// by running `run_destination` as the Responder — the byte
+    /// RECEIVER of a client-initiated SOURCE push. Mirrors `push`:
+    /// register a jobs row, race the session against cancel/hangup, and
+    /// return the response stream immediately (the session runs in the
+    /// spawned task, feeding the `ReceiverStream`). Session refusals
+    /// travel to the peer as `SessionError` frames; the daemon-specific
+    /// module resolution + transport assembly live in `super::transfer`.
+    /// Contract: docs/TRANSFER_SESSION.md.
+    async fn transfer(
+        &self,
+        request: Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<Response<Self::TransferStream>, Status> {
+        let peer = peer_addr_string(&request);
+        let modules = Arc::clone(&self.modules);
+        let default_root = self.default_root.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let inbound = request.into_inner();
+        let metrics = Arc::clone(&self.metrics);
+        metrics.inc_push();
+        let guard = Arc::clone(&metrics).enter_transfer();
+        // Jobs row: registered with an empty endpoint (the module/path
+        // arrive in the SessionOpen, mid-handshake inside the session).
+        // Populating the row's endpoint from the open is a follow-up —
+        // the row still supports CancelJob and appears in GetState, and
+        // reuses ActiveJobKind::Push (daemon-receive = push-equivalent)
+        // until the kind taxonomy is revisited at cutover.
+        let job = self.active_jobs.register(
+            ActiveJobKind::Push,
+            peer.clone(),
+            String::new(),
+            String::new(),
+        );
+        self.emit_transfer_started(&job, ActiveJobKind::Push, &peer, "", "");
+        let started = std::time::Instant::now();
+        let events_tx = self.events_tx();
+
+        tokio::spawn(async move {
+            let guard = guard;
+            let job = job;
+            let cancel_token = job.cancellation_token().clone();
+            // Session variant: cancel surfaces as a framed
+            // SessionError{CANCELLED}, not a bare Status (codex F1).
+            let (ok, err_msg) = resolve_transfer_session_outcome(
+                super::transfer::run_transfer_session(modules, default_root, inbound, tx.clone()),
+                &tx,
+                &cancel_token,
+                &metrics,
+            )
+            .await;
+            job.record_outcome(ok, err_msg.clone());
+            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
+            drop(job);
+            drop(guard);
+            let _ = events_tx.send(finished_event);
+            metrics.log_completion("transfer", started.elapsed(), ok);
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
 
     async fn subscribe(
         &self,
@@ -1352,6 +1414,48 @@ where
     }
 }
 
+/// Session variant of [`resolve_streaming_outcome`] for the `Transfer`
+/// RPC: identical hangup / completion / fault handling, but on
+/// `CancelJob` it emits a framed `SessionError{CANCELLED}` on the
+/// response stream instead of a bare `Status::cancelled` (otp-4a codex
+/// F1). The session speaks `TransferFrame`s, so the client reads the
+/// framed error — and the aborted session future can't send it itself
+/// once the select drops it, so the dispatcher does. A session that
+/// faults on its own already framed the reason; the trailing `Status`
+/// on that branch is belt-and-braces for a pre-frame transport break.
+async fn resolve_transfer_session_outcome<H>(
+    handler: H,
+    tx: &mpsc::Sender<Result<blit_core::generated::TransferFrame, Status>>,
+    cancel_token: &CancellationToken,
+    metrics: &TransferMetrics,
+) -> (bool, Option<String>)
+where
+    H: std::future::Future<Output = Result<(), Status>>,
+{
+    let outcome =
+        resolve_transfer_outcome(handler, tx.closed(), cancel_token.cancelled(), false).await;
+    match outcome {
+        Some(result) => {
+            let (ok, err_msg) = outcome_from_status(&result);
+            if let Err(status) = result {
+                metrics.inc_error();
+                let _ = tx.send(Err(status)).await;
+            }
+            (ok, err_msg)
+        }
+        None if cancel_token.is_cancelled() => {
+            let _ = tx
+                .send(Ok(blit_core::transfer_session::session_error_frame(
+                    blit_core::generated::session_error::Code::Cancelled,
+                    "transfer cancelled via CancelJob",
+                )))
+                .await;
+            (false, Some("cancelled via CancelJob".to_string()))
+        }
+        None => (false, Some("client cancelled".to_string())),
+    }
+}
+
 /// Translate a handler's `Result<_, Status>` into the
 /// `(ok, error_message)` pair the ActiveJobs guard expects.
 /// Used inside [`resolve_streaming_outcome`] for the `push` /
@@ -1409,6 +1513,42 @@ mod tests {
         )
         .await;
         assert_eq!(outcome, None, "a running handler must yield to cancel");
+    }
+
+    /// otp-4a codex F1: a `CancelJob` on a served `Transfer` session
+    /// must reach the client as a framed `SessionError{CANCELLED}` on
+    /// the response stream — not a bare `Status::cancelled` (the
+    /// session speaks frames, and the aborted session future can't
+    /// send it itself). Guard: with the cancel branch reverted to
+    /// `Err(Status::cancelled)` this fails (no `Ok` error frame lands).
+    #[tokio::test]
+    async fn transfer_cancel_emits_framed_cancelled_error() {
+        use blit_core::generated::session_error::Code;
+        use blit_core::generated::transfer_frame::Frame as WireFrame;
+
+        let (tx, mut rx) = mpsc::channel::<Result<blit_core::generated::TransferFrame, Status>>(4);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let metrics = TransferMetrics::disabled();
+        // A session that never completes on its own — cancel must win.
+        let never = std::future::pending::<Result<(), Status>>();
+        let (ok, msg) = resolve_transfer_session_outcome(never, &tx, &cancel, &metrics).await;
+        assert!(!ok, "cancel is not a success");
+        assert_eq!(msg.as_deref(), Some("cancelled via CancelJob"));
+
+        let frame = rx
+            .recv()
+            .await
+            .expect("a terminal frame")
+            .expect("a framed SessionError, not a gRPC Status");
+        match frame.frame {
+            Some(WireFrame::Error(err)) => assert_eq!(
+                err.code,
+                Code::Cancelled as i32,
+                "cancel must emit a framed CANCELLED SessionError"
+            ),
+            other => panic!("expected a CANCELLED error frame, got {other:?}"),
+        }
     }
 
     /// audit-10 / m-jobs-3: with `detach = true` the client-hangup branch

@@ -1,17 +1,14 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-04 (`w6-1`, `w6-2`, `w4-4`, and `design-3` all
-landed and graded through the codex loop in one session —
-ProgressEvent contract in blit-core; §1.6 residue filed as
-w6-2a/-2b/-2c; blocking filesystem work off the tokio runtime;
-**bounded data-plane dials**). **Both remotes at `3d8326b`**
-(owner-approved dual push 2026-07-04): GitHub (`origin`)
-`10d89e0..3d8326b`, `gitea` mirror `2a77b9f..3d8326b` — the mirror
-HAD lagged as the guidance describes; `3d8326b`'s commit message
-wrongly said it was current (an ls-remote against the swapped remote
-name hit GitHub — the very confusion that commit fixed).
-windows-latest CI on this push is the "meaningfully green" check the
-Open questions entry anticipates.
+Last updated: 2026-07-06
+
+- 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
+
+- Current session (2026-07-06): otp-6 CLOSED; otp-7 in DESIGN — slice design drafted at docs/plan/OTP7_RESUME.md (Draft). NO CODE until the owner answers Q1–Q3 and flips the plan Active. otp-6 (a/b) mirror + filters landed and graded. ONE_TRANSFER_PATH otp-1..6 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
+
+- Session work: filed audit-17 and audit-18; noted a CLI-output-redesign item in TODO.md; drafted+reviewed docs/plan/LOCAL_ERROR_TELEMETRY.md (Draft). A session-wide codex pass fixed 5 cross-doc staleness bugs.
+
+- Notes on push state: owner previously pushed master → GitHub at 10d89e0; local commits f6e592e..HEAD remain unpushed and windows-latest CI will ride the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -19,182 +16,180 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Now (active work)
 
-- **design-3 DONE — bounded data-plane dials** (`49dcec6`; finding
-  `.review/findings/design-3-unbounded-data-plane-connects.md`, impl
-  record appended). Shared `socket::dial_data_plane`: connect bounded
-  by `DATA_PLANE_ACCEPT_TIMEOUT`, w1-2 policy, handshake write
-  bounded by `DATA_PLANE_TOKEN_TIMEOUT`; TimedOut in the chain →
-  `is_retryable` transient. Both client sites collapsed (pull
-  `connect_pull_stream` incl. resize-ADD; push `connect_with_probe`
-  incl. elastic). Was: kernel SYN-timeout hangs (60–127 s) on
-  black-holed ephemeral data ports. Codex: **PASS, 0 findings**. +3
-  tests (deterministic stalled-handshake shape pin,
-  mutation-verified); workspace 1476 → 1479/0/2.
-- **Earlier same session: w4-4, w6-2, w6-1 (+design-1) all `[x]`**
-  (details: DEVLOG 2026-07-04 entries; findings + verdicts in
-  `.review/`): blocking work off the runtime w4-4
-  `0feca34`+`768e7e3` (chunked manifest checks with the
-  chunk-or-delay `manifest_drain_due` trigger from the codex round;
-  pull enumeration fully on `spawn_blocking`; F2 stays canonical);
-  §1.6 residue verified + filed as **w6-2a/-2b/-2c** w6-2
-  `0aba593`+`8b7829d`; **ProgressEvent contract in blit-core** w6-1
-  `8fd8978` (bytes ride `Payload` only, `FileComplete.bytes` deleted
-  — design-1's class unrepresentable; shared `ProgressTotals` fold
-  replaced the TUI's 3 rules + the CLI's wrong one; design-1 closed
-  alongside, codex PASS 0 findings).
-- **Earlier 2026-07-04: w3-1, w2-2, w4-5, W1 family, w4-1, w4-3 all
-  `[x]`** (details: DEVLOG 2026-07-04 entries; findings
-  `.review/findings/`): memory-aware BufferPool + sysinfo 1024× bug
-  w3-1 `f49f8f6`; dial = single stream/chunk owner w2-2
-  `01209bc`+`27f53a0`; `supports_cancellation` flipped w4-5
-  `05a8b39`+`1708075` (D-2026-07-04-3); socket policy helper w1-2
-  `16237e2`; real keepalive timing w1-3 `865fc1e`; shared accept/token
-  bounds w1-4 `6a19e1d`+`d17b089`; AbortOnDrop family w4-1;
-  disconnect racing w4-3 `37d7f91`.
-- **REV4 code-complete** (`ue-r2-1b`..`ue-r2-2`, all nine slices;
-  details: DEVLOG 2026-07-03/04 entries, REVIEW.md commit map). Stream
-  resize live end-to-end; all three static stream-count ladders
-  retired. Remaining acceptance items are measurement gates (loopback
-  parity band, 1s-start verification, 10 GbE sign-off `ue-1`/`ue-2`)
-  owned by the owner's benchmark session. Residue: see Queue item 3.
-- **Windows-host sessions (2026-07-04)**: suite fully green on the
-  owner's Windows machine (`9f37a7a` clippy baseline + `48c5a11`
-  win-1). Erratum settled (D-2026-07-04-2): those two commits don't
-  build in isolation (staging slip); stay as pushed, bisect skips
-  them; HEAD fully gated.
-- **Active context** (settled background):
-  - REV4 (`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`) is the Active
-    plan (D-2026-06-20-5), code-complete; flipping to Shipped is an
-    owner call after the 10 GbE benchmark session.
-  - Process: the codex loop (`docs/agent/GPT_REVIEW_LOOP.md`) now
-    governs **all code and plan changes** (D-2026-07-04-1, owner: "no
-    exceptions"); the `.review/README.md` async sentinel loop is
-    retired. REVIEW.md stays the queue/status index.
+- **ONE_TRANSFER_PATH ACTIVE (D-2026-07-05-1 directive,
+  D-2026-07-05-4 "flip the plan and go") — otp-4a landed.** The
+  invariant (plan doc, verbatim): ONE block of transfer code;
+  direction/initiator/verb can NEVER affect wall time by blit's doing
+  — impossible by construction because the per-direction drivers and
+  `Push`/`PullSync` are deleted at cutover. Slices otp-1..13;
+  converge-up per cell (±10%); symmetric-fs disk-to-disk verdict
+  cells. **D-2026-07-05-2: same-build peers only, refusal at session
+  open.** Progress (each through the codex loop; closed-slice detail in
+  DEVLOG + `.review/` + REVIEW.md):
+  - **otp-1 / otp-3 / otp-4a `[x]`** — wire+session contract
+    (`docs/TRANSFER_SESSION.md`); role-parameterized drivers over the
+    in-process transport (invariance property in the role suite); daemon
+    serves `Transfer` as Responder, client push over gRPC; A/B
+    byte-identical vs old push; SizeMtime = data-safe skip (open Q below).
+  - **otp-4b (1/2/3) `[x]` — push data plane fully on the session, closed**:
+    single-stream TCP data plane, mid-transfer resize/multi-stream + sf-2
+    shape correction, deterministic mid-transfer cancel. Detail: DEVLOG.
+  - **otp-5a `[x]`** (`84be1cc`, codex PASS) — the one served `Transfer`
+    RPC serves BOTH roles via `run_responder` (SOURCE-init→daemon
+    DESTINATION = push; DEST-init→daemon SOURCE = pull, in-stream).
+  - **otp-5b (1/2) `[x]`** — the SOURCE-responder data plane, closed:
+    5b-1 (`e6a0b3b`+`13485ee`) decoupled connection role (RESPONDER
+    binds+accepts, INITIATOR dials) from byte role; 5b-2 (`d579365`+
+    `773a877`) lifted the single-stream cap — the pull data plane resizes
+    via sf-2 (same resize frames as push). Defaults to TCP; A/B
+    byte-identical vs old `pull_sync`. Suite → **1522**.
+  - **otp-6 (a/b) `[x]`** — mirror + filters on the session, closed.
+    6a (`c026692`+`0bb27f5`) honors `SessionOpen.filter` via the universal
+    `FilteredSource` chokepoint. 6b (`01d9c41`+`3c99557`) is the one delete
+    rule: DESTINATION diffs the complete source manifest at SourceDone,
+    scan-complete-guarded + filter-scoped. Codex High: keep-set now folds
+    case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
+  - Current: **otp-7 IN DESIGN** — Draft `docs/plan/OTP7_RESUME.md`
+    (`9fb5e4a`) awaiting owner review (see Open questions); no code until
+    Active. otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
+- **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
+  `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
+  until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
+  baseline. Principle stands: ceiling-driven, never competitor-relative
+  (D-2026-07-04-4; a ≥25% margin answer was retracted — do not
+  re-litigate). Evidence `docs/bench/10gbe-2026-07-05/`.
+- **Background (2026-07-04/05, all `[x]`)**: REV4 code-complete +
+  measurement gates DATA-COMPLETE (push/pull ≈ 9.5 of 9.88 Gbit/s; owner
+  declarations pending in Blocked); 10 GbE session done; w9-3 + review rows
+  landed. Codex loop governs all changes (D-2026-07-04-1; DEVLOG 07-04/05).
 
 ## Queue (ordered)
 
-1. **Design-review queue** — `REVIEW.md` order governs. w6-1,
-   design-1, w6-2, w4-4, and design-3 all closed `[x]` 2026-07-04
-   (see Now). Strict row order gives **w9-3** (test-harness builder,
-   Medium — `TestContext::builder()` consolidating 5 harness clones +
-   5 cli_bin copies, OnceLock daemon build, fake-server keepalive
-   parity; also the home of the daemon-spawn e2e load-flakiness) as
-   the topmost ratified open row — sized right for a fresh session.
-   Filed alternatives (pending-review section, coder's pick):
-   **w6-2a/-2b/-2c** (daemon progress residue — independent slices,
-   2b→2a→2c smallest-first suggestion) and Low
-   `relay-1-subpath-double-join`.
-2. **10 GbE benchmark session — owner-gated** (env:
-   `admin@skippy:/mnt/generic-pool/video/test`, scp/ssh open; ping the
-   owner if a daemon can't run on skippy). This is the REV4 sign-off:
-   `ue-1` loopback parity band, `ue-2` continuous/resize behavior
-   under real load, zero-copy revisit gate (D-2026-06-12-1).
-   **Host plan (owner, 2026-07-04)**: sign-off pair = TrueNAS
-   (skippy) ↔ **Arch client**, all-Linux — the zero-copy/splice gate
-   needs a Linux consumer, and the parity band should measure the
-   engine, not Windows I/O quirks. The client box dual-boots
-   Win 11/Arch (identical hardware → clean Win-vs-Linux delta):
-   after the Linux gates close, boot Win 11 bare-metal for a
-   TrueNAS→Win pull datapoint in the same window (deployment parity,
-   not a gate). The Win VM on the Arch install is for
-   Windows-specific *functional* checks only — never perf numbers
-   (virtio/NAT skews throughput). iperf3 baseline per pair before
-   any Blit numbers (the parity band is defined against it). After
-   `ue-1`: audit Round 1, TUI rework, H10b planner.
-3. **Post-REV4 residue** (unowned until the owner slots them): pull
-   1s-start restructuring; epoch-0/early-ADD hardening; remote
-   perf-history lanes (1e gap); `derive_local_plan_tuning`
-   fold-or-retire (statically live on the local engine path but
-   dynamically dead — nothing fills the tar/raw telemetry buckets
-   since `4ce4898`, 2026-04-07; verified during the w2-2 audit,
-   design decision not review-queue material); receive-side dial
-   tuning (rest of constants-receive-chunk-1mib-asymmetry — w3-1
-   scoped it out, wire needs no change; separate slice if wanted).
+1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
+   the only work item until it ships**: slices otp-1..13 through the
+   codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
+   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b) `[x]`. Current:
+   **otp-7 IN DESIGN** (`docs/plan/OTP7_RESUME.md` Draft, owner review;
+   no code until Active). otp-2 (symmetric baseline) is RIG-GATED —
+   before otp-10 cutover.
+2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
+   Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
+   measurement follow-ups (Win 11 bare-metal; disk-path variants;
+   >ARC-size push) — disk-path items largely absorbed by otp-2/otp-12's
+   symmetric-rig matrices. Env: bench binaries at
+   `skippy:/mnt/generic-pool/video/blit-bin/` (/tmp, /home noexec there).
+3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
+   resumes/re-derives after ONE_TRANSFER_PATH ships.
+4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
+   open row; filed w6-2a/b/c + relay-1) — same directive; note w7-1
+   (mirror-executor consolidation) likely lands for free inside
+   otp-6's one-delete-rule slice; re-check before picking it up.
+5. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
+   Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
+   cutover as a runtime-selected write strategy in the unified receive
+   sink (design: eval doc §If-FAST-evidence; dead module deletes in
+   w8-1). Rig facts + the aarch64-musl static build recipe: DEVLOG
+   2026-07-05 10:00. **Standing owner safety rule**: ALL activity on
+   rig `zoey` is confined to its `…/blit-temp/` folder — module roots,
+   test data, everything; nothing written outside it, ever. Zero-copy
+   is pre-authorized to be tested there when the post-cutover slice set
+   reaches it; no daemon runs on zoey before then without a fresh go.
+6. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
+   (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
+   epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
+   `derive_local_plan_tuning` fold-or-retire; receive-side dial
+   tuning residue (w3-1 scoped it out).
 
 ## Authoritative docs right now
 
-- **Active plan: `docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** —
-  code-complete; measurement gates remain (see Active context).
-- Superseded by REV4 (history only): `UNIFIED_TRANSFER_ENGINE.md` (v1),
-  `…_REV2.md`, `…_REV3.md`.
+- **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
+  D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Draft** — otp-7 slice
+  design, awaiting owner review before any code).
+- Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
+  sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
+  complete; measurement gates remain). REV4 superseded v1/REV2/REV3
+  (history only).
 - Process: `docs/agent/GPT_REVIEW_LOOP.md` (Active) — the codex loop
   for **all code and plan changes** (D-2026-07-04-1); `.review/README.md`
   is retired as the grading mechanism (its `findings/`/`results/`
   records and the REVIEW.md index remain live).
 - Review loop: `REVIEW.md` (all `ue-r2-*` rows `[x]`; design-queue
   rows) + `.review/findings/` + `.review/results/`.
-- Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (delete ratified
-  D-2026-06-12-1, executes w8-1), `TUI_REWORK.md` (gated on Round 1),
+- Other plans: `ZERO_COPY_RECEIVE_EVAL.md` (module delete ratified
+  D-2026-06-12-1, executes w8-1; **capability unparked
+  D-2026-07-05-3** — post-cutover write strategy), `TUI_REWORK.md`
+  (gated on Round 1),
   `BENCHMARK_10GBE_PLAN.md` (Historical; env note lives in the queue).
-- Decisions: D-2026-06-20-1 (direction), -5 (REV4 Active), -6 (loop).
 
-## Blocked / waiting
+## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **10 GbE session** (REV4 sign-off + zero-copy revisit + resize
-  behavior measurement). Owner 2026-07-04: **"soon, but keep coding
-  first"** — keep working the review queue; the owner will call
-  "benchmark" when the hardware session is on. Not a daily blocker.
-- `Cargo.lock`: the pre-existing dependency-refresh drift was
-  committed at `04c9c6d` out of necessity (blit-core gained `rand`,
-  which cannot land without its lockfile edge; every gate this session
-  ran against the drifted lockfile). The owner's pending
-  commit-or-regenerate question is thereby answered "committed" —
-  revert selectively if unwanted.
+- **Three 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
+  holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE),
+  REV4 → Shipped. (The zero-copy revisit verdict and the a/b/c
+  question are RESOLVED — D-2026-07-05-3, unparked; measured skippy
+  data 1.43 cores daemon-receive / 0.45 client at 9.5 Gbit/s stays
+  recorded in DEVLOG + DIAGNOSIS.md.)
+- **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
+  approval flow; windows-latest CI on the w9-3 harness fix rides it.
+- `Cargo.lock`: fresh transitive drift (crossbeam-*, cc, etc.), same class
+  as `04c9c6d` — not this session's; owner's call to commit or revert.
 
 ## Open questions
 
-- **(OPEN)** Historical audit/finding docs (`audit-13/14/15`, `drift-*`)
-  still embed `/Users/...` in recorded evidence — scrub, or leave as
-  evidence? Agent rec: leave; live docs are already clean.
-- **(OPEN, new 2026-07-04)** `725aa07` ("chore: track claude
-  worktrees?") committed 236 files of a stale worktree snapshot at
-  `.claude/worktrees/vigilant-mayer/` into the repo — including a full
-  copy of `crates/` sources. Keep or `git rm -r`? Agent rec: remove
-  (it's a stale duplicate that pollutes grep/audit sweeps); deletion
-  awaits an owner go since the tracking commit looks deliberate-ish.
-- **(OPEN, new 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 still
-  describe `determine_remote_tuning`/`TuningParams` (stale since
-  ue-r2-1e, `TuningParams` now deleted) — fold into w10-docs-batch or
-  rewrite sooner? Agent rec: w10.
-- **(OPEN)** REV4 → Shipped flip: after the 10 GbE session, or now
-  with the measurement gates tracked separately? Owner call (10 GbE
-  now "soon" — likely resolves with it).
+- **(OPEN — owner review, 2026-07-07, otp-7)** `docs/plan/OTP7_RESUME.md`
+  (Draft) awaits the owner's Q1–Q3 (graceful stale fallback; in-place-patch
+  mid-failure model; 7a-then-7b staging — all agent-rec yes) and the flip to
+  Active. That flip unblocks otp-7 implementation.
+- **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
+  same-size + dest-NEWER — old push clobbers, session adopts **data-safe
+  SKIP** (converge-up; `--force` still overwrites; pinned by
+  `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm
+  or ask for old-push clobber. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
+- **(OPEN)** Historical docs embed `/Users/...` paths — agent rec: leave.
+- **(OPEN, 2026-07-04)** `725aa07` tracked a 236-file stale worktree snapshot
+  (`.claude/worktrees/vigilant-mayer/`). Agent rec: `git rm -r`; awaits go.
+- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 still describe
+  the deleted `determine_remote_tuning`/`TuningParams` — fold into
+  w10-docs-batch (agent rec) or rewrite sooner?
+- **(OPEN, ripe — data in hand)** REV4 → Shipped flip: the 10 GbE
+  session delivered the measurement evidence; flip awaits the three
+  declarations in Blocked (was four — zero-copy resolved,
+  D-2026-07-05-3).
+- **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
+  `blit copy src_large dst` with an existing local dir, no `./`,
+  parses the bare name as an mDNS discovery endpoint and errors
+  "remote source must include a module or root"
+  (blit-app endpoints.rs). Should local-path existence win over the
+  discovery interpretation, or at least improve the error? Candidate
+  review-queue row; owner to slot.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: full suite green
-  locally across three sessions (clippy baseline + win-1 fixed); the
-  daemon-spawn e2e family shows load-flakiness under full-parallel
-  runs (w9-3 territory). windows-latest CI on the next push should be
-  meaningfully green.
+  locally; daemon-spawn e2e flakiness root-caused + fixed on Linux (w9-3:
+  port-TOCTOU race + cargo-lock contention). Remaining: windows-latest CI
+  on the next push (10d89e0 predates the w9-3 fix).
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-04 (19th)** @ `c609192`+docs — **push recorded + 10 GbE
-  host plan settled** (owner Q&A). Owner pushed `master` → `github`
-  at `10d89e0`; gitea mirror lags. Benchmark sign-off pair decided:
-  TrueNAS ↔ Arch (all-Linux; splice gate + clean parity band), Win 11
-  bare-metal datapoint after on the same dual-boot hardware, Win VM
-  for functional checks only — recorded in Queue item 2. No code.
-  In-flight: none. **Exact first action next session**: standing
-  "reviewloop" go → **w9-3** (test-harness builder) through the codex
-  loop; the owner will call "benchmark" for the 10 GbE session.
-- **2026-07-04 (18th)** @ `49dcec6`+records —
-  **design-3-unbounded-data-plane-connects landed and graded** (same
-  session, fourth slice; coder's pick of the sanctioned smaller
-  alternative over the large w9-3). Shared `dial_data_plane`
-  (bounded connect + policy + bounded handshake write, TimedOut →
-  retryable); both client sites collapsed. Codex: **PASS 0
-  findings**. +3 tests, mutation-verified; workspace 1476 → 1479/0/2
-  across 37 suites, fmt/clippy clean (macOS host). Session closed
-  w6-1 (+design-1), w6-2 (filed w6-2a/b/c), w4-4, design-3.
-  In-flight: none. **Exact first action next session**: standing
-  "reviewloop" go → pick up **w9-3** (test-harness builder, topmost
-  ratified open row, sized for a fresh session; w6-2a/b/c + relay-1
-  are the filed coder's-pick alternatives) through the codex loop.
-  Nothing pushed — push stays owner-gated.
-- **2026-07-04 (17th)** @ `768e7e3`+records —
-  **w4-4-blocking-work-off-runtime landed and graded**. Push manifest
-  checks → chunked spawn_blocking (design-4 untouched, F2 canonical);
-  pull_sync enumeration fully off-runtime. Codex: NEEDS FIXES 1
-  Medium (chunk-only draining muted the 5 ms early-flush for
-  trickling manifests) → chunk-or-delay `manifest_drain_due`, fixed
-  `768e7e3`. +4 tests mutation-verified; 1472 → 1476/0/2. Nothing
-  pushed.
+- **2026-07-06 (39th)** @ `598f102` — **Session-wide codex review (5
+  findings, all fixed); one new backlog item filed; otp-7 still
+  untouched.** `/playbook reviewloop` named a generic template this repo's
+  own guidance says isn't the operative loop here (branch-per-finding
+  conflicts with no-agent-branches) — ran `GPT_REVIEW_LOOP.md`'s mechanism
+  instead over the whole session diff (`9876687..44de868`). 3 Medium + 2
+  Low, all cross-doc staleness/contradictions from mid-session edits not
+  propagating everywhere (stale Q5 header, a STATE/plan-doc contradiction,
+  a stale handoff entry, a date-drift note, an overstated claim) — fixed
+  `419f5d1`, verdict `.review/results/session-2026-07-06.gpt-verdict.md`.
+  Also: owner asked for a CLI transfer-output redesign (rclone/cargo-style
+  static stat block + file list; current output is bare scrolling
+  `println!`s, `helpers.rs:176`/`transfers/remote.rs:33-140`) — filed to
+  `TODO.md` only (`598f102`), needs its own `plan` when picked up.
+  **Exact first action next
+  session**: otp-7 — owner's Q1–Q3 on `docs/plan/OTP7_RESUME.md`, flip
+  Active, codex-review, implement otp-7a. In-flight: none. Done since
+  38th: the session-wide review pass; the CLI-output-redesign TODO item.
+- **2026-07-06 (38th)** @ `44de868` — **`LOCAL_ERROR_TELEMETRY.md` drafted
+  + reviewed twice (3+3 findings fixed), Q1-Q5 resolved; still Draft, no
+  code.** Full detail: DEVLOG 20:15Z/21:00Z entries and the plan doc's own
+  Q5 section (pickup timing); the 39th entry above covers the staleness
+  bugs this left behind, since fixed. Done since 37th: audit-17/18 filed
+  (`5628c03`, `deb3800`); the telemetry plan end-to-end.

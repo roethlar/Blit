@@ -13,21 +13,16 @@
 //! Watch exit codes (see `run_jobs_watch`): 0 finished-ok,
 //! 1 finished-failed, 2 not-found, 3 timeout-while-active.
 //!
-//! The dual-daemon delegation harness mirrors `remote_remote.rs`
-//! (consolidation of the harness clones is w9-3's job).
+//! The dual-daemon delegation harness builds on the shared `common`
+//! spawn primitives (consolidated by w9-3).
 
 use std::fs;
-use std::net::TcpStream;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
+use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
-use serde::Serialize;
-use tempfile::tempdir;
-
 mod common;
-use common::{run_with_timeout, ChildGuard, TestContext};
+use common::{run_with_timeout, spawn_fake_blit_server, DaemonOptions, SpawnedDaemon, TestContext};
 
 // ---------------------------------------------------------------
 // Single-daemon cases: list shape, cancel/watch unknown-id codes.
@@ -110,125 +105,15 @@ fn jobs_watch_unknown_id_exits_two() {
 }
 
 // ---------------------------------------------------------------
-// Delegation harness (dual daemon / fake source), mirroring
-// remote_remote.rs.
+// Delegation harness (dual daemon / fake source) — built on the
+// shared `common` spawn primitives (w9-3).
 // ---------------------------------------------------------------
 
-#[derive(Serialize)]
-struct DaemonConfig {
-    daemon: DaemonSection,
-    #[serde(rename = "module")]
-    modules: Vec<ModuleSection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    delegation: Option<DelegationSection>,
-}
-
-#[derive(Serialize)]
-struct DaemonSection {
-    bind: String,
-    port: u16,
-    no_mdns: bool,
-}
-
-#[derive(Serialize)]
-struct ModuleSection {
-    name: String,
-    path: PathBuf,
-    comment: Option<String>,
-    read_only: bool,
-    delegation_allowed: bool,
-}
-
-#[derive(Serialize)]
-struct DelegationSection {
-    allow_delegated_pull: bool,
-    allowed_source_hosts: Vec<String>,
-}
-
-fn binary_paths() -> (PathBuf, PathBuf) {
-    let exe_path = std::env::current_exe().expect("current_exe");
-    let deps_dir = exe_path.parent().expect("test binary directory");
-    let bin_dir = deps_dir
-        .parent()
-        .expect("deps parent directory")
-        .to_path_buf();
-    let cli_bin = bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" });
-    let daemon_bin = bin_dir.join(if cfg!(windows) {
-        "blit-daemon.exe"
-    } else {
-        "blit-daemon"
-    });
-    (cli_bin, daemon_bin)
-}
-
-fn wait_for_port(port: u16, label: &str) {
-    let mut ready = false;
-    for _ in 0..50 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert!(ready, "{label} failed to listen on {port}");
-}
-
-fn spawn_daemon(
-    workspace: &Path,
-    bin: &Path,
-    port: u16,
-    name: &str,
-    module_path: &Path,
-    delegation_enabled: bool,
-) -> ChildGuard {
-    let config = DaemonConfig {
-        daemon: DaemonSection {
-            bind: "127.0.0.1".into(),
-            port,
-            no_mdns: true,
-        },
-        modules: vec![ModuleSection {
-            name: "test".into(),
-            path: module_path.to_path_buf(),
-            comment: None,
-            read_only: false,
-            delegation_allowed: true,
-        }],
-        delegation: delegation_enabled.then(|| DelegationSection {
-            allow_delegated_pull: true,
-            // Loopback sources must be authorized by IP/CIDR form,
-            // mirroring the production SSRF rule (see remote_remote.rs).
-            allowed_source_hosts: vec!["127.0.0.1".to_string()],
-        }),
-    };
-
-    let config_path = workspace.join(format!("{name}.toml"));
-    let toml = toml::to_string(&config).expect("serialize config");
-    fs::write(&config_path, toml).expect("write config");
-
-    let child = Command::new(bin)
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--bind")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn daemon");
-
-    wait_for_port(port, &format!("daemon {name}"));
-    ChildGuard::new(child)
-}
-
 struct DelegationContext {
-    _work: tempfile::TempDir,
+    _ctx: TestContext,
+    _second: Option<SpawnedDaemon>,
     src_port: u16,
     dst_port: u16,
-    _src_daemon: Option<ChildGuard>,
-    _dst_daemon: ChildGuard,
     cli_bin: PathBuf,
     config_dir: PathBuf,
     module_src_dir: Option<PathBuf>,
@@ -238,85 +123,44 @@ struct DelegationContext {
 impl DelegationContext {
     /// Real source daemon + delegation-enabled destination daemon.
     fn with_real_source() -> Self {
-        let work = tempdir().expect("tempdir");
-        let workspace = work.path().to_path_buf();
-
-        let module_src_dir = workspace.join("module_src");
-        fs::create_dir_all(&module_src_dir).expect("module src dir");
-        let module_dst_dir = workspace.join("module_dst");
-        fs::create_dir_all(&module_dst_dir).expect("module dst dir");
-        let config_dir = workspace.join("cli-config");
-        fs::create_dir_all(&config_dir).expect("cli config");
-
-        let (cli_bin, daemon_bin) = binary_paths();
-
-        let src_port = common::pick_unused_port();
-        let dst_port = common::pick_unused_port();
-        assert_ne!(src_port, dst_port, "ports must be different");
-
-        let src_daemon = spawn_daemon(
-            &workspace,
-            &daemon_bin,
-            src_port,
-            "daemon_src",
-            &module_src_dir,
-            false,
-        );
-        let dst_daemon = spawn_daemon(
-            &workspace,
-            &daemon_bin,
-            dst_port,
+        // The context's own daemon is the plain source; the
+        // destination (whose delegation gate + job table are under
+        // test) is the second daemon.
+        let ctx = TestContext::new();
+        let dst = ctx.spawn_second_daemon(
             "daemon_dst",
-            &module_dst_dir,
-            true,
+            &DaemonOptions {
+                delegation: true,
+                ..Default::default()
+            },
         );
 
         Self {
-            _work: work,
-            src_port,
-            dst_port,
-            _src_daemon: Some(src_daemon),
-            _dst_daemon: dst_daemon,
-            cli_bin,
-            config_dir,
-            module_src_dir: Some(module_src_dir),
-            module_dst_dir,
+            src_port: ctx.daemon_port,
+            dst_port: dst.port,
+            cli_bin: ctx.cli_bin.clone(),
+            config_dir: ctx.config_dir.clone(),
+            module_src_dir: Some(ctx.module_dir.clone()),
+            module_dst_dir: dst.module_dir.clone(),
+            _ctx: ctx,
+            _second: Some(dst),
         }
     }
 
     /// Fake stalling source + delegation-enabled destination daemon.
-    /// The fake's port is owned by the caller's `StallingSourceGuard`.
+    /// The fake's port is owned by the caller's `FakeServerGuard`.
     fn with_stalling_source(fake_port: u16) -> Self {
-        let work = tempdir().expect("tempdir");
-        let workspace = work.path().to_path_buf();
-
-        let module_dst_dir = workspace.join("module_dst");
-        fs::create_dir_all(&module_dst_dir).expect("module dst dir");
-        let config_dir = workspace.join("cli-config");
-        fs::create_dir_all(&config_dir).expect("cli config");
-
-        let (cli_bin, daemon_bin) = binary_paths();
-        let dst_port = common::pick_unused_port();
-
-        let dst_daemon = spawn_daemon(
-            &workspace,
-            &daemon_bin,
-            dst_port,
-            "daemon_dst",
-            &module_dst_dir,
-            true,
-        );
+        let ctx = TestContext::builder().delegation(true).build();
 
         Self {
-            _work: work,
             src_port: fake_port,
-            dst_port,
-            _src_daemon: None,
-            _dst_daemon: dst_daemon,
-            cli_bin,
-            config_dir,
+            dst_port: ctx.daemon_port,
+            cli_bin: ctx.cli_bin.clone(),
+            config_dir: ctx.config_dir.clone(),
             module_src_dir: None,
-            module_dst_dir,
+            module_dst_dir: ctx.module_dir.clone(),
+            _ctx: ctx,
+            _second: None,
         }
     }
 
@@ -461,63 +305,12 @@ fn cancel_of_active_delegated_job_exits_zero() {
 
 // ---------------------------------------------------------------
 // Fake stalling source: a tonic server whose pull_sync never
-// answers. Everything else is unimplemented (same shape as
-// remote_remote.rs's fake daemons).
+// answers. Everything else is unimplemented. Served through the
+// shared production-shaped scaffold (common::spawn_fake_blit_server).
 // ---------------------------------------------------------------
 
-struct StallingSourceGuard {
-    port: u16,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    join: Option<thread::JoinHandle<()>>,
-}
-
-impl Drop for StallingSourceGuard {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-fn spawn_stalling_source() -> StallingSourceGuard {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fake source");
-    let port = listener.local_addr().expect("fake source addr").port();
-    listener
-        .set_nonblocking(true)
-        .expect("set fake source nonblocking");
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let join = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("fake source runtime");
-        runtime.block_on(async move {
-            use blit_core::generated::blit_server::BlitServer;
-            use tokio_stream::wrappers::TcpListenerStream;
-            use tonic::transport::Server;
-
-            let listener =
-                tokio::net::TcpListener::from_std(listener).expect("tokio fake source listener");
-            Server::builder()
-                .add_service(BlitServer::new(StallingPullSyncBlit))
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("fake source server");
-        });
-    });
-
-    wait_for_port(port, "fake stalling source");
-    StallingSourceGuard {
-        port,
-        shutdown: Some(shutdown_tx),
-        join: Some(join),
-    }
+fn spawn_stalling_source() -> common::FakeServerGuard {
+    spawn_fake_blit_server(StallingPullSyncBlit, "fake stalling source")
 }
 
 struct StallingPullSyncBlit;
@@ -546,6 +339,19 @@ impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
                 > + Send,
         >,
     >;
+
+    type TransferStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::TransferFrame, tonic::Status>,
+    >;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("otp-1 stub"))
+    }
 
     async fn push(
         &self,

@@ -106,6 +106,201 @@ explicitly-deferred logging epic (F15).
 - [x] **audit-14** Redundant `seek` system calls in sequential block-level resume copies.
 - [x] **audit-15** Missing request/idle timeouts on tonic gRPC server control plane.
 
+### New audit findings (2026-07-06)
+
+- [ ] **audit-16** `spawn_manifest_task`'s "Enumerated N entries… (streaming
+      manifest)" heartbeat (`crates/blit-core/src/remote/push/client/helpers.rs:114-183`)
+      prints unconditionally on a 1s wall-clock timer — no `--verbose` gate.
+      `docs/plan/LOCAL_TRANSFER_HEURISTICS.md:42` (Status: Historical)
+      documents the original intent as verbose-gated ("`--verbose` shows
+      real-time heartbeat messages… Default mode remains quiet unless a
+      stall occurs"); the shipped code never wired that check in, so every
+      `copy`/`mirror` run spams the heartbeat regardless of verbosity — local
+      mirror hits this same manifest-scan path too, per
+      `engine/strategy.rs:81` (mirror/checksum/force-tar always take the
+      streaming path, which is unified with remote push). Fix: gate the
+      print in `spawn_manifest_task` behind the caller's verbose option
+      (the function has no visibility into CLI args today — thread a flag
+      through `LocalMirrorOptions`/the equivalent remote-push options).
+      Related, already filed, do not re-file: `--progress` (`-p`)
+      auto-enabling on TTY regardless of the flag is
+      `docs/audit/findings/drift-principles.md`
+      (`drift-spinner-vs-quiet-default-decision-conflict`).
+- [ ] **audit-17** Local `copy` aborts the entire transfer on one
+      filename the destination filesystem rejects, instead of
+      skipping/warning and continuing. Reported: `blit copy
+      /home/michael/ /run/media/michael/8247-7E92/michael -ypv`
+      failed enumerating ~88k entries in, at
+      `crates/blit-core/src/remote/transfer/sink.rs:605`
+      (`write_tar_shard_payload`'s parallel-write closure) —
+      `std::fs::create_dir_all` on a NuGet http-cache path whose
+      final component is `670c1461c...$ps:_api.nuget.org_v3_index.json`
+      returned `Invalid argument (os error 22)`. The source filename
+      is valid on the source (Linux/ext4) fs but contains a `:`,
+      which is illegal on FAT/exFAT/NTFS-strict destinations.
+      *Assumption, unverified — drive wasn't mounted to confirm:*
+      the destination (`/run/media/...`, hex volume label
+      `8247-7E92`, the classic Linux label format for an
+      unlabeled FAT-family volume) is exFAT or FAT32. Grepped
+      `crates/blit-core/src` for existing invalid-filename handling
+      (`os error 22`, `sanitize_name`, `illegal.*char`, etc.) — none
+      found; this is a real gap, not a regression. One bad name
+      currently kills the whole run rather than being
+      skipped/reported/renamed. Fix needs a design call (owner
+      input required, `plan` this before coding): per-file
+      skip-and-report vs. optional name-sanitization vs. fail-fast
+      with a clear top-level error instead of a raw `os error 22` +
+      internal path/line. Whatever is chosen must apply uniformly
+      to both the local-mirror and remote tar-shard receive paths
+      (same `write_tar_shard_payload` helper backs both, per
+      audit-16 above). **Confirmed reproducible**: identical failure
+      (same path, same error, same line, same ~88129-entry offset)
+      recurred verbatim on a second run targeting a different mount
+      (`/run/media/michael/USB_DRIVE/michael`) — not a one-off fluke;
+      the FAT-family-destination assumption above is now corroborated
+      by a second independent mount exhibiting the same `:`-rejection.
+      **Second manifestation, same closure, one line down**: after
+      that NuGet-cache directory issue was worked past (retried on a
+      cleared destination), the identical `os error 22` recurred at
+      `sink.rs:608` — this time `std::fs::write` on a regular file
+      whose name is `frostfell06.dds:crc` (unrelated content, a game
+      asset tree, not NuGet). Confirms the bug is general to any path
+      component containing an illegal character, not create_dir_all-
+      specific or NuGet-cache-specific — the fix must cover both the
+      `create_dir_all` (line 605) and `write` (line 608) call sites in
+      the same closure (and their mirror in the local-mirror path, per
+      the note above).
+- [ ] **audit-18** Non-UTF-8 source filenames are silently corrupted
+      during enumeration, then fail to open, aborting the whole
+      transfer. Reported: `blit copy /home/michael/
+      /run/media/michael/USB_DRIVE/michael -ypv` (same host as
+      audit-17, later re-run) failed ~377k entries in at
+      `crates/blit-core/src/remote/transfer/payload.rs:360`
+      (`build_tar_shard`'s `std::fs::File::open(&full_path)`) with
+      `No such file or directory (os error 2)` opening
+      `.../Claudia-by-Choice-codex_1.0<U+FFFD>` — the trailing
+      replacement character is the tell. Root cause:
+      `crate::path_posix::relative_path_to_posix` (`path_posix.rs:36-44`)
+      builds the canonical relative-path `String` with
+      `c.as_os_str().to_string_lossy()` per component — on Linux/ext4
+      a filename can be any non-`/`/non-NUL byte sequence, and a
+      non-UTF-8 one gets its invalid bytes replaced with U+FFFD
+      *irreversibly*. `build_tar_shard` then does
+      `source_root.join(rel)` on that corrupted string, which no
+      longer names the real file → `ENOENT`. `FileEntry.path` itself
+      (`fs_enum.rs:14`) is a real `PathBuf` (exact bytes preserved),
+      so the corruption happens specifically at the `PathBuf → String`
+      relative-path conversion, not at enumeration. `relative_path_to_posix`
+      is the single canonical helper for this and is called from
+      `engine/mirror.rs`, `mirror_planner.rs`, `remote/transfer/{payload,tar_safety}.rs`,
+      `remote/endpoint.rs`, and `remote/push/client/helpers.rs` — i.e.
+      local mirror and remote push both go through the lossy path, so
+      this isn't a remote-only/proto-only constraint. Fix needs a
+      design call (owner input required, `plan` this before coding):
+      the wire `FileHeader.relative_path`/`FileBlock.relative_path`
+      fields are proto3 `string`, which is UTF-8-only at the gRPC
+      layer, so a full fix for the remote path needs an encoding
+      scheme that round-trips arbitrary bytes through a UTF-8-safe
+      string (e.g. percent-encode invalid bytes, or WTF-8) — local
+      mirror has no such wire constraint and could preserve raw
+      `OsString`/`PathBuf` throughout instead. Same failure class as
+      audit-17 (one bad filename kills the entire run instead of
+      being skipped/reported) — whatever skip/report/fail-fast
+      behavior gets designed for audit-17 should likely cover this
+      case too, but the root cause here is enumeration-side path
+      corruption, not destination-fs charset rejection, so treat as
+      a separate fix even if the error-handling policy ends up shared.
+- [ ] **audit-19** `--exclude` silently matches nothing for the path
+      forms users actually type (absolute paths, and bare directory
+      names), so an exclude that looks correct transfers the excluded
+      tree anyway. Reported: `blit mirror /home/michael/
+      /run/media/michael/USB_DRIVE -pvy --force --exclude
+      /home/michael/.java` still descended into `.java/` and tried to
+      write `.java/fonts/1.8.0_472/fcinfo-…-en.properties` — that write
+      then hit `audit-17`'s `os error 22` (`sink.rs:608`) on the
+      FAT-family destination, i.e. a working `--exclude` would also have
+      side-stepped that crash. The filter *is* plumbed (local mirror
+      enumerates via `FileFilter`, `transfers/local.rs:191` →
+      `enumerate_directory_filtered`); this is a matching-semantics bug,
+      not a dropped-filter plumbing bug. Two compounding root causes in
+      `FileFilter::allows_entry` (`crates/blit-core/src/fs_enum.rs:194-240`):
+      (1) **excludes are matched against the source-root-relative path
+      and the bare filename, never the absolute path** — `path_str` is
+      `rel_path` (`fs_enum.rs:211-213`), `filename` is
+      `abs_path.file_name()` (`fs_enum.rs:207-210`). The candidate
+      strings for this entry are `.java/fonts/…` (relative) and
+      `fcinfo-…properties` (filename); a literal `/home/michael/.java`
+      glob equals neither (globset needs a whole-string match, and
+      `glob_match` with no `*` falls through to exact equality,
+      `fs_enum.rs:399-417`). `--exclude` maps only to `exclude_files`
+      (`crates/blit-app/src/transfers/filter.rs:42`); nothing strips the
+      source prefix to make an absolute pattern relative, so an absolute
+      exclude under the source root is structurally unmatchable.
+      (2) **a directory pattern does not prune its subtree.** Even the
+      "correct" relative form `--exclude .java` only drops an entry
+      whose relative path or filename is exactly `.java`; the files
+      under it are `.java/fonts/…` and globset `*` does not cross `/`,
+      so the whole subtree still transfers. There is **no `--exclude-dir`
+      flag** (verified: no CLI arg in `blit-cli`/`blit-app`, and
+      `FileFilter::exclude_dirs` / `dir_globs` / `should_include_dir`
+      at `fs_enum.rs:274-295` is never assigned anywhere in `crates/`),
+      so the only incantation that works today is
+      `--exclude '.java/**'` (and likely `--exclude .java` too, for the
+      dir entry itself). Nothing warns that a pattern matched zero of
+      the configured globs — a silent no-op, same foot-gun class as the
+      endpoint-parse open question in `docs/STATE.md`. Docs gap:
+      `--help` says only "Exclude files matching this glob pattern"
+      (`crates/blit-cli/src/cli.rs:292`) with no hint that matching is
+      source-relative (not absolute) or that a directory needs `/**`;
+      rsync users reasonably expect leading-`/`-anchors-to-transfer-root
+      and trailing-`/`-matches-dir semantics, none of which blit
+      implements. Confirmed by reading the matcher end-to-end, not run.
+      Fix needs a design call (owner input required, `plan` this before
+      coding): options span (a) accept absolute patterns under the
+      source root by stripping the source prefix before matching;
+      (b) give directory patterns rsync-like subtree semantics and/or
+      add a real `--exclude-dir`; (c) at minimum, warn when a pattern is
+      structurally unmatchable (absolute but not under the source, or
+      literal with no possible relative/filename match) instead of
+      silently transferring everything. Whatever is chosen must apply
+      uniformly across local-mirror, push, pull, and remote-remote (all
+      route through the one `FileFilter`/`FilterInputs` chokepoint,
+      `cli.rs:288-291`) and ship `--help`/manpage/README updates in the
+      same change (docs-after-behavior rule). Distinct from `audit-17`
+      (destination-fs charset rejection) — that crash is only a
+      *symptom* here; the exclude no-op is the reported bug.
+- [ ] **CLI transfer output redesign** (owner, 2026-07-06): current
+      `blit copy`/`mirror` output "doesn't convey any useful information
+      at all" — owner wants something closer to `rclone`/`cargo`: a
+      persistent stat block at a static screen location, plus a scrolling
+      list of in-flight/recent filenames, instead of what exists today.
+      Confirmed by reading the actual code — there is no persistent/redraw
+      rendering anywhere in the transfer output path, only plain
+      scrolling `println!`/`eprintln!` lines: (1) the local/streaming-manifest
+      path's spinner + `"Enumerated N entries… (streaming manifest)"`
+      heartbeat (`crates/blit-core/src/remote/push/client/helpers.rs:176`,
+      the same call site audit-16 already flagged for its own separate
+      `--verbose`-gating bug); (2) the remote-transfer progress path's
+      once-a-second `"[progress] N/M files • X MiB copied • Y MiB/s avg •
+      Z MiB/s current"` line (`crates/blit-cli/src/transfers/remote.rs:33-140`,
+      `spawn_progress_monitor_with_options`), which just reprints a new
+      line every tick rather than redrawing in place. Neither path shows
+      a file list, a static stat panel, or does any cursor
+      repositioning — every line is transient and scrolls off, which
+      matches the owner's complaint exactly. This is a real UX/design
+      project, not a bug fix: likely needs a terminal-rendering approach
+      (raw ANSI cursor save/restore, or a crate like `indicatif`), has to
+      cover both the local and remote transfer paths above, has to decide
+      a fallback for non-TTY/`--json`/piped output (today's plain-line
+      output is presumably what scripts already parse — a redesign must
+      not break `--json` consumers), and touches `blit-cli`+`blit-app`.
+      Not designed here — needs its own `plan` before any code, per this
+      repo's governance (code changes require an approved plan) and the
+      Review policy (D-2026-07-04-1, all code through the codex loop).
+      Distinct from `docs/plan/TUI_REWORK.md` (Active), which is about
+      the separate interactive `blit-tui` navigation app, not this
+      inline CLI progress output during a transfer.
+
 ### Deferred design calls
 
 These are intentionally not next-actionable. Don't pick them up

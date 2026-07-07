@@ -65,9 +65,7 @@ its `findings/`/`results/` records and `REVIEW.md` remain the record store.
 
 Claude Code exposes these as `/catchup`, `/plan`, … via `.claude/commands/`;
 Antigravity exposes `catchup`/`handoff` as workspace skills in
-`.agents/skills/`. This repo does not currently use `.agents/playbooks/` —
-the codex review loop and `docs/agent/PROTOCOL.md` already cover that role
-for review-loop work.
+`.agents/skills/`. This repo drafts `.agents/playbooks/reviewloop.md` as a template, but the codex review loop and `docs/agent/PROTOCOL.md` already cover that role for review-loop work.
 
 ## Verification
 

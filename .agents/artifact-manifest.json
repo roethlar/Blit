@@ -1,7 +1,7 @@
 {
   "validated_against": {
-    "commit": "5bb12fb803b98ff273d1c76404fb8034b650a739",
-    "date": "2026-07-04"
+    "commit": "1ff36c712de9f8372238b5608227a0cd6f9ad232",
+    "date": "2026-07-05"
   },
   "artifacts": [
     {
@@ -127,6 +127,31 @@
     {
       "path": ".github/workflows/docs-gate.yml",
       "purpose": "CI enforcement: code changes must touch docs/STATE.md; doc lint must pass",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/playbooks/reviewloop.md",
+      "purpose": "Portable workflow for reviews (reviewloop template)",
+      "custody": "tracked"
+    },
+    {
+      "path": ".agents/hooks.json",
+      "purpose": "Agy harness hooks: SessionStart context injection",
+      "custody": "tracked"
+    },
+    {
+      "path": ".codex/hooks.json",
+      "purpose": "Codex harness hooks: SessionStart context injection and AGENTS.md pre-edit tripwire",
+      "custody": "tracked"
+    },
+    {
+      "path": ".codex/agents-md-tripwire.py",
+      "purpose": "Advisory PreToolUse hook script for Codex",
+      "custody": "tracked"
+    },
+    {
+      "path": ".grok/hooks/reground.json",
+      "purpose": "Grok harness hooks: PostCompact context injection",
       "custody": "tracked"
     }
   ]

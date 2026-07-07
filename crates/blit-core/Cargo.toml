@@ -69,6 +69,9 @@ protoc-bin-vendored = "3"
 tempfile = "3"
 # ue-r2-1e: paused-clock testing for the dial tuner (dev-only).
 tokio = { version = "1", features = ["full", "test-util"] }
+# otp-3: deterministic fixture mtimes in the role-parameterized
+# session suite (regular dep already; repeated here for tests/).
+filetime = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

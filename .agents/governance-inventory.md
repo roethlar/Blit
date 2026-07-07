@@ -22,7 +22,7 @@ now referenced from `.agents/repo-guidance.md` instead of `AGENTS.md` directly.
 
 | Artifact | Role today | Verdict | Destination | Notes |
 | --- | --- | --- | --- | --- |
-| `AGENTS.md` | Canonical cross-agent contract (Claude Code, Codex, Antigravity) | migrate | `AGENTS.md` | Replaced whole with the current template verbatim (2026-07-02.1): adds the Prime Invariants block and `playbook` operator. All repo-specific content it used to carry (project map, style, git safety specifics, source-of-truth order, operator procedures) moved to `.agents/repo-guidance.md`, generalized and re-verified against current repo evidence. No existing rule is removed or weakened — see the "Earned Practices" section of the new `.agents/repo-guidance.md` for git safety, carried forward verbatim in substance. |
+| `AGENTS.md` | Canonical cross-agent contract (Claude Code, Codex, Antigravity) | migrate | `AGENTS.md` | Replaced whole with the current template verbatim (2026-07-04.1): adds the Prime Invariants block and `playbook` operator, including the specific-over-generic rule. All repo-specific content it used to carry (project map, style, git safety specifics, source-of-truth order, operator procedures) moved to `.agents/repo-guidance.md`, generalized and re-verified against current repo evidence. No existing rule is removed or weakened — see the "Earned Practices" section of the new `.agents/repo-guidance.md` for git safety, carried forward verbatim in substance. |
 | `.agents/repo-guidance.md` | New file — carve-out target for everything specific to this repo | migrate | `.agents/repo-guidance.md` | Did not exist before this round; the toolkit only requires it as of the current template. Holds mission detail, reading order, the repo's `slice` operator (no generic-template equivalent), verification commands, remotes, git-safety earned practices, style, and project map. |
 | `.agents/push-policy.md` | New file — narrow push-only policy the current template's Prime Invariants block points to | migrate | `.agents/push-policy.md` | Set to `ask`, consistent with this repo's existing (stricter) git-safety rules, which stay the authoritative detail in `.agents/repo-guidance.md`. |
 | `CLAUDE.md` | Claude Code shim (`@AGENTS.md` import + harness specifics) | leave | - | Already a thin conformant shim; still correct after the `AGENTS.md` rewrite since it just imports the file. |
@@ -42,11 +42,15 @@ now referenced from `.agents/repo-guidance.md` instead of `AGENTS.md` directly.
 | `docs/plan/*` | Plan docs with mandatory `**Status**:` headers | leave | - | Status vocabulary is lint-enforced. |
 | `docs/audit/*`, `docs/reviews/*` | Audit and review reports (historical/reference) | leave | - | |
 | `.serena/memories/` | Tool-local scratch | leave | - | Declared non-authoritative by `AGENTS.md` Universal Invariants. |
+| `.agents/playbooks/reviewloop.md` | New playbook — portable workflow template for reviews | migrate | `.agents/playbooks/reviewloop.md` | Copied from templates. |
+| `.agents/hooks.json` | New agy hook file | migrate | `.agents/hooks.json` | Copied from templates. |
+| `.codex/hooks.json` | New codex hook file | migrate | `.codex/hooks.json` | Copied from templates. |
+| `.codex/agents-md-tripwire.py` | New codex tripwire script | migrate | `.codex/agents-md-tripwire.py` | Copied from templates. |
+| `.grok/hooks/reground.json` | New grok hook file | migrate | `.grok/hooks/reground.json` | Copied from templates. |
 
 Files updated but not newly created by this round: `.agents/state.md`,
-`.agents/decisions.md`, `.agents/repo-map.json`,
-`.agents/artifact-manifest.json` (custody/paths refreshed to include the two
-new files and the current commit).
+`.agents/decisions.md`, `.agents/repo-map.json`, `.agents/artifact-manifest.json`,
+`.agents/governance-inventory.md`.
 
 ## Supersession Banner
 
@@ -85,3 +89,13 @@ edit). Only change this round: `validated_against` stamps in `repo-map.json`
 and `artifact-manifest.json` bumped to `5bb12fb` / 2026-07-04. No new
 harvest-worthy incident identified beyond the two already recorded in
 `.agents/harvest.md`.
+
+## 2026-07-05 reconciliation run
+
+Ran bootstrap updater on 2026-07-05 to reconcile the governance files to version `2026-07-04.1`.
+`agentsTemplate.reconcileRecommended` came back `true` because the toolkit's `AGENTS.template.md` updated to include the new "Specific over generic" rule.
+- `AGENTS.md` is replaced with the verbatim copy of the new template.
+- `.agents/repo-guidance.md` is updated to note the drafted playbook template.
+- New hooks drafted: `.agents/hooks.json` (agy), `.codex/hooks.json` & `.codex/agents-md-tripwire.py` (codex), `.grok/hooks/reground.json` (grok).
+- New playbook drafted: `.agents/playbooks/reviewloop.md`.
+- `.agents/repo-map.json` and `.agents/artifact-manifest.json` updated to record the new stamps (HEAD `1ff36c712de9f8372238b5608227a0cd6f9ad232`).

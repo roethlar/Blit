@@ -1,63 +1,22 @@
 use std::fs;
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
+use std::process::Command;
 use std::time::Duration;
 
-use serde::Serialize;
 use tempfile::tempdir;
-use wait_timeout::ChildExt;
 
-#[derive(Serialize)]
-struct DaemonConfig {
-    daemon: DaemonSection,
-    #[serde(rename = "module")]
-    modules: Vec<ModuleSection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    delegation: Option<DelegationSection>,
-}
+mod common;
+use common::{run_with_timeout, spawn_fake_blit_server, DaemonOptions, SpawnedDaemon, TestContext};
 
-#[derive(Serialize)]
-struct DaemonSection {
-    bind: String,
-    port: u16,
-    no_mdns: bool,
-}
-
-#[derive(Serialize)]
-struct ModuleSection {
-    name: String,
-    path: PathBuf,
-    #[serde(default)]
-    comment: Option<String>,
-    #[serde(default)]
-    read_only: bool,
-    delegation_allowed: bool,
-}
-
-#[derive(Serialize)]
-struct DelegationSection {
-    allow_delegated_pull: bool,
-    allowed_source_hosts: Vec<String>,
-}
-
-fn pick_unused_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind probe listener")
-        .local_addr()
-        .expect("listener addr")
-        .port()
-}
-
-#[allow(dead_code)]
+/// Dual real daemons in one workspace: daemon A (the context's own
+/// daemon) is the plain source; daemon B is the destination whose
+/// delegation gate is under test. Harness lives in `common` (w9-3).
 struct DualDaemonContext {
-    _work: tempfile::TempDir,
+    _ctx: TestContext,
+    _daemon_b: SpawnedDaemon,
     workspace: PathBuf,
     daemon_a_port: u16,
     daemon_b_port: u16,
-    _daemon_a: ChildGuard,
-    _daemon_b: ChildGuard,
     cli_bin: PathBuf,
     config_dir: PathBuf,
     module_a_dir: PathBuf,
@@ -66,104 +25,26 @@ struct DualDaemonContext {
 
 impl DualDaemonContext {
     fn new(dest_delegation: bool) -> Self {
-        let work = tempdir().expect("tempdir");
-        let workspace = work.path().to_path_buf();
-
-        let module_a_dir = workspace.join("module_a");
-        fs::create_dir_all(&module_a_dir).expect("module a dir");
-
-        let module_b_dir = workspace.join("module_b");
-        fs::create_dir_all(&module_b_dir).expect("module b dir");
-
-        let config_dir = workspace.join("cli-config");
-        fs::create_dir_all(&config_dir).expect("cli config");
-
-        let port_a = pick_unused_port();
-        let port_b = pick_unused_port();
-        assert_ne!(port_a, port_b, "ports must be different");
-
-        let (cli_bin, daemon_bin) = binary_paths();
-        build_daemon();
-
-        let daemon_a = Self::spawn_daemon(
-            &workspace,
-            &daemon_bin,
-            port_a,
-            "daemon_a",
-            &module_a_dir,
-            false,
-        );
-        let daemon_b = Self::spawn_daemon(
-            &workspace,
-            &daemon_bin,
-            port_b,
+        let ctx = TestContext::new();
+        let daemon_b = ctx.spawn_second_daemon(
             "daemon_b",
-            &module_b_dir,
-            dest_delegation,
+            &DaemonOptions {
+                delegation: dest_delegation,
+                ..Default::default()
+            },
         );
 
         Self {
-            _work: work,
-            workspace,
-            daemon_a_port: port_a,
-            daemon_b_port: port_b,
-            _daemon_a: daemon_a,
+            workspace: ctx.workspace.clone(),
+            daemon_a_port: ctx.daemon_port,
+            daemon_b_port: daemon_b.port,
+            cli_bin: ctx.cli_bin.clone(),
+            config_dir: ctx.config_dir.clone(),
+            module_a_dir: ctx.module_dir.clone(),
+            module_b_dir: daemon_b.module_dir.clone(),
+            _ctx: ctx,
             _daemon_b: daemon_b,
-            cli_bin,
-            config_dir,
-            module_a_dir,
-            module_b_dir,
         }
-    }
-
-    fn spawn_daemon(
-        workspace: &Path,
-        bin: &Path,
-        port: u16,
-        name: &str,
-        module_path: &Path,
-        delegation_enabled: bool,
-    ) -> ChildGuard {
-        let config = DaemonConfig {
-            daemon: DaemonSection {
-                bind: "127.0.0.1".into(),
-                port,
-                no_mdns: true,
-            },
-            modules: vec![ModuleSection {
-                name: "test".into(),
-                path: module_path.to_path_buf(),
-                comment: None,
-                read_only: false,
-                delegation_allowed: true,
-            }],
-            delegation: delegation_enabled.then(|| DelegationSection {
-                allow_delegated_pull: true,
-                // Loopback sources must be authorized by IP/CIDR form, not
-                // hostname form. This mirrors the production SSRF rule.
-                allowed_source_hosts: vec!["127.0.0.1".to_string()],
-            }),
-        };
-
-        let config_path = workspace.join(format!("{}.toml", name));
-        let toml = toml::to_string(&config).expect("serialize config");
-        fs::write(&config_path, toml).expect("write config");
-
-        let child = Command::new(bin)
-            .arg("--config")
-            .arg(&config_path)
-            .arg("--bind")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn daemon");
-
-        wait_for_port(port, &format!("daemon {name}"));
-        ChildGuard::new(child)
     }
 
     fn source_remote(&self) -> String {
@@ -320,8 +201,8 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     let work = tempdir().expect("tempdir");
     let config_dir = work.path().join("cli-config");
     fs::create_dir_all(&config_dir).expect("cli config");
-    let (cli_bin, _daemon_bin) = binary_paths();
-    let stale = spawn_unimplemented_blit_server();
+    let cli_bin = common::cli_bin();
+    let stale = spawn_fake_blit_server(UnimplementedBlit, "fake unimplemented destination");
     let counter = work.path().join("stale.counter");
 
     let src_remote = "127.0.0.1:9:/test/";
@@ -354,7 +235,7 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
 #[test]
 fn source_refuses_destination_negotiation_does_not_fall_back_to_relay() {
     let ctx = DualDaemonContext::new(true);
-    let rejecting_source = spawn_rejecting_pull_sync_server();
+    let rejecting_source = spawn_fake_blit_server(RejectingPullSyncBlit, "fake rejecting source");
     let counter = ctx.counter_path("source_refuses");
     let src_remote = format!("127.0.0.1:{}:/test/", rejecting_source.port);
 
@@ -416,79 +297,6 @@ fn assert_success(output: &std::process::Output) {
     }
 }
 
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Output {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn command");
-
-    match child.wait_timeout(timeout).expect("wait for process") {
-        Some(_status) => child
-            .wait_with_output()
-            .expect("collect command output after completion"),
-        None => {
-            let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .expect("collect output after killing command");
-            panic!(
-                "command timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
-                timeout,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-}
-
-fn binary_paths() -> (PathBuf, PathBuf) {
-    let exe_path = std::env::current_exe().expect("current_exe");
-    let deps_dir = exe_path.parent().expect("test binary directory");
-    let bin_dir = deps_dir
-        .parent()
-        .expect("deps parent directory")
-        .to_path_buf();
-    let cli_bin = bin_dir.join(if cfg!(windows) { "blit.exe" } else { "blit" });
-    let daemon_bin = bin_dir.join(if cfg!(windows) {
-        "blit-daemon.exe"
-    } else {
-        "blit-daemon"
-    });
-    (cli_bin, daemon_bin)
-}
-
-fn build_daemon() {
-    let mut build = Command::new("cargo");
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root");
-    build.current_dir(workspace_root);
-    build
-        .arg("build")
-        .arg("-p")
-        .arg("blit-daemon")
-        .arg("--bin")
-        .arg("blit-daemon");
-    let output = build.output().expect("invoke cargo build for blit-daemon");
-    assert!(
-        output.status.success(),
-        "cargo build blit-daemon failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn wait_for_port(port: u16, label: &str) {
-    let mut ready = false;
-    for _ in 0..50 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert!(ready, "{label} failed to listen on {port}");
-}
-
 #[derive(Debug, Default)]
 struct CounterValues {
     cli_data_plane_outbound_bytes: u64,
@@ -522,118 +330,6 @@ fn read_counters(path: &Path) -> CounterValues {
     out
 }
 
-struct ChildGuard {
-    child: Option<std::process::Child>,
-}
-
-impl ChildGuard {
-    fn new(child: std::process::Child) -> Self {
-        Self { child: Some(child) }
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-struct UnimplementedServerGuard {
-    port: u16,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    join: Option<thread::JoinHandle<()>>,
-}
-
-impl Drop for UnimplementedServerGuard {
-    fn drop(&mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
-    }
-}
-
-fn spawn_unimplemented_blit_server() -> UnimplementedServerGuard {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fake server");
-    let port = listener.local_addr().expect("fake addr").port();
-    listener
-        .set_nonblocking(true)
-        .expect("set fake server nonblocking");
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let join = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("fake server runtime");
-        runtime.block_on(async move {
-            use blit_core::generated::blit_server::BlitServer;
-            use tokio_stream::wrappers::TcpListenerStream;
-            use tonic::transport::Server;
-
-            let listener =
-                tokio::net::TcpListener::from_std(listener).expect("tokio fake listener");
-            Server::builder()
-                .add_service(BlitServer::new(UnimplementedBlit))
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("fake server");
-        });
-    });
-
-    wait_for_port(port, "fake unimplemented destination");
-    UnimplementedServerGuard {
-        port,
-        shutdown: Some(shutdown_tx),
-        join: Some(join),
-    }
-}
-
-fn spawn_rejecting_pull_sync_server() -> UnimplementedServerGuard {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fake source");
-    let port = listener.local_addr().expect("fake source addr").port();
-    listener
-        .set_nonblocking(true)
-        .expect("set fake source nonblocking");
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let join = thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("fake source runtime");
-        runtime.block_on(async move {
-            use blit_core::generated::blit_server::BlitServer;
-            use tokio_stream::wrappers::TcpListenerStream;
-            use tonic::transport::Server;
-
-            let listener =
-                tokio::net::TcpListener::from_std(listener).expect("tokio fake source listener");
-            Server::builder()
-                .add_service(BlitServer::new(RejectingPullSyncBlit))
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .expect("fake source server");
-        });
-    });
-
-    wait_for_port(port, "fake rejecting source");
-    UnimplementedServerGuard {
-        port,
-        shutdown: Some(shutdown_tx),
-        join: Some(join),
-    }
-}
-
 struct UnimplementedBlit;
 
 #[tonic::async_trait]
@@ -660,6 +356,19 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
                 > + Send,
         >,
     >;
+
+    type TransferStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::TransferFrame, tonic::Status>,
+    >;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("otp-1 stub"))
+    }
 
     async fn push(
         &self,
@@ -786,6 +495,19 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
                 > + Send,
         >,
     >;
+
+    type TransferStream = tokio_stream::wrappers::ReceiverStream<
+        Result<blit_core::generated::TransferFrame, tonic::Status>,
+    >;
+
+    // otp-1: unified-session wire surface; fakes refuse like the
+    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    async fn transfer(
+        &self,
+        _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
+    ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
+        Err(tonic::Status::unimplemented("otp-1 stub"))
+    }
 
     async fn push(
         &self,

@@ -5,40 +5,11 @@
 //! report "0 files" with success.
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
-use wait_timeout::ChildExt;
-
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::process::Output {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn command");
-    match child.wait_timeout(timeout).expect("wait for process") {
-        Some(_) => child.wait_with_output().expect("collect output"),
-        None => {
-            let _ = child.kill();
-            let output = child.wait_with_output().expect("output after kill");
-            panic!(
-                "command timed out after {:?}\nstdout:\n{}\nstderr:\n{}",
-                timeout,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-}
-
-fn cli_bin() -> PathBuf {
-    let exe_path = std::env::current_exe().expect("current_exe");
-    let deps_dir = exe_path.parent().expect("test binary directory");
-    let bin_dir = deps_dir
-        .parent()
-        .expect("deps parent directory")
-        .to_path_buf();
-    let name = if cfg!(windows) { "blit.exe" } else { "blit" };
-    bin_dir.join(name)
-}
+mod common;
+use common::{cli_bin, run_with_timeout};
 
 fn run_copy(args: &[&str]) -> std::process::Output {
     let bin = cli_bin();

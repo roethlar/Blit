@@ -201,7 +201,7 @@ fn mirror_mode_from_proto(raw: i32) -> Result<MirrorMode> {
 /// hostile or buggy peer is a hard error here rather than silently
 /// dropped by `FileFilter::build_globset` later (R5-F4 of
 /// `docs/reviews/followup_review_2026-05-02.md`).
-fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
+pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     for pat in &spec.include {
         globset::Glob::new(pat).with_context(|| format!("invalid include glob '{pat}'"))?;
     }
