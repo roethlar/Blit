@@ -83,7 +83,9 @@ cargo test --workspace
   `docs/STATE.md`, unless the commit message contains `[state: skip]`
   (reserved for mechanical changes). `scripts/agent/check-docs.sh` must pass;
   run it locally before pushing docs changes.
-- Full command list and policy also live in `.agents/repo-map.json`.
+- This section is the canonical home for the verification commands (the
+  `.agents/repo-map.json` mirror was retired 2026-07-08 with the toolkit's
+  JSON layer).
 
 ## Remotes & Sync
 

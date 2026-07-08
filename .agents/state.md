@@ -10,5 +10,5 @@ gate (`.github/workflows/docs-gate.yml`), the doc lint
 and the `handoff` procedure in `docs/agent/PROTOCOL.md` all read or enforce it.
 
 - Now / Next / Blockers: `docs/STATE.md`
-- Verification commands: `.agents/repo-map.json` (mirrors `AGENTS.md` §5)
+- Verification commands: `.agents/repo-guidance.md` (Verification)
 - How to update state: the `handoff` procedure in `docs/agent/PROTOCOL.md`

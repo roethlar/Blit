@@ -19,17 +19,6 @@
           }
         ]
       }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "py -3 \"${CLAUDE_PROJECT_DIR}/.claude/agents-md-tripwire.py\" 2>/dev/null || python3 \"${CLAUDE_PROJECT_DIR}/.claude/agents-md-tripwire.py\""
-          }
-        ]
-      }
     ]
   }
 }
