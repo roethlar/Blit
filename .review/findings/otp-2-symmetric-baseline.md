@@ -1,4 +1,11 @@
-# otp-2 — symmetric disk-to-disk baseline (harness + rig, no production code)
+# otp-2 — per-direction disk-to-disk baseline (harness + rig, no production code)
+
+> Post-review note (codex F1, upheld): this rig's endpoints are
+> hardware-asymmetric, so per D-2026-07-05-1 the recorded cells anchor
+> PER-DIRECTION converge-up only; the plan's cross-direction bar is an
+> owner question in STATE. The title below and any "symmetric baseline"
+> phrasing in this doc predate that adjudication — the verdict file and
+> the evidence README are authoritative.
 
 **What**: Plan slice otp-2 — correct the sf-1 benchmark methodology
 and record the OLD paths' per-cell, per-direction baseline on the

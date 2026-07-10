@@ -14,19 +14,29 @@
 #     macOS client (needs a NOPASSWD sudoers rule), drop_caches on the
 #     Linux daemon host.
 #   * DURABLE-AT-DESTINATION timing: the timed window is the transfer
-#     PLUS a `sync` of the destination end. Without it, a run's number
-#     is a write-cache lottery — the first probe run showed 4-8x
+#     PLUS a destination flush — remote `sync` for pushes (Linux sync
+#     waits for writeback), a per-file fsync walk for pulls (macOS
+#     sync(2) only SCHEDULES writes, so a bare local sync would
+#     under-time pulls relative to pushes). Without durable windows a
+#     run's number is a write-cache lottery — probe 1 showed up to 8x
 #     spread on push cells purely from how much of the payload the
 #     pool absorbed into cache before writeback throttled.
-#   * POOL DRAIN before every timed run: the daemon host's write path
-#     has state (an NVMe tier destaging to the spinning RAID); pushes
+#   * POOL DRAIN before every timed run, AFTER flushing dirty pages
+#     (sync first, then wait quiet): the daemon host's write path has
+#     state (an NVMe tier destaging to the spinning RAID); pushes
 #     timed against a partially-full tier ascend 2.7s -> 13.4s for
-#     identical work (probe run 2). Wait until all disks are quiet
-#     (three consecutive 2s windows under 2 MiB written) so every run
-#     starts from the same drained state.
-#   * MEDIAN is the cell statistic (robust to the residual first-run
-#     outlier the drain probe still showed); avg and best recorded too.
-#   * FRESH destination every run (blit no-ops onto delivered content).
+#     identical work (probe run 2). Quiet = three consecutive 2s
+#     windows under 2 MiB written; a drain TIMEOUT is recorded against
+#     the run's label, never silent.
+#   * MEDIAN is the cell statistic (robust to the residual one-in-four
+#     outlier drained pushes still show); avg and best recorded too.
+#     All times integer ms; an even-count median is the floor of the
+#     mean of the middle two.
+#   * FRESH destination every run (blit no-ops onto delivered
+#     content), unique per invocation (an interrupted run cannot
+#     leave content a rerun would no-op onto).
+#   * Prerequisite: python3 on the client (monotonic timing + the
+#     fsync walk).
 #   * No competitor rows (D-2026-07-04-4: ceiling-driven, never
 #     competitor-relative). The July tmpfs/warm rows remain in
 #     docs/bench/10gbe-2026-07-05/ as explicitly-labeled
@@ -68,16 +78,42 @@ REMOTE="$ZOEY_HOST:$PORT:/bench/"
 
 log() { echo "$(date +%H:%M:%S) $*" | tee -a "$OUT_DIR/bench.log"; }
 zssh() { ssh -o BatchMode=yes "$ZOEY_SSH" "$@"; }
+# Wall-clock ms. Deliberately NOT time.monotonic(): its reference
+# point is per-process-undefined, and start/end here are two separate
+# python3 processes — a monotonic attempt produced 0/negative windows
+# while the daemon log showed multi-second transfers. Wall clock is
+# correct across processes; the windows are seconds long and the
+# median absorbs the (rare) NTP-step outlier. python3 is a documented
+# prerequisite (preflight-checked).
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+# Durable pull window (codex otp-2 F2): macOS sync(2) SCHEDULES writes
+# and may return early, unlike Linux sync(2) which waits — so a bare
+# `sync` under-times the pull cells relative to the push cells' remote
+# sync. fsync every file in the dest tree instead: on macOS fsync
+# flushes to the drive, the closest equivalent of Linux sync's
+# wait-for-writeback depth (F_FULLFSYNC-to-media is deliberately NOT
+# used — the Linux side does not pay media-flush either).
+fsync_tree() {
+    python3 - "$1" <<'PYEOF'
+import os, sys
+for root, dirs, files in os.walk(sys.argv[1]):
+    for name in files:
+        fd = os.open(os.path.join(root, name), os.O_RDONLY)
+        os.fsync(fd)
+        os.close(fd)
+PYEOF
+}
 
 # --- Preflight -------------------------------------------------------
 [[ -x "$BLIT" ]] || { echo "missing $BLIT (cargo build --release first)"; exit 1; }
+command -v python3 >/dev/null || { echo "python3 required (timing + fsync_tree)"; exit 1; }
 sudo -n /usr/sbin/purge || {
     echo "cold-cache purge needs a NOPASSWD sudoers rule for /usr/sbin/purge"; exit 1; }
 zssh "test -x '$ZOEY_TEMP/blit-daemon'" || {
     echo "daemon binary not staged at $ZOEY_TEMP/blit-daemon"; exit 1; }
 BUILD_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
-log "build sha: $BUILD_SHA  client: $(uname -m) macOS  daemon: $ZOEY_HOST"
+SESSION_TAG=$(date +%H%M%S).$$
+log "build sha: $BUILD_SHA  client: $(uname -m) macOS  daemon: $ZOEY_HOST  session: $SESSION_TAG"
 
 # --- Daemon lifecycle (everything inside ZOEY_TEMP) ------------------
 start_daemon() {
@@ -104,13 +140,25 @@ stop_daemon() {
     zssh "kill \$(cat '$ZOEY_TEMP/bench-daemon.pid' 2>/dev/null) 2>/dev/null; \
           rm -f '$ZOEY_TEMP/bench-daemon.pid'" || true
 }
-trap 'stop_daemon' EXIT
+# Sweep this invocation's push destinations even on an interrupted run
+# (F5) — never leave content a rerun could no-op onto. Staged pull
+# sources are kept for re-runs by design.
+sweep_push_dirs() {
+    zssh "cd '$MODULE_ROOT' 2>/dev/null && rm -rf push_${SESSION_TAG}_*" || true
+}
+trap 'stop_daemon; sweep_push_dirs' EXIT
 
 # --- Pool drain + cold caches, both ends ------------------------------
-# Quiet = three consecutive 2s windows with < 2 MiB written across all
-# physical disks on the daemon host; timeout 240s (proceed with a note).
+# Order matters (codex otp-2 F4): FIRST flush the daemon host's dirty
+# pages into the pool (`sync` — Linux sync waits), THEN wait for the
+# tier to destage until quiet (three consecutive 2s windows with
+# < 2 MiB written across all physical disks; timeout 240s), then cold
+# the caches. A drain timeout is recorded against the run's label in
+# drain.log AND bench.log so an undrained row is identifiable, never
+# silent.
 drain_pool() {
-    zssh 'quiet=0
+    zssh 'sync
+quiet=0
 for i in $(seq 1 120); do
   a=$(awk "\$3 ~ /^sd[a-z]\$|^nvme[01]n1\$/ {s+=\$10} END {printf \"%.0f\", s}" /proc/diskstats)
   sleep 2
@@ -121,11 +169,16 @@ done
 echo "DRAIN-TIMEOUT"'
 }
 
-drop_caches() {
-    drain_pool >> "$OUT_DIR/drain.log"
+drop_caches() {   # $1 = run label for the drain record
+    local outcome
+    outcome=$(drain_pool)
+    echo "$1: $outcome" >> "$OUT_DIR/drain.log"
+    if [[ "$outcome" == *DRAIN-TIMEOUT* ]]; then
+        log "  WARNING: $1 ran UNDRAINED (pool never went quiet)"
+    fi
     sync
     sudo -n /usr/sbin/purge
-    zssh "sync; echo 3 > /proc/sys/vm/drop_caches"
+    zssh "echo 3 > /proc/sys/vm/drop_caches"
 }
 
 # --- Fixtures (client disk; generated once) --------------------------
@@ -172,15 +225,18 @@ finish_cell() {  # label total best  (per-run times read back from CSV)
 }
 
 # push: client fixture -> fresh, never-seen module subdir per run.
+# SESSION_TAG makes destinations unique per INVOCATION too (codex otp-2
+# F5): an interrupted run's leftovers can never turn a rerun's copy
+# into a partial no-op; the EXIT trap also sweeps them.
 push_cell() {    # label src flag(optional)
     local label="$1" src="$2" flag="${3:-}"
     local total=0 best=999999999 run start end ms
     for run in $(seq 1 "$RUNS"); do
-        drop_caches
+        drop_caches "$label-r$run"
         start=$(now_ms)
         # shellcheck disable=SC2086
-        "$BLIT" copy "$src" "${REMOTE}${label}_r${run}/" --yes $flag >/dev/null 2>&1
-        zssh sync   # durable at the destination (zoey pool)
+        "$BLIT" copy "$src" "${REMOTE}push_${SESSION_TAG}_${label}_r${run}/" --yes $flag >/dev/null 2>&1
+        zssh sync   # durable at the destination (zoey pool; Linux sync waits)
         end=$(now_ms)
         ms=$(( end - start ))
         total=$(( total + ms )); (( ms < best )) && best=$ms
@@ -197,11 +253,11 @@ pull_cell() {    # label remote_src flag(optional)
     for run in $(seq 1 "$RUNS"); do
         rm -rf "$MAC_WORK/dst_pull"
         mkdir -p "$MAC_WORK/dst_pull"
-        drop_caches
+        drop_caches "$label-r$run"
         start=$(now_ms)
         # shellcheck disable=SC2086
         "$BLIT" copy "$remote_src" "$MAC_WORK/dst_pull" --yes $flag >/dev/null 2>&1
-        sync        # durable at the destination (client SSD)
+        fsync_tree "$MAC_WORK/dst_pull"   # durable at the destination (see fsync_tree)
         end=$(now_ms)
         ms=$(( end - start ))
         total=$(( total + ms )); (( ms < best )) && best=$ms
@@ -233,9 +289,6 @@ main() {
     done
 
     stop_daemon
-    # Push run dirs accumulate under the module; clean them (inside
-    # ZOEY_TEMP only), keep the staged pull sources for re-runs.
-    zssh "cd '$MODULE_ROOT' && rm -rf push_*_r*" || true
 
     log ""
     log "=== SUMMARY (cold-cache, disk-to-disk, $RUNS runs/cell) ==="
