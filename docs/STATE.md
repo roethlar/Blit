@@ -4,9 +4,9 @@ Last updated: 2026-07-10
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-10, this one): **otp-8 landed and CLOSED through the codex loop** — assess-first verdict: the fallback byte-carrier was substantially built by otp-3..7b; `5ffc9be` added the wire residue pins (in-stream resume over real gRPC + the D-2026-07-10-1 clamp), codex FAIL → 2/2 accepted + fixed `643294a` (in-stream cancel could HANG — fault-signal race added; unbounded `TarShardHeader` frame — in-stream splitter added). Verdicts: `.review/results/otp-8.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..8 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
+- Current session (2026-07-10, this one): **otp-8 and otp-9a landed and CLOSED through the codex loop** — otp-8 by assessment + wire pins (`5ffc9be`, fixes `643294a`: in-stream cancel-hang fault race + TarShardHeader frame bound); otp-9a pull session-client surface (`7bf8ef8`, doc fix `607a924`). Verdicts in `.review/results/otp-{8,9a}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..8 + 9a [x]. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 
-- Notes on push state (as of `643294a`; basis: the prior session's `git ls-remote origin` check — not re-verified this session): origin/master was at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD` (the prior session's four + this session's three). windows-latest CI on the w9-3 harness fix rides the next push.
+- Notes on push state (as of `607a924`; basis: the prior session's `git ls-remote origin` check — not re-verified this session): origin/master was at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD`. windows-latest CI on the w9-3 harness fix rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -31,15 +31,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     wire bounds D-2026-07-10-1. SizeMtime = data-safe skip (open Q
     below).
   - **otp-8 `[x]` — fallback byte-carrier, CLOSED by assessment +
-    residue.** The carrier was already live since otp-3 (selection at
-    negotiation only — request or bind-failure grant-less accept; the
-    old mid-flight TCP→gRPC downgrade dies with the old drivers).
-    `5ffc9be` wire pins (in-stream resume e2e both directions; 2 MiB
-    clamp proven against real tonic); codex F1 (High) in-stream
-    cancel HANG → fault-signal race + cancel e2e; F2 (Med) unbounded
-    `TarShardHeader` frame → in-stream post-planner splitter
-    (`643294a`). CLI `--force-grpc` plumbing = otp-10 staging. Suite →
-    **1555**. Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
+    residue.** Carrier live since otp-3; selection at negotiation
+    only (the old mid-flight TCP→gRPC downgrade dies with the old
+    drivers). `5ffc9be` wire pins (in-stream resume both directions;
+    2 MiB clamp vs real tonic); codex fixes `643294a`: in-stream
+    cancel HANG → fault-signal race + cancel e2e; unbounded
+    `TarShardHeader` frame → in-stream splitter. `--force-grpc`
+    plumbing = otp-10. Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
   - **otp-7b (1/2) `[x]` — resume over the TCP data plane + the D4
     fault-summary rider, CLOSED; otp-7 done.** 7b-1 (`ecac9b0`):
     composite `ResumeFile` work item = strict per-file socket
@@ -57,12 +55,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     64 MiB ceiling pinned, single-file-root "" identity). Suite →
     **1550**. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
   - Current: **otp-9 (delegated transfer)** — daemon-initiated
-    session against the other daemon; the bespoke delegated-pull
-    driver retires behind the existing authorization gate;
-    `DelegatedPull` RPC reduces to trigger + progress relay (never
-    carries payload bytes — the otp-10 deletion proof asserts it,
-    codex F3). otp-5b-3 (pull cancel) optional; otp-2 rig-gated
-    before otp-10.
+    session; delegated-pull driver retires behind the gate;
+    `DelegatedPull` reduces to trigger + progress relay (no payload
+    bytes — otp-10 deletion proof asserts it, codex F3). **otp-9a
+    `[x]`** (`7bf8ef8`+`607a924`, codex 1 Low fixed): pull client
+    mirror/filter options + destination byte-progress sink — the
+    surface 9b consumes. Next: **otp-9b** (handler reroute; exact
+    scope in DEVLOG 15:30Z). otp-5b-3 (pull cancel) optional; otp-2
+    rig-gated before otp-10. Suite → **1558**.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified

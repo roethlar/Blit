@@ -6,7 +6,7 @@ raw output: `.review/results/otp-9a.codex.md`
 verdict line: NEEDS FIXES — "one documentation correction; runtime
 wiring, e2e assertions/fixture math, scoped deferrals, and 1555→1558
 test accounting otherwise pass."
-fix commit: (appended after landing)
+fix commit: `607a924` (doc correction; suite 1558/0)
 
 ## F1 (Low) — stale `PullSessionOptions` rustdoc
 
