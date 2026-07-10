@@ -4,10 +4,15 @@
 # timed run). Requires an administrator token; enables
 # SeProfileSingleProcessPrivilege, then asks the memory manager to
 # purge the standby list (SystemMemoryListInformation / command 4).
+# Every step is checked and reported (codex otp-2w F5):
+# AdjustTokenPrivileges can "succeed" while assigning nothing
+# (ERROR_NOT_ALL_ASSIGNED) — that is surfaced as the causal error
+# instead of an opaque NTSTATUS from the purge itself.
 $ErrorActionPreference = 'Stop'
 
 Add-Type -TypeDefinition @"
 using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 public static class StandbyPurge
@@ -30,20 +35,39 @@ public static class StandbyPurge
     [DllImport("kernel32.dll")]
     public static extern IntPtr GetCurrentProcess();
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr h);
+
     [DllImport("ntdll.dll")]
     public static extern uint NtSetSystemInformation(int infoClass, ref int info, int len);
+
+    const int ERROR_NOT_ALL_ASSIGNED = 1300;
 
     public static uint Purge()
     {
         IntPtr tok = IntPtr.Zero;
-        LUID luid = new LUID();
-        OpenProcessToken(GetCurrentProcess(), 0x20 /*ADJUST*/ | 0x8 /*QUERY*/, ref tok);
-        LookupPrivilegeValue(null, "SeProfileSingleProcessPrivilege", ref luid);
-        TOKEN_PRIVILEGES tp;
-        tp.Count = 1; tp.Luid = luid; tp.Attr = 0x2 /*ENABLED*/;
-        AdjustTokenPrivileges(tok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
-        int cmd = 4; // MemoryPurgeStandbyList
-        return NtSetSystemInformation(80 /*SystemMemoryListInformation*/, ref cmd, 4);
+        if (!OpenProcessToken(GetCurrentProcess(), 0x20 /*ADJUST*/ | 0x8 /*QUERY*/, ref tok))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken");
+        try
+        {
+            LUID luid = new LUID();
+            if (!LookupPrivilegeValue(null, "SeProfileSingleProcessPrivilege", ref luid))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "LookupPrivilegeValue");
+            TOKEN_PRIVILEGES tp;
+            tp.Count = 1; tp.Luid = luid; tp.Attr = 0x2 /*ENABLED*/;
+            if (!AdjustTokenPrivileges(tok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "AdjustTokenPrivileges");
+            int gle = Marshal.GetLastWin32Error();
+            if (gle == ERROR_NOT_ALL_ASSIGNED)
+                throw new Win32Exception(gle,
+                    "SeProfileSingleProcessPrivilege was not assigned (token is not elevated?)");
+            int cmd = 4; // MemoryPurgeStandbyList
+            return NtSetSystemInformation(80 /*SystemMemoryListInformation*/, ref cmd, 4);
+        }
+        finally
+        {
+            CloseHandle(tok);
+        }
     }
 }
 "@

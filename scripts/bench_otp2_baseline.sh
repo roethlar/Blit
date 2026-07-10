@@ -77,7 +77,10 @@ MODULE_ROOT="$ZOEY_TEMP/bench-module"
 REMOTE="$ZOEY_HOST:$PORT:/bench/"
 
 log() { echo "$(date +%H:%M:%S) $*" | tee -a "$OUT_DIR/bench.log"; }
-zssh() { ssh -o BatchMode=yes "$ZOEY_SSH" "$@"; }
+# ControlMaster multiplexing: an ssh connection to this host costs
+# ~1.2s (slow-core key exchange) — reuse one connection.
+SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-%r@%h-%p" -o ControlPersist=300)
+zssh() { ssh "${SSH_MUX[@]}" "$ZOEY_SSH" "$@"; }
 # Wall-clock ms. Deliberately NOT time.monotonic(): its reference
 # point is per-process-undefined, and start/end here are two separate
 # python3 processes — a monotonic attempt produced 0/negative windows
@@ -86,6 +89,17 @@ zssh() { ssh -o BatchMode=yes "$ZOEY_SSH" "$@"; }
 # median absorbs the (rare) NTP-step outlier. python3 is a documented
 # prerequisite (preflight-checked).
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+# --- Self-timed durability steps (codex otp-2w F3, applied here too) --
+# The timed window = transfer + destination flush, and NOTHING else.
+# An `ssh host sync` wrapped in the window adds ~1.2s of connection
+# setup (measured) that lands only on push cells; each durability step
+# therefore times ITSELF on the destination machine and reports its
+# own duration, which the harness adds to the locally-timed transfer
+# segment. /proc/uptime is the remote monotonic ms source (busybox-
+# safe; both reads happen in one shell, so the reference is shared).
+sync_dest_ms() {   # Linux sync on the daemon host; prints its elapsed ms
+    zssh 'a=$(awk "{print int(\$1*1000)}" /proc/uptime); sync; b=$(awk "{print int(\$1*1000)}" /proc/uptime); echo $((b-a))'
+}
 # Durable pull window (codex otp-2 F2): macOS sync(2) SCHEDULES writes
 # and may return early, unlike Linux sync(2) which waits — so a bare
 # `sync` under-times the pull cells relative to the push cells' remote
@@ -93,14 +107,16 @@ now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 # flushes to the drive, the closest equivalent of Linux sync's
 # wait-for-writeback depth (F_FULLFSYNC-to-media is deliberately NOT
 # used — the Linux side does not pay media-flush either).
-fsync_tree() {
+fsync_tree_ms() {
     python3 - "$1" <<'PYEOF'
-import os, sys
+import os, sys, time
+t = time.monotonic()
 for root, dirs, files in os.walk(sys.argv[1]):
     for name in files:
         fd = os.open(os.path.join(root, name), os.O_RDONLY)
         os.fsync(fd)
         os.close(fd)
+print(int((time.monotonic() - t) * 1000))
 PYEOF
 }
 
@@ -171,11 +187,11 @@ echo "DRAIN-TIMEOUT"'
 
 drop_caches() {   # $1 = run label for the drain record
     local outcome
-    outcome=$(drain_pool)
-    echo "$1: $outcome" >> "$OUT_DIR/drain.log"
-    if [[ "$outcome" == *DRAIN-TIMEOUT* ]]; then
-        log "  WARNING: $1 ran UNDRAINED (pool never went quiet)"
-    fi
+    outcome=$(drain_pool || true)
+    echo "$1: ${outcome:-DRAIN-ERROR}" >> "$OUT_DIR/drain.log"
+    # Anything but a positive "drained" report is a warned anomaly —
+    # a timeout AND a failed/empty probe alike (fail loud, not open).
+    [[ "$outcome" == drained* ]] || log "  WARNING: $1 ran UNDRAINED (${outcome:-probe failed})"
     sync
     sudo -n /usr/sbin/purge
     zssh "echo 3 > /proc/sys/vm/drop_caches"
@@ -231,16 +247,17 @@ finish_cell() {  # label total best  (per-run times read back from CSV)
 push_cell() {    # label src flag(optional)
     local label="$1" src="$2" flag="${3:-}"
     local total=0 best=999999999 run start end ms
+    local flush_ms
     for run in $(seq 1 "$RUNS"); do
         drop_caches "$label-r$run"
         start=$(now_ms)
         # shellcheck disable=SC2086
         "$BLIT" copy "$src" "${REMOTE}push_${SESSION_TAG}_${label}_r${run}/" --yes $flag >/dev/null 2>&1
-        zssh sync   # durable at the destination (zoey pool; Linux sync waits)
         end=$(now_ms)
-        ms=$(( end - start ))
+        flush_ms=$(sync_dest_ms)   # durable at dest, self-timed
+        ms=$(( end - start + flush_ms ))
         total=$(( total + ms )); (( ms < best )) && best=$ms
-        log "  $label run $run: ${ms}ms"
+        log "  $label run $run: ${ms}ms (sync ${flush_ms}ms)"
         echo "$label,$run,$ms" >> "$CSV"
     done
     finish_cell "$label" "$total" "$best"
@@ -249,7 +266,7 @@ push_cell() {    # label src flag(optional)
 # pull: staged module subdir -> fresh local dest per run.
 pull_cell() {    # label remote_src flag(optional)
     local label="$1" remote_src="$2" flag="${3:-}"
-    local total=0 best=999999999 run start end ms
+    local total=0 best=999999999 run start end ms fsync_ms
     for run in $(seq 1 "$RUNS"); do
         rm -rf "$MAC_WORK/dst_pull"
         mkdir -p "$MAC_WORK/dst_pull"
@@ -257,11 +274,11 @@ pull_cell() {    # label remote_src flag(optional)
         start=$(now_ms)
         # shellcheck disable=SC2086
         "$BLIT" copy "$remote_src" "$MAC_WORK/dst_pull" --yes $flag >/dev/null 2>&1
-        fsync_tree "$MAC_WORK/dst_pull"   # durable at the destination (see fsync_tree)
         end=$(now_ms)
-        ms=$(( end - start ))
+        fsync_ms=$(fsync_tree_ms "$MAC_WORK/dst_pull")   # durable, self-timed
+        ms=$(( end - start + fsync_ms ))
         total=$(( total + ms )); (( ms < best )) && best=$ms
-        log "  $label run $run: ${ms}ms"
+        log "  $label run $run: ${ms}ms (fsync ${fsync_ms}ms)"
         echo "$label,$run,$ms" >> "$CSV"
     done
     finish_cell "$label" "$total" "$best"

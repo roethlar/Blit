@@ -5,15 +5,16 @@ otp-12 acceptance bar's **cross-direction half** after the Mac↔zoey
 session established (per D-2026-07-05-1's symmetric-endpoint rule)
 that hardware-asymmetric pairs support per-direction verdicts only —
 owner: "mac to windows would be closer spec. windows is faster, both
-have 10gbe." The zoey dataset
-(`docs/bench/otp2-baseline-2026-07-10/`) remains the per-direction
-reference for the slow-pool rig; THIS dataset anchors both halves on
-the close-spec pair.
+have 10gbe." Closer-spec is the owner's designation, not a claim of
+identical platforms: APFS and NTFS write paths differ (see Readings).
+The zoey dataset (`docs/bench/otp2-baseline-2026-07-10/`) remains the
+per-direction reference for the slow-pool rig.
 
-**Build**: `0f922de` both ends — client macOS arm64 release; daemon
-built natively on the host (source delivered as a git bundle — the
-commits were unpushed and pushes are owner-gated; a bundle is a plain
-file copy between the owner's machines).
+**Build**: `0f922de` binaries both ends — client macOS arm64 release;
+daemon built natively on the host (source delivered as a git bundle —
+the commits were unpushed and pushes are owner-gated; a bundle is a
+plain file copy between the owner's machines). The recorded run used
+the harness as of the codex-fix round.
 
 ## Rig
 
@@ -26,14 +27,16 @@ file copy between the owner's machines).
 - **Link**: Thunderbolt 10GbE (Mac) ↔ 10 Gbps NIC (host), ~0.4 ms.
 - **Host plumbing** (first-of-kind on Windows, embodied in
   `scripts/bench_otp2w_baseline.sh` + `scripts/windows/purge-standby.ps1`):
-  OpenSSH with PowerShell 7 default shell; the daemon is launched via
-  WMI `Win32_Process.Create` because Windows OpenSSH kills session
-  children on disconnect (a `Start-Process` daemon dies with the ssh
-  session); cold caches = standby-list purge
-  (`NtSetSystemInformation`, admin); durable pushes =
-  `Write-VolumeCache D`; drain = `Get-Counter` PhysicalDisk write
-  bytes/sec, three consecutive quiet 2 s samples; ONE program-scoped
-  inbound firewall rule (`blit-bench-daemon`; remove with
+  OpenSSH with PowerShell 7 default shell (multiplexed —
+  ControlMaster); daemon launched via WMI `Win32_Process.Create`
+  because Windows OpenSSH kills session children on disconnect
+  (reproduced live); launch REFUSES over a stale daemon and teardown
+  kills the recorded PID only; cold caches = standby-list purge
+  (`NtSetSystemInformation`, admin, every API step checked); durable
+  pushes = self-timed `Write-VolumeCache D`; drain = `Get-Counter`
+  PhysicalDisk write bytes/sec, three consecutive quiet 2 s samples,
+  failed probes warn rather than pass; ONE program-scoped inbound
+  firewall rule (`blit-bench-daemon`; remove with
   `Remove-NetFirewallRule -DisplayName blit-bench-daemon`). Config
   paths are TOML LITERAL strings — double-quoted TOML corrupts
   Windows paths (`\b` is an escape).
@@ -42,33 +45,43 @@ file copy between the owner's machines).
 
 | fixture | push tcp | push grpc | pull tcp | pull grpc |
 |---------|---------:|----------:|---------:|----------:|
-| large (1 GiB)            | 3549 | 3562 | 1309 | 1316 |
-| small (10k × 4 KiB)      | 2503 | 3330 | 1381 | 1494 |
-| mixed (512 MiB + 5k×2K)  | 2844 | 3241 | 1316 | 1438 |
+| large (1 GiB)            | 3054 | 3065 | 1294 | 1289 |
+| small (10k × 4 KiB)      | 1868 | 2822 | 1280 | 1462 |
+| mixed (512 MiB + 5k×2K)  | 2288 | 2687 | 1284 | 1408 |
 
-Per-run data: `runs.csv`; `drain-outcomes.txt` shows ZERO drain timeouts.
-Stability is verdict-grade: per-cell spread ≤ 2% for 8 of 12 cells,
-worst 11.9% (`pull_tcp_small`). Rounding: integer ms; even-count
-median = floor of the mean of the middle two.
+Per-run data: `runs.csv`; `drain-outcomes.txt` shows zero anomalies.
+Stability: per-cell (max−min)/min spreads 0.2–14.5%; 4 cells ≤ 2%,
+9 cells ≤ 9%. Rounding: integer ms; even-count median = floor of the
+mean of the middle two.
 
 ## Readings (recorded, not adjudicated)
 
-- Pull ≈ 6.6 Gbit/s durable on the 1 GiB cell; push ≈ 2.4 Gbit/s.
-  **Old push trails old pull ×1.8–×2.7 in every cell even on this
-  close-spec pair.**
-- On large pushes the carrier makes NO difference (TCP 3549 vs gRPC
-  3562) — the wire is not the bottleneck; the ceiling is the
-  receive/write side (Windows filesystem write path, possibly
-  Defender real-time scanning, and/or the old push-receive code).
-- Whether that ×2.7 is OS write-path cost or the old code's doing is
-  exactly what the otp-12 comparison discriminates: if the unified
-  path's push on this rig closes toward pull's number, it was the
-  code — the plan's founding bet (D-2026-07-05-1). If it doesn't
-  close, the residue is the platform write path, measurable as the
-  same gap in both old and new.
-- Windows Defender status was NOT altered for this baseline; the
-  acceptance run must use the same Defender state for old and new
-  (interleaved same-session A/B makes that automatic).
+- Pull ≈ 6.6 Gbit/s durable on the 1 GiB cell; push ≈ 2.8 Gbit/s.
+  **Old push trails old pull ×1.46–×2.38 per cell on this
+  close-spec pair** (large 2.36, small 1.46, mixed 1.78 on TCP).
+- On the large fixture the carrier makes NO difference in either
+  direction (push 3054 vs 3065; pull 1294 vs 1289) — the wire is not
+  the bottleneck; the ceilings are the endpoint read/write paths.
+- Whether the push gap is Windows write-path cost (NTFS, Defender
+  real-time scanning — left at its normal state) or the old
+  push-receive code is exactly what otp-12's interleaved old-vs-new
+  discriminates: if the unified path's push closes toward pull, it
+  was the code (the plan's founding bet, D-2026-07-05-1); if not,
+  the residue is the platform write path, measurable as the same gap
+  in both arms. Interleaved A/B keeps the Defender state identical
+  across arms.
+
+## Timing-overhead correction (probe1)
+
+The first recorded session (`probe1-sshoverhead-{runs,summary}.csv`)
+wrapped `ssh host Write-VolumeCache` inside the timed window; a
+per-connection cost of ~0.5 s (plus pwsh spawn and module load,
+~1.2 s total measured idle) landed on every PUSH window and none of
+the pull windows, inflating push medians by ~0.5–0.6 s and the
+push/pull ratios accordingly (codex otp-2w F3, upheld and
+quantified). The recorded dataset uses SELF-TIMED durability steps —
+the flush measures its own duration on the destination and only that
+is added to the transfer segment — on both rigs.
 
 ## Reproduction
 

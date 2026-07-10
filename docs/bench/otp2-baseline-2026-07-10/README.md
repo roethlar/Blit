@@ -1,19 +1,18 @@
 # otp-2 — OLD-path PER-DIRECTION disk-to-disk baseline (2026-07-10)
 
-**Status**: Recorded. **Scope caveat (load-bearing)**: this rig's
-endpoints are hardware-asymmetric (client SSD vs daemon pool), and
+**Status**: Recorded. **Scope (load-bearing)**: this rig's endpoints
+are hardware-asymmetric (client SSD vs daemon pool), and
 D-2026-07-05-1 rules that cross-direction performance comparisons are
 valid **only on symmetric endpoints**. This dataset therefore anchors
-**per-direction converge-up** (new ≤ old, same cell) and CANNOT anchor
-the otp-12 acceptance bar's cross-direction half ("every cell ≤ the
-better of that cell's two old directions"). Whether that half is
-evaluated on a symmetric pair the owner designates, or waived in favor
-of per-direction convergence, is an owner decision recorded as an open
-question in `docs/STATE.md`.
+**per-direction converge-up** (new ≤ old, same cell) and cannot anchor
+the otp-12 acceptance bar's cross-direction half — the owner
+designated the Mac↔Windows pair for that
+(`docs/bench/otp2w-baseline-2026-07-10/`).
 
-**Build**: `e757dcc` (both ends, same commit — client macOS arm64
-release; daemon static aarch64-musl via
-`cargo zigbuild --release --target aarch64-unknown-linux-musl`).
+**Build**: `e757dcc` binaries both ends (client macOS arm64 release;
+daemon static aarch64-musl via
+`cargo zigbuild --release --target aarch64-unknown-linux-musl`); the
+recorded run used the harness as of `ceea6ed`+review fixes.
 **Harness**: `scripts/bench_otp2_baseline.sh` (methodology in its
 header; the probe CSVs here are the evidence that earned each rule).
 
@@ -35,81 +34,76 @@ header; the probe CSVs here are the evidence that earned each rule).
 
 | fixture | push tcp | push grpc | pull tcp | pull grpc |
 |---------|---------:|----------:|---------:|----------:|
-| large (1 GiB)            | 3025 | 5211 | 1664 | 2383 |
-| small (10k × 4 KiB)      | 3929 | 5220 | 2699 | 4238 |
-| mixed (512 MiB + 5k×2K)  | 2666 | 3884 | 1503 | 2258 |
+| large (1 GiB)            | 2702 | 4510 | 1744 | 2585 |
+| small (10k × 4 KiB)      | 4263 | 5217 | 2784 | 4188 |
+| mixed (512 MiB + 5k×2K)  | 2070 | 3889 | 1401 | 2222 |
 
 Per-run data: `runs.csv`; avg/best alongside medians: `summary.csv`;
-per-run drain outcomes: `drain-outcomes.txt` (exactly one DRAIN-TIMEOUT, the
-expected post-staging first run — its value, 3283 ms, is not even its
-cell's maximum). Rounding: all times integer ms; an even-count median
-is the floor of the mean of the middle two.
+per-run drain outcomes: `drain-outcomes.txt` (zero anomalies).
+Rounding: integer ms; even-count median = floor of the mean of the
+middle two.
 
-Sanity: TCP < gRPC in all 12 cells. 1 GiB durable ≈ 2.8 Gbit/s push /
-5.2 Gbit/s pull. Small files are per-file-cost bound (push ≈ 393
-µs/file, pull ≈ 270 µs/file on zoey's 4 slow cores — the same
-per-file-bound shape as the July skippy diagnosis, at a slower
-constant). Old-pull beats old-push in every cell, ×1.23–×2.19
-depending on the cell — consistent with the destination-hardware
-asymmetry (pushes write durably to the pool; pulls write to the SSD),
-which is exactly why D-2026-07-05-1 excludes cross-direction verdicts
-on such endpoints.
+Sanity: TCP < gRPC in all 12 cells. 1 GiB durable ≈ 3.2 Gbit/s push /
+4.9 Gbit/s pull. Small files are per-file-cost bound (push ≈ 426
+µs/file, pull ≈ 278 µs/file on zoey's 4 slow cores — the July skippy
+diagnosis's per-file-bound shape at a slower constant). Old-pull beats
+old-push in every cell, ×1.25–×1.75 — but on THESE endpoints that gap
+is confounded with destination hardware (pool vs SSD), which is
+exactly why D-2026-07-05-1 excludes cross-direction verdicts here.
 
 ## Run-to-run stability (this dataset)
 
-- **Pull cells**: within ±6% of the cell median, except one
-  `pull_tcp_large` run at +21%.
-- **Push cells**: within ±16% of the cell median, except one high
-  outlier in each gRPC push cell (+49% and +90%) — the pool's tiered
-  write path never fully stops being stateful. The MEDIAN is the cell
-  statistic precisely because of these; both outliers are visible in
-  `runs.csv`.
-- **Cross-session check**: an independent earlier session with the
-  pre-review harness (`probe4-prereview-session-runs.csv`; bare-sync
-  pull windows, no sync-before-drain) produced medians agreeing
-  within ~10% on most cells — plus a visible +~150 ms on 10k-file
-  pull cells here, the honest per-file fsync durability cost the
-  pre-review harness under-counted.
-- **otp-12 prescription**: push-cell verdicts should be confirmed by
-  interleaved same-session A/B (old-build vs new-build alternating),
-  not by comparison to absolute numbers alone. The old-path binaries
-  of this commit stay staged in zoey's `blit-temp` for that.
+Zero drain anomalies; per-cell (max−min)/min spreads: 5.6–26.5%
+typical, worst 48.6% (`push_tcp_small` — one fast outlier run, the
+others within 9% of each other). The pool's tiered write path never
+fully stops being stateful; the MEDIAN is the cell statistic
+precisely because of this, and every run is visible in `runs.csv`.
+**otp-12 prescription**: on this rig, verdicts (especially push
+cells) should be confirmed by interleaved same-session A/B
+(old-build vs new-build alternating), not by absolute comparison
+alone. The old-path binaries stay staged in zoey's `blit-temp`.
 
 ## Methodology findings (why the harness looks the way it does)
 
 1. **Naive transfer-return timing is a write-cache lottery**
    (`probe1-no-sync-runs.csv`): per-cell spread up to 8.0× (mixed
-   push 1446/6119/11577 ms; large push 3.8×; small push 1.7×) purely
-   from how much of the payload zoey's write tier absorbed before
-   writeback throttled. Fix: durable-at-destination windows.
+   push 1446/6119/11577 ms) purely from how much of the payload the
+   write tier absorbed before writeback throttled. Fix:
+   durable-at-destination windows.
 2. **Durability must be equivalent on both ends**: Linux `sync`
    waits for writeback (push windows); macOS `sync(2)` only
    SCHEDULES writes, so pull windows fsync every landed file instead
    (media-level F_FULLFSYNC deliberately not used — the Linux side
    does not pay media flush either).
 3. **The daemon host's write path is stateful**
-   (`probe2-no-drain-runs.csv`): even durable-timed pushes ascend
+   (`probe2-no-drain-runs.csv`): durable-timed pushes ascend
    2.7 s → 13.4 s within a session as the NVMe tier fills and
    destages. Fix: sync-then-drain before every run (three
-   consecutive 2 s windows with < 2 MiB written across all disks;
-   timeouts are recorded per run label, never silent).
-   `probe3-drained-pushes.csv` is the manual confirmation probe
-   (4531/2731/3063 ms — agreement restored, residual first-run
-   outlier → median).
+   consecutive quiet 2 s windows; timeouts recorded per run label,
+   never silent). `probe3-drained-pushes.csv` is the manual
+   confirmation probe.
 4. **Wall clock, not monotonic**: start/end stamps are separate
-   processes; a cross-process `time.monotonic()` attempt produced
-   0/negative windows while the daemon logs showed multi-second
-   transfers. Wall-clock windows are seconds long; the median absorbs
-   any rare clock-step outlier.
+   processes; cross-process `time.monotonic()` has undefined
+   reference points and produced 0/negative windows (aborted run).
+5. **The durability step must time ITSELF** (codex otp-2w F3,
+   quantified): `ssh zoey sync` inside the window costs ~1.2 s of
+   connection setup (slow-core key exchange, measured) that lands
+   only on push cells. `probe5-sshoverhead-{runs,summary}.csv` is
+   the affected session — its push medians run ~0.3–0.6 s high. The
+   recorded dataset uses self-timed destination flushes (the remote
+   `sync` measures its own duration via `/proc/uptime`; the local
+   fsync walk reports its own elapsed), so connection/shell overhead
+   is excluded from every window on both rigs.
 
 ## Wire-reference data (explicitly NOT verdict cells)
 
 The July 2026-07-05 measurements (`docs/bench/10gbe-2026-07-05/`)
 used tmpfs local ends, ARC-warm re-reads, and no sync — deliberate
-engine-vs-wire isolation on a different rig (skippy ↔ netwatch-01,
-32 cores each). Per this plan slice they are re-labeled
-**wire-reference only**: never compare directions or absolute times
-from that data against these verdict cells (D-2026-07-05-1).
+engine-vs-wire isolation on a different rig. Per this plan slice they
+are re-labeled **wire-reference only**: never compare directions or
+absolute times from that data against these verdict cells
+(D-2026-07-05-1). `probe4-prereview-session-runs.csv` is an earlier
+session of THIS matrix kept for cross-session corroboration.
 
 ## Reproduction
 

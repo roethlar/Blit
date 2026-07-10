@@ -1,0 +1,13 @@
+cell,median_ms,avg_ms,best_ms
+push_tcp_large,3549,3549,3533
+push_grpc_large,3562,3561,3548
+pull_tcp_large,1309,1310,1306
+pull_grpc_large,1316,1315,1308
+push_tcp_small,2503,2505,2492
+push_grpc_small,3330,3329,3305
+pull_tcp_small,1381,1406,1351
+pull_grpc_small,1494,1497,1486
+push_tcp_mixed,2844,2843,2785
+push_grpc_mixed,3241,3239,3127
+pull_tcp_mixed,1316,1327,1295
+pull_grpc_mixed,1438,1442,1412

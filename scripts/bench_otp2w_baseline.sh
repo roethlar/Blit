@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# otp-2w: OLD-path baseline on the owner-designated NEAR-SYMMETRIC pair
-# (Mac client ↔ Windows daemon host, both 10GbE, both NVMe) — the rig
+# otp-2w: OLD-path baseline on the owner-designated CLOSER-SPEC pair
+# (Mac client ↔ Windows daemon host, both 10GbE, both NVMe; the owner's
+# words — not a claim of symmetry) — the rig
 # for the otp-12 acceptance bar's cross-direction half, which
 # D-2026-07-05-1 forbids evaluating on asymmetric endpoints (the
 # Mac↔zoey rig; see scripts/bench_otp2_baseline.sh and
@@ -56,16 +57,40 @@ DAEMON_EXE="$WIN_REPO\\target\\release\\blit-daemon.exe"
 REMOTE="$WIN_HOST:$PORT:/bench/"
 
 log() { echo "$(date +%H:%M:%S) $*" | tee -a "$OUT_DIR/bench.log"; }
-wssh() { ssh -o BatchMode=yes "$WIN_SSH" "$@"; }
+# ControlMaster multiplexing: ssh to this host costs ~0.5s per
+# connection (pwsh default-shell spawn); reuse one connection so the
+# many drain/purge round trips don't dominate wall time.
+SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-%r@%h-%p" -o ControlPersist=300)
+wssh() { ssh "${SSH_MUX[@]}" "$WIN_SSH" "$@"; }
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
-fsync_tree() {
+
+# --- Self-timed durability steps --------------------------------------
+# The timed window must contain the TRANSFER plus the DESTINATION
+# flush — and nothing else. Wrapping `ssh host flush` in the window
+# adds connection setup + shell spawn (~0.5s to this host, ~1.2s to
+# zoey — measured), which lands only on push cells and inflated the
+# first recorded session's push/pull ratios (codex otp-2w F3, upheld
+# and quantified). Each durability step therefore times ITSELF on the
+# destination machine and reports only its own duration; the harness
+# adds that to the locally-timed transfer segment.
+flush_dest_ms() {   # Windows volume flush; prints its own elapsed ms
+    # tr strips the CRLF PowerShell emits — bash arithmetic on a value
+    # with a trailing CR is a syntax error (found live on the first
+    # self-timed run).
+    local v
+    v=$(wssh "\$sw = [Diagnostics.Stopwatch]::StartNew(); Write-VolumeCache $WIN_DRIVE; \$sw.Stop(); [int]\$sw.Elapsed.TotalMilliseconds" | tr -cd '0-9')
+    echo "${v:-0}"
+}
+fsync_tree_ms() {   # macOS per-file fsync walk; prints its own elapsed ms
     python3 - "$1" <<'PYEOF'
-import os, sys
+import os, sys, time
+t = time.monotonic()
 for root, dirs, files in os.walk(sys.argv[1]):
     for name in files:
         fd = os.open(os.path.join(root, name), os.O_RDONLY)
         os.fsync(fd)
         os.close(fd)
+print(int((time.monotonic() - t) * 1000))
 PYEOF
 }
 
@@ -105,7 +130,14 @@ if (-not (Get-NetFirewallRule -DisplayName blit-bench-daemon -ErrorAction Silent
 # moment the launching ssh command returns. A WMI-created process is
 # parented outside the session and survives; `cmd /c` supplies the log
 # redirection Win32_Process.Create lacks.
+# Stale-daemon refusal + PID tracking (codex otp-2w F2): a leftover
+# daemon would mask a new bind failure and get benchmarked in place of
+# this build, so the launch REFUSES if any blit-daemon already runs;
+# the fresh daemon's PID is recorded and teardown kills exactly that
+# PID — never by name.
 start_daemon() {
+    wssh "if (Get-Process blit-daemon -ErrorAction SilentlyContinue) { 'STALE blit-daemon already running - stop it first (Stop-Process -Name blit-daemon)'; exit 1 }" || {
+        echo "refusing to start over a stale daemon"; exit 1; }
     wssh "Set-Content -Path '$WIN_TEST\\bench-config.toml' -Value @'
 [daemon]
 bind = \"0.0.0.0\"
@@ -119,13 +151,16 @@ path = '$WIN_TEST\\bench-module'
 \$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd /c \"\"$DAEMON_EXE\" --config \"$WIN_TEST\\bench-config.toml\" > \"$WIN_TEST\\daemon-out.log\" 2> \"$WIN_TEST\\daemon-err.log\"\"' }
 if (\$r.ReturnValue -ne 0) { \"wmi create failed: \$(\$r.ReturnValue)\"; exit 1 }"
     sleep 2
-    wssh "if (-not (Get-Process blit-daemon -ErrorAction SilentlyContinue)) { Get-Content '$WIN_TEST\\daemon-err.log' -ErrorAction SilentlyContinue | Select-Object -First 10; exit 1 }" || {
+    wssh "\$d = Get-Process blit-daemon -ErrorAction SilentlyContinue
+if (-not \$d) { Get-Content '$WIN_TEST\\daemon-err.log' -ErrorAction SilentlyContinue | Select-Object -First 10; exit 1 }
+Set-Content -Path '$WIN_TEST\\daemon.pid' -Value \$d.Id" || {
         echo "daemon failed to start"; exit 1; }
     log "daemon up on $WIN_HOST:$PORT (module bench -> $WIN_TEST\\bench-module)"
 }
 
 stop_daemon() {
-    wssh "Stop-Process -Name blit-daemon -Force -ErrorAction SilentlyContinue" || true
+    wssh "\$p = Get-Content '$WIN_TEST\\daemon.pid' -ErrorAction SilentlyContinue
+if (\$p) { Stop-Process -Id \$p -Force -ErrorAction SilentlyContinue; Remove-Item '$WIN_TEST\\daemon.pid' -ErrorAction SilentlyContinue }" || true
 }
 sweep_push_dirs() {
     wssh "Remove-Item -Recurse -Force '$WIN_TEST\\bench-module\\push_${SESSION_TAG}_*' -ErrorAction SilentlyContinue" || true
@@ -133,12 +168,17 @@ sweep_push_dirs() {
 trap 'stop_daemon; sweep_push_dirs' EXIT
 
 # --- Drain + cold caches ----------------------------------------------
+# A failed counter read must never count as quiet (codex otp-2w F1:
+# non-terminating errors leave $w = $null, and $null -lt N is true in
+# PowerShell) — errors terminate, and only a real numeric sample below
+# the threshold increments the quiet count.
 drain_host() {
-    wssh 'Write-VolumeCache '"$WIN_DRIVE"'
+    wssh '$ErrorActionPreference = "Stop"
+Write-VolumeCache '"$WIN_DRIVE"'
 $quiet = 0
 for ($i = 0; $i -lt 60; $i++) {
   $w = (Get-Counter "\PhysicalDisk(_Total)\Disk Write Bytes/sec" -SampleInterval 2 -MaxSamples 1).CounterSamples[0].CookedValue
-  if ($w -lt 1048576) { $quiet++ } else { $quiet = 0 }
+  if ($null -ne $w -and [double]$w -lt 1048576) { $quiet++ } else { $quiet = 0 }
   if ($quiet -ge 3) { "drained $(($i+1)*2)s"; exit 0 }
 }
 "DRAIN-TIMEOUT"'
@@ -146,9 +186,11 @@ for ($i = 0; $i -lt 60; $i++) {
 
 drop_caches() {   # $1 = run label
     local outcome
-    outcome=$(drain_host)
-    echo "$1: $outcome" >> "$OUT_DIR/drain.log"
-    [[ "$outcome" == *DRAIN-TIMEOUT* ]] && log "  WARNING: $1 ran UNDRAINED"
+    outcome=$(drain_host || true)
+    echo "$1: ${outcome:-DRAIN-ERROR}" >> "$OUT_DIR/drain.log"
+    # Anything but a positive "drained" report is a warned anomaly —
+    # a timeout AND a failed/empty probe alike (fail loud, not open).
+    [[ "$outcome" == drained* ]] || log "  WARNING: $1 ran UNDRAINED (${outcome:-probe failed})"
     sync
     sudo -n /usr/sbin/purge
     wssh "pwsh -NoProfile -File '$WIN_TEST\\purge-standby.ps1'" >/dev/null
@@ -196,17 +238,17 @@ finish_cell() {
 
 push_cell() {    # label src flag(optional)
     local label="$1" src="$2" flag="${3:-}"
-    local total=0 best=999999999 run start end ms
+    local total=0 best=999999999 run start end ms flush_ms
     for run in $(seq 1 "$RUNS"); do
         drop_caches "$label-r$run"
         start=$(now_ms)
         # shellcheck disable=SC2086
         "$BLIT" copy "$src" "${REMOTE}push_${SESSION_TAG}_${label}_r${run}/" --yes $flag >/dev/null 2>&1
-        wssh "Write-VolumeCache $WIN_DRIVE" >/dev/null   # durable at dest
         end=$(now_ms)
-        ms=$(( end - start ))
+        flush_ms=$(flush_dest_ms)         # durable at dest, self-timed
+        ms=$(( end - start + flush_ms ))
         total=$(( total + ms )); (( ms < best )) && best=$ms
-        log "  $label run $run: ${ms}ms"
+        log "  $label run $run: ${ms}ms (flush ${flush_ms}ms)"
         echo "$label,$run,$ms" >> "$CSV"
     done
     finish_cell "$label" "$total" "$best"
@@ -214,7 +256,7 @@ push_cell() {    # label src flag(optional)
 
 pull_cell() {    # label remote_src flag(optional)
     local label="$1" remote_src="$2" flag="${3:-}"
-    local total=0 best=999999999 run start end ms
+    local total=0 best=999999999 run start end ms fsync_ms
     for run in $(seq 1 "$RUNS"); do
         rm -rf "$MAC_WORK/dst_pull"
         mkdir -p "$MAC_WORK/dst_pull"
@@ -222,11 +264,11 @@ pull_cell() {    # label remote_src flag(optional)
         start=$(now_ms)
         # shellcheck disable=SC2086
         "$BLIT" copy "$remote_src" "$MAC_WORK/dst_pull" --yes $flag >/dev/null 2>&1
-        fsync_tree "$MAC_WORK/dst_pull"                  # durable at dest
         end=$(now_ms)
-        ms=$(( end - start ))
+        fsync_ms=$(fsync_tree_ms "$MAC_WORK/dst_pull")   # durable, self-timed
+        ms=$(( end - start + fsync_ms ))
         total=$(( total + ms )); (( ms < best )) && best=$ms
-        log "  $label run $run: ${ms}ms"
+        log "  $label run $run: ${ms}ms (fsync ${fsync_ms}ms)"
         echo "$label,$run,$ms" >> "$CSV"
     done
     finish_cell "$label" "$total" "$best"

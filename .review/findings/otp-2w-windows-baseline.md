@@ -29,8 +29,9 @@ cross-direction half.
   host, the host's prior checkout state preserved via stash
   (`bench-cargo-lock`).
 - Evidence: `docs/bench/otp2w-baseline-2026-07-10/` (README +
-  summary/runs/drain.log). Zero drain timeouts; 8 of 12 cells ≤ 2%
-  spread, worst 11.9%.
+  summary.csv/runs.csv/drain-outcomes.txt). Zero drain timeouts;
+  7 of 12 cells ≤ 2% spread, worst 11.9% (counts re-verified at the
+  codex round — the first write-up said 8/12).
 
 **Files**:
 
