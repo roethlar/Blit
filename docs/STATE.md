@@ -197,5 +197,4 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   now runs model gpt-5.6-sol (config default moved past the loop doc's
   gpt-5.5 note); one review round was delayed ~1 h by a codex account
   usage limit (resets hourly-ish; scriptable around).
-- *(40th and earlier pruned to the cap — see DEVLOG 2026-07-09/10 and
-  2026-07-06 entries.)*
+- *(40th and earlier pruned to the cap — see DEVLOG 2026-07-06..10.)*
