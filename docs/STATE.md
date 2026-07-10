@@ -179,21 +179,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-06 (39th)** @ `598f102` — **Session-wide codex review (5
-  findings, all fixed); one new backlog item filed; otp-7 still
-  untouched.** `/playbook reviewloop` named a generic template this repo's
-  own guidance says isn't the operative loop here (branch-per-finding
-  conflicts with no-agent-branches) — ran `GPT_REVIEW_LOOP.md`'s mechanism
-  instead over the whole session diff (`9876687..44de868`). 3 Medium + 2
-  Low, all cross-doc staleness/contradictions from mid-session edits not
-  propagating everywhere (stale Q5 header, a STATE/plan-doc contradiction,
-  a stale handoff entry, a date-drift note, an overstated claim) — fixed
-  `419f5d1`, verdict `.review/results/session-2026-07-06.gpt-verdict.md`.
-  Also: the CLI transfer-output redesign was filed to `TODO.md` only
-  (`598f102`) — full detail lives in that row.
-  **Exact first action next
-  session**: otp-7 — owner's Q1–Q3 on `docs/plan/OTP7_RESUME.md`, flip
-  Active, codex-review, implement otp-7a *(done 2026-07-09,
-  D-2026-07-09-1)*. In-flight: none. Done since
-  38th: the session-wide review pass; the CLI-output-redesign TODO item.
+- **2026-07-10 (40th)** @ `fcc0bb7`+ — **otp-7 Active (owner Q1–Q3,
+  D-2026-07-09-1); otp-7a landed and CLOSED through the codex loop; owner
+  asked to stop after the slice for a session restart.** otp-7a = resume
+  over the in-stream carrier (`4e5ff58`, fixes `1919410`, wire bounds
+  D-2026-07-10-1, suite 1530→1540 — the recorded 1529 was a miscount).
+  **Exact first action next session**: implement **otp-7b** starting from
+  the "7b implementation map" section in `docs/plan/OTP7_RESUME.md`
+  (surveyed 2026-07-10: receive side already decodes block records; the
+  work is source-side routing through `DataPlaneSink`/`NeedListSink`,
+  shared resume claims + `files_resumed` on the receive path, session-client
+  resume options, the D4 CLI fault-summary mechanism at the
+  survives-cutover layer, cancel-during-resume e2e). In-flight: none;
+  tree clean at handoff commit.
+- **2026-07-06 (39th)** @ `598f102` — session-wide codex review (5
+  findings fixed, `419f5d1`); CLI transfer-output redesign filed to
+  `TODO.md`; its stated first action (otp-7 Q1–Q3 → Active → otp-7a) was
+  done 2026-07-09/10 per the 40th. Detail: DEVLOG 2026-07-06 22:00Z.
 - *(38th and earlier pruned to the cap — see DEVLOG 2026-07-06 entries.)*

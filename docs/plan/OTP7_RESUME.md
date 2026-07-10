@@ -176,6 +176,59 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   that a `CancelJob` mid-resume tears down cleanly, as otp-4b-3 pinned for
   file records).
 
+### 7b implementation map (surveyed 2026-07-10, before any 7b code)
+
+Recorded so the implementing session starts from facts, not re-exploration:
+
+- **Receive side is ALREADY DONE.** `remote/transfer/pipeline.rs::
+  execute_receive_pipeline` (~:417) decodes the binary `BLOCK` (=2) and
+  `BLOCK_COMPLETE` (=3) record tags (`remote/transfer/data_plane.rs:16-20`),
+  enforces `MAX_WIRE_BLOCK_BYTES`, and dispatches
+  `PreparedPayload::FileBlock{,Complete}` to `sink.write_payload` — which
+  `FsTransferSink` already applies. No new decoding needed.
+- **Senders exist but are unreached**: `DataPlaneSession::send_block` (~:536)
+  and `send_block_complete` (~:592) in `remote/transfer/data_plane.rs`; the
+  block-complete record carries mtime+perms, so zero-block completes stamp
+  metadata (the wire `BlockTransferComplete` frame does not — the SOURCE has
+  the manifest header and must supply them).
+- **Un-stub sites (session)**: grant suppression `transfer_session/mod.rs`
+  (`open.in_stream_bytes || resume_negotiated(&open)`); the send-loop bail
+  ("resume block records ride the in-stream carrier until otp-7b");
+  `NeedListSink::write_payload`'s FileBlock rejection
+  (`transfer_session/data_plane.rs` ~:970, unit test ~:1030) — on the data
+  plane the resume claim + `files_resumed` count must happen HERE (the
+  control loop never sees block records), so `resume_headers`/the resumed
+  counter need to be shared with the receive path like `outstanding` is;
+  `DataPlaneSink::write_payload`'s relay rejection (`sink.rs` ~:799) routes
+  to `send_block`/`send_block_complete` instead.
+- **Source-side flow wrinkle**: `SourceDataPlane::queue` takes
+  `Vec<TransferPayload>` and the pipeline calls `source.prepare_payload`,
+  which BAILS on FileBlock ("cannot be prepared from a filesystem source",
+  `payload.rs:61`) — the block payloads must either bypass the prepare stage
+  or the session's block-diff must run inside the pipeline path; the 7a
+  in-stream block-diff (`send_resume_block_records`) is the logic to share.
+- **Session client**: `PushSessionOptions`/`PullSessionOptions`
+  (`session_client.rs:40/:119`) have NO resume field and never set
+  `SessionOpen.resume` — 7b wiring, needed by any e2e.
+- **CLI tension (affects the D4 rider)**: NO CLI verb calls
+  `run_push_session`/`run_pull_session` yet — the only callers are the
+  daemon e2e/parity tests (`blit-daemon/src/service/transfer_session_e2e.rs`);
+  CLI verbs ride the OLD paths until the otp-10 cutover. The CLI's `--resume`
+  flag (`blit-cli/src/cli.rs:267`) flows only into the old paths. So the
+  end-of-op fault summary's CLI print integration cannot be exercised
+  through a session-driven CLI verb until otp-10; 7b builds the mechanism at
+  the layer that survives cutover (structured file identity on the fault +
+  the summary formatting + pins at the session-client/e2e level) and the
+  verb-level print lands with the otp-10 verb switch. `SessionFault`
+  (`transfer_session/mod.rs` ~:176) has no structured path field today —
+  message-only; add one rather than string-scraping.
+- **e2e references**: harness `Daemon::start` + the otp-4b-3 cancel e2e
+  (`mid_transfer_cancel_surfaces_cancelled_over_the_data_plane`,
+  `transfer_session_e2e.rs` ~:294, `StuckAfterFirstChunkSource` shape) is the
+  template for cancel-during-resume; old-path A/B references:
+  `blit-cli/tests/remote_resume.rs` (real-binary `--resume` pulls) and
+  `remote/pull.rs::wire_equivalence_resume_and_filter_and_force_grpc`.
+
 ## Guard-proof targets (the plan's mandate: "pins the stale-partial and
 mid-resume-failure cases")
 
