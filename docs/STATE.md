@@ -59,10 +59,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     endpoints — so this data anchors per-direction converge-up
     (old-vs-new, same cell) and CANNOT anchor the otp-12 bar's
     cross-direction half. July tmpfs data re-labeled wire-reference.
-  - Current: **HOLD for the owner adjudication below** (otp-12
-    acceptance bar on asymmetric rigs / whether a symmetric pair
-    will be provided); **otp-10 (cutover + deletion)** follows.
-    otp-5b-3 (pull cancel) optional.
+  - **otp-2 CLOSED (both halves).** The owner adjudicated the
+    asymmetric-rig question by designating Mac↔Windows ("closer
+    spec... both have 10gbe") for the cross-direction half; recorded
+    as **otp-2w** (`scripts/bench_otp2w_baseline.sh` + PowerShell
+    host plumbing; evidence
+    `docs/bench/otp2w-baseline-2026-07-10/README.md` — zero drain
+    timeouts, 8/12 cells ≤2% spread). zoey = per-direction
+    reference; Windows pair = cross-direction rig. Notable recorded
+    reading: old push trails old pull ×1.8–×2.7 even on the
+    close-spec pair, carrier-insensitive on large — otp-12's
+    old-vs-new discriminates code cost from platform write-path
+    cost. Owner standing: remote↔remote (delegated) testing uses
+    the Windows box + TrueNAS.
+  - Current: **otp-10 (cutover + deletion)**. otp-5b-3 (pull
+    cancel) optional.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -80,10 +91,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
-   b-2), otp-8, otp-9 (a/b) `[x]`; otp-2 per-direction baseline
-   recorded (symmetric-fs half = the owner question in Open
-   questions). Current: **HOLD on that adjudication**, then
-   **otp-10** (cutover + deletion).
+   b-2), otp-8, otp-9 (a/b), otp-2 (zoey per-direction + otp-2w
+   Windows cross-direction) `[x]`. Current: **otp-10 (cutover +
+   deletion)**.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
    measurement follow-ups (Win 11 bare-metal; disk-path variants;
@@ -140,12 +150,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **otp-12 acceptance-bar adjudication (NEW — holds otp-10)**: see
-  the first Open question. The rig itself is open (owner gave SSH +
-  the 10GbE pair; per-direction baseline recorded). Standing owner
-  instruction captured: the Windows 10GbE box + TrueNAS serve
-  **remote↔remote (delegated) testing** when that stage comes
-  (otp-12 matrix). otp-5b-3 question stands.
+- ~~otp-12 acceptance-bar adjudication~~ RESOLVED (owner designated
+  Mac↔Windows; otp-2w recorded — see Now/Open questions). Nothing
+  holds otp-10 anymore. otp-5b-3 question stands.
 - **Three 10 GbE gate declarations**: ue-1 pass/fail, ue-2 pass/fail
   or re-scope, REV4 → Shipped. (Zero-copy a/b/c RESOLVED —
   D-2026-07-05-3; skippy CPU data stays in DEVLOG + DIAGNOSIS.md.)
@@ -155,19 +162,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(OPEN, new 2026-07-10, otp-2 — owner call BEFORE otp-10 proceeds)**
-  D-2026-07-05-1 already rules that cross-direction comparisons are
-  valid only on symmetric endpoints; the Mac↔zoey rig's write ends
-  are asymmetric (client SSD vs daemon pool — old-pull beat old-push
-  1.3–1.8× in every recorded cell), so the otp-12 bar's
-  cross-direction half ("every cell ≤ the better of that cell's two
-  old directions") cannot be evaluated on this rig, and otp-2's
-  "symmetric-fs verdict cells" deliverable is only partially
-  satisfiable here. Owner options: (a) accept per-direction
-  converge-up (new ≤ old, same cell, +10%) as this rig's verdict and
-  proceed to otp-10, and/or (b) designate a hardware-symmetric pair
-  (e.g. two like machines) for the cross-direction half before
-  otp-12. Details: `docs/bench/otp2-baseline-2026-07-10/README.md`.
+- **(RESOLVED 2026-07-10 — owner)** Asymmetric-rig acceptance
+  question: the owner designated Mac↔Windows as the closer-spec pair
+  for the cross-direction half (recorded as otp-2w, see Now); zoey
+  stays per-direction-only per D-2026-07-05-1. otp-12 runs both:
+  per-direction converge-up on zoey, both halves on the Windows pair
+  (interleaved A/B for push cells on both rigs).
 - **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
   same-size + dest-NEWER — old push clobbers, session adopts **data-safe
   SKIP** (converge-up; `--force` still overwrites; pinned by
