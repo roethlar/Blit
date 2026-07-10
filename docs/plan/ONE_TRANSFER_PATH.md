@@ -67,7 +67,10 @@ no second code path to differ.
   jobs, cancellation) is the bar. Zero-copy receive is **unparked**
   (D-2026-07-05-3, CPU-bound UNAS rig) but is a follow-on slice set
   after cutover, not one of this plan's slices — see the Design note
-  on the write-strategy seam.
+  on the write-strategy seam. One narrow owner-granted exception
+  (D-2026-07-09-1, otp-7b): the CLI end-of-operation fault summary —
+  name the file(s) a session fault affected and suggest a re-run —
+  lands inside otp-7. Nothing else new rides this plan.
 
 ## Constraints
 

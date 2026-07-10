@@ -115,10 +115,17 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   codex: confirm the helper doesn't belong on the trait.
 - **D4 — mid-resume-failure**: block writes patch the partial in place (no
   temp+rename, matching the old client). A fault mid-block-transfer surfaces as a
-  `SessionFault` (peer-notified) and aborts; the partial is left partially patched,
-  and the NEXT resume re-syncs via a fresh block-hash exchange (the partial's new
-  hashes reflect whatever landed). The pin asserts the fault surfaces cleanly and no
-  file is falsely counted `files_resumed`. (No stronger atomicity than the code we
+  `SessionFault` (peer-notified) and aborts **the session** — the same
+  whole-session failure model every session payload record already has (a
+  file record hitting EOF-short aborts the session today, `mod.rs`
+  `send_payload_records`); resume adds no new abort semantics. Per-file
+  continue-on-error (skip the bad file, keep transferring) is NOT in otp-7 —
+  it would be a session-wide failure-model change needing its own owner
+  decision (`docs/plan/LOCAL_ERROR_TELEMETRY.md` is the adjacent Draft).
+  After the abort the partial is left partially patched, and the NEXT resume
+  re-syncs via a fresh block-hash exchange (the partial's new hashes reflect
+  whatever landed). The pin asserts the fault surfaces cleanly and no file is
+  falsely counted `files_resumed`. (No stronger atomicity than the code we
   are replacing — called out as a Known gap, not a regression.)
   **Owner rider (2026-07-09, Q2)**: the fault must also appear in the CLI's
   **end-of-operation summary** — naming the affected file(s) and suggesting a
@@ -142,10 +149,16 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   wiring over the control-lane `BlockTransfer`/`Complete` frames; `files_resumed`.
   Pins: happy-path partial, identical-file (zero blocks), stale-partial fallback,
   mid-resume-failure.
-- **otp-7b — resume over the TCP data plane.** Port the block records onto the data
-  plane (`data_plane.rs::send_block`/`send_block_complete` already exist) with the
-  same choreography; e2e in the daemon harness. Follows 7a exactly as otp-4b-1→4b-2
-  and otp-5b-1→5b-2 did.
+- **otp-7b — resume over the TCP data plane, plus the D4 owner rider.** Port the
+  block records onto the data plane (`data_plane.rs::send_block`/
+  `send_block_complete` already exist) with the same choreography; e2e in the
+  daemon harness. Follows 7a exactly as otp-4b-1→4b-2 and otp-5b-1→5b-2 did.
+  **7b also owns the CLI end-of-operation fault summary** (D-2026-07-09-1, Q2
+  rider): a session fault reported by the CLI transfer commands must name the
+  affected file(s) at the END of the operation output and suggest a re-run to
+  converge, with a test pinning that the failed path appears in the final
+  output. 7a cannot own it — 7a's surface is the in-process roles suite,
+  which has no CLI layer.
 
 ## Guard-proof targets (the plan's mandate: "pins the stale-partial and
 mid-resume-failure cases")

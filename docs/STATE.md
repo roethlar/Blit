@@ -183,7 +183,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `TODO.md` only (`598f102`), needs its own `plan` when picked up.
   **Exact first action next
   session**: otp-7 — owner's Q1–Q3 on `docs/plan/OTP7_RESUME.md`, flip
-  Active, codex-review, implement otp-7a. In-flight: none. Done since
+  Active, codex-review, implement otp-7a *(done 2026-07-09,
+  D-2026-07-09-1)*. In-flight: none. Done since
   38th: the session-wide review pass; the CLI-output-redesign TODO item.
 - **2026-07-06 (38th)** @ `44de868` — **`LOCAL_ERROR_TELEMETRY.md` drafted
   + reviewed twice (3+3 findings fixed), Q1-Q5 resolved; still Draft, no
