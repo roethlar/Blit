@@ -89,8 +89,12 @@ temporary mutation (see the verdict file for the run evidence):
   tests (same accept-side path), but the bind failure itself is only
   log-covered — forcing a real `bind("0.0.0.0", 0)` failure in a test
   is not portably possible. Accepted as untestable-by-construction.
-- Cancel/fault e2es remain data-plane-only over the wire; the
-  in-stream fault path is pinned in the role suite
-  (`mid_resume_source_fault_surfaces_cleanly_to_both_ends`,
-  in-stream fixtures). Judged sufficient: the fault frames ride the
-  control lane identically on both carriers.
+- ~~Cancel/fault e2es remain data-plane-only over the wire … judged
+  sufficient: the fault frames ride the control lane identically on
+  both carriers.~~ **FALSIFIED by codex review (F1)**: the frames ride
+  identically but only the data-plane send path raced them — an
+  in-stream cancel could hang the client indefinitely. Fixed in the
+  review-fix commit (fault-signal race + the in-stream cancel e2e);
+  adjudication in `.review/results/otp-8.gpt-verdict.md`. Codex F2
+  (unbounded `TarShardHeader` frame vs the tonic 4 MiB limit) was also
+  accepted and fixed there (in-stream shard-header split + guards).

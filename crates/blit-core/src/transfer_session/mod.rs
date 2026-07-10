@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use eyre::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::copy::DEFAULT_BLOCK_SIZE;
 use crate::generated::transfer_frame::Frame;
@@ -87,6 +87,17 @@ const MIN_RESUME_BLOCK_SIZE: usize = 64 * 1024;
 /// whole block; 2 MiB of content plus the envelope stays well under the
 /// 4 MiB frame limit.
 const MAX_IN_STREAM_RESUME_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+/// Ceiling, in-stream carrier, for one `TarShardHeader` frame's encoded
+/// member list (codex otp-8 F2). The planner bounds a shard's CONTENT
+/// bytes and file count (≤ 4096), but not the encoded size of its
+/// header list — 4096 legally long relative paths can push the single
+/// protobuf frame past tonic's 4 MiB decode limit. The in-stream send
+/// path splits an offending shard into consecutive smaller shard
+/// records under this bound (same grammar, same planner decisions —
+/// only the record boundaries move). Same 2 MiB posture as the resume
+/// block ceiling: content plus envelope stays well under the frame
+/// limit. The data plane is unaffected (binary records, 64 MiB cap).
+const MAX_IN_STREAM_TAR_HEADER_BYTES: usize = 2 * 1024 * 1024;
 /// Ceiling, TCP data plane (otp-7b): binary `BLOCK` records have no
 /// protobuf envelope; the bound is the receive pipeline's per-record
 /// allocation cap (= the old resume path's `MAX_BLOCK_SIZE`, 64 MiB).
@@ -768,6 +779,44 @@ enum SourceEvent {
     Fault(SessionFault),
 }
 
+/// The receive half's event sender, mirroring every `Fault` onto a
+/// `watch` signal as it is queued. The in-stream send path races this
+/// signal against its (potentially blocked) record sends — codex otp-8
+/// F1: a peer fault (CANCELLED above all) must interrupt a send half
+/// stuck inside `reader.read()`/`tx.send()`, exactly as the data-plane
+/// drain's `recv_peer_fault` arm does for socket sends. The mpsc queue
+/// still carries the fault for the between-send paths; the watch is a
+/// non-consuming side channel, so mid-send `Need`s stay queued.
+struct SourceEventSender {
+    tx: mpsc::UnboundedSender<SourceEvent>,
+    fault_signal: watch::Sender<Option<SessionFault>>,
+}
+
+impl SourceEventSender {
+    fn send(&self, event: SourceEvent) -> Result<(), mpsc::error::SendError<SourceEvent>> {
+        if let SourceEvent::Fault(fault) = &event {
+            let _ = self.fault_signal.send(Some(fault.clone()));
+        }
+        self.tx.send(event)
+    }
+}
+
+/// Resolves to the peer/receive-half fault the moment one is signalled;
+/// never resolves otherwise (the racing send future decides the
+/// outcome, mirroring `recv_peer_fault`'s closed-channel posture).
+async fn peer_fault_signalled(signal: &mut watch::Receiver<Option<SessionFault>>) -> SessionFault {
+    loop {
+        if let Some(fault) = signal.borrow_and_update().clone() {
+            return fault;
+        }
+        if signal.changed().await.is_err() {
+            // Sender dropped without ever signalling a fault: stay
+            // pending so the send future's own result decides.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Run the SOURCE role of one transfer session over `transport`.
 /// Returns the destination-computed `TransferSummary` (contract: the
 /// end that wrote the bytes is the end that attests to them).
@@ -838,6 +887,10 @@ async fn drive_source(
     // after ManifestComplete received + all entries diffed).
     let manifest_sent = Arc::new(AtomicBool::new(false));
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    // Fault side-channel (codex otp-8 F1): the in-stream send path
+    // races this signal against blocked record sends; see
+    // `SourceEventSender`.
+    let (fault_tx, fault_rx) = watch::channel(None::<SessionFault>);
     // AbortOnDrop: an early error return below must abort the receive
     // half instead of leaking it (same rationale as design-2 / w4-1).
     let _recv_guard = AbortOnDrop::new(tokio::spawn(source_recv_half(
@@ -845,7 +898,10 @@ async fn drive_source(
         Arc::clone(&sent),
         Arc::clone(&manifest_sent),
         resume_negotiated(&negotiated.open),
-        event_tx,
+        SourceEventSender {
+            tx: event_tx,
+            fault_signal: fault_tx,
+        },
     )));
 
     match source_send_half(
@@ -858,6 +914,7 @@ async fn drive_source(
         sent,
         &manifest_sent,
         event_rx,
+        fault_rx,
     )
     .await
     {
@@ -882,7 +939,7 @@ async fn source_recv_half(
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
     manifest_sent: Arc<AtomicBool>,
     resume_session: bool,
-    events: mpsc::UnboundedSender<SourceEvent>,
+    events: SourceEventSender,
 ) {
     loop {
         let received = match rx.recv().await {
@@ -1008,6 +1065,7 @@ async fn source_send_half(
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
     manifest_sent: &AtomicBool,
     mut events: mpsc::UnboundedReceiver<SourceEvent>,
+    mut fault_signal: watch::Receiver<Option<SessionFault>>,
 ) -> Result<TransferSummary> {
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut resume: ResumeSendState = ResumeSendState::default();
@@ -1180,7 +1238,23 @@ async fn source_send_half(
                     }
                 }
                 None => {
-                    send_payload_records(tx, &source, plan_options, batch, &mut read_buf).await?;
+                    // codex otp-8 F1: race the record sends against the
+                    // receive half's fault signal — the in-stream twin of
+                    // the data-plane drain's `recv_peer_fault` arm. A peer
+                    // cancel (framed CANCELLED, then RPC teardown) must
+                    // interrupt a send blocked in `reader.read()` or in
+                    // flow-controlled `tx.send()` and surface the framed
+                    // reason, not hang or decay to INTERNAL. Biased:
+                    // when both are ready, the framed fault wins.
+                    tokio::select! {
+                        biased;
+                        fault = peer_fault_signalled(&mut fault_signal) => {
+                            return Err(eyre::Report::new(fault));
+                        }
+                        res = send_payload_records(tx, &source, plan_options, batch, &mut read_buf) => {
+                            res?;
+                        }
+                    }
                 }
             }
             continue;
@@ -1220,10 +1294,17 @@ async fn source_send_half(
                     for (header, hashes) in ready {
                         // codex 7b-2 G2: the whole in-stream record names
                         // its file on failure, matching the data-plane
-                        // carrier's outer wrap.
-                        send_resume_block_records(tx, &source, &header, &hashes)
-                            .await
-                            .map_err(|e| tag_path(e, &header.relative_path))?;
+                        // carrier's outer wrap. Same fault race as the
+                        // plain-batch send above (codex otp-8 F1).
+                        tokio::select! {
+                            biased;
+                            fault = peer_fault_signalled(&mut fault_signal) => {
+                                return Err(eyre::Report::new(fault));
+                            }
+                            res = send_resume_block_records(tx, &source, &header, &hashes) => {
+                                res.map_err(|e| tag_path(e, &header.relative_path))?;
+                            }
+                        }
                     }
                 }
             }
@@ -1664,6 +1745,47 @@ async fn prefer_peer_fault(
     }
 }
 
+/// Split any planned tar shard whose encoded `TarShardHeader` member
+/// list would exceed `max_encoded` into consecutive smaller shards
+/// (codex otp-8 F2 — the in-stream carrier's frame-limit bound; cap
+/// rationale at [`MAX_IN_STREAM_TAR_HEADER_BYTES`]). Order and file
+/// set are preserved; non-shard payloads pass through untouched. Pure,
+/// so the bound is unit-testable without a 4 MiB fixture.
+fn bound_in_stream_tar_headers(
+    payloads: Vec<TransferPayload>,
+    max_encoded: usize,
+) -> Vec<TransferPayload> {
+    use prost::Message;
+    let mut out = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        match payload {
+            TransferPayload::TarShard { headers } => {
+                let mut cur: Vec<FileHeader> = Vec::new();
+                let mut cur_bytes = 0usize;
+                for header in headers {
+                    // One repeated-field entry costs its message bytes
+                    // plus tag + length delimiter; 5 covers any header
+                    // a filesystem can produce.
+                    let cost = header.encoded_len() + 5;
+                    if !cur.is_empty() && cur_bytes + cost > max_encoded {
+                        out.push(TransferPayload::TarShard {
+                            headers: std::mem::take(&mut cur),
+                        });
+                        cur_bytes = 0;
+                    }
+                    cur_bytes += cost;
+                    cur.push(header);
+                }
+                if !cur.is_empty() {
+                    out.push(TransferPayload::TarShard { headers: cur });
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Plan one batch of needed headers with the engine planner and emit
 /// the resulting payload records per the in-stream grammar.
 async fn send_payload_records(
@@ -1674,6 +1796,10 @@ async fn send_payload_records(
     read_buf: &mut [u8],
 ) -> Result<()> {
     let payloads = diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
+    // In-stream only: every shard's header frame must clear the tonic
+    // frame limit (codex otp-8 F2). The data-plane branch keeps the
+    // planner's shards whole — its records are not protobuf frames.
+    let payloads = bound_in_stream_tar_headers(payloads, MAX_IN_STREAM_TAR_HEADER_BYTES);
     for payload in payloads {
         match source.prepare_payload(payload).await? {
             PreparedPayload::File(header) => {
@@ -3466,5 +3592,152 @@ mod tests {
         assert_eq!(back.peer_build_id, "1.0+aaa");
         assert_eq!(back.local_build_id, "1.0+bbb");
         assert!(back.peer_notified);
+    }
+
+    fn tar_test_header(path: String) -> FileHeader {
+        FileHeader {
+            relative_path: path,
+            size: 1,
+            mtime_seconds: 1_600_000_000,
+            permissions: 0o644,
+            checksum: Vec::new(),
+        }
+    }
+
+    /// codex otp-8 F2: an oversized shard splits into consecutive
+    /// shards, each with its encoded member list under the bound; order
+    /// and file set are preserved and non-shard payloads pass through.
+    #[test]
+    fn tar_shard_headers_split_under_the_in_stream_bound() {
+        use prost::Message;
+        let headers: Vec<FileHeader> = (0..40)
+            .map(|i| tar_test_header(format!("{i:0>100}")))
+            .collect();
+        let expected: Vec<String> = headers.iter().map(|h| h.relative_path.clone()).collect();
+
+        let out = bound_in_stream_tar_headers(
+            vec![
+                TransferPayload::TarShard {
+                    headers: headers.clone(),
+                },
+                TransferPayload::File(tar_test_header("plain.bin".into())),
+            ],
+            512,
+        );
+        let shards: Vec<&Vec<FileHeader>> = out
+            .iter()
+            .filter_map(|p| match p {
+                TransferPayload::TarShard { headers } => Some(headers),
+                _ => None,
+            })
+            .collect();
+        assert!(shards.len() > 1, "an oversized shard must split");
+        let mut flat: Vec<String> = Vec::new();
+        for shard in &shards {
+            let encoded: usize = shard.iter().map(|h| h.encoded_len() + 5).sum();
+            assert!(
+                encoded <= 512,
+                "each split shard's encoded members fit the bound (got {encoded})"
+            );
+            flat.extend(shard.iter().map(|h| h.relative_path.clone()));
+        }
+        assert_eq!(flat, expected, "order and file set preserved");
+        assert!(
+            matches!(out.last(), Some(TransferPayload::File(h)) if h.relative_path == "plain.bin"),
+            "non-shard payloads pass through in order"
+        );
+
+        // Under the real bound the same shard stays whole.
+        let out = bound_in_stream_tar_headers(
+            vec![TransferPayload::TarShard { headers }],
+            MAX_IN_STREAM_TAR_HEADER_BYTES,
+        );
+        assert_eq!(out.len(), 1, "a small shard passes through whole");
+
+        // A single header over the bound is still emitted, alone —
+        // there is nothing below one file to split to.
+        let out = bound_in_stream_tar_headers(
+            vec![TransferPayload::TarShard {
+                headers: vec![tar_test_header("x".repeat(600))],
+            }],
+            512,
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    /// codex otp-8 F2, the wiring guard: `send_payload_records` itself
+    /// must emit multiple `TarShardHeader` frames — each under the
+    /// in-stream bound — when the planner hands it ONE shard whose
+    /// header list would exceed it. 4096 one-byte files (the planner's
+    /// per-shard count ceiling, forced into a single shard) with
+    /// ~600-byte relative paths encode past the 2 MiB bound. Reverting
+    /// the `bound_in_stream_tar_headers` call makes this fail on a
+    /// single oversized frame.
+    #[tokio::test]
+    async fn in_stream_send_splits_oversized_tar_header_frames() {
+        use prost::Message;
+        use std::sync::Mutex as StdMutex2;
+
+        struct CaptureTx(Arc<StdMutex2<Vec<TransferFrame>>>);
+        #[async_trait::async_trait]
+        impl FrameTx for CaptureTx {
+            async fn send(&mut self, frame: TransferFrame) -> Result<()> {
+                self.0.lock().expect("capture lock").push(frame);
+                Ok(())
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deep = format!("{}/{}", "a".repeat(200), "b".repeat(200));
+        std::fs::create_dir_all(tmp.path().join(&deep)).expect("deep dir");
+        let mut batch: Vec<FileHeader> = Vec::with_capacity(4096);
+        for i in 0..4096 {
+            let rel = format!("{deep}/{:0>190}", i);
+            std::fs::write(tmp.path().join(&rel), b"x").expect("write file");
+            batch.push(tar_test_header(rel));
+        }
+        let encoded_total: usize = batch.iter().map(|h| h.encoded_len() + 5).sum();
+        assert!(
+            encoded_total > MAX_IN_STREAM_TAR_HEADER_BYTES,
+            "fixture must exceed the bound to exercise the split (got {encoded_total})"
+        );
+
+        let frames: Arc<StdMutex2<Vec<TransferFrame>>> = Arc::default();
+        let mut tx: Box<dyn FrameTx> = Box::new(CaptureTx(Arc::clone(&frames)));
+        let source: Arc<dyn TransferSource> = Arc::new(
+            crate::remote::transfer::source::FsTransferSource::new(tmp.path().to_path_buf()),
+        );
+        let plan_options = PlanOptions {
+            force_tar: true,
+            small_count_target: Some(4096),
+            ..PlanOptions::default()
+        };
+        let mut read_buf = vec![0u8; IN_STREAM_CHUNK];
+        send_payload_records(&mut tx, &source, plan_options, batch, &mut read_buf)
+            .await
+            .expect("in-stream send succeeds");
+
+        let frames = frames.lock().expect("capture lock");
+        let shard_headers: Vec<&TarShardHeader> = frames
+            .iter()
+            .filter_map(|f| match &f.frame {
+                Some(Frame::TarShardHeader(h)) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shard_headers.len() > 1,
+            "the oversized planner shard must split into multiple header frames"
+        );
+        let mut total_files = 0usize;
+        for header in &shard_headers {
+            assert!(
+                header.encoded_len() <= MAX_IN_STREAM_TAR_HEADER_BYTES + 16,
+                "every TarShardHeader frame stays under the in-stream bound (got {})",
+                header.encoded_len()
+            );
+            total_files += header.files.len();
+        }
+        assert_eq!(total_files, 4096, "no file lost or duplicated by the split");
     }
 }

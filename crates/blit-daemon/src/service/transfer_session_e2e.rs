@@ -1021,6 +1021,82 @@ async fn pull_session_resume_clamps_oversized_blocks_to_in_stream_ceiling() {
     daemon.stop().await;
 }
 
+/// codex otp-8 F1: the mid-transfer cancel guard on the IN-STREAM
+/// carrier. The data-plane twin above relies on the drain's
+/// `recv_peer_fault` select arm; in-stream, the send half runs the
+/// record sends inline, so without the fault race a cancel leaves the
+/// client stuck in `reader.read()` forever (this test then fails its
+/// no-hang timeout) — and a send that errors on the RPC teardown would
+/// surface INTERNAL instead of the peer's framed CANCELLED.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mid_transfer_cancel_surfaces_cancelled_over_in_stream_carrier() {
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("big.bin"), vec![0xABu8; 4 * 1024 * 1024]).unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let source = Arc::new(StuckAfterFirstChunkSource {
+        inner: FsTransferSource::new(src.path().to_path_buf()),
+        started: Arc::clone(&started),
+    });
+
+    let ep = daemon.endpoint.clone();
+    let client = tokio::spawn(async move {
+        run_push_session(
+            &ep,
+            source,
+            PushSessionOptions {
+                in_stream_bytes: true,
+                ..PushSessionOptions::default()
+            },
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("payload bytes should flow in-stream before cancel");
+
+    let transfer_id = daemon
+        .active_jobs
+        .snapshot()
+        .into_iter()
+        .next()
+        .expect("an active transfer row")
+        .transfer_id;
+    assert_eq!(
+        daemon.active_jobs.cancel(&transfer_id),
+        crate::active_jobs::CancelOutcome::Cancelled,
+        "the served session's row honors cancellation"
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), client)
+        .await
+        .expect("client must not hang on a mid-transfer cancel (in-stream)")
+        .expect("client task joins");
+    let err = result.expect_err("a cancelled transfer fails");
+    assert_eq!(
+        fault_of(&err).code,
+        session_error::Code::Cancelled,
+        "the client surfaces the peer's framed CANCELLED on the in-stream carrier: {err:#}"
+    );
+
+    let mut drained = false;
+    for _ in 0..200 {
+        if daemon.active_jobs.snapshot().is_empty() {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        drained,
+        "the daemon must drain the cancelled job from active[]"
+    );
+
+    daemon.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // otp-5a: pull-equivalent (client initiates as DESTINATION, daemon is SOURCE)
 // ---------------------------------------------------------------------------
