@@ -50,5 +50,7 @@ FAIL (6 findings). Adjudicated against source per the loop's step 5.
   the per-carrier ceiling reverted to 2 MiB the pin fails at
   2 MiB ≠ 4 MiB moved).
 
-Fix sha: (appended after the fix commit) — see below.
+Fix sha: `d48351d` (shared with the otp-7b-2 fixes — the two reviews
+were adjudicated together and their fixes interleave in the same
+files; see that verdict).
 Suite after fixes: 1548 → 1550 (both new pins; none dropped).

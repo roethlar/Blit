@@ -28,4 +28,4 @@ write paths, cancellation, DECISIONS coherence, test count 1545→1548.
   `docs/TRANSFER_SESSION.md` §Errors now documents the optional field
   and its single-file-root presence rationale.
 
-Fix sha: (appended after the fix commit) — see below.
+Fix sha: `d48351d` (shared with the otp-7b-1 fixes).

@@ -1,14 +1,12 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-09
+Last updated: 2026-07-10
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-09/10): owner answered otp-7's Q1–Q3 (D-2026-07-09-1) — docs/plan/OTP7_RESUME.md is **Active**; **otp-7a landed and closed through the codex loop** (resume over the in-stream carrier; wire bounds D-2026-07-10-1). Next slice: **otp-7b** (resume over the TCP data plane + the CLI end-of-op fault summary rider). ONE_TRANSFER_PATH otp-1..6, 7a [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
+- Current session (2026-07-10, this one): **otp-7b landed and CLOSED through the codex loop — otp-7 is done** (`ecac9b0` 7b-1 data-plane resume, `071799a` 7b-2 fault-summary rider + cancel e2e, `d48351d` review fixes; both codex verdicts adjudicated in `.review/results/otp-7b-{1,2}.gpt-verdict.md`). ONE_TRANSFER_PATH otp-1..7 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
 
-- Session work: filed audit-17 and audit-18; noted a CLI-output-redesign item in TODO.md; drafted+reviewed docs/plan/LOCAL_ERROR_TELEMETRY.md (Draft). A session-wide codex pass fixed 5 cross-doc staleness bugs.
-
-- Notes on push state: owner previously pushed master → GitHub at 10d89e0; local commits f6e592e..HEAD remain unpushed and windows-latest CI will ride the next push.
+- Notes on push state (re-verified via `git ls-remote origin` at session start, as of `d48351d`): origin/master is at `7f1c4b2` — the owner pushed since the 40th handoff's "unpushed f6e592e..HEAD" note, which is now stale. Unpushed local commits: `7f1c4b2..HEAD` (this session's four). windows-latest CI on the w9-3 harness fix rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -24,60 +22,36 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `Push`/`PullSync` are deleted at cutover. Slices otp-1..13;
   converge-up per cell (±10%); symmetric-fs disk-to-disk verdict
   cells. **D-2026-07-05-2: same-build peers only, refusal at session
-  open.** Progress (each through the codex loop; closed-slice detail in
-  DEVLOG + `.review/` + REVIEW.md):
-  - **otp-1 / otp-3 / otp-4a `[x]`** — wire+session contract
-    (`docs/TRANSFER_SESSION.md`); role-parameterized drivers over the
-    in-process transport (invariance property in the role suite); daemon
-    serves `Transfer` as Responder, client push over gRPC; A/B
-    byte-identical vs old push; SizeMtime = data-safe skip (open Q below).
-  - **otp-4b (1/2/3) `[x]` — push data plane fully on the session, closed**:
-    single-stream TCP data plane, mid-transfer resize/multi-stream + sf-2
-    shape correction, deterministic mid-transfer cancel. Detail: DEVLOG.
-  - **otp-5a `[x]`** (`84be1cc`, codex PASS) — the one served `Transfer`
-    RPC serves BOTH roles via `run_responder` (SOURCE-init→daemon
-    DESTINATION = push; DEST-init→daemon SOURCE = pull, in-stream).
-  - **otp-5b (1/2) `[x]`** — the SOURCE-responder data plane, closed:
-    5b-1 (`e6a0b3b`+`13485ee`) decoupled connection role (RESPONDER
-    binds+accepts, INITIATOR dials) from byte role; 5b-2 (`d579365`+
-    `773a877`) lifted the single-stream cap — the pull data plane resizes
-    via sf-2 (same resize frames as push). Defaults to TCP; A/B
-    byte-identical vs old `pull_sync`. Suite → **1522**.
-  - **otp-6 (a/b) `[x]`** — mirror + filters on the session, closed.
-    6a (`c026692`+`0bb27f5`) honors `SessionOpen.filter` via the universal
-    `FilteredSource` chokepoint. 6b (`01d9c41`+`3c99557`) is the one delete
-    rule: DESTINATION diffs the complete source manifest at SourceDone,
-    scan-complete-guarded + filter-scoped. Codex High: keep-set now folds
-    case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
-  - **otp-7a `[x]`** — resume over the in-stream carrier, closed.
-    `4e5ff58` + review fixes: DEST flags eligible needs (D2) + sends
-    per-grant `BlockHashList` + applies block records in place; SOURCE
-    holds a resume need until its list arrives, sends only stale blocks
-    (D1 graceful stale fallback); `files_resumed` real. Codex FAIL → 4
-    accepted + fixed (wire bounds **D-2026-07-10-1**: block size clamped
-    [64 KiB, 2 MiB] + 65_536-hash cap, over-cap degrades to full
-    transfer; choreography-bypass records rejected; arrival-time
-    validation; mid-fault pin observes the partial patch), 1 partial,
-    1 deferred to 7b (cancel-during-resume e2e). All four plan
-    guard-proof pins live under both roles; 5 guard proofs by temporary
-    revert. Suite → **1540** (the 1529 baseline was a miscount; true
-    pre-slice count 1530). Detail: DEVLOG + `.review/`.
-  - **otp-7b-1 `[x]`** — resume over the TCP data plane, landed
-    (D-2026-07-10-2 per-carrier ceiling; composite `ResumeFile` work
-    item = strict per-file socket serialization; shared
-    `ResumeBlockDiff` + shared DEST claim state; session-client resume
-    options; pins in roles suite + daemon e2e, suite → **1545**).
-  - **otp-7b-2 (code landed, codex review pending)** — the
-    D-2026-07-09-1 CLI end-of-op fault summary rider (structured
-    `SessionFault.relative_path` + wire carry, CONTRACT_VERSION → 2,
-    `end_of_operation_summary()`; verb-level print lands at otp-10) +
-    cancel-during-resume e2e (7a F4) + a gate-discovered RELIABLE fix
-    (resume block writes now flush — unflushed tokio file writes made a
-    7a pin ~50% flaky under suite load). Suite → **1548**. Codex reviews
-    of 7b-1 + 7b-2 are queued: the codex account hit its usage limit
-    (resets 02:52 EDT 2026-07-10) — findings not yet adjudicated.
-  - Next: **codex loop on otp-7b-1 (`ecac9b0`) + otp-7b-2**, then
-    otp-8 per the plan queue. otp-5b-3 (pull cancel) optional; otp-2
+  open.** Progress (each slice through the codex loop; per-slice
+  detail lives in DEVLOG + `.review/`, NOT here):
+  - **Closed `[x]`: otp-1, otp-3, otp-4a, otp-4b (1/2/3), otp-5a,
+    otp-5b (1/2), otp-6 (a/b), otp-7a** — contract + role drivers +
+    daemon serving; push and pull data planes with sf-2 resize +
+    cancel; mirror/filters (one delete rule); in-stream resume with
+    wire bounds D-2026-07-10-1. SizeMtime = data-safe skip (open Q
+    below).
+  - **otp-7b (1/2) `[x]` — resume over the TCP data plane + the D4
+    fault-summary rider, CLOSED; otp-7 done.** 7b-1 (`ecac9b0`):
+    composite `ResumeFile` work item = strict per-file socket
+    serialization; shared `ResumeBlockDiff`; DEST claim state shared
+    with `NeedListSink`; per-carrier ceiling D-2026-07-10-2;
+    session-client resume options. 7b-2 (`071799a`): structured
+    `SessionFault.relative_path` (wire optional field,
+    CONTRACT_VERSION → 2) + `end_of_operation_summary()` (verb print
+    lands at otp-10); cancel-during-resume e2e; RELIABLE fix — resume
+    block writes now flush (unflushed tokio file writes had made a 7a
+    pin ~50% flaky under suite load). Codex: 7b-1 FAIL → 3 fixed / 1
+    pre-fixed / 1 deferred (residue list) / 1 rejected; 7b-2 NEEDS
+    FIXES → 4/4 fixed (`d48351d`; keepalive ticks vs the receiver
+    StallGuard on silent hash scans, resume batches drive sf-2 resize,
+    64 MiB ceiling pinned, single-file-root "" identity). Suite →
+    **1550**. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
+  - Current: **otp-8 (fallback byte-carrier)** — NOTE for the next
+    session: the in-stream carrier already exists and is exercised as
+    the fallback by every slice since otp-3 (both directions, resume
+    included); assess whether otp-8 is substantially satisfied and
+    what residue remains (e.g. `--force-grpc`-shaped option plumbing)
+    before writing new code. otp-5b-3 (pull cancel) optional; otp-2
     rig-gated before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
@@ -95,10 +69,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
-   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7a `[x]`.
-   Current: **otp-7b** (`docs/plan/OTP7_RESUME.md` Active,
-   D-2026-07-09-1 — start at its "7b implementation map" section).
-   otp-2 (symmetric baseline) is RIG-GATED — before otp-10 cutover.
+   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
+   b-2) `[x]`. Current: **otp-8** (fallback byte-carrier — see the
+   Now section's assess-first note: the in-stream carrier already
+   runs as every slice's fallback). otp-2 (symmetric baseline) is
+   RIG-GATED — before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
    measurement follow-ups (Win 11 bare-metal; disk-path variants;
@@ -159,8 +134,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   question are RESOLVED — D-2026-07-05-3, unparked; measured skippy
   data 1.43 cores daemon-receive / 0.45 client at 9.5 Gbit/s stays
   recorded in DEVLOG + DIAGNOSIS.md.)
-- **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
-  approval flow; windows-latest CI on the w9-3 harness fix rides it.
+- **Push go**: local commits `7f1c4b2`..HEAD (this session's four)
+  await the ref-listing + approval flow; windows-latest CI on the
+  w9-3 harness fix rides it. (The 40th handoff's `f6e592e..HEAD`
+  basis was falsified at session start — origin already sits at
+  `7f1c4b2`; see the push-state note above.)
 
 ## Open questions
 
@@ -193,23 +171,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-10 (40th)** @ `3fa4ec9` — **otp-7 Active (owner Q1–Q3,
-  D-2026-07-09-1); otp-7a landed and CLOSED through the codex loop; owner
-  asked to stop after the slice for a session restart.** otp-7a = resume
-  over the in-stream carrier (`4e5ff58`, fixes `1919410`, wire bounds
-  D-2026-07-10-1, suite 1530→1540 — the recorded 1529 was a miscount).
-  **Exact first action next session**: implement **otp-7b** starting from
-  the "7b implementation map" section in `docs/plan/OTP7_RESUME.md`
-  (surveyed 2026-07-10: receive side already decodes block records; the
-  work is source-side routing through `DataPlaneSink`/`NeedListSink`,
-  shared resume claims + `files_resumed` on the receive path, session-client
-  resume options, the D4 CLI fault-summary mechanism at the
-  survives-cutover layer, cancel-during-resume e2e). In-flight: none;
-  tree clean at handoff commit. The Blocked "Cargo.lock drift" item was
-  dropped — re-verified clean at `3fa4ec9` (basis falsified; the lock
-  last changed at `16237e2`).
-- **2026-07-06 (39th)** @ `598f102` — session-wide codex review (5
-  findings fixed, `419f5d1`); CLI transfer-output redesign filed to
-  `TODO.md`; its stated first action (otp-7 Q1–Q3 → Active → otp-7a) was
-  done 2026-07-09/10 per the 40th. Detail: DEVLOG 2026-07-06 22:00Z.
-- *(38th and earlier pruned to the cap — see DEVLOG 2026-07-06 entries.)*
+- **2026-07-10 (41st)** @ `d48351d` — **otp-7b landed and CLOSED through
+  the codex loop (both sub-slices reviewed + fixes adjudicated); otp-7
+  is done, otp-1..7 `[x]`.** Commits: `ecac9b0` (7b-1 data-plane
+  resume), `071799a` (7b-2 fault-summary rider + cancel e2e + the
+  tokio-flush RELIABLE fix), `d48351d` (review fixes; verdicts in
+  `.review/results/otp-7b-{1,2}.gpt-verdict.md`). Suite 1540 → **1550**,
+  fmt/clippy clean, guard proofs by temporary revert throughout.
+  **Exact first action next session**: assess **otp-8** (fallback
+  byte-carrier) against what already exists — the in-stream carrier has
+  been the live fallback since otp-3 and is exercised in both
+  directions incl. resume; determine the actual residue before coding.
+  In-flight: none; tree clean at handoff commit. Process note: codex
+  now runs model gpt-5.6-sol (config default moved past the loop doc's
+  gpt-5.5 note); one review round was delayed ~1 h by a codex account
+  usage limit (resets hourly-ish; scriptable around).
+- **2026-07-10 (40th)** @ `3fa4ec9` — otp-7 Active (owner Q1–Q3,
+  D-2026-07-09-1); otp-7a landed and CLOSED through the codex loop
+  (`4e5ff58`, fixes `1919410`, wire bounds D-2026-07-10-1, suite
+  1530→1540 — the recorded 1529 was a miscount). Its stated first
+  action (implement otp-7b from the plan's implementation map) was
+  done this session per the 41st. The Blocked "Cargo.lock drift" item
+  was dropped — basis falsified (lock last changed at `16237e2`).
+- *(39th and earlier pruned to the cap — see DEVLOG 2026-07-06 entries.)*
