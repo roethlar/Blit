@@ -51,9 +51,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
   - Current: **otp-7 ACTIVE (D-2026-07-09-1)** — `docs/plan/OTP7_RESUME.md`
     flipped Active 2026-07-09 (Q1 contract-wins fallback; Q2 in-place patch
-    + end-of-op fault summary rider; Q3 7a-then-7b). Implementing **otp-7a**
-    (resume over the in-stream carrier) through the codex loop.
-    otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
+    + end-of-op fault summary rider; Q3 7a-then-7b). **otp-7a implemented**
+    (resume over the in-stream carrier: choreography + block-diff helper +
+    DEST hash-send/apply + `files_resumed`; all four plan guard-proof pins
+    run live, 3 guard proofs by temporary revert). Suite 1530 → **1536**
+    (+6; the previously recorded 1529 was a miscount — re-counted on the
+    pre-slice tree). Codex review of the slice commit is the next step;
+    then otp-7b. otp-5b-3 (pull cancel) optional; otp-2 rig-gated before
+    otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified

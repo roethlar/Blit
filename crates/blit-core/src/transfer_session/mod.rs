@@ -28,12 +28,14 @@ use eyre::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use crate::copy::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
 use crate::generated::transfer_frame::Frame;
 use crate::generated::{
-    session_error, ComparisonMode, DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp,
-    FileData, FileHeader, FilterSpec, ManifestComplete, MirrorMode, NeedBatch, NeedComplete,
-    NeedEntry, SessionAccept, SessionError, SessionHello, SessionOpen, SourceDone,
-    TarShardComplete, TarShardHeader, TransferFrame, TransferRole, TransferSummary,
+    session_error, BlockHashList, BlockTransfer, BlockTransferComplete, ComparisonMode,
+    DataPlaneResize, DataPlaneResizeAck, DataPlaneResizeOp, FileData, FileHeader, FilterSpec,
+    ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, SessionAccept, SessionError,
+    SessionHello, SessionOpen, SourceDone, TarShardComplete, TarShardHeader, TransferFrame,
+    TransferRole, TransferSummary,
 };
 use crate::manifest::{header_transfer_status, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
@@ -358,12 +360,14 @@ pub enum ResponderOutcome {
     Source(TransferSummary),
 }
 
+/// otp-7a: whether this open negotiates the resume block phase. One
+/// reading, both roles and both validators — the flag is in the open, so
+/// resume runs identically whichever end initiated (plan D6).
+fn resume_negotiated(open: &SessionOpen) -> bool {
+    open.resume.as_ref().is_some_and(|r| r.enabled)
+}
+
 fn source_open_validator(open: &SessionOpen) -> std::result::Result<(), SessionFault> {
-    if open.resume.as_ref().is_some_and(|r| r.enabled) {
-        return Err(SessionFault::internal(
-            "resume is not implemented on the unified session yet (otp-7)",
-        ));
-    }
     // otp-6a: filters are honored on the source scan (see
     // `source_send_half`). Validate the globs here so a malformed pattern
     // from a peer is refused at OPEN — peer-notified on the responder —
@@ -397,11 +401,6 @@ fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), Ses
             crate::remote::transfer::operation_spec::filter_from_spec(filter.clone())
                 .map_err(|e| SessionFault::protocol_violation(format!("invalid filter: {e:#}")))?;
         }
-    }
-    if open.resume.as_ref().is_some_and(|r| r.enabled) {
-        return Err(SessionFault::internal(
-            "resume is not implemented on the unified session yet (otp-7)",
-        ));
     }
     Ok(())
 }
@@ -534,7 +533,13 @@ async fn responder_finish(
     // receives (push, otp-4b), a SOURCE responder accepts+sends (pull,
     // otp-5b). The bound listener travels in `Negotiated.responder_data_plane`
     // and is consumed by whichever role's driver runs.
-    let responder_data_plane = if open.in_stream_bytes {
+    //
+    // otp-7a: a resume session rides the in-stream carrier — block records
+    // exist only as control-lane frames until otp-7b ports them onto the
+    // data plane, so granting one here would strand every resume-flagged
+    // file. The grant is always the responder's, so suppressing it here
+    // covers both initiator layouts.
+    let responder_data_plane = if open.in_stream_bytes || resume_negotiated(&open) {
         None
     } else {
         data_plane::prepare_responder_data_plane().await
@@ -655,6 +660,13 @@ async fn notify_and_wrap(transport: &mut FrameTransport, mut fault: SessionFault
 /// manifest size — the contract's bounded-buffering rule holds.
 enum SourceEvent {
     Need(FileHeader),
+    /// A resume-flagged need (otp-7a). The send half HOLDS it until the
+    /// destination's `BlockHashList` for the same path arrives — the
+    /// contract's RELIABLE ordering guarantee: no byte of a resume file
+    /// moves before its hash list.
+    ResumeNeed(FileHeader),
+    /// The destination's block hashes for a held resume need (otp-7a).
+    BlockHashes(BlockHashList),
     NeedComplete,
     /// The destination's ack of a `DataPlaneResize{ADD}` (otp-4b-2). The
     /// send half dials the epoch-N socket on `accepted`.
@@ -739,6 +751,7 @@ async fn drive_source(
         rx,
         Arc::clone(&sent),
         Arc::clone(&manifest_sent),
+        resume_negotiated(&negotiated.open),
         event_tx,
     )));
 
@@ -775,6 +788,7 @@ async fn source_recv_half(
     mut rx: Box<dyn FrameRx>,
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
     manifest_sent: Arc<AtomicBool>,
+    resume_session: bool,
     events: mpsc::UnboundedSender<SourceEvent>,
 ) {
     loop {
@@ -796,7 +810,7 @@ async fn source_recv_half(
         match received.frame {
             Some(Frame::NeedBatch(batch)) => {
                 for entry in batch.entries {
-                    if entry.resume {
+                    if entry.resume && !resume_session {
                         let _ = events.send(SourceEvent::Fault(SessionFault::protocol_violation(
                             format!(
                                 "resume-flagged need for '{}' in a session opened without resume",
@@ -810,6 +824,9 @@ async fn source_recv_half(
                         .expect("sent-manifest lock poisoned")
                         .remove(&entry.relative_path);
                     match header {
+                        Some(h) if entry.resume => {
+                            let _ = events.send(SourceEvent::ResumeNeed(h));
+                        }
                         Some(h) => {
                             let _ = events.send(SourceEvent::Need(h));
                         }
@@ -824,6 +841,21 @@ async fn source_recv_half(
                         }
                     }
                 }
+            }
+            Some(Frame::BlockHashes(list)) => {
+                // otp-7a: the destination's hashes for a resume-flagged
+                // need. The send half correlates it with the held need;
+                // in a non-resume session the frame is off-contract.
+                if !resume_session {
+                    let _ = events.send(SourceEvent::Fault(SessionFault::protocol_violation(
+                        format!(
+                            "BlockHashList for '{}' in a session opened without resume",
+                            list.relative_path
+                        ),
+                    )));
+                    return;
+                }
+                let _ = events.send(SourceEvent::BlockHashes(list));
             }
             Some(Frame::NeedComplete(_)) => {
                 if !manifest_sent.load(Ordering::Acquire) {
@@ -862,6 +894,16 @@ async fn source_recv_half(
     }
 }
 
+/// otp-7a: the send half's resume bookkeeping. A resume-flagged need is
+/// HELD until its `BlockHashList` arrives (the contract's strict
+/// ordering — the source must not send a byte of that file first); the
+/// correlated pair then queues for the block phase.
+#[derive(Default)]
+struct ResumeSendState {
+    held: HashMap<String, FileHeader>,
+    ready: Vec<(FileHeader, BlockHashList)>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn source_send_half(
     plan_options: PlanOptions,
@@ -875,6 +917,7 @@ async fn source_send_half(
     mut events: mpsc::UnboundedReceiver<SourceEvent>,
 ) -> Result<TransferSummary> {
     let mut pending: Vec<FileHeader> = Vec::new();
+    let mut resume: ResumeSendState = ResumeSendState::default();
     let mut need_complete = false;
 
     // Data plane (otp-4b/5b): set up the send sockets up front — BEFORE
@@ -971,6 +1014,7 @@ async fn source_send_half(
         drain_ready_source_events(
             &mut events,
             &mut pending,
+            &mut resume,
             &mut need_complete,
             &mut needed_bytes,
             &mut needed_count,
@@ -1010,6 +1054,7 @@ async fn source_send_half(
         drain_ready_source_events(
             &mut events,
             &mut pending,
+            &mut resume,
             &mut need_complete,
             &mut needed_bytes,
             &mut needed_count,
@@ -1047,6 +1092,22 @@ async fn source_send_half(
             }
             continue;
         }
+        if !resume.ready.is_empty() {
+            // otp-7a: the block phase for correlated (need, hash-list)
+            // pairs. Blocks are control-lane records — a resume session
+            // never gets a data-plane grant until otp-7b, but fail fast
+            // rather than silently misroute if that invariant breaks.
+            if data_plane.is_some() {
+                return Err(eyre::Report::new(SessionFault::internal(
+                    "resume block records ride the in-stream carrier until otp-7b, \
+                     but this session has a TCP data plane",
+                )));
+            }
+            for (header, hashes) in std::mem::take(&mut resume.ready) {
+                send_resume_block_records(tx, &source, &header, &hashes).await?;
+            }
+            continue;
+        }
         if need_complete {
             break;
         }
@@ -1055,6 +1116,7 @@ async fn source_send_half(
                 process_source_event(
                     event,
                     &mut pending,
+                    &mut resume,
                     &mut need_complete,
                     &mut needed_bytes,
                     &mut needed_count,
@@ -1122,9 +1184,16 @@ async fn source_send_half(
     match events.recv().await {
         Some(SourceEvent::Summary(summary)) => Ok(summary),
         Some(SourceEvent::Fault(fault)) => Err(eyre::Report::new(fault)),
-        Some(SourceEvent::Need(h)) => Err(eyre::Report::new(SessionFault::protocol_violation(
-            format!("need for '{}' after NeedComplete", h.relative_path),
-        ))),
+        Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
+            Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!("need for '{}' after NeedComplete", h.relative_path),
+            )))
+        }
+        Some(SourceEvent::BlockHashes(l)) => {
+            Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!("BlockHashList for '{}' after SourceDone", l.relative_path),
+            )))
+        }
         Some(SourceEvent::NeedComplete) => Err(eyre::Report::new(
             SessionFault::protocol_violation("duplicate NeedComplete"),
         )),
@@ -1144,6 +1213,7 @@ async fn source_send_half(
 async fn drain_ready_source_events(
     events: &mut mpsc::UnboundedReceiver<SourceEvent>,
     pending: &mut Vec<FileHeader>,
+    resume: &mut ResumeSendState,
     need_complete: &mut bool,
     needed_bytes: &mut u64,
     needed_count: &mut usize,
@@ -1155,6 +1225,7 @@ async fn drain_ready_source_events(
         process_source_event(
             event,
             pending,
+            resume,
             need_complete,
             needed_bytes,
             needed_count,
@@ -1174,6 +1245,7 @@ async fn drain_ready_source_events(
 async fn process_source_event(
     event: SourceEvent,
     pending: &mut Vec<FileHeader>,
+    resume: &mut ResumeSendState,
     need_complete: &mut bool,
     needed_bytes: &mut u64,
     needed_count: &mut usize,
@@ -1193,10 +1265,54 @@ async fn process_source_event(
             pending.push(header);
             Ok(())
         }
+        SourceEvent::ResumeNeed(header) => {
+            if *need_complete {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "resume need for '{}' after NeedComplete",
+                        header.relative_path
+                    ),
+                )));
+            }
+            // Shape totals count the whole file — the diff hasn't run
+            // yet, so the need list's implied workload is the honest
+            // upper bound (same accounting a plain need gets).
+            *needed_bytes = needed_bytes.saturating_add(header.size);
+            *needed_count += 1;
+            // HELD until its BlockHashList arrives; no duplicate is
+            // possible (the receive half's sent-map removal already
+            // faults a second need for the same path).
+            resume.held.insert(header.relative_path.clone(), header);
+            Ok(())
+        }
+        SourceEvent::BlockHashes(list) => match resume.held.remove(&list.relative_path) {
+            Some(header) => {
+                resume.ready.push((header, list));
+                Ok(())
+            }
+            None => Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!(
+                    "BlockHashList for '{}' without a held resume need",
+                    list.relative_path
+                ),
+            ))),
+        },
         SourceEvent::NeedComplete => {
             if *need_complete {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
                     "duplicate NeedComplete",
+                )));
+            }
+            // Ordered lane: the destination sends every BlockHashList
+            // before its NeedComplete, so a still-held resume need here
+            // means the peer broke the choreography — fail fast rather
+            // than hang waiting for a list that can no longer arrive.
+            if !resume.held.is_empty() {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "NeedComplete with {} resume need(s) missing their BlockHashList",
+                        resume.held.len()
+                    ),
                 )));
             }
             *need_complete = true;
@@ -1290,9 +1406,17 @@ async fn resolve_in_flight_resize(
             // waiting for ours.
             Some(SourceEvent::ResizeAck(_)) => continue,
             Some(SourceEvent::Fault(fault)) => return Err(eyre::Report::new(fault)),
-            Some(SourceEvent::Need(h)) => {
+            Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
                     format!("need for '{}' after NeedComplete", h.relative_path),
+                )))
+            }
+            Some(SourceEvent::BlockHashes(l)) => {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "BlockHashList for '{}' after NeedComplete resolved every resume need",
+                        l.relative_path
+                    ),
                 )))
             }
             Some(SourceEvent::NeedComplete) => {
@@ -1331,9 +1455,15 @@ async fn resolve_in_flight_resize(
 async fn recv_peer_fault(events: &mut mpsc::UnboundedReceiver<SourceEvent>) -> SessionFault {
     match events.recv().await {
         Some(SourceEvent::Fault(fault)) => fault,
-        Some(SourceEvent::Need(h)) => SessionFault::protocol_violation(format!(
-            "need for '{}' during the data-plane drain (after NeedComplete)",
-            h.relative_path
+        Some(SourceEvent::Need(h) | SourceEvent::ResumeNeed(h)) => {
+            SessionFault::protocol_violation(format!(
+                "need for '{}' during the data-plane drain (after NeedComplete)",
+                h.relative_path
+            ))
+        }
+        Some(SourceEvent::BlockHashes(l)) => SessionFault::protocol_violation(format!(
+            "BlockHashList for '{}' during the data-plane drain",
+            l.relative_path
         )),
         Some(SourceEvent::NeedComplete) => {
             SessionFault::protocol_violation("duplicate NeedComplete during the data-plane drain")
@@ -1444,12 +1574,88 @@ async fn send_payload_records(
                     .await?;
             }
             PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
-                // The outbound planner never emits these (resume is
-                // receive-originated and lands at otp-7).
-                eyre::bail!("resume payload planned in a non-resume session");
+                // The outbound planner never emits these: resume block
+                // records are choreography-originated (otp-7a,
+                // `send_resume_block_records` below), never planned.
+                eyre::bail!("resume payload planned by the outbound planner");
             }
         }
     }
+    Ok(())
+}
+
+/// otp-7a: the SOURCE-side block phase for one resume-flagged need —
+/// a session free helper, deliberately not a `TransferSource` method
+/// (plan D3: it needs only `open_file` + blake3, and keeping it off the
+/// trait spares every future source impl from re-implementing it, the
+/// same reasoning that made `FilteredSource` the one filter chokepoint).
+///
+/// Reads the source file sequentially at the block size the DESTINATION
+/// chose (plan D5; validated here since it crossed the wire), Blake3s
+/// each block, and emits `BlockTransfer` only for the blocks the
+/// destination's hash list proves stale: an index beyond the list, or a
+/// differing hash — a malformed hash entry (wrong length) counts as
+/// differing, so stale or garbage hashes degrade to sending the block,
+/// never to trusting it (plan D1, the graceful stale-partial fallback).
+/// Ends with `BlockTransferComplete{total_bytes = header.size}`; the
+/// manifest promised `header.size`, so EOF-short aborts exactly as a
+/// whole-file record does.
+async fn send_resume_block_records(
+    tx: &mut Box<dyn FrameTx>,
+    source: &Arc<dyn TransferSource>,
+    header: &FileHeader,
+    hashes: &BlockHashList,
+) -> Result<()> {
+    let block_size = match hashes.block_size as usize {
+        0 => DEFAULT_BLOCK_SIZE,
+        bs if bs > MAX_BLOCK_SIZE => {
+            return Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!(
+                    "BlockHashList for '{}' block_size {bs} exceeds the {MAX_BLOCK_SIZE} byte cap",
+                    hashes.relative_path
+                ),
+            )))
+        }
+        bs => bs,
+    };
+    let mut reader = source.open_file(header).await?;
+    let mut buf = vec![0u8; block_size];
+    let mut offset: u64 = 0;
+    let mut index: usize = 0;
+    while offset < header.size {
+        let this = (header.size - offset).min(block_size as u64) as usize;
+        let mut filled = 0usize;
+        while filled < this {
+            let got = reader.read(&mut buf[filled..this]).await?;
+            if got == 0 {
+                eyre::bail!(
+                    "'{}' hit EOF with {} bytes still promised",
+                    header.relative_path,
+                    header.size - offset - filled as u64
+                );
+            }
+            filled += got;
+        }
+        let stale = match hashes.hashes.get(index) {
+            Some(expected) => blake3::hash(&buf[..this]).as_bytes()[..] != expected[..],
+            None => true,
+        };
+        if stale {
+            tx.send(frame(Frame::Block(BlockTransfer {
+                relative_path: header.relative_path.clone(),
+                offset,
+                content: buf[..this].to_vec(),
+            })))
+            .await?;
+        }
+        offset += this as u64;
+        index += 1;
+    }
+    tx.send(frame(Frame::BlockComplete(BlockTransferComplete {
+        relative_path: header.relative_path.clone(),
+        total_bytes: header.size,
+    })))
+    .await?;
     Ok(())
 }
 
@@ -1818,6 +2024,26 @@ async fn destination_session(
     };
     let mut source_files: HashSet<String> = HashSet::new();
 
+    // otp-7a: resume. The DESTINATION chooses the block size (plan D5 —
+    // it hashes first; the SOURCE reads the size from each
+    // BlockHashList): 0 ⇒ default, clamped to the shared cap. Headers of
+    // resume-granted needs are retained so BlockTransferComplete can
+    // finalize with the manifest's size/mtime/permissions (the wire
+    // complete frame carries only total_bytes).
+    let resume_enabled = resume_negotiated(&negotiated.open);
+    let resume_block_size = match negotiated
+        .open
+        .resume
+        .as_ref()
+        .map(|r| r.block_size as usize)
+        .unwrap_or(0)
+    {
+        0 => DEFAULT_BLOCK_SIZE,
+        bs => bs.min(MAX_BLOCK_SIZE),
+    };
+    let mut resume_headers: HashMap<String, FileHeader> = HashMap::new();
+    let mut files_resumed: u64 = 0;
+
     // Two sets, deliberately separate (codex otp-4b-1 fix-review F1):
     // `granted` is the ever-granted DEDUP set — control-loop-local,
     // insert-only, never removed, so a concurrent data-plane claim can
@@ -1950,6 +2176,9 @@ async fn destination_session(
                         dst_root,
                         canonical_dst_root.as_deref(),
                         &compare_opts,
+                        resume_enabled,
+                        resume_block_size,
+                        &mut resume_headers,
                         &mut granted,
                         &outstanding,
                         &mut needed_paths,
@@ -1981,6 +2210,9 @@ async fn destination_session(
                     dst_root,
                     canonical_dst_root.as_deref(),
                     &compare_opts,
+                    resume_enabled,
+                    resume_block_size,
+                    &mut resume_headers,
                     &mut granted,
                     &outstanding,
                     &mut needed_paths,
@@ -2022,6 +2254,41 @@ async fn destination_session(
                 let outcome = receive_file_record(transport, &sink, &header).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
+            }
+            Some(Frame::Block(block)) => {
+                // otp-7a: a resume block record opens with its first
+                // BlockTransfer (no begin frame). Claim the need and run
+                // the strictly-serialized record to its completion frame.
+                let header = claim_resume_record(
+                    &block.relative_path,
+                    resume_enabled,
+                    data_plane_recv.is_some(),
+                    manifest_complete,
+                    &mut resume_headers,
+                    &outstanding,
+                )?;
+                let outcome = receive_block_record(transport, &sink, &header, block).await?;
+                files_written += outcome.files_written as u64;
+                bytes_written += outcome.bytes_written;
+                files_resumed += 1;
+            }
+            Some(Frame::BlockComplete(complete)) => {
+                // otp-7a: a zero-block record — every block matched
+                // (identical content, e.g. an mtime-only touch), so the
+                // completion frame arrives with no blocks before it and
+                // finalization stamps size/mtime/perms.
+                let header = claim_resume_record(
+                    &complete.relative_path,
+                    resume_enabled,
+                    data_plane_recv.is_some(),
+                    manifest_complete,
+                    &mut resume_headers,
+                    &outstanding,
+                )?;
+                let outcome = finish_block_record(&sink, &header, &complete).await?;
+                files_written += outcome.files_written as u64;
+                bytes_written += outcome.bytes_written;
+                files_resumed += 1;
             }
             Some(Frame::TarShardHeader(shard)) => {
                 if data_plane_recv.is_some() {
@@ -2187,7 +2454,7 @@ async fn destination_session(
                     bytes_transferred: bytes_written,
                     entries_deleted,
                     in_stream_carrier_used,
-                    files_resumed: 0, // resume lands at otp-7
+                    files_resumed,
                 };
                 transport.send(frame(Frame::Summary(summary))).await?;
                 return Ok(DestinationOutcome {
@@ -2201,11 +2468,10 @@ async fn destination_session(
             }
             other => {
                 // Everything else is off-lane or off-phase here:
-                // destination-lane frames echoed back (a ResizeAck the
-                // destination would never receive), resume frames in a
-                // non-resume session (otp-7), stray handshake frames,
-                // bare FileData/TarShardChunk outside a record. Fail
-                // fast, no tolerant parsing.
+                // destination-lane frames echoed back (a ResizeAck or
+                // BlockHashList the destination would never receive),
+                // stray handshake frames, bare FileData/TarShardChunk
+                // outside a record. Fail fast, no tolerant parsing.
                 return Err(violation(format!(
                     "{} not valid on the destination's receive lane in this phase",
                     frame_name(&other)
@@ -2217,13 +2483,19 @@ async fn destination_session(
 
 /// Stat-and-compare one chunk of manifest entries on the blocking
 /// pool (2+ syscalls per entry — same rationale as the daemon's
-/// w4-4 chunked checks), then stream the resulting need batch.
+/// w4-4 chunked checks), then stream the resulting need batch, followed
+/// by a `BlockHashList` for each resume-flagged entry in it (otp-7a).
+#[allow(clippy::too_many_arguments)]
 async fn diff_chunk_and_send_needs(
     transport: &mut FrameTransport,
     chunk: Vec<FileHeader>,
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     compare_opts: &CompareOptions,
+    resume_enabled: bool,
+    resume_block_size: usize,
+    // Headers of resume-granted needs, retained for record finalization.
+    resume_headers: &mut HashMap<String, FileHeader>,
     // Ever-granted DEDUP set (control-loop-local, insert-only): a path
     // the source manifests twice is granted at most once, and because it
     // is never removed, a concurrent data-plane claim can't re-open the
@@ -2236,40 +2508,47 @@ async fn diff_chunk_and_send_needs(
     if chunk.is_empty() {
         return Ok(());
     }
-    let dst_root = dst_root.to_path_buf();
+    let dst_root_owned = dst_root.to_path_buf();
     let canonical = canonical_dst_root.map(Path::to_path_buf);
     let opts = compare_opts.clone();
-    let needed: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
-        let mut needed = Vec::new();
-        for header in &chunk {
-            if destination_needs(header, &dst_root, canonical.as_deref(), &opts)? {
-                needed.push(header.relative_path.clone());
+    let needed: Vec<(FileHeader, bool)> =
+        tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
+            let mut needed = Vec::new();
+            for header in chunk {
+                match destination_needs(&header, &dst_root_owned, canonical.as_deref(), &opts)? {
+                    NeedVerdict::Skip => {}
+                    NeedVerdict::Transfer { resume_eligible } => {
+                        // plan D2: a need is resume-flagged only when the
+                        // session negotiated resume AND a non-empty dest
+                        // partial exists to diff against.
+                        needed.push((header, resume_enabled && resume_eligible));
+                    }
+                }
             }
-        }
-        Ok(needed)
-    })
-    .await
-    .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
+            Ok(needed)
+        })
+        .await
+        .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
 
     // Dedup on the ever-granted set (no lock — control-loop-local), then
     // insert the freshly granted paths into the shared `outstanding`
     // completion set BEFORE the NeedBatch goes out. The source can only
     // send a payload after receiving its need, so insert-before-send
     // orders the data-plane receive's `claim` strictly after this insert.
-    let fresh: Vec<String> = needed
+    let fresh: Vec<(FileHeader, bool)> = needed
         .into_iter()
-        .filter(|path| granted.insert(path.clone()))
+        .filter(|(header, _)| granted.insert(header.relative_path.clone()))
         .collect();
     let entries: Vec<NeedEntry> = {
         let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
         fresh
-            .into_iter()
-            .map(|relative_path| {
-                needed_paths.push(relative_path.clone());
-                out.insert(relative_path.clone());
+            .iter()
+            .map(|(header, resume)| {
+                needed_paths.push(header.relative_path.clone());
+                out.insert(header.relative_path.clone());
                 NeedEntry {
-                    relative_path,
-                    resume: false, // resume lands at otp-7
+                    relative_path: header.relative_path.clone(),
+                    resume: *resume,
                 }
             })
             .collect()
@@ -2280,7 +2559,43 @@ async fn diff_chunk_and_send_needs(
     transport
         .send(frame(Frame::NeedBatch(NeedBatch { entries })))
         .await?;
+    // otp-7a: each resume-flagged grant's hash list follows its batch on
+    // the same ordered lane — the source HOLDS the need until the list
+    // arrives, and ordered delivery guarantees every list precedes this
+    // end's eventual NeedComplete.
+    for (header, resume) in &fresh {
+        if !*resume {
+            continue;
+        }
+        let hashes = compute_resume_block_hashes(
+            dst_root,
+            canonical_dst_root,
+            &header.relative_path,
+            resume_block_size,
+        )
+        .await?;
+        transport
+            .send(frame(Frame::BlockHashes(BlockHashList {
+                relative_path: header.relative_path.clone(),
+                block_size: resume_block_size as u32,
+                hashes,
+            })))
+            .await?;
+        resume_headers.insert(header.relative_path.clone(), header.clone());
+    }
     Ok(())
+}
+
+/// The destination diff's per-entry verdict (otp-7a widened it from a
+/// bool): does this entry transfer, and if so is it eligible for the
+/// resume block phase — plan D2: the file exists at the dest as a
+/// non-empty regular file (so there is a partial to hash) AND the
+/// compare says it must transfer. Absent/empty/non-file targets are
+/// plain full transfers. Session gating (ResumeSettings.enabled) is the
+/// caller's, not this verdict's.
+enum NeedVerdict {
+    Skip,
+    Transfer { resume_eligible: bool },
 }
 
 /// Does the destination need this manifest entry? Stats its own file
@@ -2292,7 +2607,7 @@ fn destination_needs(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     opts: &CompareOptions,
-) -> Result<bool> {
+) -> Result<NeedVerdict> {
     let dst = match canonical_dst_root {
         Some(canonical) => {
             crate::path_safety::safe_join_contained(canonical, dst_root, &header.relative_path)
@@ -2330,7 +2645,224 @@ fn destination_needs(
         target.map(|(size, mtime)| (size, mtime, &[] as &[u8])),
         opts,
     );
-    Ok(matches!(status, FileStatus::New | FileStatus::Modified))
+    Ok(match status {
+        // Modified ⇒ a regular file exists at the dest (`target` was
+        // Some); it is resume-eligible when non-empty (plan D2 — an
+        // empty partial has nothing to hash, full transfer is strictly
+        // simpler and byte-equivalent).
+        FileStatus::Modified => NeedVerdict::Transfer {
+            resume_eligible: target.is_some_and(|(size, _)| size > 0),
+        },
+        FileStatus::New => NeedVerdict::Transfer {
+            resume_eligible: false,
+        },
+        _ => NeedVerdict::Skip,
+    })
+}
+
+/// otp-7a: hash the destination's existing partial for one
+/// resume-flagged grant — Blake3 per `block_size` block, in order (the
+/// wire shape of `BlockHashList.hashes`). Pure blocking FS work, so it
+/// runs on the blocking pool (same rationale as the diff chunks). A file
+/// that vanished (or emptied) between the diff and this read yields an
+/// empty/short list — the implicit full-transfer fallback (plan D1): the
+/// source sends every block a hash does not vouch for.
+async fn compute_resume_block_hashes(
+    dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
+    relative_path: &str,
+    block_size: usize,
+) -> Result<Vec<Vec<u8>>> {
+    let dst = match canonical_dst_root {
+        Some(canonical) => {
+            crate::path_safety::safe_join_contained(canonical, dst_root, relative_path)
+        }
+        None => crate::path_safety::safe_join(dst_root, relative_path),
+    }
+    .map_err(|err| {
+        SessionFault::protocol_violation(format!(
+            "resume path '{relative_path}' escapes the destination root: {err:#}"
+        ))
+    })?;
+    tokio::task::spawn_blocking(move || -> Result<Vec<Vec<u8>>> {
+        use std::io::Read;
+        let mut file = match std::fs::File::open(&dst) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(eyre::eyre!(
+                    "opening {} for block hashes: {e}",
+                    dst.display()
+                ))
+            }
+        };
+        let mut hashes = Vec::new();
+        let mut buf = vec![0u8; block_size];
+        loop {
+            let mut filled = 0usize;
+            while filled < block_size {
+                let got = file
+                    .read(&mut buf[filled..])
+                    .map_err(|e| eyre::eyre!("hashing {}: {e}", dst.display()))?;
+                if got == 0 {
+                    break;
+                }
+                filled += got;
+            }
+            if filled == 0 {
+                break;
+            }
+            hashes.push(blake3::hash(&buf[..filled]).as_bytes().to_vec());
+            if filled < block_size {
+                break;
+            }
+        }
+        Ok(hashes)
+    })
+    .await
+    .map_err(|err| eyre::eyre!("resume hash task panicked: {err}"))?
+}
+
+/// otp-7a: validate and claim the resume-flagged need a block record
+/// opens for. Fail-fast on every off-contract shape: block records ride
+/// the control lane only (7b ports them to the data plane), only after
+/// ManifestComplete, only in a resume session, and only for a path this
+/// end granted with `resume=true` — exactly once (the header map and
+/// the outstanding set are both claimed here).
+fn claim_resume_record(
+    relative_path: &str,
+    resume_enabled: bool,
+    data_plane_active: bool,
+    manifest_complete: bool,
+    resume_headers: &mut HashMap<String, FileHeader>,
+    outstanding: &data_plane::OutstandingNeeds,
+) -> Result<FileHeader> {
+    if !resume_enabled {
+        return Err(violation(format!(
+            "block record for '{relative_path}' in a session opened without resume"
+        )));
+    }
+    if data_plane_active {
+        return Err(violation(format!(
+            "block record for '{relative_path}' on the control lane while a TCP data plane is active"
+        )));
+    }
+    if !manifest_complete {
+        return Err(violation(format!(
+            "block record for '{relative_path}' before ManifestComplete"
+        )));
+    }
+    let header = resume_headers.remove(relative_path).ok_or_else(|| {
+        violation(format!(
+            "block record for '{relative_path}' which was not granted a resume-flagged need"
+        ))
+    })?;
+    if !outstanding
+        .lock()
+        .expect("outstanding-needs lock poisoned")
+        .remove(relative_path)
+    {
+        return Err(violation(format!(
+            "block record for '{relative_path}' which is not on the need list"
+        )));
+    }
+    Ok(header)
+}
+
+/// otp-7a: receive one strictly-serialized resume block record whose
+/// first `BlockTransfer` is already in hand: apply each block in place
+/// through the sink, until the record's `BlockTransferComplete`. Nothing
+/// may interleave with the open record on the source lane — same rule as
+/// file records.
+async fn receive_block_record(
+    transport: &mut FrameTransport,
+    sink: &FsTransferSink,
+    header: &FileHeader,
+    first: BlockTransfer,
+) -> Result<crate::remote::transfer::SinkOutcome> {
+    let mut bytes_written: u64 = 0;
+    let mut block = first;
+    loop {
+        let len = block.content.len() as u64;
+        if block.offset.saturating_add(len) > header.size {
+            return Err(violation(format!(
+                "block record '{}' overran its size: offset {} + {} byte(s) > {}",
+                header.relative_path, block.offset, len, header.size
+            )));
+        }
+        let outcome = sink
+            .write_payload(PreparedPayload::FileBlock {
+                relative_path: header.relative_path.clone(),
+                offset: block.offset,
+                bytes: block.content,
+            })
+            .await?;
+        bytes_written += outcome.bytes_written;
+        let received = match transport.recv().await? {
+            Some(f) => f,
+            None => {
+                return Err(eyre::Report::new(SessionFault::internal(format!(
+                    "peer closed inside block record '{}'",
+                    header.relative_path
+                ))))
+            }
+        };
+        match received.frame {
+            Some(Frame::Block(next)) if next.relative_path == header.relative_path => {
+                block = next;
+            }
+            Some(Frame::BlockComplete(complete))
+                if complete.relative_path == header.relative_path =>
+            {
+                let outcome = finish_block_record(sink, header, &complete).await?;
+                return Ok(crate::remote::transfer::SinkOutcome {
+                    files_written: outcome.files_written,
+                    bytes_written: bytes_written + outcome.bytes_written,
+                });
+            }
+            Some(Frame::Error(err)) => {
+                // A mid-record abort (plan D4): the peer says why before
+                // closing — surface ITS fault, not a violation about the
+                // frame's position.
+                return Err(eyre::Report::new(SessionFault::from_wire(err)));
+            }
+            other => {
+                // Strict serialization: nothing may interleave with an
+                // open record on the source lane — including a block for
+                // a different path.
+                return Err(violation(format!(
+                    "{} inside block record '{}'",
+                    frame_name(&other),
+                    header.relative_path
+                )));
+            }
+        }
+    }
+}
+
+/// otp-7a: finalize one resume block record — truncate to the manifest
+/// size and stamp mtime/permissions from the retained manifest header
+/// (the wire complete frame carries only `total_bytes`, which must match
+/// the size the manifest promised, exactly as a file record must
+/// complete at `header.size` bytes).
+async fn finish_block_record(
+    sink: &FsTransferSink,
+    header: &FileHeader,
+    complete: &BlockTransferComplete,
+) -> Result<crate::remote::transfer::SinkOutcome> {
+    if complete.total_bytes != header.size {
+        return Err(violation(format!(
+            "block record '{}' completed at {} byte(s), manifest promised {}",
+            header.relative_path, complete.total_bytes, header.size
+        )));
+    }
+    sink.write_payload(PreparedPayload::FileBlockComplete {
+        relative_path: header.relative_path.clone(),
+        total_size: complete.total_bytes,
+        mtime_seconds: header.mtime_seconds,
+        permissions: header.permissions,
+    })
+    .await
 }
 
 /// Receive one strictly-serialized file record (`file_begin` already

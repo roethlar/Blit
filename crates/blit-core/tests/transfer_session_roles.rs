@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, ComparisonMode, FileHeader, FilterSpec, ManifestComplete, MirrorMode, NeedBatch,
-    NeedComplete, NeedEntry, SessionHello, SessionOpen, TransferFrame, TransferRole,
-    TransferSummary,
+    session_error, BlockHashList, ComparisonMode, FileHeader, FilterSpec, ManifestComplete,
+    MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings, SessionHello, SessionOpen,
+    TransferFrame, TransferRole, TransferSummary,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{PreparedPayload, TransferPayload};
@@ -334,6 +334,419 @@ async fn preexisting_identical_tree_yields_empty_need_list() {
     assert!(needed.is_empty(), "identical trees must need nothing");
     assert_eq!(summary.files_transferred, 0);
     assert_eq!(summary.bytes_transferred, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Resume block phase (otp-7a, docs/plan/OTP7_RESUME.md)
+// ---------------------------------------------------------------------------
+
+/// Block size for the resume fixtures: small enough that multi-block
+/// files stay tiny, and never a divisor-of-content accident (fixtures
+/// add partial tail blocks deliberately).
+const RESUME_BS: u32 = 4096;
+
+fn resume_open(initiator_role: TransferRole, block_size: u32) -> SessionOpen {
+    SessionOpen {
+        resume: Some(ResumeSettings {
+            enabled: true,
+            block_size,
+        }),
+        ..basic_open(initiator_role)
+    }
+}
+
+/// Run a resume-enabled fixture under both role assignments (fresh
+/// trees per run) and pin the invariance property, exactly as
+/// [`assert_invariant_across_roles`] does for plain sessions (plan D6:
+/// resume runs identically whichever end initiated).
+async fn assert_resume_invariant_across_roles(
+    src_files: &[FileSpec],
+    dst_files: &[FileSpec],
+) -> (TransferSummary, Vec<String>) {
+    let mut per_role: Vec<(TransferSummary, Vec<String>)> = Vec::new();
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, src_files);
+        write_tree(&dst_root, dst_files);
+
+        let (source_result, dest_result) = run_session_with_open(
+            resume_open(initiator_role, RESUME_BS),
+            &src_root,
+            &dst_root,
+            PlanOptions::default(),
+        )
+        .await;
+        let source_summary = source_result
+            .unwrap_or_else(|e| panic!("source failed under initiator {initiator_role:?}: {e:#}"));
+        let dest_outcome = dest_result.unwrap_or_else(|e| {
+            panic!("destination failed under initiator {initiator_role:?}: {e:#}")
+        });
+
+        assert_eq!(
+            source_summary, dest_outcome.summary,
+            "both ends must hold the same summary (initiator {initiator_role:?})"
+        );
+        assert!(
+            source_summary.in_stream_carrier_used,
+            "resume sessions ride the in-stream carrier (otp-7a)"
+        );
+        assert_trees_identical(&src_root, &dst_root);
+
+        let mut needed = dest_outcome.needed_paths.clone();
+        needed.sort();
+        per_role.push((dest_outcome.summary, needed));
+    }
+
+    let (summary_a, needed_a) = per_role.remove(0);
+    let (summary_b, needed_b) = per_role.remove(0);
+    assert_eq!(
+        needed_a, needed_b,
+        "need-list set must be identical whichever end initiates"
+    );
+    assert_eq!(
+        summary_a, summary_b,
+        "summary must be identical whichever end initiates"
+    );
+    (summary_a, needed_a)
+}
+
+#[tokio::test]
+async fn resume_moves_only_the_changed_blocks() {
+    // Plan guard-proof 1 (partial resume): a 6-block file whose first 4
+    // blocks already landed at the dest. Only the 2 missing blocks may
+    // move — pinned through `bytes_transferred`, which under the
+    // in-stream carrier counts exactly the payload bytes written.
+    // Guard: neuter the source block-diff (send every block) and this
+    // fails at 6 blocks ≠ 2 blocks. A plain absent file rides along, so
+    // block records and file records coexist in one session.
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(6 * bs);
+    let partial = content[..4 * bs].to_vec();
+    let src: Vec<FileSpec> = vec![
+        ("big.bin", content, 1_600_000_700),
+        ("fresh.txt", b"fresh".to_vec(), 1_600_000_701),
+    ];
+    let dst: Vec<FileSpec> = vec![("big.bin", partial, 1_600_000_600)];
+
+    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst).await;
+    assert_eq!(needed, vec!["big.bin".to_string(), "fresh.txt".to_string()]);
+    assert_eq!(summary.files_transferred, 2);
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(
+        summary.bytes_transferred,
+        (2 * bs + 5) as u64,
+        "only the 2 stale blocks plus the plain file may move"
+    );
+}
+
+#[tokio::test]
+async fn resume_identical_content_moves_zero_blocks_and_stamps_mtime() {
+    // Plan guard-proof 2 (identical file): same bytes, dest mtime older
+    // (an mtime-only touch). SizeMtime says transfer; every block hash
+    // matches, so ZERO payload bytes move — yet the file still counts
+    // done and BlockTransferComplete stamps the source mtime, which is
+    // what makes the next run skip it. Run per role so the mtime stamp
+    // can be asserted on the live dest tree.
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(2 * bs + 123);
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[("touched.bin", content.clone(), 1_600_000_800)],
+        );
+        write_tree(
+            &dst_root,
+            &[("touched.bin", content.clone(), 1_600_000_700)],
+        );
+
+        let (source_result, dest_result) = run_session_with_open(
+            resume_open(initiator_role, RESUME_BS),
+            &src_root,
+            &dst_root,
+            PlanOptions::default(),
+        )
+        .await;
+        let summary = source_result
+            .unwrap_or_else(|e| panic!("source failed under initiator {initiator_role:?}: {e:#}"));
+        let outcome = dest_result.unwrap_or_else(|e| {
+            panic!("destination failed under initiator {initiator_role:?}: {e:#}")
+        });
+        assert_eq!(summary, outcome.summary);
+        assert_eq!(summary.files_resumed, 1);
+        assert_eq!(summary.files_transferred, 1);
+        assert_eq!(
+            summary.bytes_transferred, 0,
+            "identical content must move zero block bytes (initiator {initiator_role:?})"
+        );
+        assert_trees_identical(&src_root, &dst_root);
+        let stamped = std::fs::metadata(dst_root.join("touched.bin"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            stamped, 1_600_000_800,
+            "BlockTransferComplete must stamp the source mtime (initiator {initiator_role:?})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resume_stale_partial_falls_back_to_full_content() {
+    // Plan guard-proof 3 (stale-partial fallback, D1/Q1): a dest partial
+    // sharing NO blocks with the source degrades to a full-content
+    // transfer of that file — never an abort, never trusted hashes.
+    // Guard: force the source to trust the stale hashes and the
+    // byte-identical assertion fails on corrupt output. A shrunk-to-empty
+    // source rides along: zero blocks, truncate-to-0 at complete.
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(3 * bs + 200);
+    let stale = vec![0xFFu8; content.len()];
+    let src: Vec<FileSpec> = vec![
+        ("swapped.bin", content.clone(), 1_600_000_900),
+        ("shrunk.bin", Vec::new(), 1_600_000_901),
+    ];
+    let dst: Vec<FileSpec> = vec![
+        ("swapped.bin", stale, 1_600_000_810),
+        ("shrunk.bin", vec![0xEE; 100], 1_600_000_811),
+    ];
+
+    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst).await;
+    assert_eq!(
+        needed,
+        vec!["shrunk.bin".to_string(), "swapped.bin".to_string()]
+    );
+    assert_eq!(summary.files_resumed, 2);
+    assert_eq!(summary.files_transferred, 2);
+    assert_eq!(
+        summary.bytes_transferred,
+        content.len() as u64,
+        "every block of the swapped file moves; the shrunk file moves none"
+    );
+}
+
+#[tokio::test]
+async fn resume_ineligible_targets_are_plain_full_transfers() {
+    // Plan D2: absent and empty dest files have no partial to hash — they
+    // transfer as plain full records with no resume flag, and count in
+    // files_transferred but never files_resumed.
+    let bs = RESUME_BS as usize;
+    let src: Vec<FileSpec> = vec![
+        ("absent.bin", make_patterned(2 * bs), 1_600_001_000),
+        ("empty-dest.bin", make_patterned(bs + 5), 1_600_001_001),
+    ];
+    let dst: Vec<FileSpec> = vec![("empty-dest.bin", Vec::new(), 1_600_000_910)];
+
+    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst).await;
+    assert_eq!(
+        needed,
+        vec!["absent.bin".to_string(), "empty-dest.bin".to_string()]
+    );
+    assert_eq!(summary.files_resumed, 0);
+    assert_eq!(summary.files_transferred, 2);
+    assert_eq!(summary.bytes_transferred, (3 * bs + 5) as u64);
+}
+
+/// otp-7a fault injection: a source whose reader for one path yields
+/// only the first `limit` bytes and then EOF, provably short of the
+/// manifested size — the session's mid-record fault (the same EOF-short
+/// abort a whole-file record has).
+struct TruncatedReadSource {
+    inner: FsTransferSource,
+    fail_path: &'static str,
+    limit: u64,
+}
+
+#[async_trait::async_trait]
+impl TransferSource for TruncatedReadSource {
+    fn scan(
+        &self,
+        filter: Option<blit_core::fs_enum::FileFilter>,
+        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<FileHeader>,
+        tokio::task::JoinHandle<eyre::Result<u64>>,
+    ) {
+        self.inner.scan(filter, unreadable_paths)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> eyre::Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> eyre::Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        use tokio::io::AsyncReadExt;
+        let reader = self.inner.open_file(header).await?;
+        if header.relative_path == self.fail_path {
+            Ok(Box::new(reader.take(self.limit)))
+        } else {
+            Ok(reader)
+        }
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+#[tokio::test]
+async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
+    // Plan guard-proof 4 (mid-resume-failure, D4): the source faults
+    // mid-block-phase — after at least one BlockTransfer landed — and a
+    // clean `SessionFault` surfaces at BOTH ends within the suite
+    // timeout (no deadlock), with no summary and so no false
+    // `files_resumed`. The partial is left partially patched by design
+    // (in-place model); the next run re-syncs it.
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(3 * bs);
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(
+            &src_root,
+            &[("partial.bin", content.clone(), 1_600_001_100)],
+        );
+        // Every dest block is stale, so the source starts sending block
+        // records immediately; its reader dies mid-block-2.
+        write_tree(
+            &dst_root,
+            &[("partial.bin", vec![0x11; content.len()], 1_600_001_000)],
+        );
+
+        let open = resume_open(initiator_role, RESUME_BS);
+        let (source_endpoint, dest_endpoint) = match initiator_role {
+            TransferRole::Source => (SessionEndpoint::initiator(open), SessionEndpoint::Responder),
+            TransferRole::Destination => {
+                (SessionEndpoint::Responder, SessionEndpoint::initiator(open))
+            }
+            TransferRole::Unspecified => unreachable!(),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: None,
+        };
+        let (a, b) = in_process_pair();
+        let source: Arc<dyn TransferSource> = Arc::new(TruncatedReadSource {
+            inner: FsTransferSource::new(src_root.clone()),
+            fail_path: "partial.bin",
+            limit: (bs + bs / 2) as u64, // dies halfway through block 2
+        });
+        let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+            tokio::join!(
+                run_source(source_cfg, a, source),
+                run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+            )
+        })
+        .await
+        .expect("mid-resume fault must not deadlock");
+
+        let source_err = source_result.expect_err("source must fault");
+        let source_fault = fault_of(&source_err);
+        assert_eq!(source_fault.code, session_error::Code::Internal);
+        assert!(
+            source_fault.message.contains("partial.bin"),
+            "source fault must name the file: {}",
+            source_fault.message
+        );
+        let dest_err = dest_result.expect_err("destination must fault");
+        let dest_fault = fault_of(&dest_err);
+        assert_eq!(
+            dest_fault.code,
+            session_error::Code::Internal,
+            "the destination must surface the source's framed fault, got: {}",
+            dest_fault.message
+        );
+        assert!(
+            dest_fault.message.contains("partial.bin"),
+            "destination fault must name the file: {}",
+            dest_fault.message
+        );
+    }
+}
+
+#[tokio::test]
+async fn block_hashes_without_a_held_resume_need_fault_the_source() {
+    // Choreography strictness: a BlockHashList must correlate with a
+    // resume-flagged need the destination previously granted; an
+    // uncorrelated list is a protocol violation, not a silent ignore.
+    let tmp = tempfile::tempdir().unwrap();
+    let src_root = tmp.path().join("src");
+    std::fs::create_dir_all(&src_root).unwrap();
+    write_tree(&src_root, &[("real.txt", b"real".to_vec(), 1_600_001_200)]);
+
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(resume_open(TransferRole::Source, RESUME_BS)),
+        plan_options: PlanOptions::default(),
+        data_plane_host: None,
+    };
+    let (source_transport, mut peer) = in_process_pair();
+    let source = Arc::new(FsTransferSource::new(src_root));
+    let source_task = tokio::spawn(run_source(source_cfg, source_transport, source));
+
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Open(_)));
+    peer.send(wire(Frame::Accept(Default::default())))
+        .await
+        .unwrap();
+    loop {
+        match recv_or_panic(&mut peer).await {
+            Frame::ManifestEntry(_) => continue,
+            Frame::ManifestComplete(_) => break,
+            other => panic!("expected manifest stream, got {other:?}"),
+        }
+    }
+    peer.send(wire(Frame::BlockHashes(BlockHashList {
+        relative_path: "real.txt".into(),
+        block_size: RESUME_BS,
+        hashes: Vec::new(),
+    })))
+    .await
+    .unwrap();
+
+    let source_err = source_task.await.unwrap().unwrap_err();
+    let fault = fault_of(&source_err);
+    assert_eq!(fault.code, session_error::Code::ProtocolViolation);
+    assert!(
+        fault.message.contains("without a held resume need"),
+        "got: {}",
+        fault.message
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

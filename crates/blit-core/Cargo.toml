@@ -72,6 +72,9 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # otp-3: deterministic fixture mtimes in the role-parameterized
 # session suite (regular dep already; repeated here for tests/).
 filetime = "0.2"
+# otp-7a: the role suite's fault-injection TransferSource implements
+# the async trait directly (regular dep already; repeated for tests/).
+async-trait = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
