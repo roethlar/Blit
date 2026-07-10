@@ -46,7 +46,7 @@ file copy between the owner's machines).
 | small (10k × 4 KiB)      | 2503 | 3330 | 1381 | 1494 |
 | mixed (512 MiB + 5k×2K)  | 2844 | 3241 | 1316 | 1438 |
 
-Per-run data: `runs.csv`; `drain.log` shows ZERO drain timeouts.
+Per-run data: `runs.csv`; `drain-outcomes.txt` shows ZERO drain timeouts.
 Stability is verdict-grade: per-cell spread ≤ 2% for 8 of 12 cells,
 worst 11.9% (`pull_tcp_small`). Rounding: integer ms; even-count
 median = floor of the mean of the middle two.

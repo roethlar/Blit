@@ -40,7 +40,7 @@ header; the probe CSVs here are the evidence that earned each rule).
 | mixed (512 MiB + 5k×2K)  | 2666 | 3884 | 1503 | 2258 |
 
 Per-run data: `runs.csv`; avg/best alongside medians: `summary.csv`;
-per-run drain outcomes: `drain.log` (exactly one DRAIN-TIMEOUT, the
+per-run drain outcomes: `drain-outcomes.txt` (exactly one DRAIN-TIMEOUT, the
 expected post-staging first run — its value, 3283 ms, is not even its
 cell's maximum). Rounding: all times integer ms; an even-count median
 is the floor of the mean of the middle two.
