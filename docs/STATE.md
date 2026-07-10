@@ -47,31 +47,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     (SCAN_INCOMPLETE refusal) and the mirror delete pass made
     cancellation-abortable. Suite → **1555**. Detail: DEVLOG
     2026-07-10 17:30Z + `.review/`.
-  - **otp-2 — PER-DIRECTION rig baseline recorded; symmetric-fs
-    verdict cells NOT satisfiable on this rig (codex F1, upheld)**.
-    Owner opened Mac ↔ zoey (Thunderbolt 10GbE, zoey confined to
-    `blit-temp`); harness `scripts/bench_otp2_baseline.sh` (cold
-    caches, durable-at-dest windows both ends, pool drain,
-    median-of-4); evidence
-    `docs/bench/otp2-baseline-2026-07-10/README.md`. These endpoints
-    are hardware-asymmetric, and D-2026-07-05-1's own rule says
-    cross-direction comparisons are valid ONLY on symmetric
-    endpoints — so this data anchors per-direction converge-up
-    (old-vs-new, same cell) and CANNOT anchor the otp-12 bar's
-    cross-direction half. July tmpfs data re-labeled wire-reference.
-  - **otp-2 CLOSED (both halves).** The owner adjudicated the
-    asymmetric-rig question by designating Mac↔Windows ("closer
-    spec... both have 10gbe") for the cross-direction half; recorded
-    as **otp-2w** (`scripts/bench_otp2w_baseline.sh` + PowerShell
-    host plumbing; evidence
-    `docs/bench/otp2w-baseline-2026-07-10/README.md` — zero drain
-    timeouts, 8/12 cells ≤2% spread). zoey = per-direction
-    reference; Windows pair = cross-direction rig. Notable recorded
-    reading: old push trails old pull ×1.8–×2.7 even on the
-    close-spec pair, carrier-insensitive on large — otp-12's
-    old-vs-new discriminates code cost from platform write-path
-    cost. Owner standing: remote↔remote (delegated) testing uses
-    the Windows box + TrueNAS.
+  - **otp-2 CLOSED (both halves).** zoey rig (Mac↔zoey, Thunderbolt
+    10GbE, zoey confined to `blit-temp`) = PER-DIRECTION reference —
+    hardware-asymmetric ends, so D-2026-07-05-1 forbids
+    cross-direction verdicts there (codex F1, upheld). The owner then
+    designated Mac↔Windows ("closer spec... both have 10gbe") =
+    cross-direction rig, recorded as **otp-2w**. Harnesses
+    `scripts/bench_otp2{,w}_baseline.sh` (cold caches, self-timed
+    durable-at-dest windows, drain, median-of-4); evidence
+    `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`. July tmpfs
+    data re-labeled wire-reference. Key recorded reading: old push
+    trails old pull on BOTH rigs, carrier-insensitive on large —
+    otp-12's interleaved old-vs-new discriminates code cost from
+    platform write-path cost (exact ratios per the READMEs, post
+    timing-overhead correction).
   - Current: **otp-10 (cutover + deletion)**. otp-5b-3 (pull
     cancel) optional.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
@@ -153,6 +142,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - ~~otp-12 acceptance-bar adjudication~~ RESOLVED (owner designated
   Mac↔Windows; otp-2w recorded — see Now/Open questions). Nothing
   holds otp-10 anymore. otp-5b-3 question stands.
+- **Rig availability (owner, 2026-07-10, verified by ssh)**: for the
+  otp-12 matrix — remote↔remote (delegated) uses the Windows box
+  (`michael@10.1.10.173`) + TrueNAS `skippy` (`admin@skippy`,
+  x86_64; existing test folder `/mnt/generic-pool/video/blit-bin/`
+  with July binaries + bench.toml; /tmp and /home are noexec there);
+  skippy also available for Mac↔Linux cells "if needed" (owner).
+  zoey = per-direction rig; Windows pair = cross-direction rig.
 - **Three 10 GbE gate declarations**: ue-1 pass/fail, ue-2 pass/fail
   or re-scope, REV4 → Shipped. (Zero-copy a/b/c RESOLVED —
   D-2026-07-05-3; skippy CPU data stays in DEVLOG + DIAGNOSIS.md.)
