@@ -233,8 +233,16 @@ impl SessionFault {
     /// tests pin its content.
     pub fn end_of_operation_summary(&self) -> Option<String> {
         let path = self.relative_path.as_deref()?;
+        // "" is the single-file-root transfer's identity (the root IS
+        // the file) — render it as such rather than a blank name
+        // (codex 7b-2 G1).
+        let shown = if path.is_empty() {
+            "<the transfer root file>"
+        } else {
+            path
+        };
         Some(format!(
-            "transfer aborted: {}\naffected file: {path} — partial data at the \
+            "transfer aborted: {}\naffected file: {shown} — partial data at the \
              destination is preserved; re-run the same command to converge \
              (resume transfers only what is still missing)",
             self.message
@@ -270,7 +278,9 @@ impl SessionFault {
             local_build_id: err.peer_build_id,
             peer_build_id: err.local_build_id,
             peer_notified: true,
-            relative_path: (!err.relative_path.is_empty()).then_some(err.relative_path),
+            // Explicit wire presence (codex 7b-2 G1): "" is the valid
+            // identity of a single-file-root transfer, not absence.
+            relative_path: err.relative_path,
         }
     }
 
@@ -280,7 +290,7 @@ impl SessionFault {
             message: self.message.clone(),
             local_build_id: self.local_build_id.clone(),
             peer_build_id: self.peer_build_id.clone(),
-            relative_path: self.relative_path.clone().unwrap_or_default(),
+            relative_path: self.relative_path.clone(),
         }
     }
 }
@@ -368,7 +378,7 @@ pub fn session_error_frame(code: session_error::Code, message: impl Into<String>
         message: message.into(),
         local_build_id: String::new(),
         peer_build_id: String::new(),
-        relative_path: String::new(),
+        relative_path: None,
     }))
 }
 
@@ -1185,6 +1195,12 @@ async fn source_send_half(
             let ready = std::mem::take(&mut resume.ready);
             match &mut data_plane {
                 Some(dp) => {
+                    // codex 7b-1 F4: resume batches drive the sf-2 shape
+                    // correction exactly as plain batches do — a
+                    // resume-heavy need list must not stay pinned to the
+                    // zero-knowledge single stream.
+                    maybe_propose_resize(dp, tx, needed_bytes, needed_count, &mut pending_resize)
+                        .await?;
                     let payloads = ready
                         .into_iter()
                         .map(|(header, hashes)| TransferPayload::ResumeFile {
@@ -1202,7 +1218,12 @@ async fn source_send_half(
                 }
                 None => {
                     for (header, hashes) in ready {
-                        send_resume_block_records(tx, &source, &header, &hashes).await?;
+                        // codex 7b-2 G2: the whole in-stream record names
+                        // its file on failure, matching the data-plane
+                        // carrier's outer wrap.
+                        send_resume_block_records(tx, &source, &header, &hashes)
+                            .await
+                            .map_err(|e| tag_path(e, &header.relative_path))?;
                     }
                 }
             }
@@ -1743,22 +1764,31 @@ async fn send_resume_block_records(
     header: &FileHeader,
     hashes: &BlockHashList,
 ) -> Result<()> {
+    use crate::remote::transfer::resume_diff::{ResumeBlockDiff, ResumeDiffEvent};
     // block_size was range-validated when the BlockHashList arrived
-    // (`process_source_event`, codex F5) — use it directly.
-    let mut diff = crate::remote::transfer::resume_diff::ResumeBlockDiff::open(
+    // (`process_source_event`, codex F5) — use it directly. Keepalive
+    // stays unarmed: the control lane carries no receive stall guard,
+    // so a silent scan cannot trip one (codex 7b-1 F1 is a data-plane
+    // concern; `DataPlaneSink` arms it there).
+    let mut diff = ResumeBlockDiff::open(
         source,
         header,
         hashes.block_size as usize,
         hashes.hashes.clone(),
     )
     .await?;
-    while let Some((offset, block)) = diff.next_stale().await? {
-        tx.send(frame(Frame::Block(BlockTransfer {
-            relative_path: header.relative_path.clone(),
-            offset,
-            content: block.to_vec(),
-        })))
-        .await?;
+    while let Some(event) = diff.next_event().await? {
+        match event {
+            ResumeDiffEvent::Stale { offset, bytes } => {
+                tx.send(frame(Frame::Block(BlockTransfer {
+                    relative_path: header.relative_path.clone(),
+                    offset,
+                    content: bytes.to_vec(),
+                })))
+                .await?;
+            }
+            ResumeDiffEvent::KeepAlive { .. } => {}
+        }
     }
     tx.send(frame(Frame::BlockComplete(BlockTransferComplete {
         relative_path: header.relative_path.clone(),
@@ -3036,7 +3066,13 @@ async fn receive_block_record(
             .await
             .map_err(|e| tag_path(e, &header.relative_path))?;
         bytes_written += outcome.bytes_written;
-        let received = match transport.recv().await? {
+        // codex 7b-2 G3: a transport break inside the record names the
+        // file the record already identified.
+        let received = match transport
+            .recv()
+            .await
+            .map_err(|e| tag_path(e, &header.relative_path))?
+        {
             Some(f) => f,
             None => {
                 return Err(eyre::Report::new(
@@ -3127,7 +3163,13 @@ async fn receive_file_record(
     let feed = async {
         let mut remaining = header.size;
         while remaining > 0 {
-            let received = match transport.recv().await? {
+            // codex 7b-2 G3: a transport break inside the record names
+            // the file the record already identified.
+            let received = match transport
+                .recv()
+                .await
+                .map_err(|e| tag_path(e, &header.relative_path))?
+            {
                 Some(f) => f,
                 None => {
                     return Err(eyre::Report::new(
@@ -3353,7 +3395,26 @@ mod tests {
         let restored = SessionFault::from_wire(fault.to_wire());
         assert_eq!(restored.relative_path.as_deref(), Some("big.bin"));
         let no_path = SessionFault::from_wire(SessionFault::internal("x").to_wire());
-        assert_eq!(no_path.relative_path, None, "empty wire path is None");
+        assert_eq!(no_path.relative_path, None, "absent wire path is None");
+        // codex 7b-2 G1: "" is the single-file-root identity — it must
+        // survive the wire (explicit presence) and render non-blank.
+        let root_file = SessionFault::from_wire(
+            SessionFault::internal("root file fault")
+                .with_path("")
+                .to_wire(),
+        );
+        assert_eq!(
+            root_file.relative_path.as_deref(),
+            Some(""),
+            "the empty single-file-root identity survives the wire"
+        );
+        assert!(
+            root_file
+                .end_of_operation_summary()
+                .expect("a summary exists for the root-file identity")
+                .contains("<the transfer root file>"),
+            "the root-file identity renders non-blank"
+        );
 
         // eyre-chain lift: a FaultedPath marker anywhere in a non-fault
         // report becomes the fault's structured identity.

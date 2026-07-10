@@ -226,7 +226,13 @@ push/pull-specific message.
   `DELEGATION_REFUSED`, `SCAN_INCOMPLETE`, `PROTOCOL_VIOLATION`,
   `DATA_PLANE_FAILED`, `CANCELLED`, `INTERNAL`. An end that refuses
   or aborts says why before closing; operators never diagnose from a
-  bare stream reset.
+  bare stream reset. Since contract v2 (otp-7b-2, the D-2026-07-09-1
+  Q2 rider) the frame also carries `optional relative_path` — the
+  file the fault concerns, when one is known (per-file read/write
+  failures name their file; optional because "" is itself the valid
+  identity of a single-file-root transfer). Both ends can therefore
+  name the affected file in their end-of-operation summary,
+  structurally, wherever the fault originated.
 - `CancelJob` interop: the responder registers the session in
   `ActiveJobs` at OPEN (same transfer_id contract as today); the
   cancel token races the session exactly as w4-3 wired, and the

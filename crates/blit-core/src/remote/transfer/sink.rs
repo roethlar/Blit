@@ -835,22 +835,41 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                 block_size,
                 dest_hashes,
             } => {
+                use crate::remote::transfer::resume_diff::{ResumeBlockDiff, ResumeDiffEvent};
                 let path = header.relative_path.clone();
                 let record = async {
-                    let mut diff = crate::remote::transfer::resume_diff::ResumeBlockDiff::open(
+                    // codex otp-7b-1 F1: a mostly-matching scan is a
+                    // long SILENT read+hash — arm keepalive ticks well
+                    // inside the receiver's stall window and answer each
+                    // with a zero-length BLOCK (a no-op in-place write),
+                    // so a healthy scan never reads as a stalled peer.
+                    let mut diff = ResumeBlockDiff::open(
                         &self.source,
                         &header,
                         block_size as usize,
                         dest_hashes,
                     )
-                    .await?;
+                    .await?
+                    .with_keepalive(
+                        crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT / 3,
+                    );
                     let mut bytes_written: u64 = 0;
-                    while let Some((offset, block)) = diff.next_stale().await? {
-                        session
-                            .send_block(&header.relative_path, offset, block)
-                            .await
-                            .context("sending resume block")?;
-                        bytes_written += block.len() as u64;
+                    while let Some(event) = diff.next_event().await? {
+                        match event {
+                            ResumeDiffEvent::Stale { offset, bytes } => {
+                                session
+                                    .send_block(&header.relative_path, offset, bytes)
+                                    .await
+                                    .context("sending resume block")?;
+                                bytes_written += bytes.len() as u64;
+                            }
+                            ResumeDiffEvent::KeepAlive { offset } => {
+                                session
+                                    .send_block(&header.relative_path, offset, &[])
+                                    .await
+                                    .context("sending resume keepalive block")?;
+                            }
+                        }
                     }
                     session
                         .send_block_complete(

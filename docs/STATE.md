@@ -125,7 +125,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
    epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
    `derive_local_plan_tuning` fold-or-retire; receive-side dial
-   tuning residue (w3-1 scoped it out).
+   tuning residue (w3-1 scoped it out); the source send half's bounded
+   `dp.queue()` is not raced against control-lane events — shape since
+   otp-4b, deferred at codex otp-7b-1 F3 (keepalive bounds the window;
+   both cancel e2es pin the required behavior).
 
 ## Authoritative docs right now
 

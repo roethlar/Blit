@@ -1349,10 +1349,12 @@ message SessionError {
   string peer_build_id = 4;
   // otp-7b-2 (D-2026-07-09-1 Q2 rider): the file the fault concerns,
   // when one is known (a mid-record read/write failure names its
-  // file). Empty = no file identity. Lets the reporting end's
-  // end-of-operation summary name the affected file structurally
-  // instead of string-scraping the message.
-  string relative_path = 5;
+  // file). OPTIONAL for explicit presence (codex 7b-2 G1): the empty
+  // string is itself a valid identity — the single-file-root transfer
+  // uses relative path "" — so absence must be distinguishable from
+  // it. Lets the reporting end's end-of-operation summary name the
+  // affected file structurally instead of string-scraping the message.
+  optional string relative_path = 5;
 }
 
 // The single frame type BOTH wire directions carry. Which frames an

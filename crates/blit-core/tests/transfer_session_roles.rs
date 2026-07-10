@@ -552,6 +552,31 @@ async fn resume_over_the_data_plane_moves_only_the_changed_blocks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_data_plane_honors_block_sizes_above_the_in_stream_ceiling() {
+    // codex otp-7b-1 F6 / D-2026-07-10-2 pin: the data-plane carrier's
+    // block-size ceiling (64 MiB) exceeds the in-stream carrier's
+    // (2 MiB). Request 4 MiB blocks over a 4 MiB file whose LAST byte
+    // is stale at the dest: honored, the single 4 MiB block covers the
+    // whole file and the whole file moves; an implementation wrongly
+    // clamping to the in-stream ceiling would hash two 2 MiB blocks,
+    // find only the second stale, and move 2 MiB instead.
+    const BS: usize = 4 * 1024 * 1024;
+    let content = make_patterned(BS);
+    let mut stale_tail = content.clone();
+    *stale_tail.last_mut().unwrap() ^= 0xFF;
+    let src: Vec<FileSpec> = vec![("one-block.bin", content, 1_600_001_600)];
+    let dst: Vec<FileSpec> = vec![("one-block.bin", stale_tail, 1_600_001_500)];
+
+    let (summary, _) = assert_resume_data_plane_invariant_across_roles(&src, &dst, BS as u32).await;
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(
+        summary.bytes_transferred, BS as u64,
+        "a 4 MiB block size (over the in-stream ceiling) must be honored \
+         on the data plane: one block covers the file, so the whole file moves"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_over_the_data_plane_stale_partial_falls_back_to_full_content() {
     // otp-7b: the D1 stale-partial fallback holds on the data-plane
     // carrier too — a dest partial sharing NO blocks with the source

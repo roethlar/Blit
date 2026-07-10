@@ -100,6 +100,18 @@ otp-10).
 - Session-wide block size only; per-file auto-scaling for partials past
   the hash cap (>4 TiB at 64 MiB blocks) stays future work — such
   partials degrade to the D1 full transfer (D-2026-07-10-2 notes this).
+- The per-worker diff buffer is `block_size` bytes outside the shared
+  `BufferPool` budget (codex 7b-1 F5, rejected as blocking): the worst
+  case (streams × 64 MiB) requires the user to explicitly request the
+  64 MiB ceiling AND a high advertised stream count; the default is
+  1 MiB and the buffer is transient per resume file. Pool integration
+  can ride a later slice if a real workload hits it.
+- The source's bounded `dp.queue()` is not raced against control-lane
+  events (codex 7b-1 F3, deferred): the shape is pre-existing since
+  otp-4b for plain batches; the F1 keepalive fix bounds the new long
+  silent-scan window (a worker touches its socket at least every
+  stall/3, so a torn-down session surfaces promptly), and both cancel
+  e2es pin the required behavior.
 - The D4 CLI end-of-op fault summary and cancel-during-resume e2e are
   otp-7b-2 (next pass), per the staging split recorded in the plan.
 - Send-side `SinkOutcome.files_written/bytes_written` for a resume record

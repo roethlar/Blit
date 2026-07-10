@@ -479,8 +479,17 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
             }
             DATA_PLANE_RECORD_BLOCK => {
                 let path = read_string(socket).await?;
-                let offset = read_u64(socket).await?;
-                let len = read_u32(socket).await? as usize;
+                // otp-7b-2 (codex G3): once the record names its file,
+                // every failure inside it does too.
+                let offset = read_u64(socket)
+                    .await
+                    .context("reading block offset")
+                    .map_err(|e| e.wrap_err(super::faulted_path::FaultedPath(path.clone())))?;
+                let len = read_u32(socket)
+                    .await
+                    .context("reading block length")
+                    .map_err(|e| e.wrap_err(super::faulted_path::FaultedPath(path.clone())))?
+                    as usize;
                 if len > MAX_WIRE_BLOCK_BYTES {
                     bail!(
                         "wire block payload {} bytes exceeds max {} (rejecting to avoid OOM)",
@@ -513,9 +522,22 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
             }
             DATA_PLANE_RECORD_BLOCK_COMPLETE => {
                 let path = read_string(socket).await?;
-                let total_size = read_u64(socket).await?;
-                let mtime = read_i64(socket).await?;
-                let perms = read_u32(socket).await?;
+                // otp-7b-2 (codex G3): completion-metadata read failures
+                // name the file the record already identified.
+                let tag =
+                    |e: eyre::Report| e.wrap_err(super::faulted_path::FaultedPath(path.clone()));
+                let total_size = read_u64(socket)
+                    .await
+                    .context("reading block complete size")
+                    .map_err(tag)?;
+                let mtime = read_i64(socket)
+                    .await
+                    .context("reading block complete mtime")
+                    .map_err(tag)?;
+                let perms = read_u32(socket)
+                    .await
+                    .context("reading block complete permissions")
+                    .map_err(tag)?;
                 let path_for_progress = progress.map(|_| path.clone());
                 let payload = PreparedPayload::FileBlockComplete {
                     relative_path: path,
