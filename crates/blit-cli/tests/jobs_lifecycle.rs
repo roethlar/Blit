@@ -363,13 +363,18 @@ impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
         Err(tonic::Status::unimplemented("stalling fake source"))
     }
 
-    /// The point of this fake: accept the RPC and never answer.
+    /// otp-9b F4: deliberately NOT a stall — delegation no longer
+    /// touches PullSync, and a stalling legacy arm would let a
+    /// reverted (pre-session) delegated path keep the cancel window
+    /// and pass this test unnoticed. A revert now fails fast here and
+    /// the cancel-of-active-job pin fails.
     async fn pull_sync(
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
     ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
-        std::future::pending::<()>().await;
-        unreachable!("pending() never resolves")
+        Err(tonic::Status::unimplemented(
+            "delegation no longer uses PullSync (otp-9b)",
+        ))
     }
 
     async fn subscribe(

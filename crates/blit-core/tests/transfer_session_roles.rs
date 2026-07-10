@@ -1770,6 +1770,75 @@ async fn mirror_refused_when_source_scan_incomplete() {
 }
 
 #[tokio::test]
+async fn incomplete_scan_refused_when_completeness_required() {
+    // codex otp-9b F1 (R49-F2 on the session): an initiator that
+    // declared require_complete_scan (`blit move` — the source is
+    // deleted after success) must NOT get a success out of an
+    // incomplete source scan; files the scan could not read would be
+    // silently lost with the source. The destination refuses at
+    // ManifestComplete{scan_complete=false} with SCAN_INCOMPLETE.
+    // Scripted source peer so we control the flag.
+    let tmp = tempfile::tempdir().unwrap();
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst_root).unwrap();
+
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+        byte_progress: None,
+    };
+    let (mut peer, dest_transport) = in_process_pair();
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root.clone()),
+    ));
+
+    let mut open = basic_open(TransferRole::Source);
+    open.require_complete_scan = true;
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(wire(Frame::Open(open))).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Accept(_)));
+
+    peer.send(wire(Frame::ManifestEntry(FileHeader {
+        relative_path: "present.txt".into(),
+        size: 1,
+        mtime_seconds: 1_600_000_000,
+        permissions: 0o644,
+        checksum: vec![],
+    })))
+    .await
+    .unwrap();
+    peer.send(wire(Frame::ManifestComplete(ManifestComplete {
+        scan_complete: false,
+    })))
+    .await
+    .unwrap();
+
+    // Bounded wait: an implementation that fails to refuse proceeds to
+    // the payload phase and would otherwise hang this scripted peer.
+    let refusal = tokio::time::timeout(SUITE_TIMEOUT, async {
+        loop {
+            match recv_or_panic(&mut peer).await {
+                Frame::Error(e) => break e,
+                Frame::NeedBatch(_) | Frame::NeedComplete(_) => continue,
+                other => panic!("expected SessionError, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("destination must refuse the incomplete scan, not proceed");
+    assert_eq!(refusal.code, session_error::Code::ScanIncomplete as i32);
+    let dest_err = dest.await.unwrap().unwrap_err();
+    assert_eq!(
+        fault_of(&dest_err).code,
+        session_error::Code::ScanIncomplete
+    );
+}
+
+#[tokio::test]
 async fn source_filter_limits_manifest_under_both_initiators() {
     // otp-6a: an include filter on the open restricts the source scan to
     // matching files; non-matching files are neither manifested nor

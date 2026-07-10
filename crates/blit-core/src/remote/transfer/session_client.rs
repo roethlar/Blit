@@ -282,24 +282,40 @@ fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
     }
 }
 
-/// A peer refusing the `Transfer` RPC at OPEN is a session-negotiation
-/// failure, not a generic transport error (otp-9b): map the gRPC
-/// status onto the `SessionFault` code the same refusal would carry as
-/// a session frame, so callers phase it structurally. On a same-build
-/// fleet an `Unimplemented` Transfer only means a pre-session peer —
-/// the build-mismatch shape; `PermissionDenied` is the peer's own
-/// delegation/ACL gate.
-fn transfer_open_refusal(status: tonic::Status) -> crate::transfer_session::SessionFault {
+/// The `Transfer` RPC failed at OPEN — before any session frame flowed.
+/// A distinct error type (not a bare `SessionFault`) so callers can
+/// classify EVERY open-time failure structurally as a negotiation
+/// failure (codex otp-9b F3 — the old typed `PullSyncError` boundary
+/// treated every pre-response RPC failure as NEGOTIATE); the inner
+/// fault still carries the closest session code for the message.
+#[derive(Debug)]
+pub struct TransferOpenRefusal(pub crate::transfer_session::SessionFault);
+
+impl std::fmt::Display for TransferOpenRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for TransferOpenRefusal {}
+
+/// Map an open-time gRPC status onto the `SessionFault` code the same
+/// refusal would carry as a session frame. On a same-build fleet an
+/// `Unimplemented` Transfer only means a pre-session peer — the
+/// build-mismatch shape; `PermissionDenied` is the peer's own
+/// delegation/ACL gate; anything else keeps INTERNAL, with the
+/// [`TransferOpenRefusal`] wrapper preserving the open-phase identity.
+fn transfer_open_refusal(status: tonic::Status) -> TransferOpenRefusal {
     use crate::generated::session_error::Code;
     let code = match status.code() {
         tonic::Code::Unimplemented => Code::BuildMismatch,
         tonic::Code::PermissionDenied => Code::DelegationRefused,
         _ => Code::Internal,
     };
-    crate::transfer_session::SessionFault::refusal(
+    TransferOpenRefusal(crate::transfer_session::SessionFault::refusal(
         code,
         format!("opening Transfer RPC: {}", status.message()),
-    )
+    ))
 }
 
 /// Build a `BlitClient` over `endpoint`'s control-plane URI with the

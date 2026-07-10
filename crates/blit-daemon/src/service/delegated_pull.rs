@@ -24,7 +24,7 @@ use blit_core::generated::{
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
 use blit_core::remote::transfer::session_client::{
-    connect_transfer_client, run_pull_session_with_client, PullSessionOptions,
+    connect_transfer_client, run_pull_session_with_client, PullSessionOptions, TransferOpenRefusal,
 };
 use blit_core::transfer_session::SessionFault;
 use tokio::sync::mpsc;
@@ -83,6 +83,29 @@ pub(crate) fn validate_spec(spec: TransferOperationSpec) -> Result<TransferOpera
 pub(crate) fn delete_list_authorized(mirror_mode_proto: i32) -> bool {
     mirror_mode_proto == MirrorMode::FilteredSubset as i32
         || mirror_mode_proto == MirrorMode::All as i32
+}
+
+/// Classify a session error onto the wire error phase (codex otp-9b
+/// F3): every `Transfer`-open failure is a NEGOTIATE-phase failure —
+/// structurally, via [`TransferOpenRefusal`], exactly as the old typed
+/// `PullSyncError` boundary treated every pre-response RPC failure
+/// (R37-F1) — and a mid-session `SessionFault` phases by its code
+/// (handshake refusals → NEGOTIATE; everything else → TRANSFER).
+fn session_error_phase(err: &eyre::Report) -> blit_core::generated::delegated_pull_error::Phase {
+    use blit_core::generated::delegated_pull_error::Phase;
+    if err.downcast_ref::<TransferOpenRefusal>().is_some() {
+        return Phase::Negotiate;
+    }
+    match err.downcast_ref::<SessionFault>().map(|f| f.code) {
+        Some(
+            session_error::Code::BuildMismatch
+            | session_error::Code::ModuleUnknown
+            | session_error::Code::ReadOnly
+            | session_error::Code::DelegationRefused
+            | session_error::Code::ScanIncomplete,
+        ) => Phase::Negotiate,
+        _ => Phase::Transfer,
+    }
 }
 
 /// Build a CLI-bound `DelegatedPullProgress` carrying a phased error.
@@ -332,20 +355,10 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let outcome = run_pull_session_with_client(client, &endpoint, dest_root, options)
         .await
         .map_err(|err| {
-            // Session refusals keep the NEGOTIATE phase the old typed
-            // `PullSyncError` boundary provided (R37-F1); everything
-            // else is a transfer-phase failure.
-            let phase = match err.downcast_ref::<SessionFault>().map(|f| f.code) {
-                Some(
-                    session_error::Code::BuildMismatch
-                    | session_error::Code::ModuleUnknown
-                    | session_error::Code::ReadOnly
-                    | session_error::Code::DelegationRefused
-                    | session_error::Code::ScanIncomplete,
-                ) => Phase::Negotiate,
-                _ => Phase::Transfer,
-            };
-            err_progress(phase as i32, format!("delegated transfer: {err:#}"))
+            err_progress(
+                session_error_phase(&err) as i32,
+                format!("delegated transfer: {err:#}"),
+            )
         })?;
 
     // Optional manifest_batch event for symmetry with normal pull
@@ -552,6 +565,42 @@ mod tests {
         // the contract is "from_spec rejects malformed globs", and
         // its message wording can vary across glob crate versions.
         assert!(validate_spec(spec).is_err());
+    }
+
+    /// codex otp-9b F3: phase classification is structural. EVERY
+    /// Transfer-open failure — whatever its inner code — is NEGOTIATE
+    /// (the old typed boundary's contract for pre-response failures);
+    /// mid-session faults phase by code; a plain transport error is
+    /// TRANSFER.
+    #[test]
+    fn session_error_phase_classifies_structurally() {
+        use blit_core::generated::delegated_pull_error::Phase;
+
+        // Open-time failure with a non-special inner code (e.g. the
+        // peer returned Unavailable at open) → still NEGOTIATE.
+        let open_err = eyre::Report::new(TransferOpenRefusal(SessionFault::refusal(
+            session_error::Code::Internal,
+            "opening Transfer RPC: unavailable",
+        )));
+        assert_eq!(session_error_phase(&open_err), Phase::Negotiate);
+
+        // Mid-session handshake refusal → NEGOTIATE by code.
+        let refusal = eyre::Report::new(SessionFault::refusal(
+            session_error::Code::ReadOnly,
+            "module is read-only",
+        ));
+        assert_eq!(session_error_phase(&refusal), Phase::Negotiate);
+
+        // Mid-session abort (cancel) → TRANSFER.
+        let cancel = eyre::Report::new(SessionFault::refusal(
+            session_error::Code::Cancelled,
+            "cancelled",
+        ));
+        assert_eq!(session_error_phase(&cancel), Phase::Transfer);
+
+        // A bare transport error with no session identity → TRANSFER.
+        let plain = eyre::eyre!("connection reset by peer");
+        assert_eq!(session_error_phase(&plain), Phase::Transfer);
     }
 
     /// R-followup: `handle_delegated_pull` must return `false` when

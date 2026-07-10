@@ -2219,6 +2219,7 @@ fn mirror_delete_pass(
     filter: &crate::fs_enum::FileFilter,
     tolerate_nonempty_dirs: bool,
     canonical_dst_root: Option<&Path>,
+    abort: &AtomicBool,
 ) -> Result<u64> {
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
@@ -2235,8 +2236,21 @@ fn mirror_delete_pass(
         Ok(())
     };
 
+    // codex otp-9b F2: a dropped session future (client disconnect,
+    // CancelJob) cannot abort a running blocking task — the caller's
+    // drop-guard flips this flag instead, and the pass stops deleting
+    // at the next filesystem op rather than running to completion
+    // behind a job already recorded cancelled.
+    let check_abort = || -> Result<()> {
+        if abort.load(Ordering::Acquire) {
+            return Err(eyre::eyre!("mirror delete pass aborted: session cancelled"));
+        }
+        Ok(())
+    };
+
     let mut deleted = 0u64;
     for file in &plan.files {
+        check_abort()?;
         contained(file)?;
         // Windows refuses to delete a read-only file; clear the attribute
         // first, matching the daemon purge (admin.rs) and local mirror
@@ -2250,6 +2264,7 @@ fn mirror_delete_pass(
         }
     }
     for dir in &plan.dirs {
+        check_abort()?;
         contained(dir)?;
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(dir);
@@ -2539,6 +2554,20 @@ async fn destination_session(
                          the source still has",
                     )));
                 }
+                // codex otp-9b F1 (R49-F2 on the session): an initiator
+                // that declared "the source will be deleted after this
+                // transfer" (`blit move`) must NOT get a success out of
+                // an incomplete source scan — files the scan could not
+                // read would be silently lost when the caller deletes
+                // the source. Same abort point as the mirror guard.
+                if negotiated.open.require_complete_scan && !complete.scan_complete {
+                    return Err(eyre::Report::new(SessionFault::refusal(
+                        session_error::Code::ScanIncomplete,
+                        "transfer refused: the source scan did not complete \
+                         (unreadable paths) and the operation requires a \
+                         complete scan (move deletes the source afterwards)",
+                    )));
+                }
                 let chunk = std::mem::take(&mut pending);
                 diff_chunk_and_send_needs(
                     transport,
@@ -2806,6 +2835,20 @@ async fn destination_session(
                     let files = std::mem::take(&mut source_files);
                     let filter = mirror_filter.clone_without_cache();
                     let tolerate_nonempty = mirror_kind == MirrorMode::FilteredSubset;
+                    // codex otp-9b F2: if THIS future is dropped while the
+                    // blocking pass runs (client disconnect, CancelJob),
+                    // the guard's Drop flips the abort flag and the pass
+                    // stops deleting instead of running to completion
+                    // behind a cancelled job. (A completed await drops the
+                    // guard too — harmless, the task is already done.)
+                    struct AbortFlagOnDrop(Arc<AtomicBool>);
+                    impl Drop for AbortFlagOnDrop {
+                        fn drop(&mut self) {
+                            self.0.store(true, Ordering::Release);
+                        }
+                    }
+                    let abort = Arc::new(AtomicBool::new(false));
+                    let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
                     tokio::task::spawn_blocking(move || {
                         mirror_delete_pass(
                             &dst,
@@ -2813,6 +2856,7 @@ async fn destination_session(
                             &filter,
                             tolerate_nonempty,
                             canonical.as_deref(),
+                            &abort,
                         )
                     })
                     .await
@@ -3621,6 +3665,34 @@ mod tests {
         assert_eq!(back.peer_build_id, "1.0+aaa");
         assert_eq!(back.local_build_id, "1.0+bbb");
         assert!(back.peer_notified);
+    }
+
+    /// codex otp-9b F2: the mirror pass runs on the blocking pool, where
+    /// a dropped session future cannot reach it — the drop-guard's abort
+    /// flag must stop it before the next filesystem op. With the flag
+    /// pre-set the pass deletes NOTHING, even with a genuinely
+    /// extraneous entry present.
+    #[test]
+    fn mirror_delete_pass_aborts_on_the_cancellation_flag() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("extraneous.bin"), b"x").expect("write");
+        let source_files: HashSet<String> = HashSet::new(); // everything extraneous
+        let filter = crate::fs_enum::FileFilter::default();
+
+        let abort = AtomicBool::new(true);
+        let result = mirror_delete_pass(tmp.path(), &source_files, &filter, false, None, &abort);
+        assert!(result.is_err(), "an aborted pass reports the abort");
+        assert!(
+            tmp.path().join("extraneous.bin").exists(),
+            "an aborted pass must not delete"
+        );
+
+        // Un-aborted control: the same fixture deletes the entry.
+        let abort = AtomicBool::new(false);
+        let deleted = mirror_delete_pass(tmp.path(), &source_files, &filter, false, None, &abort)
+            .expect("pass succeeds");
+        assert_eq!(deleted, 1);
+        assert!(!tmp.path().join("extraneous.bin").exists());
     }
 
     fn tar_test_header(path: String) -> FileHeader {

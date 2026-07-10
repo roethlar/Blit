@@ -522,12 +522,17 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         ))
     }
 
+    /// otp-9b F4: deliberately NOT the ACL refusal — delegation no
+    /// longer touches PullSync, and keeping equivalent legacy behavior
+    /// here would let a reverted (pre-session) delegated path pass the
+    /// refusal test unnoticed. A revert now surfaces this message
+    /// instead of the pinned NEGOTIATE wording and fails the test.
     async fn pull_sync(
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
     ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
-        Err(tonic::Status::permission_denied(
-            "source ACL rejected delegated peer",
+        Err(tonic::Status::unimplemented(
+            "delegation no longer uses PullSync (otp-9b)",
         ))
     }
 
