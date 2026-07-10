@@ -145,8 +145,13 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   the limit — and caps any one `BlockHashList` at **65_536 hashes** (2 MiB); a
   partial with more blocks degrades to the empty list = the D1 full-transfer
   fallback. The SOURCE range-validates the wire value at arrival (same-build peers:
-  a mismatch is a violation, not a negotiation). otp-7b revisits the ceiling for the
-  data plane, whose binary block records have no protobuf envelope.
+  a mismatch is a violation, not a negotiation).
+  **Amended by D-2026-07-10-2 (otp-7b-1)** — the ceiling is **per carrier**: 2 MiB
+  in-stream (above), **64 MiB on the TCP data plane**
+  (`MAX_DATA_PLANE_RESUME_BLOCK_SIZE` = the wire's `MAX_WIRE_BLOCK_BYTES`), whose
+  binary block records have no protobuf envelope. Both ends decide by grant
+  presence, so they agree without negotiation; the floor and the hash cap are
+  carrier-independent.
 - **D6 — invariance**: resume runs identically whichever end initiated (the flag is
   in the open; the DEST computes hashes and applies; the SOURCE diffs and sends). The
   role suite runs both initiator assignments, as for every prior slice.
@@ -159,22 +164,38 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   wiring over the control-lane `BlockTransfer`/`Complete` frames; `files_resumed`.
   Pins: happy-path partial, identical-file (zero blocks), stale-partial fallback,
   mid-resume-failure.
-- **otp-7b — resume over the TCP data plane, plus the D4 owner rider.** Port the
-  block records onto the data plane (`data_plane.rs::send_block`/
-  `send_block_complete` already exist) with the same choreography; e2e in the
-  daemon harness. Follows 7a exactly as otp-4b-1→4b-2 and otp-5b-1→5b-2 did.
-  **7b also owns the CLI end-of-operation fault summary** (D-2026-07-09-1, Q2
-  rider): a session fault reported by the CLI transfer commands must name the
-  affected file(s) at the END of the operation output and suggest a re-run to
-  converge, with a test pinning that the failed path appears in the final
-  output. 7a cannot own it — 7a's surface is the in-process roles suite,
-  which has no CLI layer. Carried into 7b from the 7a codex review:
-  revisit the D-2026-07-10-1 block-size ceiling for the data-plane carrier
-  (binary records, no protobuf envelope), and exercise cancel-during-resume
-  in the daemon e2e harness (codex 7a F4 — the in-stream hash/block phases
-  inherit the session's existing payload-phase cancel latency; the e2e pins
-  that a `CancelJob` mid-resume tears down cleanly, as otp-4b-3 pinned for
-  file records).
+- **otp-7b — resume over the TCP data plane, plus the D4 owner rider.**
+  Runs as two codex-loop passes, following the otp-4b-1→3 / otp-5b-1→2
+  precedent:
+  - **otp-7b-1 — the data-plane carrier** `[x]`: block records ride the
+    sockets as binary `BLOCK`/`BLOCK_COMPLETE` records with the same
+    choreography — each correlated (need, hash-list) pair becomes ONE
+    composite `ResumeFile` work item, so one pipeline worker runs the whole
+    record on one socket (strict per-file serialization; no cross-socket
+    reorder against the truncate+stamp). The block-diff is single-sourced
+    (`ResumeBlockDiff`) for both carriers; the DEST's grant map +
+    `files_resumed` are shared with the data-plane receive (`NeedListSink`)
+    exactly as `outstanding` is, with the in-stream claim strictness
+    replicated (grant-only, in-bounds, exactly-once, size-verified,
+    resume-flagged grants refuse file/tar delivery). Grant suppression
+    removed; ceiling per carrier (D-2026-07-10-2);
+    `Push/PullSessionOptions.resume{,_block_size}` wired to
+    `SessionOpen.resume`; pins in the roles suite (both initiator
+    assignments over loopback data planes) and the daemon e2e (push + pull).
+  - **otp-7b-2 — the D4 owner rider + cancel-during-resume.** The CLI
+    end-of-operation fault summary (D-2026-07-09-1, Q2 rider): a session
+    fault reported by the CLI transfer commands must name the affected
+    file(s) at the END of the operation output and suggest a re-run to
+    converge, with a test pinning that the failed path appears in the final
+    output — built at the survives-cutover layer (structured file identity
+    on `SessionFault` + summary formatting + session-client/e2e pins; the
+    verb-level print lands with the otp-10 verb switch). 7a could not own
+    it — 7a's surface is the in-process roles suite, which has no CLI
+    layer. Also carried from the 7a codex review: exercise
+    cancel-during-resume in the daemon e2e harness (codex 7a F4 — the
+    hash/block phases inherit the session's existing payload-phase cancel
+    latency; the e2e pins that a `CancelJob` mid-resume tears down cleanly,
+    as otp-4b-3 pinned for file records).
 
 ### 7b implementation map (surveyed 2026-07-10, before any 7b code)
 

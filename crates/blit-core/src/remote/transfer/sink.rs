@@ -255,6 +255,12 @@ impl TransferSink for FsTransferSink {
                 }
                 outcome
             }
+            // otp-7b: the composite resume payload is send-side only
+            // (DataPlaneSink); the receive pipeline decodes per-block
+            // FileBlock/FileBlockComplete, never this shape.
+            PreparedPayload::ResumeFile { .. } => {
+                eyre::bail!("FsTransferSink does not consume composite ResumeFile payloads")
+            }
             PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
                 // Capture paths for tracking before payload moves into
                 // the spawn_blocking closure.
@@ -799,6 +805,49 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
             PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
                 eyre::bail!("DataPlaneSink does not relay resume-block payloads")
             }
+            // otp-7b: one resume-flagged file's whole block phase. The
+            // session lock is held across the record, so every BLOCK and
+            // the closing BLOCK_COMPLETE ride THIS socket in order —
+            // the same strict serialization the in-stream carrier gets
+            // from its single control lane. The complete record carries
+            // mtime+perms from the manifest header so a zero-block
+            // resume still stamps metadata at the destination.
+            PreparedPayload::ResumeFile {
+                header,
+                block_size,
+                dest_hashes,
+            } => {
+                let mut diff = crate::remote::transfer::resume_diff::ResumeBlockDiff::open(
+                    &self.source,
+                    &header,
+                    block_size as usize,
+                    dest_hashes,
+                )
+                .await?;
+                let mut bytes_written: u64 = 0;
+                while let Some((offset, block)) = diff.next_stale().await? {
+                    session
+                        .send_block(&header.relative_path, offset, block)
+                        .await
+                        .with_context(|| format!("sending block of {}", header.relative_path))?;
+                    bytes_written += block.len() as u64;
+                }
+                session
+                    .send_block_complete(
+                        &header.relative_path,
+                        header.size,
+                        header.mtime_seconds,
+                        header.permissions,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("sending block complete for {}", header.relative_path)
+                    })?;
+                Ok(SinkOutcome {
+                    files_written: 1,
+                    bytes_written,
+                })
+            }
         }
     }
 
@@ -875,6 +924,11 @@ impl TransferSink for NullSink {
                 bytes_written: bytes.len() as u64,
             }),
             PreparedPayload::FileBlockComplete { .. } => Ok(SinkOutcome::default()),
+            // Send-side composite (otp-7b); the receive path this sink
+            // benchmarks never produces it.
+            PreparedPayload::ResumeFile { .. } => {
+                eyre::bail!("NullSink does not consume composite ResumeFile payloads")
+            }
         }
     }
 
@@ -1061,9 +1115,12 @@ impl TransferSink for GrpcFallbackSink {
                 })
             }
             // gRPC fallback is outbound only; receive-side payloads
-            // shouldn't reach this sink.
-            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
-                eyre::bail!("GrpcFallbackSink does not handle FileBlock payloads (outbound only)");
+            // shouldn't reach this sink. The composite resume payload
+            // (otp-7b) rides the TCP data plane only.
+            PreparedPayload::FileBlock { .. }
+            | PreparedPayload::FileBlockComplete { .. }
+            | PreparedPayload::ResumeFile { .. } => {
+                eyre::bail!("GrpcFallbackSink does not handle resume payloads (outbound only)");
             }
         }
     }
@@ -1231,9 +1288,11 @@ impl TransferSink for GrpcServerStreamingSink {
                     bytes_written: bytes,
                 })
             }
-            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+            PreparedPayload::FileBlock { .. }
+            | PreparedPayload::FileBlockComplete { .. }
+            | PreparedPayload::ResumeFile { .. } => {
                 eyre::bail!(
-                    "GrpcServerStreamingSink does not handle FileBlock payloads (resume \
+                    "GrpcServerStreamingSink does not handle resume payloads (resume \
                      uses block_transfer messages on the daemon's bidirectional stream)"
                 );
             }

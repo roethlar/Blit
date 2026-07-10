@@ -62,10 +62,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     guard-proof pins live under both roles; 5 guard proofs by temporary
     revert. Suite → **1540** (the 1529 baseline was a miscount; true
     pre-slice count 1530). Detail: DEVLOG + `.review/`.
-  - Current: **otp-7b** — resume over the TCP data plane + the
-    D-2026-07-09-1 CLI end-of-op fault summary rider + cancel-during-
-    resume e2e (plan Staging). otp-5b-3 (pull cancel) optional; otp-2
-    rig-gated before otp-10.
+  - **otp-7b-1 `[x]`** — resume over the TCP data plane, landed
+    (D-2026-07-10-2 per-carrier ceiling; composite `ResumeFile` work
+    item = strict per-file socket serialization; shared
+    `ResumeBlockDiff` + shared DEST claim state; session-client resume
+    options; pins in roles suite + daemon e2e, suite → **1545**).
+  - Current: **otp-7b-2** — the D-2026-07-09-1 CLI end-of-op fault
+    summary rider + cancel-during-resume e2e (plan Staging).
+    otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified

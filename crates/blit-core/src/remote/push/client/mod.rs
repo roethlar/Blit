@@ -566,9 +566,11 @@ fn prune_unrequested_payloads(
                     skipped += 1;
                 }
             }
-            // Resume payloads originate on the receive side; the
-            // outbound prune path never sees them.
-            TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => {
+            // Resume payloads (per-block, and otp-7b's session-only
+            // composite) never route through the old push prune path.
+            TransferPayload::FileBlock { .. }
+            | TransferPayload::FileBlockComplete { .. }
+            | TransferPayload::ResumeFile { .. } => {
                 skipped += 1;
             }
             TransferPayload::TarShard { headers } => {
@@ -921,8 +923,9 @@ impl RemotePushClient {
                                                         }
                                                     }
                                                     TransferPayload::FileBlock { .. }
-                                                    | TransferPayload::FileBlockComplete { .. } => {
-                                                        // Receive-only — never produced by the outbound planner.
+                                                    | TransferPayload::FileBlockComplete { .. }
+                                                    | TransferPayload::ResumeFile { .. } => {
+                                                        // Never produced by the outbound planner.
                                                     }
                                                 }
                                             }
@@ -1321,8 +1324,9 @@ impl RemotePushClient {
                                                         }
                                                     }
                                                     TransferPayload::FileBlock { .. }
-                                                    | TransferPayload::FileBlockComplete { .. } => {
-                                                        // Receive-only — never produced by the outbound planner.
+                                                    | TransferPayload::FileBlockComplete { .. }
+                                                    | TransferPayload::ResumeFile { .. } => {
+                                                        // Never produced by the outbound planner.
                                                     }
                                                 }
                                             }

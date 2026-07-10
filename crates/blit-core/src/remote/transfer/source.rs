@@ -294,9 +294,13 @@ impl TransferSource for RemoteTransferSource {
                 let data = builder.into_inner()?;
                 Ok(PreparedPayload::TarShard { headers, data })
             }
-            // Resume payloads originate on the receive side only.
-            TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => {
-                bail!("FileBlock payloads cannot be prepared from a remote source")
+            // Resume payloads originate on the receive side only; the
+            // composite ResumeFile (otp-7b) is session-choreography-
+            // originated and never routes through a relay source.
+            TransferPayload::FileBlock { .. }
+            | TransferPayload::FileBlockComplete { .. }
+            | TransferPayload::ResumeFile { .. } => {
+                bail!("resume payloads cannot be prepared from a remote source")
             }
         }
     }

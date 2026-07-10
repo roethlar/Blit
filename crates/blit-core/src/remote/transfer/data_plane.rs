@@ -224,7 +224,9 @@ impl<P: Probe> DataPlaneSession<P> {
                         }
                     }
                 }
-                PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+                PreparedPayload::FileBlock { .. }
+                | PreparedPayload::FileBlockComplete { .. }
+                | PreparedPayload::ResumeFile { .. } => {
                     bail!("DataPlaneSession::send_payloads does not handle resume payloads");
                 }
             }

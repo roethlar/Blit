@@ -394,7 +394,8 @@ async fn assert_resume_invariant_across_roles(
         );
         assert!(
             source_summary.in_stream_carrier_used,
-            "resume sessions ride the in-stream carrier (otp-7a)"
+            "these fixtures request the in-stream carrier (otp-7a); the \
+             data-plane variants are pinned separately (otp-7b)"
         );
         assert_trees_identical(&src_root, &dst_root);
 
@@ -414,6 +415,175 @@ async fn assert_resume_invariant_across_roles(
         "summary must be identical whichever end initiates"
     );
     (summary_a, needed_a)
+}
+
+/// Run a resume-enabled fixture over the TCP DATA PLANE under both role
+/// assignments (otp-7b) and pin the invariance property. Mirrors
+/// [`assert_resume_invariant_across_roles`] (in-stream) with the data
+/// plane wired per connection role, exactly as the plain data-plane
+/// tests below wire it: the RESPONDER binds+accepts on loopback, the
+/// INITIATOR dials 127.0.0.1.
+async fn assert_resume_data_plane_invariant_across_roles(
+    src_files: &[FileSpec],
+    dst_files: &[FileSpec],
+    block_size: u32,
+) -> (TransferSummary, Vec<String>) {
+    let mut per_role: Vec<(TransferSummary, Vec<String>)> = Vec::new();
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).unwrap();
+        std::fs::create_dir_all(&dst_root).unwrap();
+        write_tree(&src_root, src_files);
+        write_tree(&dst_root, dst_files);
+
+        let open = SessionOpen {
+            in_stream_bytes: false,
+            ..resume_open(initiator_role, block_size)
+        };
+        // The initiator dials the responder's loopback grant; the
+        // responder never dials.
+        let (source_endpoint, dest_endpoint, source_host, dest_host) = match initiator_role {
+            TransferRole::Source => (
+                SessionEndpoint::initiator(open),
+                SessionEndpoint::Responder,
+                Some("127.0.0.1".to_string()),
+                None,
+            ),
+            TransferRole::Destination => (
+                SessionEndpoint::Responder,
+                SessionEndpoint::initiator(open),
+                None,
+                Some("127.0.0.1".to_string()),
+            ),
+            TransferRole::Unspecified => unreachable!(),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: source_endpoint,
+            plan_options: PlanOptions::default(),
+            data_plane_host: source_host,
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: dest_endpoint,
+            data_plane_host: dest_host,
+        };
+        let (a, b) = in_process_pair();
+        let source = Arc::new(FsTransferSource::new(src_root.clone()));
+        let (source_result, dest_result) = tokio::time::timeout(SUITE_TIMEOUT, async {
+            tokio::join!(
+                run_source(source_cfg, a, source),
+                run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+            )
+        })
+        .await
+        .expect("session run timed out");
+
+        let source_summary = source_result
+            .unwrap_or_else(|e| panic!("source failed under initiator {initiator_role:?}: {e:#}"));
+        let dest_outcome = dest_result.unwrap_or_else(|e| {
+            panic!("destination failed under initiator {initiator_role:?}: {e:#}")
+        });
+
+        assert_eq!(
+            source_summary, dest_outcome.summary,
+            "both ends must hold the same summary (initiator {initiator_role:?})"
+        );
+        assert!(
+            !source_summary.in_stream_carrier_used,
+            "otp-7b resume rides the TCP data plane (initiator {initiator_role:?})"
+        );
+        assert!(
+            dest_outcome.data_plane_streams.is_some(),
+            "the data plane must have run (initiator {initiator_role:?})"
+        );
+        assert_trees_identical(&src_root, &dst_root);
+
+        let mut needed = dest_outcome.needed_paths.clone();
+        needed.sort();
+        per_role.push((dest_outcome.summary, needed));
+    }
+
+    let (summary_a, needed_a) = per_role.remove(0);
+    let (summary_b, needed_b) = per_role.remove(0);
+    assert_eq!(
+        needed_a, needed_b,
+        "need-list set must be identical whichever end initiates"
+    );
+    assert_eq!(
+        summary_a, summary_b,
+        "summary must be identical whichever end initiates"
+    );
+    (summary_a, needed_a)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_over_the_data_plane_moves_only_the_changed_blocks() {
+    // otp-7b guard-proof 1 over the TCP data plane: the same partial
+    // fixture as the in-stream pin, but block records ride the sockets
+    // as binary BLOCK/BLOCK_COMPLETE records. Only the 2 missing blocks
+    // may move (pinned through `bytes_transferred`, which on the data
+    // plane counts exactly the block bytes the sink applied); a plain
+    // absent file rides along so file records and block records coexist
+    // on the sockets. Guard: neuter the shared block-diff (send every
+    // block) and this fails at 6 blocks ≠ 2; revert the grant
+    // un-suppression and the in_stream_carrier_used assertion fails.
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(6 * bs);
+    let partial = content[..4 * bs].to_vec();
+    let src: Vec<FileSpec> = vec![
+        ("big.bin", content, 1_600_000_700),
+        ("fresh.txt", b"fresh".to_vec(), 1_600_000_701),
+    ];
+    let dst: Vec<FileSpec> = vec![("big.bin", partial, 1_600_000_600)];
+
+    let (summary, needed) =
+        assert_resume_data_plane_invariant_across_roles(&src, &dst, RESUME_BS).await;
+    assert_eq!(needed, vec!["big.bin".to_string(), "fresh.txt".to_string()]);
+    assert_eq!(summary.files_transferred, 2);
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(
+        summary.bytes_transferred,
+        (2 * bs + 5) as u64,
+        "only the 2 stale blocks plus the plain file may move"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_over_the_data_plane_stale_partial_falls_back_to_full_content() {
+    // otp-7b: the D1 stale-partial fallback holds on the data-plane
+    // carrier too — a dest partial sharing NO blocks with the source
+    // degrades to full content of that file, never an abort, never
+    // trusted hashes. A shrunk-to-empty source rides along: zero
+    // blocks, truncate-to-0 at complete (a zero-block BLOCK_COMPLETE
+    // record over the socket).
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(3 * bs + 200);
+    let stale = vec![0xFFu8; content.len()];
+    let src: Vec<FileSpec> = vec![
+        ("swapped.bin", content.clone(), 1_600_000_900),
+        ("shrunk.bin", Vec::new(), 1_600_000_901),
+    ];
+    let dst: Vec<FileSpec> = vec![
+        ("swapped.bin", stale, 1_600_000_810),
+        ("shrunk.bin", vec![0xEE; 100], 1_600_000_811),
+    ];
+
+    let (summary, needed) =
+        assert_resume_data_plane_invariant_across_roles(&src, &dst, RESUME_BS).await;
+    assert_eq!(
+        needed,
+        vec!["shrunk.bin".to_string(), "swapped.bin".to_string()]
+    );
+    assert_eq!(summary.files_resumed, 2);
+    assert_eq!(summary.files_transferred, 2);
+    assert_eq!(
+        summary.bytes_transferred,
+        content.len() as u64,
+        "every block of the swapped file moves; the shrunk file moves none"
+    );
 }
 
 #[tokio::test]

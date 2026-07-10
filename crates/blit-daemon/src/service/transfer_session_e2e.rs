@@ -570,6 +570,112 @@ async fn same_size_newer_destination_is_skipped_not_clobbered() {
 }
 
 // ---------------------------------------------------------------------------
+// otp-7b: resume over the TCP data plane, daemon-served both directions
+// ---------------------------------------------------------------------------
+
+/// otp-7b: a resume push over the daemon-served session rides the TCP
+/// data plane — the destination partial is patched block-wise (binary
+/// BLOCK/BLOCK_COMPLETE records on the sockets), only the stale blocks
+/// move, and the summary counts the file resumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_session_resumes_partial_over_the_data_plane() {
+    const BS: usize = 64 * 1024; // == the session's block-size floor
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    let content: Vec<u8> = (0..6 * BS).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.path().join("big.bin"), &content).unwrap();
+    filetime::set_file_mtime(
+        src.path().join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_100, 0),
+    )
+    .unwrap();
+    // Dest partial: the first 4 blocks already landed, older mtime.
+    std::fs::write(daemon.dest_root.join("big.bin"), &content[..4 * BS]).unwrap();
+    filetime::set_file_mtime(
+        daemon.dest_root.join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_000, 0),
+    )
+    .unwrap();
+
+    let summary = run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            resume: true,
+            resume_block_size: BS as u32,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("resume session push succeeds");
+
+    assert!(
+        !summary.in_stream_carrier_used,
+        "otp-7b resume rides the TCP data plane"
+    );
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(summary.files_transferred, 1);
+    assert_eq!(
+        summary.bytes_transferred,
+        (2 * BS) as u64,
+        "only the 2 missing blocks may move"
+    );
+    assert_trees_identical(src.path(), &daemon.dest_root);
+    daemon.stop().await;
+}
+
+/// otp-7b, roles flipped: a resume pull — the daemon is the SOURCE
+/// responder running the block-diff and sending block records over the
+/// sockets it accepted; the client DESTINATION initiator hashes its
+/// partial, dials, and applies the blocks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_resumes_partial_over_the_data_plane() {
+    const BS: usize = 64 * 1024;
+    let daemon = Daemon::start(false).await;
+    let content: Vec<u8> = (0..6 * BS).map(|i| (i % 251) as u8).collect();
+    // The daemon module tree is the source.
+    std::fs::write(daemon.dest_root.join("big.bin"), &content).unwrap();
+    filetime::set_file_mtime(
+        daemon.dest_root.join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_100, 0),
+    )
+    .unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    std::fs::write(dest.path().join("big.bin"), &content[..4 * BS]).unwrap();
+    filetime::set_file_mtime(
+        dest.path().join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_000, 0),
+    )
+    .unwrap();
+
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            resume: true,
+            resume_block_size: BS as u32,
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("resume session pull succeeds");
+
+    assert!(
+        !outcome.summary.in_stream_carrier_used,
+        "otp-7b resume pull rides the TCP data plane"
+    );
+    assert_eq!(outcome.summary.files_resumed, 1);
+    assert_eq!(outcome.summary.files_transferred, 1);
+    assert_eq!(
+        outcome.summary.bytes_transferred,
+        (2 * BS) as u64,
+        "only the 2 missing blocks may move"
+    );
+    assert_trees_identical(&daemon.dest_root, dest.path());
+    daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // otp-5a: pull-equivalent (client initiates as DESTINATION, daemon is SOURCE)
 // ---------------------------------------------------------------------------
 

@@ -37,8 +37,9 @@
 //! via [`SinkControl::Add`]. The cheap-dial live tuner (chunk/prefetch) is
 //! still future work — the resize moves only the stream count.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -72,6 +73,25 @@ use super::SessionFault;
 /// as its payload lands). Completion is an empty set — the same signal
 /// the in-stream carrier uses via its inline `outstanding.remove`.
 pub(super) type OutstandingNeeds = Arc<StdMutex<HashSet<String>>>;
+
+/// Headers of resume-granted needs (otp-7a/7b), keyed by relative path
+/// and retained until the grant's block record completes. Shared
+/// between the destination's control loop (which inserts each header
+/// before sending that file's `BlockHashList`, and claims it inline on
+/// the in-stream carrier) and the data-plane receive (which validates
+/// and claims it as block records land on the sockets) — the same
+/// sharing shape as [`OutstandingNeeds`].
+pub(super) type ResumeHeaders = Arc<StdMutex<HashMap<String, FileHeader>>>;
+
+/// otp-7b: the resume half of the data-plane receive contract — present
+/// only when the session negotiated resume. `headers` is the shared
+/// grant map above; `resumed` is the destination's `files_resumed`
+/// counter, incremented here because the control loop never sees
+/// data-plane block records.
+pub(super) struct ResumeRecv {
+    pub(super) headers: ResumeHeaders,
+    pub(super) resumed: Arc<AtomicU64>,
+}
 
 fn dp_fault(msg: impl Into<String>) -> eyre::Report {
     eyre::Report::new(SessionFault::refusal(Code::DataPlaneFailed, msg))
@@ -919,18 +939,34 @@ impl SourceDataPlane {
 /// `execute_receive_pipeline` writes socket-provided paths directly, so
 /// without this a peer could substitute an off-need-list path for a
 /// needed one (count-preserving), duplicate one, or send resume block
-/// records the non-resume session never negotiated (codex otp-4b-1 F1).
-/// Every written path must be a granted, not-yet-received need; resume
+/// records the session never negotiated (codex otp-4b-1 F1). Every
+/// written path must be a granted, not-yet-received need. Resume
+/// sessions (otp-7b) additionally validate + claim block records
+/// against the shared [`ResumeHeaders`] grant map — with the identical
+/// strictness the in-stream `claim_resume_record` applies — and count
+/// completions into the shared resumed counter; in a non-resume session
 /// block records are rejected outright. The shared [`OutstandingNeeds`]
 /// set makes completion `is_empty()` for both carriers.
 pub(super) struct NeedListSink {
     inner: Arc<dyn TransferSink>,
     outstanding: OutstandingNeeds,
+    /// `Some` iff the session negotiated resume (otp-7b): the shared
+    /// grant map + resumed counter block records are validated and
+    /// claimed against. `None` ⇒ any block record is a violation.
+    resume: Option<ResumeRecv>,
 }
 
 impl NeedListSink {
-    pub(super) fn new(inner: Arc<dyn TransferSink>, outstanding: OutstandingNeeds) -> Self {
-        Self { inner, outstanding }
+    pub(super) fn new(
+        inner: Arc<dyn TransferSink>,
+        outstanding: OutstandingNeeds,
+        resume: Option<ResumeRecv>,
+    ) -> Self {
+        Self {
+            inner,
+            outstanding,
+            resume,
+        }
     }
 
     /// Remove `path` from the outstanding set, or fault: a path that is
@@ -952,24 +988,163 @@ impl NeedListSink {
             )))
         }
     }
+
+    /// codex otp-7a F3, data-plane parity: a resume-flagged grant may
+    /// be satisfied ONLY by its block record — a whole-file or tar-shard
+    /// delivery for it bypasses the hash choreography this end committed
+    /// to.
+    fn reject_resume_flagged(&self, path: &str) -> Result<()> {
+        if let Some(resume) = &self.resume {
+            if resume
+                .headers
+                .lock()
+                .expect("resume-headers lock poisoned")
+                .contains_key(path)
+            {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "data-plane file payload for resume-flagged '{path}' — the \
+                         contract requires its block record"
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// otp-7b: validate one mid-record `FileBlock` against its grant —
+    /// the path must hold a live resume grant, still be an outstanding
+    /// need (its completion has not claimed it), and the block must stay
+    /// inside the manifested size. The grant is NOT claimed here;
+    /// [`Self::claim_block_complete`] does that exactly once.
+    fn check_block(&self, path: &str, offset: u64, len: u64) -> Result<()> {
+        let Some(resume) = &self.resume else {
+            return Err(eyre::Report::new(SessionFault::protocol_violation(
+                "resume block record on the data plane of a non-resume session",
+            )));
+        };
+        let size = {
+            let held = resume.headers.lock().expect("resume-headers lock poisoned");
+            match held.get(path) {
+                Some(header) => header.size,
+                None => {
+                    return Err(eyre::Report::new(SessionFault::protocol_violation(
+                        format!(
+                            "data-plane block record for '{path}' which was not granted \
+                             a resume-flagged need"
+                        ),
+                    )))
+                }
+            }
+        };
+        if !self
+            .outstanding
+            .lock()
+            .expect("outstanding-needs lock poisoned")
+            .contains(path)
+        {
+            return Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!("data-plane block record for '{path}' which is not an outstanding need"),
+            )));
+        }
+        if offset.saturating_add(len) > size {
+            return Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!(
+                    "block record '{path}' overran its size: offset {offset} + {len} \
+                     byte(s) > {size}"
+                ),
+            )));
+        }
+        Ok(())
+    }
+
+    /// otp-7b: claim one `FileBlockComplete` — remove the grant, verify
+    /// the completed size against the manifest promise, and claim the
+    /// outstanding need. Mirrors the in-stream `claim_resume_record` +
+    /// `finish_block_record` checks. The resumed COUNT happens in
+    /// `write_payload` only after the finalization write lands, matching
+    /// the in-stream ordering.
+    fn claim_block_complete(&self, path: &str, total_size: u64) -> Result<()> {
+        let Some(resume) = &self.resume else {
+            return Err(eyre::Report::new(SessionFault::protocol_violation(
+                "resume block record on the data plane of a non-resume session",
+            )));
+        };
+        let header = resume
+            .headers
+            .lock()
+            .expect("resume-headers lock poisoned")
+            .remove(path)
+            .ok_or_else(|| {
+                eyre::Report::new(SessionFault::protocol_violation(format!(
+                    "data-plane block complete for '{path}' which was not granted \
+                     a resume-flagged need"
+                )))
+            })?;
+        if total_size != header.size {
+            return Err(eyre::Report::new(SessionFault::protocol_violation(
+                format!(
+                    "block record '{path}' completed at {total_size} byte(s), manifest \
+                     promised {}",
+                    header.size
+                ),
+            )));
+        }
+        self.claim(path)
+    }
 }
 
 #[async_trait]
 impl TransferSink for NeedListSink {
     async fn write_payload(&self, payload: PreparedPayload) -> Result<SinkOutcome> {
         match &payload {
-            PreparedPayload::File(header) => self.claim(&header.relative_path)?,
+            PreparedPayload::File(header) => {
+                self.reject_resume_flagged(&header.relative_path)?;
+                self.claim(&header.relative_path)?;
+            }
             PreparedPayload::TarShard { headers, .. } => {
+                for header in headers {
+                    self.reject_resume_flagged(&header.relative_path)?;
+                }
                 for header in headers {
                     self.claim(&header.relative_path)?;
                 }
             }
-            // The session did not negotiate resume (otp-7), so a block
-            // record on the data plane is a protocol violation, not a
+            // otp-7b: resume block records ride the data plane. A
+            // mid-record block validates against its live grant (claimed
+            // only at completion); the completion claims the grant, the
+            // outstanding need, and the resumed count — all against the
+            // same shared state the in-stream arms use inline. In a
+            // non-resume session both are violations, never a
             // silently-applied patch.
-            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+            PreparedPayload::FileBlock {
+                relative_path,
+                offset,
+                bytes,
+            } => {
+                self.check_block(relative_path, *offset, bytes.len() as u64)?;
+            }
+            PreparedPayload::FileBlockComplete {
+                relative_path,
+                total_size,
+                ..
+            } => {
+                self.claim_block_complete(relative_path, *total_size)?;
+                let outcome = self.inner.write_payload(payload).await?;
+                // Count only after the finalization write landed —
+                // the same ordering the in-stream arms follow.
+                self.resume
+                    .as_ref()
+                    .expect("claim_block_complete verified resume is negotiated")
+                    .resumed
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(outcome);
+            }
+            // Send-side composite (otp-7b) — the wire never carries it,
+            // so the receive pipeline can never produce one here.
+            PreparedPayload::ResumeFile { .. } => {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
-                    "resume block record on the data plane of a non-resume session",
+                    "composite ResumeFile payload on the data-plane receive",
                 )));
             }
         }
@@ -981,6 +1156,7 @@ impl TransferSink for NeedListSink {
         header: &FileHeader,
         reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     ) -> Result<SinkOutcome> {
+        self.reject_resume_flagged(&header.relative_path)?;
         self.claim(&header.relative_path)?;
         self.inner.write_file_stream(header, reader).await
     }
@@ -1032,7 +1208,7 @@ mod tests {
 
         let outstanding: OutstandingNeeds =
             Arc::new(StdMutex::new(HashSet::from(["a.txt".to_string()])));
-        let sink = NeedListSink::new(Arc::new(NullSink::new()), Arc::clone(&outstanding));
+        let sink = NeedListSink::new(Arc::new(NullSink::new()), Arc::clone(&outstanding), None);
 
         let file = |path: &str| {
             PreparedPayload::File(FileHeader {
@@ -1074,5 +1250,133 @@ mod tests {
             })
             .await
             .expect_err("resume block on a non-resume session must fault");
+    }
+
+    /// otp-7b: the data-plane receive enforces the resume grant
+    /// contract with the same strictness the in-stream
+    /// `claim_resume_record` applies — blocks validate against a live
+    /// grant and the manifested size, completion claims exactly once
+    /// and counts, ungranted paths and wrong sizes fault, and a
+    /// whole-file delivery for a resume-flagged grant is rejected.
+    #[tokio::test]
+    async fn need_list_sink_enforces_the_resume_grant_contract() {
+        use crate::remote::transfer::sink::NullSink;
+
+        let outstanding: OutstandingNeeds = Arc::new(StdMutex::new(HashSet::from([
+            "part.bin".to_string(),
+            "plain.txt".to_string(),
+        ])));
+        let headers: ResumeHeaders = Arc::new(StdMutex::new(HashMap::from([(
+            "part.bin".to_string(),
+            FileHeader {
+                relative_path: "part.bin".to_string(),
+                size: 100,
+                ..Default::default()
+            },
+        )])));
+        let resumed = Arc::new(AtomicU64::new(0));
+        let sink = NeedListSink::new(
+            Arc::new(NullSink::new()),
+            Arc::clone(&outstanding),
+            Some(ResumeRecv {
+                headers: Arc::clone(&headers),
+                resumed: Arc::clone(&resumed),
+            }),
+        );
+
+        // A whole-file record for the resume-flagged grant bypasses the
+        // hash choreography — rejected (codex otp-7a F3 parity).
+        let _ = sink
+            .write_payload(PreparedPayload::File(FileHeader {
+                relative_path: "part.bin".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .expect_err("file record for a resume-flagged grant must fault");
+
+        // A block for an ungranted path faults.
+        let _ = sink
+            .write_payload(PreparedPayload::FileBlock {
+                relative_path: "plain.txt".to_string(),
+                offset: 0,
+                bytes: vec![0u8; 4],
+            })
+            .await
+            .expect_err("block for a non-resume-granted path must fault");
+
+        // A block overrunning the manifested size faults.
+        let _ = sink
+            .write_payload(PreparedPayload::FileBlock {
+                relative_path: "part.bin".to_string(),
+                offset: 90,
+                bytes: vec![0u8; 20],
+            })
+            .await
+            .expect_err("block overrunning the manifest size must fault");
+
+        // In-bounds blocks pass and do NOT claim the need.
+        sink.write_payload(PreparedPayload::FileBlock {
+            relative_path: "part.bin".to_string(),
+            offset: 0,
+            bytes: vec![0u8; 50],
+        })
+        .await
+        .expect("in-bounds block writes");
+        assert!(
+            outstanding.lock().expect("lock").contains("part.bin"),
+            "a mid-record block must not claim the outstanding need"
+        );
+        assert_eq!(resumed.load(Ordering::Relaxed), 0);
+
+        // A completion at the wrong size faults.
+        let _ = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "part.bin".to_string(),
+                total_size: 99,
+                mtime_seconds: 0,
+                permissions: 0,
+            })
+            .await
+            .expect_err("completion at the wrong size must fault");
+
+        // The grant was consumed by the failed completion attempt above
+        // (the session would abort there); re-arm it to exercise the
+        // happy-path completion claim.
+        headers.lock().expect("lock").insert(
+            "part.bin".to_string(),
+            FileHeader {
+                relative_path: "part.bin".to_string(),
+                size: 100,
+                ..Default::default()
+            },
+        );
+        sink.write_payload(PreparedPayload::FileBlockComplete {
+            relative_path: "part.bin".to_string(),
+            total_size: 100,
+            mtime_seconds: 0,
+            permissions: 0,
+        })
+        .await
+        .expect("correct completion claims");
+        assert!(
+            !outstanding.lock().expect("lock").contains("part.bin"),
+            "completion claims the outstanding need"
+        );
+        assert!(
+            headers.lock().expect("lock").is_empty(),
+            "completion consumes the grant"
+        );
+        assert_eq!(resumed.load(Ordering::Relaxed), 1, "completion counts");
+
+        // A duplicate completion (no grant left) faults.
+        let _ = sink
+            .write_payload(PreparedPayload::FileBlockComplete {
+                relative_path: "part.bin".to_string(),
+                total_size: 100,
+                mtime_seconds: 0,
+                permissions: 0,
+            })
+            .await
+            .expect_err("duplicate completion must fault");
     }
 }

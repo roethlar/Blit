@@ -24,7 +24,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::generated::blit_client::BlitClient;
-use crate::generated::{ComparisonMode, SessionOpen, TransferRole, TransferSummary};
+use crate::generated::{
+    ComparisonMode, ResumeSettings, SessionOpen, TransferRole, TransferSummary,
+};
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::source::TransferSource;
 use crate::transfer_plan::PlanOptions;
@@ -34,9 +36,10 @@ use crate::transfer_session::{
     HelloConfig, SessionEndpoint, SourceSessionConfig,
 };
 
-/// The push-shaped subset of session options otp-4a/4b supports. Mirror,
-/// filters, and resume are refused at OPEN until their slices land
-/// (otp-6/otp-7), so they are intentionally absent here.
+/// The push-shaped subset of session options the landed slices support.
+/// Mirror and filters are refused at OPEN until their client wiring
+/// lands (the session itself honors them since otp-6), so they are
+/// intentionally absent here.
 pub struct PushSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
@@ -47,6 +50,14 @@ pub struct PushSessionOptions {
     /// payloads ride TCP sockets; `true` is the diagnostics / unreachable
     /// data-plane fallback (`--force-grpc`-shaped).
     pub in_stream_bytes: bool,
+    /// otp-7b: negotiate the resume block phase (`SessionOpen.resume`).
+    /// Changed dest partials are then patched block-wise instead of
+    /// re-transferred whole.
+    pub resume: bool,
+    /// Requested resume block size in bytes; `0` lets the DESTINATION
+    /// choose (currently 1 MiB). The destination clamps to its
+    /// carrier's bounds either way. Ignored unless `resume` is true.
+    pub resume_block_size: u32,
 }
 
 impl Default for PushSessionOptions {
@@ -57,6 +68,8 @@ impl Default for PushSessionOptions {
             require_complete_scan: false,
             plan_options: PlanOptions::default(),
             in_stream_bytes: false,
+            resume: false,
+            resume_block_size: 0,
         }
     }
 }
@@ -86,6 +99,12 @@ pub async fn run_push_session(
         // otp-4b: default to the TCP data plane; the responder grants it
         // in SessionAccept unless this asks for the in-stream fallback.
         in_stream_bytes: options.in_stream_bytes,
+        // otp-7b: resume rides the open (plan D6 — the flag is in the
+        // open, so resume runs identically whichever end initiated).
+        resume: options.resume.then_some(ResumeSettings {
+            enabled: true,
+            block_size: options.resume_block_size,
+        }),
         ..Default::default()
     };
 
@@ -112,10 +131,11 @@ pub async fn run_push_session(
     run_source(cfg, transport, source).await
 }
 
-/// The pull-shaped subset of session options otp-5a supports. Mirror,
-/// filters, and resume are refused at OPEN until their slices land, so
-/// they are intentionally absent here. The DESTINATION owns the compare
-/// decision; the SOURCE owns the planner knobs (none cross the wire).
+/// The pull-shaped subset of session options the landed slices support.
+/// Mirror and filters are refused at OPEN until their client wiring
+/// lands, so they are intentionally absent here. The DESTINATION owns
+/// the compare decision; the SOURCE owns the planner knobs (none cross
+/// the wire).
 pub struct PullSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
@@ -126,6 +146,13 @@ pub struct PullSessionOptions {
     /// sockets; `true` is the diagnostics / unreachable data-plane
     /// fallback. Symmetric with [`PushSessionOptions::in_stream_bytes`].
     pub in_stream_bytes: bool,
+    /// otp-7b: negotiate the resume block phase — symmetric with
+    /// [`PushSessionOptions::resume`] (plan D6: the flag is in the open,
+    /// so resume runs identically whichever end initiated).
+    pub resume: bool,
+    /// Requested resume block size in bytes; `0` lets the DESTINATION
+    /// (this end) choose. Ignored unless `resume` is true.
+    pub resume_block_size: u32,
 }
 
 impl Default for PullSessionOptions {
@@ -135,6 +162,8 @@ impl Default for PullSessionOptions {
             ignore_existing: false,
             require_complete_scan: false,
             in_stream_bytes: false,
+            resume: false,
+            resume_block_size: 0,
         }
     }
 }
@@ -172,6 +201,11 @@ pub async fn run_pull_session(
         // grants it in SessionAccept unless this asks for the in-stream
         // fallback.
         in_stream_bytes: options.in_stream_bytes,
+        // otp-7b: resume rides the open, role-agnostic (plan D6).
+        resume: options.resume.then_some(ResumeSettings {
+            enabled: true,
+            block_size: options.resume_block_size,
+        }),
         ..Default::default()
     };
 

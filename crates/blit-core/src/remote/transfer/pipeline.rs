@@ -206,8 +206,11 @@ pub async fn execute_sink_pipeline_elastic(
                             .collect(),
                         // Resume-block payloads patch existing files; no
                         // file-completion event from one-block-at-a-time.
+                        // The composite ResumeFile rides the session data
+                        // plane, which reports no per-file progress here.
                         PreparedPayload::FileBlock { .. }
-                        | PreparedPayload::FileBlockComplete { .. } => Vec::new(),
+                        | PreparedPayload::FileBlockComplete { .. }
+                        | PreparedPayload::ResumeFile { .. } => Vec::new(),
                     };
                     let outcome = sink
                         .write_payload(prepared)
@@ -567,8 +570,10 @@ const MAX_WIRE_TAR_SHARD_FILES: usize = 1_048_576;
 const MAX_WIRE_TAR_SHARD_BYTES: usize =
     crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES as usize;
 /// Maximum single-block payload size on the resume protocol. Aligns
-/// with `crate::copy::MAX_BLOCK_SIZE`.
-const MAX_WIRE_BLOCK_BYTES: usize = 64 * 1024 * 1024;
+/// with `crate::copy::MAX_BLOCK_SIZE`. `pub(crate)` since otp-7b: the
+/// session's data-plane resume ceiling (`transfer_session`) must never
+/// exceed what this receive-side bound accepts.
+pub(crate) const MAX_WIRE_BLOCK_BYTES: usize = 64 * 1024 * 1024;
 
 async fn read_string<R: AsyncRead + Unpin>(socket: &mut R) -> Result<String> {
     let len = read_u32(socket).await? as usize;
@@ -1110,6 +1115,7 @@ mod tests {
                 PreparedPayload::TarShard { headers, data } => (headers.len(), data.len() as u64),
                 PreparedPayload::FileBlock { bytes, .. } => (0, bytes.len() as u64),
                 PreparedPayload::FileBlockComplete { .. } => (1, 0),
+                PreparedPayload::ResumeFile { header, .. } => (1, header.size),
             };
             Ok(SinkOutcome {
                 files_written,

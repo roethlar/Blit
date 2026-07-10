@@ -182,6 +182,17 @@ push/pull-specific message.
   session); armed slots that go unclaimed expire, as today's resize
   wiring already does. A socket presenting anything else is closed
   without response.
+  **Resume on the data plane (otp-7b):** in a resume session, block
+  records ride the sockets as the binary `BLOCK`/`BLOCK_COMPLETE`
+  record shapes (the receive pipeline's existing tags), while the
+  `BlockHashList` stays a control-lane frame. All records of one
+  resumed file travel one socket, in order, ending with its
+  `BLOCK_COMPLETE` (which carries mtime+perms so zero-block resumes
+  still stamp metadata). The DESTINATION-chosen block size clamps to
+  the CARRIER's ceiling — 2 MiB in-stream (tonic frame limit,
+  D-2026-07-10-1), 64 MiB data plane (the wire block record bound,
+  D-2026-07-10-2) — with a shared 64 KiB floor and 65_536-hash list
+  cap; both ends read the carrier from grant presence.
 - **In-stream carrier:** requested via `SessionOpen.in_stream_bytes`
   (operator `--force-grpc` diagnostics) or granted by the responder
   when it cannot bind a data plane (`SessionAccept` with no grant).

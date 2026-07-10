@@ -39,7 +39,7 @@ use crate::generated::{
 };
 use crate::manifest::{header_transfer_status, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
-use crate::remote::transfer::payload::PreparedPayload;
+use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
@@ -68,19 +68,30 @@ const DEST_DIFF_CHUNK: usize = 128;
 /// buffering per file record.
 const FILE_RECORD_PIPE_BYTES: usize = 256 * 1024;
 
-/// otp-7a resume bounds (codex F1, D-2026-07-10-1). The in-stream
-/// carrier rides the gRPC `Transfer` RPC when the daemon serves, and
-/// tonic's default 4 MiB decode limit applies to every frame — so the
-/// DESTINATION's block-size clamp (plan D5) must keep both resume frame
-/// shapes under it. The data plane (otp-7b) carries blocks as binary
-/// records with no protobuf envelope; the ceiling is revisited there.
+/// otp-7a resume bounds (codex F1, D-2026-07-10-1; data-plane ceiling
+/// otp-7b, D-2026-07-10-2). The in-stream carrier rides the gRPC
+/// `Transfer` RPC when the daemon serves, and tonic's default 4 MiB
+/// decode limit applies to every frame — so the DESTINATION's
+/// block-size clamp (plan D5) must keep both resume frame shapes under
+/// it. The TCP data plane carries blocks as binary records with no
+/// protobuf envelope, so its ceiling is the wire record bound instead.
+/// The ceiling is therefore PER CARRIER; both ends know the carrier
+/// (grant present ⇒ data plane), so they agree without negotiation.
 ///
 /// Floor: a `BlockHashList` costs 32 bytes per block, so absurdly small
 /// blocks amplify — a block_size=1 list would be 32× the partial.
 const MIN_RESUME_BLOCK_SIZE: usize = 64 * 1024;
-/// Ceiling: one `BlockTransfer` frame carries one whole block; 2 MiB of
-/// content plus the envelope stays well under the 4 MiB frame limit.
+/// Ceiling, in-stream carrier: one `BlockTransfer` frame carries one
+/// whole block; 2 MiB of content plus the envelope stays well under the
+/// 4 MiB frame limit.
 const MAX_IN_STREAM_RESUME_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+/// Ceiling, TCP data plane (otp-7b): binary `BLOCK` records have no
+/// protobuf envelope; the bound is the receive pipeline's per-record
+/// allocation cap (= the old resume path's `MAX_BLOCK_SIZE`, 64 MiB).
+/// The hash list still rides the control lane as protobuf, but its
+/// size is governed by the 65_536-hash cap, not by block size.
+const MAX_DATA_PLANE_RESUME_BLOCK_SIZE: usize =
+    crate::remote::transfer::pipeline::MAX_WIRE_BLOCK_BYTES;
 /// One `BlockHashList` frame carries a partial's whole list; capped at
 /// 65_536 × 32 B = 2 MiB of hashes. A partial with more blocks than
 /// this degrades to the empty list — the contract's full-transfer
@@ -560,12 +571,12 @@ async fn responder_finish(
     // otp-5b). The bound listener travels in `Negotiated.responder_data_plane`
     // and is consumed by whichever role's driver runs.
     //
-    // otp-7a: a resume session rides the in-stream carrier — block records
-    // exist only as control-lane frames until otp-7b ports them onto the
-    // data plane, so granting one here would strand every resume-flagged
-    // file. The grant is always the responder's, so suppressing it here
-    // covers both initiator layouts.
-    let responder_data_plane = if open.in_stream_bytes || resume_negotiated(&open) {
+    //
+    // otp-7b: resume sessions ride the data plane too — block records
+    // travel as binary BLOCK/BLOCK_COMPLETE records on the sockets (the
+    // otp-7a in-stream frames remain the fallback carrier), so the grant
+    // is no longer suppressed for a resume session.
+    let responder_data_plane = if open.in_stream_bytes {
         None
     } else {
         data_plane::prepare_responder_data_plane().await
@@ -1119,18 +1130,35 @@ async fn source_send_half(
             continue;
         }
         if !resume.ready.is_empty() {
-            // otp-7a: the block phase for correlated (need, hash-list)
-            // pairs. Blocks are control-lane records — a resume session
-            // never gets a data-plane grant until otp-7b, but fail fast
-            // rather than silently misroute if that invariant breaks.
-            if data_plane.is_some() {
-                return Err(eyre::Report::new(SessionFault::internal(
-                    "resume block records ride the in-stream carrier until otp-7b, \
-                     but this session has a TCP data plane",
-                )));
-            }
-            for (header, hashes) in std::mem::take(&mut resume.ready) {
-                send_resume_block_records(tx, &source, &header, &hashes).await?;
+            // The block phase for correlated (need, hash-list) pairs.
+            // Data plane (otp-7b): each pair becomes ONE composite
+            // ResumeFile work item, so one pipeline worker runs the
+            // whole record on one socket — strict per-file serialization
+            // without cross-socket reorder hazards. In-stream (otp-7a):
+            // control-lane BlockTransfer/Complete frames, as before.
+            let ready = std::mem::take(&mut resume.ready);
+            match &mut data_plane {
+                Some(dp) => {
+                    let payloads = ready
+                        .into_iter()
+                        .map(|(header, hashes)| TransferPayload::ResumeFile {
+                            header,
+                            block_size: hashes.block_size,
+                            dest_hashes: hashes.hashes,
+                        })
+                        .collect();
+                    // Same cancel posture as the plain-batch queue above:
+                    // prefer the peer's framed reason over the transport
+                    // break a cancel also causes (otp-4b-3 codex F1).
+                    if let Err(dp_err) = dp.queue(payloads).await {
+                        return Err(prefer_peer_fault(&mut events, dp_err).await);
+                    }
+                }
+                None => {
+                    for (header, hashes) in ready {
+                        send_resume_block_records(tx, &source, &header, &hashes).await?;
+                    }
+                }
             }
             continue;
         }
@@ -1317,13 +1345,21 @@ async fn process_source_event(
             // go out first, and an already-invalid frame must fail fast.
             // A conforming destination clamps into this range (D5 /
             // D-2026-07-10-1); same-build peers make a mismatch a
-            // violation, never a negotiation.
+            // violation, never a negotiation. The ceiling is the
+            // CARRIER's (otp-7b, D-2026-07-10-2): binary data-plane
+            // records take up to the wire block cap; in-stream frames
+            // must stay under the gRPC frame limit.
+            let ceiling = if data_plane.is_some() {
+                MAX_DATA_PLANE_RESUME_BLOCK_SIZE
+            } else {
+                MAX_IN_STREAM_RESUME_BLOCK_SIZE
+            };
             let bs = list.block_size as usize;
-            if !(MIN_RESUME_BLOCK_SIZE..=MAX_IN_STREAM_RESUME_BLOCK_SIZE).contains(&bs) {
+            if !(MIN_RESUME_BLOCK_SIZE..=ceiling).contains(&bs) {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
                     format!(
                         "BlockHashList for '{}' block_size {bs} outside \
-                         [{MIN_RESUME_BLOCK_SIZE}, {MAX_IN_STREAM_RESUME_BLOCK_SIZE}]",
+                         [{MIN_RESUME_BLOCK_SIZE}, {ceiling}]",
                         list.relative_path
                     ),
                 )));
@@ -1617,10 +1653,12 @@ async fn send_payload_records(
                 tx.send(frame(Frame::TarShardComplete(TarShardComplete {})))
                     .await?;
             }
-            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
+            PreparedPayload::FileBlock { .. }
+            | PreparedPayload::FileBlockComplete { .. }
+            | PreparedPayload::ResumeFile { .. } => {
                 // The outbound planner never emits these: resume block
-                // records are choreography-originated (otp-7a,
-                // `send_resume_block_records` below), never planned.
+                // records are choreography-originated (otp-7a in-stream,
+                // otp-7b data plane), never planned.
                 eyre::bail!("resume payload planned by the outbound planner");
             }
         }
@@ -1628,22 +1666,22 @@ async fn send_payload_records(
     Ok(())
 }
 
-/// otp-7a: the SOURCE-side block phase for one resume-flagged need —
-/// a session free helper, deliberately not a `TransferSource` method
-/// (plan D3: it needs only `open_file` + blake3, and keeping it off the
-/// trait spares every future source impl from re-implementing it, the
-/// same reasoning that made `FilteredSource` the one filter chokepoint).
+/// otp-7a: the SOURCE-side block phase for one resume-flagged need over
+/// the IN-STREAM carrier — a session free helper, deliberately not a
+/// `TransferSource` method (plan D3: it needs only `open_file` + blake3,
+/// and keeping it off the trait spares every future source impl from
+/// re-implementing it, the same reasoning that made `FilteredSource`
+/// the one filter chokepoint).
 ///
-/// Reads the source file sequentially at the block size the DESTINATION
-/// chose (plan D5; range-validated at frame arrival), Blake3s
-/// each block, and emits `BlockTransfer` only for the blocks the
-/// destination's hash list proves stale: an index beyond the list, or a
-/// differing hash — a malformed hash entry (wrong length) counts as
-/// differing, so stale or garbage hashes degrade to sending the block,
-/// never to trusting it (plan D1, the graceful stale-partial fallback).
-/// Ends with `BlockTransferComplete{total_bytes = header.size}`; the
-/// manifest promised `header.size`, so EOF-short aborts exactly as a
-/// whole-file record does.
+/// The diff itself — read sequentially at the block size the
+/// DESTINATION chose (plan D5; range-validated at frame arrival),
+/// blake3 each block, treat an index beyond the list, a differing hash,
+/// or a MALFORMED hash as stale (plan D1, the graceful stale-partial
+/// fallback) — is [`ResumeBlockDiff`], shared verbatim with the data
+/// plane's `DataPlaneSink` (otp-7b) so both carriers keep one staleness
+/// semantic. Ends with `BlockTransferComplete{total_bytes =
+/// header.size}`; the manifest promised `header.size`, so EOF-short
+/// aborts exactly as a whole-file record does.
 async fn send_resume_block_records(
     tx: &mut Box<dyn FrameTx>,
     source: &Arc<dyn TransferSource>,
@@ -1652,39 +1690,20 @@ async fn send_resume_block_records(
 ) -> Result<()> {
     // block_size was range-validated when the BlockHashList arrived
     // (`process_source_event`, codex F5) — use it directly.
-    let block_size = hashes.block_size as usize;
-    let mut reader = source.open_file(header).await?;
-    let mut buf = vec![0u8; block_size];
-    let mut offset: u64 = 0;
-    let mut index: usize = 0;
-    while offset < header.size {
-        let this = (header.size - offset).min(block_size as u64) as usize;
-        let mut filled = 0usize;
-        while filled < this {
-            let got = reader.read(&mut buf[filled..this]).await?;
-            if got == 0 {
-                eyre::bail!(
-                    "'{}' hit EOF with {} bytes still promised",
-                    header.relative_path,
-                    header.size - offset - filled as u64
-                );
-            }
-            filled += got;
-        }
-        let stale = match hashes.hashes.get(index) {
-            Some(expected) => blake3::hash(&buf[..this]).as_bytes()[..] != expected[..],
-            None => true,
-        };
-        if stale {
-            tx.send(frame(Frame::Block(BlockTransfer {
-                relative_path: header.relative_path.clone(),
-                offset,
-                content: buf[..this].to_vec(),
-            })))
-            .await?;
-        }
-        offset += this as u64;
-        index += 1;
+    let mut diff = crate::remote::transfer::resume_diff::ResumeBlockDiff::open(
+        source,
+        header,
+        hashes.block_size as usize,
+        hashes.hashes.clone(),
+    )
+    .await?;
+    while let Some((offset, block)) = diff.next_stale().await? {
+        tx.send(frame(Frame::Block(BlockTransfer {
+            relative_path: header.relative_path.clone(),
+            offset,
+            content: block.to_vec(),
+        })))
+        .await?;
     }
     tx.send(frame(Frame::BlockComplete(BlockTransferComplete {
         relative_path: header.relative_path.clone(),
@@ -2059,25 +2078,18 @@ async fn destination_session(
     };
     let mut source_files: HashSet<String> = HashSet::new();
 
-    // otp-7a: resume. The DESTINATION chooses the block size (plan D5 —
-    // it hashes first; the SOURCE reads the size from each
-    // BlockHashList): 0 ⇒ default, clamped to the shared cap. Headers of
-    // resume-granted needs are retained so BlockTransferComplete can
-    // finalize with the manifest's size/mtime/permissions (the wire
-    // complete frame carries only total_bytes).
+    // otp-7a: resume. Headers of resume-granted needs are retained so a
+    // record's completion can finalize with the manifest's
+    // size/mtime/permissions and be validated against the grant. Both
+    // the header map and the resumed counter are SHARED with the
+    // data-plane receive (otp-7b) exactly as `outstanding` is: on the
+    // data plane the control loop never sees block records, so the
+    // NeedListSink claims resume grants and counts completions as they
+    // land on the sockets. The block size is chosen below, once the
+    // carrier is known (the ceiling is per carrier).
     let resume_enabled = resume_negotiated(&negotiated.open);
-    let resume_block_size = match negotiated
-        .open
-        .resume
-        .as_ref()
-        .map(|r| r.block_size as usize)
-        .unwrap_or(0)
-    {
-        0 => DEFAULT_BLOCK_SIZE,
-        bs => bs.clamp(MIN_RESUME_BLOCK_SIZE, MAX_IN_STREAM_RESUME_BLOCK_SIZE),
-    };
-    let mut resume_headers: HashMap<String, FileHeader> = HashMap::new();
-    let mut files_resumed: u64 = 0;
+    let resume_headers: data_plane::ResumeHeaders = Arc::default();
+    let files_resumed = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Two sets, deliberately separate (codex otp-4b-1 fix-review F1):
     // `granted` is the ever-granted DEDUP set — control-loop-local,
@@ -2111,6 +2123,13 @@ async fn destination_session(
     let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
         Arc::clone(&sink) as Arc<dyn TransferSink>,
         Arc::clone(&outstanding),
+        // otp-7b: only a resume session accepts block records on the
+        // data plane; the sink validates + claims them against the same
+        // shared grant state the in-stream arms use.
+        resume_enabled.then(|| data_plane::ResumeRecv {
+            headers: Arc::clone(&resume_headers),
+            resumed: Arc::clone(&files_resumed),
+        }),
     ));
     let (mut data_plane_recv, mut resize_live, resize_ceiling) = match negotiated
         .responder_data_plane
@@ -2174,6 +2193,29 @@ async fn destination_session(
         },
     };
 
+    // otp-7a/7b: the DESTINATION chooses the resume block size (plan D5
+    // — it hashes first; the SOURCE reads the size from each
+    // BlockHashList): 0 ⇒ default, clamped to THIS CARRIER's cap
+    // (D-2026-07-10-1 in-stream, D-2026-07-10-2 data plane) — decided
+    // here, after the carrier is settled.
+    let resume_block_size = {
+        let ceiling = if data_plane_recv.is_some() {
+            MAX_DATA_PLANE_RESUME_BLOCK_SIZE
+        } else {
+            MAX_IN_STREAM_RESUME_BLOCK_SIZE
+        };
+        match negotiated
+            .open
+            .resume
+            .as_ref()
+            .map(|r| r.block_size as usize)
+            .unwrap_or(0)
+        {
+            0 => DEFAULT_BLOCK_SIZE,
+            bs => bs.clamp(MIN_RESUME_BLOCK_SIZE, ceiling),
+        }
+    };
+
     let mut pending: Vec<FileHeader> = Vec::new();
     let mut needed_paths: Vec<String> = Vec::new();
     let mut manifest_complete = false;
@@ -2213,7 +2255,7 @@ async fn destination_session(
                         &compare_opts,
                         resume_enabled,
                         resume_block_size,
-                        &mut resume_headers,
+                        &resume_headers,
                         &mut granted,
                         &outstanding,
                         &mut needed_paths,
@@ -2247,7 +2289,7 @@ async fn destination_session(
                     &compare_opts,
                     resume_enabled,
                     resume_block_size,
-                    &mut resume_headers,
+                    &resume_headers,
                     &mut granted,
                     &outstanding,
                     &mut needed_paths,
@@ -2279,7 +2321,11 @@ async fn destination_session(
                 // A resume-flagged grant may be satisfied ONLY by its
                 // block record — a whole-file record for it bypasses the
                 // hash choreography this end committed to (codex F3).
-                if resume_headers.contains_key(&header.relative_path) {
+                if resume_headers
+                    .lock()
+                    .expect("resume-headers lock poisoned")
+                    .contains_key(&header.relative_path)
+                {
                     return Err(violation(format!(
                         "file record for resume-flagged '{}' — the contract requires \
                          its block record",
@@ -2309,13 +2355,13 @@ async fn destination_session(
                     resume_enabled,
                     data_plane_recv.is_some(),
                     manifest_complete,
-                    &mut resume_headers,
+                    &resume_headers,
                     &outstanding,
                 )?;
                 let outcome = receive_block_record(transport, &sink, &header, block).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
-                files_resumed += 1;
+                files_resumed.fetch_add(1, Ordering::Relaxed);
             }
             Some(Frame::BlockComplete(complete)) => {
                 // otp-7a: a zero-block record — every block matched
@@ -2327,13 +2373,13 @@ async fn destination_session(
                     resume_enabled,
                     data_plane_recv.is_some(),
                     manifest_complete,
-                    &mut resume_headers,
+                    &resume_headers,
                     &outstanding,
                 )?;
                 let outcome = finish_block_record(&sink, &header, &complete).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
-                files_resumed += 1;
+                files_resumed.fetch_add(1, Ordering::Relaxed);
             }
             Some(Frame::TarShardHeader(shard)) => {
                 if data_plane_recv.is_some() {
@@ -2347,13 +2393,16 @@ async fn destination_session(
                 }
                 // Same rule as file records (codex F3): a resume-flagged
                 // grant may not be satisfied through a tar shard.
-                for h in &shard.files {
-                    if resume_headers.contains_key(&h.relative_path) {
-                        return Err(violation(format!(
-                            "tar shard entry for resume-flagged '{}' — the contract \
-                             requires its block record",
-                            h.relative_path
-                        )));
+                {
+                    let held = resume_headers.lock().expect("resume-headers lock poisoned");
+                    for h in &shard.files {
+                        if held.contains_key(&h.relative_path) {
+                            return Err(violation(format!(
+                                "tar shard entry for resume-flagged '{}' — the contract \
+                                 requires its block record",
+                                h.relative_path
+                            )));
+                        }
                     }
                 }
                 {
@@ -2473,13 +2522,19 @@ async fn destination_session(
                     )));
                 }
                 // Belt-and-braces (codex F3): with the per-record claims
-                // above, an empty outstanding set implies every resume
-                // grant completed as a block record — but verify the
-                // stronger invariant directly rather than infer it.
-                if !resume_headers.is_empty() {
+                // above (in-stream inline, data-plane in NeedListSink),
+                // an empty outstanding set implies every resume grant
+                // completed as a block record — but verify the stronger
+                // invariant directly rather than infer it. The data
+                // plane's finish() above drained every receive worker,
+                // so all socket-side claims have landed.
+                let unresumed = resume_headers
+                    .lock()
+                    .expect("resume-headers lock poisoned")
+                    .len();
+                if unresumed != 0 {
                     return Err(violation(format!(
-                        "SourceDone with {} resume grant(s) never completed by a block record",
-                        resume_headers.len()
+                        "SourceDone with {unresumed} resume grant(s) never completed by a block record"
                     )));
                 }
                 // otp-6b: run the mirror delete pass now — after every payload
@@ -2520,7 +2575,7 @@ async fn destination_session(
                     bytes_transferred: bytes_written,
                     entries_deleted,
                     in_stream_carrier_used,
-                    files_resumed,
+                    files_resumed: files_resumed.load(Ordering::Relaxed),
                 };
                 transport.send(frame(Frame::Summary(summary))).await?;
                 return Ok(DestinationOutcome {
@@ -2560,8 +2615,9 @@ async fn diff_chunk_and_send_needs(
     compare_opts: &CompareOptions,
     resume_enabled: bool,
     resume_block_size: usize,
-    // Headers of resume-granted needs, retained for record finalization.
-    resume_headers: &mut HashMap<String, FileHeader>,
+    // Headers of resume-granted needs, retained for record finalization
+    // (shared with the data-plane receive, otp-7b).
+    resume_headers: &data_plane::ResumeHeaders,
     // Ever-granted DEDUP set (control-loop-local, insert-only): a path
     // the source manifests twice is granted at most once, and because it
     // is never removed, a concurrent data-plane claim can't re-open the
@@ -2640,6 +2696,15 @@ async fn diff_chunk_and_send_needs(
             resume_block_size,
         )
         .await?;
+        // Retain the grant BEFORE the hash list goes out (otp-7b): the
+        // data-plane receive validates arriving block records against
+        // this map on another task, so insert-before-send is what
+        // orders its lookup strictly after the grant exists — the same
+        // rule `outstanding` follows above.
+        resume_headers
+            .lock()
+            .expect("resume-headers lock poisoned")
+            .insert(header.relative_path.clone(), header.clone());
         transport
             .send(frame(Frame::BlockHashes(BlockHashList {
                 relative_path: header.relative_path.clone(),
@@ -2647,7 +2712,6 @@ async fn diff_chunk_and_send_needs(
                 hashes,
             })))
             .await?;
-        resume_headers.insert(header.relative_path.clone(), header.clone());
     }
     Ok(())
 }
@@ -2804,18 +2868,20 @@ async fn compute_resume_block_hashes(
     .map_err(|err| eyre::eyre!("resume hash task panicked: {err}"))?
 }
 
-/// otp-7a: validate and claim the resume-flagged need a block record
-/// opens for. Fail-fast on every off-contract shape: block records ride
-/// the control lane only (7b ports them to the data plane), only after
-/// ManifestComplete, only in a resume session, and only for a path this
-/// end granted with `resume=true` — exactly once (the header map and
-/// the outstanding set are both claimed here).
+/// otp-7a: validate and claim the resume-flagged need an IN-STREAM
+/// block record opens for. Fail-fast on every off-contract shape:
+/// control-lane block records are valid only when no data plane is
+/// active (with one, blocks ride the sockets and `NeedListSink` claims
+/// them — otp-7b), only after ManifestComplete, only in a resume
+/// session, and only for a path this end granted with `resume=true` —
+/// exactly once (the header map and the outstanding set are both
+/// claimed here).
 fn claim_resume_record(
     relative_path: &str,
     resume_enabled: bool,
     data_plane_active: bool,
     manifest_complete: bool,
-    resume_headers: &mut HashMap<String, FileHeader>,
+    resume_headers: &data_plane::ResumeHeaders,
     outstanding: &data_plane::OutstandingNeeds,
 ) -> Result<FileHeader> {
     if !resume_enabled {
@@ -2833,11 +2899,15 @@ fn claim_resume_record(
             "block record for '{relative_path}' before ManifestComplete"
         )));
     }
-    let header = resume_headers.remove(relative_path).ok_or_else(|| {
-        violation(format!(
-            "block record for '{relative_path}' which was not granted a resume-flagged need"
-        ))
-    })?;
+    let header = resume_headers
+        .lock()
+        .expect("resume-headers lock poisoned")
+        .remove(relative_path)
+        .ok_or_else(|| {
+            violation(format!(
+                "block record for '{relative_path}' which was not granted a resume-flagged need"
+            ))
+        })?;
     if !outstanding
         .lock()
         .expect("outstanding-needs lock poisoned")

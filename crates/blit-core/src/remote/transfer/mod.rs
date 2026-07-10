@@ -6,6 +6,7 @@ pub mod operation_spec;
 pub mod payload;
 pub mod pipeline;
 pub mod progress;
+pub mod resume_diff;
 pub mod session_client;
 pub mod sink;
 pub mod socket;
@@ -29,6 +30,8 @@ pub use pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_elastic, execute_sink_pipeline_streaming,
     SinkControl,
 };
+pub use resume_diff::ResumeBlockDiff;
+
 pub use progress::{
     ByteProgressSink, LiveProbe, NoProbe, Probe, ProgressEvent, ProgressTotals,
     RemoteTransferProgress, StreamId, StreamProbe, StreamState, StreamTelemetry,

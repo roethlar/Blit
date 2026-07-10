@@ -38,6 +38,19 @@ pub enum TransferPayload {
         relative_path: String,
         total_size: u64,
     },
+    /// otp-7b: one resume-flagged file's WHOLE block phase as a single
+    /// work item — the manifest header plus the destination's block
+    /// hashes. Choreography-originated only (the session's send half
+    /// queues it once the file's `BlockHashList` has arrived); the
+    /// outbound planner never emits it. One work item ⇒ one pipeline
+    /// worker ⇒ one socket, which is what keeps the record strictly
+    /// serialized (every `BLOCK` before its `BLOCK_COMPLETE`, no
+    /// cross-socket reorder hazard against the truncate+stamp).
+    ResumeFile {
+        header: FileHeader,
+        block_size: u32,
+        dest_hashes: Vec<Vec<u8>>,
+    },
 }
 
 pub async fn prepare_payload(
@@ -61,6 +74,18 @@ pub async fn prepare_payload(
         TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => {
             bail!("FileBlock payloads cannot be prepared from a filesystem source")
         }
+        // otp-7b: nothing to prepare — the block-diff streams the source
+        // file inside the sink write (DataPlaneSink), where the record's
+        // strict serialization lives. Pass through.
+        TransferPayload::ResumeFile {
+            header,
+            block_size,
+            dest_hashes,
+        } => Ok(PreparedPayload::ResumeFile {
+            header,
+            block_size,
+            dest_hashes,
+        }),
     }
 }
 
@@ -102,6 +127,17 @@ pub enum PreparedPayload {
         total_size: u64,
         mtime_seconds: i64,
         permissions: u32,
+    },
+    /// otp-7b: a resume-flagged file's whole block phase, send-side only
+    /// (see [`TransferPayload::ResumeFile`]). Consumed by `DataPlaneSink`,
+    /// which runs the block-diff against `dest_hashes` and emits the
+    /// `BLOCK*`/`BLOCK_COMPLETE` wire records; every receive-side sink
+    /// rejects it (the wire never carries this composite shape — the
+    /// receive pipeline decodes per-block `FileBlock`/`FileBlockComplete`).
+    ResumeFile {
+        header: FileHeader,
+        block_size: u32,
+        dest_hashes: Vec<Vec<u8>>,
     },
 }
 
@@ -180,6 +216,7 @@ pub fn plan_transfer_payloads(
     payloads.sort_by_key(|p| match p {
         TransferPayload::TarShard { .. } => (0, 0),
         TransferPayload::File(h) => (1, h.size),
+        TransferPayload::ResumeFile { header, .. } => (1, header.size),
         TransferPayload::FileBlock { size, .. } => (2, *size),
         TransferPayload::FileBlockComplete { .. } => (3, 0),
     });
@@ -196,6 +233,8 @@ pub fn payload_file_count(payloads: &[TransferPayload]) -> usize {
             // Resume payloads patch existing files in-place — they
             // don't add to the "files transferred" count.
             TransferPayload::FileBlock { .. } | TransferPayload::FileBlockComplete { .. } => 0,
+            // One composite resume item completes exactly one file.
+            TransferPayload::ResumeFile { .. } => 1,
         })
         .sum()
 }
@@ -321,9 +360,11 @@ pub async fn transfer_payloads_via_control_plane(
                     }
                 }
             }
-            // Resume variants are receive-only — gRPC control plane is outbound only.
-            PreparedPayload::FileBlock { .. } | PreparedPayload::FileBlockComplete { .. } => {
-                bail!("FileBlock payloads cannot traverse the gRPC control plane (outbound only)");
+            // Resume variants never traverse the gRPC control plane.
+            PreparedPayload::FileBlock { .. }
+            | PreparedPayload::FileBlockComplete { .. }
+            | PreparedPayload::ResumeFile { .. } => {
+                bail!("resume payloads cannot traverse the gRPC control plane");
             }
         }
     }
