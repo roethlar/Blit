@@ -6,7 +6,7 @@ reviewed commit: `5ffc9be`
 raw output: `.review/results/otp-8.codex.md`
 verdict line: FAIL — "the new tests are otherwise sound; runnable test
 count is confirmed at 1550 → 1552."
-fix commit: (appended below after landing)
+fix commit: `643294a` (both findings; suite 1552 → 1555)
 
 ## F1 (High) — in-stream sends don't race peer faults; cancellation can hang or surface INTERNAL
 

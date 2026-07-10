@@ -4,9 +4,9 @@ Last updated: 2026-07-10
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-10, this one): **otp-7b landed and CLOSED through the codex loop — otp-7 is done** (`ecac9b0` 7b-1 data-plane resume, `071799a` 7b-2 fault-summary rider + cancel e2e, `d48351d` review fixes; both codex verdicts adjudicated in `.review/results/otp-7b-{1,2}.gpt-verdict.md`). ONE_TRANSFER_PATH otp-1..7 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
+- Current session (2026-07-10, this one): **otp-8 landed and CLOSED through the codex loop** — assess-first verdict: the fallback byte-carrier was substantially built by otp-3..7b; `5ffc9be` added the wire residue pins (in-stream resume over real gRPC + the D-2026-07-10-1 clamp), codex FAIL → 2/2 accepted + fixed `643294a` (in-stream cancel could HANG — fault-signal race added; unbounded `TarShardHeader` frame — in-stream splitter added). Verdicts: `.review/results/otp-8.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..8 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
 
-- Notes on push state (re-verified via `git ls-remote origin` at session start, as of `d48351d`): origin/master is at `7f1c4b2` — the owner pushed since the 40th handoff's "unpushed f6e592e..HEAD" note, which is now stale. Unpushed local commits: `7f1c4b2..HEAD` (this session's four). windows-latest CI on the w9-3 harness fix rides the next push.
+- Notes on push state (as of `643294a`; basis: the prior session's `git ls-remote origin` check — not re-verified this session): origin/master was at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD` (the prior session's four + this session's three). windows-latest CI on the w9-3 harness fix rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -30,6 +30,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     cancel; mirror/filters (one delete rule); in-stream resume with
     wire bounds D-2026-07-10-1. SizeMtime = data-safe skip (open Q
     below).
+  - **otp-8 `[x]` — fallback byte-carrier, CLOSED by assessment +
+    residue.** The carrier was already live since otp-3 (selection at
+    negotiation only — request or bind-failure grant-less accept; the
+    old mid-flight TCP→gRPC downgrade dies with the old drivers).
+    `5ffc9be` wire pins (in-stream resume e2e both directions; 2 MiB
+    clamp proven against real tonic); codex F1 (High) in-stream
+    cancel HANG → fault-signal race + cancel e2e; F2 (Med) unbounded
+    `TarShardHeader` frame → in-stream post-planner splitter
+    (`643294a`). CLI `--force-grpc` plumbing = otp-10 staging. Suite →
+    **1555**. Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
   - **otp-7b (1/2) `[x]` — resume over the TCP data plane + the D4
     fault-summary rider, CLOSED; otp-7 done.** 7b-1 (`ecac9b0`):
     composite `ResumeFile` work item = strict per-file socket
@@ -46,13 +56,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     StallGuard on silent hash scans, resume batches drive sf-2 resize,
     64 MiB ceiling pinned, single-file-root "" identity). Suite →
     **1550**. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
-  - Current: **otp-8 (fallback byte-carrier)** — NOTE for the next
-    session: the in-stream carrier already exists and is exercised as
-    the fallback by every slice since otp-3 (both directions, resume
-    included); assess whether otp-8 is substantially satisfied and
-    what residue remains (e.g. `--force-grpc`-shaped option plumbing)
-    before writing new code. otp-5b-3 (pull cancel) optional; otp-2
-    rig-gated before otp-10.
+  - Current: **otp-9 (delegated transfer)** — daemon-initiated
+    session against the other daemon; the bespoke delegated-pull
+    driver retires behind the existing authorization gate;
+    `DelegatedPull` RPC reduces to trigger + progress relay (never
+    carries payload bytes — the otp-10 deletion proof asserts it,
+    codex F3). otp-5b-3 (pull cancel) optional; otp-2 rig-gated
+    before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -70,10 +80,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
-   b-2) `[x]`. Current: **otp-8** (fallback byte-carrier — see the
-   Now section's assess-first note: the in-stream carrier already
-   runs as every slice's fallback). otp-2 (symmetric baseline) is
-   RIG-GATED — before otp-10 cutover.
+   b-2), otp-8 `[x]`. Current: **otp-9** (delegated transfer).
+   otp-2 (symmetric baseline) is RIG-GATED — before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
    measurement follow-ups (Win 11 bare-metal; disk-path variants;
@@ -103,7 +111,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    tuning residue (w3-1 scoped it out); the source send half's bounded
    `dp.queue()` is not raced against control-lane events — shape since
    otp-4b, deferred at codex otp-7b-1 F3 (keepalive bounds the window;
-   both cancel e2es pin the required behavior).
+   both cancel e2es pin the required behavior). otp-8 F1 gave the
+   IN-STREAM sends a fault race (watch signal, biased fault-first);
+   the residual there is only the narrow send-error-beats-framed-fault
+   ordering decaying CANCELLED→INTERNAL (verdict file, same family).
 
 ## Authoritative docs right now
 
