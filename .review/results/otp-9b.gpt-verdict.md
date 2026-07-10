@@ -5,7 +5,7 @@ reviewed commit: `b2fd876`
 raw output: `.review/results/otp-9b.codex.md`
 verdict line: NEEDS FIXES (4 findings; test-count accounting confirmed
 exact: 9 retired + 3 new, 1558 → 1552)
-fix commit: (appended after landing)
+fix commit: `1ce73b5` (4/4; suite 1552 → 1555)
 
 ## F1 (High) — `require_complete_scan` forwarded but never enforced by the session
 

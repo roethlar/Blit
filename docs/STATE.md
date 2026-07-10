@@ -4,9 +4,9 @@ Last updated: 2026-07-10
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-10, this one): **otp-8 and otp-9a landed and CLOSED through the codex loop** — otp-8 by assessment + wire pins (`5ffc9be`, fixes `643294a`: in-stream cancel-hang fault race + TarShardHeader frame bound); otp-9a pull session-client surface (`7bf8ef8`, doc fix `607a924`). Verdicts in `.review/results/otp-{8,9a}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..8 + 9a [x]. SMALL_FILE_CEILING paused (D-2026-07-05-1).
+- Current session (2026-07-10, this one): **otp-8 and otp-9 (a+b) landed and CLOSED through the codex loop** — otp-8 by assessment + wire pins (`5ffc9be`/`643294a`); otp-9 delegated-on-session (`7bf8ef8`/`607a924`, `b2fd876`/`1ce73b5` — codex caught two session-wide High findings, both fixed: require_complete_scan enforcement + cancellation-abortable mirror pass). Verdicts in `.review/results/otp-{8,9a,9b}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..9 [x]. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 
-- Notes on push state (as of `607a924`; basis: the prior session's `git ls-remote origin` check — not re-verified this session): origin/master was at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD`. windows-latest CI on the w9-3 harness fix rides the next push.
+- Notes on push state (as of `1ce73b5`; basis: the prior session's `git ls-remote origin` check — not re-verified this session): origin/master was at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD`. windows-latest CI on the w9-3 harness fix rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -39,30 +39,25 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     `TarShardHeader` frame → in-stream splitter. `--force-grpc`
     plumbing = otp-10. Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
   - **otp-7b (1/2) `[x]` — resume over the TCP data plane + the D4
-    fault-summary rider, CLOSED; otp-7 done.** 7b-1 (`ecac9b0`):
-    composite `ResumeFile` work item = strict per-file socket
-    serialization; shared `ResumeBlockDiff`; DEST claim state shared
-    with `NeedListSink`; per-carrier ceiling D-2026-07-10-2;
-    session-client resume options. 7b-2 (`071799a`): structured
-    `SessionFault.relative_path` (wire optional field,
-    CONTRACT_VERSION → 2) + `end_of_operation_summary()` (verb print
-    lands at otp-10); cancel-during-resume e2e; RELIABLE fix — resume
-    block writes now flush (unflushed tokio file writes had made a 7a
-    pin ~50% flaky under suite load). Codex: 7b-1 FAIL → 3 fixed / 1
-    pre-fixed / 1 deferred (residue list) / 1 rejected; 7b-2 NEEDS
-    FIXES → 4/4 fixed (`d48351d`; keepalive ticks vs the receiver
-    StallGuard on silent hash scans, resume batches drive sf-2 resize,
-    64 MiB ceiling pinned, single-file-root "" identity). Suite →
-    **1550**. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
-  - Current: **otp-9 (delegated transfer)** — daemon-initiated
-    session; delegated-pull driver retires behind the gate;
-    `DelegatedPull` reduces to trigger + progress relay (no payload
-    bytes — otp-10 deletion proof asserts it, codex F3). **otp-9a
-    `[x]`** (`7bf8ef8`+`607a924`, codex 1 Low fixed): pull client
-    mirror/filter options + destination byte-progress sink — the
-    surface 9b consumes. Next: **otp-9b** (handler reroute; exact
-    scope in DEVLOG 15:30Z). otp-5b-3 (pull cancel) optional; otp-2
-    rig-gated before otp-10. Suite → **1558**.
+    fault-summary rider; otp-7 done** (`ecac9b0`, `071799a`, review
+    fixes `d48351d`). Per-carrier block ceiling D-2026-07-10-2;
+    `SessionFault.relative_path` (CONTRACT_VERSION → 2) +
+    `end_of_operation_summary()` (verb print at otp-10); RELIABLE
+    flush fix. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
+  - **otp-9 `[x]` (a: `7bf8ef8`+`607a924`; b: `b2fd876`+`1ce73b5`)
+    — the delegated transfer rides the unified session.** 9a: pull
+    client mirror/filter options + destination byte-progress sink.
+    9b: the handler initiates the session as DESTINATION (gate/
+    validation front half untouched); `DelegatedPull` = trigger +
+    progress relay; local manifest, source-attested delete list, and
+    capability overrides dead by construction; 9 helper tests retired
+    (called out), two-daemon e2es added. Codex 9b: 4/4 fixed — incl.
+    two session-wide catches: `require_complete_scan` now ENFORCED
+    (SCAN_INCOMPLETE refusal — R49-F2 on the session) and the mirror
+    delete pass is cancellation-abortable (drop-guard flag). Suite →
+    **1555**. Detail: DEVLOG 2026-07-10 17:30Z + `.review/`.
+  - Current: **otp-2 (symmetric baseline — RIG-GATED)** then
+    **otp-10 (cutover + deletion)**. otp-5b-3 (pull cancel) optional.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -80,8 +75,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
-   b-2), otp-8 `[x]`. Current: **otp-9** (delegated transfer).
-   otp-2 (symmetric baseline) is RIG-GATED — before otp-10 cutover.
+   b-2), otp-8, otp-9 (a/b) `[x]`. Current: **otp-2** (symmetric
+   baseline — RIG-GATED, needs the owner's rig) then **otp-10**
+   (cutover + deletion).
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
    measurement follow-ups (Win 11 bare-metal; disk-path variants;
