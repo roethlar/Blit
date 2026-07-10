@@ -78,6 +78,18 @@ stale blocks. `TransferSummary.files_resumed` is now real.
 - Existing `resume_flagged_need_is_refused_in_non_resume_session` still
   passes unchanged (the violation is now conditional on the open).
 
+Added by the codex fix pass (see the verdict file):
+- `resume_block_size_floor_clamps_tiny_requests` /
+  `resume_block_size_ceiling_clamps_oversized_requests` — the
+  D-2026-07-10-1 wire bounds, guard-proven by removing the clamp.
+- `resume_hash_list_cap_boundary` (lib) — the 65_536-hash cap boundary as
+  a pure-fn test (a live fixture would be 4 GiB).
+- `file_record_for_resume_flagged_path_is_protocol_violation` — the
+  choreography-bypass rejection (guard-proven: without the check the
+  destination absorbs the record and hangs; the pin fails bounded).
+- The mid-fault pin now also observes the partial patch (block 0 landed,
+  byte `bs` untouched) — the fault is provably mid-record.
+
 **Known gaps** (all deliberate, plan-scoped):
 - Data-plane resume is otp-7b; resume sessions are forced onto the
   in-stream carrier by grant suppression.
@@ -89,6 +101,16 @@ stale blocks. `TransferSummary.files_resumed` is now real.
 - Blake3 hashing runs inline on the async task at both ends' send/apply
   paths (1 MiB default blocks; matches the old gRPC path's pattern) — a
   perf pass belongs to the benchmark-gated slices, not 7a.
+- Hash lists for correlated resume needs buffer in the source's
+  `resume.ready` until ManifestComplete lets the payload phase run
+  (payload-before-ManifestComplete is a contract violation, so earlier
+  sending is impossible). Each list is ≤ 2 MiB after D-2026-07-10-1; the
+  aggregate is O(resume-flagged needs) — same shape as the `pending`
+  need vector, bounded per item (codex F2, partial). Revisit at 7b.
+- Hash/block phases inherit the session's payload-phase cancel latency
+  (codex F4, deferred): a queued peer fault is seen at the next event
+  drain, exactly as for file-record batches. otp-7b's daemon e2e pins
+  cancel-during-resume (plan Staging updated).
 - Whole-file records inside `receive_file_record` still report a peer
   `SessionError` mid-record as a position violation (pre-existing); block
   records got the from-wire treatment (needed by D4's pin). Aligning file

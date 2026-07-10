@@ -134,9 +134,19 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   per-file fault; this is about where it is reported). The full progress-display
   redesign it brushes against is a separate queued item (TODO.md "CLI transfer
   output redesign") and is NOT in otp-7 scope.
-- **D5 — block size**: `ResumeSettings.block_size` clamped to `MAX_BLOCK_SIZE`, `0` ⇒
-  `DEFAULT_BLOCK_SIZE`. The DEST chooses (it hashes first); the SOURCE reads the size
-  from the `BlockHashList`, so the two never disagree.
+- **D5 — block size**: the DEST chooses (it hashes first); the SOURCE reads the size
+  from the `BlockHashList`, so the two never disagree. `0` ⇒ `DEFAULT_BLOCK_SIZE`.
+  **Amended by D-2026-07-10-1 (codex 7a F1)** — the original "clamp to
+  `MAX_BLOCK_SIZE` (64 MiB)" was unsafe on the in-stream carrier: it rides the gRPC
+  `Transfer` RPC when the daemon serves, where tonic's default 4 MiB frame limit
+  applies. The DEST clamps into **[64 KiB, 2 MiB]** (`MIN_RESUME_BLOCK_SIZE`,
+  `MAX_IN_STREAM_RESUME_BLOCK_SIZE`) — the floor kills the 32×-amplified hash lists
+  of absurdly small blocks, the ceiling keeps one-block `BlockTransfer` frames under
+  the limit — and caps any one `BlockHashList` at **65_536 hashes** (2 MiB); a
+  partial with more blocks degrades to the empty list = the D1 full-transfer
+  fallback. The SOURCE range-validates the wire value at arrival (same-build peers:
+  a mismatch is a violation, not a negotiation). otp-7b revisits the ceiling for the
+  data plane, whose binary block records have no protobuf envelope.
 - **D6 — invariance**: resume runs identically whichever end initiated (the flag is
   in the open; the DEST computes hashes and applies; the SOURCE diffs and sends). The
   role suite runs both initiator assignments, as for every prior slice.
@@ -158,7 +168,13 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   affected file(s) at the END of the operation output and suggest a re-run to
   converge, with a test pinning that the failed path appears in the final
   output. 7a cannot own it — 7a's surface is the in-process roles suite,
-  which has no CLI layer.
+  which has no CLI layer. Carried into 7b from the 7a codex review:
+  revisit the D-2026-07-10-1 block-size ceiling for the data-plane carrier
+  (binary records, no protobuf envelope), and exercise cancel-during-resume
+  in the daemon e2e harness (codex 7a F4 — the in-stream hash/block phases
+  inherit the session's existing payload-phase cancel latency; the e2e pins
+  that a `CancelJob` mid-resume tears down cleanly, as otp-4b-3 pinned for
+  file records).
 
 ## Guard-proof targets (the plan's mandate: "pins the stale-partial and
 mid-resume-failure cases")

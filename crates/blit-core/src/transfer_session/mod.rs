@@ -28,7 +28,7 @@ use eyre::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::copy::{DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE};
+use crate::copy::DEFAULT_BLOCK_SIZE;
 use crate::generated::transfer_frame::Frame;
 use crate::generated::{
     session_error, BlockHashList, BlockTransfer, BlockTransferComplete, ComparisonMode,
@@ -67,6 +67,32 @@ const DEST_DIFF_CHUNK: usize = 128;
 /// into `FsTransferSink::write_file_stream`. Bounds destination-side
 /// buffering per file record.
 const FILE_RECORD_PIPE_BYTES: usize = 256 * 1024;
+
+/// otp-7a resume bounds (codex F1, D-2026-07-10-1). The in-stream
+/// carrier rides the gRPC `Transfer` RPC when the daemon serves, and
+/// tonic's default 4 MiB decode limit applies to every frame — so the
+/// DESTINATION's block-size clamp (plan D5) must keep both resume frame
+/// shapes under it. The data plane (otp-7b) carries blocks as binary
+/// records with no protobuf envelope; the ceiling is revisited there.
+///
+/// Floor: a `BlockHashList` costs 32 bytes per block, so absurdly small
+/// blocks amplify — a block_size=1 list would be 32× the partial.
+const MIN_RESUME_BLOCK_SIZE: usize = 64 * 1024;
+/// Ceiling: one `BlockTransfer` frame carries one whole block; 2 MiB of
+/// content plus the envelope stays well under the 4 MiB frame limit.
+const MAX_IN_STREAM_RESUME_BLOCK_SIZE: usize = 2 * 1024 * 1024;
+/// One `BlockHashList` frame carries a partial's whole list; capped at
+/// 65_536 × 32 B = 2 MiB of hashes. A partial with more blocks than
+/// this degrades to the empty list — the contract's full-transfer
+/// fallback (plan D1) — never an oversized frame.
+const MAX_RESUME_BLOCK_HASHES: u64 = 65_536;
+
+/// Does a partial of `dst_len` bytes get a real hash list, or the empty
+/// full-transfer fallback (cap rationale above)? Pure, so the cap is
+/// unit-testable without a multi-GiB fixture.
+fn resume_hash_list_fits(dst_len: u64, block_size: usize) -> bool {
+    dst_len.div_ceil(block_size.max(1) as u64) <= MAX_RESUME_BLOCK_HASHES
+}
 
 /// This build's session identity: `<crate version>+<git sha>[.dirty]`
 /// (contract §Invariants 2). `BLIT_GIT_SHA` is emitted by build.rs;
@@ -1285,18 +1311,36 @@ async fn process_source_event(
             resume.held.insert(header.relative_path.clone(), header);
             Ok(())
         }
-        SourceEvent::BlockHashes(list) => match resume.held.remove(&list.relative_path) {
-            Some(header) => {
-                resume.ready.push((header, list));
-                Ok(())
+        SourceEvent::BlockHashes(list) => {
+            // Validate the wire block size at ARRIVAL (codex F5), not
+            // when the record is eventually sent — pending plain files
+            // go out first, and an already-invalid frame must fail fast.
+            // A conforming destination clamps into this range (D5 /
+            // D-2026-07-10-1); same-build peers make a mismatch a
+            // violation, never a negotiation.
+            let bs = list.block_size as usize;
+            if !(MIN_RESUME_BLOCK_SIZE..=MAX_IN_STREAM_RESUME_BLOCK_SIZE).contains(&bs) {
+                return Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "BlockHashList for '{}' block_size {bs} outside \
+                         [{MIN_RESUME_BLOCK_SIZE}, {MAX_IN_STREAM_RESUME_BLOCK_SIZE}]",
+                        list.relative_path
+                    ),
+                )));
             }
-            None => Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!(
-                    "BlockHashList for '{}' without a held resume need",
-                    list.relative_path
-                ),
-            ))),
-        },
+            match resume.held.remove(&list.relative_path) {
+                Some(header) => {
+                    resume.ready.push((header, list));
+                    Ok(())
+                }
+                None => Err(eyre::Report::new(SessionFault::protocol_violation(
+                    format!(
+                        "BlockHashList for '{}' without a held resume need",
+                        list.relative_path
+                    ),
+                ))),
+            }
+        }
         SourceEvent::NeedComplete => {
             if *need_complete {
                 return Err(eyre::Report::new(SessionFault::protocol_violation(
@@ -1591,7 +1635,7 @@ async fn send_payload_records(
 /// same reasoning that made `FilteredSource` the one filter chokepoint).
 ///
 /// Reads the source file sequentially at the block size the DESTINATION
-/// chose (plan D5; validated here since it crossed the wire), Blake3s
+/// chose (plan D5; range-validated at frame arrival), Blake3s
 /// each block, and emits `BlockTransfer` only for the blocks the
 /// destination's hash list proves stale: an index beyond the list, or a
 /// differing hash — a malformed hash entry (wrong length) counts as
@@ -1606,18 +1650,9 @@ async fn send_resume_block_records(
     header: &FileHeader,
     hashes: &BlockHashList,
 ) -> Result<()> {
-    let block_size = match hashes.block_size as usize {
-        0 => DEFAULT_BLOCK_SIZE,
-        bs if bs > MAX_BLOCK_SIZE => {
-            return Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!(
-                    "BlockHashList for '{}' block_size {bs} exceeds the {MAX_BLOCK_SIZE} byte cap",
-                    hashes.relative_path
-                ),
-            )))
-        }
-        bs => bs,
-    };
+    // block_size was range-validated when the BlockHashList arrived
+    // (`process_source_event`, codex F5) — use it directly.
+    let block_size = hashes.block_size as usize;
     let mut reader = source.open_file(header).await?;
     let mut buf = vec![0u8; block_size];
     let mut offset: u64 = 0;
@@ -2039,7 +2074,7 @@ async fn destination_session(
         .unwrap_or(0)
     {
         0 => DEFAULT_BLOCK_SIZE,
-        bs => bs.min(MAX_BLOCK_SIZE),
+        bs => bs.clamp(MIN_RESUME_BLOCK_SIZE, MAX_IN_STREAM_RESUME_BLOCK_SIZE),
     };
     let mut resume_headers: HashMap<String, FileHeader> = HashMap::new();
     let mut files_resumed: u64 = 0;
@@ -2241,6 +2276,16 @@ async fn destination_session(
                         header.relative_path
                     )));
                 }
+                // A resume-flagged grant may be satisfied ONLY by its
+                // block record — a whole-file record for it bypasses the
+                // hash choreography this end committed to (codex F3).
+                if resume_headers.contains_key(&header.relative_path) {
+                    return Err(violation(format!(
+                        "file record for resume-flagged '{}' — the contract requires \
+                         its block record",
+                        header.relative_path
+                    )));
+                }
                 if !outstanding
                     .lock()
                     .expect("outstanding-needs lock poisoned")
@@ -2299,6 +2344,17 @@ async fn destination_session(
                 }
                 if !manifest_complete {
                     return Err(violation("tar shard record before ManifestComplete".into()));
+                }
+                // Same rule as file records (codex F3): a resume-flagged
+                // grant may not be satisfied through a tar shard.
+                for h in &shard.files {
+                    if resume_headers.contains_key(&h.relative_path) {
+                        return Err(violation(format!(
+                            "tar shard entry for resume-flagged '{}' — the contract \
+                             requires its block record",
+                            h.relative_path
+                        )));
+                    }
                 }
                 {
                     let mut out = outstanding.lock().expect("outstanding-needs lock poisoned");
@@ -2414,6 +2470,16 @@ async fn destination_session(
                 if unfulfilled != 0 {
                     return Err(violation(format!(
                         "SourceDone with {unfulfilled} needed file(s) never delivered"
+                    )));
+                }
+                // Belt-and-braces (codex F3): with the per-record claims
+                // above, an empty outstanding set implies every resume
+                // grant completed as a block record — but verify the
+                // stronger invariant directly rather than infer it.
+                if !resume_headers.is_empty() {
+                    return Err(violation(format!(
+                        "SourceDone with {} resume grant(s) never completed by a block record",
+                        resume_headers.len()
                     )));
                 }
                 // otp-6b: run the mirror delete pass now — after every payload
@@ -2686,6 +2752,16 @@ async fn compute_resume_block_hashes(
     })?;
     tokio::task::spawn_blocking(move || -> Result<Vec<Vec<u8>>> {
         use std::io::Read;
+        // Re-stat inside the claim: a partial that vanished, stopped
+        // being a regular file, or grew past the hash-count cap since
+        // the diff yields the empty list — the full-transfer fallback
+        // (D1) — never an error and never an oversized frame (codex F1).
+        match std::fs::metadata(&dst) {
+            Ok(meta) if meta.is_file() && resume_hash_list_fits(meta.len(), block_size) => {}
+            Ok(_) => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(eyre::eyre!("stat {} for block hashes: {e}", dst.display())),
+        }
         let mut file = match std::fs::File::open(&dst) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2713,6 +2789,11 @@ async fn compute_resume_block_hashes(
                 break;
             }
             hashes.push(blake3::hash(&buf[..filled]).as_bytes().to_vec());
+            // A file growing concurrently with this read could blow past
+            // the stat-time cap check — degrade, don't overshoot.
+            if hashes.len() as u64 > MAX_RESUME_BLOCK_HASHES {
+                return Ok(Vec::new());
+            }
             if filled < block_size {
                 break;
             }
@@ -3062,6 +3143,22 @@ mod tests {
             fault.code,
             session_error::Code::Cancelled,
             "an in-flight need must be skipped, not surfaced as a violation"
+        );
+    }
+
+    /// otp-7a codex F1: the hash-count cap decision — a partial at
+    /// exactly the cap hashes; one block past it degrades to the empty
+    /// full-transfer fallback. Pure-function test because the boundary
+    /// fixture would otherwise be MAX_RESUME_BLOCK_HASHES × 64 KiB = 4 GiB.
+    #[test]
+    fn resume_hash_list_cap_boundary() {
+        let bs = MIN_RESUME_BLOCK_SIZE;
+        let at_cap = MAX_RESUME_BLOCK_HASHES * bs as u64;
+        assert!(resume_hash_list_fits(0, bs), "empty partial fits");
+        assert!(resume_hash_list_fits(at_cap, bs), "exactly the cap fits");
+        assert!(
+            !resume_hash_list_fits(at_cap + 1, bs),
+            "one byte past the cap degrades to the full-transfer fallback"
         );
     }
 

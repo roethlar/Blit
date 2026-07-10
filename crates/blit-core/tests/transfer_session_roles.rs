@@ -340,10 +340,11 @@ async fn preexisting_identical_tree_yields_empty_need_list() {
 // Resume block phase (otp-7a, docs/plan/OTP7_RESUME.md)
 // ---------------------------------------------------------------------------
 
-/// Block size for the resume fixtures: small enough that multi-block
-/// files stay tiny, and never a divisor-of-content accident (fixtures
-/// add partial tail blocks deliberately).
-const RESUME_BS: u32 = 4096;
+/// Block size for the resume fixtures: the session's floor (64 KiB,
+/// `MIN_RESUME_BLOCK_SIZE`) so the open's value equals the effective
+/// clamped value and byte-count expectations stay exact. Fixtures add
+/// partial tail blocks deliberately.
+const RESUME_BS: u32 = 64 * 1024;
 
 fn resume_open(initiator_role: TransferRole, block_size: u32) -> SessionOpen {
     SessionOpen {
@@ -362,6 +363,7 @@ fn resume_open(initiator_role: TransferRole, block_size: u32) -> SessionOpen {
 async fn assert_resume_invariant_across_roles(
     src_files: &[FileSpec],
     dst_files: &[FileSpec],
+    block_size: u32,
 ) -> (TransferSummary, Vec<String>) {
     let mut per_role: Vec<(TransferSummary, Vec<String>)> = Vec::new();
     for initiator_role in [TransferRole::Source, TransferRole::Destination] {
@@ -374,7 +376,7 @@ async fn assert_resume_invariant_across_roles(
         write_tree(&dst_root, dst_files);
 
         let (source_result, dest_result) = run_session_with_open(
-            resume_open(initiator_role, RESUME_BS),
+            resume_open(initiator_role, block_size),
             &src_root,
             &dst_root,
             PlanOptions::default(),
@@ -432,7 +434,7 @@ async fn resume_moves_only_the_changed_blocks() {
     ];
     let dst: Vec<FileSpec> = vec![("big.bin", partial, 1_600_000_600)];
 
-    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst).await;
+    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst, RESUME_BS).await;
     assert_eq!(needed, vec!["big.bin".to_string(), "fresh.txt".to_string()]);
     assert_eq!(summary.files_transferred, 2);
     assert_eq!(summary.files_resumed, 1);
@@ -522,7 +524,7 @@ async fn resume_stale_partial_falls_back_to_full_content() {
         ("shrunk.bin", vec![0xEE; 100], 1_600_000_811),
     ];
 
-    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst).await;
+    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst, RESUME_BS).await;
     assert_eq!(
         needed,
         vec!["shrunk.bin".to_string(), "swapped.bin".to_string()]
@@ -548,7 +550,7 @@ async fn resume_ineligible_targets_are_plain_full_transfers() {
     ];
     let dst: Vec<FileSpec> = vec![("empty-dest.bin", Vec::new(), 1_600_000_910)];
 
-    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst).await;
+    let (summary, needed) = assert_resume_invariant_across_roles(&src, &dst, RESUME_BS).await;
     assert_eq!(
         needed,
         vec!["absent.bin".to_string(), "empty-dest.bin".to_string()]
@@ -556,6 +558,169 @@ async fn resume_ineligible_targets_are_plain_full_transfers() {
     assert_eq!(summary.files_resumed, 0);
     assert_eq!(summary.files_transferred, 2);
     assert_eq!(summary.bytes_transferred, (3 * bs + 5) as u64);
+}
+
+#[tokio::test]
+async fn resume_block_size_floor_clamps_tiny_requests() {
+    // codex otp-7a F1: a block_size=1 open must not hash at 1-byte
+    // granularity (a 32× hash-list amplification) — the destination
+    // clamps to the 64 KiB floor. Behavioral pin: a 2-block file whose
+    // second block is stale moves exactly one floor-sized block; an
+    // unclamped run would move a different byte count (either the tiny
+    // byte-granular diff, or the whole file via the cap-overflow
+    // fallback a 1-byte list triggers).
+    let bs = RESUME_BS as usize; // == MIN_RESUME_BLOCK_SIZE
+    let content = make_patterned(2 * bs);
+    let mut stale_tail = content.clone();
+    for b in &mut stale_tail[bs..] {
+        *b = 0xFE;
+    }
+    let src: Vec<FileSpec> = vec![("floor.bin", content, 1_600_001_300)];
+    let dst: Vec<FileSpec> = vec![("floor.bin", stale_tail, 1_600_001_200)];
+
+    let (summary, _) = assert_resume_invariant_across_roles(&src, &dst, 1).await;
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(
+        summary.bytes_transferred, bs as u64,
+        "the floor clamp must yield exactly one 64 KiB stale block"
+    );
+}
+
+#[tokio::test]
+async fn resume_block_size_ceiling_clamps_oversized_requests() {
+    // codex otp-7a F1: a 64 MiB block_size would put a single
+    // BlockTransfer frame far past tonic's 4 MiB decode limit on the
+    // gRPC-served in-stream carrier — the destination clamps to the
+    // 2 MiB in-stream ceiling. Behavioral pin: a 4 MiB file whose
+    // second half is stale moves exactly one 2 MiB block; unclamped,
+    // the whole file is one block and 4 MiB moves.
+    const CEIL: usize = 2 * 1024 * 1024; // == MAX_IN_STREAM_RESUME_BLOCK_SIZE
+    let content = make_patterned(2 * CEIL);
+    let mut stale_tail = content.clone();
+    for b in &mut stale_tail[CEIL..] {
+        *b = 0xFD;
+    }
+    let src: Vec<FileSpec> = vec![("ceiling.bin", content, 1_600_001_400)];
+    let dst: Vec<FileSpec> = vec![("ceiling.bin", stale_tail, 1_600_001_310)];
+
+    let (summary, _) = assert_resume_invariant_across_roles(&src, &dst, 64 * 1024 * 1024).await;
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(
+        summary.bytes_transferred, CEIL as u64,
+        "the ceiling clamp must yield exactly one 2 MiB stale block"
+    );
+}
+
+#[tokio::test]
+async fn file_record_for_resume_flagged_path_is_protocol_violation() {
+    // codex otp-7a F3: a resume-flagged grant may be satisfied ONLY by
+    // its block record. A scripted source that answers the grant with a
+    // whole-file record must fail the session fast — accepting it would
+    // bypass the hash choreography and report a clean summary. Also
+    // pins the wire BlockHashList.block_size == the open's (in-range)
+    // value.
+    let tmp = tempfile::tempdir().unwrap();
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst_root).unwrap();
+    let bs = RESUME_BS as usize;
+    let content = make_patterned(2 * bs);
+    write_tree(
+        &dst_root,
+        &[("partial.bin", content[..bs].to_vec(), 1_600_001_500)],
+    );
+
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+    };
+    let (mut peer, dest_transport) = in_process_pair();
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root),
+    ));
+
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(wire(Frame::Open(resume_open(
+        TransferRole::Source,
+        RESUME_BS,
+    ))))
+    .await
+    .unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Accept(_)));
+
+    let header = FileHeader {
+        relative_path: "partial.bin".into(),
+        size: (2 * bs) as u64,
+        mtime_seconds: 1_600_001_600,
+        permissions: 0o644,
+        checksum: vec![],
+    };
+    peer.send(wire(Frame::ManifestEntry(header.clone())))
+        .await
+        .unwrap();
+    peer.send(wire(Frame::ManifestComplete(ManifestComplete {
+        scan_complete: true,
+    })))
+    .await
+    .unwrap();
+
+    // The grant must come back resume-flagged, with its hash list.
+    let mut saw_resume_need = false;
+    let mut saw_hashes = false;
+    while !(saw_resume_need && saw_hashes) {
+        match recv_or_panic(&mut peer).await {
+            Frame::NeedBatch(batch) => {
+                assert!(
+                    batch
+                        .entries
+                        .iter()
+                        .any(|e| e.relative_path == "partial.bin" && e.resume),
+                    "the partial must be granted with resume=true"
+                );
+                saw_resume_need = true;
+            }
+            Frame::BlockHashes(list) => {
+                assert_eq!(list.relative_path, "partial.bin");
+                assert_eq!(
+                    list.block_size, RESUME_BS,
+                    "an in-range open block_size must ride the wire unclamped"
+                );
+                saw_hashes = true;
+            }
+            Frame::NeedComplete(_) => continue,
+            other => panic!("expected need choreography, got {other:?}"),
+        }
+    }
+
+    // The violation: a whole-file record for the resume-flagged path.
+    peer.send(wire(Frame::FileBegin(header))).await.unwrap();
+
+    // Bounded wait: a regression here (accepting the record) leaves the
+    // destination blocked on FileData frames this peer never sends —
+    // the pin must fail on the clock, not hang the suite.
+    let refusal = tokio::time::timeout(SUITE_TIMEOUT, async {
+        loop {
+            match recv_or_panic(&mut peer).await {
+                Frame::Error(e) => break e,
+                Frame::NeedComplete(_) => continue,
+                other => panic!("expected SessionError, got {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the violation must be answered promptly, not absorbed");
+    assert_eq!(refusal.code, session_error::Code::ProtocolViolation as i32);
+    let dest_err = dest.await.unwrap().unwrap_err();
+    let fault = fault_of(&dest_err);
+    assert_eq!(fault.code, session_error::Code::ProtocolViolation);
+    assert!(
+        fault.message.contains("resume-flagged"),
+        "got: {}",
+        fault.message
+    );
 }
 
 /// otp-7a fault injection: a source whose reader for one path yields
@@ -694,6 +859,21 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             dest_fault.message.contains("partial.bin"),
             "destination fault must name the file: {}",
             dest_fault.message
+        );
+        // The fault was genuinely MID-record (codex F6): block 0 landed
+        // in place before the reader died in block 1, so the partial is
+        // partially patched — the in-place model D4 documents — and the
+        // never-sent tail is untouched.
+        let patched = std::fs::read(dst_root.join("partial.bin")).unwrap();
+        assert_eq!(
+            &patched[..bs],
+            &content[..bs],
+            "the first stale block must have landed before the fault \
+             (initiator {initiator_role:?})"
+        );
+        assert_eq!(
+            patched[bs], 0x11,
+            "no byte past the faulted block may land (initiator {initiator_role:?})"
         );
     }
 }

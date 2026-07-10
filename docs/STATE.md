@@ -4,7 +4,7 @@ Last updated: 2026-07-09
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-09): owner answered otp-7's Q1–Q3 (D-2026-07-09-1) — docs/plan/OTP7_RESUME.md is **Active**; otp-7a (resume over the in-stream carrier) is the current slice, through the codex loop. ONE_TRANSFER_PATH otp-1..6 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
+- Current session (2026-07-09/10): owner answered otp-7's Q1–Q3 (D-2026-07-09-1) — docs/plan/OTP7_RESUME.md is **Active**; **otp-7a landed and closed through the codex loop** (resume over the in-stream carrier; wire bounds D-2026-07-10-1). Next slice: **otp-7b** (resume over the TCP data plane + the CLI end-of-op fault summary rider). ONE_TRANSFER_PATH otp-1..6, 7a [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
 
 - Session work: filed audit-17 and audit-18; noted a CLI-output-redesign item in TODO.md; drafted+reviewed docs/plan/LOCAL_ERROR_TELEMETRY.md (Draft). A session-wide codex pass fixed 5 cross-doc staleness bugs.
 
@@ -49,16 +49,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     rule: DESTINATION diffs the complete source manifest at SourceDone,
     scan-complete-guarded + filter-scoped. Codex High: keep-set now folds
     case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
-  - Current: **otp-7 ACTIVE (D-2026-07-09-1)** — `docs/plan/OTP7_RESUME.md`
-    flipped Active 2026-07-09 (Q1 contract-wins fallback; Q2 in-place patch
-    + end-of-op fault summary rider; Q3 7a-then-7b). **otp-7a implemented**
-    (resume over the in-stream carrier: choreography + block-diff helper +
-    DEST hash-send/apply + `files_resumed`; all four plan guard-proof pins
-    run live, 3 guard proofs by temporary revert). Suite 1530 → **1536**
-    (+6; the previously recorded 1529 was a miscount — re-counted on the
-    pre-slice tree). Codex review of the slice commit is the next step;
-    then otp-7b. otp-5b-3 (pull cancel) optional; otp-2 rig-gated before
-    otp-10.
+  - **otp-7a `[x]`** — resume over the in-stream carrier, closed.
+    `4e5ff58` + review fixes: DEST flags eligible needs (D2) + sends
+    per-grant `BlockHashList` + applies block records in place; SOURCE
+    holds a resume need until its list arrives, sends only stale blocks
+    (D1 graceful stale fallback); `files_resumed` real. Codex FAIL → 4
+    accepted + fixed (wire bounds **D-2026-07-10-1**: block size clamped
+    [64 KiB, 2 MiB] + 65_536-hash cap, over-cap degrades to full
+    transfer; choreography-bypass records rejected; arrival-time
+    validation; mid-fault pin observes the partial patch), 1 partial,
+    1 deferred to 7b (cancel-during-resume e2e). All four plan
+    guard-proof pins live under both roles; 5 guard proofs by temporary
+    revert. Suite → **1540** (the 1529 baseline was a miscount; true
+    pre-slice count 1530). Detail: DEVLOG + `.review/`.
+  - Current: **otp-7b** — resume over the TCP data plane + the
+    D-2026-07-09-1 CLI end-of-op fault summary rider + cancel-during-
+    resume e2e (plan Staging). otp-5b-3 (pull cancel) optional; otp-2
+    rig-gated before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -182,18 +189,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   propagating everywhere (stale Q5 header, a STATE/plan-doc contradiction,
   a stale handoff entry, a date-drift note, an overstated claim) — fixed
   `419f5d1`, verdict `.review/results/session-2026-07-06.gpt-verdict.md`.
-  Also: owner asked for a CLI transfer-output redesign (rclone/cargo-style
-  static stat block + file list; current output is bare scrolling
-  `println!`s, `helpers.rs:176`/`transfers/remote.rs:33-140`) — filed to
-  `TODO.md` only (`598f102`), needs its own `plan` when picked up.
+  Also: the CLI transfer-output redesign was filed to `TODO.md` only
+  (`598f102`) — full detail lives in that row.
   **Exact first action next
   session**: otp-7 — owner's Q1–Q3 on `docs/plan/OTP7_RESUME.md`, flip
   Active, codex-review, implement otp-7a *(done 2026-07-09,
   D-2026-07-09-1)*. In-flight: none. Done since
   38th: the session-wide review pass; the CLI-output-redesign TODO item.
-- **2026-07-06 (38th)** @ `44de868` — **`LOCAL_ERROR_TELEMETRY.md` drafted
-  + reviewed twice (3+3 findings fixed), Q1-Q5 resolved; still Draft, no
-  code.** Full detail: DEVLOG 20:15Z/21:00Z entries and the plan doc's own
-  Q5 section (pickup timing); the 39th entry above covers the staleness
-  bugs this left behind, since fixed. Done since 37th: audit-17/18 filed
-  (`5628c03`, `deb3800`); the telemetry plan end-to-end.
+- *(38th and earlier pruned to the cap — see DEVLOG 2026-07-06 entries.)*
