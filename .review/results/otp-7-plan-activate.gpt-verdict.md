@@ -28,4 +28,4 @@
    first action" is annotated done (2026-07-09, D-2026-07-09-1) so it no
    longer reads as a live instruction.
 
-Fix sha: (appended below after commit)
+Fix sha: `30c5b4e`.
