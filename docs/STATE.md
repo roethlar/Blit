@@ -31,13 +31,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     wire bounds D-2026-07-10-1. SizeMtime = data-safe skip (open Q
     below).
   - **otp-8 `[x]` — fallback byte-carrier, CLOSED by assessment +
-    residue.** Carrier live since otp-3; selection at negotiation
-    only (the old mid-flight TCP→gRPC downgrade dies with the old
-    drivers). `5ffc9be` wire pins (in-stream resume both directions;
-    2 MiB clamp vs real tonic); codex fixes `643294a`: in-stream
-    cancel HANG → fault-signal race + cancel e2e; unbounded
-    `TarShardHeader` frame → in-stream splitter. `--force-grpc`
-    plumbing = otp-10. Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
+    wire residue pins** (`5ffc9be`; codex fixes `643294a`: in-stream
+    cancel HANG → fault race; unbounded `TarShardHeader` frame →
+    splitter). Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
   - **otp-7b (1/2) `[x]` — resume over the TCP data plane + the D4
     fault-summary rider; otp-7 done** (`ecac9b0`, `071799a`, review
     fixes `d48351d`). Per-carrier block ceiling D-2026-07-10-2;
@@ -45,19 +41,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     `end_of_operation_summary()` (verb print at otp-10); RELIABLE
     flush fix. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
   - **otp-9 `[x]` (a: `7bf8ef8`+`607a924`; b: `b2fd876`+`1ce73b5`)
-    — the delegated transfer rides the unified session.** 9a: pull
-    client mirror/filter options + destination byte-progress sink.
-    9b: the handler initiates the session as DESTINATION (gate/
-    validation front half untouched); `DelegatedPull` = trigger +
-    progress relay; local manifest, source-attested delete list, and
-    capability overrides dead by construction; 9 helper tests retired
-    (called out), two-daemon e2es added. Codex 9b: 4/4 fixed — incl.
-    two session-wide catches: `require_complete_scan` now ENFORCED
-    (SCAN_INCOMPLETE refusal — R49-F2 on the session) and the mirror
-    delete pass is cancellation-abortable (drop-guard flag). Suite →
-    **1555**. Detail: DEVLOG 2026-07-10 17:30Z + `.review/`.
-  - Current: **otp-2 (symmetric baseline — RIG-GATED)** then
-    **otp-10 (cutover + deletion)**. otp-5b-3 (pull cancel) optional.
+    — the delegated transfer rides the unified session**;
+    `DelegatedPull` = trigger + progress relay. Codex 9b caught two
+    session-wide Highs, both fixed: `require_complete_scan` ENFORCED
+    (SCAN_INCOMPLETE refusal) and the mirror delete pass made
+    cancellation-abortable. Suite → **1555**. Detail: DEVLOG
+    2026-07-10 17:30Z + `.review/`.
+  - **otp-2 `[x]` — symmetric baseline RECORDED** (owner opened the
+    rig this session: Mac ↔ zoey over Thunderbolt 10GbE, zoey work
+    confined to `blit-temp`). Harness
+    `scripts/bench_otp2_baseline.sh` (cold caches, durable-at-dest
+    windows, pool drain, median-of-4); evidence + methodology
+    findings + otp-12 prescriptions:
+    `docs/bench/otp2-baseline-2026-07-10/README.md`. July tmpfs data
+    re-labeled wire-reference. NEW open question below
+    (cross-direction acceptance bar vs hardware-asymmetric rig).
+  - Current: **otp-10 (cutover + deletion)** — the rig gate is
+    satisfied. otp-5b-3 (pull cancel) optional.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -134,15 +134,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **ONE_TRANSFER_PATH rig gate (NEW, blocks all further otp work)**:
-  otp-1..9 are done; the next slice is **otp-2** (symmetric-fs
-  baseline of the OLD paths, per-cell per-direction, on the owner's
-  rig — the converge-up reference) and the plan orders it BEFORE
-  otp-10 (cutover + deletion). Needs the rig + an owner go; nothing
-  in the plan is executable without it (otp-11..13 sit behind 10;
-  otp-5b-3 is optional). Agent question for the owner: should
-  otp-5b-3 (pull mid-transfer cancel e2e, marked optional) be picked
-  up while waiting, or dropped?
+- ~~ONE_TRANSFER_PATH rig gate~~ **SATISFIED this session** — owner
+  opened SSH to zoey + the Thunderbolt 10GbE pair and authorized the
+  run; otp-2 recorded (see Now). Standing owner instruction captured:
+  the Windows 10GbE box + TrueNAS are available and should be used
+  for **remote↔remote (delegated) testing** when that stage comes
+  (otp-12 matrix / delegated acceptance). otp-5b-3 question stands.
 - **Three 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
   holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE),
   REV4 → Shipped. (The zero-copy revisit verdict and the a/b/c
@@ -155,6 +152,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
+- **(OPEN, new 2026-07-10, otp-2 — owner call before otp-12)** The
+  plan's acceptance bar "every cell ≤ the better of that cell's two
+  old directions + noise" presupposes hardware-symmetric endpoints;
+  the Mac↔zoey rig's write ends are asymmetric (client SSD vs daemon
+  pool), so old-pull beats old-push ~1.6–1.7× in every cell for
+  physics reasons and the cross-direction bar is unreachable for
+  push cells regardless of code. Agent proposal: on hardware-
+  asymmetric rigs the verdict is per-direction converge-up (new ≤
+  old, same cell, +10%), cross-direction only where endpoints are
+  symmetric; code-level direction-invariance stays enforced by
+  construction. Details: `docs/bench/otp2-baseline-2026-07-10/README.md` §4.
 - **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
   same-size + dest-NEWER — old push clobbers, session adopts **data-safe
   SKIP** (converge-up; `--force` still overwrites; pinned by
@@ -181,19 +189,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-10 (41st)** @ `d48351d` — **otp-7b landed and CLOSED through
-  the codex loop (both sub-slices reviewed + fixes adjudicated); otp-7
-  is done, otp-1..7 `[x]`.** Commits: `ecac9b0` (7b-1 data-plane
-  resume), `071799a` (7b-2 fault-summary rider + cancel e2e + the
-  tokio-flush RELIABLE fix), `d48351d` (review fixes; verdicts in
-  `.review/results/otp-7b-{1,2}.gpt-verdict.md`). Suite 1540 → **1550**,
-  fmt/clippy clean, guard proofs by temporary revert throughout.
-  **Exact first action next session**: assess **otp-8** (fallback
-  byte-carrier) against what already exists — the in-stream carrier has
-  been the live fallback since otp-3 and is exercised in both
-  directions incl. resume; determine the actual residue before coding.
-  In-flight: none; tree clean at handoff commit. Process note: codex
-  now runs model gpt-5.6-sol (config default moved past the loop doc's
-  gpt-5.5 note); one review round was delayed ~1 h by a codex account
-  usage limit (resets hourly-ish; scriptable around).
+- **2026-07-10 (41st)** @ `d48351d` — otp-7b closed through the codex
+  loop; otp-1..7 `[x]`; suite → 1550. Its stated first action (assess
+  otp-8 before coding) was done this session. Process note: codex now
+  runs gpt-5.6-sol; one round was delayed ~1 h by a codex usage limit.
 - *(40th and earlier pruned to the cap — see DEVLOG 2026-07-06..10.)*
