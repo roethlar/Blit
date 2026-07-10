@@ -25,10 +25,12 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::generated::blit_client::BlitClient;
 use crate::generated::{
-    ComparisonMode, ResumeSettings, SessionOpen, TransferRole, TransferSummary,
+    ComparisonMode, FilterSpec, MirrorMode, ResumeSettings, SessionOpen, TransferRole,
+    TransferSummary,
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::source::TransferSource;
+use crate::remote::transfer::ByteProgressSink;
 use crate::transfer_plan::PlanOptions;
 use crate::transfer_session::transport::{grpc_client_transport, GRPC_CHANNEL_FRAMES};
 use crate::transfer_session::{
@@ -153,6 +155,21 @@ pub struct PullSessionOptions {
     /// Requested resume block size in bytes; `0` lets the DESTINATION
     /// (this end) choose. Ignored unless `resume` is true.
     pub resume_block_size: u32,
+    /// otp-9a: source-side scan filter, riding `SessionOpen.filter`
+    /// (the session honors it since otp-6a — this is the client
+    /// wiring). `None` scans everything.
+    pub filter: Option<FilterSpec>,
+    /// otp-9a: mirror on the session (otp-6b's one delete rule — this
+    /// DESTINATION diffs the complete source manifest against its tree
+    /// at SourceDone and deletes extraneous entries locally). Explicit
+    /// enabled + scope per the contract; `MirrorMode::Off` with
+    /// `mirror_enabled` set is refused at OPEN.
+    pub mirror_enabled: bool,
+    pub mirror_kind: MirrorMode,
+    /// otp-9a: live counter the session sink reports applied payload
+    /// bytes against (the delegated dst daemon's jobs row, otp-9; CLI
+    /// progress at otp-10).
+    pub byte_progress: Option<ByteProgressSink>,
 }
 
 impl Default for PullSessionOptions {
@@ -164,6 +181,10 @@ impl Default for PullSessionOptions {
             in_stream_bytes: false,
             resume: false,
             resume_block_size: 0,
+            filter: None,
+            mirror_enabled: false,
+            mirror_kind: MirrorMode::Off,
+            byte_progress: None,
         }
     }
 }
@@ -206,6 +227,11 @@ pub async fn run_pull_session(
             enabled: true,
             block_size: options.resume_block_size,
         }),
+        // otp-9a: filter + mirror ride the open (otp-6a/6b session
+        // support; this is the client wiring).
+        filter: options.filter,
+        mirror_enabled: options.mirror_enabled,
+        mirror_kind: options.mirror_kind as i32,
         ..Default::default()
     };
 
@@ -223,6 +249,7 @@ pub async fn run_pull_session(
         // The initiator dials the data plane on the same host it reached
         // the control plane on (contract §Transport: initiator dials).
         data_plane_host: Some(endpoint.host.clone()),
+        byte_progress: options.byte_progress,
     };
     run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await
 }

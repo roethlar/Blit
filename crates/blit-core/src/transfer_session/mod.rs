@@ -190,6 +190,13 @@ pub struct DestinationSessionConfig {
     /// rather than dials — falls back to the in-stream carrier. Symmetric
     /// with [`SourceSessionConfig::data_plane_host`].
     pub data_plane_host: Option<String>,
+    /// Live byte counter for this DESTINATION's writes (otp-9a). The
+    /// session sink reports applied payload bytes against it — the same
+    /// `ByteProgressSink` contract the old drivers used, so a caller
+    /// that owns a jobs row (the delegated dst daemon, otp-9) or a CLI
+    /// progress line can watch bytes land while the session runs.
+    /// `None` = no reporting (unchanged behavior).
+    pub byte_progress: Option<crate::remote::transfer::ByteProgressSink>,
 }
 
 /// A session-terminating fault: either end refusing, aborting, or
@@ -2020,6 +2027,7 @@ pub async fn run_destination(
         negotiated,
         &dst_root,
         cfg.data_plane_host.as_deref(),
+        cfg.byte_progress,
     )
     .await
 }
@@ -2033,8 +2041,17 @@ async fn drive_destination(
     negotiated: Negotiated,
     dst_root: &Path,
     data_plane_host: Option<&str>,
+    byte_progress: Option<crate::remote::transfer::ByteProgressSink>,
 ) -> Result<DestinationOutcome> {
-    match destination_session(transport, negotiated, dst_root, data_plane_host).await {
+    match destination_session(
+        transport,
+        negotiated,
+        dst_root,
+        data_plane_host,
+        byte_progress,
+    )
+    .await
+    {
         Ok(outcome) => Ok(outcome),
         Err(report) => {
             let mut fault = fault_from_report(report);
@@ -2106,7 +2123,11 @@ pub async fn run_responder(
             };
             // A DESTINATION responder (push) binds+accepts its receive
             // sockets — it never dials, so it needs no data-plane host.
-            let outcome = drive_destination(&mut transport, negotiated, &dst_root, None).await?;
+            // Served destination (push-equivalent): no byte counter yet —
+            // wiring the daemon row's counter through here is the core.rs
+            // jobs-row follow-up, revisited at cutover.
+            let outcome =
+                drive_destination(&mut transport, negotiated, &dst_root, None, None).await?;
             Ok(ResponderOutcome::Destination(outcome))
         }
         // Initiator DESTINATION ⇒ this end is SOURCE (pull-equivalent).
@@ -2254,6 +2275,7 @@ async fn destination_session(
     negotiated: Negotiated,
     dst_root: &Path,
     data_plane_host: Option<&str>,
+    byte_progress: Option<crate::remote::transfer::ByteProgressSink>,
 ) -> Result<DestinationOutcome> {
     let compare_mode = ComparisonMode::try_from(negotiated.open.compare_mode)
         .unwrap_or(ComparisonMode::Unspecified);
@@ -2268,7 +2290,7 @@ async fn destination_session(
     // occur on a session destination (payload bytes arrive as records
     // and go through the stream/tar write paths). `Arc` so the data-plane
     // receive task (otp-4b) can share the one sink across sockets.
-    let sink = Arc::new(FsTransferSink::new(
+    let mut sink = FsTransferSink::new(
         PathBuf::new(),
         dst_root.to_path_buf(),
         FsSinkConfig {
@@ -2278,7 +2300,14 @@ async fn destination_session(
             resume: false,
             compare_mode,
         },
-    ));
+    );
+    // otp-9a: applied payload bytes report against the caller's live
+    // counter (delegated dst daemon's jobs row, CLI progress at otp-10)
+    // through the sink's existing ByteProgressSink contract.
+    if let Some(bp) = byte_progress {
+        sink = sink.with_byte_progress(bp);
+    }
+    let sink = Arc::new(sink);
     // Same canonical-containment chokepoint the sink write paths use
     // (R46-F3), applied to diff stats so a hostile manifest path can't
     // make the destination stat outside its root.

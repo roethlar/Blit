@@ -1171,6 +1171,111 @@ async fn pull_session_lands_bytes_over_in_stream_carrier() {
     daemon.stop().await;
 }
 
+// ---------------------------------------------------------------------------
+// otp-9a: the pull session-client surface the delegated reroute (otp-9b)
+// consumes — mirror + filter through PullSessionOptions, and the caller's
+// live byte counter. The session has honored mirror/filter since otp-6;
+// these pin the CLIENT wiring over a daemon-served RPC.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_mirror_purges_extraneous_via_client_options() {
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+
+    let dest = tempfile::tempdir().unwrap();
+    std::fs::write(dest.path().join("stale.bin"), b"extraneous").unwrap();
+
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            mirror_enabled: true,
+            mirror_kind: blit_core::generated::MirrorMode::All,
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("mirror session pull succeeds");
+
+    assert!(
+        !dest.path().join("stale.bin").exists(),
+        "mirror ALL purges the extraneous destination file (one delete rule)"
+    );
+    assert_eq!(
+        outcome.summary.entries_deleted, 1,
+        "the purge is scored on the summary"
+    );
+    assert_trees_identical(&daemon.dest_root, dest.path());
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_filter_limits_manifest_via_client_options() {
+    let daemon = Daemon::start(false).await;
+    write_tree(
+        &daemon.dest_root,
+        &[
+            ("keep.txt", b"a" as &[u8], 1_600_000_001),
+            ("drop.log", b"b", 1_600_000_002),
+        ],
+    );
+
+    let dest = tempfile::tempdir().unwrap();
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            filter: Some(blit_core::generated::FilterSpec {
+                include: vec!["*.txt".to_string()],
+                ..Default::default()
+            }),
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("filtered session pull succeeds");
+
+    assert_eq!(outcome.summary.files_transferred, 1);
+    assert!(dest.path().join("keep.txt").exists());
+    assert!(
+        !dest.path().join("drop.log").exists(),
+        "the include filter rides the open and scopes the remote scan"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_reports_bytes_against_the_callers_counter() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+
+    let counter = Arc::new(AtomicU64::new(0));
+    let dest = tempfile::tempdir().unwrap();
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            byte_progress: Some(blit_core::remote::transfer::ByteProgressSink::from_counter(
+                Arc::clone(&counter),
+            )),
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("session pull succeeds");
+
+    let counted = counter.load(Ordering::Relaxed);
+    assert!(counted > 0, "the caller's live counter saw bytes land");
+    assert_eq!(
+        counted, outcome.summary.bytes_transferred,
+        "the counter and the summary agree on applied payload bytes"
+    );
+    daemon.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn old_pull_and_session_produce_identical_trees_and_counts() {
     // Arm A: OLD pull_sync into a client-local dest.
