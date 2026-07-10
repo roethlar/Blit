@@ -105,12 +105,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
    `derive_local_plan_tuning` fold-or-retire; receive-side dial
    tuning residue (w3-1 scoped it out); the source send half's bounded
-   `dp.queue()` is not raced against control-lane events — shape since
-   otp-4b, deferred at codex otp-7b-1 F3 (keepalive bounds the window;
-   both cancel e2es pin the required behavior). otp-8 F1 gave the
-   IN-STREAM sends a fault race (watch signal, biased fault-first);
-   the residual there is only the narrow send-error-beats-framed-fault
-   ordering decaying CANCELLED→INTERNAL (verdict file, same family).
+   `dp.queue()` is not raced against control-lane events (deferred at
+   codex otp-7b-1 F3; otp-8 F1 gave the in-stream sends a fault race —
+   residual: the narrow CANCELLED→INTERNAL decay, verdict file).
+   Delegated Checksum compare degrades to transfer-for-verification
+   (otp-9b Known gap — session dest diff computes no local checksums).
 
 ## Authoritative docs right now
 
@@ -135,17 +134,24 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
+- **ONE_TRANSFER_PATH rig gate (NEW, blocks all further otp work)**:
+  otp-1..9 are done; the next slice is **otp-2** (symmetric-fs
+  baseline of the OLD paths, per-cell per-direction, on the owner's
+  rig — the converge-up reference) and the plan orders it BEFORE
+  otp-10 (cutover + deletion). Needs the rig + an owner go; nothing
+  in the plan is executable without it (otp-11..13 sit behind 10;
+  otp-5b-3 is optional). Agent question for the owner: should
+  otp-5b-3 (pull mid-transfer cancel e2e, marked optional) be picked
+  up while waiting, or dropped?
 - **Three 10 GbE gate declarations**: ue-1 pass/fail (evidence: band
   holds), ue-2 pass/fail or re-scope (no organic resize at 10 GbE),
   REV4 → Shipped. (The zero-copy revisit verdict and the a/b/c
   question are RESOLVED — D-2026-07-05-3, unparked; measured skippy
   data 1.43 cores daemon-receive / 0.45 client at 9.5 Gbit/s stays
   recorded in DEVLOG + DIAGNOSIS.md.)
-- **Push go**: local commits `7f1c4b2`..HEAD (this session's four)
-  await the ref-listing + approval flow; windows-latest CI on the
-  w9-3 harness fix rides it. (The 40th handoff's `f6e592e..HEAD`
-  basis was falsified at session start — origin already sits at
-  `7f1c4b2`; see the push-state note above.)
+- **Push go**: local commits `7f1c4b2..HEAD` (otp-7b through otp-9
+  close) await the ref-listing + approval flow; windows-latest CI on
+  the w9-3 harness fix rides it.
 
 ## Open questions
 
@@ -154,16 +160,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   SKIP** (converge-up; `--force` still overwrites; pinned by
   `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm
   or ask for old-push clobber. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
-- **(OPEN)** Historical docs embed `/Users/...` paths — agent rec: leave.
-- **(OPEN, 2026-07-04)** `725aa07` tracked a 236-file stale worktree snapshot
-  (`.claude/worktrees/vigilant-mayer/`). Agent rec: `git rm -r`; awaits go.
-- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 still describe
-  the deleted `determine_remote_tuning`/`TuningParams` — fold into
-  w10-docs-batch (agent rec) or rewrite sooner?
-- **(OPEN, ripe — data in hand)** REV4 → Shipped flip: the 10 GbE
-  session delivered the measurement evidence; flip awaits the three
-  declarations in Blocked (was four — zero-copy resolved,
-  D-2026-07-05-3).
+- **(OPEN)** Historical docs embed `/Users/...` paths — agent rec:
+  leave. **(OPEN, 2026-07-04)** `725aa07` tracked a stale worktree
+  snapshot (`.claude/worktrees/vigilant-mayer/`); rec `git rm -r`, awaits go.
+- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 describe
+  the deleted `determine_remote_tuning` — fold into w10-docs-batch?
+- **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
+  three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
 - **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
   `blit copy src_large dst` with an existing local dir, no `./`,
   parses the bare name as an mDNS discovery endpoint and errors
