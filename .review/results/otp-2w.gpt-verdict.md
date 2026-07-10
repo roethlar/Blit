@@ -4,7 +4,7 @@ reviewer: gpt-5.6-sol (codex exec, read-only)
 reviewed commits: `0c43d2a` + `ceea6ed`
 raw output: `.review/results/otp-2w.codex.md`
 verdict line: NEEDS FIXES (4 Medium, 3 Low)
-fix commit: (appended after landing)
+fix commit: `7e732d4` (7/7; both matrices re-run under self-timed windows)
 
 ## F1 (Med) — drain probe fails open (`$null -lt N` is true)
 
