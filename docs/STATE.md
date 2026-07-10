@@ -82,10 +82,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 1. **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE, D-2026-07-05-4) —
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
-   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b) `[x]`. Current:
-   **otp-7 ACTIVE** (`docs/plan/OTP7_RESUME.md`, D-2026-07-09-1) —
-   implementing otp-7a. otp-2 (symmetric baseline) is RIG-GATED —
-   before otp-10 cutover.
+   otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7a `[x]`.
+   Current: **otp-7b** (`docs/plan/OTP7_RESUME.md` Active,
+   D-2026-07-09-1 — start at its "7b implementation map" section).
+   otp-2 (symmetric baseline) is RIG-GATED — before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
    measurement follow-ups (Win 11 bare-metal; disk-path variants;
@@ -145,8 +145,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   recorded in DEVLOG + DIAGNOSIS.md.)
 - **Push go**: local commits `f6e592e`..HEAD await the ref-listing +
   approval flow; windows-latest CI on the w9-3 harness fix rides it.
-- `Cargo.lock`: fresh transitive drift (crossbeam-*, cc, etc.), same class
-  as `04c9c6d` — not this session's; owner's call to commit or revert.
 
 ## Open questions
 
@@ -179,7 +177,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-10 (40th)** @ `fcc0bb7`+ — **otp-7 Active (owner Q1–Q3,
+- **2026-07-10 (40th)** @ `3fa4ec9` — **otp-7 Active (owner Q1–Q3,
   D-2026-07-09-1); otp-7a landed and CLOSED through the codex loop; owner
   asked to stop after the slice for a session restart.** otp-7a = resume
   over the in-stream carrier (`4e5ff58`, fixes `1919410`, wire bounds
@@ -191,7 +189,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   shared resume claims + `files_resumed` on the receive path, session-client
   resume options, the D4 CLI fault-summary mechanism at the
   survives-cutover layer, cancel-during-resume e2e). In-flight: none;
-  tree clean at handoff commit.
+  tree clean at handoff commit. The Blocked "Cargo.lock drift" item was
+  dropped — re-verified clean at `3fa4ec9` (basis falsified; the lock
+  last changed at `16237e2`).
 - **2026-07-06 (39th)** @ `598f102` — session-wide codex review (5
   findings fixed, `419f5d1`); CLI transfer-output redesign filed to
   `TODO.md`; its stated first action (otp-7 Q1–Q3 → Active → otp-7a) was
