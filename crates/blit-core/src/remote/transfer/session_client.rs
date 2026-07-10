@@ -134,10 +134,9 @@ pub async fn run_push_session(
 }
 
 /// The pull-shaped subset of session options the landed slices support.
-/// Mirror and filters are refused at OPEN until their client wiring
-/// lands, so they are intentionally absent here. The DESTINATION owns
-/// the compare decision; the SOURCE owns the planner knobs (none cross
-/// the wire).
+/// Mirror and filters ride the open since otp-9a (the session honors
+/// them since otp-6). The DESTINATION owns the compare decision; the
+/// SOURCE owns the planner knobs (none cross the wire).
 pub struct PullSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
