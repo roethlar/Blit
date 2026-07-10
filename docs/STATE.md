@@ -1,10 +1,10 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-06
+Last updated: 2026-07-09
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-06): otp-6 CLOSED; otp-7 in DESIGN — slice design drafted at docs/plan/OTP7_RESUME.md (Draft). NO CODE until the owner answers Q1–Q3 and flips the plan Active. otp-6 (a/b) mirror + filters landed and graded. ONE_TRANSFER_PATH otp-1..6 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
+- Current session (2026-07-09): owner answered otp-7's Q1–Q3 (D-2026-07-09-1) — docs/plan/OTP7_RESUME.md is **Active**; otp-7a (resume over the in-stream carrier) is the current slice, through the codex loop. ONE_TRANSFER_PATH otp-1..6 [x]. SMALL_FILE_CEILING remains paused (D-2026-07-05-1).
 
 - Session work: filed audit-17 and audit-18; noted a CLI-output-redesign item in TODO.md; drafted+reviewed docs/plan/LOCAL_ERROR_TELEMETRY.md (Draft). A session-wide codex pass fixed 5 cross-doc staleness bugs.
 
@@ -49,9 +49,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     rule: DESTINATION diffs the complete source manifest at SourceDone,
     scan-complete-guarded + filter-scoped. Codex High: keep-set now folds
     case on macOS too (case-insensitive-FS data-loss). Suite → **1529**.
-  - Current: **otp-7 IN DESIGN** — Draft `docs/plan/OTP7_RESUME.md`
-    (`9fb5e4a`) awaiting owner review (see Open questions); no code until
-    Active. otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
+  - Current: **otp-7 ACTIVE (D-2026-07-09-1)** — `docs/plan/OTP7_RESUME.md`
+    flipped Active 2026-07-09 (Q1 contract-wins fallback; Q2 in-place patch
+    + end-of-op fault summary rider; Q3 7a-then-7b). Implementing **otp-7a**
+    (resume over the in-stream carrier) through the codex loop.
+    otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -69,8 +71,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b) `[x]`. Current:
-   **otp-7 IN DESIGN** (`docs/plan/OTP7_RESUME.md` Draft, owner review;
-   no code until Active). otp-2 (symmetric baseline) is RIG-GATED —
+   **otp-7 ACTIVE** (`docs/plan/OTP7_RESUME.md`, D-2026-07-09-1) —
+   implementing otp-7a. otp-2 (symmetric baseline) is RIG-GATED —
    before otp-10 cutover.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
@@ -103,8 +105,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Authoritative docs right now
 
 - **`docs/plan/ONE_TRANSFER_PATH.md` (ACTIVE — governs all work;
-  D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Draft** — otp-7 slice
-  design, awaiting owner review before any code).
+  D-2026-07-05-4)**; `docs/plan/OTP7_RESUME.md` (**Active**,
+  D-2026-07-09-1 — otp-7 slice design; governs otp-7a/7b).
 - Active plans: `docs/plan/SMALL_FILE_CEILING.md` (**paused** at
   sf-2) and **`docs/plan/UNIFIED_TRANSFER_ENGINE_REV4.md`** (code-
   complete; measurement gates remain). REV4 superseded v1/REV2/REV3
@@ -136,10 +138,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(OPEN — owner review, 2026-07-07, otp-7)** `docs/plan/OTP7_RESUME.md`
-  (Draft) awaits the owner's Q1–Q3 (graceful stale fallback; in-place-patch
-  mid-failure model; 7a-then-7b staging — all agent-rec yes) and the flip to
-  Active. That flip unblocks otp-7 implementation.
 - **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
   same-size + dest-NEWER — old push clobbers, session adopts **data-safe
   SKIP** (converge-up; `--force` still overwrites; pinned by

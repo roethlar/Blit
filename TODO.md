@@ -269,11 +269,18 @@ explicitly-deferred logging epic (F15).
       same change (docs-after-behavior rule). Distinct from `audit-17`
       (destination-fs charset rejection) — that crash is only a
       *symptom* here; the exclude no-op is the reported bug.
-- [ ] **CLI transfer output redesign** (owner, 2026-07-06): current
-      `blit copy`/`mirror` output "doesn't convey any useful information
-      at all" — owner wants something closer to `rclone`/`cargo`: a
-      persistent stat block at a static screen location, plus a scrolling
-      list of in-flight/recent filenames, instead of what exists today.
+- [ ] **CLI transfer output redesign** (owner, 2026-07-06; re-confirmed
+      2026-07-09): current `blit copy`/`mirror` output "doesn't convey any
+      useful information at all" — owner wants something closer to
+      `rclone`/`cargo`: "a coherent info block with stats and a scrolling
+      list of files in a frame below, so probably a TUI?" (owner wording,
+      2026-07-09) — i.e. a persistent stat block at a static screen
+      location, plus a scrolling list of in-flight/recent filenames,
+      instead of what exists today. 2026-07-09 context: the owner hit this
+      while settling otp-7's error-surfacing question — "the current
+      progress display is absolutely useless for this". The narrow
+      end-of-operation fault summary (name failed files, suggest re-run)
+      ships with otp-7 (D-2026-07-09-1) and is NOT gated on this redesign.
       Confirmed by reading the actual code — there is no persistent/redraw
       rendering anywhere in the transfer output path, only plain
       scrolling `println!`/`eprintln!` lines: (1) the local/streaming-manifest

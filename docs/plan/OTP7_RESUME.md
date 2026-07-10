@@ -1,12 +1,13 @@
 # otp-7 — resume block phase (design)
 
-**Status**: Draft
+**Status**: Active (owner Q1–Q3 answered + "confirmed", 2026-07-09; D-2026-07-09-1)
 **Created**: 2026-07-07
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-7.
 **Contract**: `docs/TRANSFER_SESSION.md` (resume exception + frame table, pinned otp-1).
-**Governs**: no code until the owner flips this to `**Status**: Active`
-(AGENTS.md; `.agents/repo-guidance.md` plan operator). Per D-2026-07-04-1 this
-plan change also goes through the codex loop.
+**Governs**: implementation proceeds 7a → 7b, one slice per codex loop pass
+(D-2026-07-04-1). Owner's deciding principle, quoted: "FAST, SIMPLE, RELIABLE
+file transfer. if we abort the whole thing when we could have fixed or
+surfaced a single error, we are violating all of those."
 
 ## Why this doc
 
@@ -119,6 +120,13 @@ path's `BlockHashList` (fail-fast if a block phase would start without one).
   hashes reflect whatever landed). The pin asserts the fault surfaces cleanly and no
   file is falsely counted `files_resumed`. (No stronger atomicity than the code we
   are replacing — called out as a Known gap, not a regression.)
+  **Owner rider (2026-07-09, Q2)**: the fault must also appear in the CLI's
+  **end-of-operation summary** — naming the affected file(s) and suggesting a
+  re-run to converge — not only as a mid-stream line that scrolls away. Small
+  CLI-layer deliverable, lands within otp-7 (the session already collects the
+  per-file fault; this is about where it is reported). The full progress-display
+  redesign it brushes against is a separate queued item (TODO.md "CLI transfer
+  output redesign") and is NOT in otp-7 scope.
 - **D5 — block size**: `ResumeSettings.block_size` clamped to `MAX_BLOCK_SIZE`, `0` ⇒
   `DEFAULT_BLOCK_SIZE`. The DEST chooses (it hashes first); the SOURCE reads the size
   from the `BlockHashList`, so the two never disagree.
@@ -154,16 +162,17 @@ mid-resume-failure cases")
    `SessionFault` surfaces to both ends, `files_resumed` not incremented for the
    aborted file, no deadlock.
 
-## Open questions for the owner
+## Open questions — RESOLVED (owner, 2026-07-09; D-2026-07-09-1)
 
-- **Q1**: D1 (graceful stale fallback) reconciles the old data-plane hard-error
-  against the contract. Confirm the contract wins (agent rec: yes — it is the pinned
-  wire behavior and the safer one).
-- **Q2**: D4 keeps the old in-place-patch failure model (no temp+rename atomicity).
-  Acceptable as-is for otp-7, or do you want atomic partial-file handling as a
-  follow-up item? (agent rec: keep parity now, file a follow-up if wanted.)
-- **Q3**: Staging — 7a (in-stream) then 7b (data-plane), per the AskUserQuestion
-  answer's default. Confirm, or collapse into one.
+- **Q1 — contract wins.** Stale/mismatched partial degrades gracefully to a
+  full-file transfer, never an abort. Owner's principle (quoted in the header)
+  is the rationale; D1 stands as written.
+- **Q2 — keep in-place patch, surface at end of op.** No temp+rename atomicity
+  for otp-7 (parity with the code being replaced). The owner's rider: the fault
+  is surfaced in the end-of-operation summary with a re-run suggestion — see D4.
+  No atomicity follow-up filed; convergence-on-retry is the reliability model.
+- **Q3 — 7a then 7b, no collapse.** Owner: "confirmed. no collapse. keep the
+  reviewloop codex playbook going slice by slice."
 
 ## Verification (when Active)
 
