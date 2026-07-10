@@ -4,7 +4,7 @@ reviewer: gpt-5.6-sol (codex exec, read-only)
 reviewed commit: `e757dcc`
 raw output: `.review/results/otp-2.codex.md`
 verdict line: NEEDS FIXES (8 findings)
-fix commit: (appended after landing)
+fix commit: `4286c23` (8/8; matrix re-run under the fixed harness)
 
 ## F1 (High) — "symmetric baseline" mislabeled; per-direction observations only
 
