@@ -679,6 +679,17 @@ async fn write_file_block_payload(
     file.write_all(&bytes)
         .await
         .with_context(|| format!("writing block to {}", dst.display()))?;
+    // tokio::fs::File buffers writes and performs them on the blocking
+    // pool in the background — `write_all` returning does NOT mean the
+    // bytes reached the OS. Without this flush an acknowledged block can
+    // land arbitrarily late (or race the finalization truncate, which
+    // runs on a separate handle) — observed as the otp-7b-2 flake where
+    // a faulted session's already-applied block was missing from the
+    // partial under full-suite load. Flush before reporting the write
+    // done, so "record applied" means the OS has the bytes.
+    file.flush()
+        .await
+        .with_context(|| format!("flushing block write to {}", dst.display()))?;
     Ok(SinkOutcome {
         files_written: 0, // Resume blocks patch in-place; finalization counts the file.
         bytes_written: bytes_len,
@@ -779,10 +790,17 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
         match payload {
             PreparedPayload::File(header) => {
                 let size = header.size;
+                // otp-7b-2: name the file structurally on failure, so a
+                // mid-record fault reaches the end-of-operation summary.
                 session
                     .send_file(self.source.clone(), &header)
                     .await
-                    .with_context(|| format!("sending {}", header.relative_path))?;
+                    .with_context(|| format!("sending {}", header.relative_path))
+                    .map_err(|e| {
+                        e.wrap_err(crate::remote::transfer::faulted_path::FaultedPath(
+                            header.relative_path.clone(),
+                        ))
+                    })?;
                 Ok(SinkOutcome {
                     files_written: 1,
                     bytes_written: size,
@@ -817,35 +835,42 @@ impl<P: Probe> TransferSink for DataPlaneSink<P> {
                 block_size,
                 dest_hashes,
             } => {
-                let mut diff = crate::remote::transfer::resume_diff::ResumeBlockDiff::open(
-                    &self.source,
-                    &header,
-                    block_size as usize,
-                    dest_hashes,
-                )
-                .await?;
-                let mut bytes_written: u64 = 0;
-                while let Some((offset, block)) = diff.next_stale().await? {
-                    session
-                        .send_block(&header.relative_path, offset, block)
-                        .await
-                        .with_context(|| format!("sending block of {}", header.relative_path))?;
-                    bytes_written += block.len() as u64;
-                }
-                session
-                    .send_block_complete(
-                        &header.relative_path,
-                        header.size,
-                        header.mtime_seconds,
-                        header.permissions,
+                let path = header.relative_path.clone();
+                let record = async {
+                    let mut diff = crate::remote::transfer::resume_diff::ResumeBlockDiff::open(
+                        &self.source,
+                        &header,
+                        block_size as usize,
+                        dest_hashes,
                     )
-                    .await
-                    .with_context(|| {
-                        format!("sending block complete for {}", header.relative_path)
-                    })?;
-                Ok(SinkOutcome {
-                    files_written: 1,
-                    bytes_written,
+                    .await?;
+                    let mut bytes_written: u64 = 0;
+                    while let Some((offset, block)) = diff.next_stale().await? {
+                        session
+                            .send_block(&header.relative_path, offset, block)
+                            .await
+                            .context("sending resume block")?;
+                        bytes_written += block.len() as u64;
+                    }
+                    session
+                        .send_block_complete(
+                            &header.relative_path,
+                            header.size,
+                            header.mtime_seconds,
+                            header.permissions,
+                        )
+                        .await
+                        .context("sending resume block complete")?;
+                    Ok(SinkOutcome {
+                        files_written: 1,
+                        bytes_written,
+                    })
+                }
+                .await;
+                // otp-7b-2: any failure inside the record names its file
+                // structurally (the end-of-operation summary's identity).
+                record.map_err(|e: eyre::Report| {
+                    e.wrap_err(crate::remote::transfer::faulted_path::FaultedPath(path))
                 })
             }
         }

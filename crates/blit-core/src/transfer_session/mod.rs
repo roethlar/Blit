@@ -44,14 +44,16 @@ use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
-use crate::remote::transfer::{AbortOnDrop, CONTROL_PLANE_CHUNK_SIZE};
+use crate::remote::transfer::{AbortOnDrop, FaultedPath, CONTROL_PLANE_CHUNK_SIZE};
 use crate::transfer_plan::PlanOptions;
 use transport::{FrameRx, FrameTransport, FrameTx};
 
 /// Belt-and-braces wire-shape version, bumped on any change to the
 /// frame set or grammar. Exchanged (and exact-matched) in
 /// `SessionHello` alongside the build id (D-2026-07-05-2).
-pub const CONTRACT_VERSION: u32 = 1;
+/// v2: `SessionError.relative_path` (otp-7b-2, the D-2026-07-09-1 Q2
+/// fault-summary rider).
+pub const CONTRACT_VERSION: u32 = 2;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -195,6 +197,13 @@ pub struct SessionFault {
     /// the `SessionError` frame itself, or this end already emitted
     /// one. Drivers must not send another.
     pub peer_notified: bool,
+    /// otp-7b-2 (D-2026-07-09-1 Q2 rider): the file this fault
+    /// concerns, when one is known — a mid-record read/write failure
+    /// names its file so the end-of-operation summary can, too.
+    /// Carried on the wire (`SessionError.relative_path`), so BOTH
+    /// ends can name it, wherever the fault originated. Structured
+    /// identity, never scraped from the message.
+    pub relative_path: Option<String>,
 }
 
 impl SessionFault {
@@ -205,7 +214,31 @@ impl SessionFault {
             local_build_id: String::new(),
             peer_build_id: String::new(),
             peer_notified: false,
+            relative_path: None,
         }
+    }
+
+    /// Attach the file identity this fault concerns (otp-7b-2).
+    fn with_path(mut self, relative_path: impl Into<String>) -> Self {
+        self.relative_path = Some(relative_path.into());
+        self
+    }
+
+    /// otp-7b-2, the D-2026-07-09-1 Q2 rider's mechanism: the
+    /// END-OF-OPERATION summary block a reporting CLI appends after a
+    /// faulted transfer — naming the affected file and suggesting a
+    /// re-run to converge — or `None` when the fault names no file
+    /// (nothing to converge on; the plain fault line suffices). The
+    /// otp-10 verb switch prints this; until then the session-client
+    /// tests pin its content.
+    pub fn end_of_operation_summary(&self) -> Option<String> {
+        let path = self.relative_path.as_deref()?;
+        Some(format!(
+            "transfer aborted: {}\naffected file: {path} — partial data at the \
+             destination is preserved; re-run the same command to converge \
+             (resume transfers only what is still missing)",
+            self.message
+        ))
     }
 
     fn protocol_violation(message: impl Into<String>) -> Self {
@@ -237,6 +270,7 @@ impl SessionFault {
             local_build_id: err.peer_build_id,
             peer_build_id: err.local_build_id,
             peer_notified: true,
+            relative_path: (!err.relative_path.is_empty()).then_some(err.relative_path),
         }
     }
 
@@ -246,6 +280,7 @@ impl SessionFault {
             message: self.message.clone(),
             local_build_id: self.local_build_id.clone(),
             peer_build_id: self.peer_build_id.clone(),
+            relative_path: self.relative_path.clone().unwrap_or_default(),
         }
     }
 }
@@ -260,11 +295,20 @@ impl std::error::Error for SessionFault {}
 
 /// Downcast a driver-internal error back to its fault, wrapping
 /// non-fault failures (fs errors, planner errors, transport failures)
-/// as INTERNAL — an end that aborts says why before closing.
+/// as INTERNAL — an end that aborts says why before closing. A
+/// [`FaultedPath`] marker anywhere in the chain (otp-7b-2) becomes the
+/// fault's structured file identity, so per-file read/write failures
+/// keep naming their file across the eyre boundary.
 fn fault_from_report(report: eyre::Report) -> SessionFault {
     match report.downcast::<SessionFault>() {
         Ok(fault) => fault,
-        Err(other) => SessionFault::internal(format!("{other:#}")),
+        Err(other) => {
+            let fault = SessionFault::internal(format!("{other:#}"));
+            match other.downcast_ref::<FaultedPath>() {
+                Some(FaultedPath(path)) => fault.with_path(path.clone()),
+                None => fault,
+            }
+        }
     }
 }
 
@@ -324,6 +368,7 @@ pub fn session_error_frame(code: session_error::Code, message: impl Into<String>
         message: message.into(),
         local_build_id: String::new(),
         peer_build_id: String::new(),
+        relative_path: String::new(),
     }))
 }
 
@@ -498,6 +543,7 @@ async fn exchange_hello(transport: &mut FrameTransport, hello: &HelloConfig) -> 
             local_build_id: hello.build_id.clone(),
             peer_build_id: peer_hello.build_id.clone(),
             peer_notified: false,
+            relative_path: None,
         };
         return Err(notify_and_wrap(transport, fault).await);
     }
@@ -1614,20 +1660,29 @@ async fn send_payload_records(
                 if header.size == 0 {
                     continue; // record complete at 0 cumulative bytes
                 }
-                let mut reader = source.open_file(&header).await?;
+                let mut reader = source
+                    .open_file(&header)
+                    .await
+                    .map_err(|e| tag_path(e, &header.relative_path))?;
                 let mut remaining = header.size;
                 while remaining > 0 {
                     let want = read_buf.len().min(remaining as usize);
-                    let got = reader.read(&mut read_buf[..want]).await?;
+                    let got = reader
+                        .read(&mut read_buf[..want])
+                        .await
+                        .map_err(|e| tag_path(eyre::Report::new(e), &header.relative_path))?;
                     if got == 0 {
                         // Shorter on disk than the manifest promised —
                         // the record can no longer complete at
                         // header.size; abort rather than pad.
-                        eyre::bail!(
-                            "'{}' hit EOF with {} bytes still promised",
-                            header.relative_path,
-                            remaining
-                        );
+                        return Err(tag_path(
+                            eyre::eyre!(
+                                "'{}' hit EOF with {} bytes still promised",
+                                header.relative_path,
+                                remaining
+                            ),
+                            &header.relative_path,
+                        ));
                     }
                     tx.send(frame(Frame::FileData(FileData {
                         content: read_buf[..got].to_vec(),
@@ -1946,6 +2001,25 @@ pub async fn run_responder(
 
 fn violation(message: String) -> eyre::Report {
     eyre::Report::new(SessionFault::protocol_violation(message))
+}
+
+/// A protocol violation that names the file it concerns (otp-7b-2):
+/// the path rides `SessionFault.relative_path` so the end-of-operation
+/// summary can name it structurally.
+fn violation_for(path: &str, message: String) -> eyre::Report {
+    eyre::Report::new(SessionFault::protocol_violation(message).with_path(path))
+}
+
+/// Attach `path` to a non-fault error (otp-7b-2). A report already
+/// carrying a `SessionFault` is left untouched — the fault owns its
+/// own identity, and wrapping it would bury the downcast
+/// `fault_from_report` depends on.
+fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
+    if report.downcast_ref::<SessionFault>().is_some() {
+        report
+    } else {
+        report.wrap_err(FaultedPath(path.to_string()))
+    }
 }
 
 /// otp-6b: the DESTINATION's mirror delete pass — the session's single
@@ -2885,37 +2959,46 @@ fn claim_resume_record(
     outstanding: &data_plane::OutstandingNeeds,
 ) -> Result<FileHeader> {
     if !resume_enabled {
-        return Err(violation(format!(
-            "block record for '{relative_path}' in a session opened without resume"
-        )));
+        return Err(violation_for(
+            relative_path,
+            format!("block record for '{relative_path}' in a session opened without resume"),
+        ));
     }
     if data_plane_active {
-        return Err(violation(format!(
-            "block record for '{relative_path}' on the control lane while a TCP data plane is active"
-        )));
+        return Err(violation_for(
+            relative_path,
+            format!(
+                "block record for '{relative_path}' on the control lane while a TCP data plane is active"
+            ),
+        ));
     }
     if !manifest_complete {
-        return Err(violation(format!(
-            "block record for '{relative_path}' before ManifestComplete"
-        )));
+        return Err(violation_for(
+            relative_path,
+            format!("block record for '{relative_path}' before ManifestComplete"),
+        ));
     }
     let header = resume_headers
         .lock()
         .expect("resume-headers lock poisoned")
         .remove(relative_path)
         .ok_or_else(|| {
-            violation(format!(
-                "block record for '{relative_path}' which was not granted a resume-flagged need"
-            ))
+            violation_for(
+                relative_path,
+                format!(
+                    "block record for '{relative_path}' which was not granted a resume-flagged need"
+                ),
+            )
         })?;
     if !outstanding
         .lock()
         .expect("outstanding-needs lock poisoned")
         .remove(relative_path)
     {
-        return Err(violation(format!(
-            "block record for '{relative_path}' which is not on the need list"
-        )));
+        return Err(violation_for(
+            relative_path,
+            format!("block record for '{relative_path}' which is not on the need list"),
+        ));
     }
     Ok(header)
 }
@@ -2936,10 +3019,13 @@ async fn receive_block_record(
     loop {
         let len = block.content.len() as u64;
         if block.offset.saturating_add(len) > header.size {
-            return Err(violation(format!(
-                "block record '{}' overran its size: offset {} + {} byte(s) > {}",
-                header.relative_path, block.offset, len, header.size
-            )));
+            return Err(violation_for(
+                &header.relative_path,
+                format!(
+                    "block record '{}' overran its size: offset {} + {} byte(s) > {}",
+                    header.relative_path, block.offset, len, header.size
+                ),
+            ));
         }
         let outcome = sink
             .write_payload(PreparedPayload::FileBlock {
@@ -2947,15 +3033,19 @@ async fn receive_block_record(
                 offset: block.offset,
                 bytes: block.content,
             })
-            .await?;
+            .await
+            .map_err(|e| tag_path(e, &header.relative_path))?;
         bytes_written += outcome.bytes_written;
         let received = match transport.recv().await? {
             Some(f) => f,
             None => {
-                return Err(eyre::Report::new(SessionFault::internal(format!(
-                    "peer closed inside block record '{}'",
-                    header.relative_path
-                ))))
+                return Err(eyre::Report::new(
+                    SessionFault::internal(format!(
+                        "peer closed inside block record '{}'",
+                        header.relative_path
+                    ))
+                    .with_path(header.relative_path.as_str()),
+                ))
             }
         };
         match received.frame {
@@ -2981,11 +3071,14 @@ async fn receive_block_record(
                 // Strict serialization: nothing may interleave with an
                 // open record on the source lane — including a block for
                 // a different path.
-                return Err(violation(format!(
-                    "{} inside block record '{}'",
-                    frame_name(&other),
-                    header.relative_path
-                )));
+                return Err(violation_for(
+                    &header.relative_path,
+                    format!(
+                        "{} inside block record '{}'",
+                        frame_name(&other),
+                        header.relative_path
+                    ),
+                ));
             }
         }
     }
@@ -3002,10 +3095,13 @@ async fn finish_block_record(
     complete: &BlockTransferComplete,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
     if complete.total_bytes != header.size {
-        return Err(violation(format!(
-            "block record '{}' completed at {} byte(s), manifest promised {}",
-            header.relative_path, complete.total_bytes, header.size
-        )));
+        return Err(violation_for(
+            &header.relative_path,
+            format!(
+                "block record '{}' completed at {} byte(s), manifest promised {}",
+                header.relative_path, complete.total_bytes, header.size
+            ),
+        ));
     }
     sink.write_payload(PreparedPayload::FileBlockComplete {
         relative_path: header.relative_path.clone(),
@@ -3014,6 +3110,7 @@ async fn finish_block_record(
         permissions: header.permissions,
     })
     .await
+    .map_err(|e| tag_path(e, &header.relative_path))
 }
 
 /// Receive one strictly-serialized file record (`file_begin` already
@@ -3033,21 +3130,27 @@ async fn receive_file_record(
             let received = match transport.recv().await? {
                 Some(f) => f,
                 None => {
-                    return Err(eyre::Report::new(SessionFault::internal(format!(
-                        "peer closed inside file record '{}'",
-                        header.relative_path
-                    ))))
+                    return Err(eyre::Report::new(
+                        SessionFault::internal(format!(
+                            "peer closed inside file record '{}'",
+                            header.relative_path
+                        ))
+                        .with_path(header.relative_path.as_str()),
+                    ))
                 }
             };
             match received.frame {
                 Some(Frame::FileData(data)) => {
                     let len = data.content.len() as u64;
                     if len > remaining {
-                        return Err(violation(format!(
-                            "file record '{}' overran its size by {} byte(s)",
-                            header.relative_path,
-                            len - remaining
-                        )));
+                        return Err(violation_for(
+                            &header.relative_path,
+                            format!(
+                                "file record '{}' overran its size by {} byte(s)",
+                                header.relative_path,
+                                len - remaining
+                            ),
+                        ));
                     }
                     pipe_wr.write_all(&data.content).await?;
                     remaining -= len;
@@ -3055,19 +3158,23 @@ async fn receive_file_record(
                 other => {
                     // Strict serialization: nothing may interleave
                     // with an open record on the source lane.
-                    return Err(violation(format!(
-                        "{} inside file record '{}' ({} byte(s) short)",
-                        frame_name(&other),
-                        header.relative_path,
-                        remaining
-                    )));
+                    return Err(violation_for(
+                        &header.relative_path,
+                        format!(
+                            "{} inside file record '{}' ({} byte(s) short)",
+                            frame_name(&other),
+                            header.relative_path,
+                            remaining
+                        ),
+                    ));
                 }
             }
         }
         pipe_wr.shutdown().await?;
         Ok(())
     };
-    let (outcome, ()) = tokio::try_join!(write, feed)?;
+    let (outcome, ()) =
+        tokio::try_join!(write, feed).map_err(|e| tag_path(e, &header.relative_path))?;
     Ok(outcome)
 }
 
@@ -3160,6 +3267,7 @@ mod tests {
             local_build_id: String::new(),
             peer_build_id: String::new(),
             peer_notified: true,
+            relative_path: None,
         }))
         .expect("send fault");
 
@@ -3198,6 +3306,7 @@ mod tests {
             local_build_id: String::new(),
             peer_build_id: String::new(),
             peer_notified: true,
+            relative_path: None,
         }))
         .expect("send fault");
 
@@ -3214,6 +3323,52 @@ mod tests {
             session_error::Code::Cancelled,
             "an in-flight need must be skipped, not surfaced as a violation"
         );
+    }
+
+    /// otp-7b-2 (D-2026-07-09-1 Q2 rider): the end-of-operation summary
+    /// names the affected file and suggests a re-run; a fault with no
+    /// file identity yields no summary block (nothing to converge on).
+    /// The path survives the wire round trip (`SessionError.relative_path`)
+    /// so BOTH ends can report it, and a `FaultedPath` marker in an eyre
+    /// chain is lifted into the fault by `fault_from_report`.
+    #[test]
+    fn fault_summary_names_the_file_and_survives_the_wire() {
+        let fault = SessionFault::internal("'big.bin' hit EOF with 42 bytes still promised")
+            .with_path("big.bin");
+        let summary = fault
+            .end_of_operation_summary()
+            .expect("a fault naming a file yields a summary");
+        assert!(summary.contains("big.bin"), "summary names the file");
+        assert!(
+            summary.contains("re-run"),
+            "summary suggests a re-run to converge"
+        );
+        assert_eq!(
+            SessionFault::internal("no file involved").end_of_operation_summary(),
+            None,
+            "no file identity, no summary block"
+        );
+
+        // Wire round trip: the path rides SessionError.relative_path.
+        let restored = SessionFault::from_wire(fault.to_wire());
+        assert_eq!(restored.relative_path.as_deref(), Some("big.bin"));
+        let no_path = SessionFault::from_wire(SessionFault::internal("x").to_wire());
+        assert_eq!(no_path.relative_path, None, "empty wire path is None");
+
+        // eyre-chain lift: a FaultedPath marker anywhere in a non-fault
+        // report becomes the fault's structured identity.
+        let report =
+            eyre::eyre!("underlying io error").wrap_err(FaultedPath("dir/partial.bin".to_string()));
+        let lifted = fault_from_report(report);
+        assert_eq!(lifted.relative_path.as_deref(), Some("dir/partial.bin"));
+        // ...and a report already carrying a SessionFault keeps that
+        // fault verbatim (tag_path never wraps one).
+        let fault_report = tag_path(
+            eyre::Report::new(SessionFault::protocol_violation("v").with_path("kept.bin")),
+            "other.bin",
+        );
+        let kept = fault_from_report(fault_report);
+        assert_eq!(kept.relative_path.as_deref(), Some("kept.bin"));
     }
 
     /// otp-7a codex F1: the hash-count cap decision — a partial at
@@ -3240,6 +3395,7 @@ mod tests {
             local_build_id: "1.0+aaa".into(),
             peer_build_id: "1.0+bbb".into(),
             peer_notified: false,
+            relative_path: None,
         };
         let wire = fault.to_wire();
         let back = SessionFault::from_wire(wire);

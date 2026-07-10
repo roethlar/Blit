@@ -1347,6 +1347,12 @@ message SessionError {
   // which end is stale.
   string local_build_id = 3;
   string peer_build_id = 4;
+  // otp-7b-2 (D-2026-07-09-1 Q2 rider): the file the fault concerns,
+  // when one is known (a mid-record read/write failure names its
+  // file). Empty = no file identity. Lets the reporting end's
+  // end-of-operation summary name the affected file structurally
+  // instead of string-scraping the message.
+  string relative_path = 5;
 }
 
 // The single frame type BOTH wire directions carry. Which frames an

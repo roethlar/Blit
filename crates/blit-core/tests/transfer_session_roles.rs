@@ -1017,6 +1017,18 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             "source fault must name the file: {}",
             source_fault.message
         );
+        // otp-7b-2 (D-2026-07-09-1 Q2 rider): STRUCTURED file identity on
+        // the fault — locally lifted from the FaultedPath marker — and an
+        // end-of-operation summary naming it with a re-run suggestion.
+        assert_eq!(
+            source_fault.relative_path.as_deref(),
+            Some("partial.bin"),
+            "source fault carries the structured path (initiator {initiator_role:?})"
+        );
+        let summary = source_fault
+            .end_of_operation_summary()
+            .expect("a file-naming fault yields the end-of-operation summary");
+        assert!(summary.contains("partial.bin") && summary.contains("re-run"));
         let dest_err = dest_result.expect_err("destination must fault");
         let dest_fault = fault_of(&dest_err);
         assert_eq!(
@@ -1029,6 +1041,14 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             dest_fault.message.contains("partial.bin"),
             "destination fault must name the file: {}",
             dest_fault.message
+        );
+        // The identity crossed the wire (SessionError.relative_path), so
+        // the OTHER end can name the file in its summary too.
+        assert_eq!(
+            dest_fault.relative_path.as_deref(),
+            Some("partial.bin"),
+            "destination fault carries the structured path over the wire \
+             (initiator {initiator_role:?})"
         );
         // The fault was genuinely MID-record (codex F6): block 0 landed
         // in place before the reader died in block 1, so the partial is

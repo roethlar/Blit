@@ -980,12 +980,13 @@ impl NeedListSink {
         {
             Ok(())
         } else {
-            Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!(
+            Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
                     "data-plane payload for '{path}' which is not an outstanding need \
                  (off the need list, or a duplicate delivery)"
-                ),
-            )))
+                ))
+                .with_path(path),
+            ))
         }
     }
 
@@ -1001,12 +1002,13 @@ impl NeedListSink {
                 .expect("resume-headers lock poisoned")
                 .contains_key(path)
             {
-                return Err(eyre::Report::new(SessionFault::protocol_violation(
-                    format!(
+                return Err(eyre::Report::new(
+                    SessionFault::protocol_violation(format!(
                         "data-plane file payload for resume-flagged '{path}' — the \
                          contract requires its block record"
-                    ),
-                )));
+                    ))
+                    .with_path(path),
+                ));
             }
         }
         Ok(())
@@ -1028,12 +1030,13 @@ impl NeedListSink {
             match held.get(path) {
                 Some(header) => header.size,
                 None => {
-                    return Err(eyre::Report::new(SessionFault::protocol_violation(
-                        format!(
+                    return Err(eyre::Report::new(
+                        SessionFault::protocol_violation(format!(
                             "data-plane block record for '{path}' which was not granted \
                              a resume-flagged need"
-                        ),
-                    )))
+                        ))
+                        .with_path(path),
+                    ))
                 }
             }
         };
@@ -1043,17 +1046,21 @@ impl NeedListSink {
             .expect("outstanding-needs lock poisoned")
             .contains(path)
         {
-            return Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!("data-plane block record for '{path}' which is not an outstanding need"),
-            )));
+            return Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
+                    "data-plane block record for '{path}' which is not an outstanding need"
+                ))
+                .with_path(path),
+            ));
         }
         if offset.saturating_add(len) > size {
-            return Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!(
+            return Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
                     "block record '{path}' overran its size: offset {offset} + {len} \
                      byte(s) > {size}"
-                ),
-            )));
+                ))
+                .with_path(path),
+            ));
         }
         Ok(())
     }
@@ -1076,19 +1083,23 @@ impl NeedListSink {
             .expect("resume-headers lock poisoned")
             .remove(path)
             .ok_or_else(|| {
-                eyre::Report::new(SessionFault::protocol_violation(format!(
-                    "data-plane block complete for '{path}' which was not granted \
-                     a resume-flagged need"
-                )))
+                eyre::Report::new(
+                    SessionFault::protocol_violation(format!(
+                        "data-plane block complete for '{path}' which was not granted \
+                         a resume-flagged need"
+                    ))
+                    .with_path(path),
+                )
             })?;
         if total_size != header.size {
-            return Err(eyre::Report::new(SessionFault::protocol_violation(
-                format!(
+            return Err(eyre::Report::new(
+                SessionFault::protocol_violation(format!(
                     "block record '{path}' completed at {total_size} byte(s), manifest \
                      promised {}",
                     header.size
-                ),
-            )));
+                ))
+                .with_path(path),
+            ));
         }
         self.claim(path)
     }
@@ -1130,7 +1141,12 @@ impl TransferSink for NeedListSink {
                 ..
             } => {
                 self.claim_block_complete(relative_path, *total_size)?;
-                let outcome = self.inner.write_payload(payload).await?;
+                let path = relative_path.clone();
+                let outcome = self
+                    .inner
+                    .write_payload(payload)
+                    .await
+                    .map_err(|e| super::tag_path(e, &path))?;
                 // Count only after the finalization write landed —
                 // the same ordering the in-stream arms follow.
                 self.resume
@@ -1148,7 +1164,21 @@ impl TransferSink for NeedListSink {
                 )));
             }
         }
-        self.inner.write_payload(payload).await
+        // Tag the inner write's failure with the file it concerned
+        // (otp-7b-2) where the payload names exactly one file.
+        let tag: Option<String> = match &payload {
+            PreparedPayload::File(h) => Some(h.relative_path.clone()),
+            PreparedPayload::FileBlock { relative_path, .. } => Some(relative_path.clone()),
+            _ => None,
+        };
+        match tag {
+            Some(path) => self
+                .inner
+                .write_payload(payload)
+                .await
+                .map_err(|e| super::tag_path(e, &path)),
+            None => self.inner.write_payload(payload).await,
+        }
     }
 
     async fn write_file_stream(
@@ -1158,7 +1188,10 @@ impl TransferSink for NeedListSink {
     ) -> Result<SinkOutcome> {
         self.reject_resume_flagged(&header.relative_path)?;
         self.claim(&header.relative_path)?;
-        self.inner.write_file_stream(header, reader).await
+        self.inner
+            .write_file_stream(header, reader)
+            .await
+            .map_err(|e| super::tag_path(e, &header.relative_path))
     }
 
     async fn finish(&self) -> Result<()> {

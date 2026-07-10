@@ -67,9 +67,18 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     item = strict per-file socket serialization; shared
     `ResumeBlockDiff` + shared DEST claim state; session-client resume
     options; pins in roles suite + daemon e2e, suite → **1545**).
-  - Current: **otp-7b-2** — the D-2026-07-09-1 CLI end-of-op fault
-    summary rider + cancel-during-resume e2e (plan Staging).
-    otp-5b-3 (pull cancel) optional; otp-2 rig-gated before otp-10.
+  - **otp-7b-2 (code landed, codex review pending)** — the
+    D-2026-07-09-1 CLI end-of-op fault summary rider (structured
+    `SessionFault.relative_path` + wire carry, CONTRACT_VERSION → 2,
+    `end_of_operation_summary()`; verb-level print lands at otp-10) +
+    cancel-during-resume e2e (7a F4) + a gate-discovered RELIABLE fix
+    (resume block writes now flush — unflushed tokio file writes made a
+    7a pin ~50% flaky under suite load). Suite → **1548**. Codex reviews
+    of 7b-1 + 7b-2 are queued: the codex account hit its usage limit
+    (resets 02:52 EDT 2026-07-10) — findings not yet adjudicated.
+  - Next: **codex loop on otp-7b-1 (`ecac9b0`) + otp-7b-2**, then
+    otp-8 per the plan queue. otp-5b-3 (pull cancel) optional; otp-2
+    rig-gated before otp-10.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified

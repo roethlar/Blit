@@ -492,7 +492,11 @@ pub async fn execute_receive_pipeline<R: AsyncRead + Unpin + Send>(
                 socket
                     .read_exact(&mut bytes)
                     .await
-                    .context("reading block bytes")?;
+                    .context("reading block bytes")
+                    .map_err(|e| {
+                        // otp-7b-2: a socket break mid-block names its file.
+                        e.wrap_err(super::faulted_path::FaultedPath(path.clone()))
+                    })?;
                 let payload = PreparedPayload::FileBlock {
                     relative_path: path,
                     offset,

@@ -570,6 +570,229 @@ async fn same_size_newer_destination_is_skipped_not_clobbered() {
 }
 
 // ---------------------------------------------------------------------------
+// otp-7b-2: cancel + fault identity during a data-plane resume
+// ---------------------------------------------------------------------------
+
+/// otp-7b-2 (codex otp-7a F4, deferred to 7b): a `CancelJob` fired while
+/// the resume block phase is provably in progress over the TCP data
+/// plane tears down cleanly — the client surfaces the peer's framed
+/// CANCELLED (not the transport break), nothing hangs, and the daemon
+/// drains the job row — exactly as otp-4b-3 pinned for file records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mid_resume_cancel_surfaces_cancelled_over_the_data_plane() {
+    const BS: usize = 64 * 1024;
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    let content = vec![0xABu8; 4 * 1024 * 1024];
+    std::fs::write(src.path().join("big.bin"), &content).unwrap();
+    filetime::set_file_mtime(
+        src.path().join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_100, 0),
+    )
+    .unwrap();
+    // An all-stale dest partial, so the file is resume-flagged and the
+    // block phase starts sending immediately.
+    std::fs::write(
+        daemon.dest_root.join("big.bin"),
+        vec![0x11u8; content.len()],
+    )
+    .unwrap();
+    filetime::set_file_mtime(
+        daemon.dest_root.join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_000, 0),
+    )
+    .unwrap();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let source = Arc::new(StuckAfterFirstChunkSource {
+        inner: FsTransferSource::new(src.path().to_path_buf()),
+        started: Arc::clone(&started),
+    });
+
+    let ep = daemon.endpoint.clone();
+    let client = tokio::spawn(async move {
+        run_push_session(
+            &ep,
+            source,
+            PushSessionOptions {
+                resume: true,
+                resume_block_size: BS as u32,
+                ..PushSessionOptions::default()
+            },
+        )
+        .await
+    });
+
+    // The resume block phase is provably in progress: the block-diff has
+    // consumed the stuck reader's first chunk and can never finish.
+    tokio::time::timeout(std::time::Duration::from_secs(10), started.notified())
+        .await
+        .expect("the resume block phase should start before cancel");
+
+    let transfer_id = daemon
+        .active_jobs
+        .snapshot()
+        .into_iter()
+        .next()
+        .expect("an active transfer row")
+        .transfer_id;
+    assert_eq!(
+        daemon.active_jobs.cancel(&transfer_id),
+        crate::active_jobs::CancelOutcome::Cancelled,
+        "the served resume session's row honors cancellation"
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), client)
+        .await
+        .expect("client must not hang on a mid-resume cancel")
+        .expect("client task joins");
+    let err = result.expect_err("a cancelled resume transfer fails");
+    assert_eq!(
+        fault_of(&err).code,
+        session_error::Code::Cancelled,
+        "the client surfaces the peer's framed CANCELLED: {err:#}"
+    );
+
+    let mut drained = false;
+    for _ in 0..200 {
+        if daemon.active_jobs.snapshot().is_empty() {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        drained,
+        "the daemon must drain the cancelled resume job from active[]"
+    );
+
+    daemon.stop().await;
+}
+
+/// otp-7b-2 fault-injection source: the reader for one path yields only
+/// the first `limit` bytes then EOF, provably short of the manifested
+/// size — the mid-record fault D4 documents. Everything else delegates
+/// to the real filesystem source.
+struct TruncatedReadSource {
+    inner: FsTransferSource,
+    fail_path: &'static str,
+    limit: u64,
+}
+
+#[async_trait::async_trait]
+impl blit_core::remote::transfer::source::TransferSource for TruncatedReadSource {
+    fn scan(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<blit_core::generated::FileHeader>,
+        tokio::task::JoinHandle<eyre::Result<u64>>,
+    ) {
+        self.inner.scan(filter, unreadable)
+    }
+
+    async fn prepare_payload(
+        &self,
+        payload: blit_core::remote::transfer::payload::TransferPayload,
+    ) -> eyre::Result<blit_core::remote::transfer::payload::PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<blit_core::generated::FileHeader>,
+        unreadable: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> eyre::Result<Vec<blit_core::generated::FileHeader>> {
+        self.inner.check_availability(headers, unreadable).await
+    }
+
+    async fn open_file(
+        &self,
+        header: &blit_core::generated::FileHeader,
+    ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        use tokio::io::AsyncReadExt;
+        let reader = self.inner.open_file(header).await?;
+        if header.relative_path == self.fail_path {
+            Ok(Box::new(reader.take(self.limit)))
+        } else {
+            Ok(reader)
+        }
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// otp-7b-2 (D-2026-07-09-1 Q2 rider): a source fault mid-resume over
+/// the daemon-served data plane surfaces with STRUCTURED file identity,
+/// and the end-of-operation summary the CLI will print (otp-10) names
+/// the affected file and suggests a re-run to converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mid_resume_fault_names_the_file_in_the_end_of_operation_summary() {
+    const BS: usize = 64 * 1024;
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    let content: Vec<u8> = (0..3 * BS).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.path().join("big.bin"), &content).unwrap();
+    filetime::set_file_mtime(
+        src.path().join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_100, 0),
+    )
+    .unwrap();
+    // All-stale partial: the source starts sending blocks immediately,
+    // and its reader dies halfway through block 2.
+    std::fs::write(
+        daemon.dest_root.join("big.bin"),
+        vec![0x11u8; content.len()],
+    )
+    .unwrap();
+    filetime::set_file_mtime(
+        daemon.dest_root.join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_000, 0),
+    )
+    .unwrap();
+
+    let source = Arc::new(TruncatedReadSource {
+        inner: FsTransferSource::new(src.path().to_path_buf()),
+        fail_path: "big.bin",
+        limit: (BS + BS / 2) as u64,
+    });
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        run_push_session(
+            &daemon.endpoint,
+            source,
+            PushSessionOptions {
+                resume: true,
+                resume_block_size: BS as u32,
+                ..PushSessionOptions::default()
+            },
+        ),
+    )
+    .await
+    .expect("a mid-resume fault must not hang")
+    .expect_err("a truncated source must fault the session");
+
+    let fault = fault_of(&err);
+    assert_eq!(
+        fault.relative_path.as_deref(),
+        Some("big.bin"),
+        "the fault carries structured file identity: {fault:?}"
+    );
+    let summary = fault
+        .end_of_operation_summary()
+        .expect("a file-naming fault yields the end-of-operation summary");
+    assert!(
+        summary.contains("big.bin") && summary.contains("re-run"),
+        "the summary names the file and suggests a re-run: {summary}"
+    );
+
+    daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // otp-7b: resume over the TCP data plane, daemon-served both directions
 // ---------------------------------------------------------------------------
 

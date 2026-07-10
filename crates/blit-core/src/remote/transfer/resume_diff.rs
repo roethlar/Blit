@@ -65,13 +65,21 @@ impl ResumeBlockDiff {
             let this = (self.size - self.offset).min(self.block_size as u64) as usize;
             let mut filled = 0usize;
             while filled < this {
-                let got = self.reader.read(&mut self.buf[filled..this]).await?;
+                let got = self
+                    .reader
+                    .read(&mut self.buf[filled..this])
+                    .await
+                    .map_err(|e| {
+                        eyre::Report::new(e)
+                            .wrap_err(super::faulted_path::FaultedPath(self.relative_path.clone()))
+                    })?;
                 if got == 0 {
-                    eyre::bail!(
+                    return Err(eyre::eyre!(
                         "'{}' hit EOF with {} bytes still promised",
                         self.relative_path,
                         self.size - self.offset - filled as u64
-                    );
+                    )
+                    .wrap_err(super::faulted_path::FaultedPath(self.relative_path.clone())));
                 }
                 filled += got;
             }
