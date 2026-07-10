@@ -899,6 +899,129 @@ async fn pull_session_resumes_partial_over_the_data_plane() {
 }
 
 // ---------------------------------------------------------------------------
+// otp-8: the fallback byte-carrier's residue — resume over the REAL wire
+// on the in-stream carrier. The in-process role suite exercises the same
+// record grammar, but only a real tonic stream enforces the 4 MiB frame
+// decode limit the in-stream block-size ceiling exists for
+// (D-2026-07-10-1) — these pins put that ceiling where it can fail.
+// ---------------------------------------------------------------------------
+
+/// otp-8: a resume push forced onto the in-stream carrier still patches
+/// the destination partial block-wise over the daemon-served RPC — the
+/// same fixture as the data-plane twin above, so the two carriers are
+/// pinned equivalent over the wire (same blocks move, same summary).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_session_resumes_partial_over_in_stream_carrier() {
+    const BS: usize = 64 * 1024; // == the session's block-size floor
+    let daemon = Daemon::start(false).await;
+    let src = tempfile::tempdir().unwrap();
+    let content: Vec<u8> = (0..6 * BS).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.path().join("big.bin"), &content).unwrap();
+    filetime::set_file_mtime(
+        src.path().join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_100, 0),
+    )
+    .unwrap();
+    // Dest partial: the first 4 blocks already landed, older mtime.
+    std::fs::write(daemon.dest_root.join("big.bin"), &content[..4 * BS]).unwrap();
+    filetime::set_file_mtime(
+        daemon.dest_root.join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_000, 0),
+    )
+    .unwrap();
+
+    let summary = run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            in_stream_bytes: true,
+            resume: true,
+            resume_block_size: BS as u32,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("in-stream resume session push succeeds");
+
+    assert!(
+        summary.in_stream_carrier_used,
+        "an in_stream_bytes resume request rides the in-stream carrier"
+    );
+    assert_eq!(summary.files_resumed, 1);
+    assert_eq!(summary.files_transferred, 1);
+    assert_eq!(
+        summary.bytes_transferred,
+        (2 * BS) as u64,
+        "only the 2 missing blocks may move"
+    );
+    assert_trees_identical(src.path(), &daemon.dest_root);
+    daemon.stop().await;
+}
+
+/// otp-8, roles flipped, and the D-2026-07-10-1 clamp pinned over real
+/// tonic: an OVERSIZED block-size request (8 MiB) on the in-stream
+/// carrier must clamp to the carrier's 2 MiB ceiling. The fixture makes
+/// the effective block size observable: a 6 MiB source, a same-size
+/// dest copy with ONE corrupt byte at offset 3 MiB (older mtime). With
+/// 2 MiB blocks exactly the middle block moves — `bytes_transferred`
+/// == 2 MiB. An unclamped 8 MiB block would cover the whole file and
+/// ship a single 6 MiB `BlockTransfer` frame, which tonic's default
+/// 4 MiB decode limit rejects (the failure the ceiling exists to
+/// prevent — unobservable on the in-process transport, which has no
+/// frame limit); any other effective block size moves a different byte
+/// count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_session_resume_clamps_oversized_blocks_to_in_stream_ceiling() {
+    const MIB: usize = 1024 * 1024;
+    let daemon = Daemon::start(false).await;
+    let content: Vec<u8> = (0..6 * MIB).map(|i| (i % 251) as u8).collect();
+    // The daemon module tree is the source.
+    std::fs::write(daemon.dest_root.join("big.bin"), &content).unwrap();
+    filetime::set_file_mtime(
+        daemon.dest_root.join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_100, 0),
+    )
+    .unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    let mut stale = content.clone();
+    stale[3 * MIB] ^= 0xFF;
+    std::fs::write(dest.path().join("big.bin"), &stale).unwrap();
+    filetime::set_file_mtime(
+        dest.path().join("big.bin"),
+        filetime::FileTime::from_unix_time(1_600_000_000, 0),
+    )
+    .unwrap();
+
+    let outcome = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            in_stream_bytes: true,
+            resume: true,
+            resume_block_size: (8 * MIB) as u32,
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect("in-stream resume session pull succeeds");
+
+    assert!(
+        outcome.summary.in_stream_carrier_used,
+        "an in_stream_bytes resume request rides the in-stream carrier"
+    );
+    assert_eq!(outcome.summary.files_resumed, 1);
+    assert_eq!(outcome.summary.files_transferred, 1);
+    assert_eq!(
+        outcome.summary.bytes_transferred,
+        (2 * MIB) as u64,
+        "the 8 MiB request must clamp to the 2 MiB in-stream ceiling: \
+         exactly the one 2 MiB block holding the corrupt byte moves"
+    );
+    assert_trees_identical(&daemon.dest_root, dest.path());
+    daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // otp-5a: pull-equivalent (client initiates as DESTINATION, daemon is SOURCE)
 // ---------------------------------------------------------------------------
 
