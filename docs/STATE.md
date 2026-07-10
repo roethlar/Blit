@@ -4,9 +4,9 @@ Last updated: 2026-07-10
 
 - 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
 
-- Current session (2026-07-10, this one): **otp-8 and otp-9 (a+b) landed and CLOSED through the codex loop** — otp-8 by assessment + wire pins (`5ffc9be`/`643294a`); otp-9 delegated-on-session (`7bf8ef8`/`607a924`, `b2fd876`/`1ce73b5` — codex caught two session-wide High findings, both fixed: require_complete_scan enforcement + cancellation-abortable mirror pass). Verdicts in `.review/results/otp-{8,9a,9b}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..9 [x]. SMALL_FILE_CEILING paused (D-2026-07-05-1).
+- Current session (2026-07-10, this one): **otp-8, otp-9 (a+b), and otp-2 (zoey per-direction + otp-2w Windows cross-direction) all landed and CLOSED through the codex loop** — code slices first, then the owner opened three rigs mid-session (zoey, the Windows box, skippy) and both benchmark baselines were recorded, reviewed (8- and 7-finding rounds, incl. a timing-overhead bug that forced a re-measure of both matrices), and committed. Verdicts in `.review/results/otp-{8,9a,9b,2,2w}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..9 + otp-2 [x]; **otp-10 is next and nothing holds it**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 
-- Notes on push state (as of `1ce73b5`; basis: the prior session's `git ls-remote origin` check — not re-verified this session): origin/master was at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD`. windows-latest CI on the w9-3 harness fix rides the next push.
+- Notes on push state (re-verified via `git ls-remote origin` at this handoff, as of `cccd89a`): origin/master is at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD` = **24** (otp-7b close through otp-2w close). windows-latest CI on the w9-3 harness fix rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -24,45 +24,39 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   cells. **D-2026-07-05-2: same-build peers only, refusal at session
   open.** Progress (each slice through the codex loop; per-slice
   detail lives in DEVLOG + `.review/`, NOT here):
-  - **Closed `[x]`: otp-1, otp-3, otp-4a, otp-4b (1/2/3), otp-5a,
-    otp-5b (1/2), otp-6 (a/b), otp-7a** — contract + role drivers +
-    daemon serving; push and pull data planes with sf-2 resize +
-    cancel; mirror/filters (one delete rule); in-stream resume with
-    wire bounds D-2026-07-10-1. SizeMtime = data-safe skip (open Q
-    below).
-  - **otp-8 `[x]` — fallback byte-carrier, CLOSED by assessment +
-    wire residue pins** (`5ffc9be`; codex fixes `643294a`: in-stream
-    cancel HANG → fault race; unbounded `TarShardHeader` frame →
-    splitter). Detail: DEVLOG 2026-07-10 14:15Z + `.review/`.
-  - **otp-7b (1/2) `[x]` — resume over the TCP data plane + the D4
-    fault-summary rider; otp-7 done** (`ecac9b0`, `071799a`, review
-    fixes `d48351d`). Per-carrier block ceiling D-2026-07-10-2;
-    `SessionFault.relative_path` (CONTRACT_VERSION → 2) +
-    `end_of_operation_summary()` (verb print at otp-10); RELIABLE
-    flush fix. Detail: DEVLOG 2026-07-10 07:30Z + `.review/`.
-  - **otp-9 `[x]` (a: `7bf8ef8`+`607a924`; b: `b2fd876`+`1ce73b5`)
-    — the delegated transfer rides the unified session**;
-    `DelegatedPull` = trigger + progress relay. Codex 9b caught two
-    session-wide Highs, both fixed: `require_complete_scan` ENFORCED
-    (SCAN_INCOMPLETE refusal) and the mirror delete pass made
-    cancellation-abortable. Suite → **1555**. Detail: DEVLOG
-    2026-07-10 17:30Z + `.review/`.
-  - **otp-2 CLOSED (both halves).** zoey rig (Mac↔zoey, Thunderbolt
-    10GbE, zoey confined to `blit-temp`) = PER-DIRECTION reference —
-    hardware-asymmetric ends, so D-2026-07-05-1 forbids
-    cross-direction verdicts there (codex F1, upheld). The owner then
-    designated Mac↔Windows ("closer spec... both have 10gbe") =
-    cross-direction rig, recorded as **otp-2w**. Harnesses
-    `scripts/bench_otp2{,w}_baseline.sh` (cold caches, self-timed
-    durable-at-dest windows, drain, median-of-4); evidence
+  - **Closed `[x]`: otp-1, otp-3, otp-4 (a, b-1/2/3), otp-5 (a,
+    b-1/2), otp-6 (a/b), otp-7 (a, b-1/2), otp-8, otp-9 (a/b)** —
+    the full session machine: contract, role drivers, daemon
+    serving, both data planes + sf-2 resize + cancel, mirror/filters
+    (one delete rule), resume both carriers (wire bounds
+    D-2026-07-10-1/-2), fallback byte-carrier, delegated-on-session.
+    Suite → **1555** (as of `1ce73b5`; later commits are
+    bench/docs-only). SizeMtime = data-safe skip (open Q below).
+    Per-slice detail: DEVLOG 2026-07-10 entries + `.review/`.
+  - **otp-2 `[x]` (both halves).** zoey rig = PER-DIRECTION
+    reference (hardware-asymmetric ends; D-2026-07-05-1 forbids
+    cross-direction verdicts there — codex F1 upheld); owner then
+    designated Mac↔Windows = cross-direction rig (**otp-2w**).
+    Harnesses `scripts/bench_otp2{,w}_baseline.sh` (cold caches,
+    SELF-TIMED durable-at-dest windows — an in-window ssh flush had
+    inflated push medians ~1.2 s on both rigs, both matrices
+    re-measured), evidence
     `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`. July tmpfs
-    data re-labeled wire-reference. Key recorded reading: old push
-    trails old pull on BOTH rigs, carrier-insensitive on large —
-    otp-12's interleaved old-vs-new discriminates code cost from
-    platform write-path cost (exact ratios per the READMEs, post
-    timing-overhead correction).
-  - Current: **otp-10 (cutover + deletion)**. otp-5b-3 (pull
-    cancel) optional.
+    data re-labeled wire-reference. Key reading: old push trails old
+    pull on BOTH rigs (Windows ×1.46–×2.38), carrier-insensitive on
+    large — otp-12's interleaved old-vs-new discriminates code cost
+    from platform write-path cost.
+  - Current: **otp-10 (cutover + deletion)** — staging sketch from
+    the survey: 10a push-shaped verb rides `run_push_session` (+ the
+    deferred verb wiring: PushSessionOptions mirror/filter,
+    `--force-grpc`, progress line via ByteProgressSink,
+    `end_of_operation_summary` print, resume flags; A/B parity pins
+    vs old push); 10b pull-shaped verb likewise (options exist since
+    9a); 10c deletion — 4 drivers + `Push`/`PullSync` RPCs out of
+    tree AND proto, no bridge, ported-test accounting + file-by-file
+    deletion proof (incl. DelegatedPull no-payload-bytes assertion).
+    Dispatch chokepoint: `blit-app/src/transfers/dispatch.rs`
+    (`TransferRoute`). otp-5b-3 (pull cancel) optional.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -84,11 +78,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    Windows cross-direction) `[x]`. Current: **otp-10 (cutover +
    deletion)**.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
-   Shipped (zero-copy resolved — D-2026-07-05-3). Optional owner-gated
-   measurement follow-ups (Win 11 bare-metal; disk-path variants;
-   >ARC-size push) — disk-path items largely absorbed by otp-2/otp-12's
-   symmetric-rig matrices. Env: bench binaries at
-   `skippy:/mnt/generic-pool/video/blit-bin/` (/tmp, /home noexec there).
+   Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
+   largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
+   moved to Blocked → Rig availability.
 3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
 4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
@@ -139,9 +131,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- ~~otp-12 acceptance-bar adjudication~~ RESOLVED (owner designated
-  Mac↔Windows; otp-2w recorded — see Now/Open questions). Nothing
-  holds otp-10 anymore. otp-5b-3 question stands.
 - **Rig availability (owner, 2026-07-10, verified by ssh)**: for the
   otp-12 matrix — remote↔remote (delegated) uses the Windows box
   (`michael@10.1.10.173`) + TrueNAS `skippy` (`admin@skippy`,
@@ -152,9 +141,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **Three 10 GbE gate declarations**: ue-1 pass/fail, ue-2 pass/fail
   or re-scope, REV4 → Shipped. (Zero-copy a/b/c RESOLVED —
   D-2026-07-05-3; skippy CPU data stays in DEVLOG + DIAGNOSIS.md.)
-- **Push go**: local commits `7f1c4b2..HEAD` (otp-7b through otp-9
-  close) await the ref-listing + approval flow; windows-latest CI on
-  the w9-3 harness fix rides it.
+- **Push go**: local commits `7f1c4b2..HEAD` (24 — otp-7b close
+  through otp-2w close, as of `cccd89a`) await the ref-listing +
+  approval flow; windows-latest CI on the w9-3 harness fix rides it.
+- **otp-5b-3** (pull mid-transfer cancel e2e, marked optional): pick
+  up while otp-10 runs, or drop? — standing question.
 
 ## Open questions
 
@@ -189,8 +180,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
+- **2026-07-10 (42nd)** @ `cccd89a` — **otp-8, otp-9, otp-2/otp-2w
+  all closed through the codex loop; otp-1..9 + otp-2 `[x]`; both
+  benchmark baselines recorded on owner-opened rigs.** In-flight:
+  none; tree clean. **Exact first action next session**: implement
+  **otp-10a** — the push-shaped verb rides `run_push_session` per the
+  staging sketch in Now (dispatch chokepoint
+  `blit-app/src/transfers/dispatch.rs`); codex loop per sub-slice.
+  Machine-local (this Mac): rig SSH keys installed (zoey root,
+  Windows michael@10.1.10.173, skippy admin); NOPASSWD purge sudoers
+  rule; zig/cargo-zigbuild toolchain; ssh ControlMaster sockets.
+  Windows box keeps the blit-bench-daemon firewall rule + staged
+  purge script; zoey keeps `e757dcc` binaries in blit-temp (for
+  otp-12 interleaved A/B), Windows repo checkout is DETACHED at
+  `0f922de` with the owner's prior state stashed (`bench-cargo-lock`).
 - **2026-07-10 (41st)** @ `d48351d` — otp-7b closed through the codex
-  loop; otp-1..7 `[x]`; suite → 1550. Its stated first action (assess
-  otp-8 before coding) was done this session. Process note: codex now
-  runs gpt-5.6-sol; one round was delayed ~1 h by a codex usage limit.
+  loop; otp-1..7 `[x]`; suite → 1550. Process note: codex runs
+  gpt-5.6-sol; one round was delayed ~1 h by a codex usage limit.
 - *(40th and earlier pruned to the cap — see DEVLOG 2026-07-06..10.)*
