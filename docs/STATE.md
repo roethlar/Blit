@@ -197,11 +197,5 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   now runs model gpt-5.6-sol (config default moved past the loop doc's
   gpt-5.5 note); one review round was delayed ~1 h by a codex account
   usage limit (resets hourly-ish; scriptable around).
-- **2026-07-10 (40th)** @ `3fa4ec9` — otp-7 Active (owner Q1–Q3,
-  D-2026-07-09-1); otp-7a landed and CLOSED through the codex loop
-  (`4e5ff58`, fixes `1919410`, wire bounds D-2026-07-10-1, suite
-  1530→1540 — the recorded 1529 was a miscount). Its stated first
-  action (implement otp-7b from the plan's implementation map) was
-  done this session per the 41st. The Blocked "Cargo.lock drift" item
-  was dropped — basis falsified (lock last changed at `16237e2`).
-- *(39th and earlier pruned to the cap — see DEVLOG 2026-07-06 entries.)*
+- *(40th and earlier pruned to the cap — see DEVLOG 2026-07-09/10 and
+  2026-07-06 entries.)*
