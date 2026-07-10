@@ -118,7 +118,7 @@ pub async fn run_push_session(
     let inbound = client
         .transfer(ReceiverStream::new(out_rx))
         .await
-        .map_err(|status| eyre!("opening Transfer RPC: {}", status.message()))?
+        .map_err(|status| eyre::Report::new(transfer_open_refusal(status)))?
         .into_inner();
     let transport = grpc_client_transport(out_tx, inbound);
 
@@ -206,9 +206,21 @@ pub async fn run_pull_session(
     dest_root: PathBuf,
     options: PullSessionOptions,
 ) -> Result<DestinationOutcome> {
-    let (module, path) = endpoint_module_path(endpoint)?;
+    let client = connect_transfer_client(endpoint).await?;
+    run_pull_session_with_client(client, endpoint, dest_root, options).await
+}
 
-    let mut client = connect_transfer_client(endpoint).await?;
+/// [`run_pull_session`] over an already-connected client (otp-9b). The
+/// delegated dst daemon connects separately so a connect failure keeps
+/// its own error phase (`ConnectSource`) structurally, without string
+/// matching on the session error.
+pub async fn run_pull_session_with_client(
+    mut client: BlitClient<Channel>,
+    endpoint: &RemoteEndpoint,
+    dest_root: PathBuf,
+    options: PullSessionOptions,
+) -> Result<DestinationOutcome> {
+    let (module, path) = endpoint_module_path(endpoint)?;
 
     let open = SessionOpen {
         initiator_role: TransferRole::Destination as i32,
@@ -238,7 +250,7 @@ pub async fn run_pull_session(
     let inbound = client
         .transfer(ReceiverStream::new(out_rx))
         .await
-        .map_err(|status| eyre!("opening Transfer RPC: {}", status.message()))?
+        .map_err(|status| eyre::Report::new(transfer_open_refusal(status)))?
         .into_inner();
     let transport = grpc_client_transport(out_tx, inbound);
 
@@ -270,9 +282,31 @@ fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
     }
 }
 
+/// A peer refusing the `Transfer` RPC at OPEN is a session-negotiation
+/// failure, not a generic transport error (otp-9b): map the gRPC
+/// status onto the `SessionFault` code the same refusal would carry as
+/// a session frame, so callers phase it structurally. On a same-build
+/// fleet an `Unimplemented` Transfer only means a pre-session peer —
+/// the build-mismatch shape; `PermissionDenied` is the peer's own
+/// delegation/ACL gate.
+fn transfer_open_refusal(status: tonic::Status) -> crate::transfer_session::SessionFault {
+    use crate::generated::session_error::Code;
+    let code = match status.code() {
+        tonic::Code::Unimplemented => Code::BuildMismatch,
+        tonic::Code::PermissionDenied => Code::DelegationRefused,
+        _ => Code::Internal,
+    };
+    crate::transfer_session::SessionFault::refusal(
+        code,
+        format!("opening Transfer RPC: {}", status.message()),
+    )
+}
+
 /// Build a `BlitClient` over `endpoint`'s control-plane URI with the
 /// same bounded-connect policy `RemotePushClient::connect` uses.
-async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitClient<Channel>> {
+/// `pub` since otp-9b: the delegated dst daemon connects separately
+/// from running the session so connect failures keep their own phase.
+pub async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitClient<Channel>> {
     let uri = endpoint.control_plane_uri();
     let conn = Endpoint::from_shared(uri.clone())
         .map_err(|e| eyre!("invalid endpoint uri {uri}: {e}"))?

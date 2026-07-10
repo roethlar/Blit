@@ -344,13 +344,16 @@ impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
         Result<blit_core::generated::TransferFrame, tonic::Status>,
     >;
 
-    // otp-1: unified-session wire surface; fakes refuse like the
-    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    /// otp-9b: the delegated dst daemon opens the unified session
+    /// against this fake, so the stall this fake models lives on the
+    /// Transfer surface — accept the RPC and never answer, exactly as
+    /// the pull_sync stall below did for the old driver.
     async fn transfer(
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
     ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("otp-1 stub"))
+        std::future::pending::<()>().await;
+        unreachable!("pending() never resolves")
     }
 
     async fn push(

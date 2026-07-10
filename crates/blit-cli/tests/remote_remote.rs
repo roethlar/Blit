@@ -500,13 +500,17 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
         Result<blit_core::generated::TransferFrame, tonic::Status>,
     >;
 
-    // otp-1: unified-session wire surface; fakes refuse like the
-    // real service until otp-3/otp-4 (docs/TRANSFER_SESSION.md).
+    // otp-9b: the delegated dst daemon now opens the unified session
+    // against this fake source, so the ACL refusal this fake models
+    // lives on the Transfer surface too (the session client maps an
+    // open-time PermissionDenied onto DELEGATION_REFUSED → NEGOTIATE).
     async fn transfer(
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
     ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("otp-1 stub"))
+        Err(tonic::Status::permission_denied(
+            "source ACL rejected delegated peer",
+        ))
     }
 
     async fn push(

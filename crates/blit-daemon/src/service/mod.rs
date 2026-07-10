@@ -1,6 +1,8 @@
 mod admin;
 mod core;
 pub(crate) mod delegated_pull;
+#[cfg(test)]
+mod delegated_session_e2e;
 mod pull_sync;
 mod push;
 mod transfer;

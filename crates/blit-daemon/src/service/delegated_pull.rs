@@ -2,25 +2,31 @@
 //!
 //! The CLI calls this on the destination daemon when both endpoints in
 //! a `blit copy` are remote. The destination daemon validates the
-//! request through the delegation gate, opens its own pull against the
-//! named source, and streams progress back to the CLI. Bytes flow
-//! source→dst directly.
+//! request through the delegation gate, then (otp-9b) initiates the
+//! unified `Transfer` session against the named source as DESTINATION
+//! — the same choreography every transfer runs — and relays progress
+//! back to the CLI. Bytes flow source→dst directly; this RPC carries
+//! trigger + progress only, never payload bytes.
 //!
 //! See `docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md` §4.2 for the
-//! ordered handler steps and §4.3 for the gate.
+//! ordered handler steps and §4.3 for the gate;
+//! `docs/plan/ONE_TRANSFER_PATH.md` §Design (Delegated transfer) for
+//! the session reroute.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use blit_core::generated::{
-    delegated_pull_progress::Payload as ProgressPayload, ComparisonMode, DelegatedPullError,
-    DelegatedPullProgress, DelegatedPullRequest, DelegatedPullStarted, DelegatedPullSummary,
-    FileHeader, ManifestBatch as ProtoManifestBatch, MirrorMode, PeerCapabilities, PullSummary,
-    TransferOperationSpec,
+    delegated_pull_progress::Payload as ProgressPayload, session_error, ComparisonMode,
+    DelegatedPullError, DelegatedPullProgress, DelegatedPullRequest, DelegatedPullStarted,
+    DelegatedPullSummary, ManifestBatch as ProtoManifestBatch, MirrorMode, TransferOperationSpec,
 };
 use blit_core::remote::endpoint::{RemoteEndpoint, RemotePath};
-use blit_core::remote::pull::{PullSyncError, RemotePullClient};
 use blit_core::remote::transfer::operation_spec::NormalizedTransferOperation;
+use blit_core::remote::transfer::session_client::{
+    connect_transfer_client, run_pull_session_with_client, PullSessionOptions,
+};
+use blit_core::transfer_session::SessionFault;
 use tokio::sync::mpsc;
 use tonic::Status;
 
@@ -28,47 +34,6 @@ use crate::delegation_gate::{validate_source, GateDenial, HostResolver, LocatorV
 use crate::metrics::TransferMetrics;
 use crate::runtime::{ModuleConfig, RootExport};
 use crate::service::util::{resolve_contained_path, resolve_module};
-
-/// audit-1: deadline for the dst→src TCP connect. Bounds the OS SYN
-/// timeout (60-180s) against a firewalled/black-holed source; matches
-/// the data-plane accept timeout's 30s margin for slow networks.
-const SOURCE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Per-request capabilities advertised by *this destination daemon* on
-/// the spec it forwards to src. The CLI's value is overwritten — the
-/// CLI is not in the byte path and cannot speak for what dst supports.
-pub(crate) fn dst_capabilities() -> PeerCapabilities {
-    PeerCapabilities {
-        supports_resume: true,
-        supports_tar_shards: true,
-        supports_data_plane_tcp: true,
-        supports_filter_spec: true,
-        // ue-r2-2: the delegated byte path IS `pull_sync_with_spec`,
-        // whose receive worker set is growable — the dst daemon (the
-        // byte receiver and dialer in delegation) advertises resize
-        // and inherits the whole client-side implementation.
-        supports_stream_resize: true,
-    }
-}
-
-/// Mandatory `client_capabilities` override (R25-F2). The CLI is not
-/// the byte recipient in delegation; the destination is. Whatever
-/// `client_capabilities` the CLI put on the spec must be replaced
-/// with the destination's actual capabilities before the spec leaves
-/// for src. Unconditional — no merging, no field-level fallback.
-///
-/// ue-r2-1b extends the same boundary to `receiver_capacity`: the byte
-/// recipient is this destination daemon, so a CLI-supplied profile is
-/// non-authoritative and is REPLACED with this daemon's own profile
-/// (ue-r2-1e — dst is the receiver in delegation, so its capacity is
-/// what the source's dial must respect).
-pub(crate) fn apply_dst_capabilities_override(
-    mut spec: TransferOperationSpec,
-) -> TransferOperationSpec {
-    spec.client_capabilities = Some(dst_capabilities());
-    spec.receiver_capacity = Some(blit_core::engine::local_receiver_capacity());
-    spec
-}
 
 /// Validate the wire spec via the same `NormalizedTransferOperation::from_spec`
 /// boundary that push and pull_sync use (R30-F3). Catches bad
@@ -85,13 +50,12 @@ pub(crate) fn apply_dst_capabilities_override(
 pub(crate) fn validate_spec(spec: TransferOperationSpec) -> Result<TransferOperationSpec, String> {
     NormalizedTransferOperation::from_spec(spec.clone()).map_err(|e| format!("{e:#}"))?;
     // ue-r2-1h review (self-review panel F1): metadata_only is a
-    // header-scan session shape for the relay's direct PullSync use
-    // ONLY. Forwarded through delegation it would make the source
-    // stream bare FileHeaders that this daemon's pull_sync client
-    // loop answers with File::create — truncating every enumerated
-    // destination file to zero bytes and then reporting success.
-    // Fail closed at the same boundary that validates everything
-    // else, before any outbound connect.
+    // header-scan shape for the relay's direct PullSync use ONLY —
+    // it has no meaning on a delegated transfer (and on the old
+    // driver it truncated every enumerated destination file to zero
+    // bytes). The Transfer session has no metadata_only concept, so
+    // this stays refused at the same boundary that validates
+    // everything else, before any outbound connect.
     if spec.metadata_only {
         return Err(
             "metadata_only is not valid on a delegated pull: the destination \
@@ -276,14 +240,20 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     metrics.inc_pull();
     let _guard = Arc::clone(&metrics).enter_transfer();
 
-    // Step 8: mandatory client_capabilities override (R25-F2). The
-    // CLI is not the byte recipient — dst is. Whatever the CLI sent
-    // here is non-authoritative; we rewrite unconditionally.
-    let spec = apply_dst_capabilities_override(spec);
+    // Step 8 (RETIRED at otp-9b): the R25-F2 capabilities override and
+    // the ue-r2-1b receiver-capacity override are satisfied by
+    // construction on the session path — `run_destination` advertises
+    // THIS end's own `local_receiver_capacity()` in its `SessionOpen`
+    // (contract §Invariants 5: the byte receiver advertises, wherever
+    // it initiates), and same-build peers make capability bits moot
+    // (D-2026-07-05-2). Nothing capability-shaped from the CLI's spec
+    // is consulted.
 
     // Step 9: outbound connect. The endpoint host is the validated
     // IP literal — no further DNS resolution between check and
-    // connect. The gRPC channel takes the URI directly.
+    // connect. The session client's connect policy bounds it (30s,
+    // the audit-1 posture — a black-holed source cannot pin this
+    // handler for the OS SYN timeout).
     let endpoint_host = match resolved.ip() {
         std::net::IpAddr::V4(v4) => v4.to_string(),
         std::net::IpAddr::V6(v6) => format!("[{}]", v6),
@@ -291,48 +261,28 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
     let endpoint = RemoteEndpoint {
         host: endpoint_host,
         port: resolved.port(),
-        // The endpoint is transport-only (R25-F1). The spec carries
-        // the authoritative module + source_path. We set
-        // RemotePath::Discovery here as a defensive sentinel: any
-        // accidental read of self.endpoint.path inside
-        // pull_sync_with_spec would bail loudly on the Discovery
-        // variant rather than silently work with stale identity.
-        path: RemotePath::Discovery,
+        // The spec is authoritative for module + source path (R25-F1);
+        // the session client derives `SessionOpen.module/path` from
+        // the endpoint's `RemotePath`.
+        path: RemotePath::Module {
+            module: spec.module.clone(),
+            rel_path: PathBuf::from(&spec.source_path),
+        },
     };
-    // audit-1: bound the TCP connect to the source daemon. A firewalled
-    // or black-holed source would otherwise block the handler for the OS
-    // TCP SYN timeout (60-180s on Linux), pinning the ActiveJobs row and
-    // resources. 30s matches the data-plane accept timeout.
-    let mut pull_client =
-        crate::net_timeout::within(SOURCE_CONNECT_TIMEOUT, RemotePullClient::connect(endpoint))
-            .await
-            .ok_or_else(|| {
-                err_progress(
-                    Phase::ConnectSource as i32,
-                    format!(
-                        "connecting to source {}:{} timed out after {:?}",
-                        resolved.ip(),
-                        resolved.port(),
-                        SOURCE_CONNECT_TIMEOUT
-                    ),
-                )
-            })?
-            .map_err(|err| {
-                err_progress(
-                    Phase::ConnectSource as i32,
-                    format!(
-                        "connecting to source {}:{}: {}",
-                        resolved.ip(),
-                        resolved.port(),
-                        err
-                    ),
-                )
-            })?;
+    let client = connect_transfer_client(&endpoint).await.map_err(|err| {
+        err_progress(
+            Phase::ConnectSource as i32,
+            format!(
+                "connecting to source {}:{}: {err:#}",
+                resolved.ip(),
+                resolved.port()
+            ),
+        )
+    })?;
 
     // Send the "started" progress event so CLI knows the dst→src
     // handshake is underway. The diagnostic source_data_plane_endpoint
-    // is filled in once data-plane negotiation completes; for now we
-    // surface the validated source IP/port. (CLI tests rely on the
+    // surfaces the validated source IP/port. (CLI tests rely on the
     // CLI-side byte counter for the load-bearing isolation assertion;
     // this field is informational only.)
     let _ = tx
@@ -345,279 +295,93 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
         }))
         .await;
 
-    // Step 10: build a local manifest of the destination tree (so
-    // src can decide what to send) and run pull_sync_with_spec. The
-    // checksum_required hint follows the spec — if compare_mode is
-    // Checksum, the source will need authoritative dest checksums to
-    // decide which files to transfer.
-    let want_checksums = spec.compare_mode == ComparisonMode::Checksum as i32;
-    let local_manifest = enumerate_local_manifest(&dest_root, want_checksums)
-        .await
-        .map_err(|err| {
-            err_progress(
-                Phase::Apply as i32,
-                format!("enumerating destination manifest: {err}"),
-            )
-        })?;
-
-    // Step 11/12: progress forwarding + cancellation.
+    // Step 10 (otp-9b): this daemon initiates the unified `Transfer`
+    // session as DESTINATION against src — the same choreography as
+    // every other transfer (plan §Design, Delegated transfer). The
+    // source streams its manifest and THIS end diffs incrementally
+    // against its module tree (the old pre-enumerated local manifest
+    // dies with the bespoke driver); payload bytes ride the session's
+    // TCP data plane, or the in-stream carrier when the spec asks
+    // (`force_grpc`); mirror deletions run HERE via the one delete
+    // rule (otp-6b). R30-F1/R32-F1 are satisfied by construction:
+    // there is no source-attested delete list anymore — this end
+    // deletes only what its own scan-complete-guarded diff says, and
+    // only when the validated mirror mode authorizes deletions.
     //
-    // pull_sync_with_spec doesn't currently expose a streaming progress
-    // adapter that maps to DelegatedPullProgress directly. For 0.1.0 we
-    // call it as a single await (no per-chunk progress passthrough);
-    // the final summary is the load-bearing event. A bounded
-    // RemoteTransferProgress sink can be added later.
-    //
-    // Cancellation: if the CLI disconnects, this future is dropped by
-    // the gRPC server's stream cancellation; the inner pull is then
-    // dropped too, propagating cleanup through the existing pull
-    // cancellation paths.
-    //
-    // Capture mirror_mode before moving `spec` into pull_sync_with_spec
-    // — we need it after the call to gate `apply_delete_list` (R32-F1).
-    let spec_mirror_mode = spec.mirror_mode;
-    let report = pull_client
-        .pull_sync_with_spec(
-            &dest_root,
-            local_manifest,
-            spec,
-            /* track_paths = */ false,
-            None,
-            Some(byte_progress),
-        )
-        .await
-        .map_err(|err| {
-            // Errors here can be from the negotiate/transfer/apply
-            // phases. Preserve pull_sync_with_spec's typed
-            // negotiation boundary so source-side refusal surfaces as
-            // `NEGOTIATE` instead of a generic transfer failure (R37-F1).
-            if err
-                .downcast_ref::<PullSyncError>()
-                .is_some_and(PullSyncError::is_negotiation)
-            {
-                err_progress(Phase::Negotiate as i32, err.to_string())
-            } else {
-                err_progress(Phase::Transfer as i32, format!("delegated pull: {err}"))
-            }
-        })?;
-
-    // R30-F1 + R32-F1: apply the daemon-authoritative mirror delete
-    // list, but ONLY when this transfer is actually a mirror. The CLI
-    // path at remote.rs:304 gates on `mirror_mode`; the delegated
-    // handler must match. Without the gate, a buggy or hostile source
-    // daemon could attach a non-empty `paths_to_delete` to a plain
-    // copy and we would dutifully unlink in-scope destination files.
-    //
-    // We read the mirror mode off the validated wire spec — it has
-    // already passed `NormalizedTransferOperation::from_spec`, so
-    // unknown values are rejected at the boundary. Only the active
-    // deletion modes (FilteredSubset / All) trigger
-    // `apply_delete_list`; Off / Unspecified silently ignore any
-    // delete list the source attached.
-    let entries_deleted_locally = if delete_list_authorized(spec_mirror_mode) {
-        if let Some(ref delete_paths) = report.paths_to_delete {
-            apply_delete_list(&dest_root, delete_paths)
-                .await
-                .map_err(|err| err_progress(Phase::Apply as i32, err))?
+    // Cancellation: unchanged — core.rs races this future against
+    // tx.closed() and the row's CancelJob token; dropping it tears the
+    // transport down and the src daemon's served session cleans up.
+    let mirror_active = delete_list_authorized(spec.mirror_mode);
+    let options = PullSessionOptions {
+        compare_mode: ComparisonMode::try_from(spec.compare_mode)
+            .unwrap_or(ComparisonMode::SizeMtime),
+        ignore_existing: spec.ignore_existing,
+        require_complete_scan: spec.require_complete_scan,
+        in_stream_bytes: spec.force_grpc,
+        resume: spec.resume.as_ref().is_some_and(|r| r.enabled),
+        resume_block_size: spec.resume.as_ref().map_or(0, |r| r.block_size),
+        filter: spec.filter.clone(),
+        mirror_enabled: mirror_active,
+        mirror_kind: if mirror_active {
+            MirrorMode::try_from(spec.mirror_mode).unwrap_or(MirrorMode::Off)
         } else {
-            0
-        }
-    } else {
-        // Plain copy: we ignore any delete list. Don't surface it as
-        // entries_deleted on the summary either.
-        0
+            MirrorMode::Off
+        },
+        byte_progress: Some(byte_progress.clone()),
     };
+    let outcome = run_pull_session_with_client(client, &endpoint, dest_root, options)
+        .await
+        .map_err(|err| {
+            // Session refusals keep the NEGOTIATE phase the old typed
+            // `PullSyncError` boundary provided (R37-F1); everything
+            // else is a transfer-phase failure.
+            let phase = match err.downcast_ref::<SessionFault>().map(|f| f.code) {
+                Some(
+                    session_error::Code::BuildMismatch
+                    | session_error::Code::ModuleUnknown
+                    | session_error::Code::ReadOnly
+                    | session_error::Code::DelegationRefused
+                    | session_error::Code::ScanIncomplete,
+                ) => Phase::Negotiate,
+                _ => Phase::Transfer,
+            };
+            err_progress(phase as i32, format!("delegated transfer: {err:#}"))
+        })?;
 
     // Optional manifest_batch event for symmetry with normal pull
     // progress shape (CLIs may render an aggregate count).
-    if let Some(batch_count) = report.summary.as_ref().map(|s| s.files_transferred) {
-        let _ = tx
-            .send(Ok(DelegatedPullProgress {
-                payload: Some(ProgressPayload::ManifestBatch(ProtoManifestBatch {
-                    file_count: batch_count,
-                    total_bytes: report
-                        .summary
-                        .as_ref()
-                        .map(|s| s.bytes_transferred)
-                        .unwrap_or(0),
-                })),
-            }))
-            .await;
-    }
-
-    let summary = build_summary(&report.summary, &resolved, entries_deleted_locally);
     let _ = tx
         .send(Ok(DelegatedPullProgress {
-            payload: Some(ProgressPayload::Summary(summary)),
+            payload: Some(ProgressPayload::ManifestBatch(ProtoManifestBatch {
+                file_count: outcome.summary.files_transferred,
+                total_bytes: outcome.summary.bytes_transferred,
+            })),
+        }))
+        .await;
+
+    // Summary: the session's DESTINATION-computed record IS this end's
+    // authoritative account (R34-F1 by construction — the session
+    // scored what this filesystem did, deletions included; the old
+    // source-attested count problem cannot recur).
+    let s = &outcome.summary;
+    let _ = tx
+        .send(Ok(DelegatedPullProgress {
+            payload: Some(ProgressPayload::Summary(DelegatedPullSummary {
+                files_transferred: s.files_transferred,
+                bytes_transferred: s.bytes_transferred,
+                bytes_zero_copy: 0,
+                // Wire-compat: the old field means "the gRPC byte
+                // fallback carried the payload" — on the session that
+                // is the in-stream carrier.
+                tcp_fallback_used: s.in_stream_carrier_used,
+                entries_deleted: s.entries_deleted,
+                // Diagnostic only (R23-F4). The destination's view; not
+                // load-bearing for byte-path isolation.
+                source_peer_observed: format!("{}:{}", resolved.ip(), resolved.port()),
+            })),
         }))
         .await;
     Ok(())
-}
-
-/// Apply the daemon's authoritative mirror delete list against the
-/// destination tree. Every path is routed through
-/// `safe_join_contained` (R5-F1 lexical check + R46-F3 canonical
-/// containment) before the unlink. R58-F3 closed the symmetry gap:
-/// the non-delegated `blit_app::transfers::remote::delete_listed_paths`
-/// upgraded to `safe_join_contained` in R46-F3 (the helper lived in
-/// `blit-cli` at the time of that fix; Phase 5 A.0 moved it to
-/// `blit-app`), but this daemon-side delegated path was still on bare
-/// `safe_join`. With `dest_root/link → /outside` a peer-controlled
-/// delete-list entry like `link/victim` would have removed an
-/// outside file.
-///
-/// Returns the count of files actually removed (after which the
-/// caller may surface it via `entries_deleted` on the summary). On
-/// error returns a phase-bearing message string for `Phase::Apply`.
-async fn apply_delete_list(
-    dest_root: &Path,
-    relative_paths: &[String],
-) -> std::result::Result<u64, String> {
-    use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
-    use std::collections::BTreeSet;
-
-    // R58-F3: capture the canonical destination root once. Fail
-    // closed if it can't be canonicalized — on the destructive
-    // side, lexical-only fallback would be the bug we're closing.
-    let canonical = canonical_dest_root(dest_root).map_err(|e| {
-        format!(
-            "cannot canonicalize destination '{}' for mirror-purge containment: {e:#}",
-            dest_root.display()
-        )
-    })?;
-
-    let mut files_deleted: u64 = 0;
-    let mut candidate_parents: BTreeSet<PathBuf> = BTreeSet::new();
-
-    for rel in relative_paths {
-        let target = safe_join_contained(&canonical, dest_root, rel)
-            .map_err(|e| format!("source delete list contained unsafe path '{rel}': {e:#}"))?;
-        // safe_join("") returns dest_root itself; we never delete it.
-        if target == dest_root {
-            return Err("source delete list referenced the destination root itself".to_string());
-        }
-        match tokio::fs::remove_file(&target).await {
-            Ok(()) => {
-                files_deleted += 1;
-                let mut p = target.parent();
-                while let Some(parent) = p {
-                    if parent == dest_root {
-                        break;
-                    }
-                    candidate_parents.insert(parent.to_path_buf());
-                    p = parent.parent();
-                }
-            }
-            // Already gone: source's view may lag. Not an error.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(format!("failed to delete {}: {e}", target.display()));
-            }
-        }
-    }
-
-    // Prune empty directories deepest-first. Failures here are
-    // ignored (dir not empty / dir doesn't exist) — same posture as
-    // `blit_app::transfers::remote::delete_listed_paths`.
-    let mut dirs: Vec<_> = candidate_parents.into_iter().collect();
-    dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-    for dir in dirs {
-        let _ = tokio::fs::remove_dir(&dir).await;
-    }
-
-    Ok(files_deleted)
-}
-
-fn build_summary(
-    inner: &Option<PullSummary>,
-    resolved: &std::net::SocketAddr,
-    entries_deleted_locally: u64,
-) -> DelegatedPullSummary {
-    let s = inner.as_ref();
-    // R34-F1: report what *this destination* actually deleted —
-    // never the source-attested count. The source-side
-    // `PullSummary.entries_deleted` is what the source thought we
-    // should delete; in plain copy mode (gated post-R32-F1) we do
-    // not delete anything locally, so falling back to the source
-    // count would lie on the summary. The dst is now the only
-    // authority on what happened on the dst filesystem.
-    DelegatedPullSummary {
-        files_transferred: s.map(|x| x.files_transferred).unwrap_or(0),
-        bytes_transferred: s.map(|x| x.bytes_transferred).unwrap_or(0),
-        bytes_zero_copy: s.map(|x| x.bytes_zero_copy).unwrap_or(0),
-        tcp_fallback_used: s.map(|x| x.tcp_fallback_used).unwrap_or(false),
-        entries_deleted: entries_deleted_locally,
-        // Diagnostic only (R23-F4). The destination's view; not
-        // load-bearing for byte-path isolation.
-        source_peer_observed: format!("{}:{}", resolved.ip(), resolved.port()),
-    }
-}
-
-/// Walk the destination tree and emit a manifest the source can use
-/// to decide which files need transfer. Mirror of
-/// `blit_app::transfers::remote::enumerate_local_manifest` (which was
-/// the CLI-side helper pre-Phase 5 A.0, now a shared library helper)
-/// but lives on the daemon side because the destination owns this
-/// view in the delegated path. Sequential walk; for a 0.1.0 release
-/// targeting modest module sizes this is fine. Parallelize later if
-/// the manifest enumeration becomes the bottleneck.
-async fn enumerate_local_manifest(
-    root: &Path,
-    compute_checksums: bool,
-) -> std::result::Result<Vec<FileHeader>, std::io::Error> {
-    use blit_core::checksum::{hash_file, ChecksumType};
-    use walkdir::WalkDir;
-
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let root_path = root.to_path_buf();
-    let manifest = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<FileHeader>> {
-        let mut out = Vec::new();
-        for entry in WalkDir::new(&root_path).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            let rel = match path.strip_prefix(&root_path) {
-                Ok(rel) => rel,
-                Err(_) => continue,
-            };
-            let relative_path = rel
-                .iter()
-                .map(|c| c.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            let meta = match std::fs::metadata(path) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            let mtime_seconds = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let checksum = if compute_checksums {
-                hash_file(path, ChecksumType::Blake3).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            out.push(FileHeader {
-                relative_path,
-                size: meta.len(),
-                mtime_seconds,
-                permissions: 0,
-                checksum,
-            });
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| std::io::Error::other(format!("manifest task panicked: {e}")))??;
-
-    Ok(manifest)
 }
 
 #[cfg(test)]
@@ -659,132 +423,7 @@ mod tests {
         }
     }
 
-    // ── R25-F2: client_capabilities mandatory override ───────────────
-
-    #[test]
-    fn dst_override_replaces_cli_supplied_caps_unconditionally() {
-        // CLI tries to claim the destination doesn't support tar
-        // shards. The destination supports them. The override must
-        // rewrite the field — silently honoring the CLI's claim
-        // would let a misbehaving CLI degrade the wire shape.
-        let cli_caps = PeerCapabilities {
-            supports_resume: false,
-            supports_tar_shards: false,
-            supports_data_plane_tcp: false,
-            supports_filter_spec: false,
-            // The CLI under-claims resize support; dst DOES resize
-            // (ue-r2-2), and dst — not the CLI — is the byte
-            // recipient, so the override must assert dst's own truth
-            // in both directions.
-            supports_stream_resize: false,
-        };
-        let spec_in = spec_with_caps(cli_caps);
-        let spec_out = apply_dst_capabilities_override(spec_in);
-
-        let caps_out = spec_out
-            .client_capabilities
-            .as_ref()
-            .expect("override populates client_capabilities");
-        assert!(caps_out.supports_resume);
-        assert!(caps_out.supports_tar_shards);
-        assert!(caps_out.supports_data_plane_tcp);
-        assert!(caps_out.supports_filter_spec);
-        assert!(
-            caps_out.supports_stream_resize,
-            "ue-r2-2: dst advertises its real resize support"
-        );
-    }
-
-    #[test]
-    fn dst_override_replaces_cli_supplied_receiver_capacity() {
-        // ue-r2-1b/1e: the byte recipient in delegation is dst, so a
-        // CLI-supplied receiver profile is non-authoritative — the
-        // override must replace it with dst's OWN profile; leaking the
-        // CLI value through would hand the src sender a fabricated
-        // capacity ceiling.
-        let mut spec_in = spec_with_caps(dst_capabilities());
-        spec_in.receiver_capacity = Some(blit_core::generated::CapacityProfile {
-            cpu_cores: 999,
-            drain_class: 0,
-            load_percent: 0,
-            max_streams: 4096,
-            drain_rate_bytes_per_sec: u64::MAX,
-            max_chunk_bytes: u64::MAX,
-            max_inflight_bytes: u64::MAX,
-        });
-        let spec_out = apply_dst_capabilities_override(spec_in);
-        let profile = spec_out
-            .receiver_capacity
-            .expect("dst stamps its own profile");
-        assert_eq!(profile, blit_core::engine::local_receiver_capacity());
-        assert_ne!(profile.max_streams, 4096, "CLI ceiling must not leak");
-    }
-
-    #[test]
-    fn dst_override_preserves_every_non_capabilities_field() {
-        // Apart from client_capabilities, the spec must travel
-        // verbatim — that's the R21-F1 contract. A regression that
-        // accidentally rebuilt other fields would silently change
-        // operator intent.
-        let mut spec_in = TransferOperationSpec {
-            spec_version: 2,
-            module: "alpha".into(),
-            source_path: "x/y".into(),
-            filter: None,
-            compare_mode: ComparisonMode::Checksum as i32,
-            mirror_mode: 3, // MirrorMode::All
-            resume: Some(blit_core::generated::ResumeSettings {
-                enabled: true,
-                block_size: 4096,
-            }),
-            client_capabilities: Some(PeerCapabilities {
-                supports_resume: false,
-                supports_tar_shards: false,
-                supports_data_plane_tcp: false,
-                supports_filter_spec: false,
-                supports_stream_resize: false,
-            }),
-            force_grpc: true,
-            ignore_existing: true,
-            require_complete_scan: false,
-            receiver_capacity: None,
-            // ue-r2-1h: non-default so preservation is provable below.
-            metadata_only: true,
-        };
-        let snapshot_module = spec_in.module.clone();
-        let snapshot_source_path = spec_in.source_path.clone();
-        let snapshot_compare = spec_in.compare_mode;
-        let snapshot_mirror = spec_in.mirror_mode;
-        let snapshot_resume = spec_in.resume;
-        let snapshot_force_grpc = spec_in.force_grpc;
-        let snapshot_ignore_existing = spec_in.ignore_existing;
-        let snapshot_metadata_only = spec_in.metadata_only;
-        // Move spec_in by value through the override.
-        spec_in = apply_dst_capabilities_override(spec_in);
-        assert_eq!(spec_in.module, snapshot_module);
-        assert_eq!(spec_in.source_path, snapshot_source_path);
-        assert_eq!(spec_in.compare_mode, snapshot_compare);
-        assert_eq!(spec_in.mirror_mode, snapshot_mirror);
-        assert_eq!(spec_in.resume, snapshot_resume);
-        assert_eq!(spec_in.force_grpc, snapshot_force_grpc);
-        assert_eq!(spec_in.ignore_existing, snapshot_ignore_existing);
-        assert_eq!(spec_in.metadata_only, snapshot_metadata_only);
-    }
-
-    #[test]
-    fn dst_override_populates_when_cli_left_field_unset() {
-        // The CLI is allowed to leave client_capabilities unset
-        // entirely (the field is non-authoritative anyway). The
-        // destination must still emit a populated value on the wire.
-        let mut spec_in = spec_with_caps(PeerCapabilities::default());
-        spec_in.client_capabilities = None;
-        let spec_out = apply_dst_capabilities_override(spec_in);
-        assert!(spec_out.client_capabilities.is_some());
-        let caps = spec_out.client_capabilities.as_ref().unwrap();
-        // `dst_capabilities()` is the source of truth.
-        assert_eq!(*caps, dst_capabilities());
-    }
-
+    // ── R25-F2: client_capabilities mandatory override ────
     // ── R21-F6 / R25 spec_version: explicit allowlist ────────────────
 
     #[test]
@@ -853,54 +492,7 @@ mod tests {
         );
     }
 
-    // ── R34-F1: build_summary reports only the local delete count ────
-
-    #[test]
-    fn build_summary_reports_local_entries_deleted_count_not_source_side() {
-        // Plain copy: local count is 0 (delete list never applied).
-        // The source-attested count must NOT leak through. Pre-R34-F1
-        // we fell back to source-side when local was 0, which would
-        // mis-report on a copy if the source attached a non-zero
-        // entries_deleted.
-        let resolved: std::net::SocketAddr = "127.0.0.1:9031".parse().unwrap();
-        let inner = Some(PullSummary {
-            files_transferred: 5,
-            bytes_transferred: 1024,
-            bytes_zero_copy: 0,
-            tcp_fallback_used: false,
-            entries_deleted: 7, // source claims 7 — must be ignored
-        });
-        let summary = build_summary(&inner, &resolved, /* local = */ 0);
-        assert_eq!(summary.entries_deleted, 0);
-        assert_eq!(summary.files_transferred, 5);
-        assert_eq!(summary.bytes_transferred, 1024);
-    }
-
-    #[test]
-    fn build_summary_reports_local_entries_deleted_count_in_mirror_mode() {
-        // Mirror: local count is what was actually unlinked. The
-        // source-side count is informational at best (it tells us
-        // what was supposed to happen, not what did).
-        let resolved: std::net::SocketAddr = "127.0.0.1:9031".parse().unwrap();
-        let inner = Some(PullSummary {
-            files_transferred: 0,
-            bytes_transferred: 0,
-            bytes_zero_copy: 0,
-            tcp_fallback_used: false,
-            entries_deleted: 99, // source claim, ignored
-        });
-        let summary = build_summary(&inner, &resolved, /* local = */ 3);
-        assert_eq!(summary.entries_deleted, 3);
-    }
-
-    #[test]
-    fn build_summary_zero_when_no_inner_and_no_local() {
-        let resolved: std::net::SocketAddr = "127.0.0.1:9031".parse().unwrap();
-        let summary = build_summary(&None, &resolved, 0);
-        assert_eq!(summary.entries_deleted, 0);
-        assert_eq!(summary.files_transferred, 0);
-    }
-
+    // ── R34-F1: build_summary reports only the local delete co
     // ── R32-F1: delete-list gating on validated MirrorMode ───────────
 
     #[test]
@@ -960,56 +552,6 @@ mod tests {
         // the contract is "from_spec rejects malformed globs", and
         // its message wording can vary across glob crate versions.
         assert!(validate_spec(spec).is_err());
-    }
-
-    // ── R58-F3: apply_delete_list canonical containment ─────────────
-
-    /// A delete-list entry that traverses a pre-existing escape
-    /// symlink under `dest_root` MUST be rejected by the
-    /// destination daemon's mirror-purge step. Pre-fix this path
-    /// used bare `safe_join` (lexical-only); a peer-controlled
-    /// `link/victim` entry would have removed
-    /// `/outside/victim`.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn apply_delete_list_rejects_symlink_escape() {
-        use std::os::unix::fs::symlink;
-        let tmp = tempfile::tempdir().unwrap();
-        let dest_root = tmp.path().join("dst");
-        let outside = tmp.path().join("outside");
-        std::fs::create_dir_all(&dest_root).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("victim.txt"), b"do not lose").unwrap();
-        // Pre-existing escape symlink under dest_root.
-        symlink(&outside, dest_root.join("link")).unwrap();
-
-        let err = apply_delete_list(&dest_root, &["link/victim.txt".to_string()])
-            .await
-            .expect_err("R58-F3: delete through escape symlink must reject");
-        assert!(
-            err.contains("escape") || err.contains("escapes"),
-            "expected canonical-escape rejection, got: {err}"
-        );
-        // The outside file must be intact.
-        assert!(
-            outside.join("victim.txt").exists(),
-            "victim file must survive — apply_delete_list rejected the unsafe entry"
-        );
-    }
-
-    /// Sanity: in-scope deletes still work after R58-F3.
-    #[tokio::test]
-    async fn apply_delete_list_removes_in_scope_entries() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dest_root = tmp.path().join("dst");
-        std::fs::create_dir_all(&dest_root).unwrap();
-        std::fs::write(dest_root.join("victim.txt"), b"goodbye").unwrap();
-
-        let count = apply_delete_list(&dest_root, &["victim.txt".to_string()])
-            .await
-            .expect("in-scope delete should succeed");
-        assert_eq!(count, 1);
-        assert!(!dest_root.join("victim.txt").exists());
     }
 
     /// R-followup: `handle_delegated_pull` must return `false` when

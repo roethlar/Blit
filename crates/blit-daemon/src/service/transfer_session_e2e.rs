@@ -141,9 +141,9 @@ impl Daemon {
     }
 }
 
-type FileSpec = (&'static str, &'static [u8], i64);
+pub(crate) type FileSpec = (&'static str, &'static [u8], i64);
 
-fn write_tree(root: &Path, files: &[FileSpec]) {
+pub(crate) fn write_tree(root: &Path, files: &[FileSpec]) {
     for (rel, content, mtime) in files {
         let path = root.join(rel);
         if let Some(parent) = path.parent() {
@@ -181,7 +181,7 @@ fn collect_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-fn assert_trees_identical(a: &Path, b: &Path) {
+pub(crate) fn assert_trees_identical(a: &Path, b: &Path) {
     let ta = collect_tree(a);
     let tb = collect_tree(b);
     assert_eq!(
