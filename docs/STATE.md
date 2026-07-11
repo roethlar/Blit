@@ -86,8 +86,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
 4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
-   open row; filed w6-2a/b/c + relay-1) — same directive; note w7-1
-   (mirror-executor consolidation) likely lands for free inside
+   open row) — same directive; w7-1 likely landed for free inside
    otp-6's one-delete-rule slice; re-check before picking it up.
 5. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
@@ -168,20 +167,22 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   SKIP** (converge-up; `--force` still overwrites; pinned by
   `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm
   or ask for old-push clobber. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
-- **(OPEN)** Historical docs embed `/Users/...` paths (rec: leave);
-  `725aa07` tracked a stale worktree snapshot (rec `git rm -r`, awaits go).
-- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` §§~309/606/641 describe
-  the deleted `determine_remote_tuning` — fold into w10-docs-batch?
+- **(OPEN)** `725aa07` tracked a stale worktree snapshot (rec
+  `git rm -r`, awaits go); historical docs embed `/Users/...` paths
+  (rec: leave).
+- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` describes the deleted
+  `determine_remote_tuning` — fold into w10-docs-batch?
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
   three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
-- **(OPEN, new 2026-07-05)** CLI foot-gun: `blit copy src_large dst`
-  with an existing local dir and no `./` parses the bare name as an
-  mDNS discovery endpoint and errors (blit-app endpoints.rs). Should
-  local-path existence win, or the error improve? Owner to slot.
-- **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: full suite green
-  locally; daemon-spawn e2e flakiness root-caused + fixed on Linux (w9-3:
-  port-TOCTOU race + cargo-lock contention). Remaining: windows-latest CI
-  on the next push (10d89e0 predates the w9-3 fix).
+- **(OPEN, new 2026-07-05)** CLI foot-gun: a bare local dir name with
+  no `./` parses as an mDNS discovery endpoint and errors (blit-app
+  endpoints.rs). Local-path existence wins, or better error? Owner to
+  slot.
+- **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: w9-3 fixed the
+  Linux daemon-spawn flakiness; windows-latest CI pending the next
+  push. NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
+  reproduced at `6d37a22`) ran ELEVATED under heavy load (~3/12 vs 2/8
+  historical) — own finding if it persists on a quiet machine.
 
 ## Handoff log (newest first, keep ≤ 3)
 
@@ -192,9 +193,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   recorded)**. In-flight: none; tree clean. **Next**: otp-11b
   (unblocked). (Mid-session full-suite "failures" = dirty-tree
   BUILD_MISMATCH sampling artifacts; clean rebuild converged them.)
-- **2026-07-11 (44th)** — otp-10c closed (relay removal
-  D-2026-07-11-1 + the cutover deletion); suite 1605 → 1488. Owner
-  ask pending: the `725aa07` snapshot `git rm -r` go (otp-10c-2 F6).
+- **2026-07-11 (44th)** — otp-10c closed (relay removal + the cutover
+  deletion); suite 1605 → 1488. Owner ask pending: `725aa07` snapshot.
 - **2026-07-11 (43rd)** — otp-10a/10b-1/10b-2 closed (1555 → 1605);
   verb cutover complete.
 - *(42nd and earlier pruned to the cap — see DEVLOG 2026-07-06..12.)*
