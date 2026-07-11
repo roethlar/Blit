@@ -439,8 +439,9 @@ fn transfer_open_refusal(status: tonic::Status) -> TransferOpenRefusal {
     ))
 }
 
-/// Build a `BlitClient` over `endpoint`'s control-plane URI with the
-/// same bounded-connect policy `RemotePushClient::connect` uses.
+/// Build a `BlitClient` over `endpoint`'s control-plane URI with a
+/// bounded connect (audit-2's 30 s policy, inherited from the old
+/// drivers' connect path).
 /// `pub` since otp-9b: the delegated dst daemon connects separately
 /// from running the session so connect failures keep their own phase.
 pub async fn connect_transfer_client(endpoint: &RemoteEndpoint) -> Result<BlitClient<Channel>> {

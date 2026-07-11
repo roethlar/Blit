@@ -55,10 +55,9 @@ use tokio::time::{Instant, Sleep};
 /// transfer is aborted with `TimedOut` rather than pinning resources
 /// forever. Owner-decided 30s.
 ///
-/// Applied by:
-/// - CLI pull-receive TCP (`remote::pull` — audit-1c) via [`StallGuard`].
-/// - Daemon push-receive TCP (`daemon::service::push::data_plane`
-///   — audit-h3a) via [`StallGuard`].
+/// Applied by (the audit-1c / audit-h3a receive surfaces, now both
+/// inside the unified session):
+/// - Session DESTINATION receive TCP via [`StallGuard`].
 /// - Daemon pull-data-plane **write progress after token acceptance**
 ///   (`daemon::service::pull_sync` — audit-h3b; the `pull` service died
 ///   at ue-r2-1h) via [`StallGuardWriter`] inside `DataPlaneSession`.

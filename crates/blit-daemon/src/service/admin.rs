@@ -2,7 +2,7 @@ use super::{DiskUsageSender, FindSender};
 use blit_core::enumeration::{EntryKind, FileEnumerator};
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{DiskUsageEntry, FilesystemStatsResponse, FindEntry};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -51,105 +51,6 @@ pub(crate) async fn delete_rel_paths(
     task::spawn_blocking(move || delete_rel_paths_sync(&module_path, &canonical_root, rel_paths))
         .await
         .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
-}
-
-pub(crate) async fn purge_extraneous_entries(
-    module_path: PathBuf,
-    canonical_root: PathBuf,
-    expected_files: Vec<PathBuf>,
-    // R59 #1 F2: filter to apply when enumerating the destination
-    // for purge candidates. Default = unfiltered (legacy /
-    // mirror_kind=ALL behavior). When the caller is a
-    // FilteredSubset mirror, this carries the user's source-side
-    // filter so out-of-scope destination entries aren't classified
-    // as extraneous and deleted.
-    purge_filter: FileFilter,
-) -> Result<DeletionStats, Status> {
-    task::spawn_blocking(move || {
-        // R13-F1: verify the purge root is contained before any
-        // enumeration. The delete phase below has its own per-entry
-        // verify_contained, but plan_extraneous_entries enumerates
-        // module_path itself — that read-side filesystem op needs the
-        // same protection. The push handler's destination_path
-        // containment check should already reject escape paths at
-        // handshake; this is defense-in-depth in case a future
-        // caller bypasses the handshake check.
-        blit_core::path_safety::verify_contained(&canonical_root, &module_path)
-            .map_err(|e| Status::permission_denied(format!("purge root containment: {e:#}")))?;
-
-        let extraneous = plan_extraneous_entries(&module_path, &expected_files, &purge_filter)?;
-        if extraneous.is_empty() {
-            return Ok(DeletionStats::default());
-        }
-        delete_rel_paths_sync(&module_path, &canonical_root, extraneous)
-    })
-    .await
-    .map_err(|err| Status::internal(format!("purge task failed: {}", err)))?
-}
-
-fn plan_extraneous_entries(
-    module_path: &Path,
-    expected_files: &[PathBuf],
-    purge_filter: &FileFilter,
-) -> Result<Vec<PathBuf>, Status> {
-    // R59 #1 F2: enumerate the destination through the user's
-    // filter so we never classify out-of-scope entries as
-    // "extraneous". When the caller is mirror_kind=ALL the filter
-    // is FileFilter::default() and behavior matches the historical
-    // unfiltered purge.
-    let enumerator = FileEnumerator::new(purge_filter.clone_without_cache());
-    let entries = enumerator.enumerate_local(module_path).map_err(|err| {
-        Status::internal(format!(
-            "enumerating target {}: {}",
-            module_path.display(),
-            err
-        ))
-    })?;
-
-    let mut expected_file_set: HashSet<PathBuf> = HashSet::new();
-    let mut expected_dirs: HashSet<PathBuf> = HashSet::new();
-    expected_dirs.insert(PathBuf::from("."));
-
-    for rel in expected_files {
-        expected_file_set.insert(rel.clone());
-        let mut current = rel.parent();
-        while let Some(parent) = current {
-            if parent.as_os_str().is_empty() {
-                expected_dirs.insert(PathBuf::from("."));
-                break;
-            }
-            expected_dirs.insert(parent.to_path_buf());
-            current = parent.parent();
-        }
-    }
-
-    let mut files_to_delete = Vec::new();
-    let mut dirs_to_delete = Vec::new();
-
-    for entry in entries {
-        let rel = entry.relative_path;
-        if rel.as_os_str().is_empty() || rel == Path::new(".") {
-            continue;
-        }
-        match &entry.kind {
-            EntryKind::Directory => {
-                if !expected_dirs.contains(&rel) {
-                    dirs_to_delete.push(rel);
-                }
-            }
-            _ => {
-                if !expected_file_set.contains(&rel) {
-                    files_to_delete.push(rel);
-                }
-            }
-        }
-    }
-
-    dirs_to_delete.sort_by_key(|p| p.components().count());
-    dirs_to_delete.reverse();
-
-    files_to_delete.extend(dirs_to_delete);
-    Ok(files_to_delete)
 }
 
 fn delete_rel_paths_sync(
@@ -655,67 +556,6 @@ pub(crate) fn filesystem_stats_for_path(path: &Path) -> Result<FilesystemStatsRe
         used_bytes: disk.total_space().saturating_sub(disk.available_space()),
         free_bytes: disk.available_space(),
     })
-}
-
-#[cfg(test)]
-mod purge_filter_tests {
-    //! R59 #1 F2: the daemon's purge enumerator must honor the
-    //! source-side filter when mirror_kind=FilteredSubset, so
-    //! destination entries excluded by the user's filter aren't
-    //! deleted just because they're absent from the (filtered)
-    //! source manifest. Pre-fix the enumerator used
-    //! FileFilter::default() and treated every out-of-scope file
-    //! as extraneous.
-
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn filtered_subset_keeps_excluded_destination_entries() {
-        let tmp = tempdir().unwrap();
-        let module = tmp.path();
-        fs::write(module.join("kept.txt"), b"a").unwrap();
-        fs::write(module.join("kept.log"), b"b").unwrap();
-        fs::write(module.join("extra.txt"), b"c").unwrap();
-
-        // Source filter is `--include '*.txt'`. Source manifest
-        // would only carry `*.txt` files. Expected = the one txt
-        // file the client knows about. Without the filter scope
-        // applied during enumeration, the daemon would classify
-        // kept.log as extraneous (it's not in expected) and
-        // delete it.
-        let mut filter = FileFilter::default();
-        filter.include_files = vec!["*.txt".to_string()];
-
-        let expected = vec![PathBuf::from("kept.txt")];
-        let extras = plan_extraneous_entries(module, &expected, &filter).unwrap();
-
-        assert!(
-            extras.contains(&PathBuf::from("extra.txt")),
-            "extra.txt is an in-scope file absent from source — must be purged"
-        );
-        assert!(
-            !extras.iter().any(|p| p == Path::new("kept.log")),
-            "kept.log is out of scope (matches --exclude semantics implicit \
-             in --include '*.txt') — must NOT be purged"
-        );
-    }
-
-    #[test]
-    fn unfiltered_purge_treats_all_unexpected_as_extras() {
-        let tmp = tempdir().unwrap();
-        let module = tmp.path();
-        fs::write(module.join("kept.txt"), b"a").unwrap();
-        fs::write(module.join("kept.log"), b"b").unwrap();
-
-        // mirror_kind=ALL → empty filter → matches pre-R59 behavior.
-        let filter = FileFilter::default();
-        let expected = vec![PathBuf::from("kept.txt")];
-        let extras = plan_extraneous_entries(module, &expected, &filter).unwrap();
-
-        assert!(extras.contains(&PathBuf::from("kept.log")));
-    }
 }
 
 #[cfg(test)]

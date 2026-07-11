@@ -42,11 +42,11 @@ pub(crate) async fn resolve_module(
 /// inputs to `PathBuf::from(".")` (module root) — request paths for
 /// list/find/du legitimately mean "the root" with these forms.
 ///
-/// File-path validation (per-file manifest entries, receive sink
-/// targets) uses `resolve_manifest_relative_path` which preserves
-/// empty as empty and rejects `"."` outright. The two variants exist
-/// because R1-F3 (`docs/reviews/followup_review_2026-05-02.md`)
-/// pointed out that conflating these contexts leads to bugs.
+/// File-path contexts (per-file manifest entries, receive sink
+/// targets) must NOT fold — the session's receive path validates
+/// those itself, preserving empty as "the root is itself the file"
+/// (R1-F3 of `docs/reviews/followup_review_2026-05-02.md` on why
+/// conflating the two contexts leads to bugs).
 #[allow(clippy::result_large_err)]
 pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
     // Request-path-context fold: directory references (".", "./", "")
@@ -64,20 +64,6 @@ pub(crate) fn resolve_relative_path(rel: &str) -> Result<PathBuf, Status> {
     } else {
         Ok(normalized)
     }
-}
-
-/// Same validation as `resolve_relative_path` but preserves an empty
-/// input as `PathBuf::new()` instead of folding it to ".".
-///
-/// Used for per-file manifest entries during push: a single-file source
-/// legitimately emits `relative_path = ""` to mean "the root is itself
-/// the file". Folding to "." here breaks that — `module.path/file.txt`
-/// vs. `module.path/file.txt/.` are not the same thing when the caller
-/// opens the path (File::create on `.../file.txt/.` fails ENOTDIR).
-#[allow(clippy::result_large_err)]
-pub(crate) fn resolve_manifest_relative_path(rel: &str) -> Result<PathBuf, Status> {
-    blit_core::path_safety::validate_wire_path(rel)
-        .map_err(|e| Status::invalid_argument(format!("path not allowed: {}: {e}", rel)))
 }
 
 /// Resolve a destination file path as `base.join(rel)`, but preserving
@@ -135,26 +121,6 @@ pub(crate) fn metadata_mtime_seconds(meta: &fs::Metadata) -> Option<i64> {
             Some(-(dur.as_secs() as i64))
         }
     }
-}
-
-pub(crate) fn permissions_mode(meta: &fs::Metadata) -> u32 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
-    }
-}
-
-pub(crate) fn normalize_relative_path(path: &Path) -> String {
-    // Canonical POSIX form — see `blit_core::path_posix` for why a
-    // component-walk is correct on every platform and the historical
-    // string `replace('\\', "/")` was destructive on POSIX.
-    blit_core::path_posix::relative_path_to_posix(path)
 }
 
 pub(crate) fn pathbuf_to_display(path: &Path) -> String {

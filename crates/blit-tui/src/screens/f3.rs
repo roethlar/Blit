@@ -35,7 +35,7 @@
 //! `browse::pull_source_endpoint(...).display()`).
 //!
 //! d-35: `p` opens a destination prompt and runs a
-//! remote→local PullSync owned by the TUI process. The
+//! remote→local pull session owned by the TUI process. The
 //! footer shows one of (d-55 `m` mirror / d-57 `v` move swap
 //! the verb and add a destructive confirm):
 //! - `pull → <dest>_` (cyan, EnteringDest — typing)
@@ -93,7 +93,7 @@ pub enum F3PullDisplay {
         verb: &'static str,
         detail: &'static str,
     },
-    /// PullSync in flight. d-37: live cumulative
+    /// Pull session in flight. d-37: live cumulative
     /// counters (0 until the first progress event).
     /// d-39: `bytes_per_sec` is average throughput
     /// (0 until ~1s elapsed). `verb` is the present participle.

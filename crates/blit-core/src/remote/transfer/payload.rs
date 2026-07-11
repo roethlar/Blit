@@ -3,21 +3,13 @@ use std::path::{Path, PathBuf};
 
 use eyre::{bail, eyre, Context, Result};
 use futures::{stream, StreamExt};
-use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
 use tokio::task;
 
 use crate::fs_enum::FileEntry;
-use crate::generated::client_push_request::Payload as ClientPayload;
-use crate::generated::{
-    ClientPushRequest, FileData, FileHeader, TarShardChunk, TarShardComplete, TarShardHeader,
-    UploadComplete,
-};
+use crate::generated::FileHeader;
 use crate::transfer_plan::{self, PlanOptions, TransferTask};
 use tar::{Builder, EntryType, Header};
 
-use super::data_plane::CONTROL_PLANE_CHUNK_SIZE;
-use super::progress::RemoteTransferProgress;
 use crate::remote::transfer::source::TransferSource;
 use std::sync::Arc;
 
@@ -257,131 +249,6 @@ pub fn prepared_payload_stream(
         async move { source.prepare_payload(payload).await }
     }))
     .buffered(capacity)
-}
-
-pub async fn transfer_payloads_via_control_plane(
-    source: Arc<dyn TransferSource>,
-    payloads: Vec<TransferPayload>,
-    tx: &mpsc::Sender<ClientPushRequest>,
-    finish: bool,
-    progress: Option<&RemoteTransferProgress>,
-    chunk_bytes: usize,
-    payload_prefetch: usize,
-) -> Result<()> {
-    // audit-h3c slice 1: clamp at the gRPC fallback ceiling for the
-    // same reason GrpcFallbackSink / GrpcServerStreamingSink do — this
-    // function emits FileData / TarShardChunk over the same gRPC
-    // control plane and must produce frames at observable cadence.
-    // No live caller today (grep returns zero matches), but the
-    // function is `pub` and re-exported, so any future caller would
-    // silently bypass the cap without this line.
-    let chunk_size =
-        super::grpc_fallback::clamp_fallback_chunk_size(chunk_bytes.max(CONTROL_PLANE_CHUNK_SIZE));
-    let mut buffer = vec![0u8; chunk_size];
-    let mut prepared_stream = prepared_payload_stream(payloads, source.clone(), payload_prefetch);
-
-    while let Some(prepared) = prepared_stream.next().await {
-        match prepared? {
-            PreparedPayload::File(header) => {
-                send_payload(tx, ClientPayload::FileManifest(header.clone())).await?;
-
-                if header.size == 0 {
-                    if let Some(progress) = progress {
-                        progress.report_file_complete(header.relative_path.clone());
-                    }
-                    continue;
-                }
-
-                let mut file = source
-                    .open_file(&header)
-                    .await
-                    .with_context(|| format!("opening {}", header.relative_path))?;
-
-                let mut remaining = header.size;
-                while remaining > 0 {
-                    let to_read = buffer.len().min(remaining as usize);
-                    let chunk = file
-                        .read(&mut buffer[..to_read])
-                        .await
-                        .with_context(|| format!("reading {}", header.relative_path))?;
-                    if chunk == 0 {
-                        bail!(
-                            "unexpected EOF while reading {} ({} bytes remaining)",
-                            header.relative_path,
-                            remaining
-                        );
-                    }
-
-                    send_payload(
-                        tx,
-                        ClientPayload::FileData(FileData {
-                            content: buffer[..chunk].to_vec(),
-                        }),
-                    )
-                    .await?;
-                    if let Some(progress) = progress {
-                        progress.report_payload(0, chunk as u64);
-                    }
-                    remaining -= chunk as u64;
-                }
-                if let Some(progress) = progress {
-                    // Bytes already rode the per-chunk Payload reports
-                    // above; FileComplete only marks the file done.
-                    progress.report_file_complete(header.relative_path.clone());
-                }
-            }
-            PreparedPayload::TarShard { headers, data } => {
-                send_payload(
-                    tx,
-                    ClientPayload::TarShardHeader(TarShardHeader {
-                        files: headers.clone(),
-                        archive_size: data.len() as u64,
-                    }),
-                )
-                .await?;
-
-                for chunk in data.chunks(chunk_size) {
-                    send_payload(
-                        tx,
-                        ClientPayload::TarShardChunk(TarShardChunk {
-                            content: chunk.to_vec(),
-                        }),
-                    )
-                    .await?;
-                    if let Some(progress) = progress {
-                        progress.report_payload(0, chunk.len() as u64);
-                    }
-                }
-
-                send_payload(tx, ClientPayload::TarShardComplete(TarShardComplete {})).await?;
-                if let Some(progress) = progress {
-                    for header in &headers {
-                        progress.report_file_complete(header.relative_path.clone());
-                    }
-                }
-            }
-            // Resume variants never traverse the gRPC control plane.
-            PreparedPayload::FileBlock { .. }
-            | PreparedPayload::FileBlockComplete { .. }
-            | PreparedPayload::ResumeFile { .. } => {
-                bail!("resume payloads cannot traverse the gRPC control plane");
-            }
-        }
-    }
-
-    if finish {
-        send_payload(tx, ClientPayload::UploadComplete(UploadComplete {})).await?;
-    }
-
-    Ok(())
-}
-
-async fn send_payload(tx: &mpsc::Sender<ClientPushRequest>, payload: ClientPayload) -> Result<()> {
-    tx.send(ClientPushRequest {
-        payload: Some(payload),
-    })
-    .await
-    .map_err(|_| eyre!("failed to send push request payload"))
 }
 
 pub fn build_tar_shard(source_root: &Path, headers: &[FileHeader]) -> Result<Vec<u8>> {

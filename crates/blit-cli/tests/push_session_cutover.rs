@@ -6,9 +6,9 @@
 //! per-direction push client. These pins guard the verb-level option
 //! wiring that cutover added (wire filter, mirror, `--force-grpc`,
 //! progress events, resume flags, the unreadable-scan error `blit
-//! move`'s source-delete gate relies on) plus an A/B parity run
-//! against the old driver, which stays in-tree until otp-10c deletes
-//! it.
+//! move`'s source-delete gate relies on) plus the absolute
+//! tree/count pin that replaced the otp-10a A/B parity run when the
+//! old driver was deleted (otp-10c-2).
 //!
 //! Each test spawns a real daemon via the shared harness and calls the
 //! library entry in-process — the same boundary the verbs use, minus
@@ -18,17 +18,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 mod common;
 use common::TestContext;
 
 use blit_app::transfers::remote::{run_remote_push, PushExecution};
-use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{ComparisonMode, FilterSpec, MirrorMode};
-use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
-use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePushClient};
+use blit_core::remote::{RemoteEndpoint, RemotePath};
 
 fn module_endpoint(port: u16) -> RemoteEndpoint {
     RemoteEndpoint {
@@ -110,46 +107,26 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("runtime")
 }
 
-/// A/B parity (the otp-10a converge guard): the session-backed verb
-/// entry and the old push driver land byte-identical trees with equal
-/// summary counts, from the same source, against real daemons. The old
-/// driver is deleted at otp-10c; until then it is the reference.
+/// otp-10a's A/B parity pin, converted to an ABSOLUTE pin at
+/// otp-10c-2 (the old-driver reference arm died with the driver):
+/// the session-backed verb entry lands a byte-identical tree and
+/// reports summary counts equal to the fixture's own totals — the
+/// exact facts the A/B equality proved transitively. Performance
+/// parity is carried by the committed otp-2/otp-2w baselines and
+/// otp-12's interleaved old-binary acceptance runs.
 #[test]
-fn push_verb_and_old_push_produce_identical_trees_and_counts() {
+fn push_verb_lands_identical_tree_with_exact_counts() {
     let ctx = TestContext::new();
-    let old_daemon = ctx.spawn_second_daemon("old", &Default::default());
 
     let src = ctx.workspace.join("src");
-    write_fixture(&src);
+    let (fixture_files, fixture_bytes) = write_fixture(&src);
 
-    let (new_summary, old_report) = runtime().block_on(async {
-        let new_summary = run_remote_push(push_execution(&src, ctx.daemon_port), None)
-            .await
-            .expect("session push")
-            .summary;
-
-        let mut client = RemotePushClient::connect(module_endpoint(old_daemon.port))
-            .await
-            .expect("old push connect");
-        let old_report = client
-            .push(
-                Arc::new(FsTransferSource::new(src.clone())),
-                &FileFilter::default(),
-                false,
-                MirrorMode::Off,
-                false,
-                false,
-                None,
-                false,
-            )
-            .await
-            .expect("old push");
-        (new_summary, old_report)
-    });
+    let new_summary = runtime()
+        .block_on(run_remote_push(push_execution(&src, ctx.daemon_port), None))
+        .expect("session push")
+        .summary;
 
     let new_tree = tree_contents(&ctx.module_dir);
-    let old_tree = tree_contents(&old_daemon.module_dir);
-    assert_eq!(new_tree, old_tree, "session vs old push trees differ");
     assert_eq!(
         new_tree,
         tree_contents(&src),
@@ -157,12 +134,12 @@ fn push_verb_and_old_push_produce_identical_trees_and_counts() {
     );
 
     assert_eq!(
-        new_summary.files_transferred, old_report.summary.files_transferred,
-        "files_transferred parity"
+        new_summary.files_transferred, fixture_files as u64,
+        "files_transferred must equal the fixture count"
     );
     assert_eq!(
-        new_summary.bytes_transferred, old_report.summary.bytes_transferred,
-        "bytes_transferred parity"
+        new_summary.bytes_transferred, fixture_bytes,
+        "bytes_transferred must equal the fixture byte total"
     );
     assert!(
         !new_summary.in_stream_carrier_used,

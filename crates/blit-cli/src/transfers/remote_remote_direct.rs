@@ -6,7 +6,7 @@ use blit_app::transfers::remote::{
     DelegatedPullOutcome,
 };
 use blit_core::generated::DelegatedPullSummary;
-use blit_core::remote::pull::PullSyncOptions;
+use blit_core::remote::transfer::operation_spec::DelegatedSpecOptions;
 use blit_core::remote::RemoteEndpoint;
 
 use super::remote::spawn_progress_monitor_with_options;
@@ -63,20 +63,20 @@ pub async fn run_remote_to_remote_direct_deferred(
 /// delegated transfer, so its compare must never produce a
 /// metadata-shaped skip: `ignore_times` is forced on unless the user
 /// asked for `--checksum` (a content-proven skip is safe) —
-/// `build_spec_from_options` maps ignore_times with top precedence,
-/// so this reproduces the verbs' `move_comparison_mode` through the
-/// old wire spec. Pre-fix a delegated move rode the SizeMtime
-/// default: a same-size changed destination file was skipped and the
-/// source-delete destroyed the only copy — the exact otp-10a F1
-/// hazard on the one route the cutover slice missed.
+/// `delegated_spec_from_options` maps ignore_times with top
+/// precedence, so this reproduces the verbs' `move_comparison_mode`
+/// through the delegated wire spec. Pre-fix a delegated move rode the
+/// SizeMtime default: a same-size changed destination file was
+/// skipped and the source-delete destroyed the only copy — the exact
+/// otp-10a F1 hazard on the one route the cutover slice missed.
 /// `require_complete_scan` rides the same flag (R49-F2).
 fn delegated_pull_options(
     args: &TransferArgs,
     filter_spec: blit_core::generated::FilterSpec,
     mirror_mode: bool,
     move_verb: bool,
-) -> PullSyncOptions {
-    PullSyncOptions {
+) -> DelegatedSpecOptions {
+    DelegatedSpecOptions {
         force_grpc: args.force_grpc,
         mirror_mode,
         delete_all_scope: args.delete_scope_all(),
@@ -297,7 +297,8 @@ fn describe_delegated_result(
 mod delegated_options_tests {
     use super::*;
     use blit_core::generated::{ComparisonMode, FilterSpec};
-    use blit_core::remote::{RemoteEndpoint, RemotePullClient};
+    use blit_core::remote::transfer::operation_spec::delegated_spec_from_options;
+    use blit_core::remote::RemoteEndpoint;
 
     /// Minimal args for the option-mapping pins; only the compare
     /// flags vary per test.
@@ -334,9 +335,9 @@ mod delegated_options_tests {
         }
     }
 
-    fn wire_compare(options: &PullSyncOptions) -> i32 {
+    fn wire_compare(options: &DelegatedSpecOptions) -> i32 {
         let ep = RemoteEndpoint::parse("h:9031:/m/").expect("endpoint");
-        RemotePullClient::build_spec_from_options(&ep, options)
+        delegated_spec_from_options(&ep, options)
             .expect("spec")
             .compare_mode
     }

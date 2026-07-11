@@ -2,7 +2,6 @@ pub mod abort_on_drop;
 pub mod data_plane;
 pub mod diff_planner;
 pub mod faulted_path;
-pub mod grpc_fallback;
 pub mod operation_spec;
 pub mod payload;
 pub mod pipeline;
@@ -25,8 +24,7 @@ pub use data_plane::{
 pub use faulted_path::FaultedPath;
 pub use payload::{
     build_tar_shard, payload_file_count, plan_transfer_payloads, prepare_payload,
-    prepared_payload_stream, transfer_payloads_via_control_plane, PreparedPayload, TransferPayload,
-    DEFAULT_PAYLOAD_PREFETCH,
+    prepared_payload_stream, PreparedPayload, TransferPayload, DEFAULT_PAYLOAD_PREFETCH,
 };
 pub use pipeline::{
     execute_sink_pipeline, execute_sink_pipeline_elastic, execute_sink_pipeline_streaming,
@@ -39,9 +37,6 @@ pub use progress::{
     RemoteTransferProgress, StreamId, StreamProbe, StreamState, StreamTelemetry,
     StreamTelemetrySnapshot,
 };
-pub use sink::{
-    DataPlaneSink, FsSinkConfig, FsTransferSink, GrpcFallbackSink, GrpcServerStreamingSink,
-    NullSink, SinkOutcome, TransferSink,
-};
+pub use sink::{DataPlaneSink, FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink};
 pub use socket::{configure_data_socket, DATA_PLANE_ACCEPT_TIMEOUT, DATA_PLANE_TOKEN_TIMEOUT};
 pub use tcp_info::{sample_stream as sample_tcp_info, TcpInfoSample};

@@ -7,23 +7,26 @@
 use crate::f3pull;
 use blit_core::remote::endpoint::RemoteEndpoint;
 
-/// d-55 R2 / d-57: build the `PullSyncOptions` for a DELEGATED F1
-/// remote→remote transfer (the wire `TransferOperationSpec` is built
-/// from these via `RemotePullClient::build_spec_from_options`).
+/// d-55 R2 / d-57: build the [`DelegatedSpecOptions`] for a DELEGATED
+/// F1 remote→remote transfer (the wire `TransferOperationSpec` is
+/// built from these via `delegated_spec_from_options` — the builder
+/// relocated to `operation_spec` when the old pull driver was deleted
+/// at otp-10c-2).
 ///
-/// otp-10b-2: the F3 pull itself no longer consumes this — it rides
-/// the unified session via [`build_f3_pull_execution`]. Only
-/// [`build_delegated_execution`] still maps through PullSync options
-/// (the delegated trigger wire; retired with the driver at otp-10c).
+/// The name is historical: F3 pulls ride the unified session since
+/// otp-10b-2; only [`build_delegated_execution`] consumes this.
 ///
 /// `mirror_mode` here tells the daemon to compute the delete list;
 /// `require_complete_scan` on a `Move` makes the source daemon refuse
 /// a partial scan (deleting the remote source after an incomplete
 /// copy would lose the skipped files) — though delegated move is
 /// rejected upstream, the mapping stays safe.
-pub(crate) fn f3_pull_options(kind: f3pull::PullKind) -> blit_core::remote::pull::PullSyncOptions {
+pub(crate) fn f3_pull_options(
+    kind: f3pull::PullKind,
+) -> blit_core::remote::transfer::operation_spec::DelegatedSpecOptions {
+    use blit_core::remote::transfer::operation_spec::DelegatedSpecOptions;
     use f3pull::PullKind;
-    blit_core::remote::pull::PullSyncOptions {
+    DelegatedSpecOptions {
         mirror_mode: kind == PullKind::Mirror,
         require_complete_scan: kind == PullKind::Move,
         // codex otp-10b-2 F2: a move deletes the remote source after
@@ -33,7 +36,7 @@ pub(crate) fn f3_pull_options(kind: f3pull::PullKind) -> blit_core::remote::pull
         // upstream in the TUI today; this keeps the mapping safe if
         // that gate ever loosens).
         ignore_times: kind == PullKind::Move,
-        ..blit_core::remote::pull::PullSyncOptions::default()
+        ..DelegatedSpecOptions::default()
     }
 }
 

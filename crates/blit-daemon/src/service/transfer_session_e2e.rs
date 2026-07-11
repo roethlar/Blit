@@ -7,10 +7,9 @@
 //! push-equivalent behavior over both carriers:
 //!
 //! - a session lands bytes byte-identically and scores them correctly,
-//!   over the data plane and over the in-stream fallback;
-//! - **A/B parity**: the same fixture through OLD push and the NEW
-//!   session (data plane) yields byte-identical destination trees +
-//!   equal shared summary counters (the converge-up bar);
+//!   over the data plane and over the in-stream fallback — with exact
+//!   summary counts (the absolute form of the old A/B parity pins;
+//!   the old-driver reference arms died at otp-10c-2);
 //! - responder refusals (read-only module, unknown module) arrive as
 //!   `SessionError` frames, surfaced to the client as faults;
 //! - the unified SizeMtime semantic: a same-size destination file that
@@ -23,9 +22,10 @@
 //! daemon (SOURCE responder) binds+grants+accepts sockets while sending and
 //! the client (DESTINATION initiator) dials + receives — with the in-stream
 //! carrier as the requested fallback. Those tests pin a byte-identical
-//! landing over both carriers + A/B parity vs old `pull_sync`, proving the
-//! one served RPC handles both directions by the declared role, not a
-//! second code path.
+//! landing over both carriers with exact summary counts (the absolute
+//! form of the old A/B parity pins — the old drivers died at
+//! otp-10c-2), proving the one served RPC handles both directions by
+//! the declared role, not a second code path.
 //!
 //! Harness mirrors `push/shape_resize_e2e.rs`: a real in-process
 //! `BlitService` on loopback + a real client. Only in-crate tests can
@@ -38,13 +38,12 @@ use std::sync::Arc;
 
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_server::BlitServer;
-use blit_core::generated::{session_error, ComparisonMode, MirrorMode};
-use blit_core::remote::pull::PullSyncOptions;
+use blit_core::generated::{session_error, ComparisonMode};
 use blit_core::remote::transfer::session_client::{
     run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
 };
 use blit_core::remote::transfer::source::FsTransferSource;
-use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient, RemotePushClient};
+use blit_core::remote::{RemoteEndpoint, RemotePath};
 use blit_core::transfer_session::SessionFault;
 use tokio::sync::oneshot;
 
@@ -444,53 +443,35 @@ async fn session_lands_bytes_over_in_stream_carrier() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn old_push_and_session_produce_identical_trees_and_counts() {
+async fn session_push_lands_identical_tree_with_exact_counts() {
+    // otp-10c-2: this was the otp-4 A/B parity pin against the old
+    // push driver. The reference arm died with the driver, so the pin
+    // is now ABSOLUTE — byte-identical tree AND summary counts equal
+    // to the fixture's own totals (exactly what the A/B equality
+    // proved transitively; the committed otp-2/otp-2w baselines +
+    // otp-12's interleaved old-binary runs carry the performance
+    // half).
     let src = tempfile::tempdir().unwrap();
-    write_tree(src.path(), &small_tree());
+    let fixture = small_tree();
+    write_tree(src.path(), &fixture);
+    let expected_files = fixture.len() as u64;
+    let expected_bytes: u64 = fixture.iter().map(|(_, data, _)| data.len() as u64).sum();
 
-    // Arm A: OLD push.
-    let daemon_a = Daemon::start(false).await;
-    let mut push_client = RemotePushClient::connect(daemon_a.endpoint.clone())
-        .await
-        .expect("old push client connects");
-    let report = push_client
-        .push(
-            Arc::new(FsTransferSource::new(src.path().to_path_buf())),
-            &FileFilter::default(),
-            false,
-            MirrorMode::FilteredSubset,
-            false,
-            false,
-            None,
-            false,
-        )
-        .await
-        .expect("old push succeeds");
-
-    // Arm B: NEW session.
-    let daemon_b = Daemon::start(false).await;
+    let daemon = Daemon::start(false).await;
     let summary = run_push_session(
-        &daemon_b.endpoint,
+        &daemon.endpoint,
         Arc::new(FsTransferSource::new(src.path().to_path_buf())),
         PushSessionOptions::default(),
     )
     .await
     .expect("session push succeeds");
 
-    // Both destinations equal the source and each other.
-    assert_trees_identical(src.path(), &daemon_a.dest_root);
-    assert_trees_identical(src.path(), &daemon_b.dest_root);
-    assert_trees_identical(&daemon_a.dest_root, &daemon_b.dest_root);
+    assert_trees_identical(src.path(), &daemon.dest_root);
+    assert_eq!(summary.files_transferred, expected_files);
+    assert_eq!(summary.bytes_transferred, expected_bytes);
+    assert_eq!(summary.entries_deleted, 0);
 
-    // Shared summary counters agree (transport-specific fields —
-    // tcp_fallback_used/bytes_zero_copy vs in_stream_carrier_used — have
-    // no cross analog and are not compared).
-    assert_eq!(report.summary.files_transferred, summary.files_transferred);
-    assert_eq!(report.summary.bytes_transferred, summary.bytes_transferred);
-    assert_eq!(report.summary.entries_deleted, summary.entries_deleted);
-
-    daemon_a.stop().await;
-    daemon_b.stop().await;
+    daemon.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1432,54 +1413,30 @@ async fn pull_session_reports_bytes_against_the_callers_counter() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn old_pull_and_session_produce_identical_trees_and_counts() {
-    // Arm A: OLD pull_sync into a client-local dest.
-    let daemon_a = Daemon::start(false).await;
-    write_tree(&daemon_a.dest_root, &small_tree());
-    let dest_a = tempfile::tempdir().unwrap();
-    let mut pull_client = RemotePullClient::connect(daemon_a.endpoint.clone())
-        .await
-        .expect("old pull client connects");
-    let report = pull_client
-        .pull_sync(
-            dest_a.path(),
-            Vec::new(),
-            &PullSyncOptions::default(),
-            false,
-            None,
-        )
-        .await
-        .expect("old pull succeeds");
+async fn session_pull_lands_identical_tree_with_exact_counts() {
+    // otp-10c-2: this was the otp-5 A/B parity pin against the old
+    // pull driver — converted to an ABSOLUTE pin the same way as the
+    // push twin above (the reference arm died with the driver).
+    let daemon = Daemon::start(false).await;
+    let fixture = small_tree();
+    write_tree(&daemon.dest_root, &fixture);
+    let expected_files = fixture.len() as u64;
+    let expected_bytes: u64 = fixture.iter().map(|(_, data, _)| data.len() as u64).sum();
 
-    // Arm B: NEW session (client DESTINATION initiator).
-    let daemon_b = Daemon::start(false).await;
-    write_tree(&daemon_b.dest_root, &small_tree());
-    let dest_b = tempfile::tempdir().unwrap();
+    let dest = tempfile::tempdir().unwrap();
     let outcome = run_pull_session(
-        &daemon_b.endpoint,
-        dest_b.path().to_path_buf(),
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
         PullSessionOptions::default(),
     )
     .await
     .expect("session pull succeeds");
 
-    // Both dests equal their source module and each other.
-    assert_trees_identical(&daemon_a.dest_root, dest_a.path());
-    assert_trees_identical(&daemon_b.dest_root, dest_b.path());
-    assert_trees_identical(dest_a.path(), dest_b.path());
+    assert_trees_identical(&daemon.dest_root, dest.path());
+    assert_eq!(outcome.summary.files_transferred, expected_files);
+    assert_eq!(outcome.summary.bytes_transferred, expected_bytes);
 
-    // Shared counters agree (transport-specific fields have no cross
-    // analog and are not compared). Old pull already SKIPs the same-size
-    // dest-NEWER cell, so this A/B is byte-identical with no caveat —
-    // unlike the push A/B where old push clobbers.
-    assert_eq!(
-        report.files_transferred as u64,
-        outcome.summary.files_transferred
-    );
-    assert_eq!(report.bytes_transferred, outcome.summary.bytes_transferred);
-
-    daemon_a.stop().await;
-    daemon_b.stop().await;
+    daemon.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

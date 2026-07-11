@@ -4,8 +4,8 @@ use crate::fs_enum::FileFilter;
 /// (FilteredSubset / All) plus a `false`/`true` flag form. R58-F6:
 /// pre-fix, local mirror had no plumbing for this — `apply_mirror_deletions`
 /// always operated on whatever the transfer filter let through. The
-/// remote pull path already supports both modes via
-/// `PullSyncOptions.delete_all_scope`; this brings local up to parity.
+/// remote paths already support both modes via the wire
+/// `MirrorMode` scope; this brings local up to parity.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LocalMirrorDeleteScope {
     /// Default: only delete destination entries that the source-side

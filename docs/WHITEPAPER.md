@@ -23,8 +23,8 @@ combinations:
 | Combination | Implementation |
 |---|---|
 | local → local | `crates/blit-core/src/orchestrator/orchestrator.rs` (zero-copy cascade: `copy_file_range`, `clonefile`, ReFS block clone, `sendfile`, fallback to read/write) |
-| local → remote | `RemotePushClient` in `crates/blit-core/src/remote/push/client/mod.rs` |
-| remote → local | `RemotePullClient` in `crates/blit-core/src/remote/pull.rs` (`pull` for raw, `pull_sync` for compare-and-mirror) |
+| local → remote | the unified transfer session as SOURCE (`run_push_session` → `crates/blit-core/src/transfer_session/`); the old `RemotePushClient` driver was deleted at otp-10c-2 |
+| remote → local | the unified transfer session as DESTINATION (`run_pull_session`); the old `RemotePullClient` driver was deleted at otp-10c-2 |
 | remote → remote | delegated: the destination daemon pulls directly from the source daemon (`DelegatedPull` trigger; payload bytes never cross the CLI host — the CLI relay was removed at otp-10c-1, D-2026-07-11-1) |
 
 Wire transport: dual-channel hybrid.
@@ -82,8 +82,9 @@ Concrete implementations:
 - **Sinks:** `FsTransferSink` (local writes; uses zero-copy cascade for
   whole-file payloads, manual stream for receive payloads),
   `DataPlaneSink` (writes to a TCP stream wrapped in `DataPlaneSession`),
-  `NullSink` (drains + counts; for benchmarking),
-  `GrpcFallbackSink` (control-plane fallback; outbound only).
+  `NullSink` (drains + counts; for benchmarking). (The old wire-specific
+  gRPC fallback sinks died with the Push/PullSync RPCs at otp-10c-2 —
+  the session's in-stream carrier sends `TransferFrame`s directly.)
 
 ### 2.1 The outbound executor
 
@@ -376,12 +377,12 @@ pub fn compare_manifests(
 `compare_file` switches on `CompareMode` (Default = size+mtime,
 SizeOnly, IgnoreTimes, Force, Checksum).
 
-For files marked `Modified` (size matched but mtime differs, or
-explicit `--resume`), the daemon can request block hashes via gRPC and
-send only differing blocks via the data plane (see
-`stream_via_data_plane_resume` in `crates/blit-daemon/src/service/pull_sync.rs`).
-This is a Blake3-block-hash-based delta protocol, not rsync's rolling
-checksum.
+For resume-flagged files (`--resume`), the session runs a strictly
+ordered block-hash exchange (the DESTINATION's `BlockHashList` for a
+file precedes any block of that file — otp-7, `remote/transfer/
+resume_diff.rs` + the session's grant map) and sends only differing
+blocks on either carrier. This is a Blake3-block-hash-based delta
+protocol, not rsync's rolling checksum.
 
 ---
 
@@ -687,12 +688,13 @@ Notable gaps:
 
 In rough order of likely yield:
 
-1. **`crates/blit-core/src/remote/pull.rs::pull_sync`** — the longest
-   function, most concurrent state, recent fix that may have
-   introduced subtleties. ~250 LOC.
-2. **`crates/blit-core/src/remote/push/client/mod.rs::push`** —
-   even longer, lots of nested `match` arms across the bidi response
-   loop, recently modified for the `need_lists_done` gate.
+1. **`crates/blit-core/src/transfer_session/mod.rs`** — the ONE
+   transfer choreography since cutover (otp-10c-2 deleted the
+   per-direction drivers this list used to point at): role state
+   machine, both carriers, resume phase, mirror pass, cancellation.
+2. **`crates/blit-core/src/transfer_session/data_plane.rs`** — the
+   session's socket choreography (dial/accept, resize epochs,
+   per-file and block records).
 3. **The receive pipeline unification** — sink trait, `write_file_stream`,
    `execute_receive_pipeline`, `WireReader → take`. New code, exposed
    to all push and pull receive paths.
@@ -713,19 +715,14 @@ Specific questions a reviewer could answer:
 
 - Are there any `await` points in either pull or push hot loops where
   we hold a lock or open file handle that we shouldn't?
-- The bidi gRPC stream's tx is shared between a sender task and the
-  main loop in both `push` and `pull_sync` — is the drop ordering
-  correct, or could the daemon see a premature EOF?
-- The wire format has `path_len: u32` on three different records. Are
-  the bounds checks consistent? (Spot check: `helpers.rs` and
-  `data_plane.rs::send_file_from_reader` both check; what about
-  receive-side?)
-- TarShardExecutor in `crates/blit-daemon/src/service/push/data_plane.rs`
-  is now used only by the gRPC fallback. Worth deleting outright?
-- Is there a sensible test that would have caught the
-  `pull_sync` channel deadlock (3rd-party reviewer was supposed to
-  look for `await` on a bounded channel before its consumer is
-  attached)?
+- The session control stream's tx is shared between the event queue
+  and the main loop at both ends — is the drop ordering correct, or
+  could a peer see a premature EOF?
+- The wire format has `path_len: u32` on multiple binary records. Are
+  the bounds checks consistent on the receive side?
+- Is there a sensible test class for `await`-on-a-bounded-channel
+  deadlocks (the historical pull_sync deadlock shape; the old driver
+  died at otp-10c-2 but the session has the same channel topology)?
 
 ---
 

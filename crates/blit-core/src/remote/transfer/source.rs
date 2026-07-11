@@ -64,7 +64,6 @@ impl TransferSource for FsTransferSource {
         mpsc::Receiver<FileHeader>,
         tokio::task::JoinHandle<Result<u64>>,
     ) {
-        use crate::remote::push::client::helpers::spawn_manifest_task;
         spawn_manifest_task(
             self.root.clone(),
             filter.unwrap_or_default(),
@@ -82,7 +81,6 @@ impl TransferSource for FsTransferSource {
         headers: Vec<FileHeader>,
         unreadable_paths: Arc<Mutex<Vec<String>>>,
     ) -> Result<Vec<FileHeader>> {
-        use crate::remote::push::client::helpers::filter_readable_headers;
         filter_readable_headers(&self.root, headers, &unreadable_paths).await
     }
 
@@ -107,6 +105,181 @@ impl TransferSource for FsTransferSource {
     fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// Stream a manifest scan of `root` as `FileHeader`s (otp-10c-2:
+/// relocated verbatim from the deleted push driver's
+/// `client::helpers` — `FsTransferSource` is its only consumer now).
+///
+/// R46-F2: suppressed walk errors and unreadable files land in
+/// `unreadable` so a downstream mirror-deletion gate sees "scan was
+/// incomplete" via a single check.
+fn spawn_manifest_task(
+    root: PathBuf,
+    filter: FileFilter,
+    unreadable: Arc<Mutex<Vec<String>>>,
+) -> (
+    mpsc::Receiver<FileHeader>,
+    tokio::task::JoinHandle<Result<u64>>,
+) {
+    use crate::enumeration::{EntryKind, FileEnumerator};
+    use eyre::eyre;
+    use std::io::ErrorKind;
+    use std::time::{Duration, Instant};
+
+    let (manifest_tx, manifest_rx) = mpsc::channel::<FileHeader>(64);
+    let handle = tokio::task::spawn_blocking(move || -> Result<u64> {
+        let enumerator = FileEnumerator::new(filter);
+        let start = Instant::now();
+        let mut last_log = start;
+        let mut enumerated: u64 = 0;
+        let unreadable = unreadable;
+        let scan_outcome = enumerator.enumerate_local_streaming_capturing(&root, |entry| {
+            if let EntryKind::File { size } = entry.kind {
+                let rel = crate::path_posix::relative_path_to_posix(&entry.relative_path);
+                let absolute = entry.absolute_path.clone();
+
+                if let Err(err) = std::fs::File::open(&absolute) {
+                    match err.kind() {
+                        ErrorKind::PermissionDenied => {
+                            record_unreadable_entry(&unreadable, &rel, "permission denied");
+                            return Ok(());
+                        }
+                        ErrorKind::NotFound => {
+                            record_unreadable_entry(&unreadable, &rel, "not found");
+                            return Ok(());
+                        }
+                        _ => {
+                            return Err(eyre!(format!(
+                                "manifest open {}: {}",
+                                absolute.display(),
+                                err
+                            )));
+                        }
+                    }
+                }
+
+                let mtime = unix_seconds(&entry.metadata);
+                let permissions = permissions_mode(&entry.metadata);
+                let header = FileHeader {
+                    relative_path: rel,
+                    size,
+                    mtime_seconds: mtime,
+                    permissions,
+                    checksum: vec![],
+                };
+                manifest_tx
+                    .blocking_send(header)
+                    .map_err(|_| eyre!("failed to queue manifest entry"))?;
+                enumerated += 1;
+                if last_log.elapsed() >= Duration::from_secs(1) {
+                    // R46-F4: progress to stderr, never stdout — the
+                    // CLI's `--json` modes own stdout.
+                    eprintln!("Enumerated {} entries… (streaming manifest)", enumerated);
+                    last_log = Instant::now();
+                }
+            }
+            Ok(())
+        })?;
+        for suppressed in &scan_outcome.suppressed_errors {
+            record_unreadable_entry(
+                &unreadable,
+                &suppressed.path,
+                &format!("scan suppressed: {}", suppressed.message),
+            );
+        }
+        eprintln!(
+            "Manifest enumeration complete in {:.2?} ({} entries)",
+            start.elapsed(),
+            enumerated
+        );
+        Ok(enumerated)
+    });
+
+    (manifest_rx, handle)
+}
+
+fn record_unreadable_entry(list: &Arc<Mutex<Vec<String>>>, rel: &str, reason: &str) {
+    log::warn!("scan skipping '{}' ({})", rel, reason);
+    if let Ok(mut guard) = list.lock() {
+        guard.push(format!("{} ({})", rel, reason));
+    }
+}
+
+fn unix_seconds(metadata: &std::fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    match metadata.modified() {
+        Ok(time) => match time.duration_since(UNIX_EPOCH) {
+            Ok(dur) => dur.as_secs() as i64,
+            Err(err) => {
+                let duration = err.duration();
+                -(duration.as_secs() as i64)
+            }
+        },
+        Err(_) => 0,
+    }
+}
+
+fn permissions_mode(metadata: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+/// Filter `headers` down to the ones whose files are still readable
+/// under `source_root`, recording the rest in `unreadable`
+/// (otp-10c-2: relocated verbatim from the deleted push driver's
+/// `client::helpers`).
+async fn filter_readable_headers(
+    source_root: &Path,
+    headers: Vec<FileHeader>,
+    unreadable: &Arc<Mutex<Vec<String>>>,
+) -> Result<Vec<FileHeader>> {
+    use eyre::eyre;
+    use std::io::ErrorKind;
+
+    let mut filtered = Vec::with_capacity(headers.len());
+    for header in headers {
+        let rel = header.relative_path.clone();
+        // Empty relative_path means "the root is itself the file" — a
+        // single-file source. `source_root.join("")` preserves a
+        // trailing separator that `File::open` then rejects as
+        // ENOTDIR, so treat the empty case specially.
+        let path = if rel.is_empty() {
+            source_root.to_path_buf()
+        } else {
+            source_root.join(&rel)
+        };
+        match fs::File::open(&path).await {
+            Ok(file) => drop(file),
+            Err(err) => match err.kind() {
+                ErrorKind::PermissionDenied => {
+                    record_unreadable_entry(unreadable, &rel, "permission denied");
+                    continue;
+                }
+                ErrorKind::NotFound => {
+                    record_unreadable_entry(unreadable, &rel, "not found");
+                    continue;
+                }
+                _ => {
+                    return Err(eyre!(format!(
+                        "opening {} during payload planning: {}",
+                        path.display(),
+                        err
+                    )));
+                }
+            },
+        }
+        filtered.push(header);
+    }
+    Ok(filtered)
 }
 
 /// Decorator that applies a `FileFilter` uniformly to any inner

@@ -1,15 +1,17 @@
 # TransferSession wire + session contract (otp-1)
 
-**Status**: Active (contract; implementation lands otp-3..otp-10)
+**Status**: Active (contract; the session is the ONLY remote transfer
+path since cutover, otp-10c-2)
 **Created**: 2026-07-05
 **Plan**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4)
 **Decision refs**: D-2026-07-05-1 (one path), D-2026-07-05-2
 (same-build only), D-2026-06-20-1/-2 (bounded-unilateral dial)
 
 This document is the authoritative contract for the single `Transfer`
-RPC that replaces `Push` and `PullSync` at cutover (otp-10). Proto
-truth lives in `proto/blit.proto` under "ONE_TRANSFER_PATH unified
-session"; this doc explains the state machine the proto cannot.
+RPC — the only byte-moving RPC since cutover (`Push` and `PullSync`
+were deleted whole at otp-10c-2). Proto truth lives in
+`proto/blit.proto` under "ONE_TRANSFER_PATH unified session"; this
+doc explains the state machine the proto cannot.
 
 ## Invariants
 
@@ -256,13 +258,13 @@ push/pull-specific message.
   attach at the same boundaries they do today; the session emits the
   existing `DaemonEvent` payloads.
 
-## What this replaces
+## What this replaced
 
-At cutover (otp-10): `Push`, `PullSync`, and their message
-choreographies are deleted from the proto and the tree; the four
-per-direction drivers die with them; `DelegatedPull` shrinks to
-trigger + progress relay (no payload bytes). Until then the old paths
-stay live alongside the session as migration scaffolding.
+Cutover is DONE (otp-10c-2, 2026-07-11): `Push`, `PullSync`, their
+message choreographies, and the four per-direction drivers are
+deleted from the proto and the tree — no bridge (D-2026-07-05-2).
+`DelegatedPull` survives as trigger + progress relay only (no payload
+bytes; proof recorded in the otp-10c-2 finding doc).
 
 Progress: otp-3 landed the role-parameterized drivers over the
 in-process transport; **otp-4a** made the daemon serve `Transfer` for

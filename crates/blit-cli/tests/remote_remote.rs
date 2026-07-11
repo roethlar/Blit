@@ -197,7 +197,7 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
 #[test]
 fn source_refuses_destination_negotiation_does_not_fall_back_to_relay() {
     let ctx = DualDaemonContext::new(true);
-    let rejecting_source = spawn_fake_blit_server(RejectingPullSyncBlit, "fake rejecting source");
+    let rejecting_source = spawn_fake_blit_server(RejectingTransferBlit, "fake rejecting source");
     let counter = ctx.counter_path("source_refuses");
     let src_remote = format!("127.0.0.1:{}:/test/", rejecting_source.port);
 
@@ -287,12 +287,6 @@ struct UnimplementedBlit;
 
 #[tonic::async_trait]
 impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
-    type PushStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::ServerPushResponse, tonic::Status>,
-    >;
-    type PullSyncStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::ServerPullMessage, tonic::Status>,
-    >;
     type FindStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::FindEntry, tonic::Status>,
     >;
@@ -321,20 +315,6 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
         _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
     ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
         Err(tonic::Status::unimplemented("otp-1 stub"))
-    }
-
-    async fn push(
-        &self,
-        _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
-    ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stale daemon"))
-    }
-
-    async fn pull_sync(
-        &self,
-        _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
-    ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stale daemon"))
     }
 
     async fn subscribe(
@@ -422,16 +402,10 @@ impl blit_core::generated::blit_server::Blit for UnimplementedBlit {
     }
 }
 
-struct RejectingPullSyncBlit;
+struct RejectingTransferBlit;
 
 #[tonic::async_trait]
-impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
-    type PushStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::ServerPushResponse, tonic::Status>,
-    >;
-    type PullSyncStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::ServerPullMessage, tonic::Status>,
-    >;
+impl blit_core::generated::blit_server::Blit for RejectingTransferBlit {
     type FindStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::FindEntry, tonic::Status>,
     >;
@@ -463,29 +437,6 @@ impl blit_core::generated::blit_server::Blit for RejectingPullSyncBlit {
     ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
         Err(tonic::Status::permission_denied(
             "source ACL rejected delegated peer",
-        ))
-    }
-
-    async fn push(
-        &self,
-        _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
-    ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "test only exercises pull_sync",
-        ))
-    }
-
-    /// otp-9b F4: deliberately NOT the ACL refusal — delegation no
-    /// longer touches PullSync, and keeping equivalent legacy behavior
-    /// here would let a reverted (pre-session) delegated path pass the
-    /// refusal test unnoticed. A revert now surfaces this message
-    /// instead of the pinned NEGOTIATE wording and fails the test.
-    async fn pull_sync(
-        &self,
-        _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
-    ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "delegation no longer uses PullSync (otp-9b)",
         ))
     }
 

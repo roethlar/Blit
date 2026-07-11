@@ -441,9 +441,9 @@ async fn run_remote_pull_transfer_inner(
     // Mirror deletions run in-session at SourceDone (the one delete
     // rule, otp-6b) — there is no post-RPC destructive step, so the
     // monitor's lifetime matches the one library call, exactly like
-    // the push verb. (The old pull's run_pull_sync /
-    // apply_pull_mirror_purge split existed to tear the monitor down
-    // before a client-side purge; that step is gone from this path.)
+    // the push verb. (The old pull's two-phase split existed to tear
+    // the monitor down before a client-side purge; both the split and
+    // the purge died with the driver at otp-10c-2.)
     let outcome = run_remote_pull(execution, progress_handle.as_ref()).await;
 
     drop(progress_handle);
@@ -589,11 +589,8 @@ pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, des
     println!("Destination: {}", destination);
 }
 
-// R46-F3 safety tests for delete_listed_paths moved alongside
-// the implementation in blit_app::transfers::remote::tests.
-// The CLI now relies on those library-local tests; this
-// module's test surface is reserved for CLI-entry-point
-// behavior.
+// This module's test surface is reserved for CLI-entry-point
+// behavior; library behavior is pinned in blit_app/blit_core.
 
 #[cfg(test)]
 mod session_fault_summary_tests {

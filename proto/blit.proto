@@ -3,27 +3,16 @@ package blit.v2;
 
 // The main service for all data transfer and remote management operations.
 service Blit {
-  // Push uses a bidirectional stream for an efficient "check-then-send" workflow.
-  // (Deleted at ONE_TRANSFER_PATH cutover, otp-10 — replaced by Transfer.)
-  rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
-
-  // ONE_TRANSFER_PATH (otp-1): the single role-tagged transfer session
-  // that replaces Push and PullSync at cutover. Contract:
-  // docs/TRANSFER_SESSION.md. UNIMPLEMENTED until otp-3/otp-4.
+  // ONE_TRANSFER_PATH (otp-1): the single role-tagged transfer session.
+  // Contract: docs/TRANSFER_SESSION.md. This is the ONLY byte-moving
+  // RPC. Deleted at cutover (otp-10c-2, D-2026-07-05-1): rpc Push and
+  // rpc PullSync, with every message only they referenced (their
+  // exclusive frame sets, DataTransferNegotiation, the old summaries,
+  // and TransferOperationSpec.metadata_only — the relay scan flag,
+  // whose caller was removed at otp-10c-1). Earlier deletion, same
+  // rule: rpc Pull (2026-07-03, ue-r2-1h). No bridge, no
+  // version-tolerance — same-build peers only (D-2026-07-05-2).
   rpc Transfer(stream TransferFrame) returns (stream TransferFrame);
-
-  // Removed 2026-07-03 (ue-r2-1h): rpc Pull(PullRequest) returns
-  // (stream PullChunk) — the deprecated server-streaming pull.
-  // Superseded whole by PullSync; the relay client's metadata scan and
-  // single-file streaming moved to PullSync sessions
-  // (TransferOperationSpec.metadata_only / a single-file force_grpc
-  // spec). PullRequest/PullChunk were deleted with it (they had no
-  // other referents); PullSummary, ManifestBatch, FileHeader, FileData,
-  // and DataTransferNegotiation survive — PullSync and push share them.
-
-  // Bidirectional pull with manifest comparison for selective transfers.
-  // Client sends local manifest, server compares and sends only needed files.
-  rpc PullSync(stream ClientPullMessage) returns (stream ServerPullMessage);
 
   // Lists contents of a remote directory.
   rpc List(ListRequest) returns (ListResponse);
@@ -69,7 +58,7 @@ service Blit {
 
   // Cancel a daemon-side in-flight transfer by transfer_id.
   // M-Jobs of docs/plan/TUI_DESIGN.md §6.5. Every kind that can
-  // hold an active row — push, pull_sync, and delegated pull —
+  // hold an active row — served/delegated sessions of either role —
   // supports cancellation (D-2026-07-04-3): the daemon fires the
   // row's cancellation token and the dispatcher races it, so an
   // attached transfer tears down promptly and its still-connected
@@ -133,56 +122,6 @@ service Blit {
 
 // --- Message Definitions ---
 
-// Negotiation response indicating how the data plane (TCP/RDMA) is configured.
-message DataTransferNegotiation {
-  uint32 tcp_port = 1;
-  string one_time_token = 2;
-  bool tcp_fallback = 3; // true when the server could not reserve the preferred data-plane.
-  uint32 stream_count = 4; // number of parallel TCP streams negotiated for the data plane
-  reserved 5 to 10; // RDMA fields (QP numbers, GID, etc.) for Phase 3.5
-
-  // ── ue-r2-1b wire dial contract (UNIFIED_TRANSFER_ENGINE_REV4 §5) ──
-  // Fields 11-13 are defined ahead of the behavior slices that consume
-  // them (ue-r2-1e live dials, ue-r2-2 stream resize). Until those land,
-  // senders leave all three unset. Mixed-version behavior: an old peer
-  // skips unknown fields, a new peer treats "absent" as "old peer" —
-  // both degrade to today's static-ladder behavior.
-  //
-  // NOTE on field numbers: the abandoned adaptive-streams PR3 branch
-  // (d9d4ec7) used 11-14 for min/max_stream_count/adaptive_enabled/
-  // epoch0_sub_token. That contract never shipped anywhere, so the
-  // numbers are free to reassign; REV4 assigns 11 to receiver_capacity.
-  // PR3's negotiated min/max stream bounds are subsumed by
-  // CapacityProfile.max_streams (ceiling) with an implicit floor of 1.
-
-  // The byte receiver's capacity profile, advertised to the byte sender
-  // during setup. On push this message already travels daemon→client and
-  // the daemon is the receiver, so the daemon stamps its own profile
-  // here. On pull_sync the negotiation travels daemon→client but the
-  // CLIENT is the byte receiver — the profile travels client→daemon in
-  // TransferOperationSpec.receiver_capacity instead, and this field
-  // stays unset. Absent = "peer predates the profile or has nothing to
-  // advertise" → the sender keeps today's conservative/static behavior.
-  CapacityProfile receiver_capacity = 11;
-
-  // Daemon-authoritative resize gate: the single source of truth both
-  // ends read before any DataPlaneResize may be sent (ue-r2-2). The
-  // daemon sets it true only when ALL hold: the peer advertised resize
-  // support (PushHeader.supports_stream_resize or
-  // PeerCapabilities.supports_stream_resize), the daemon itself supports
-  // resize, tcp_port != 0, and !tcp_fallback. False/absent = fixed
-  // stream count for the whole transfer; resize messages must not be
-  // sent in either direction (an old peer would decode them as an
-  // unknown payload variant and see an empty frame).
-  bool resize_enabled = 12;
-
-  // 16 random bytes that every initial (epoch 0) data socket must echo
-  // after the one_time_token when resize_enabled is true. Empty and
-  // ignored when resize_enabled is false (the pre-resize handshake is
-  // unchanged, so old peers never see a suffixed handshake).
-  bytes epoch0_sub_token = 13;
-}
-
 // ── ue-r2-1b: receiver capacity profile ─────────────────────────────
 // The rich profile the byte RECEIVER advertises to the byte SENDER at
 // setup. The sender owns the live dial (chunk size, prefetch, in-flight
@@ -191,12 +130,12 @@ message DataTransferNegotiation {
 // with margin (REV4 "Risks": a receiver may over-advertise, and there
 // is no probe phase to catch it before the first byte).
 //
-// Travel direction per path (receiver → sender):
-//   push:      dst daemon → client, in DataTransferNegotiation.receiver_capacity
-//   pull_sync: client → src daemon, in TransferOperationSpec.receiver_capacity
-//   delegated: dst daemon → src daemon, in the forwarded spec (the dst
-//              daemon REPLACES any CLI-supplied value — same override
-//              boundary as client_capabilities)
+// Travel direction (receiver → sender): the session DESTINATION
+// advertises its profile in SessionOpen/SessionAccept.receiver_capacity
+// (whichever end plays DESTINATION); a delegated trigger also carries
+// one in TransferOperationSpec.receiver_capacity, which the dst daemon
+// REPLACES with its own before initiating (same override boundary as
+// client_capabilities).
 //
 // Every field uses 0 (or UNSPECIFIED) as "unknown"; the sender treats
 // unknown as "no information — stay conservative", never as "unlimited".
@@ -236,8 +175,8 @@ enum DrainClass {
 // ── ue-r2-1b: mid-transfer stream resize (consumed at ue-r2-2) ──────
 // Control-plane request to grow/shrink the live data-plane stream set.
 // Carried on the transfer control streams (never as a blind TCP
-// data-plane record), and only after the daemon set
-// DataTransferNegotiation.resize_enabled — old peers never receive one.
+// data-plane record), and only when the session negotiated resize
+// support at open.
 // Shape carried over from the adaptive-streams PR3 prior art (d9d4ec7).
 enum DataPlaneResizeOp {
   DATA_PLANE_RESIZE_OP_UNSPECIFIED = 0;
@@ -269,84 +208,7 @@ message DataPlaneResizeAck {
   bool accepted = 3;
 }
 
-// Push Operation
-message ClientPushRequest {
-  oneof payload {
-    PushHeader header = 1;
-    FileHeader file_manifest = 2;
-    ManifestComplete manifest_complete = 3;
-    FileData file_data = 4;
-    UploadComplete upload_complete = 5;
-    TarShardHeader tar_shard_header = 6;
-    TarShardChunk tar_shard_chunk = 7;
-    TarShardComplete tar_shard_complete = 8;
-    // ue-r2-1b: on push the client is the sender/controller and the
-    // dialer. It sends a pre-dial ADD so the daemon can register
-    // (epoch, sub_token) and arm its accept loop before the dial;
-    // REMOVE is accounting-only. Never sent unless the daemon set
-    // resize_enabled. Unused until ue-r2-2 wires the controller.
-    DataPlaneResize data_plane_resize = 9;
-  }
-}
-
-message ServerPushResponse {
-  oneof payload {
-    Ack ack = 1;
-    FileList files_to_upload = 2; // The "NeedList"
-    PushSummary summary = 3;
-    DataTransferNegotiation negotiation = 4; // Negotiation event before summary
-    // ue-r2-1b: daemon confirms it registered the epoch and armed
-    // accept (ADD), or retired the streams (REMOVE). Unused until
-    // ue-r2-2.
-    DataPlaneResizeAck data_plane_resize_ack = 5;
-  }
-}
-
-message PushHeader {
-  string module = 1;
-  // Master switch: when true, the daemon will purge destination
-  // entries absent from the source manifest. The scope is governed
-  // by `mirror_kind` (R59 #1 F2).
-  bool mirror_mode = 2;
-  string destination_path = 3;
-  bool force_grpc = 4;
-
-  // R59 #1 F2: source-side filter the client used during scan.
-  // Daemon-side purge enumerator MUST apply this filter when
-  // `mirror_kind == FILTERED_SUBSET` so it doesn't classify
-  // user-excluded destination entries as "extraneous" and delete them.
-  FilterSpec filter = 5;
-
-  // R59 #1 F2: scope of mirror deletions. Pre-fix the daemon
-  // unconditionally enumerated with FileFilter::default() and
-  // purged anything not in `expected_rel_files`, so a push of
-  // `--include '*.bin' --mirror` deleted the destination's
-  // non-bin files even though they were out of scope. Default
-  // FILTERED_SUBSET preserves user intent; ALL bypasses the
-  // filter for explicit "destination exactly mirrors filtered
-  // source" intent.
-  MirrorMode mirror_kind = 6;
-
-  // R59 #1 F1: client signals it intends the source-side scan
-  // to be complete (no unreadable subtrees). When true, the
-  // daemon refuses to purge any destination entries if the
-  // client's ManifestComplete.scan_complete arrives as false —
-  // because a partial scan would let absent-due-to-unreadable
-  // files be deleted from the destination. Independent of
-  // mirror_kind: required for mirror correctness, also useful
-  // for move-like pushes once those exist.
-  bool require_complete_scan = 7;
-
-  // ue-r2-1b: the push client advertises that it can drive
-  // mid-transfer stream resize. Push opens with PushHeader (it does
-  // not carry PeerCapabilities), so the capability bit lives here;
-  // the daemon folds it into DataTransferNegotiation.resize_enabled.
-  // Old clients leave it false and run at the fixed negotiated
-  // stream count. Clients keep it false until ue-r2-2 actually
-  // implements resize.
-  bool supports_stream_resize = 8;
-}
-
+// Shared transfer frames (session manifest / payload building blocks).
 message FileHeader {
   string relative_path = 1;
   uint64 size = 2;
@@ -371,66 +233,18 @@ message TarShardChunk {
 message TarShardComplete {}
 
 message ManifestComplete {
-  // R59 #1 F1: client tells the daemon whether its source-side
-  // scan finished cleanly. False when any subtree was unreadable
-  // (EACCES, ELOOP, IO errors). Required for the daemon to
-  // safely purge in mirror mode — see PushHeader.require_complete_scan.
-  // Pre-fix the daemon purged destination entries unconditionally
-  // after upload, so a permission error mid-scan caused silent
-  // data loss on the destination.
+  // R59 #1 F1: the SOURCE tells the DESTINATION whether its scan
+  // finished cleanly. False when any subtree was unreadable
+  // (EACCES, ELOOP, IO errors). Required for safe mirror purges —
+  // the session refuses an incomplete-scan mirror, and refuses
+  // outright when the open set require_complete_scan (otp-9b F1).
   bool scan_complete = 1;
 }
-message UploadComplete {}
-message Ack {}
-
-// Acknowledgment for PullSync with server capabilities
-message PullSyncAck {
-  bool server_checksums_enabled = 1;  // Whether daemon computed checksums for manifest
-}
-message FileList { repeated string relative_paths = 1; }
-message PushSummary {
-    uint64 files_transferred = 1;
-    uint64 bytes_transferred = 2;
-    uint64 bytes_zero_copy = 3; // bytes sent via zero-copy kernel paths
-    bool tcp_fallback_used = 4; // true if we had to fall back to gRPC streaming
-    uint64 entries_deleted = 5; // count of files/dirs removed during mirror purge
-}
-
-// Pull progress/summary messages. (PullRequest/PullChunk, the
-// deprecated Pull RPC's messages, were removed 2026-07-03 at
-// ue-r2-1h — see the note in the service block. These two survive
-// because ServerPullMessage and DelegatedPullProgress reuse them.)
+// Progress: enumeration discovered X files (reused by
+// DelegatedPullProgress and TransferProgress).
 message ManifestBatch {
   uint64 file_count = 1;
   uint64 total_bytes = 2;
-}
-
-message PullSummary {
-  uint64 files_transferred = 1;
-  uint64 bytes_transferred = 2;
-  uint64 bytes_zero_copy = 3;
-  bool tcp_fallback_used = 4;
-  uint64 entries_deleted = 5; // count of files/dirs removed during mirror purge
-}
-
-// PullSync Operation (bidirectional pull with manifest comparison).
-// The leading message is now `TransferOperationSpec` (the unified
-// contract — see step 2 of docs/plan/PIPELINE_UNIFICATION.md). The
-// previous `PullSyncHeader` bool-soup shape was removed entirely
-// because we don't carry backward compatibility into the next release.
-message ClientPullMessage {
-  oneof payload {
-    TransferOperationSpec spec = 1;      // Initial request: module, path, filter, compare/mirror/resume
-    FileHeader local_file = 2;           // Client's local file metadata
-    ManifestComplete manifest_done = 3;  // Signals end of client manifest
-    BlockHashList block_hashes = 4;      // Client's block hashes for resume mode
-    // ue-r2-1b: on pull the daemon is the sender/controller and the
-    // client is the dialer. The client acks the daemon's resize command
-    // here, on the outbound half — a different stream direction than
-    // the inbound ServerPullMessage carrying the command, so no
-    // head-of-line block. Unused until ue-r2-2.
-    DataPlaneResizeAck data_plane_resize_ack = 5;
-  }
 }
 
 // Block-level resume messages
@@ -451,51 +265,6 @@ message BlockTransferComplete {
   uint64 total_bytes = 2;                // Final file size (for truncation if needed)
 }
 
-message ServerPullMessage {
-  oneof payload {
-    Ack ack = 1;                              // Acknowledgment of header (deprecated, use pull_sync_ack)
-    FileList files_to_download = 2;           // The "NeedList" - files client should receive
-    DataTransferNegotiation negotiation = 3;  // Data plane setup
-    PullSummary summary = 4;                  // Final summary
-    ManifestBatch manifest_batch = 5;         // Progress: server discovered X files
-    FileHeader file_header = 6;               // For gRPC fallback: file being sent
-    FileData file_data = 7;                   // For gRPC fallback: file content
-    PullSyncAck pull_sync_ack = 8;            // Acknowledgment with server capabilities
-    BlockHashRequest block_hash_request = 9;  // Server requests block hashes for resume
-    BlockTransfer block_transfer = 10;        // Server sends a block for resume
-    BlockTransferComplete block_complete = 11; // Server signals file resume complete
-    // Authoritative deletion list for mirror mode. Server has the
-    // filtered source manifest and the unfiltered client manifest;
-    // it computes exactly which client paths should be removed (with
-    // MirrorMode::FilteredSubset, only client files that match the
-    // source filter are candidates) and tells the client. Replaces
-    // the prior "client walks dest tree" purge inference, which
-    // mis-purged unchanged files and ignored filter scope.
-    FileList delete_list = 12;
-    // Tar-shard payloads on the gRPC server-streaming fallback. Same
-    // shape as ClientPushRequest's tar_shard_* — the daemon's
-    // GrpcServerStreamingSink emits these for batched small files
-    // when the TCP data plane isn't usable. Without these the gRPC
-    // fallback was artificially file-by-file, which left a
-    // performance gap relative to push.
-    TarShardHeader tar_shard_header = 13;
-    TarShardChunk tar_shard_chunk = 14;
-    TarShardComplete tar_shard_complete = 15;
-    // ue-r2-1b: daemon (sender/controller on pull) registers the epoch
-    // locally, then sends this command so the client dials the new
-    // socket (ADD) or retires a receive worker (REMOVE). Never sent
-    // unless resize_enabled was negotiated. Unused until ue-r2-2.
-    DataPlaneResize data_plane_resize = 16;
-  }
-}
-
-// Server requests block hashes from client for a file it wants to resume
-message BlockHashRequest {
-  string relative_path = 1;              // File to get block hashes for
-  uint32 block_size = 2;                 // Block size to use
-}
-
-// Other Operations
 message ListRequest { string module = 1; string path = 2; }
 message ListResponse { repeated FileInfo entries = 1; }
 message FileInfo {
@@ -655,12 +424,9 @@ message TransferOperationSpec {
   // the same scan-completeness requirement that mirror does.
   bool require_complete_scan = 11;
 
-  // ue-r2-1b: the byte receiver's capacity profile for the paths where
-  // the receiver is the spec INITIATOR — pull_sync (the pull client
-  // receives the bytes) and delegated pull (the destination daemon
-  // receives the bytes). Push ignores this field; there the receiver
-  // is the daemon and the profile travels the other way, in
-  // DataTransferNegotiation.receiver_capacity.
+  // ue-r2-1b: the byte receiver's capacity profile on the delegated
+  // trigger (the destination daemon receives the bytes). The session
+  // itself negotiates capacity in SessionOpen/SessionAccept.
   //
   // OVERRIDE BOUNDARY (same rule as client_capabilities): in
   // delegation the byte recipient is the destination daemon, not the
@@ -673,27 +439,6 @@ message TransferOperationSpec {
   // without a bump (see the spec_version history note).
   CapacityProfile receiver_capacity = 12;
 
-  // ue-r2-1h: metadata-only session — the origin enumerates (honoring
-  // `filter`) and streams one ServerPullMessage.file_header per entry,
-  // then a summary, and never moves file bytes or negotiates a data
-  // plane. This is how the remote→remote relay's manifest scan rides
-  // PullSync now that the deprecated Pull RPC (whose PullRequest had
-  // the same flag) is gone. Only valid on a direct PullSync session:
-  // push never carries this message, and delegated pull REJECTS the
-  // flag at its validation boundary — a forwarded metadata-only spec
-  // would make the destination daemon materialize the source's bare
-  // headers as zero-byte files.
-  //
-  // Added at spec_version 2 without a bump, like receiver_capacity.
-  // Mixed-version note: this flag is NOT a pure optimization hint — an
-  // old daemon ignores it and runs the full protocol, streaming file
-  // bytes the caller didn't ask for. That degradation is CORRECT for
-  // the scan caller (it reads headers off the fallback stream and
-  // discards data frames; it always sets force_grpc=true so no data
-  // plane is negotiated) — just wasteful. Nothing safety-critical is
-  // lost, which is the bar the spec_version history note sets for
-  // bump-free additions.
-  bool metadata_only = 13;
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -787,14 +532,10 @@ message PeerCapabilities {
   // this to true; older receivers that didn't honor filter rules
   // will not.
   bool supports_filter_spec = 4;
-  // ue-r2-1b: the pull / delegated-pull byte recipient can drive
-  // mid-transfer stream resize (dial new data sockets on
-  // DataPlaneResize ADD, retire receive workers on REMOVE). The
-  // daemon folds this into DataTransferNegotiation.resize_enabled.
-  // Old peers leave it false and run at the fixed negotiated stream
-  // count. Stays false until ue-r2-2 implements resize. The push-side
-  // equivalent is PushHeader.supports_stream_resize (push does not
-  // carry PeerCapabilities).
+  // ue-r2-1b: the byte recipient can drive mid-transfer stream
+  // resize (dial new data sockets on DataPlaneResize ADD, retire
+  // receive workers on REMOVE). The responder folds this into its
+  // resize gate. Same-build peers both set it (D-2026-07-05-2).
   bool supports_stream_resize = 5;
 }
 
@@ -849,8 +590,8 @@ message DelegatedPullRequest {
   // session.
   //
   // Only valid on `DelegatedPull` (the daemon-to-daemon byte
-  // path). Push / pull_sync put the CLI in the byte
-  // path — detach is meaningless there because the CLI
+  // path). Any route with a local endpoint puts the CLI in the
+  // byte path — detach is meaningless there because the CLI
   // disconnecting drops the bytes. The CLI rejects `--detach`
   // for those routes; the daemon-side flag is therefore
   // unused on non-delegated kinds.
@@ -908,7 +649,8 @@ message BytesProgress {
 }
 
 message DelegatedPullSummary {
-  // Mirrors PullSummary plus a delegation-specific diagnostic field.
+  // The old per-direction summary shape plus a delegation-specific
+  // diagnostic field.
   uint64 files_transferred = 1;
   uint64 bytes_transferred = 2;
   uint64 bytes_zero_copy = 3;
@@ -997,10 +739,9 @@ message ActiveTransfer {
   // transport didn't surface one (in-process tests).
   string peer = 3;
   string module = 4;
-  // Module-relative path the transfer targets. Empty until the
-  // streaming RPCs (push / pull_sync) parse their first stream
-  // frame; populated immediately for delegated_pull (the only
-  // remaining unary-request kind).
+  // Module-relative path the transfer targets. Empty until a served
+  // session resolves its open frame; populated immediately for
+  // delegated_pull (the only unary-request kind).
   string path = 5;
   uint64 start_unix_ms = 6;
   // Byte-level progress fields. Always zero in milestone B —
@@ -1126,11 +867,11 @@ message DaemonEvent {
 
 // Fired when the daemon registers a new active transfer in its
 // `ActiveJobs` table (the same registration that surfaces it in
-// `GetState.active[]`). Streaming RPCs (push, pull_sync) fire this
-// with empty `module`/`path` because those values arrive in the first
-// stream frame, not at dispatch time — subscribers can reconcile via
-// a follow-up GetState query if they need the populated endpoint
-// before the transfer completes.
+// `GetState.active[]`). A served session fires this with empty
+// `module`/`path` because those values arrive in the open frame, not
+// at dispatch time — subscribers can reconcile via a follow-up
+// GetState query if they need the populated endpoint before the
+// transfer completes.
 message TransferStarted {
   string transfer_id = 1;
   TransferKind kind = 2;
@@ -1216,9 +957,8 @@ message TransferError {
 // ═══════════════════════════════════════════════════════════════════
 // ONE_TRANSFER_PATH unified session (otp-1 wire contract).
 // Authoritative state machine + frame table: docs/TRANSFER_SESSION.md.
-// Compiled-but-refusing until otp-3/otp-4 land behavior (the Transfer
-// handler returns UNIMPLEMENTED, pinned by test). Replaces Push and
-// PullSync whole at cutover (otp-10, D-2026-07-05-1); no bridge
+// The ONLY transfer choreography: Push and PullSync were deleted
+// whole at cutover (otp-10c-2, D-2026-07-05-1); no bridge
 // (D-2026-07-05-2: same-build peers only).
 // ═══════════════════════════════════════════════════════════════════
 
@@ -1318,7 +1058,7 @@ message SourceDone {}
 
 // DESTINATION → SOURCE at close: the end that wrote bytes and
 // executed deletes attests to the outcome (one summary shape for
-// every direction; replaces PushSummary/PullSummary at cutover).
+// every direction; it replaced the per-direction summaries at cutover).
 message TransferSummary {
   uint64 files_transferred = 1;
   uint64 bytes_transferred = 2;

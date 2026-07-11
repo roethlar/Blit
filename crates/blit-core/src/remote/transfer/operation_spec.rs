@@ -95,16 +95,6 @@ pub struct NormalizedTransferOperation {
     /// conservative_within`). `None` = old peer or nothing advertised
     /// → conservative defaults.
     pub receiver_capacity: Option<crate::generated::CapacityProfile>,
-    /// ue-r2-1h: metadata-only session — the origin enumerates
-    /// (honoring `filter`) and streams headers plus a summary, never
-    /// moving file bytes or negotiating a data plane. Carries the
-    /// relay's manifest scan, ported from the deleted Pull RPC's flag
-    /// of the same name. Only valid on a direct pull_sync session:
-    /// push never sees this type on the wire, and delegated pull
-    /// REJECTS the flag in `validate_spec` (a forwarded metadata-only
-    /// spec would make the destination materialize bare headers as
-    /// zero-byte files).
-    pub metadata_only: bool,
 }
 
 impl NormalizedTransferOperation {
@@ -156,7 +146,6 @@ impl NormalizedTransferOperation {
             ignore_existing: spec.ignore_existing,
             require_complete_scan: spec.require_complete_scan,
             receiver_capacity: spec.receiver_capacity,
-            metadata_only: spec.metadata_only,
         })
     }
 
@@ -225,6 +214,136 @@ pub(crate) fn filter_from_spec(spec: ProtoFilterSpec) -> Result<FileFilter> {
     Ok(filter)
 }
 
+/// Options for building a delegated remote→remote trigger spec —
+/// the CLI/TUI-side inputs `delegated_spec_from_options` maps onto
+/// the wire [`TransferOperationSpec`] that rides
+/// `DelegatedPullRequest.spec`.
+///
+/// otp-10c-2: relocated verbatim from the deleted old-pull driver
+/// (`remote/pull.rs`, where it was `PullSyncOptions` +
+/// `RemotePullClient::build_spec_from_options`). The delegated
+/// trigger is its only consumer — the destination daemon validates
+/// this spec and maps it onto its own `PullSessionOptions`
+/// (otp-9b); the CLI verbs build session options directly.
+#[derive(Debug, Default, Clone)]
+pub struct DelegatedSpecOptions {
+    /// Force the in-stream byte carrier (`--force-grpc`).
+    pub force_grpc: bool,
+    /// Mirror mode: the destination deletes extraneous entries.
+    pub mirror_mode: bool,
+    /// Mirror scope policy: when true, deletions extend across the
+    /// full destination tree (`MirrorMode::All`). Default false →
+    /// `MirrorMode::FilteredSubset` so files outside the source
+    /// filter scope are never purged.
+    pub delete_all_scope: bool,
+    /// Filter rules applied at the source daemon's enumeration.
+    /// `None` means no filtering.
+    pub filter: Option<crate::generated::FilterSpec>,
+    /// Compare only by size, ignore modification time.
+    pub size_only: bool,
+    /// Transfer all files unconditionally.
+    pub ignore_times: bool,
+    /// Skip files that already exist on target.
+    pub ignore_existing: bool,
+    /// Overwrite even if target is newer (dangerous).
+    pub force: bool,
+    /// Force checksum comparison (slower but more accurate).
+    pub checksum: bool,
+    /// Enable block-level resume for partial/changed files.
+    pub resume: bool,
+    /// Block size for resume (0 = default 1 MiB).
+    pub block_size: u32,
+    /// R49-F2: when true, the operation is refused if the source-side
+    /// scan was incomplete. Set for a move-shaped delegation (the
+    /// caller deletes the source after the transfer succeeds).
+    pub require_complete_scan: bool,
+}
+
+/// Build the delegated trigger's wire [`TransferOperationSpec`] from a
+/// source endpoint + [`DelegatedSpecOptions`]. Body ported verbatim
+/// from the deleted `RemotePullClient::build_spec_from_options`
+/// (otp-10c-2) — same precedence, same wire bytes.
+pub fn delegated_spec_from_options(
+    endpoint: &crate::remote::endpoint::RemoteEndpoint,
+    options: &DelegatedSpecOptions,
+) -> Result<TransferOperationSpec> {
+    use crate::remote::endpoint::RemotePath;
+
+    let (module, rel_path) = match &endpoint.path {
+        RemotePath::Module { module, rel_path } => (module.clone(), rel_path.clone()),
+        RemotePath::Root { rel_path } => (String::new(), rel_path.clone()),
+        RemotePath::Discovery => {
+            bail!("remote source must specify a module (server:/module/...)");
+        }
+    };
+
+    let path_str = if rel_path.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        rel_path
+            .iter()
+            .map(|component| component.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+
+    // ComparisonMode covers only the "given the file is being
+    // considered, what counts as a match?" axis; the orthogonal
+    // "skip if dst exists" axis travels in the top-level
+    // `ignore_existing` spec field.
+    let compare_mode = if options.ignore_times {
+        ComparisonMode::IgnoreTimes
+    } else if options.force {
+        ComparisonMode::Force
+    } else if options.size_only {
+        ComparisonMode::SizeOnly
+    } else if options.checksum {
+        ComparisonMode::Checksum
+    } else {
+        ComparisonMode::SizeMtime
+    };
+    let mirror = if options.mirror_mode {
+        if options.delete_all_scope {
+            MirrorMode::All
+        } else {
+            // Default — files outside the filter scope are not
+            // purged from the destination, since the source
+            // filter excluded them on purpose.
+            MirrorMode::FilteredSubset
+        }
+    } else {
+        MirrorMode::Off
+    };
+    let filter_spec = options.filter.clone().unwrap_or_default();
+    Ok(TransferOperationSpec {
+        spec_version: SUPPORTED_SPEC_VERSION,
+        module,
+        source_path: path_str,
+        filter: Some(filter_spec),
+        compare_mode: compare_mode as i32,
+        mirror_mode: mirror as i32,
+        resume: Some(ResumeSettings {
+            enabled: options.resume,
+            block_size: options.block_size,
+        }),
+        // OVERRIDE BOUNDARY (proto): in a delegation the byte
+        // recipient is the destination DAEMON — it mandatorily
+        // replaces `client_capabilities` with its own before
+        // forwarding, so this CLI-side value is non-authoritative.
+        client_capabilities: Some(PeerCapabilities {
+            supports_resume: true,
+            supports_tar_shards: true,
+            supports_data_plane_tcp: true,
+            supports_filter_spec: true,
+            supports_stream_resize: true,
+        }),
+        force_grpc: options.force_grpc,
+        ignore_existing: options.ignore_existing,
+        require_complete_scan: options.require_complete_scan,
+        receiver_capacity: Some(crate::engine::local_receiver_capacity()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,7 +362,6 @@ mod tests {
             ignore_existing: false,
             require_complete_scan: false,
             receiver_capacity: None,
-            metadata_only: false,
         }
     }
 

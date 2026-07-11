@@ -7,8 +7,8 @@
 //! stopped at formatting/exit-code unit tests in `jobs.rs`. This file
 //! is the regression net W4 needed before changing cancellation
 //! (that change has since landed: D-2026-07-04-3 / w4-5 flipped
-//! CancelJob dispatch on for attached push/pull_sync, so exit 2 no
-//! longer occurs for those kinds; the 0/1/2 mapping is unchanged).
+//! CancelJob dispatch on for the attached push/pull-shaped kinds,
+//! so exit 2 no longer occurs for them; 0/1/2 mapping unchanged).
 //!
 //! Watch exit codes (see `run_jobs_watch`): 0 finished-ok,
 //! 1 finished-failed, 2 not-found, 3 timeout-while-active.
@@ -283,10 +283,11 @@ fn detached_copy_watch_to_terminal_then_cancel_is_not_found() {
 #[test]
 fn cancel_of_active_delegated_job_exits_zero() {
     // A fake source that accepts the gRPC connection but never
-    // answers PullSync: the destination daemon emits Started (the
-    // ActiveJobs row registers synchronously at dispatch, before the
-    // handler runs), then stalls inside pull_sync_with_spec — a
-    // deterministic window in which the job is active and cancelable.
+    // answers the Transfer open: the destination daemon emits
+    // Started (the ActiveJobs row registers synchronously at
+    // dispatch, before the handler runs), then stalls inside its
+    // initiated session — a deterministic window in which the job
+    // is active and cancelable.
     let fake = spawn_stalling_source();
     let ctx = DelegationContext::with_stalling_source(fake.port);
 
@@ -304,25 +305,19 @@ fn cancel_of_active_delegated_job_exits_zero() {
 }
 
 // ---------------------------------------------------------------
-// Fake stalling source: a tonic server whose pull_sync never
+// Fake stalling source: a tonic server whose Transfer open never
 // answers. Everything else is unimplemented. Served through the
 // shared production-shaped scaffold (common::spawn_fake_blit_server).
 // ---------------------------------------------------------------
 
 fn spawn_stalling_source() -> common::FakeServerGuard {
-    spawn_fake_blit_server(StallingPullSyncBlit, "fake stalling source")
+    spawn_fake_blit_server(StallingTransferBlit, "fake stalling source")
 }
 
-struct StallingPullSyncBlit;
+struct StallingTransferBlit;
 
 #[tonic::async_trait]
-impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
-    type PushStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::ServerPushResponse, tonic::Status>,
-    >;
-    type PullSyncStream = tokio_stream::wrappers::ReceiverStream<
-        Result<blit_core::generated::ServerPullMessage, tonic::Status>,
-    >;
+impl blit_core::generated::blit_server::Blit for StallingTransferBlit {
     type FindStream = tokio_stream::wrappers::ReceiverStream<
         Result<blit_core::generated::FindEntry, tonic::Status>,
     >;
@@ -346,35 +341,13 @@ impl blit_core::generated::blit_server::Blit for StallingPullSyncBlit {
 
     /// otp-9b: the delegated dst daemon opens the unified session
     /// against this fake, so the stall this fake models lives on the
-    /// Transfer surface — accept the RPC and never answer, exactly as
-    /// the pull_sync stall below did for the old driver.
+    /// Transfer surface — accept the RPC and never answer.
     async fn transfer(
         &self,
         _: tonic::Request<tonic::Streaming<blit_core::generated::TransferFrame>>,
     ) -> Result<tonic::Response<Self::TransferStream>, tonic::Status> {
         std::future::pending::<()>().await;
         unreachable!("pending() never resolves")
-    }
-
-    async fn push(
-        &self,
-        _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPushRequest>>,
-    ) -> Result<tonic::Response<Self::PushStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("stalling fake source"))
-    }
-
-    /// otp-9b F4: deliberately NOT a stall — delegation no longer
-    /// touches PullSync, and a stalling legacy arm would let a
-    /// reverted (pre-session) delegated path keep the cancel window
-    /// and pass this test unnoticed. A revert now fails fast here and
-    /// the cancel-of-active-job pin fails.
-    async fn pull_sync(
-        &self,
-        _: tonic::Request<tonic::Streaming<blit_core::generated::ClientPullMessage>>,
-    ) -> Result<tonic::Response<Self::PullSyncStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "delegation no longer uses PullSync (otp-9b)",
-        ))
     }
 
     async fn subscribe(

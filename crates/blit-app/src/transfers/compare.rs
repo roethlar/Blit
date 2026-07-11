@@ -1,7 +1,8 @@
 //! otp-10b-2: the ONE args→compare mapping for both remote verbs.
 //!
 //! The old pull client mapped its CLI compare flags onto the wire
-//! `ComparisonMode` in `RemotePullClient::build_spec_from_options`; the
+//! `ComparisonMode` in its spec builder (now the delegated-only
+//! `delegated_spec_from_options`); the
 //! old push driver ignored every compare flag (R54-F2 documented the
 //! silent fall-through to size+mtime). On the unified session the
 //! DESTINATION owns the compare decision for BOTH directions, fed by

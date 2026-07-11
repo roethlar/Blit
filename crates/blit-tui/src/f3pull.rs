@@ -3,9 +3,9 @@
 //!
 //! Unlike the F2 transfers pane (which only *observes*
 //! daemon-tracked jobs via the Subscribe stream), an F3
-//! pull is driven by the TUI process itself: the daemon's
-//! `PullSync` RPC streams bytes into the TUI's local
-//! filesystem. So the lifecycle lives here, mirroring
+//! pull is driven by the TUI process itself: it runs a
+//! DESTINATION-role transfer session that lands bytes in
+//! the TUI's local filesystem. So the lifecycle lives here, mirroring
 //! F4's local-transfer `TransferState` shape rather than
 //! the daemon-job model.
 //!
@@ -95,7 +95,7 @@ pub enum F3PullStatus {
         dest_root: PathBuf,
         kind: PullKind,
     },
-    /// PullSync RPC in flight. d-37: `files` / `bytes` are
+    /// Pull session in flight. d-37: `files` / `bytes` are
     /// live cumulative counters fed by the progress
     /// forwarder (0 until the first `Payload` /
     /// `FileComplete` event lands). d-39: `bytes_per_sec`
@@ -374,7 +374,7 @@ impl F3PullState {
 
     /// d-55: rsync-style destination resolution, shared by the
     /// copy launch and the destructive-confirm gate.
-    /// `run_pull_sync` treats `dest_root` as already-resolved
+    /// The pull session treats `dest_root` as already-resolved
     /// (see [`launch`]), so both paths must apply identical
     /// semantics or a mirror would purge the wrong directory.
     fn resolve_dest(source: &RemoteEndpoint, raw_dest: &str) -> PathBuf {
@@ -408,7 +408,7 @@ impl F3PullState {
         let raw_dest = raw_dest_in.trim().to_string();
         // d-35 round 2: apply the same rsync-style
         // destination resolution the CLI runs before a
-        // pull (`resolve_destination`). `run_pull_sync`
+        // pull (`resolve_destination`). The pull session
         // treats `dest_root` as already-resolved — a
         // single-file pull expects the final FILE path,
         // and a directory pull into an existing local dir
@@ -844,7 +844,7 @@ mod tests {
     }
 
     // d-35 round 2: rsync-style destination resolution.
-    // `run_pull_sync` treats `dest_root` as the already
+    // The pull session treats `dest_root` as the already
     // resolved target, so begin_run must apply the same
     // `resolve_destination` semantics the CLI does.
 
@@ -876,8 +876,8 @@ mod tests {
     }
 
     /// File source into a trailing-slash container →
-    /// `<dir>/<filename>` (the final file path
-    /// `run_pull_sync` expects for a single-file pull).
+    /// `<dir>/<filename>` (the final file path the pull
+    /// session expects for a single-file pull).
     #[test]
     fn resolve_file_into_container_appends_filename() {
         let dest_root = launch_for("nas:/docs/readme.txt", "/tmp/blit-no-such-dir-xyz/");
@@ -1130,7 +1130,10 @@ mod tests {
                 "destructive Enter defers the launch to confirm"
             );
             assert!(s.is_confirming_destructive());
-            assert!(!s.is_running(), "no PullSync until the operator confirms");
+            assert!(
+                !s.is_running(),
+                "no pull session until the operator confirms"
+            );
         }
     }
 

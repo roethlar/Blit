@@ -286,7 +286,7 @@ struct AppState {
     cancel_reply_tx: mpsc::Sender<CancelReply>,
     cancel_request_seq: u64,
     /// d-35: F3 transfer-from-cursor pull lifecycle —
-    /// destination prompt + remote→local PullSync owned
+    /// destination prompt + remote→local pull session owned
     /// by the TUI process. Renders into the F3 footer.
     f3_pull: f3pull::F3PullState,
     f3_pull_reply_tx: mpsc::Sender<F3PullReply>,
@@ -3215,19 +3215,17 @@ async fn run_f3_du_total(remote: &RemoteEndpoint) -> eyre::Result<(u64, u64)> {
 /// daemon emits the root plus immediate children; the root
 /// subtree contains every child, so the max-byte entry is always
 /// the root total we want.
-/// d-35: spawn a remote→local PullSync for an F3
+/// d-35: spawn a remote→local pull session for an F3
 /// transfer-from-cursor. Mirrors the F4 local-transfer
 /// spawn shape: run the operation on a tokio task, flatten
 /// the outcome into a [`F3PullReply`], and send it back on
 /// `tx` for the event loop to apply (generation-guarded by
 /// `request_id`).
 ///
-/// This is the TUI's own pull (the daemon streams bytes to
-/// this process), so it uses default `PullSyncOptions` —
-/// no mirror, no filter, no progress monitor. A non-mirror
-/// pull needs only `run_pull_sync`; the mirror-purge half
-/// (`apply_pull_mirror_purge`) is a no-op when
-/// `mirror_mode = false`, so it's skipped.
+/// This is the TUI's own pull (this process is the session
+/// DESTINATION, otp-10b-2) built via `build_f3_pull_execution`;
+/// mirror deletions run in-session, so there is no separate
+/// purge step to skip.
 /// d-37: live progress snapshot forwarded from a running
 /// pull to the event loop. d-39: `bytes_per_sec` is the
 /// average throughput (0 until ~1s elapsed).
@@ -9295,7 +9293,7 @@ mod tests {
         );
         assert!(
             !app.f3_pull.is_running(),
-            "no PullSync until the operator confirms"
+            "no pull session until the operator confirms"
         );
         assert_eq!(app.current_screen, Screen::F3, "jumped to F3 to confirm");
     }
@@ -9475,40 +9473,36 @@ mod tests {
         assert!(app.f3_pull.is_confirming_destructive(), "still confirming");
     }
 
-    /// d-55 R2 regression (reviewer reopen): the F3 mirror must
-    /// build a mirror-ENABLED wire spec, not just carry the
-    /// post-pull purge flag. The daemon computes the delete list
-    /// from `TransferOperationSpec.mirror_mode`, which
-    /// `build_spec_from_options` derives from `options.mirror_mode`
-    /// — so a mirror whose options say `mirror_mode = false` would
-    /// get `MirrorMode::Off` and silently behave like a plain pull
-    /// (no deletions). Assert the spec is non-Off for a mirror and
-    /// Off for a copy.
+    /// d-55 R2 regression (reviewer reopen): the delegated F1 mirror
+    /// must build a mirror-ENABLED wire spec, not just carry the
+    /// post-pull purge flag. The dst daemon derives its session
+    /// mirror mode from `TransferOperationSpec.mirror_mode`, which
+    /// `delegated_spec_from_options` derives from
+    /// `options.mirror_mode` — so a mirror whose options say
+    /// `mirror_mode = false` would get `MirrorMode::Off` and silently
+    /// behave like a plain copy (no deletions). Assert the spec is
+    /// non-Off for a mirror and Off for a copy.
     #[test]
     fn f3_mirror_options_build_mirror_enabled_spec() {
         use blit_core::generated::MirrorMode;
-        use blit_core::remote::pull::RemotePullClient;
+        use blit_core::remote::transfer::operation_spec::delegated_spec_from_options;
         let endpoint = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
 
-        let mirror_spec = RemotePullClient::build_spec_from_options(
-            &endpoint,
-            &f3_pull_options(f3pull::PullKind::Mirror),
-        )
-        .expect("mirror spec");
+        let mirror_spec =
+            delegated_spec_from_options(&endpoint, &f3_pull_options(f3pull::PullKind::Mirror))
+                .expect("mirror spec");
         assert_ne!(
             mirror_spec.mirror_mode,
             MirrorMode::Off as i32,
             "a mirror must ask the daemon to compute deletions"
         );
         // No filter / no delete-all scope → FilteredSubset (the
-        // build_spec default for mirror_mode without delete_all).
+        // spec-builder default for mirror_mode without delete_all).
         assert_eq!(mirror_spec.mirror_mode, MirrorMode::FilteredSubset as i32);
 
-        let copy_spec = RemotePullClient::build_spec_from_options(
-            &endpoint,
-            &f3_pull_options(f3pull::PullKind::Copy),
-        )
-        .expect("copy spec");
+        let copy_spec =
+            delegated_spec_from_options(&endpoint, &f3_pull_options(f3pull::PullKind::Copy))
+                .expect("copy spec");
         assert_eq!(
             copy_spec.mirror_mode,
             MirrorMode::Off as i32,
@@ -9526,7 +9520,7 @@ mod tests {
     #[test]
     fn f3_move_options_require_complete_scan_and_not_mirror() {
         use blit_core::generated::MirrorMode;
-        use blit_core::remote::pull::RemotePullClient;
+        use blit_core::remote::transfer::operation_spec::delegated_spec_from_options;
         let move_opts = f3_pull_options(f3pull::PullKind::Move);
         assert!(
             move_opts.require_complete_scan,
@@ -9535,8 +9529,7 @@ mod tests {
         assert!(!move_opts.mirror_mode, "move is not a destination mirror");
 
         let endpoint = RemoteEndpoint::parse("nas:/photos/2024").expect("endpoint");
-        let spec =
-            RemotePullClient::build_spec_from_options(&endpoint, &move_opts).expect("move spec");
+        let spec = delegated_spec_from_options(&endpoint, &move_opts).expect("move spec");
         assert_eq!(
             spec.mirror_mode,
             MirrorMode::Off as i32,

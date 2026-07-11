@@ -48,21 +48,10 @@ use crate::service::util::{resolve_contained_path, resolve_module};
 /// using the wire shape. Returns a phase-bearing error string on
 /// failure.
 pub(crate) fn validate_spec(spec: TransferOperationSpec) -> Result<TransferOperationSpec, String> {
+    // (The ue-r2-1h metadata_only rejection that used to follow the
+    // normalization died with the field at otp-10c-2 — the relay scan
+    // shape it guarded against no longer exists on the wire.)
     NormalizedTransferOperation::from_spec(spec.clone()).map_err(|e| format!("{e:#}"))?;
-    // ue-r2-1h review (self-review panel F1): metadata_only is a
-    // header-scan shape for the relay's direct PullSync use ONLY —
-    // it has no meaning on a delegated transfer (and on the old
-    // driver it truncated every enumerated destination file to zero
-    // bytes). The Transfer session has no metadata_only concept, so
-    // this stays refused at the same boundary that validates
-    // everything else, before any outbound connect.
-    if spec.metadata_only {
-        return Err(
-            "metadata_only is not valid on a delegated pull: the destination \
-             would materialize the source's headers as empty files"
-                .to_string(),
-        );
-    }
     Ok(spec)
 }
 
@@ -440,7 +429,6 @@ mod tests {
             ignore_existing: false,
             require_complete_scan: false,
             receiver_capacity: None,
-            metadata_only: false,
         }
     }
 
@@ -480,21 +468,8 @@ mod tests {
         assert!(err.contains("spec_version"));
     }
 
-    #[test]
-    fn validate_spec_rejects_metadata_only() {
-        // ue-r2-1h review (panel F1): a forwarded metadata_only spec
-        // would make the source stream bare headers that this daemon's
-        // pull_sync client loop materializes as zero-byte files —
-        // silent destination truncation reported as success. Fail
-        // closed at the validation boundary.
-        let mut spec = spec_with_caps(PeerCapabilities::default());
-        spec.metadata_only = true;
-        let err = validate_spec(spec).unwrap_err();
-        assert!(
-            err.contains("metadata_only"),
-            "expected metadata_only rejection, got: {err}"
-        );
-    }
+    // (validate_spec_rejects_metadata_only died with the wire field at
+    // otp-10c-2 — the rejected shape is unrepresentable.)
 
     #[test]
     fn validate_spec_rejects_contradictory_force_plus_ignore_existing() {

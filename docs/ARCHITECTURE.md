@@ -47,10 +47,10 @@ The core library containing all transfer logic, protocols, and platform abstract
 |--------|----------------|
 | `remote::transfer::pipeline` | `execute_sink_pipeline` + `execute_sink_pipeline_streaming` — the single entry point for every src→dst combination |
 | `remote::transfer::source` | `TransferSource` trait (read side) + `FsTransferSource` implementation |
-| `remote::transfer::sink` | `TransferSink` trait (write side) + `FsTransferSink`, `DataPlaneSink`, `GrpcFallbackSink`, `NullSink` implementations |
+| `remote::transfer::sink` | `TransferSink` trait (write side) + `FsTransferSink`, `DataPlaneSink`, `NullSink` implementations |
 | `remote::transfer::payload` | `plan_transfer_payloads` — classifies files into tar shards / raw bundles / large-file payloads |
 | `orchestrator` | Local transfer entry: journal fast-path, mirror deletions, perf history; delegates execution to `execute_sink_pipeline` |
-| `remote::push::client` | Push-side negotiation; feeds need-list payloads into `execute_sink_pipeline_streaming` over N `DataPlaneSink`s |
+| `transfer_session` | The ONE transfer choreography (`TransferSession`, both roles); the per-direction driver modules were deleted at cutover (otp-10c-2, D-2026-07-05-1) |
 | `mirror_planner` | Computes file differences for sync operations |
 | `enumeration` | Directory traversal and file discovery |
 | `copy` | Platform-optimized file copying (zero-copy cascade: copy_file_range, sendfile, clonefile, block clone) |
@@ -222,10 +222,14 @@ remote→remote — routes through the same pipeline. Only the concrete
 - **`DataPlaneSink`** — wraps a single TCP `DataPlaneSession`; used for push
   (client→daemon) and pull (daemon→client). Multi-stream transfers create one
   sink per TCP connection.
-- **`GrpcFallbackSink`** — sends payloads over the gRPC control plane; used
-  when `--force-grpc` is set or TCP is unavailable.
 - **`NullSink`** — discards all writes, used for benchmarking source read
   throughput in isolation.
+
+(With `--force-grpc`, or when TCP is unavailable, the session's
+in-stream byte carrier sends payloads as `TransferFrame`s on the
+control stream — a carrier option inside the one choreography, not a
+separate sink; the old wire-specific gRPC fallback sinks died with
+the Push/PullSync RPCs at otp-10c-2.)
 
 ### Per-direction wiring
 
@@ -233,7 +237,7 @@ remote→remote — routes through the same pipeline. Only the concrete
 |---|---|---|
 | local → local | `FsTransferSource` | `FsTransferSink` |
 | local → remote (push, TCP) | `FsTransferSource` | N × `DataPlaneSink` |
-| local → remote (push, gRPC fallback) | `FsTransferSource` | `GrpcFallbackSink` |
+| local → remote (push, in-stream carrier) | `FsTransferSource` | session control-stream frames |
 | remote → local (pull, TCP) | daemon's `FsTransferSource` | N × `DataPlaneSink` (on daemon) |
 | remote → remote (delegated) | source daemon's `FsTransferSource` | destination daemon's receive path (the CLI only triggers and relays progress) |
 
@@ -351,10 +355,10 @@ Defined in `proto/blit.proto` — a single `Blit` service:
 
 ```protobuf
 service Blit {
-  // Transfer (the deprecated server-streaming Pull RPC was removed
-  // 2026-07-03 at ue-r2-1h; PullSync is the only pull wire)
-  rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
-  rpc PullSync(stream ClientPullMessage) returns (stream ServerPullMessage);
+  // Transfer — the ONE byte-moving RPC (role-tagged session; Push and
+  // PullSync were deleted whole at cutover, otp-10c-2 / D-2026-07-05-1;
+  // the server-streaming Pull RPC went earlier at ue-r2-1h)
+  rpc Transfer(stream TransferFrame) returns (stream TransferFrame);
   rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
 
   // Admin / query

@@ -2,8 +2,6 @@ use super::admin::{
     delete_rel_paths, filesystem_stats_for_path, list_completions, sanitize_request_paths,
     split_completion_prefix, stream_disk_usage, stream_find_entries,
 };
-use super::pull_sync::handle_pull_sync_stream;
-use super::push::handle_push_stream;
 use super::util::{
     metadata_mtime_seconds, resolve_contained_path, resolve_module, resolve_relative_path,
 };
@@ -15,13 +13,12 @@ use blit_core::generated::blit_server::Blit;
 pub use blit_core::generated::blit_server::BlitServer;
 use blit_core::generated::{
     daemon_event, ActiveTransfer, CancelJobRequest, CancelJobResponse, ClearRecentRequest,
-    ClearRecentResponse, ClientPullMessage, ClientPushRequest, CompletionRequest,
-    CompletionResponse, Counters, DaemonEvent, DaemonState, DelegatedPullProgress,
-    DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo, FilesystemStatsRequest,
-    FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest, ListModulesRequest,
-    ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PurgeRequest, PurgeResponse,
-    ServerPullMessage, ServerPushResponse, SubscribeRequest, TransferComplete, TransferError,
-    TransferProgress, TransferRecord, TransferStarted,
+    ClearRecentResponse, CompletionRequest, CompletionResponse, Counters, DaemonEvent, DaemonState,
+    DelegatedPullProgress, DelegatedPullRequest, DiskUsageEntry, DiskUsageRequest, FileInfo,
+    FilesystemStatsRequest, FilesystemStatsResponse, FindEntry, FindRequest, GetStateRequest,
+    ListModulesRequest, ListModulesResponse, ListRequest, ListResponse, ModuleInfo, PurgeRequest,
+    PurgeResponse, SubscribeRequest, TransferComplete, TransferError, TransferProgress,
+    TransferRecord, TransferStarted,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -30,7 +27,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 
 /// Capacity of the daemon's `Subscribe` event broadcast channel.
 /// Sized for a handful of subscribers (operator TUI + maybe a
@@ -341,8 +338,6 @@ pub(crate) fn build_transfer_finished_event(
 
 #[tonic::async_trait]
 impl Blit for BlitService {
-    type PushStream = ReceiverStream<Result<ServerPushResponse, Status>>;
-    type PullSyncStream = ReceiverStream<Result<ServerPullMessage, Status>>;
     type FindStream = ReceiverStream<Result<FindEntry, Status>>;
     type DiskUsageStream = ReceiverStream<Result<DiskUsageEntry, Status>>;
     type DelegatedPullStream = ReceiverStream<Result<DelegatedPullProgress, Status>>;
@@ -580,174 +575,6 @@ impl Blit for BlitService {
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
-    async fn push(
-        &self,
-        request: Request<Streaming<ClientPushRequest>>,
-    ) -> Result<Response<Self::PushStream>, Status> {
-        let peer = peer_addr_string(&request);
-        let modules = Arc::clone(&self.modules);
-        let (tx, rx) = mpsc::channel(32);
-        let stream = request.into_inner();
-        let force_grpc_data = self.force_grpc_data;
-        let default_root = self.default_root.clone();
-        // Counter increments at the dispatch boundary — single chokepoint
-        // per RPC, no reach-in to the transfer pipeline. No-op when
-        // metrics are disabled (default). The active-transfers gauge
-        // uses an RAII guard so panic/cancellation can't leak it
-        // (F5 of docs/reviews/codebase_review_2026-05-01.md).
-        let metrics = Arc::clone(&self.metrics);
-        metrics.inc_push();
-        let guard = Arc::clone(&metrics).enter_transfer();
-        // ActiveJobs row registered with empty module/path —
-        // those arrive in the first stream frame; the handler
-        // calls `job.set_endpoint(...)` once the header is
-        // parsed (b-2-set-endpoint).
-        let job = self.active_jobs.register(
-            ActiveJobKind::Push,
-            peer.clone(),
-            String::new(),
-            String::new(),
-        );
-        // Subscribe event — fired with the empty module/path the
-        // row currently carries. Subscribers reconcile to the
-        // populated endpoint by reading GetState.active[] after
-        // the first stream frame; a separate "endpoint resolved"
-        // event family member is a future C slice.
-        self.emit_transfer_started(&job, ActiveJobKind::Push, &peer, "", "");
-        // §3.1 / D5: capture start time so `--metrics` can emit a
-        // per-RPC duration line at completion.
-        let started = std::time::Instant::now();
-        // c-3: clone the broadcast Sender into the spawn closure
-        // so the terminal-event emit (TransferComplete on success,
-        // TransferError on failure) can fire without `&self`.
-        let events_tx = self.events_tx();
-
-        tokio::spawn(async move {
-            // `guard` and `job` are moved into the task; their
-            // Drop fires no matter how the task ends.
-            let guard = guard;
-            let job = job;
-            // w4-3: cloned off the guard so the select can hold a
-            // `cancelled()` future while the handler borrows `job`.
-            let cancel_token = job.cancellation_token().clone();
-            // w4-3: race the handler against client hangup and the
-            // row's cancel token instead of bare-awaiting it. Pre-fix
-            // a client that disconnected during a send-free compute
-            // phase left this task running the full handler for a
-            // dead peer — the mechanism `delegated_pull` has had
-            // since R30-F2. See `resolve_streaming_outcome`.
-            let (ok, err_msg) = resolve_streaming_outcome(
-                handle_push_stream(
-                    modules,
-                    default_root,
-                    stream,
-                    tx.clone(),
-                    force_grpc_data,
-                    &job,
-                ),
-                &tx,
-                &cancel_token,
-                &metrics,
-            )
-            .await;
-            // Record the outcome before dropping the
-            // ActiveJob guard — Drop builds the recent-runs
-            // TransferRecord and reads this cell. If we
-            // dropped the guard first the record would say
-            // "cancelled before outcome recorded."
-            job.record_outcome(ok, err_msg.clone());
-            // c-3 round 2: build the terminal event from the
-            // still-alive guard (we need its byte counter +
-            // start_unix_ms), drain the daemon's bookkeeping
-            // (active row + metrics gauge + error counter),
-            // and ONLY THEN broadcast. A subscriber that races
-            // GetState immediately after seeing the event will
-            // observe the transfer already drained from
-            // active[] and present in recent[] — the event
-            // signals reconcilable state, not "about to drain."
-            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
-            drop(job);
-            // §3.1 followup: drop the active-transfer guard BEFORE the
-            // completion log so `active=N` reflects state AFTER the
-            // just-finished RPC is removed from the gauge. Pre-fix
-            // a single-transfer log showed `active=1`, which is
-            // misleading for an end-of-RPC summary.
-            drop(guard);
-            let _ = events_tx.send(finished_event);
-            metrics.log_completion("push", started.elapsed(), ok);
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
-    async fn pull_sync(
-        &self,
-        request: Request<Streaming<ClientPullMessage>>,
-    ) -> Result<Response<Self::PullSyncStream>, Status> {
-        let peer = peer_addr_string(&request);
-        let modules = Arc::clone(&self.modules);
-        let (tx, rx) = mpsc::channel(32);
-        let stream = request.into_inner();
-        let force_grpc_data = self.force_grpc_data;
-        let default_root = self.default_root.clone();
-        let server_checksums_enabled = self.server_checksums_enabled;
-        let metrics = Arc::clone(&self.metrics);
-        metrics.inc_pull();
-        let guard = Arc::clone(&metrics).enter_transfer();
-        // Same shape as `push` above: module + path arrive in
-        // the first stream frame; handler calls
-        // `job.set_endpoint(...)` after parsing the spec.
-        let job = self.active_jobs.register(
-            ActiveJobKind::PullSync,
-            peer.clone(),
-            String::new(),
-            String::new(),
-        );
-        // Subscribe event with empty module/path — same caveat
-        // as the push site above. Subscribers reconcile via
-        // GetState.active[].
-        self.emit_transfer_started(&job, ActiveJobKind::PullSync, &peer, "", "");
-        let started = std::time::Instant::now();
-        let events_tx = self.events_tx();
-
-        tokio::spawn(async move {
-            let guard = guard;
-            let job = job;
-            // w4-3: same handler-vs-hangup-vs-cancel race as the push
-            // site above — pull_sync's enumerate+checksum collection
-            // is the longest send-free compute window of the three
-            // transfer RPCs, so it was the most exposed to running to
-            // completion for a client that had already disconnected.
-            let cancel_token = job.cancellation_token().clone();
-            let (ok, err_msg) = resolve_streaming_outcome(
-                handle_pull_sync_stream(
-                    modules,
-                    default_root,
-                    stream,
-                    tx.clone(),
-                    force_grpc_data,
-                    server_checksums_enabled,
-                    &job,
-                ),
-                &tx,
-                &cancel_token,
-                &metrics,
-            )
-            .await;
-            job.record_outcome(ok, err_msg.clone());
-            // c-3 round 2: same ordering as push/pull — build,
-            // drain, then broadcast so subscribers can race
-            // GetState and see reconcilable state.
-            let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
-            drop(guard);
-            drop(job);
-            let _ = events_tx.send(finished_event);
-            metrics.log_completion("pull_sync", started.elapsed(), ok);
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
     async fn delegated_pull(
         &self,
         request: Request<DelegatedPullRequest>,
@@ -759,10 +586,9 @@ impl Blit for BlitService {
         // termination path (success, handler failure, client
         // hangup). Module + dst path come straight off the
         // request; they're synchronously available here unlike
-        // the streaming RPCs (push, pull_sync), which register
-        // with empty endpoint strings and have their handlers
-        // fill them in via `ActiveJobGuard::set_endpoint` once
-        // the first stream frame parses.
+        // a served Transfer session, which registers with empty
+        // endpoint strings and fills them in once the open frame
+        // resolves.
         let job = self.active_jobs.register(
             ActiveJobKind::DelegatedPull,
             peer.clone(),
@@ -770,7 +596,7 @@ impl Blit for BlitService {
             req.dst_destination_path.clone(),
         );
         // Subscribe event — module/path are populated for
-        // delegated_pull at dispatch time (unlike push/pull_sync).
+        // delegated_pull at dispatch time (unlike served sessions).
         self.emit_transfer_started(
             &job,
             ActiveJobKind::DelegatedPull,
@@ -787,10 +613,10 @@ impl Blit for BlitService {
         // client connection state.
         let detach = req.detach;
         let transfer_id_for_started = job.transfer_id().to_string();
-        // c-1b: byte-progress sink fed by the data-plane write
-        // loop inside `pull_sync_with_spec`. Reports land on the
-        // same atomic the table row holds, so GetState sees live
-        // progress while the transfer is in flight.
+        // c-1b: byte-progress sink fed by the initiated session's
+        // receive path (otp-9a). Reports land on the same atomic
+        // the table row holds, so GetState sees live progress
+        // while the transfer is in flight.
         let byte_progress = job.bytes_counter();
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
@@ -809,7 +635,7 @@ impl Blit for BlitService {
         // disconnect drops the inner pull future. tonic's response
         // stream drops the mpsc Receiver when the client cancels;
         // that closes the Sender, and tx.closed() resolves. The
-        // handler's pull_sync_with_spec future is then dropped,
+        // handler's initiated-session future is then dropped,
         // which propagates cancellation through the existing pull
         // cancellation path (data plane connection drop, manifest
         // task cleanup). Without this race the spawned task would
@@ -1375,8 +1201,9 @@ fn peer_addr_string<T>(request: &Request<T>) -> String {
 /// Extracted for `delegated_pull` (R30-F2 / m-jobs-1) and generalized
 /// in w4-3 to be the single owner of the biased select every transfer
 /// RPC races through — `delegated_pull` calls it directly (handler
-/// output `bool`), while `push` / `pull_sync` go through
-/// [`resolve_streaming_outcome`] (handler output `Result<(), Status>`).
+/// output `bool`); the served `Transfer` session goes through
+/// [`resolve_transfer_session_outcome`] (handler output
+/// `Result<(), Status>`).
 ///
 /// The select is `biased` with the **handler branch first**: when the
 /// handler future is `Ready`, its result wins even if the cancel token
@@ -1412,78 +1239,12 @@ where
     }
 }
 
-/// w4-3: resolve a streaming transfer RPC's (`push` / `pull_sync`)
-/// terminal outcome, racing the handler against client hangup and the
-/// row's `CancelJob` token via [`resolve_transfer_outcome`].
-///
-/// Pre-w4-3 these dispatchers bare-awaited their handlers, so a client
-/// that disconnected during a send-free compute phase (pull_sync's
-/// enumerate+checksum collection, push's mirror purge) left the daemon
-/// running the whole remaining handler for a dead peer — unbounded,
-/// unobservable work that `CancelJob` also refused to touch
-/// (async-daemon-handlers-blind-to-disconnect-in-compute-phases).
-/// Dropping the handler future propagates through the existing
-/// cancellation paths: the push data-plane accept task is
-/// `AbortOnDrop`-wrapped and its workers live in a `JoinSet` (w4-1),
-/// and pull_sync's payload feeder exits when its channel closes. An
-/// in-flight `spawn_blocking` enumeration/checksum batch still runs to
-/// its natural end with the result discarded — making that window
-/// abortable is the finding's stated follow-up slice.
-///
-/// The streaming RPCs have no `detach` mode (the client is inherently
-/// attached to the byte path), so the hangup arm is always armed —
-/// hence the hardcoded `detach: false`.
-///
-/// Returns the `(ok, error_message)` pair the ActiveJobs ring records:
-/// - handler completed → its result via [`outcome_from_status`]; an
-///   `Err` is counted (`inc_error`) and forwarded to the
-///   still-connected client, exactly as the pre-w4-3 dispatchers did.
-/// - client hung up → `(false, "client cancelled")`; nothing is sent —
-///   the receiver is gone, that's what ended the race.
-/// - cancel token fired → `(false, "cancelled via CancelJob")`, and the
-///   still-connected client gets a terminal `Status::cancelled`. This
-///   arm is live in production: D-2026-07-04-3 flipped
-///   `ActiveJobKind::supports_cancellation` on for push/pull_sync, so
-///   `blit jobs cancel` (and the TUI `K`/`Shift+X`) reaches it for
-///   attached transfers.
-async fn resolve_streaming_outcome<T, H>(
-    handler: H,
-    tx: &mpsc::Sender<Result<T, Status>>,
-    cancel_token: &CancellationToken,
-    metrics: &TransferMetrics,
-) -> (bool, Option<String>)
-where
-    H: std::future::Future<Output = Result<(), Status>>,
-{
-    let outcome =
-        resolve_transfer_outcome(handler, tx.closed(), cancel_token.cancelled(), false).await;
-    match outcome {
-        Some(result) => {
-            let (ok, err_msg) = outcome_from_status(&result);
-            if let Err(status) = result {
-                metrics.inc_error();
-                let _ = tx.send(Err(status)).await;
-            }
-            (ok, err_msg)
-        }
-        // Same disambiguation the delegated_pull closure uses: a fired
-        // token means the cause was CancelJob; otherwise the client
-        // hung up.
-        None if cancel_token.is_cancelled() => {
-            let _ = tx
-                .send(Err(Status::cancelled("transfer cancelled via CancelJob")))
-                .await;
-            (false, Some("cancelled via CancelJob".to_string()))
-        }
-        None => (false, Some("client cancelled".to_string())),
-    }
-}
-
-/// Session variant of [`resolve_streaming_outcome`] for the `Transfer`
-/// RPC: identical hangup / completion / fault handling, but on
-/// `CancelJob` it emits a framed `SessionError{CANCELLED}` on the
-/// response stream instead of a bare `Status::cancelled` (otp-4a codex
-/// F1). The session speaks `TransferFrame`s, so the client reads the
+/// Resolve a served `Transfer` session's terminal outcome, racing the
+/// handler against client hangup and the row's `CancelJob` token via
+/// [`resolve_transfer_outcome`] (the w4-3 shape the deleted
+/// push/pull_sync dispatchers used). On `CancelJob` it emits a framed
+/// `SessionError{CANCELLED}` on the response stream instead of a bare
+/// `Status::cancelled` (otp-4a codex F1). The session speaks `TransferFrame`s, so the client reads the
 /// framed error — and the aborted session future can't send it itself
 /// once the select drops it, so the dispatcher does. A session that
 /// faults on its own already framed the reason; the trailing `Status`
@@ -1523,10 +1284,9 @@ where
 
 /// Translate a handler's `Result<_, Status>` into the
 /// `(ok, error_message)` pair the ActiveJobs guard expects.
-/// Used inside [`resolve_streaming_outcome`] for the `push` /
-/// `pull_sync` dispatchers. `delegated_pull` has its own shape
-/// (handler returns `bool` inside a select) and inlines the
-/// equivalent mapping there.
+/// Used inside [`resolve_transfer_session_outcome`].
+/// `delegated_pull` has its own shape (handler returns `bool`
+/// inside a select) and inlines the equivalent mapping there.
 fn outcome_from_status<T>(result: &Result<T, Status>) -> (bool, Option<String>) {
     match result {
         Ok(_) => (true, None),
@@ -1637,77 +1397,64 @@ mod tests {
         );
     }
 
-    /// w4-3: a client hangup (dropped response `Receiver`) must resolve
-    /// a still-running streaming handler as `(false, "client
-    /// cancelled")` instead of letting it run to completion for a dead
-    /// peer. Pre-fix the push/pull_sync dispatchers bare-awaited the
-    /// handler, so with a `pending()` handler this future would never
-    /// resolve — the test would hang, not merely assert-fail.
-    /// Deterministic: the receiver is dropped before the race starts,
-    /// so `tx.closed()` is already level-set.
+    /// w4-3 (re-pointed at otp-10c-2 from the deleted
+    /// `resolve_streaming_outcome`): a client hangup (dropped response
+    /// `Receiver`) must resolve a still-running served session as
+    /// `(false, "client cancelled")` instead of letting it run to
+    /// completion for a dead peer. Deterministic: the receiver is
+    /// dropped before the race starts, so `tx.closed()` is level-set.
     #[tokio::test]
-    async fn streaming_hangup_resolves_pending_handler_as_client_cancelled() {
+    async fn session_hangup_resolves_pending_handler_as_client_cancelled() {
         use std::future::pending;
-        let (tx, rx) = mpsc::channel::<Result<(), Status>>(1);
+        let (tx, rx) = mpsc::channel::<Result<blit_core::generated::TransferFrame, Status>>(1);
         drop(rx); // client hung up: tonic drops the ReceiverStream
         let token = CancellationToken::new();
         let metrics = TransferMetrics::disabled();
-        let (ok, err) =
-            resolve_streaming_outcome(pending::<Result<(), Status>>(), &tx, &token, &metrics).await;
+        let (ok, err) = resolve_transfer_session_outcome(
+            pending::<Result<(), Status>>(),
+            &tx,
+            &token,
+            &metrics,
+        )
+        .await;
         assert!(!ok, "a hangup-terminated transfer must record ok=false");
         assert_eq!(err.as_deref(), Some("client cancelled"));
     }
 
-    /// w4-3: a fired row token must resolve a still-running streaming
-    /// handler as `(false, "cancelled via CancelJob")` and deliver a
-    /// terminal `Status::cancelled` to the still-connected client.
-    /// (Production dispatch reaches this arm since D-2026-07-04-3
-    /// flipped `supports_cancellation` on for push/pull_sync.)
+    /// w4-3 / audit-10, on the session dispatcher: a handler that has
+    /// completed must win the race even when the client has hung up
+    /// AND the token has fired at the same instant — a real success
+    /// must not be mis-recorded as a cancellation.
     #[tokio::test]
-    async fn streaming_canceljob_resolves_pending_handler_and_notifies_client() {
-        use std::future::pending;
-        let (tx, mut rx) = mpsc::channel::<Result<(), Status>>(1);
-        let token = CancellationToken::new();
-        token.cancel();
-        let metrics = TransferMetrics::disabled();
-        let (ok, err) =
-            resolve_streaming_outcome(pending::<Result<(), Status>>(), &tx, &token, &metrics).await;
-        assert!(!ok);
-        assert_eq!(err.as_deref(), Some("cancelled via CancelJob"));
-        let sent = rx.recv().await.expect("client must get a terminal frame");
-        let status = sent.expect_err("terminal frame must be an error status");
-        assert_eq!(status.code(), tonic::Code::Cancelled);
-    }
-
-    /// w4-3 extends audit-10's guarantee to the streaming dispatchers:
-    /// a handler that has completed must win the race even when the
-    /// client has hung up AND the token has fired at the same instant —
-    /// a real success must not be mis-recorded as a cancellation.
-    #[tokio::test]
-    async fn streaming_completed_handler_wins_simultaneous_races() {
+    async fn session_completed_handler_wins_simultaneous_races() {
         use std::future::ready;
-        let (tx, rx) = mpsc::channel::<Result<(), Status>>(1);
+        let (tx, rx) = mpsc::channel::<Result<blit_core::generated::TransferFrame, Status>>(1);
         drop(rx);
         let token = CancellationToken::new();
         token.cancel();
         let metrics = TransferMetrics::disabled();
-        let (ok, err) = resolve_streaming_outcome(ready(Ok(())), &tx, &token, &metrics).await;
+        let (ok, err) =
+            resolve_transfer_session_outcome(ready(Ok(())), &tx, &token, &metrics).await;
         assert!(ok, "a completed handler must beat simultaneous cancels");
         assert_eq!(err, None);
     }
 
-    /// w4-3: the pre-existing dispatcher error path must survive the
-    /// rewire — a handler `Err` is recorded with the status message and
-    /// the status itself is forwarded to the still-connected client.
+    /// w4-3, on the session dispatcher: a handler `Err` is recorded
+    /// with the status message and the status itself is forwarded to
+    /// the still-connected client.
     #[tokio::test]
-    async fn streaming_handler_error_recorded_and_forwarded_to_client() {
+    async fn session_handler_error_recorded_and_forwarded_to_client() {
         use std::future::ready;
-        let (tx, mut rx) = mpsc::channel::<Result<(), Status>>(1);
+        let (tx, mut rx) = mpsc::channel::<Result<blit_core::generated::TransferFrame, Status>>(1);
         let token = CancellationToken::new();
         let metrics = TransferMetrics::disabled();
-        let (ok, err) =
-            resolve_streaming_outcome(ready(Err(Status::internal("boom"))), &tx, &token, &metrics)
-                .await;
+        let (ok, err) = resolve_transfer_session_outcome(
+            ready(Err(Status::internal("boom"))),
+            &tx,
+            &token,
+            &metrics,
+        )
+        .await;
         assert!(!ok);
         assert_eq!(err.as_deref(), Some("boom"));
         let status = rx
@@ -1719,16 +1466,17 @@ mod tests {
         assert_eq!(status.message(), "boom");
     }
 
-    /// w4-3: a clean success sends nothing extra on the response
-    /// channel (the handler already sent its own summary frames) and
-    /// records `(true, None)`.
+    /// w4-3, on the session dispatcher: a clean success sends nothing
+    /// extra on the response channel (the session already sent its own
+    /// summary frames) and records `(true, None)`.
     #[tokio::test]
-    async fn streaming_handler_success_records_ok_and_sends_nothing() {
+    async fn session_handler_success_records_ok_and_sends_nothing() {
         use std::future::ready;
-        let (tx, mut rx) = mpsc::channel::<Result<(), Status>>(1);
+        let (tx, mut rx) = mpsc::channel::<Result<blit_core::generated::TransferFrame, Status>>(1);
         let token = CancellationToken::new();
         let metrics = TransferMetrics::disabled();
-        let (ok, err) = resolve_streaming_outcome(ready(Ok(())), &tx, &token, &metrics).await;
+        let (ok, err) =
+            resolve_transfer_session_outcome(ready(Ok(())), &tx, &token, &metrics).await;
         assert!(ok);
         assert!(err.is_none());
         drop(tx);

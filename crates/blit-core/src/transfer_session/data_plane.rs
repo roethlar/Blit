@@ -3,10 +3,10 @@
 //! The unified session reuses blit-core's data-plane byte plumbing —
 //! [`DataPlaneSession`] record framing, [`execute_receive_pipeline`],
 //! [`execute_sink_pipeline_streaming`], [`dial_data_plane`] — but owns
-//! its OWN choreography here. The push-specific bind/arm/accept loop
-//! (`blit-daemon` push service) and the multi-stream send driver
-//! (`remote::push::client`) are per-direction drivers ONE_TRANSFER_PATH
-//! deletes at cutover (otp-10), so nothing in this file calls into them.
+//! its OWN choreography here. The per-direction drivers (the old
+//! daemon push service loop and `remote::push::client` send driver)
+//! were deleted at cutover (otp-10c-2); this file is the one
+//! choreography.
 //!
 //! Two orthogonal axes (otp-5b): the **connection role** — the RESPONDER
 //! binds+accepts, the INITIATOR dials (NAT reality) — and the **byte
