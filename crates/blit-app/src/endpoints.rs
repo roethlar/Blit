@@ -19,10 +19,9 @@
 //! two paper-thin wrappers that map `&TransferArgs` →
 //! primitives, and the future TUI will call the library
 //! functions directly. Error messages reference the CLI flag
-//! names (`--dry-run`, `--workers`, `--checksum`) because those
-//! are the documented user surface; if the TUI ever surfaces
-//! the refusal verbatim it can remap to its own labels at the
-//! catch point.
+//! names (`--dry-run`, `--workers`) because those are the
+//! documented user surface; if the TUI ever surfaces the refusal
+//! verbatim it can remap to its own labels at the catch point.
 //!
 //! Endpoint-shape gates ([`ensure_remote_destination_supported`],
 //! [`ensure_remote_source_supported`]) reject
@@ -123,35 +122,23 @@ pub fn ensure_remote_transfer_supported(dry_run: bool, workers_limit_set: bool) 
 }
 
 /// Gate for **remote-source / local-destination** pulls. Allows
-/// `--checksum`: the pull-sync handshake negotiates checksum
-/// support with the daemon and bails at the ack if the daemon has
-/// `--no-server-checksums`. Closes R15-F1 of
-/// `docs/reviews/followup_review_2026-05-02.md`: the previous
-/// blanket `--checksum` rejection made the F11 ack-mismatch error
-/// path unreachable from the CLI.
+/// `--checksum`: the session's Checksum compare (contract v3,
+/// otp-10b-1) is refused at OPEN with `CHECKSUM_DISABLED` when the
+/// daemon runs `--no-server-checksums` — the successor to the old
+/// pull's F11 ack negotiation (R15-F1 made that path reachable).
 pub fn ensure_remote_pull_supported(dry_run: bool, workers_limit_set: bool) -> Result<()> {
     ensure_remote_transfer_supported(dry_run, workers_limit_set)
 }
 
 /// Gate for **local-source / remote-destination** pushes and
-/// **remote-remote** relays. The push protocol has no per-transfer
-/// capability negotiation yet, so `--checksum` is rejected here
-/// rather than silently degrading. Symmetric pull-side support
-/// arrived through the F11 ack negotiation; push needs its own
-/// equivalent before this gate can lift.
-pub fn ensure_remote_push_supported(
-    dry_run: bool,
-    workers_limit_set: bool,
-    checksum: bool,
-) -> Result<()> {
-    ensure_remote_transfer_supported(dry_run, workers_limit_set)?;
-    if checksum {
-        bail!(
-            "--checksum is not supported for remote-destination transfers \
-             (push protocol has no checksum capability negotiation today)"
-        );
-    }
-    Ok(())
+/// **remote-remote** relays. otp-10b-2 lifted the historical
+/// `--checksum` rejection: the unified session's Checksum compare is
+/// role-agnostic (whichever end holds SOURCE hashes its manifest, the
+/// DESTINATION hashes its diff candidates), and a
+/// `--no-server-checksums` daemon refuses at OPEN either direction —
+/// push `--checksum` now behaves exactly like pull `--checksum`.
+pub fn ensure_remote_push_supported(dry_run: bool, workers_limit_set: bool) -> Result<()> {
+    ensure_remote_transfer_supported(dry_run, workers_limit_set)
 }
 
 /// Loose parser: returns `Endpoint::Remote` when the input parses

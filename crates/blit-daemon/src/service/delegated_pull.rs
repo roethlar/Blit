@@ -353,6 +353,12 @@ async fn run_delegated_pull<R: HostResolver + ?Sized>(
             MirrorMode::Off
         },
         byte_progress: Some(byte_progress.clone()),
+        // The delegated dst daemon has no per-file progress consumer —
+        // its live lane is the jobs-row byte counter above — and its
+        // stderr is the daemon log, not an operator terminal, so dial
+        // traces stay off (otp-10b-2 fields; verb-side only).
+        progress: None,
+        trace_data_plane: false,
     };
     let outcome = run_pull_session_with_client(client, &endpoint, dest_root, options)
         .await

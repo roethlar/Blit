@@ -232,3 +232,41 @@ fn local_move_rejects_ignore_times_flag() {
         "src/file.txt must survive — move --ignore-times rejected before any work"
     );
 }
+
+/// otp-10b-2: `--size-only` joins the R54-F2 move rejections. A
+/// size-only skip of a same-size changed file followed by move's
+/// source-delete destroys the only copy — the old pull driver honored
+/// the flag on move (a live data-loss hazard this gate closes).
+#[test]
+fn local_move_rejects_size_only_flag() {
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+    fs::write(src.join("file.txt"), b"src content").unwrap();
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg("--size-only")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(15));
+    assert!(
+        !output.status.success(),
+        "move --size-only must fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("move does not support --size-only"),
+        "expected the --size-only rejection, got stderr: {}",
+        stderr
+    );
+    assert!(
+        src.join("file.txt").exists(),
+        "src/file.txt must survive — move --size-only rejected before any work"
+    );
+}

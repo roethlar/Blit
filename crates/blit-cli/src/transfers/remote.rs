@@ -6,22 +6,20 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
+use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
 use blit_app::transfers::remote::{
-    apply_pull_mirror_purge, run_pull_sync, run_remote_push, LocalPurgeStats, PullExecutionOutcome,
-    PullSyncExecution, PushExecution,
+    run_remote_pull, run_remote_push, PullExecution, PullVerbOutcome, PushExecution,
 };
-use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
-use blit_core::remote::{RemoteEndpoint, RemotePullReport};
+use blit_core::remote::RemoteEndpoint;
 
 use blit_app::endpoints::{format_remote_endpoint, Endpoint};
 
-/// CLI-facing alias for the library's pull-outcome struct.
-/// Field shape unchanged across the A.0 move — this preserves
-/// the public name `DeferredPullState` that `transfers::mod`
-/// already imports while letting the orchestration body live
-/// in `blit-app`.
-pub type DeferredPullState = PullExecutionOutcome;
+/// CLI-facing alias for the library's pull-outcome struct — since
+/// otp-10b-2 the session verb outcome (`summary` + `dest_root`); the
+/// public name `DeferredPullState` that `transfers::mod` imports is
+/// preserved across the retype.
+pub type DeferredPullState = PullVerbOutcome;
 
 /// Spawn the per-transfer progress monitor. `suppress_final_line=true`
 /// lets move callers gate the post-transfer "[progress] final: …"
@@ -158,49 +156,47 @@ pub(crate) fn spawn_progress_monitor_with_options(
     (Some(progress), Some(join))
 }
 
+/// The user's compare flags, lifted off clap once for both verbs —
+/// the inputs to the one `transfers::compare` mapping (otp-10b-2).
+fn verb_compare_flags(args: &TransferArgs) -> CompareFlags {
+    CompareFlags {
+        checksum: args.checksum,
+        size_only: args.size_only,
+        ignore_times: args.ignore_times,
+        force: args.force,
+    }
+}
+
 pub async fn run_remote_push_transfer(
     args: &TransferArgs,
     source: Endpoint,
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<()> {
-    run_remote_push_transfer_inner(
-        args,
-        source,
-        remote,
-        mirror_mode,
-        blit_core::generated::ComparisonMode::SizeMtime,
-        false,
-    )
-    .await
-    .map(|_| ())
+    run_remote_push_transfer_inner(args, source, remote, mirror_mode, false, false)
+        .await
+        .map(|_| ())
 }
 
 /// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
 /// the push summary instead of printing inline so the caller can
 /// defer output until after source-delete.
 ///
-/// codex otp-10a F1: move pushes with `IgnoreTimes` (transfer every
-/// file unconditionally). Move deletes the source on success, so a
-/// compare-mode skip of a same-size file whose content differs would
-/// destroy the only copy of the source bytes; always-transfer makes
-/// the delete safe by construction. Copy/mirror keep `SizeMtime`
-/// (whose same-size dest-newer skip is the standing owner question).
+/// codex otp-10a F1: move maps through `move_comparison_mode` —
+/// `IgnoreTimes` (transfer every file unconditionally), or `Checksum`
+/// when the user asked for it (a content-proven skip is safe). Move
+/// deletes the source on success, so a metadata-shaped skip of a
+/// same-size file whose content differs would destroy the only copy;
+/// the mapping makes the delete safe by construction. Copy/mirror map
+/// through the shared copy mapping (SizeMtime default, whose
+/// same-size dest-newer skip is the standing owner question).
 pub async fn run_remote_push_transfer_deferred(
     args: &TransferArgs,
     source: Endpoint,
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<DeferredPushState> {
-    run_remote_push_transfer_inner(
-        args,
-        source,
-        remote,
-        mirror_mode,
-        blit_core::generated::ComparisonMode::IgnoreTimes,
-        true,
-    )
-    .await
+    run_remote_push_transfer_inner(args, source, remote, mirror_mode, true, true).await
 }
 
 pub struct DeferredPushState {
@@ -248,7 +244,7 @@ async fn run_remote_push_transfer_inner(
     source: Endpoint,
     remote: RemoteEndpoint,
     mirror_mode: bool,
-    compare_mode: blit_core::generated::ComparisonMode,
+    move_verb: bool,
     defer_output: bool,
 ) -> Result<DeferredPushState> {
     let show_progress = args.effective_progress() || args.verbose;
@@ -282,6 +278,14 @@ async fn run_remote_push_transfer_inner(
         blit_core::generated::MirrorMode::Off
     };
 
+    // otp-10b-2: the ONE args→compare mapping, shared with the pull
+    // verb (the old push driver ignored every compare flag).
+    let compare_mode = if move_verb {
+        move_comparison_mode(verb_compare_flags(args))
+    } else {
+        comparison_mode(verb_compare_flags(args))
+    };
+
     let execution = PushExecution {
         source,
         remote: remote.clone(),
@@ -290,10 +294,15 @@ async fn run_remote_push_transfer_inner(
         mirror_kind,
         force_grpc: args.force_grpc,
         trace_data_plane: args.trace_data_plane,
+        // Mirror needs a complete source scan (R59 #1 F1). Move-push
+        // keeps otp-10a's posture instead: the readable subset lands,
+        // the unreadable accumulator fails the call, and the deferred
+        // print + source-delete gate never fire.
         require_complete_scan: mirror_mode,
         resume: args.resume,
         resume_block_size: 0, // destination default (1 MiB)
         compare_mode,
+        ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
     };
 
@@ -331,14 +340,14 @@ pub async fn run_remote_pull_transfer(
     remote: RemoteEndpoint,
     dest_root: &Path,
     mirror_mode: bool,
-    require_complete_scan: bool,
+    move_verb: bool,
 ) -> Result<()> {
     run_remote_pull_transfer_inner(
         args,
         remote,
         dest_root,
         mirror_mode,
-        require_complete_scan,
+        move_verb,
         false, // emit success summary inline (copy/mirror default)
     )
     .await
@@ -346,53 +355,24 @@ pub async fn run_remote_pull_transfer(
 }
 
 /// R51-F4: move's variant of `run_remote_pull_transfer` — runs the
-/// transfer and the (no-op for mirror=false) purge, but does NOT
-/// emit the success summary. Caller is responsible for printing
-/// after source-delete completes (or refusing to print on
-/// source-delete failure). Returns the same `(report, purge_stats)`
-/// state the inline printer uses so the deferred print can
-/// produce byte-identical output.
+/// transfer but does NOT emit the success summary. Caller is
+/// responsible for printing after source-delete completes (or
+/// refusing to print on source-delete failure).
 pub async fn run_remote_pull_transfer_deferred(
     args: &TransferArgs,
     remote: RemoteEndpoint,
     dest_root: &Path,
     mirror_mode: bool,
-    require_complete_scan: bool,
+    move_verb: bool,
 ) -> Result<DeferredPullState> {
-    run_remote_pull_transfer_inner(
-        args,
-        remote,
-        dest_root,
-        mirror_mode,
-        require_complete_scan,
-        true,
-    )
-    .await
+    run_remote_pull_transfer_inner(args, remote, dest_root, mirror_mode, move_verb, true).await
 }
-
-// `DeferredPullState` is now a type alias for
-// `blit_app::transfers::remote::PullExecutionOutcome` (see the
-// top of this file). Same field shape, same callers — the
-// orchestration body that builds it lives in `blit-app` after
-// this A.0 sub-slice.
 
 pub fn print_deferred_pull_result(args: &TransferArgs, state: &DeferredPullState) {
     if args.json {
-        print_pull_json(
-            &state.report,
-            &state.actual_dest,
-            state.mirror_purge_stats.as_ref(),
-        );
+        print_pull_json(&state.summary, &state.dest_root);
     } else {
-        describe_pull_result(&state.report, &state.actual_dest);
-        if let Some(stats) = state.mirror_purge_stats.as_ref() {
-            if stats.files_deleted > 0 || stats.dirs_deleted > 0 {
-                println!(
-                    "Mirror purge removed {} file(s) and {} directorie(s).",
-                    stats.files_deleted, stats.dirs_deleted
-                );
-            }
-        }
+        describe_pull_result(&state.summary, &state.dest_root);
     }
 }
 
@@ -401,14 +381,13 @@ async fn run_remote_pull_transfer_inner(
     remote: RemoteEndpoint,
     dest_root: &Path,
     mirror_mode: bool,
-    require_complete_scan: bool,
+    move_verb: bool,
     defer_output: bool,
 ) -> Result<DeferredPullState> {
-    // Filter parity (Step 4B): build the wire FilterSpec here and
-    // ship it on TransferOperationSpec. The daemon applies the same
-    // rules during its source enumeration, so the file set the daemon
-    // sees matches what `--exclude/--include/--min-size/...` would
-    // have produced for an equivalent push.
+    // Filter parity: the wire FilterSpec rides `SessionOpen.filter`
+    // (otp-10b-2); the daemon SOURCE applies it through the universal
+    // `FilteredSource` chokepoint and this DESTINATION scopes mirror
+    // deletions with it — identical rules to push, by construction.
     let filter_spec = super::build_filter_spec(args)?;
 
     let show_progress = args.effective_progress() || args.verbose;
@@ -419,60 +398,67 @@ async fn run_remote_pull_transfer_inner(
         defer_output, // R53-F1: suppress final progress line on move
     );
 
-    let execution = PullSyncExecution {
+    // R59 #1 F2: --delete-scope → wire MirrorMode, same mapping as the
+    // push verb (FilteredSubset default so `--include … --mirror`
+    // deletes only in-scope entries).
+    let mirror_kind = if mirror_mode {
+        if args.delete_scope_all() {
+            blit_core::generated::MirrorMode::All
+        } else {
+            blit_core::generated::MirrorMode::FilteredSubset
+        }
+    } else {
+        blit_core::generated::MirrorMode::Off
+    };
+
+    // otp-10b-2: the ONE args→compare mapping, shared with push.
+    let compare_mode = if move_verb {
+        move_comparison_mode(verb_compare_flags(args))
+    } else {
+        comparison_mode(verb_compare_flags(args))
+    };
+
+    let execution = PullExecution {
         remote: remote.clone(),
         dest_root: dest_root.to_path_buf(),
-        options: PullSyncOptions {
-            force_grpc: args.force_grpc,
-            mirror_mode,
-            delete_all_scope: args.delete_scope_all(),
-            filter: Some(filter_spec),
-            size_only: args.size_only,
-            ignore_times: args.ignore_times,
-            ignore_existing: args.ignore_existing,
-            force: args.force,
-            checksum: args.checksum,
-            resume: args.resume,
-            block_size: 0, // Use default (1 MiB)
-            // R49-F2: move arms set this true so the daemon refuses
-            // partial source scans before we delete the remote source.
-            require_complete_scan,
-        },
-        compute_checksums: args.checksum,
+        filter: Some(filter_spec),
         mirror_mode,
+        mirror_kind,
+        force_grpc: args.force_grpc,
+        trace_data_plane: args.trace_data_plane,
+        // R49-F2 / otp-9b F1: move refuses a partial source scan
+        // (ScanIncomplete, before any deletion decision) — the remote
+        // source is deleted after this returns. Mirror needs no flag:
+        // the session refuses an incomplete-scan mirror on its own.
+        require_complete_scan: move_verb,
+        resume: args.resume,
+        resume_block_size: 0, // destination default (1 MiB)
+        compare_mode,
+        ignore_existing: args.ignore_existing,
         remote_label: format_remote_endpoint(&remote),
     };
 
-    // Lifecycle (round-2 fix for a0-pull-execution):
-    //
-    //   1. PullSync RPC with progress monitor live.
-    //   2. Tear down progress channel + drain monitor task.
-    //   3. Apply mirror-purge in the now-quiet state.
-    //   4. Print summary (or defer to the move caller).
-    //
-    // Round-1 bundled steps 1 and 3 into a single library call,
-    // which kept the monitor alive through purge and let stale
-    // [progress] ticks emit during destructive cleanup. The
-    // library now exposes the two halves separately so the CLI
-    // (and TUI) can place the lifecycle boundary at step 2.
-    //
-    // R53-F1 (`suppress_final_line`) and R46-F6 (purge stats in
-    // the same JSON document as the report) both still hold —
-    // R46-F6 is about ordering relative to *printing*, which
-    // still happens at the very end below.
-    let sync_outcome = run_pull_sync(execution, progress_handle.as_ref()).await?;
+    // Mirror deletions run in-session at SourceDone (the one delete
+    // rule, otp-6b) — there is no post-RPC destructive step, so the
+    // monitor's lifetime matches the one library call, exactly like
+    // the push verb. (The old pull's run_pull_sync /
+    // apply_pull_mirror_purge split existed to tear the monitor down
+    // before a client-side purge; that step is gone from this path.)
+    let outcome = run_remote_pull(execution, progress_handle.as_ref()).await;
 
     drop(progress_handle);
     if let Some(task) = progress_task {
         let _ = task.await;
     }
 
-    let mirror_purge_stats = apply_pull_mirror_purge(&sync_outcome, mirror_mode).await?;
-
-    let state = PullExecutionOutcome {
-        report: sync_outcome.report,
-        actual_dest: sync_outcome.actual_dest,
-        mirror_purge_stats,
+    let state = match outcome {
+        Ok(state) => state,
+        Err(err) => {
+            // otp-10a Q2 parity: a failed session names the file the
+            // fault touched before the error propagates.
+            emit_session_fault_summary(&err);
+            return Err(err);
+        }
     };
 
     // R51-F4: when deferred, skip the inline print. The caller
@@ -486,40 +472,22 @@ async fn run_remote_pull_transfer_inner(
     Ok(state)
 }
 
-// `enumerate_local_manifest`, `delete_listed_paths`,
-// `LocalPurgeStats`, and the pull-execution orchestration
-// (`PullSyncExecution` / `PullSyncOutcome` /
-// `PullExecutionOutcome` plus `run_pull_sync` and
-// `apply_pull_mirror_purge`) all live in
-// `blit_app::transfers::remote`. CLI imports them at the top of
-// this file; the inner function above is now a thin wrapper that
-// handles clap arg → primitive input translation, the
-// progress-monitor lifecycle (drop/await between pull_sync and
-// purge), and presentation.
-
-fn print_pull_json(
-    report: &RemotePullReport,
-    dest_root: &Path,
-    mirror_purge_stats: Option<&LocalPurgeStats>,
-) {
+fn print_pull_json(summary: &blit_core::generated::TransferSummary, dest_root: &Path) {
     use serde_json::json;
-    // R46-F6: include mirror-purge stats inside the JSON document so
-    // downstream tools see a single self-contained object instead
-    // of having human-readable text appended after the JSON.
-    let mirror = mirror_purge_stats.map(|s| {
-        json!({
-            "files_deleted": s.files_deleted,
-            "dirs_deleted": s.dirs_deleted,
-        })
-    });
+    // otp-10b-2: the pull verb reports the session's
+    // destination-computed summary — the same keys as the push verb's
+    // JSON. Keys only the deleted driver could fill (bytes_zero_copy —
+    // always 0 on the session; the R46-F6 mirror_purge object — the
+    // wire carries one entries_deleted count) are gone; files_resumed
+    // is new.
     let summary = json!({
         "operation": "pull",
         "destination": dest_root.to_string_lossy(),
-        "files_transferred": report.summary.as_ref().map(|s| s.files_transferred).unwrap_or(report.files_transferred as u64),
-        "bytes_transferred": report.summary.as_ref().map(|s| s.bytes_transferred).unwrap_or(report.bytes_transferred),
-        "bytes_zero_copy": report.summary.as_ref().map(|s| s.bytes_zero_copy).unwrap_or(0u64),
-        "tcp_fallback": report.summary.as_ref().map(|s| s.tcp_fallback_used).unwrap_or(false),
-        "mirror_purge": mirror,
+        "files_transferred": summary.files_transferred,
+        "bytes_transferred": summary.bytes_transferred,
+        "files_resumed": summary.files_resumed,
+        "entries_deleted": summary.entries_deleted,
+        "tcp_fallback": summary.in_stream_carrier_used,
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
@@ -542,26 +510,38 @@ fn print_push_json(summary: &blit_core::generated::TransferSummary, destination:
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
 
-pub fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
-    if let Some(summary) = &report.summary {
-        println!(
-            "Pull complete: {} file(s), {} bytes (zero-copy {} bytes){} -> {}.",
-            summary.files_transferred,
-            summary.bytes_transferred,
-            summary.bytes_zero_copy,
-            if summary.tcp_fallback_used {
-                " [gRPC fallback]"
-            } else {
-                ""
-            },
-            dest_root.display()
-        );
+pub fn describe_pull_result(summary: &blit_core::generated::TransferSummary, dest_root: &Path) {
+    // otp-10b-2: the session's DESTINATION (this end) is the scorer.
+    // The pinned `Pull complete:` prefix and `[gRPC fallback]` marker
+    // keep their exact wording; the old driver-only zero-copy clause
+    // is gone (always 0 on the session — zero-copy returns as a
+    // post-cutover write strategy, D-2026-07-05-3).
+    let resumed = if summary.files_resumed > 0 {
+        format!(" ({} resumed block-wise)", summary.files_resumed)
     } else {
+        String::new()
+    };
+    println!(
+        "Pull complete: {} file(s), {} bytes{}{} -> {}.",
+        summary.files_transferred,
+        summary.bytes_transferred,
+        resumed,
+        if summary.in_stream_carrier_used {
+            " [gRPC fallback]"
+        } else {
+            ""
+        },
+        dest_root.display()
+    );
+    if summary.entries_deleted > 0 {
+        let plural = if summary.entries_deleted == 1 {
+            "y"
+        } else {
+            "ies"
+        };
         println!(
-            "Pull complete: {} file(s), {} bytes written to {}.",
-            report.files_transferred,
-            report.bytes_transferred,
-            dest_root.display()
+            "Mirror purge removed {} entr{}.",
+            summary.entries_deleted, plural
         );
     }
 }
@@ -594,10 +574,12 @@ pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, des
         }
     );
     if summary.entries_deleted > 0 {
+        // otp-10b-2: "entr"/"entrs" typo fixed; matches the pull
+        // printer's entry/entries.
         let plural = if summary.entries_deleted == 1 {
-            ""
+            "y"
         } else {
-            "s"
+            "ies"
         };
         println!(
             "Remote purge removed {} entr{}.",

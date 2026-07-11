@@ -61,8 +61,8 @@ use crate::remote::transfer::socket::{
 use crate::remote::transfer::source::TransferSource;
 use crate::remote::transfer::stall_guard::{StallGuard, TRANSFER_STALL_TIMEOUT};
 use crate::remote::transfer::{
-    execute_sink_pipeline_elastic, generate_sub_token, AbortOnDrop, DataPlaneSession, SinkControl,
-    SUB_TOKEN_LEN,
+    execute_sink_pipeline_elastic, generate_sub_token, AbortOnDrop, DataPlaneSession,
+    RemoteTransferProgress, SinkControl, SUB_TOKEN_LEN,
 };
 
 use super::{SessionFault, SourceInstruments};
@@ -221,11 +221,15 @@ impl ResponderDataPlane {
     /// `SourceDone` (drops the arm sender) and every receive worker has
     /// drained its END. Runs concurrently with the control-stream diff
     /// loop; the DESTINATION is the scorer, so it returns the totals.
-    pub(super) fn spawn(self, sink: Arc<dyn TransferSink>) -> ResponderDataPlaneRun {
+    pub(super) fn spawn(
+        self,
+        sink: Arc<dyn TransferSink>,
+        progress: Option<RemoteTransferProgress>,
+    ) -> ResponderDataPlaneRun {
         let ceiling = local_receiver_capacity().max_streams.max(1) as usize;
         let session_token = self.session_token.clone();
         let (arm_tx, arm_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(sink, arm_rx)));
+        let task = AbortOnDrop::new(tokio::spawn(self.accept_loop(sink, progress, arm_rx)));
         ResponderDataPlaneRun {
             arm_tx,
             task,
@@ -237,6 +241,7 @@ impl ResponderDataPlane {
     async fn accept_loop(
         self,
         sink: Arc<dyn TransferSink>,
+        progress: Option<RemoteTransferProgress>,
         arm_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     ) -> Result<ReceiveTotals> {
         // Epoch-0 socket credential: session_token ‖ epoch0_sub_token.
@@ -252,7 +257,7 @@ impl ResponderDataPlane {
         for _ in 0..self.initial_streams {
             let socket = accept_authenticated(&self.listener, &epoch0).await?;
             streams += 1;
-            spawn_receive(&mut receives, socket, &sink);
+            spawn_receive(&mut receives, socket, &sink, progress.clone());
         }
 
         // Resize ADDs: each arms a `session_token ‖ sub_token` credential
@@ -304,7 +309,7 @@ impl ResponderDataPlane {
                     let socket =
                         authenticate_resize(socket, &self.session_token, &mut armed).await?;
                     streams += 1;
-                    spawn_receive(&mut receives, socket, &sink);
+                    spawn_receive(&mut receives, socket, &sink, progress.clone());
                 }
                 joined = receives.join_next(), if !receives.is_empty() => {
                     let outcome = joined
@@ -352,11 +357,12 @@ fn spawn_receive(
     receives: &mut JoinSet<Result<SinkOutcome>>,
     socket: TcpStream,
     sink: &Arc<dyn TransferSink>,
+    progress: Option<RemoteTransferProgress>,
 ) {
     let sink = Arc::clone(sink);
     receives.spawn(async move {
         let mut guarded = StallGuard::new(socket, TRANSFER_STALL_TIMEOUT);
-        execute_receive_pipeline(&mut guarded, sink, None).await
+        execute_receive_pipeline(&mut guarded, sink, progress.as_ref()).await
     });
 }
 
@@ -474,6 +480,13 @@ pub(super) struct InitiatorReceivePlaneRun {
     session_token: Vec<u8>,
     /// The shared need-list receive sink each dialed worker drains into.
     sink: Arc<dyn TransferSink>,
+    /// w6-1 progress lane each receive worker reports into (otp-10b-2);
+    /// cloned per worker, including resize-added ones.
+    progress: Option<RemoteTransferProgress>,
+    /// `[data-plane-client]` connect traces (`--trace-data-plane`,
+    /// otp-10b-2). Applied to the epoch-0 dials at construction and to
+    /// each epoch-N resize dial in [`Self::add_dialed_stream`].
+    trace: bool,
 }
 
 /// Dial the granted epoch-0 socket(s) and spawn one receive worker per
@@ -486,6 +499,8 @@ pub(super) async fn dial_destination_data_plane(
     host: &str,
     grant: &DataPlaneGrant,
     sink: Arc<dyn TransferSink>,
+    progress: Option<RemoteTransferProgress>,
+    trace: bool,
 ) -> Result<InitiatorReceivePlaneRun> {
     let initial = grant.initial_streams.max(1) as usize;
     // Epoch-0 handshake: session_token ‖ epoch0_sub_token.
@@ -500,6 +515,9 @@ pub(super) async fn dial_destination_data_plane(
         // writes the handshake credential — the same bounded dial the
         // SOURCE initiator uses (design-3: one owner for every client-side
         // data-plane dial, both directions).
+        if trace {
+            eprintln!("[data-plane-client] connecting to {addr} (receive)");
+        }
         let socket = dial_data_plane(&addr, &handshake, None)
             .await
             .map_err(|err| {
@@ -509,7 +527,7 @@ pub(super) async fn dial_destination_data_plane(
                 )
             })?;
         streams += 1;
-        spawn_receive(&mut receives, socket, &sink);
+        spawn_receive(&mut receives, socket, &sink, progress.clone());
     }
     Ok(InitiatorReceivePlaneRun {
         receives,
@@ -518,6 +536,8 @@ pub(super) async fn dial_destination_data_plane(
         tcp_port: grant.tcp_port,
         session_token: grant.session_token.clone(),
         sink,
+        progress,
+        trace,
     })
 }
 
@@ -534,6 +554,9 @@ impl InitiatorReceivePlaneRun {
         let mut handshake = self.session_token.clone();
         handshake.extend_from_slice(sub_token);
         let addr = format!("{}:{}", self.host, self.tcp_port);
+        if self.trace {
+            eprintln!("[data-plane-client] connecting to {addr} (receive resize)");
+        }
         let socket = dial_data_plane(&addr, &handshake, None)
             .await
             .map_err(|err| {
@@ -543,7 +566,12 @@ impl InitiatorReceivePlaneRun {
                 )
             })?;
         self.streams += 1;
-        spawn_receive(&mut self.receives, socket, &self.sink);
+        spawn_receive(
+            &mut self.receives,
+            socket,
+            &self.sink,
+            self.progress.clone(),
+        );
         Ok(())
     }
 

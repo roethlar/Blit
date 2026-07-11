@@ -10,6 +10,7 @@
 //! that consume the route-selection primitive in `dispatch.rs`
 //! plus the per-transport execution functions in this module.
 
+pub mod compare;
 pub mod dispatch;
 pub mod filter;
 pub mod local;

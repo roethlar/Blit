@@ -101,6 +101,65 @@ fn move_lands_source_bytes_over_same_size_newer_destination() {
     );
 }
 
+/// otp-10b-2 (codex otp-10a F1 mirrored on pull): a remote→local move
+/// through the actual binary must land the REMOTE source's bytes over
+/// a same-size-newer LOCAL destination before deleting the remote
+/// source — the pull twin of the push-move pin above. Pre-cutover the
+/// old pull's SizeMtime compare would skip the file and the
+/// source-delete would destroy the only copy of its content.
+#[test]
+fn pull_move_lands_source_bytes_over_same_size_newer_destination() {
+    let ctx = TestContext::new();
+
+    let remote_file = ctx.module_dir.join("clash.txt");
+    fs::write(&remote_file, "source-bytes").expect("write remote source");
+
+    // Same size, different content, newer mtime at the LOCAL destination.
+    let dest_dir = ctx.workspace.join("dest");
+    fs::create_dir_all(&dest_dir).expect("dest dir");
+    let dest_file = dest_dir.join("clash.txt");
+    fs::write(&dest_file, "dest---bytes").expect("seed dest");
+    let newer = filetime::FileTime::from_unix_time(
+        filetime::FileTime::from_last_modification_time(
+            &fs::metadata(&remote_file).expect("remote meta"),
+        )
+        .unix_seconds()
+            + 60,
+        0,
+    );
+    filetime::set_file_mtime(&dest_file, newer).expect("bump dest mtime");
+
+    // A single-file remote source (a module-root move cannot delete
+    // the module root itself); the rsync rule drops it into dest_dir.
+    let src_remote = format!("127.0.0.1:{}:/test/clash.txt", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("move")
+        .arg("--yes")
+        .arg(&src_remote)
+        .arg(&dest_dir);
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
+    assert!(
+        output.status.success(),
+        "blit move failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(&dest_file).expect("read dest"),
+        b"source-bytes",
+        "pull-move must overwrite the same-size-newer destination with the remote bytes"
+    );
+    assert!(
+        !remote_file.exists(),
+        "remote source deleted only after its bytes landed"
+    );
+}
+
 #[test]
 fn test_remote_move_remote_to_local() {
     let ctx = TestContext::new();

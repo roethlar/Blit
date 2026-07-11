@@ -12,8 +12,10 @@
 //! Verb wiring: the push-shaped verb (CLI `copy`/`mirror`/`move` to a
 //! remote destination, TUI F1 push) rides [`run_push_session`] since
 //! otp-10a via `blit_app::transfers::remote::run_remote_push`; the
-//! pull-shaped verb keeps riding the old driver until otp-10b. Both push
-//! (otp-4b) and pull (otp-5b) default to the TCP data plane; the in-stream
+//! pull-shaped verb (remote source → local destination, TUI F3 pull)
+//! rides [`run_pull_session`] since otp-10b-2 via
+//! `blit_app::transfers::remote::run_remote_pull`. Both push (otp-4b)
+//! and pull (otp-5b) default to the TCP data plane; the in-stream
 //! carrier is the requested fallback either direction.
 
 use std::path::PathBuf;
@@ -36,8 +38,9 @@ use crate::remote::transfer::{ByteProgressSink, RemoteTransferProgress};
 use crate::transfer_plan::PlanOptions;
 use crate::transfer_session::transport::{grpc_client_transport, GRPC_CHANNEL_FRAMES};
 use crate::transfer_session::{
-    run_destination, run_source, DestinationOutcome, DestinationSessionConfig, DestinationTarget,
-    HelloConfig, SessionEndpoint, SourceInstruments, SourceSessionConfig,
+    run_destination, run_source, DestinationInstruments, DestinationOutcome,
+    DestinationSessionConfig, DestinationTarget, HelloConfig, SessionEndpoint, SourceInstruments,
+    SourceSessionConfig,
 };
 
 /// The push-shaped session options. The full verb surface rides here
@@ -229,9 +232,17 @@ pub struct PullSessionOptions {
     pub mirror_enabled: bool,
     pub mirror_kind: MirrorMode,
     /// otp-9a: live counter the session sink reports applied payload
-    /// bytes against (the delegated dst daemon's jobs row, otp-9; CLI
-    /// progress at otp-10).
+    /// bytes against (the delegated dst daemon's jobs row, otp-9).
     pub byte_progress: Option<ByteProgressSink>,
+    /// otp-10b-2: w6-1 progress events from this DESTINATION's receive
+    /// side — need batches as the denominator, `Payload`/`FileComplete`
+    /// per record received on either carrier. The CLI progress line and
+    /// the TUI footer consume these exactly as they did from the old
+    /// driver. Symmetric with [`PushSessionOptions::progress`].
+    pub progress: Option<RemoteTransferProgress>,
+    /// otp-10b-2: emit `[data-plane-client]` connect traces on the data
+    /// plane sockets this DESTINATION dials (`--trace-data-plane`).
+    pub trace_data_plane: bool,
 }
 
 impl Default for PullSessionOptions {
@@ -247,6 +258,8 @@ impl Default for PullSessionOptions {
             mirror_enabled: false,
             mirror_kind: MirrorMode::Off,
             byte_progress: None,
+            progress: None,
+            trace_data_plane: false,
         }
     }
 }
@@ -262,8 +275,7 @@ impl Default for PullSessionOptions {
 /// responder binds+grants+accepts sockets while sending, and this
 /// DESTINATION initiator dials + receives over them (the transport/role
 /// decoupling). `PullSessionOptions::in_stream_bytes` forces the in-stream
-/// fallback (diagnostics / unreachable data plane). Not wired to CLI verbs
-/// (otp-10).
+/// fallback (diagnostics / unreachable data plane).
 pub async fn run_pull_session(
     endpoint: &RemoteEndpoint,
     dest_root: PathBuf,
@@ -323,7 +335,11 @@ pub async fn run_pull_session_with_client(
         // The initiator dials the data plane on the same host it reached
         // the control plane on (contract §Transport: initiator dials).
         data_plane_host: Some(endpoint.host.clone()),
-        byte_progress: options.byte_progress,
+        instruments: DestinationInstruments {
+            progress: options.progress,
+            byte_progress: options.byte_progress,
+            trace_data_plane: options.trace_data_plane,
+        },
     };
     run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await
 }

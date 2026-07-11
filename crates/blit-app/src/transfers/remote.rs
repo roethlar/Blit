@@ -11,16 +11,19 @@
 //!   canonical-containment safety.
 //! - [`run_pull_sync`] + [`apply_pull_mirror_purge`] +
 //!   [`PullSyncExecution`] / [`PullSyncOutcome`] /
-//!   [`PullExecutionOutcome`] — pull entry-point orchestration,
-//!   split into the pull_sync RPC half (returns intermediate
-//!   state) and the mirror-purge half. The caller composes them
-//!   so it can tear down its progress channel between the two
-//!   steps. Round-1 of this slice bundled both halves into a
-//!   single library call, which kept the progress monitor alive
-//!   through purge — round-2 split fixes that regression.
-//!   Presentation (progress monitor spawn, summary printing)
-//!   stays in `blit-cli` until the M-C `AppProgressEvent`
-//!   reshape lands.
+//!   [`PullExecutionOutcome`] — the OLD pull orchestration over
+//!   the PullSync RPC. No verb reaches it since otp-10b-2 (the
+//!   relay source and the delegated spec builder still ride the
+//!   pull client); it is deleted with the driver at otp-10c.
+//!
+//! - [`run_remote_pull`] + [`PullExecution`] +
+//!   [`PullVerbOutcome`] — pull entry-point orchestration on the
+//!   unified transfer session (otp-10b-2): one DESTINATION-role
+//!   session, mirror deletions in-session (no post-RPC purge
+//!   half — the old split's reason to exist is gone on this
+//!   path). Presentation (progress monitor spawn, summary
+//!   printing) stays in `blit-cli` until the M-C
+//!   `AppProgressEvent` reshape lands.
 //!
 //! - [`run_delegated_pull`] + [`DelegatedPullExecution`] +
 //!   [`DelegatedPullOutcome`] — delegated remote→remote
@@ -58,7 +61,9 @@ use blit_core::generated::{
 };
 use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
 use blit_core::remote::pull::{PullSyncOptions, RemotePullReport};
-use blit_core::remote::transfer::session_client::{run_push_session, PushSessionOptions};
+use blit_core::remote::transfer::session_client::{
+    run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
+};
 use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
 use blit_core::remote::transfer::RemoteTransferProgress;
 use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient};
@@ -427,13 +432,19 @@ pub struct PushExecution {
     pub resume: bool,
     pub resume_block_size: u32,
     /// How the DESTINATION decides which files it needs. Copy/mirror
-    /// verbs pass `SizeMtime` (the historical default; its same-size
-    /// dest-newer skip is the standing owner question in STATE). Move
-    /// verbs MUST pass `IgnoreTimes` (codex otp-10a F1): move deletes
-    /// the source on success, so every source file's bytes must be at
-    /// the destination — a compare-mode skip of a same-size file whose
-    /// content differs would otherwise let move destroy the only copy.
+    /// verbs map their compare flags through the one
+    /// `transfers::compare` mapping (otp-10b-2 — identical for push
+    /// and pull; the SizeMtime default's same-size dest-newer skip is
+    /// the standing owner question in STATE). Move verbs MUST pass
+    /// `move_comparison_mode`'s result (codex otp-10a F1): move
+    /// deletes the source on success, so every skip must be provably
+    /// safe — `IgnoreTimes`, or `Checksum` (content-proven equal).
     pub compare_mode: ComparisonMode,
+    /// Skip files that already exist at the destination, whatever
+    /// their content (`--ignore-existing`) — the orthogonal compare
+    /// axis, riding `SessionOpen.ignore_existing` (otp-10b-2; the old
+    /// push driver silently ignored the flag).
+    pub ignore_existing: bool,
     pub remote_label: String,
 }
 
@@ -522,6 +533,7 @@ pub async fn run_remote_push(
 
     let options = PushSessionOptions {
         compare_mode: execution.compare_mode,
+        ignore_existing: execution.ignore_existing,
         require_complete_scan: execution.require_complete_scan,
         // `--force-grpc`: the session's in-stream byte carrier is the
         // gRPC-fallback lane (otp-8).
@@ -547,6 +559,112 @@ pub async fn run_remote_push(
     Ok(PushExecutionOutcome {
         summary,
         destination: execution.remote_label,
+    })
+}
+
+/// Inputs for [`run_remote_pull`] (otp-10b-2: the pull-shaped verb on
+/// the unified transfer session). Primitive fields only — no clap, no
+/// presentation. CLI builds this from `&TransferArgs`; the TUI builds
+/// it directly. Field semantics match [`PushExecution`] exactly (the
+/// one option surface, roles flipped): `filter` rides
+/// `SessionOpen.filter` and is applied by the daemon SOURCE through
+/// the universal `FilteredSource` chokepoint; `mirror_kind` carries
+/// `--delete-scope`; `compare_mode` comes from the one
+/// `transfers::compare` mapping.
+pub struct PullExecution {
+    pub remote: RemoteEndpoint,
+    /// Local destination root — or, for a single-file pull, the target
+    /// file path itself (the source manifests the file with an empty
+    /// relative path, so the session writes AT this path — the old
+    /// pull's exact convention).
+    pub dest_root: PathBuf,
+    pub filter: Option<FilterSpec>,
+    pub mirror_mode: bool,
+    pub mirror_kind: MirrorMode,
+    pub force_grpc: bool,
+    pub trace_data_plane: bool,
+    /// R49-F2 / otp-9b F1: `blit move` sets this so the session
+    /// refuses a partial source scan (`ScanIncomplete` at
+    /// ManifestComplete) BEFORE the caller deletes the remote source.
+    pub require_complete_scan: bool,
+    pub resume: bool,
+    pub resume_block_size: u32,
+    /// See [`PushExecution::compare_mode`] — the same mapping serves
+    /// both verbs; move verbs pass `move_comparison_mode`'s result.
+    pub compare_mode: ComparisonMode,
+    pub ignore_existing: bool,
+    pub remote_label: String,
+}
+
+/// Output of [`run_remote_pull`]: the session [`TransferSummary`] this
+/// DESTINATION computed (contract: the end that wrote the bytes is the
+/// scorer — here that's us) plus the destination root echoed back for
+/// the printer. Mirror deletions ran in-session (the one delete rule,
+/// otp-6b) and are scored in `summary.entries_deleted` — there is no
+/// post-transfer purge step and no separate purge stats.
+pub struct PullVerbOutcome {
+    pub summary: TransferSummary,
+    pub dest_root: PathBuf,
+}
+
+/// Run a remote pull end-to-end (otp-10b-2): initiate one
+/// DESTINATION-role `Transfer` session against the source daemon via
+/// `run_pull_session`. The daemon becomes the SOURCE responder and
+/// streams its module tree; this end diffs, receives, and (in mirror
+/// mode) deletes extraneous local entries at SourceDone.
+///
+/// `progress` is borrowed for the duration of the session — the caller
+/// owns the channel + monitor task, exactly as with
+/// [`run_remote_push`]. Unlike the old pull there is no post-RPC
+/// destructive step (deletes are in-session), so the monitor's
+/// lifetime lines up with the one call and the run_pull_sync /
+/// apply_pull_mirror_purge split does not apply here. Move's
+/// remote-source delete remains a caller-side follow-up, gated by
+/// `require_complete_scan`.
+pub async fn run_remote_pull(
+    execution: PullExecution,
+    progress: Option<&RemoteTransferProgress>,
+) -> Result<PullVerbOutcome> {
+    // No pre-created destination directories: the session sink creates
+    // each write target's parent chain itself (including the
+    // single-file case, where `dest_root` IS the target file path and
+    // must never be mkdir'd) — pinned by
+    // `single_file_pull_lands_at_the_target_file_path` against a
+    // missing parent. The old pull's explicit parent-creation step is
+    // redundant on this path.
+    let options = PullSessionOptions {
+        compare_mode: execution.compare_mode,
+        ignore_existing: execution.ignore_existing,
+        require_complete_scan: execution.require_complete_scan,
+        // `--force-grpc`: the session's in-stream byte carrier is the
+        // gRPC-fallback lane (otp-8).
+        in_stream_bytes: execution.force_grpc,
+        resume: execution.resume,
+        resume_block_size: execution.resume_block_size,
+        filter: execution.filter,
+        mirror_enabled: execution.mirror_mode,
+        mirror_kind: if execution.mirror_mode {
+            execution.mirror_kind
+        } else {
+            MirrorMode::Off
+        },
+        byte_progress: None,
+        progress: progress.cloned(),
+        trace_data_plane: execution.trace_data_plane,
+    };
+    let outcome = run_pull_session(&execution.remote, execution.dest_root.clone(), options)
+        .await
+        .with_context(|| {
+            format!(
+                "pulling from {} into {}",
+                execution.remote_label,
+                execution.dest_root.display()
+            )
+        })?;
+
+    Ok(PullVerbOutcome {
+        summary: outcome.summary,
+        dest_root: execution.dest_root,
     })
 }
 

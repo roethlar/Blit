@@ -16,12 +16,9 @@ pub fn ensure_remote_pull_supported(args: &TransferArgs) -> Result<()> {
     blit_app::endpoints::ensure_remote_pull_supported(args.dry_run, args.workers.is_some())
 }
 
-/// Clap-shaped wrapper for the push gate.
+/// Clap-shaped wrapper for the push gate. `--checksum` passes since
+/// otp-10b-2 (the session's Checksum compare is role-agnostic).
 /// Library counterpart: [`blit_app::endpoints::ensure_remote_push_supported`].
 pub fn ensure_remote_push_supported(args: &TransferArgs) -> Result<()> {
-    blit_app::endpoints::ensure_remote_push_supported(
-        args.dry_run,
-        args.workers.is_some(),
-        args.checksum,
-    )
+    blit_app::endpoints::ensure_remote_push_supported(args.dry_run, args.workers.is_some())
 }

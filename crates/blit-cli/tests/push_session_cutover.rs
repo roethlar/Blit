@@ -56,6 +56,7 @@ fn push_execution(src: &Path, port: u16) -> PushExecution {
         resume: false,
         resume_block_size: 0,
         compare_mode: ComparisonMode::SizeMtime,
+        ignore_existing: false,
         remote_label: format!("127.0.0.1:{port}:/test/"),
     }
 }

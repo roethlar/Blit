@@ -221,13 +221,35 @@ pub struct DestinationSessionConfig {
     /// rather than dials — falls back to the in-stream carrier. Symmetric
     /// with [`SourceSessionConfig::data_plane_host`].
     pub data_plane_host: Option<String>,
+    /// Caller-side observability hooks (otp-10b-2). All default-off; the
+    /// daemon DESTINATION responder runs with the defaults. Symmetric
+    /// with [`SourceSessionConfig::instruments`].
+    pub instruments: DestinationInstruments,
+}
+
+/// Observability hooks a DESTINATION-side caller can attach to its
+/// session (otp-10b-2 — the pull-shaped verb's progress line rides
+/// these; `byte_progress` predates them, otp-9a). Everything defaults
+/// to off; the session's behavior on the wire is identical either way.
+#[derive(Clone, Default)]
+pub struct DestinationInstruments {
+    /// w6-1 progress events from this end's receive side:
+    /// `ManifestBatch` per NeedBatch emitted (the pull-direction
+    /// denominator — files this DESTINATION requested, the same
+    /// files-to-transfer semantic the push verb reports),
+    /// `Payload`/`FileComplete` per record received on either carrier.
+    pub progress: Option<RemoteTransferProgress>,
     /// Live byte counter for this DESTINATION's writes (otp-9a). The
     /// session sink reports applied payload bytes against it — the same
     /// `ByteProgressSink` contract the old drivers used, so a caller
-    /// that owns a jobs row (the delegated dst daemon, otp-9) or a CLI
-    /// progress line can watch bytes land while the session runs.
-    /// `None` = no reporting (unchanged behavior).
+    /// that owns a jobs row (the delegated dst daemon, otp-9) can watch
+    /// bytes land while the session runs. `None` = no reporting.
     pub byte_progress: Option<crate::remote::transfer::ByteProgressSink>,
+    /// Emit `[data-plane-client]` connect traces on the data-plane
+    /// sockets this DESTINATION initiator dials (`--trace-data-plane`).
+    /// A DESTINATION responder accepts rather than dials; the flag is
+    /// inert there.
+    pub trace_data_plane: bool,
 }
 
 /// A session-terminating fault: either end refusing, aborting, or
@@ -2218,7 +2240,7 @@ pub async fn run_destination(
         negotiated,
         &dst_root,
         cfg.data_plane_host.as_deref(),
-        cfg.byte_progress,
+        cfg.instruments,
     )
     .await
 }
@@ -2232,14 +2254,14 @@ async fn drive_destination(
     negotiated: Negotiated,
     dst_root: &Path,
     data_plane_host: Option<&str>,
-    byte_progress: Option<crate::remote::transfer::ByteProgressSink>,
+    instruments: DestinationInstruments,
 ) -> Result<DestinationOutcome> {
     match destination_session(
         transport,
         negotiated,
         dst_root,
         data_plane_host,
-        byte_progress,
+        instruments,
     )
     .await
     {
@@ -2318,11 +2340,18 @@ pub async fn run_responder(
             };
             // A DESTINATION responder (push) binds+accepts its receive
             // sockets — it never dials, so it needs no data-plane host.
-            // Served destination (push-equivalent): no byte counter yet —
-            // wiring the daemon row's counter through here is the core.rs
-            // jobs-row follow-up, revisited at cutover.
-            let outcome =
-                drive_destination(&mut transport, negotiated, &dst_root, None, None).await?;
+            // Served destination (push-equivalent): no instruments — the
+            // serving daemon has no progress line; wiring the daemon
+            // row's byte counter through here is the core.rs jobs-row
+            // follow-up.
+            let outcome = drive_destination(
+                &mut transport,
+                negotiated,
+                &dst_root,
+                None,
+                DestinationInstruments::default(),
+            )
+            .await?;
             Ok(ResponderOutcome::Destination(outcome))
         }
         // Initiator DESTINATION ⇒ this end is SOURCE (pull-equivalent).
@@ -2495,8 +2524,12 @@ async fn destination_session(
     negotiated: Negotiated,
     dst_root: &Path,
     data_plane_host: Option<&str>,
-    byte_progress: Option<crate::remote::transfer::ByteProgressSink>,
+    instruments: DestinationInstruments,
 ) -> Result<DestinationOutcome> {
+    // otp-10b-2: the receive side's w6-1 progress lane. Need batches are
+    // the denominator (reported where they're emitted, below); per-file
+    // events ride each carrier's record handling.
+    let progress = instruments.progress;
     let compare_mode = ComparisonMode::try_from(negotiated.open.compare_mode)
         .unwrap_or(ComparisonMode::Unspecified);
     let compare_opts = CompareOptions {
@@ -2522,9 +2555,9 @@ async fn destination_session(
         },
     );
     // otp-9a: applied payload bytes report against the caller's live
-    // counter (delegated dst daemon's jobs row, CLI progress at otp-10)
-    // through the sink's existing ByteProgressSink contract.
-    if let Some(bp) = byte_progress {
+    // counter (the delegated dst daemon's jobs row) through the sink's
+    // existing ByteProgressSink contract.
+    if let Some(bp) = instruments.byte_progress {
         sink = sink.with_byte_progress(bp);
     }
     let sink = Arc::new(sink);
@@ -2610,67 +2643,73 @@ async fn destination_session(
             resumed: Arc::clone(&files_resumed),
         }),
     ));
-    let (mut data_plane_recv, mut resize_live, resize_ceiling) = match negotiated
-        .responder_data_plane
-    {
-        // DESTINATION responder (push, otp-4b): accept + receive.
-        Some(rdp) => {
-            let initial = rdp.initial_streams() as usize;
-            let run = rdp.spawn(recv_sink);
-            let ceiling = run.ceiling;
-            (
-                Some(data_plane::DestRecvPlane::Responder(run)),
-                initial,
-                ceiling,
-            )
-        }
-        // DESTINATION initiator (pull, otp-5b): dial + receive when the
-        // SOURCE responder granted a data plane and we have a host to dial.
-        None => match (&negotiated.accept.data_plane, data_plane_host) {
-            (Some(grant), Some(host)) => {
-                let initial = grant.initial_streams.max(1) as usize;
-                let run = data_plane::dial_destination_data_plane(host, grant, recv_sink).await?;
-                // otp-5b-2: the pull data plane resizes too. Seed
-                // `resize_live` from the epoch-0 streams dialed and bound
-                // growth by the capacity THIS end advertised in its open
-                // (it is the byte receiver) — the exact ceiling the SOURCE
-                // responder's dial already clamps to, so both ends agree
-                // even when the caller advertised a max_streams below this
-                // host's fresh local reading (codex otp-5b-2 F1). On a
-                // Resize frame the initiator dials the epoch-N socket (vs
-                // the responder path's arm).
-                let ceiling = negotiated
-                    .open
-                    .receiver_capacity
-                    .as_ref()
-                    .map(|c| c.max_streams)
-                    .unwrap_or(0)
-                    .max(1) as usize;
+    let (mut data_plane_recv, mut resize_live, resize_ceiling) =
+        match negotiated.responder_data_plane {
+            // DESTINATION responder (push, otp-4b): accept + receive.
+            Some(rdp) => {
+                let initial = rdp.initial_streams() as usize;
+                let run = rdp.spawn(recv_sink, progress.clone());
+                let ceiling = run.ceiling;
                 (
-                    Some(data_plane::DestRecvPlane::Initiator(run)),
+                    Some(data_plane::DestRecvPlane::Responder(run)),
                     initial,
                     ceiling,
                 )
             }
-            // A grant with no host to dial is an inconsistent initiator
-            // config: fail fast, mirroring the SOURCE initiator
-            // (`source_send_half`). The SOURCE responder has already bound
-            // and blocks accepting the socket this end would dial, so
-            // silently taking the in-stream branch cannot fall back — it
-            // would deadlock until the responder's accept times out. A
-            // grant means the initiator MUST dial (contract §Transport).
-            // (codex otp-5b-1 finding.)
-            (Some(_), None) => {
-                return Err(eyre::Report::new(SessionFault::internal(
-                    "responder granted a TCP data plane but this DESTINATION \
+            // DESTINATION initiator (pull, otp-5b): dial + receive when the
+            // SOURCE responder granted a data plane and we have a host to dial.
+            None => match (&negotiated.accept.data_plane, data_plane_host) {
+                (Some(grant), Some(host)) => {
+                    let initial = grant.initial_streams.max(1) as usize;
+                    let run = data_plane::dial_destination_data_plane(
+                        host,
+                        grant,
+                        recv_sink,
+                        progress.clone(),
+                        instruments.trace_data_plane,
+                    )
+                    .await?;
+                    // otp-5b-2: the pull data plane resizes too. Seed
+                    // `resize_live` from the epoch-0 streams dialed and bound
+                    // growth by the capacity THIS end advertised in its open
+                    // (it is the byte receiver) — the exact ceiling the SOURCE
+                    // responder's dial already clamps to, so both ends agree
+                    // even when the caller advertised a max_streams below this
+                    // host's fresh local reading (codex otp-5b-2 F1). On a
+                    // Resize frame the initiator dials the epoch-N socket (vs
+                    // the responder path's arm).
+                    let ceiling = negotiated
+                        .open
+                        .receiver_capacity
+                        .as_ref()
+                        .map(|c| c.max_streams)
+                        .unwrap_or(0)
+                        .max(1) as usize;
+                    (
+                        Some(data_plane::DestRecvPlane::Initiator(run)),
+                        initial,
+                        ceiling,
+                    )
+                }
+                // A grant with no host to dial is an inconsistent initiator
+                // config: fail fast, mirroring the SOURCE initiator
+                // (`source_send_half`). The SOURCE responder has already bound
+                // and blocks accepting the socket this end would dial, so
+                // silently taking the in-stream branch cannot fall back — it
+                // would deadlock until the responder's accept times out. A
+                // grant means the initiator MUST dial (contract §Transport).
+                // (codex otp-5b-1 finding.)
+                (Some(_), None) => {
+                    return Err(eyre::Report::new(SessionFault::internal(
+                        "responder granted a TCP data plane but this DESTINATION \
                      initiator has no host to dial",
-                )))
-            }
-            // No grant (the responder could not bind, or the initiator
-            // asked for in-stream): the in-stream carrier.
-            (None, _) => (None, 0usize, 0usize),
-        },
-    };
+                    )))
+                }
+                // No grant (the responder could not bind, or the initiator
+                // asked for in-stream): the in-stream carrier.
+                (None, _) => (None, 0usize, 0usize),
+            },
+        };
 
     // otp-7a/7b: the DESTINATION chooses the resume block size (plan D5
     // — it hashes first; the SOURCE reads the size from each
@@ -2738,6 +2777,7 @@ async fn destination_session(
                         &mut granted,
                         &outstanding,
                         &mut needed_paths,
+                        progress.as_ref(),
                     )
                     .await?;
                 }
@@ -2786,6 +2826,7 @@ async fn destination_session(
                     &mut granted,
                     &outstanding,
                     &mut needed_paths,
+                    progress.as_ref(),
                 )
                 .await?;
                 // NeedComplete only after ManifestComplete received
@@ -2838,6 +2879,13 @@ async fn destination_session(
                 let outcome = receive_file_record(transport, &sink, &header).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
+                // otp-10b-2: in-stream per-file progress, same convention
+                // as the data-plane receive (`execute_receive_pipeline`):
+                // bytes ride Payload, FileComplete is byteless.
+                if let Some(p) = &progress {
+                    p.report_payload(0, outcome.bytes_written);
+                    p.report_file_complete(header.relative_path.clone());
+                }
             }
             Some(Frame::Block(block)) => {
                 // otp-7a: a resume block record opens with its first
@@ -2855,6 +2903,12 @@ async fn destination_session(
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 files_resumed.fetch_add(1, Ordering::Relaxed);
+                // The whole block record (patch bytes + completion) ran
+                // to its completion frame — one resumed file done.
+                if let Some(p) = &progress {
+                    p.report_payload(0, outcome.bytes_written);
+                    p.report_file_complete(header.relative_path.clone());
+                }
             }
             Some(Frame::BlockComplete(complete)) => {
                 // otp-7a: a zero-block record — every block matched
@@ -2873,6 +2927,11 @@ async fn destination_session(
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 files_resumed.fetch_add(1, Ordering::Relaxed);
+                // Zero-block record: nothing transferred, the file is
+                // complete (identical content, metadata stamped).
+                if let Some(p) = &progress {
+                    p.report_file_complete(header.relative_path.clone());
+                }
             }
             Some(Frame::TarShardHeader(shard)) => {
                 if data_plane_recv.is_some() {
@@ -2909,9 +2968,26 @@ async fn destination_session(
                         }
                     }
                 }
+                // Capture member paths for the per-file progress lane
+                // before the record consumes the shard (the data-plane
+                // receive does the same); skip the allocation when no one
+                // is listening.
+                let member_paths: Option<Vec<String>> = progress.as_ref().map(|_| {
+                    shard
+                        .files
+                        .iter()
+                        .map(|h| h.relative_path.clone())
+                        .collect()
+                });
                 let outcome = receive_tar_record(transport, &sink, shard).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
+                if let Some(p) = &progress {
+                    p.report_payload(0, outcome.bytes_written);
+                    for path in member_paths.unwrap_or_default() {
+                        p.report_file_complete(path);
+                    }
+                }
             }
             Some(Frame::Resize(resize)) => {
                 // sf-2 shape correction (otp-4b-2 push, otp-5b-2 pull): the
@@ -3128,6 +3204,10 @@ async fn diff_chunk_and_send_needs(
     // Not-yet-delivered COMPLETION set (shared with the receive).
     outstanding: &data_plane::OutstandingNeeds,
     needed_paths: &mut Vec<String>,
+    // otp-10b-2: w6-1 denominator — each NeedBatch sent reports a
+    // ManifestBatch (files this DESTINATION requested), mirroring what
+    // the push SOURCE reports per NeedBatch received.
+    progress: Option<&RemoteTransferProgress>,
 ) -> Result<()> {
     if chunk.is_empty() {
         return Ok(());
@@ -3195,6 +3275,9 @@ async fn diff_chunk_and_send_needs(
     };
     if entries.is_empty() {
         return Ok(());
+    }
+    if let Some(p) = progress {
+        p.report_manifest_batch(entries.len());
     }
     transport
         .send(frame(Frame::NeedBatch(NeedBatch { entries })))

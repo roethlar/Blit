@@ -373,78 +373,59 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         );
     }
 
-    // R54-F2 (data-loss): reject `--force` and `--ignore-times`
-    // for move. Both flags are documented as "unconditionally
-    // transfer regardless of size/mtime match," but neither is
-    // currently plumbed through `LocalMirrorOptions` /
-    // `PushControl`'s comparison-mode selection — the local and
-    // local→remote paths fall through to size+mtime regardless.
-    // For move that means a stale destination with matching
-    // size+mtime is treated as up-to-date, the source isn't
-    // copied, and then the source-delete step removes it.
+    // R54-F2 (data-loss), refreshed at otp-10b-2: reject `--force`,
+    // `--ignore-times`, and `--size-only` for move.
     //
-    // R55: the error messages must NOT point users at a workaround
-    // that has the same data-loss class. Specifically:
-    //   - `blit copy --force` / `--ignore-times`: not plumbed for
-    //     local-source paths either — same skip-then-delete bug
-    //     hits in the recommended copy step.
-    //   - `blit copy --checksum`: works end-to-end for local→local
-    //     and for remote-source pull (PullSyncOptions.checksum is
-    //     honored), but local→remote push at
-    //     `daemon/src/service/push/control.rs:419` decides need-list
-    //     by size+mtime only regardless. So --checksum is safe to
-    //     recommend for local-to-local, NOT for local-to-remote.
-    // The remediation in each branch below is tailored to what
-    // the user actually has available as a safe escape hatch.
+    // Remote moves already transfer unconditionally (the session's
+    // move mapping is IgnoreTimes — or Checksum, the one skip that is
+    // content-proven safe — codex otp-10a F1), so `--force` /
+    // `--ignore-times` are redundant there. The LOCAL move path still
+    // falls through to size+mtime regardless of these flags (it rides
+    // the local orchestration until otp-11), so honoring them cannot
+    // be promised uniformly; a user relying on the flag on the one
+    // path that ignores it would hit the skip-then-delete data loss.
+    //
+    // `--size-only` is worse than redundant: a size-only skip of a
+    // changed file followed by source-delete destroys the only copy —
+    // the exact hazard the move mapping exists to prevent. The old
+    // pull driver honored it on move; the gate closes that hole.
+    //
+    // R55 still applies: escape hatches must not have the same
+    // data-loss class. `blit copy --checksum` is now honored on every
+    // remote direction (the session's Checksum compare is
+    // role-agnostic since otp-10b-1/2) and locally — or use
+    // `blit move --checksum`, which transfers exactly the files whose
+    // content differs and only skips proven-identical ones.
     if args.force {
         bail!(
-            "move does not support --force: the local and \
-             local→remote transfer paths don't currently honor \
-             this flag in their comparison mode, so a stale \
-             destination with matching size+mtime would be \
-             treated as up-to-date — the source would be \
-             skipped during the transfer and then deleted by \
-             move.\n\
-             \n\
-             Safe escape hatches by direction:\n\
-               local→local: `blit copy --checksum SRC DST` \
-             (content comparison) then `blit rm SRC` once you've \
-             verified the result.\n\
-               remote-source: `blit copy --checksum REMOTE DST` \
-             (--checksum is honored end-to-end on the pull path) \
-             then delete the remote source manually.\n\
-               local→remote: NO automatic safe replacement — the \
-             daemon's push receive compares by size+mtime only \
-             regardless of --checksum. `touch` source files to \
-             bump mtime before transfer, or compare contents \
-             out-of-band, then move.\n\
-             \n\
-             Proper plumbing of --force/--ignore-times through \
-             the local and push comparison paths is a post-0.1.0 \
-             item."
+            "move does not support --force: remote moves already \
+             transfer every file unconditionally, and the local move \
+             path does not honor the flag (its size+mtime skip plus \
+             move's source-delete would lose data). Use \
+             `blit move --checksum` for a content-verified move, or \
+             `blit copy --checksum SRC DST` then remove the source \
+             once verified."
         );
     }
     if args.ignore_times {
         bail!(
-            "move does not support --ignore-times: same reason \
-             as --force — the local and local→remote paths fall \
-             through to size+mtime comparison regardless of \
-             this flag, so a stale destination with matching \
-             size+mtime would be treated as up-to-date and the \
-             source-delete step would lose data.\n\
-             \n\
-             Safe escape hatches by direction:\n\
-               local→local: `blit copy --checksum SRC DST` then \
-             `blit rm SRC` once verified.\n\
-               remote-source: `blit copy --checksum REMOTE DST` \
-             then delete the remote source manually.\n\
-               local→remote: NO automatic safe replacement — \
-             daemon push compares by size+mtime only. `touch` \
-             source files to bump mtime first, or verify \
-             contents out-of-band, then move.\n\
-             \n\
-             Proper plumbing of --ignore-times through the local \
-             and push paths is a post-0.1.0 item."
+            "move does not support --ignore-times: remote moves \
+             already transfer every file unconditionally, and the \
+             local move path does not honor the flag (its size+mtime \
+             skip plus move's source-delete would lose data). Use \
+             `blit move --checksum` for a content-verified move, or \
+             `blit copy --checksum SRC DST` then remove the source \
+             once verified."
+        );
+    }
+    if args.size_only {
+        bail!(
+            "move does not support --size-only: a same-size file \
+             whose content changed would be skipped during the \
+             transfer and then permanently removed by the \
+             source-delete step. Use `blit move --checksum` for a \
+             content-verified move, or plain `blit move` (which \
+             transfers every file unconditionally)."
         );
     }
 
@@ -548,9 +529,11 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         (Endpoint::Remote(remote), Endpoint::Local(dst_path)) => {
             ensure_remote_pull_supported(args)?;
             ensure_remote_source_supported(&remote)?;
-            // R49-F2: require_complete_scan=true so the source
-            // daemon refuses partial scans before we delete the
-            // remote source via delete_remote_path below.
+            // move_verb=true: the session refuses partial source
+            // scans (R49-F2 / otp-9b F1) before we delete the remote
+            // source via delete_remote_path below, and the move
+            // compare mapping transfers unconditionally (codex
+            // otp-10a F1, mirrored on pull at otp-10b-2).
             // R51-F4: defer output so a failure during the
             // remote-source delete doesn't leave a success-looking
             // transfer summary on stdout.

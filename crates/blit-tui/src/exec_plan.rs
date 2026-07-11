@@ -7,30 +7,80 @@
 use crate::f3pull;
 use blit_core::remote::endpoint::RemoteEndpoint;
 
-/// d-55 R2 / d-57: build the `PullSyncOptions` for an F3 pull.
+/// d-55 R2 / d-57: build the `PullSyncOptions` for a DELEGATED F1
+/// remote→remote transfer (the wire `TransferOperationSpec` is built
+/// from these via `RemotePullClient::build_spec_from_options`).
 ///
-/// `mirror_mode` MUST live here, on the options — the wire
-/// `TransferOperationSpec` is built from `options`
-/// (`RemotePullClient::build_spec_from_options`), so it's
-/// `options.mirror_mode` that tells the daemon to compute the
-/// delete list. The execution-level `PullSyncExecution.mirror_mode`
-/// is only the receive-side `track_paths` flag; setting it alone
-/// (d-55 round 1) left the daemon emitting `MirrorMode::Off`, so
-/// `apply_pull_mirror_purge` had no paths to delete and the
-/// "mirror" silently behaved like a plain pull. The CLI sets the
-/// options field (`blit-cli/src/transfers/remote.rs`); we match it.
+/// otp-10b-2: the F3 pull itself no longer consumes this — it rides
+/// the unified session via [`build_f3_pull_execution`]. Only
+/// [`build_delegated_execution`] still maps through PullSync options
+/// (the delegated trigger wire; retired with the driver at otp-10c).
 ///
-/// d-57: a `Move` sets `require_complete_scan` so the daemon
-/// refuses a partial source scan — mirroring the CLI's move guard
-/// (`run_remote_pull_transfer_deferred(.., true)`). Deleting the
-/// remote source after an incomplete copy would lose the files
-/// that were skipped.
+/// `mirror_mode` here tells the daemon to compute the delete list;
+/// `require_complete_scan` on a `Move` makes the source daemon refuse
+/// a partial scan (deleting the remote source after an incomplete
+/// copy would lose the skipped files) — though delegated move is
+/// rejected upstream, the mapping stays safe.
 pub(crate) fn f3_pull_options(kind: f3pull::PullKind) -> blit_core::remote::pull::PullSyncOptions {
     use f3pull::PullKind;
     blit_core::remote::pull::PullSyncOptions {
         mirror_mode: kind == PullKind::Mirror,
         require_complete_scan: kind == PullKind::Move,
         ..blit_core::remote::pull::PullSyncOptions::default()
+    }
+}
+
+/// otp-10b-2: build the `PullExecution` for an F3 pull on the unified
+/// transfer session — the pull mirror of [`build_f1_push_execution`],
+/// unit-pinnable for the same reason (d-65 R2).
+///
+/// Mirror enables the session's one delete rule (this DESTINATION
+/// diffs the complete source manifest against its tree at SourceDone
+/// and deletes extraneous local entries — no post-pull purge step);
+/// `FilteredSubset` matches the CLI pull's `--delete-scope` default,
+/// and with no filter UI on the trigger it behaves as a whole-tree
+/// scope. Mirror needs no scan gate here: the session refuses an
+/// incomplete-scan mirror on its own. A `Move` sets
+/// `require_complete_scan` (the remote source is deleted after the
+/// pull — d-57) and maps through `move_comparison_mode` (transfer
+/// unconditionally; codex otp-10a F1 mirrored on pull).
+pub(crate) fn build_f3_pull_execution(
+    remote: RemoteEndpoint,
+    dest_root: std::path::PathBuf,
+    kind: f3pull::PullKind,
+) -> blit_app::transfers::remote::PullExecution {
+    use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
+    use blit_app::transfers::remote::PullExecution;
+    use blit_core::generated::MirrorMode;
+    let mirror = kind == f3pull::PullKind::Mirror;
+    let remote_label = remote.display();
+    // No compare toggles on the F3 trigger — the default flags map to
+    // SizeMtime (copy/mirror) / IgnoreTimes (move), through the same
+    // one mapping the CLI verbs use.
+    let compare_mode = if kind == f3pull::PullKind::Move {
+        move_comparison_mode(CompareFlags::default())
+    } else {
+        comparison_mode(CompareFlags::default())
+    };
+    PullExecution {
+        remote,
+        dest_root,
+        // No filter UI on the F3 trigger — the session scans everything.
+        filter: None,
+        mirror_mode: mirror,
+        mirror_kind: if mirror {
+            MirrorMode::FilteredSubset
+        } else {
+            MirrorMode::Off
+        },
+        force_grpc: false,
+        trace_data_plane: false,
+        require_complete_scan: kind == f3pull::PullKind::Move,
+        resume: false,
+        resume_block_size: 0,
+        compare_mode,
+        ignore_existing: false,
+        remote_label,
     }
 }
 
@@ -82,6 +132,8 @@ pub(crate) fn build_f1_push_execution(
         } else {
             ComparisonMode::SizeMtime
         },
+        // No ignore-existing toggle on the F1 trigger.
+        ignore_existing: false,
         remote_label,
     }
 }

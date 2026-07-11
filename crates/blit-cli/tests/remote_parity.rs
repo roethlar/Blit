@@ -56,7 +56,9 @@ fn test_pull_tcp_negotiation() {
         .arg(&ctx.config_dir)
         .arg("mirror")
         .arg("--yes")
-        // .arg("--trace-data-plane") // Not wired for pull yet
+        // otp-10b-2 wired --trace-data-plane for pull (the session
+        // DESTINATION initiator dials, and its dials trace).
+        .arg("--trace-data-plane")
         .arg(&src_remote)
         .arg(&dest_dir);
 
@@ -75,6 +77,12 @@ fn test_pull_tcp_negotiation() {
         "expected success message, got stdout:\n{}",
         stdout
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[data-plane-client] connecting to"),
+        "expected a traced receive-socket dial, got stderr:\n{}",
+        stderr
+    );
 
     let dest_file = dest_dir.join("pull_tcp.txt");
     if !dest_file.exists() {
@@ -88,10 +96,13 @@ fn test_pull_tcp_negotiation() {
 /// ue-r2-1g: a many-file pull against a new daemon negotiates >1
 /// stream (MULTISTREAM_PULL acceptance: observable, not assumed) and
 /// lands byte-identical content. 300 files clears the engine shape
-/// table's 256-file tier, so the daemon proposes 2 streams; the
-/// client's `[pull-data-plane]` per-stream throughput line is printed
-/// ONLY on the multi-stream receive branch, so its presence proves the
-/// negotiation actually fanned out.
+/// table's 256-file tier, so the SOURCE's shape correction grows the
+/// data plane past the zero-knowledge single-stream grant (sf-2); with
+/// `--trace-data-plane` each receive-socket dial prints a
+/// `[data-plane-client] connecting to` line, so ≥2 of them prove the
+/// fan-out actually happened. (Ported at otp-10b-2: the old driver's
+/// unconditional `[pull-data-plane]` per-stream line died with it —
+/// dial traces are the session's equivalent observable.)
 #[test]
 fn test_pull_multistream_many_files() {
     let ctx = TestContext::new();
@@ -114,6 +125,7 @@ fn test_pull_multistream_many_files() {
         .arg(&ctx.config_dir)
         .arg("mirror")
         .arg("--yes")
+        .arg("--trace-data-plane")
         .arg(&src_remote)
         .arg(&dest_dir);
 
@@ -127,10 +139,11 @@ fn test_pull_multistream_many_files() {
         stdout
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let receive_dials = stderr.matches("[data-plane-client] connecting to").count();
     assert!(
-        stderr.contains("[pull-data-plane]"),
-        "expected the multi-stream per-stream receive marker \
-         (daemon should negotiate >1 stream for 300 files), got stderr:\n{}",
+        receive_dials >= 2,
+        "expected >1 receive-socket dial for 300 files (epoch-0 plus a \
+         shape-correction resize), got {receive_dials}; stderr:\n{}",
         stderr
     );
 

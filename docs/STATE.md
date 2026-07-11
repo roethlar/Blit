@@ -48,17 +48,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     below). Suite 1555 → **1576**. Detail: DEVLOG 2026-07-11 +
     finding/verdict under `.review/`. Current: **10b pull-shaped
     verb** — **10b-1 (session checksum compare, contract v3) `[x]`
-    CLOSED through the codex loop** (5/5 findings fixed, the High:
-    unhashable files emit with empty checksums instead of silently
-    dropping; suite → **1581**; DEVLOG 2026-07-11 10:00 + REVIEW
-    row). (`blit_utils` flake = pre-existing w9-3 class, proven at
-    `6d37a22` 2/8.) Next: 10b-2 verb cutover
-    (run_pull_session; ONE args→compare
-    mapping for BOTH verbs incl. lifting push's `--checksum` gate;
-    dest-side w6-1 progress — `execute_receive_pipeline` takes the
-    handle, session passes None; printers retype; mirror retires
-    `apply_pull_mirror_purge` from the verb path; move-pull adopts
-    IgnoreTimes, F1's hazard mirrored). Then 10c deletion — 4
+    CLOSED** (5/5 findings fixed; suite → 1581; DEVLOG + REVIEW
+    row) and **10b-2 (pull verb rides `run_pull_session`) LANDED —
+    codex round next**: one chokepoint `blit_app run_remote_pull`
+    (CLI copy/mirror/move-pull + TUI F3); ONE args→compare mapping
+    for BOTH verbs (`blit_app transfers/compare.rs` — push's
+    `--checksum` gate lifted; push now honors every compare flag +
+    `--ignore-existing`); dest-side w6-1 progress + pull
+    `--trace-data-plane` (`DestinationInstruments`); printers retype
+    to the session summary; mirror = the in-session one delete rule
+    (`apply_pull_mirror_purge` off the verb path); move-pull maps
+    IgnoreTimes/Checksum-only + NEW `--size-only` move gate (otp-10a
+    F1's hazard mirrored, binary-pinned incl. A/B vs old pull).
+    Suite → **1599**, fmt/clippy clean, 9 guard-proof mutations.
+    (`blit_utils` flake = pre-existing w9-3 class, proven at
+    `6d37a22` 2/8.) Then 10c deletion — 4
     drivers + `Push`/`PullSync` out of tree AND proto, ported-test
     accounting + file-by-file deletion proof (incl. the
     DelegatedPull no-payload-bytes assertion; relay's PullSync-read

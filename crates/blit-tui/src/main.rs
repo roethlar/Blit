@@ -53,7 +53,7 @@ use crate::del_request::{build_delete_request, del_wire_path, is_deletable_remot
 use crate::display_f1::{f1_push_status, f1_trigger_prompt};
 use crate::display_f2::{cancel_status_remaining_ttl, cancel_status_to_display};
 use crate::display_f3::{f3_del_to_display, f3_du_to_display, f3_pull_to_display};
-use crate::exec_plan::{build_delegated_execution, build_f1_push_execution, f3_pull_options};
+use crate::exec_plan::{build_delegated_execution, build_f1_push_execution};
 use crate::progress_accum::{du_total_from_entries, pull_throughput};
 use crate::theme_color::{base_theme_style, raw_color_to_ratatui};
 use crate::tick_budget::{compute_tick_budget, min_opt};
@@ -3252,8 +3252,9 @@ fn spawn_f3_pull(
     request_id: u64,
     source: RemoteEndpoint,
     dest_root: std::path::PathBuf,
-    // d-55/d-57: copy / mirror / move. Mirror runs the post-pull
-    // `apply_pull_mirror_purge`; move deletes the remote source.
+    // d-55/d-57: copy / mirror / move. Mirror deletions run
+    // in-session (the one delete rule, otp-10b-2) and surface via
+    // `summary.entries_deleted`; move deletes the remote source.
     kind: f3pull::PullKind,
     tx: mpsc::Sender<F3PullReply>,
     // d-37: live byte/file progress snapshots. `try_send`
@@ -3263,11 +3264,11 @@ fn spawn_f3_pull(
     progress_tx: mpsc::Sender<F3PullProgress>,
 ) {
     use blit_app::admin::rm::delete_remote_path;
-    use blit_app::transfers::remote::{apply_pull_mirror_purge, run_pull_sync, PullSyncExecution};
+    use blit_app::transfers::remote::run_remote_pull;
     use blit_core::remote::transfer::{ProgressEvent, RemoteTransferProgress};
     use f3pull::PullKind;
     tokio::spawn(async move {
-        // d-37: progress monitor. run_pull_sync reports
+        // d-37: progress monitor. run_remote_pull reports
         // ProgressEvents into `pe_rx`; the forwarder folds them
         // through the shared `ProgressTotals` accumulator (w6-1)
         // and ships snapshots to the UI.
@@ -3294,47 +3295,37 @@ fn spawn_f3_pull(
         // receive (to delete it), but `source` moves into the
         // execution — clone it up front for the move path only.
         let move_source = (kind == PullKind::Move).then(|| source.clone());
-        let remote_label = source.display();
-        let execution = PullSyncExecution {
-            remote: source,
-            dest_root,
-            options: f3_pull_options(kind),
-            compute_checksums: false,
-            // receive-side track_paths — only meaningful for mirror.
-            mirror_mode: kind == PullKind::Mirror,
-            remote_label,
-        };
-        // d-55: run_pull_sync does the receive half; the
-        // destructive step (mirror purge / move source-delete) is
-        // run AFTER the progress monitor is torn down. So:
-        // pull → drop progress → drain forwarder → destructive phase.
-        let sync = run_pull_sync(execution, Some(&progress)).await;
+        let execution = exec_plan::build_f3_pull_execution(source, dest_root, kind);
+        // otp-10b-2: one session call — mirror deletions run
+        // in-session at SourceDone (no post-pull purge half), so the
+        // monitor teardown happens after the only step, exactly like
+        // the F1 push. Move's source-delete stays a follow-up.
+        let sync = run_remote_pull(execution, Some(&progress)).await;
         // Close the progress channel → the forwarder drains and
-        // exits before we run the destructive phase / send the reply.
+        // exits before the move source-delete / the reply.
         drop(progress);
         let _ = forwarder.await;
         let result = match sync {
             Ok(outcome) => {
                 let transferred = (
-                    outcome.report.files_transferred,
-                    outcome.report.bytes_transferred,
+                    usize::try_from(outcome.summary.files_transferred).unwrap_or(usize::MAX),
+                    outcome.summary.bytes_transferred,
                 );
                 match kind {
                     // Plain pull — nothing to remove.
                     PullKind::Copy => Ok((transferred.0, transferred.1, 0)),
-                    // d-55/d-56: delete local files absent from the
-                    // source; surface the purge count.
-                    PullKind::Mirror => match apply_pull_mirror_purge(&outcome, true).await {
-                        Ok(stats) => {
-                            let deleted = stats.map(|s| s.files_deleted).unwrap_or(0);
-                            Ok((transferred.0, transferred.1, deleted))
-                        }
-                        Err(err) => Err(format!("{err:#}")),
-                    },
+                    // d-55/d-56: the purge count is the session's
+                    // entries_deleted score (files + pruned dirs, one
+                    // count — the wire carries no split).
+                    PullKind::Mirror => Ok((
+                        transferred.0,
+                        transferred.1,
+                        outcome.summary.entries_deleted,
+                    )),
                     // d-57: delete the remote source only after a
-                    // successful receive. The `require_complete_scan`
-                    // option made the daemon refuse a partial scan, so
-                    // a successful pull means the whole source was
+                    // successful receive. `require_complete_scan` made
+                    // the session refuse a partial scan, so a
+                    // successful pull means the whole source was
                     // copied — safe to remove it now. A delete failure
                     // surfaces as the op's error (the copy already
                     // succeeded, but the operator must know the source
@@ -5797,6 +5788,11 @@ mod tests {
     // crate::config_reload in audit-7d5, so import it test-locally to avoid
     // an unused-import warning in the non-test bin build.
     use crate::config_reload::classify_reload;
+    // f3_pull_options' only non-test consumer is now exec_plan's own
+    // delegated builder (otp-10b-2 moved the F3 pull onto the session),
+    // so the option-shape pins import it test-locally for the same
+    // unused-import reason.
+    use crate::exec_plan::f3_pull_options;
 
     /// audit-8: the forwarder must observe a dropped receiver and stop,
     /// even when the underlying stream never produces a message. Before
@@ -8762,6 +8758,53 @@ mod tests {
                 build_f1_push_execution(std::path::PathBuf::from("/tmp/src"), remote.clone(), kind);
             assert_eq!(ex.compare_mode, ComparisonMode::SizeMtime, "{kind:?}");
         }
+    }
+
+    /// otp-10b-2: the F3 pull execution's option wiring — the pull
+    /// mirror of the two d-65/otp-10a F1 push pins above. Mirror
+    /// enables the session's in-session delete rule (no scan gate
+    /// flag: the session refuses an incomplete-scan mirror on its
+    /// own); move gates on a complete scan (the remote source is
+    /// deleted afterwards, d-57) and transfers unconditionally
+    /// (`IgnoreTimes` — a compare-mode skip of a same-size changed
+    /// file would let the delete destroy the only copy).
+    #[test]
+    fn build_f3_pull_execution_wires_mirror_and_move_safety() {
+        use blit_core::generated::{ComparisonMode, MirrorMode};
+        let remote = RemoteEndpoint::parse("nas:9031:/home/").expect("remote");
+        let dest = std::path::PathBuf::from("/tmp/dest");
+
+        let mirror = crate::exec_plan::build_f3_pull_execution(
+            remote.clone(),
+            dest.clone(),
+            f3pull::PullKind::Mirror,
+        );
+        assert!(mirror.mirror_mode, "mirror enables the local purge");
+        assert_eq!(mirror.mirror_kind, MirrorMode::FilteredSubset);
+        assert_eq!(mirror.compare_mode, ComparisonMode::SizeMtime);
+        assert!(
+            !mirror.require_complete_scan,
+            "the session's own mirror guard covers the scan gate",
+        );
+
+        let mv = crate::exec_plan::build_f3_pull_execution(
+            remote.clone(),
+            dest.clone(),
+            f3pull::PullKind::Move,
+        );
+        assert_eq!(
+            mv.compare_mode,
+            ComparisonMode::IgnoreTimes,
+            "move must transfer unconditionally before the source delete",
+        );
+        assert!(mv.require_complete_scan, "move refuses partial scans");
+        assert!(!mv.mirror_mode);
+
+        let copy = crate::exec_plan::build_f3_pull_execution(remote, dest, f3pull::PullKind::Copy);
+        assert_eq!(copy.compare_mode, ComparisonMode::SizeMtime);
+        assert!(!copy.mirror_mode);
+        assert_eq!(copy.mirror_kind, MirrorMode::Off);
+        assert!(!copy.require_complete_scan);
     }
 
     /// d-68: a remote source + remote dest copy routes to the
