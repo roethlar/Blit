@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-10
+Last updated: 2026-07-11
 
-- Prior session (2026-07-10, 42nd): **otp-8, otp-9 (a+b), and otp-2 (zoey per-direction + otp-2w Windows cross-direction) all landed and CLOSED through the codex loop** — code slices first, then the owner opened three rigs mid-session (zoey, the Windows box, skippy) and both benchmark baselines were recorded, reviewed (8- and 7-finding rounds, incl. a timing-overhead bug that forced a re-measure of both matrices), and committed. Verdicts in `.review/results/otp-{8,9a,9b,2,2w}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..9 + otp-2 [x]. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state (re-verified via `git ls-remote origin` at that handoff, as of `cccd89a`): origin/master at `7f1c4b2`; unpushed local commits `7f1c4b2..HEAD` = **24** (otp-7b close through otp-2w close); windows-latest CI on the w9-3 harness fix rides the next push.
+- Recent sessions (2026-07-11, 43rd–44th): **verb cutover complete (otp-10a, 10b-1, 10b-2) and otp-10c-1 closed through the codex loop** — `--relay-via-cli` removed on an owner decision (D-2026-07-11-1); remote→remote is delegated-only. ONE_TRANSFER_PATH otp-1..9 + otp-2 + 10a/10b/10c-1 `[x]`; suite **1586**. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked (partial push landed outside these sessions; count re-verified 2026-07-11).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -61,21 +61,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     delegated move rode SizeMtime-then-delete (fixed + wire-pinned),
     served sessions now record real kind/endpoint/metrics (pull =
     PullSync rows again). Suite → **1605**, 12 guard-proof mutations
-    across both rounds. **10c-1 (`--relay-via-cli` removed) `[x]`
-    CLOSED** — owner decision **D-2026-07-11-1**: remote→remote is
-    delegated-only; flag + relay route + 4 relay gates +
-    `RemoteTransferSource` deleted, `PushExecution.source` narrowed
-    to `PathBuf`; codex 3/3 fixed (counter's positive control
-    restored, mutation-proven; live-guidance purge; comment retype).
-    Suite 1605 → 1585 (20 relay-only tests, accounted) → **1586**.
-    Next: 10c-2 pure deletion — 4 drivers (`remote/push/`,
-    `remote/pull.rs`, daemon `service/push/`, `service/pull_sync.rs`)
-    + `Push`/`PullSync` out of tree AND proto (exclusive messages
-    only — TransferOperationSpec/ManifestBatch/BytesProgress +
-    job-kind enum stay), delegated spec builder relocated out of
-    `pull.rs`, ported-test accounting incl. the A/B reference pins +
-    the DelegatedPull no-payload-bytes assertion, file-by-file
-    deletion proof.
+    across both rounds. **10c-1 (`--relay-via-cli` removed,
+    D-2026-07-11-1) `[x]` CLOSED** — remote→remote is delegated-only;
+    relay route/gates/`RemoteTransferSource` deleted, push source
+    narrowed to `PathBuf`; codex 3/3 fixed. Suite → **1586** (20
+    relay-only tests retired, accounted; detail: DEVLOG 07-11 18:30).
+    Next: 10c-2 pure deletion — 4 drivers + `Push`/`PullSync` out of
+    tree AND proto (exclusive messages only), delegated spec builder
+    relocated, ported-test accounting + the DelegatedPull
+    no-payload-bytes assertion, file-by-file deletion proof.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -161,12 +155,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **Three 10 GbE gate declarations**: ue-1 pass/fail, ue-2 pass/fail
   or re-scope, REV4 → Shipped. (Zero-copy a/b/c RESOLVED —
   D-2026-07-05-3; skippy CPU data stays in DEVLOG + DIAGNOSIS.md.)
-- **Push go**: origin/master moved to `6d37a22` since the 42nd-session
-  count (a partial push landed outside these sessions); unpushed is
-  now `6d37a22..HEAD` (re-verified via `git ls-remote origin` this
-  session, 2026-07-11 — 12 commits as of the otp-10c-1 record).
-  Awaits the ref-listing + approval flow; windows-latest CI on the
-  w9-3 harness fix rides it.
+- **Push go**: origin/master = `6d37a22` (re-verified via `ls-remote`
+  2026-07-11 — a partial push landed outside these sessions); unpushed
+  `6d37a22..HEAD` (12 at the 10c-1 record). Awaits the ref-listing +
+  approval flow; windows-latest CI on the w9-3 fix rides it.
 - **otp-5b-3** (pull mid-transfer cancel e2e, marked optional): pick
   up while otp-10 runs, or drop? — standing question.
 
@@ -183,13 +175,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   the deleted `determine_remote_tuning` — fold into w10-docs-batch?
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
   three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
-- **(OPEN, new 2026-07-05)** CLI foot-gun found during the session:
-  `blit copy src_large dst` with an existing local dir, no `./`,
-  parses the bare name as an mDNS discovery endpoint and errors
-  "remote source must include a module or root"
-  (blit-app endpoints.rs). Should local-path existence win over the
-  discovery interpretation, or at least improve the error? Candidate
-  review-queue row; owner to slot.
+- **(OPEN, new 2026-07-05)** CLI foot-gun: `blit copy src_large dst`
+  with an existing local dir and no `./` parses the bare name as an
+  mDNS discovery endpoint and errors (blit-app endpoints.rs). Should
+  local-path existence win, or the error improve? Owner to slot.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: full suite green
   locally; daemon-spawn e2e flakiness root-caused + fixed on Linux (w9-3:
   port-TOCTOU race + cargo-lock contention). Remaining: windows-latest CI
@@ -203,11 +192,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   **Next**: otp-10c deletion per Now.
 - **2026-07-10 (42nd)** @ `cccd89a` — otp-8, otp-9, otp-2/otp-2w all
   closed; otp-1..9 + otp-2 `[x]`; both benchmark baselines recorded.
-  Machine-local (this Mac): rig SSH keys installed (zoey root,
-  Windows michael@10.1.10.173, skippy admin); NOPASSWD purge sudoers
-  rule; zig/cargo-zigbuild toolchain; ssh ControlMaster sockets.
-  Windows box keeps the blit-bench-daemon firewall rule + staged
-  purge script; zoey keeps `e757dcc` binaries in blit-temp (for
-  otp-12 interleaved A/B), Windows repo checkout is DETACHED at
-  `0f922de` with the owner's prior state stashed (`bench-cargo-lock`).
+  Machine-local facts (rig keys/toolchain/firewall/staged binaries,
+  incl. zoey's `e757dcc` pair for otp-12 A/B) → `.agents/machines.md`.
 - *(41st and earlier pruned to the cap — see DEVLOG 2026-07-06..11.)*
