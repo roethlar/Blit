@@ -248,14 +248,6 @@ fn compare_file(
     }
 }
 
-/// Build a manifest from FileHeader list, returning paths that need transfer.
-pub fn files_needing_transfer(diff: &ManifestDiff) -> Vec<String> {
-    diff.files_to_transfer
-        .iter()
-        .map(|f| f.relative_path.clone())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

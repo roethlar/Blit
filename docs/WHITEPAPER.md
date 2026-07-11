@@ -330,52 +330,27 @@ top architectural gap** — see § 8.
 
 ---
 
-## 6. Resume / mirror comparison protocol (`pull_sync`)
+## 6. Compare / mirror / resume on the session
 
-`pull_sync` is mirror's main path. The flow:
+The DESTINATION owns every compare decision (both directions since
+otp-10b-2). The flow:
 
-1. Client opens bidi gRPC stream.
-2. Client sends `PullSyncHeader` then a `LocalFile` per local entry,
-   then `ManifestDone`.
-3. Daemon enumerates source, builds server manifest.
-4. `manifest::compare_manifests(source, target, opts)` produces a
-   `ManifestDiff { files_to_transfer, files_to_delete, ... }`.
-5. If diff is empty: daemon sends `Summary`, both sides finish.
-6. Otherwise: daemon sends `FilesToDownload` need-list, opens TCP data
-   plane, streams via outbound pipeline (`execute_sink_pipeline`).
+1. Initiator opens the `Transfer` session; `SessionOpen` carries
+   compare mode, mirror mode, filter, and resume settings.
+2. The SOURCE streams its manifest as it enumerates; the DESTINATION
+   diffs each header incrementally against its own filesystem
+   (`transfer_session/mod.rs` destination diff, delegating the
+   per-file verdict to `manifest::header_transfer_status` — the
+   mode-aware owner: SizeMtime default, SizeOnly, IgnoreTimes, Force,
+   Checksum) and returns `NeedBatch` frames.
+3. Resume-flagged needs run the strictly ordered block-hash exchange
+   (§ above) before any block moves.
+4. Mirror: at SourceDone the DESTINATION plans deletions from the
+   complete source file set (filter-scoped) and executes them locally
+   with per-target canonical containment — no delete list ever
+   crosses the wire.
+5. One `TransferSummary`, computed by the end that wrote the bytes.
 
-The comparison is in:
-
-```rust
-// crates/blit-core/src/manifest.rs (~line 83)
-pub fn compare_manifests(
-    source: &[FileHeader],
-    target: &[FileHeader],
-    options: &CompareOptions,
-) -> ManifestDiff {
-    let target_map: HashMap<&str, (u64, i64, &[u8])> = target.iter()
-        .map(|h| (h.relative_path.as_str(), (h.size, h.mtime_seconds, h.checksum.as_slice())))
-        .collect();
-    for src in source {
-        let status = match target_map.get(src.relative_path.as_str()) {
-            None => FileStatus::New,
-            Some(&(t_size, t_mtime, t_checksum)) => {
-                if options.ignore_existing { FileStatus::SkippedExisting }
-                else { compare_file(src, t_size, t_mtime, t_checksum, options.mode) }
-            }
-        };
-        if status == FileStatus::New || status == FileStatus::Modified {
-            diff.bytes_to_transfer += src.size;
-            diff.files_to_transfer.push(FileComparison { /* ... */ });
-        }
-    }
-    if options.include_deletions { /* extras to delete for mirror_mode */ }
-    diff
-}
-```
-
-`compare_file` switches on `CompareMode` (Default = size+mtime,
-SizeOnly, IgnoreTimes, Force, Checksum).
 
 For resume-flagged files (`--resume`), the session runs a strictly
 ordered block-hash exchange (the DESTINATION's `BlockHashList` for a

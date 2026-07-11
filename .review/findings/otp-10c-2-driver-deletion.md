@@ -44,6 +44,14 @@ D-2026-07-11-1) cleared the last non-driver consumer beforehand.
 - `remote/transfer/grpc_fallback.rs` — DELETED WHOLE (module + 7
   tests): `GRPC_FALLBACK_CHUNK_BYTES`/`clamp_fallback_chunk_size`
   clamped only the two deleted sinks and the deleted dead helper.
+- **Codex round (F2), newly orphaned helpers whose only callers were
+  the drivers**: `EnumerationOutcome::is_complete`,
+  `manifest::files_needing_transfer`, `FileFilter::allows_relative`,
+  `FsTransferSink::{path_tracker, with_path_tracker, track}` (field +
+  builder + per-write calls), `BufferSizer::return_vec` — DELETED.
+  (`manifest::compare_manifests` is also caller-less but is
+  local-path-adjacent surface with its own test block — deferred to
+  otp-11's sweep, noted in the verdict.)
 
 **blit-daemon (serving drivers):**
 
@@ -80,6 +88,14 @@ reserved-field ceremony is owed — mismatched builds refuse at open):
 
 - `rpc Push`, `rpc PullSync` — DELETED (service block carries the
   dated note).
+- **Codex round (F1)**: `TransferOperationSpec.client_capabilities`
+  (field 8), `TransferOperationSpec.receiver_capacity` (field 12),
+  and the `PeerCapabilities` message — DELETED (fields reserved).
+  Nothing read them once delegation stopped forwarding the spec
+  (otp-9b) and D-2026-07-05-2 made capability bits meaningless; the
+  session negotiates capacity in `SessionOpen`/`SessionAccept`. The
+  normalized-spec members, the builder fields, and the stale
+  "override boundary / forwarding" comments died with them.
 - Messages deleted (each referenced ONLY by the two dead RPCs):
   `ClientPushRequest`, `ServerPushResponse`, `PushHeader`,
   `UploadComplete`, `Ack`, `PullSyncAck`, `FileList`, `PushSummary`,
@@ -160,9 +176,15 @@ w9-3 daemon-spawn class, 3/3 green isolated)
   and_notifies_client` 1 (superseded by the framed-cancel pin
   `transfer_cancel_emits_framed_cancelled_error`, which pins the same
   arm with the stronger frame assertion); admin `purge_filter_tests`
-  2; blit-app `delete_listed_paths` containment tests 4 (the
-  daemon-authored delete list no longer exists — deletion containment
-  is the session mirror's canonical-containment, pinned since otp-6b).
+  2; blit-app `delete_listed_paths` containment tests 4 — the
+  daemon-authored delete list no longer exists (the session's delete
+  candidates come from its OWN local plan, never the wire), and the
+  session pass's per-target canonical-containment wiring is now
+  directly pinned by
+  `mirror_delete_pass_containment_check_gates_every_deletion`
+  (codex F4: the wiring existed since otp-6b but was unpinned — the
+  original claim here overstated the otp-6b coverage, which pins
+  FilteredSubset scoping, not containment).
 - **Converted, not dropped**: the four A/B parity pins (CLI push/pull
   cutover + daemon push/pull e2e) became ABSOLUTE pins — byte-identical
   tree AND exact fixture counts (what the A/B equality proved
@@ -172,25 +194,25 @@ w9-3 daemon-spawn class, 3/3 green isolated)
   `set_endpoint` pins re-pointed to `ActiveJobUpdater::
   set_kind_and_endpoint`; 4 streaming-dispatch pins re-pointed to
   `resolve_transfer_session_outcome`.
-- No new production code beyond the two relocations; no new tests —
-  every surviving property was already pinned at the session level
-  (cited per item above).
+- **New pins from the codex round (+8)**: `delegated_spec_tests` (7 —
+  the relocated builder's endpoint mapping, the old driver's full
+  compare precedence, mirror scopes, field carriage + normalization
+  round-trip; codex F3: the live builder had lost its direct pins)
+  and the `mirror_delete_pass` containment wiring pin (codex F4).
+  Guard-proven by temporary mutation: inverting the builder's
+  ignore_times/force precedence fails the precedence pin; commenting
+  out the pass's `contained(...)` call fails the containment pin;
+  both restored.
 
 ## Known gaps
 
-- **1480 is 3 BELOW the plan's end-of-plan floor** (final count ≥
+- **The count sits near the plan's end-of-plan floor** (final count ≥
   1483, the pre-plan baseline — an otp-13 acceptance criterion, not a
-  per-slice gate). This slice's drop is the deletion the plan always
-  priced in, but the margin is now negative: otp-11 (local
-  orchestration deletion) retires more while porting local perf pins,
-  and otp-12/13 add none automatically. Flagged for the otp-13
-  checklist walk — the criterion must be met by real pins (ported or
-  new), not re-baselined.
-- `DelegatedSpecOptions` still carries `client_capabilities`/
-  `receiver_capacity` the dst daemon mandatorily overrides (proto
-  boundary note) — relocation was verbatim by design; pruning the
-  delegated trigger spec is post-cutover cleanup if the owner wants
-  it, not this slice.
+  per-slice gate): the slice landed at 1480, and the codex round's +8
+  pins bring it to 1488 (+5 margin). otp-11 (local orchestration
+  deletion) retires more while porting local perf pins — flagged for
+  the otp-13 checklist walk so the criterion is met by real pins, not
+  a re-baseline.
 - Historical/audit/review docs and Shipped/Historical plans keep
   their PullSync-era text verbatim per repo convention; the
   `docs/WHITEPAPER.md` deep sections beyond the ones corrected here

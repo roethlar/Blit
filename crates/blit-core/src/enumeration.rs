@@ -42,13 +42,6 @@ pub struct EnumerationOutcome {
     pub suppressed_errors: Vec<SuppressedScanError>,
 }
 
-impl EnumerationOutcome {
-    /// True iff the walk completed without dropping any subtree.
-    pub fn is_complete(&self) -> bool {
-        self.suppressed_errors.is_empty()
-    }
-}
-
 /// Result of filesystem enumeration. `absolute_path` is the full path on disk,
 /// `relative_path` is the path relative to the enumeration root, and
 /// `metadata` always refers to the filesystem object (captured via

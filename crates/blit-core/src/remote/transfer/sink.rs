@@ -123,11 +123,6 @@ pub struct FsTransferSink {
     /// the destination root.
     canonical_dst_root: Option<PathBuf>,
     config: FsSinkConfig,
-    /// Optional collector for relative paths of successfully-written
-    /// files. Used by remote pull's mirror flow to know which files to
-    /// keep when purging extraneous local entries. Each successful
-    /// `write_payload`/`write_file_stream` pushes its `relative_path`.
-    path_tracker: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
     /// Optional byte-level progress sink. When set,
     /// `write_file_stream` passes it into
     /// `receive_stream_double_buffered` so chunk-granularity
@@ -155,18 +150,8 @@ impl FsTransferSink {
             dst_root,
             canonical_dst_root,
             config,
-            path_tracker: None,
             byte_progress: None,
         }
-    }
-
-    /// Enable path tracking. After each successful write, the relative
-    /// path of the written file is pushed onto the supplied collector.
-    /// Lets receive callers (e.g. mirror) discover which files survived
-    /// without re-implementing the record dispatch loop.
-    pub fn with_path_tracker(mut self, tracker: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
-        self.path_tracker = Some(tracker);
-        self
     }
 
     /// Attach a byte-level progress sink. When set,
@@ -199,14 +184,6 @@ impl FsTransferSink {
                     self.dst_root.display()
                 );
                 crate::path_safety::safe_join(&self.dst_root, wire_path)
-            }
-        }
-    }
-
-    fn track(&self, rel: &str) {
-        if let Some(tracker) = &self.path_tracker {
-            if let Ok(mut guard) = tracker.lock() {
-                guard.push(PathBuf::from(rel));
             }
         }
     }
@@ -249,9 +226,6 @@ impl TransferSink for FsTransferSink {
                     permissions,
                 )
                 .await?;
-                if outcome.files_written > 0 {
-                    self.track(&relative_path);
-                }
                 outcome
             }
             // otp-7b: the composite resume payload is send-side only
@@ -261,15 +235,6 @@ impl TransferSink for FsTransferSink {
                 eyre::bail!("FsTransferSink does not consume composite ResumeFile payloads")
             }
             PreparedPayload::File(_) | PreparedPayload::TarShard { .. } => {
-                // Capture paths for tracking before payload moves into
-                // the spawn_blocking closure.
-                let tracked_paths: Vec<String> = match &payload {
-                    PreparedPayload::File(h) => vec![h.relative_path.clone()],
-                    PreparedPayload::TarShard { headers, .. } => {
-                        headers.iter().map(|h| h.relative_path.clone()).collect()
-                    }
-                    _ => Vec::new(),
-                };
                 let src_root = self.src_root.clone();
                 let dst_root = self.dst_root.clone();
                 let canonical_dst_root = self.canonical_dst_root.clone();
@@ -293,11 +258,6 @@ impl TransferSink for FsTransferSink {
                 })
                 .await
                 .context("sink worker panicked")??;
-                if outcome.files_written > 0 {
-                    for path in tracked_paths {
-                        self.track(&path);
-                    }
-                }
                 outcome
             }
         };
@@ -435,8 +395,6 @@ impl TransferSink for FsTransferSink {
         }
         #[cfg(not(unix))]
         let _ = header.permissions;
-
-        self.track(&header.relative_path);
 
         Ok(SinkOutcome {
             files_written: 1,

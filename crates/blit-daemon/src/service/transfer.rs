@@ -7,9 +7,11 @@
 //! which dispatches on the client's declared initiator role — a SOURCE
 //! initiator makes the daemon the DESTINATION (push-equivalent), a
 //! DESTINATION initiator makes it the SOURCE (pull-equivalent, streaming
-//! its module tree). The dispatcher in `core.rs::transfer` mirrors
-//! `push`: register a jobs row, race the session against cancel/hangup
-//! via `resolve_streaming_outcome`, return the response `ReceiverStream`.
+//! its module tree). The dispatcher in `core.rs::transfer` registers a
+//! jobs row and races the session against cancel/hangup via
+//! `resolve_transfer_session_outcome`, returning the response
+//! `ReceiverStream`. This is the ONLY transfer dispatch since cutover
+//! (otp-10c-2 deleted the push/pull_sync arms).
 //!
 //! This module owns the two daemon-specific pieces the session driver
 //! in blit-core cannot: (1) the [`OpenResolver`] that maps a wire
@@ -17,11 +19,11 @@
 //! free of module config and `tonic::Status`), and (2) the transport
 //! assembly + outcome mapping.
 //!
-//! Carrier: the push-equivalent (daemon DESTINATION) rides the TCP data
-//! plane (otp-4b); the pull-equivalent (daemon SOURCE) is in-stream only
-//! until otp-5b adds the SOURCE-responder data plane. Progress-byte
-//! wiring (`with_byte_progress`) is not threaded yet — session rows
-//! report `bytes_completed=0`, matching today's push rows.
+//! Both roles ride the TCP data plane by default (otp-4b/5b), with the
+//! in-stream carrier as the fallback. Progress-byte wiring
+//! (`with_byte_progress`) is not threaded into served-session rows yet —
+//! they report `bytes_completed=0` (REVIEW.md w6-2b, re-scoped to this
+//! dispatcher at otp-10c-2).
 
 use std::collections::HashMap;
 use std::sync::Arc;

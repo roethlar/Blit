@@ -3862,6 +3862,63 @@ async fn receive_tar_record(
 mod tests {
     use super::*;
 
+    /// otp-10c-2 codex F4: the mirror delete pass containment-checks
+    /// every planned target against the canonical destination root
+    /// before any filesystem op. The wiring was unpinned (a mutation
+    /// deleting the `contained(...)` call survived the suite): with a
+    /// canonical root that does NOT contain the destination, the pass
+    /// must refuse before deleting anything — and with the real root
+    /// it deletes normally (the control arm, so this can't pass
+    /// vacuously).
+    #[test]
+    fn mirror_delete_pass_containment_check_gates_every_deletion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("extraneous.txt"), b"x").unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let elsewhere = elsewhere.canonicalize().unwrap();
+
+        let source_files: HashSet<String> = HashSet::new(); // everything is extraneous
+        let filter = crate::fs_enum::FileFilter::default();
+        let abort = AtomicBool::new(false);
+
+        // Foreign canonical root → the containment check must refuse
+        // the deletion and leave the file alone.
+        let err = mirror_delete_pass(
+            &dst,
+            &source_files,
+            &filter,
+            false,
+            Some(&elsewhere),
+            &abort,
+        )
+        .expect_err("a target outside the canonical root must refuse");
+        assert!(
+            format!("{err:#}").contains("mirror delete containment"),
+            "got: {err:#}"
+        );
+        assert!(
+            dst.join("extraneous.txt").exists(),
+            "nothing may be deleted once containment refuses"
+        );
+
+        // Control: the real canonical root deletes the extraneous file.
+        let real_root = crate::path_safety::canonical_dest_root(&dst).unwrap();
+        let deleted = mirror_delete_pass(
+            &dst,
+            &source_files,
+            &filter,
+            false,
+            Some(&real_root),
+            &abort,
+        )
+        .expect("in-root deletion proceeds");
+        assert_eq!(deleted, 1);
+        assert!(!dst.join("extraneous.txt").exists());
+    }
+
     #[test]
     fn build_id_has_version_and_git_components() {
         let id = session_build_id();

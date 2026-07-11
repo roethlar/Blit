@@ -387,19 +387,17 @@ originating peer); `ClearRecent` wipes the recent-transfers ring.
 
 For large transfers, Blit uses a hybrid approach:
 
-1. **Control Plane (gRPC)**: Manifest exchange, coordination, status
+1. **Control Plane (gRPC)**: The `Transfer` session's frames —
+   manifest, need batches, resume hashes, summary, errors
 2. **Data Plane (TCP)**: Bulk file content transfer with zero-copy
 
-The `DataTransferNegotiation` message coordinates the handoff:
-
-```protobuf
-message DataTransferNegotiation {
-  uint32 tcp_port = 1;
-  string one_time_token = 2;
-  bool tcp_fallback = 3;
-  uint32 stream_count = 4;
-}
-```
+The session coordinates the handoff itself: the responder issues a
+`DataPlaneGrant` frame (port + one-time token + epoch-0 sub-token),
+the connection-initiating end dials, and mid-transfer resize rides
+`DataPlaneResize`/`DataPlaneResizeAck` frames. With no grant, payload
+bytes ride the in-stream carrier on the control stream. (The old
+`DataTransferNegotiation` message died with the Push/PullSync RPCs at
+otp-10c-2.)
 
 ## Performance Optimizations
 

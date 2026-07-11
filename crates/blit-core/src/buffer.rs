@@ -207,7 +207,7 @@ fn cache_returned_buffer(
     }
     // Restore the logical length so `acquire()` hands out a full-size
     // slice. `resize` zeroes only the grown delta (rare — only if a
-    // `take()`+`return_vec` shrank it); the common release path is already
+    // an earlier borrower shrank it); the common release path is already
     // at `buffer_size`, so this is a no-op `truncate` with no zeroing.
     if buffer.len() < buffer_size {
         buffer.resize(buffer_size, 0);
@@ -423,16 +423,6 @@ impl BufferPool {
     /// Record bytes transferred through a pooled buffer (for statistics)
     pub fn record_bytes(&self, bytes: u64) {
         self.bytes_through.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Return a Vec directly to the pool for reuse.
-    ///
-    /// This is useful when a buffer was taken via `PoolBuffer::take()` and
-    /// needs to be returned after processing. The buffer will only be cached
-    /// if it has sufficient capacity and the pool has room.
-    pub fn return_vec(&self, buffer: Vec<u8>) {
-        // audit-13: same single-lock, no-redundant-zeroing path as release().
-        cache_returned_buffer(&self.cache, self.pool_size, self.buffer_size, buffer);
     }
 
     /// Get the buffer size for this pool

@@ -132,10 +132,9 @@ service Blit {
 //
 // Travel direction (receiver → sender): the session DESTINATION
 // advertises its profile in SessionOpen/SessionAccept.receiver_capacity
-// (whichever end plays DESTINATION); a delegated trigger also carries
-// one in TransferOperationSpec.receiver_capacity, which the dst daemon
-// REPLACES with its own before initiating (same override boundary as
-// client_capabilities).
+// (whichever end plays DESTINATION). Nothing else carries one — the
+// delegated initiator is the dst daemon itself (otp-9b), so it
+// advertises its own capacity at session open.
 //
 // Every field uses 0 (or UNSPECIFIED) as "unknown"; the sender treats
 // unknown as "no information — stay conservative", never as "unlimited".
@@ -394,10 +393,12 @@ message TransferOperationSpec {
   // FileBlock / FileBlockComplete pairs for changed files.
   ResumeSettings resume = 7;
 
-  // What the initiator's side of the wire supports. Lets the origin
-  // pick payload shapes the target can handle (e.g. fall back from
-  // tar shards if the client is older).
-  PeerCapabilities client_capabilities = 8;
+  // Field 8 was `PeerCapabilities client_capabilities` — deleted at
+  // otp-10c-2 with the codex round: nothing read it once delegation
+  // stopped forwarding the spec (otp-9b) and D-2026-07-05-2 made
+  // capability bits meaningless (same build implies same features).
+  reserved 8;
+  reserved "client_capabilities";
 
   // Request that the origin route bulk file bytes through the gRPC
   // control plane instead of negotiating a TCP data plane. Useful for
@@ -424,21 +425,13 @@ message TransferOperationSpec {
   // the same scan-completeness requirement that mirror does.
   bool require_complete_scan = 11;
 
-  // ue-r2-1b: the byte receiver's capacity profile on the delegated
-  // trigger (the destination daemon receives the bytes). The session
-  // itself negotiates capacity in SessionOpen/SessionAccept.
-  //
-  // OVERRIDE BOUNDARY (same rule as client_capabilities): in
-  // delegation the byte recipient is the destination daemon, not the
-  // CLI, so the destination handler REPLACES this field with its own
-  // profile before forwarding the spec to the source. Any
-  // CLI-supplied value is non-authoritative.
-  //
-  // Absent = old client or nothing to advertise → the sender keeps
-  // today's static/conservative behavior. Added at spec_version 2
-  // without a bump (see the spec_version history note).
-  CapacityProfile receiver_capacity = 12;
-
+  // Field 12 was `CapacityProfile receiver_capacity` — deleted at
+  // otp-10c-2 with the codex round: the session negotiates capacity
+  // itself in SessionOpen/SessionAccept, and the delegated initiator
+  // (the dst daemon, otp-9b) advertises its OWN capacity there; the
+  // spec-level copy had no readers.
+  reserved 12;
+  reserved "receiver_capacity";
 }
 
 // Source-side filter rules. Applied at the origin's TransferSource
@@ -520,25 +513,6 @@ message ResumeSettings {
   uint32 block_size = 2;
 }
 
-// Peer capability advertisement. Used during initial spec exchange so
-// the origin can emit only payload shapes the target understands.
-// Receivers default missing fields to false (not supported).
-message PeerCapabilities {
-  bool supports_resume = 1;
-  bool supports_tar_shards = 2;
-  bool supports_data_plane_tcp = 3;
-  // Receiver implements the FilterSpec pipeline chokepoint
-  // (FilteredSource on its origin-side TransferSource). Senders set
-  // this to true; older receivers that didn't honor filter rules
-  // will not.
-  bool supports_filter_spec = 4;
-  // ue-r2-1b: the byte recipient can drive mid-transfer stream
-  // resize (dial new data sockets on DataPlaneResize ADD, retire
-  // receive workers on REMOVE). The responder folds this into its
-  // resize gate. Same-build peers both set it (D-2026-07-05-2).
-  bool supports_stream_resize = 5;
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // Delegated Pull — direct daemon-to-daemon byte path for remote→remote
 // transfers. See docs/plan/REMOTE_REMOTE_DELEGATION_PLAN.md.
@@ -559,16 +533,11 @@ message DelegatedPullRequest {
 
   // The universal transfer contract. Reuses TransferOperationSpec
   // including FilterSpec, ComparisonMode, MirrorMode, ResumeSettings,
-  // force_grpc, ignore_existing, and spec_version. Receivers normalize
-  // via NormalizedTransferOperation::from_spec exactly like push/pull.
-  //
-  // OVERRIDE BOUNDARY: spec.client_capabilities describes the byte
-  // recipient's capabilities. In delegation, the byte recipient is
-  // the destination daemon, not the CLI. The destination handler
-  // mandatorily REPLACES client_capabilities with its own
-  // PeerCapabilities before forwarding the spec to the source —
-  // any CLI-supplied value here is non-authoritative. Every other
-  // field flows through unchanged.
+  // force_grpc, ignore_existing, require_complete_scan, and
+  // spec_version. The destination daemon validates it via
+  // NormalizedTransferOperation::from_spec, maps it onto its own
+  // session options, and initiates a Transfer session against the
+  // source (otp-9b) — the spec itself is never forwarded anywhere.
   TransferOperationSpec spec = 20;
 
   // Diagnostics-only.

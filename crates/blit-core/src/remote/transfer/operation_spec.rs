@@ -24,7 +24,7 @@ use eyre::{bail, Context, Result};
 use crate::fs_enum::FileFilter;
 
 pub use crate::generated::{
-    ComparisonMode, FilterSpec, MirrorMode, PeerCapabilities, ResumeSettings, TransferOperationSpec,
+    ComparisonMode, FilterSpec, MirrorMode, ResumeSettings, TransferOperationSpec,
 };
 
 // Aliases for proto-side types (raw wire shape) so the from_spec()
@@ -71,8 +71,6 @@ pub struct NormalizedTransferOperation {
     /// Convert origin-side filter rules into a ready-to-apply `FileFilter`.
     /// `None` if the spec carried no filter or the filter was empty.
     pub filter: Option<FileFilter>,
-    /// Peer capabilities (all false if the spec didn't carry any).
-    pub capabilities: PeerCapabilities,
     /// Whether the initiator requested gRPC bulk transport.
     pub force_grpc: bool,
     /// Skip any file the target already has, regardless of
@@ -89,12 +87,6 @@ pub struct NormalizedTransferOperation {
     /// purge dest extras) but carries the same scan-completeness
     /// requirement that a mirror operation does.
     pub require_complete_scan: bool,
-    /// ue-r2-1e: the byte receiver's capacity profile, carried through
-    /// (not validated — a hostile profile can only LOWER the sender's
-    /// dial ceilings, never raise them; see `TransferDial::
-    /// conservative_within`). `None` = old peer or nothing advertised
-    /// → conservative defaults.
-    pub receiver_capacity: Option<crate::generated::CapacityProfile>,
 }
 
 impl NormalizedTransferOperation {
@@ -126,7 +118,6 @@ impl NormalizedTransferOperation {
             bail!("ignore_existing=true with compare_mode=Force is contradictory");
         }
         let resume = spec.resume.unwrap_or_default();
-        let capabilities = spec.client_capabilities.unwrap_or_default();
         let filter = spec
             .filter
             .map(filter_from_spec)
@@ -141,11 +132,9 @@ impl NormalizedTransferOperation {
             mirror_mode,
             resume,
             filter,
-            capabilities,
             force_grpc: spec.force_grpc,
             ignore_existing: spec.ignore_existing,
             require_complete_scan: spec.require_complete_scan,
-            receiver_capacity: spec.receiver_capacity,
         })
     }
 
@@ -326,22 +315,166 @@ pub fn delegated_spec_from_options(
             enabled: options.resume,
             block_size: options.block_size,
         }),
-        // OVERRIDE BOUNDARY (proto): in a delegation the byte
-        // recipient is the destination DAEMON — it mandatorily
-        // replaces `client_capabilities` with its own before
-        // forwarding, so this CLI-side value is non-authoritative.
-        client_capabilities: Some(PeerCapabilities {
-            supports_resume: true,
-            supports_tar_shards: true,
-            supports_data_plane_tcp: true,
-            supports_filter_spec: true,
-            supports_stream_resize: true,
-        }),
         force_grpc: options.force_grpc,
         ignore_existing: options.ignore_existing,
         require_complete_scan: options.require_complete_scan,
-        receiver_capacity: Some(crate::engine::local_receiver_capacity()),
     })
+}
+
+#[cfg(test)]
+mod delegated_spec_tests {
+    //! otp-10c-2 codex F3: the delegated trigger's spec builder is
+    //! live code and lost its direct pins when the old pull driver's
+    //! `spec_extraction_tests` died with it — re-pinned here against
+    //! the relocated `delegated_spec_from_options`.
+
+    use super::*;
+    use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
+    use std::path::PathBuf;
+
+    fn ep(path: RemotePath) -> RemoteEndpoint {
+        RemoteEndpoint {
+            host: "h".into(),
+            port: 9031,
+            path,
+        }
+    }
+
+    fn module_ep(rel: &str) -> RemoteEndpoint {
+        ep(RemotePath::Module {
+            module: "mod".into(),
+            rel_path: PathBuf::from(rel),
+        })
+    }
+
+    #[test]
+    fn endpoint_module_subpath_joins_with_forward_slashes() {
+        let spec = delegated_spec_from_options(&module_ep("a/b"), &DelegatedSpecOptions::default())
+            .unwrap();
+        assert_eq!(spec.module, "mod");
+        assert_eq!(spec.source_path, "a/b");
+        assert_eq!(spec.spec_version, SUPPORTED_SPEC_VERSION);
+    }
+
+    #[test]
+    fn endpoint_module_empty_rel_path_yields_dot_source() {
+        let spec =
+            delegated_spec_from_options(&module_ep(""), &DelegatedSpecOptions::default()).unwrap();
+        assert_eq!(spec.source_path, ".");
+    }
+
+    #[test]
+    fn endpoint_root_variant_yields_empty_module() {
+        let spec = delegated_spec_from_options(
+            &ep(RemotePath::Root {
+                rel_path: PathBuf::from("sub"),
+            }),
+            &DelegatedSpecOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(spec.module, "");
+        assert_eq!(spec.source_path, "sub");
+    }
+
+    #[test]
+    fn endpoint_discovery_variant_bails() {
+        let err = delegated_spec_from_options(
+            &ep(RemotePath::Discovery),
+            &DelegatedSpecOptions::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must specify a module"));
+    }
+
+    /// The old pull driver's full compare precedence, verbatim:
+    /// ignore_times > force > size_only > checksum > SizeMtime.
+    #[test]
+    fn compare_precedence_matches_the_old_drivers_table() {
+        let cell = |ignore_times: bool, force: bool, size_only: bool, checksum: bool| {
+            let opts = DelegatedSpecOptions {
+                ignore_times,
+                force,
+                size_only,
+                checksum,
+                ..DelegatedSpecOptions::default()
+            };
+            delegated_spec_from_options(&module_ep(""), &opts)
+                .unwrap()
+                .compare_mode
+        };
+        assert_eq!(
+            cell(true, true, true, true),
+            ComparisonMode::IgnoreTimes as i32
+        );
+        assert_eq!(cell(false, true, true, true), ComparisonMode::Force as i32);
+        assert_eq!(
+            cell(false, false, true, true),
+            ComparisonMode::SizeOnly as i32
+        );
+        assert_eq!(
+            cell(false, false, false, true),
+            ComparisonMode::Checksum as i32
+        );
+        assert_eq!(
+            cell(false, false, false, false),
+            ComparisonMode::SizeMtime as i32
+        );
+    }
+
+    #[test]
+    fn mirror_scope_maps_off_subset_and_all() {
+        let cell = |mirror_mode: bool, delete_all_scope: bool| {
+            let opts = DelegatedSpecOptions {
+                mirror_mode,
+                delete_all_scope,
+                ..DelegatedSpecOptions::default()
+            };
+            delegated_spec_from_options(&module_ep(""), &opts)
+                .unwrap()
+                .mirror_mode
+        };
+        assert_eq!(cell(false, false), MirrorMode::Off as i32);
+        assert_eq!(cell(false, true), MirrorMode::Off as i32);
+        assert_eq!(cell(true, false), MirrorMode::FilteredSubset as i32);
+        assert_eq!(cell(true, true), MirrorMode::All as i32);
+    }
+
+    /// Field carriage: every remaining option lands on its wire field,
+    /// and the built spec passes the receiver's own normalization gate
+    /// (what `pull_sync_wrapper_emits_same_spec_as_build_spec_from_options`
+    /// used to prove via the wire).
+    #[test]
+    fn options_carry_onto_the_wire_spec_and_normalize() {
+        let filter = FilterSpec {
+            exclude: vec!["*.tmp".into()],
+            ..Default::default()
+        };
+        let opts = DelegatedSpecOptions {
+            force_grpc: true,
+            ignore_existing: true,
+            require_complete_scan: true,
+            resume: true,
+            block_size: 4096,
+            filter: Some(filter.clone()),
+            ..DelegatedSpecOptions::default()
+        };
+        let spec = delegated_spec_from_options(&module_ep("x"), &opts).unwrap();
+        assert!(spec.force_grpc);
+        assert!(spec.ignore_existing);
+        assert!(spec.require_complete_scan);
+        let resume = spec.resume.expect("resume settings present");
+        assert!(resume.enabled);
+        assert_eq!(resume.block_size, 4096);
+        assert_eq!(spec.filter.as_ref(), Some(&filter));
+
+        let normalized = NormalizedTransferOperation::from_spec(spec)
+            .expect("built spec passes the receiver gate");
+        assert!(normalized.force_grpc);
+        assert!(normalized.ignore_existing);
+        assert!(normalized.require_complete_scan);
+        assert!(normalized.resume.enabled);
+        assert!(normalized.filter.is_some());
+    }
 }
 
 #[cfg(test)]
@@ -357,11 +490,9 @@ mod tests {
             compare_mode: ProtoCompareMode::Unspecified as i32,
             mirror_mode: ProtoMirrorMode::Unspecified as i32,
             resume: None,
-            client_capabilities: None,
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
-            receiver_capacity: None,
         }
     }
 

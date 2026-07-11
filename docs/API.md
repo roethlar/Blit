@@ -10,7 +10,16 @@ The Blit daemon exposes a gRPC service defined in `proto/blit.proto`.
 
 ```protobuf
 service Blit {
-  rpc Push(stream ClientPushRequest) returns (stream ServerPushResponse);
+  // The ONE byte-moving RPC: a role-tagged bidirectional transfer
+  // session (contract: docs/TRANSFER_SESSION.md). Push and PullSync
+  // were deleted whole at cutover (otp-10c-2, D-2026-07-05-1).
+  rpc Transfer(stream TransferFrame) returns (stream TransferFrame);
+
+  // Daemon-to-daemon remote→remote trigger + progress relay (no
+  // payload bytes ever cross this RPC).
+  rpc DelegatedPull(DelegatedPullRequest) returns (stream DelegatedPullProgress);
+
+  // Admin / query
   rpc List(ListRequest) returns (ListResponse);
   rpc Purge(PurgeRequest) returns (PurgeResponse);
   rpc CompletePath(CompletionRequest) returns (CompletionResponse);
@@ -18,129 +27,49 @@ service Blit {
   rpc Find(FindRequest) returns (stream FindEntry);
   rpc DiskUsage(DiskUsageRequest) returns (stream DiskUsageEntry);
   rpc FilesystemStats(FilesystemStatsRequest) returns (FilesystemStatsResponse);
+
+  // Daemon state / observability
+  rpc GetState(GetStateRequest) returns (DaemonState);
+  rpc Subscribe(SubscribeRequest) returns (stream DaemonEvent);
+  rpc CancelJob(CancelJobRequest) returns (CancelJobResponse);
+  rpc ClearRecent(ClearRecentRequest) returns (ClearRecentResponse);
 }
 ```
 
-> Removed 2026-07-03 (ue-r2-1h): `rpc Pull(PullRequest) returns (stream
-> PullChunk)` — superseded whole by PullSync (bidirectional, manifest
-> comparison; also carries the relay's metadata-only scan via
-> `TransferOperationSpec.metadata_only`). This block was already a
-> partial snapshot before the removal — `PullSync`, `DelegatedPull`,
-> `GetState`, `CancelJob`, `ClearRecent`, and `Subscribe` are live RPCs
-> not yet documented here; `proto/blit.proto` is the source of truth.
+`proto/blit.proto` is the source of truth; this page summarizes.
 
 ---
 
-## Push Operation
+## Transfer Session
 
-Bidirectional streaming RPC for uploading files from client to server.
+Every remote transfer — push-shaped or pull-shaped, either verb —
+rides the single bidirectional `Transfer` RPC. The initiator declares
+which end is SOURCE and which is DESTINATION in `SessionOpen`; the
+frames each end may send are determined by that ROLE, never by which
+end is the gRPC client. The full state machine (same-build handshake,
+streaming manifest, need batches, resume block phase, mirror pass,
+carriers, error/cancel semantics) is specified in
+`docs/TRANSFER_SESSION.md` — the authoritative contract.
 
-### Protocol Flow
+Highlights:
 
-```
-Client                                    Server
-   │                                         │
-   ├──── PushHeader ─────────────────────────▶│
-   │                                         │
-   ├──── FileHeader (file 1) ────────────────▶│
-   ├──── FileHeader (file 2) ────────────────▶│
-   ├──── FileHeader (file N) ────────────────▶│
-   ├──── ManifestComplete ───────────────────▶│
-   │                                         │
-   │◀─── DataTransferNegotiation ────────────┤  (TCP handoff)
-   │◀─── FileList (need list) ───────────────┤
-   │                                         │
-   ├──── FileData / TarShard ────────────────▶│  (via TCP or gRPC)
-   ├──── UploadComplete ─────────────────────▶│
-   │                                         │
-   │◀─── PushSummary ────────────────────────┤
-   │                                         │
-```
+- **Same-build only** (D-2026-07-05-2): the `SessionHello` exchange
+  refuses any peer not built from identical sources. There is no
+  version negotiation.
+- **Carriers**: payload bytes ride the TCP data plane by default
+  (parallel streams, one-time tokens, mid-transfer resize) or the
+  in-stream carrier (`TransferFrame` payload frames on the control
+  stream) when requested (`--force-grpc`) or when the responder
+  cannot bind sockets.
+- **One summary shape**: `TransferSummary` — files/bytes transferred,
+  files resumed, entries deleted, carrier used — computed by the
+  DESTINATION (the end that wrote the bytes).
 
-### Messages
-
-#### ClientPushRequest
-
-```protobuf
-message ClientPushRequest {
-  oneof payload {
-    PushHeader header = 1;
-    FileHeader file_manifest = 2;
-    ManifestComplete manifest_complete = 3;
-    FileData file_data = 4;
-    UploadComplete upload_complete = 5;
-    TarShardHeader tar_shard_header = 6;
-    TarShardChunk tar_shard_chunk = 7;
-    TarShardComplete tar_shard_complete = 8;
-  }
-}
-```
-
-#### PushHeader
-
-Initial message specifying transfer parameters.
-
-```protobuf
-message PushHeader {
-  string module = 1;           // Target module name
-  bool mirror_mode = 2;        // Enable mirror (delete extra files)
-  string destination_path = 3; // Relative path within module
-  bool force_grpc = 4;         // Disable TCP data plane
-}
-```
-
-#### FileHeader
-
-Metadata for a single file in the manifest.
-
-```protobuf
-message FileHeader {
-  string relative_path = 1;    // Path relative to destination
-  uint64 size = 2;             // File size in bytes
-  int64 mtime_seconds = 3;     // Modification time (Unix epoch)
-  uint32 permissions = 4;      // POSIX permissions
-}
-```
-
-#### ServerPushResponse
-
-```protobuf
-message ServerPushResponse {
-  oneof payload {
-    Ack ack = 1;
-    FileList files_to_upload = 2;  // Files server needs
-    PushSummary summary = 3;        // Final transfer summary
-    DataTransferNegotiation negotiation = 4;
-  }
-}
-```
-
-#### PushSummary
-
-```protobuf
-message PushSummary {
-  uint64 files_transferred = 1;
-  uint64 bytes_transferred = 2;
-  uint64 bytes_zero_copy = 3;
-  bool tcp_fallback_used = 4;
-  uint64 entries_deleted = 5;  // Mirror mode deletions
-}
-```
-
----
-
-## Pull Operation
-
-Removed 2026-07-03 (ue-r2-1h). The deprecated server-streaming
-`Pull(PullRequest) → stream PullChunk` RPC and its two request/stream
-messages were deleted; pulls ride the bidirectional `PullSync` RPC
-(spec + manifest comparison + need-list; TCP data plane or gRPC
-fallback frames). `PullSummary` and `ManifestBatch` survive as
-`ServerPullMessage`/`DelegatedPullProgress` payloads. The former
-`metadata_only` request flag lives on as
-`TransferOperationSpec.metadata_only` (header-only enumeration for the
-remote→remote relay's scan; rejected on delegated pulls). See
-`proto/blit.proto` for the full PullSync contract.
+Remote→remote transfers are delegated: the CLI calls `DelegatedPull`
+on the destination daemon, which validates the request through its
+delegation gate and initiates a `Transfer` session against the source
+daemon itself. The `DelegatedPullProgress` stream back to the CLI
+carries only progress counters and diagnostics — never file content.
 
 ---
 
@@ -304,52 +233,41 @@ message FilesystemStatsResponse {
 
 ---
 
-## Data Transfer Negotiation
+## Data Plane Negotiation
 
-For high-performance transfers, Blit negotiates a TCP data plane.
-
-```protobuf
-message DataTransferNegotiation {
-  uint32 tcp_port = 1;           // Port for TCP connections
-  string one_time_token = 2;     // Authentication token
-  bool tcp_fallback = 3;         // True if TCP unavailable
-  uint32 stream_count = 4;       // Number of parallel TCP streams
-}
-```
-
-### TCP Data Plane Protocol
-
-1. Client receives `DataTransferNegotiation` via gRPC
-2. Client opens `stream_count` TCP connections to `tcp_port`
-3. Client sends `one_time_token` on each connection
-4. File data transferred in parallel across connections
-5. Client signals completion via gRPC
+The DESTINATION advertises its receive capacity (`CapacityProfile`)
+in `SessionOpen`/`SessionAccept`; the responder grants TCP data-plane
+access with a `DataPlaneGrant` (port + one-time token + epoch-0
+sub-token). The connection-initiating end dials the sockets; byte
+direction within a socket is set by role, not by who dialed.
+Mid-transfer stream resize rides `DataPlaneResize`/`DataPlaneResizeAck`
+frames. When no grant is issued, payloads ride the in-stream carrier
+on the control stream.
 
 ---
 
 ## Rust Client Example
 
 ```rust
-use blit_core::remote::{RemoteEndpoint, RemotePushClient};
-use std::path::PathBuf;
+use blit_core::remote::transfer::session_client::{run_push_session, PushSessionOptions};
+use blit_core::remote::transfer::source::FsTransferSource;
+use blit_core::remote::RemoteEndpoint;
+use std::sync::Arc;
 
 async fn push_files() -> eyre::Result<()> {
-    let endpoint = RemoteEndpoint::parse("server://192.168.1.100:50051/backup/docs")?;
+    let endpoint = RemoteEndpoint::parse("192.168.1.100:50051:/backup/docs")?;
 
-    let client = RemotePushClient::connect(&endpoint).await?;
+    let outcome = run_push_session(
+        &endpoint,
+        Arc::new(FsTransferSource::new("/local/documents".into())),
+        PushSessionOptions::default(),
+    )
+    .await?;
 
-    let report = client
-        .push(
-            PathBuf::from("/local/documents"),
-            false, // mirror_mode
-            false, // dry_run
-            false, // force_grpc
-        )
-        .await?;
-
-    println!("Transferred {} files, {} bytes",
-             report.files_transferred,
-             report.bytes_transferred);
+    println!(
+        "Transferred {} files, {} bytes",
+        outcome.summary.files_transferred, outcome.summary.bytes_transferred
+    );
 
     Ok(())
 }
@@ -423,10 +341,7 @@ server://host:port/relative/path
 
 ## Versioning
 
-The gRPC API is versioned via the package name:
-
-```protobuf
-package blit.v2;
-```
-
-Breaking changes will increment the version number. Clients should specify the expected version when connecting.
+There is none, by decision (D-2026-07-05-2): client and daemon
+interoperate only when built from the same sources, and the session
+handshake refuses a mismatched peer at open. The proto package name
+(`blit.v2`) is a namespace, not a compatibility promise.

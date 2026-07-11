@@ -407,15 +407,14 @@ mod tests {
     //!
     //! Allowlist matching, DNS-rebinding mitigation, IDNA, and the
     //! loopback IP-form rule are tested in
-    //! `crates/blit-daemon/src/delegation_gate.rs`. Wire-equivalence
-    //! and endpoint-isolation for the spec extraction live in
-    //! `crates/blit-core/src/remote/pull.rs::spec_extraction_tests`.
-    //! End-to-end byte-path isolation lands in Phase 2 integration.
+    //! `crates/blit-daemon/src/delegation_gate.rs`. Spec-extraction
+    //! coverage lives with the builder in
+    //! `remote/transfer/operation_spec.rs` (relocated at otp-10c-2).
+    //! End-to-end byte-path isolation: the remote_remote.rs pins.
 
     use super::*;
-    use blit_core::generated::PeerCapabilities;
 
-    fn spec_with_caps(caps: PeerCapabilities) -> TransferOperationSpec {
+    fn wire_spec() -> TransferOperationSpec {
         TransferOperationSpec {
             spec_version: 2,
             module: "m".into(),
@@ -424,20 +423,17 @@ mod tests {
             compare_mode: 0,
             mirror_mode: 0,
             resume: None,
-            client_capabilities: Some(caps),
             force_grpc: false,
             ignore_existing: false,
             require_complete_scan: false,
-            receiver_capacity: None,
         }
     }
 
-    // ── R25-F2: client_capabilities mandatory override ────
     // ── R21-F6 / R25 spec_version: explicit allowlist ────────────────
 
     #[test]
     fn validate_spec_accepts_known_version_and_clean_fields() {
-        let spec = spec_with_caps(PeerCapabilities::default());
+        let spec = wire_spec();
         let out = validate_spec(spec.clone()).expect("clean spec validates");
         // Wire spec must travel verbatim through validation.
         assert_eq!(out, spec);
@@ -449,7 +445,7 @@ mod tests {
         // NormalizedTransferOperation::from_spec check, not from
         // protobuf unknown-field detection. Per R21-F6 we do not
         // rely on prost dropping unknown fields.
-        let mut spec = spec_with_caps(PeerCapabilities::default());
+        let mut spec = wire_spec();
         spec.spec_version = 99;
         let err = validate_spec(spec).unwrap_err();
         assert!(
@@ -462,7 +458,7 @@ mod tests {
     fn validate_spec_rejects_zero_spec_version() {
         // spec_version 0 is what proto3 sees when the sender omits
         // the field. We require explicit version setting.
-        let mut spec = spec_with_caps(PeerCapabilities::default());
+        let mut spec = wire_spec();
         spec.spec_version = 0;
         let err = validate_spec(spec).unwrap_err();
         assert!(err.contains("spec_version"));
@@ -478,7 +474,7 @@ mod tests {
         // delegated handler must catch this at the boundary, before
         // any DNS/connect/manifest work — exactly like push and
         // pull_sync. (R30-F3.)
-        let mut spec = spec_with_caps(PeerCapabilities::default());
+        let mut spec = wire_spec();
         spec.compare_mode = blit_core::generated::ComparisonMode::Force as i32;
         spec.ignore_existing = true;
         let err = validate_spec(spec).unwrap_err();
@@ -534,7 +530,7 @@ mod tests {
         // source's own from_spec reject it later, but only after the
         // delegation gate / outbound connect has already burned
         // resources. (R30-F3.)
-        let mut spec = spec_with_caps(PeerCapabilities::default());
+        let mut spec = wire_spec();
         spec.filter = Some(blit_core::generated::FilterSpec {
             include: vec!["[invalid-glob".into()],
             exclude: vec![],
