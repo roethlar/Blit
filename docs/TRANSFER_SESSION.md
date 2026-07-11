@@ -224,7 +224,8 @@ push/pull-specific message.
   BUILD_MISMATCH):
   `BUILD_MISMATCH`, `MODULE_UNKNOWN`, `READ_ONLY`,
   `DELEGATION_REFUSED`, `SCAN_INCOMPLETE`, `PROTOCOL_VIOLATION`,
-  `DATA_PLANE_FAILED`, `CANCELLED`, `INTERNAL`. An end that refuses
+  `DATA_PLANE_FAILED`, `CANCELLED`, `INTERNAL`, `CHECKSUM_DISABLED`
+  (contract v3, below). An end that refuses
   or aborts says why before closing; operators never diagnose from a
   bare stream reset. Since contract v2 (otp-7b-2, the D-2026-07-09-1
   Q2 rider) the frame also carries `optional relative_path` — the
@@ -233,6 +234,20 @@ push/pull-specific message.
   identity of a single-file-root transfer). Both ends can therefore
   name the affected file in their end-of-operation summary,
   structurally, wherever the fault originated.
+- **Checksum compare (contract v3, otp-10b-1)**: a session opened
+  with `COMPARISON_MODE_CHECKSUM` is a content compare — the SOURCE
+  fills each `ManifestEntry.checksum` (Blake3, hashed through its own
+  read path, after the filter so only in-scope files pay), and the
+  DESTINATION hashes its same-size candidates during the diff, so a
+  content-equal file SKIPS regardless of mtime and a content-differing
+  same-size+mtime file transfers. Role-agnostic: whichever end holds
+  SOURCE hashes the manifest; whichever holds DESTINATION hashes its
+  candidates. A responder whose operator disabled hashing
+  (`--no-server-checksums` / `server_checksums_enabled = false`)
+  refuses the open with `CHECKSUM_DISABLED` — the session never
+  silently degrades a content-compare request to a weaker mode. A
+  missing checksum on either side of a comparison degrades to
+  transfer (conservative, never a false skip).
 - `CancelJob` interop: the responder registers the session in
   `ActiveJobs` at OPEN (same transfer_id contract as today); the
   cancel token races the session exactly as w4-3 wired, and the

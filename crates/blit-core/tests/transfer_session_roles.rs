@@ -2323,3 +2323,86 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
         session_error::Code::ProtocolViolation
     );
 }
+
+/// otp-10b-1: a Checksum session is a CONTENT compare — a file whose
+/// bytes are identical but whose mtime differs must SKIP (the old
+/// pull's `--checksum` behavior, now role-agnostic), under both
+/// initiator layouts. Control: the same fixture under SizeMtime
+/// transfers (source mtime is newer), proving the skip is the
+/// checksum's doing and the pin is not vacuous.
+#[tokio::test]
+async fn checksum_compare_skips_content_equal_files_regardless_of_mtime() {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        for (mode, expected) in [
+            (ComparisonMode::SizeMtime, 1u64), // control: mtime differs
+            (ComparisonMode::Checksum, 0u64),  // content-equal skips
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let src_root = tmp.path().join("src");
+            let dst_root = tmp.path().join("dst");
+            std::fs::create_dir_all(&src_root).unwrap();
+            std::fs::create_dir_all(&dst_root).unwrap();
+            write_tree(&src_root, &[("same.bin", vec![7u8; 4096], 2_000)]);
+            write_tree(&dst_root, &[("same.bin", vec![7u8; 4096], 1_000)]);
+
+            let open = SessionOpen {
+                compare_mode: mode as i32,
+                ..basic_open(initiator_role)
+            };
+            let (source_result, dest_result) =
+                run_session_with_open(open, &src_root, &dst_root, PlanOptions::default()).await;
+            let summary = source_result.unwrap_or_else(|e| {
+                panic!("source failed ({mode:?}, initiator {initiator_role:?}): {e:#}")
+            });
+            dest_result.unwrap_or_else(|e| {
+                panic!("destination failed ({mode:?}, initiator {initiator_role:?}): {e:#}")
+            });
+            assert_eq!(
+                summary.files_transferred, expected,
+                "{mode:?} under initiator {initiator_role:?}"
+            );
+        }
+    }
+}
+
+/// otp-10b-1: the cell SizeMtime provably misses — same size, same
+/// mtime, DIFFERENT content — must transfer under Checksum, both
+/// initiator layouts. Control first: SizeMtime skips it (that is the
+/// documented weakness `--checksum` exists for).
+#[tokio::test]
+async fn checksum_compare_transfers_content_change_size_mtime_misses() {
+    for initiator_role in [TransferRole::Source, TransferRole::Destination] {
+        for (mode, expected) in [
+            (ComparisonMode::SizeMtime, 0u64), // control: looks up to date
+            (ComparisonMode::Checksum, 1u64),  // content differs
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let src_root = tmp.path().join("src");
+            let dst_root = tmp.path().join("dst");
+            std::fs::create_dir_all(&src_root).unwrap();
+            std::fs::create_dir_all(&dst_root).unwrap();
+            write_tree(&src_root, &[("stealth.bin", vec![1u8; 4096], 1_000)]);
+            write_tree(&dst_root, &[("stealth.bin", vec![2u8; 4096], 1_000)]);
+
+            let open = SessionOpen {
+                compare_mode: mode as i32,
+                ..basic_open(initiator_role)
+            };
+            let (source_result, dest_result) =
+                run_session_with_open(open, &src_root, &dst_root, PlanOptions::default()).await;
+            let summary = source_result.unwrap_or_else(|e| {
+                panic!("source failed ({mode:?}, initiator {initiator_role:?}): {e:#}")
+            });
+            dest_result.unwrap_or_else(|e| {
+                panic!("destination failed ({mode:?}, initiator {initiator_role:?}): {e:#}")
+            });
+            assert_eq!(
+                summary.files_transferred, expected,
+                "{mode:?} under initiator {initiator_role:?}"
+            );
+            if mode == ComparisonMode::Checksum {
+                assert_trees_identical(&src_root, &dst_root);
+            }
+        }
+    }
+}

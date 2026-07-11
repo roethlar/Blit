@@ -30,14 +30,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     bench/docs-only). SizeMtime = data-safe skip (open Q below).
     Per-slice detail: DEVLOG 2026-07-10 entries + `.review/`.
   - **otp-2 `[x]` (both halves).** zoey rig = PER-DIRECTION
-    reference (hardware-asymmetric ends; D-2026-07-05-1 forbids
-    cross-direction verdicts there — codex F1 upheld); owner then
-    designated Mac↔Windows = cross-direction rig (**otp-2w**).
-    Harnesses `scripts/bench_otp2{,w}_baseline.sh` (cold caches,
-    SELF-TIMED durable-at-dest windows — an in-window ssh flush had
-    inflated push medians ~1.2 s on both rigs, both matrices
-    re-measured), evidence
-    `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`. July tmpfs
+    reference (hardware-asymmetric, D-2026-07-05-1); Mac↔Windows =
+    cross-direction rig (**otp-2w**, owner-designated). Harnesses
+    `scripts/bench_otp2{,w}_baseline.sh`, evidence
+    `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`; July tmpfs
     data re-labeled wire-reference. Key reading: old push trails old
     pull on BOTH rigs (Windows ×1.46–×2.38), carrier-insensitive on
     large — otp-12's interleaved old-vs-new discriminates code cost
@@ -51,12 +47,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     mutation-proven; the copy-verb skip stays the owner question
     below). Suite 1555 → **1576**. Detail: DEVLOG 2026-07-11 +
     finding/verdict under `.review/`. Current: **10b pull-shaped
-    verb**, staged: 10b-1 session checksum compare (old pull's
-    `--checksum` content-skip; the session's Checksum mode today
-    transfers everything — SOURCE hashes on a Checksum open, DEST
-    hashes diff candidates, daemon `--no-server-checksums` refuses
-    at OPEN so the checksum-negotiation e2es keep their refusal
-    shape); 10b-2 verb cutover (run_pull_session; ONE args→compare
+    verb** — **10b-1 (session checksum compare) CODE LANDED (this
+    commit), codex review pending**: real content compare both
+    roles (SOURCE `ChecksummingSource`, DEST hashes same-size diff
+    candidates), `CHECKSUM_DISABLED` OPEN refusal for
+    `--no-server-checksums` daemons (contract v3), suite 1576 →
+    **1580**, 3 guard proofs; finding:
+    `.review/findings/otp-10b-1-session-checksum-compare.md`.
+    (`blit_utils` flake = pre-existing w9-3 class, proven at
+    `6d37a22` 2/8; commit msg has detail.) Then 10b-2 verb cutover
+    (run_pull_session; ONE args→compare
     mapping for BOTH verbs incl. lifting push's `--checksum` gate;
     dest-side w6-1 progress — `execute_receive_pipeline` takes the
     handle, session passes None; printers retype; mirror retires

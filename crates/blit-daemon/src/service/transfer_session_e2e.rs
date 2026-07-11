@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::blit_server::BlitServer;
-use blit_core::generated::{session_error, MirrorMode};
+use blit_core::generated::{session_error, ComparisonMode, MirrorMode};
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::session_client::{
     run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
@@ -68,6 +68,16 @@ struct Daemon {
 
 impl Daemon {
     async fn start(read_only: bool) -> Self {
+        Self::start_with(read_only, true).await
+    }
+
+    /// otp-10b-1: variant for a daemon whose operator disabled
+    /// server-side checksum hashing (`--no-server-checksums`).
+    async fn start_with_checksums_disabled() -> Self {
+        Self::start_with(false, false).await
+    }
+
+    async fn start_with(read_only: bool, server_checksums_enabled: bool) -> Self {
         let dest = tempfile::tempdir().expect("dest dir");
         let canonical = dest.path().canonicalize().expect("canonical dest");
         let mut modules = HashMap::new();
@@ -82,7 +92,14 @@ impl Daemon {
                 delegation_allowed: true,
             },
         );
-        let service = BlitService::with_modules(modules, false);
+        let service = BlitService::from_runtime(
+            modules,
+            None,
+            false,
+            server_checksums_enabled,
+            crate::metrics::TransferMetrics::disabled(),
+            crate::delegation_gate::DelegationConfig::default(),
+        );
         let active_jobs = service.active_jobs.clone();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -566,6 +583,89 @@ async fn same_size_newer_destination_is_skipped_not_clobbered() {
         b"new-source-here--",
         "a stale destination file must be updated"
     );
+    daemon.stop().await;
+}
+
+/// otp-10b-1: a served Checksum session content-compares — a
+/// content-equal destination file skips despite a newer source mtime
+/// (SizeMtime would transfer it), and the daemon DESTINATION hashes
+/// its own candidates to decide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checksum_push_skips_content_equal_dest_over_served_session() {
+    let daemon = Daemon::start(false).await;
+    write_tree(
+        &daemon.dest_root,
+        &[("same.bin", b"identical-bytes", 1_000)],
+    );
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &[("same.bin", b"identical-bytes", 2_000)]);
+
+    let summary = run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            compare_mode: ComparisonMode::Checksum,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect("checksum session push succeeds");
+
+    assert_eq!(
+        summary.files_transferred, 0,
+        "content-equal file must skip under Checksum despite the newer source mtime"
+    );
+    daemon.stop().await;
+}
+
+/// otp-10b-1: a daemon whose operator disabled server-side checksums
+/// refuses a `COMPARISON_MODE_CHECKSUM` open with `CHECKSUM_DISABLED`
+/// — never a silent degrade to a weaker compare — in BOTH roles (the
+/// refusal is responder policy, not role logic).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checksum_open_refused_when_daemon_disables_checksums() {
+    let daemon = Daemon::start_with_checksums_disabled().await;
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &[("f.txt", b"x", 1_000)]);
+
+    // Push-shaped (daemon = DESTINATION responder).
+    let push_err = run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions {
+            compare_mode: ComparisonMode::Checksum,
+            ..PushSessionOptions::default()
+        },
+    )
+    .await
+    .expect_err("checksum push against a no-checksum daemon must refuse");
+    let fault = push_err
+        .downcast_ref::<SessionFault>()
+        .expect("refusal surfaces as a SessionFault");
+    assert_eq!(fault.code, session_error::Code::ChecksumDisabled);
+    assert!(
+        fault.message.contains("checksum") && fault.message.contains("disabled"),
+        "operator-facing reason names the knob, got: {}",
+        fault.message
+    );
+
+    // Pull-shaped (daemon = SOURCE responder): same policy, same code.
+    let dest = tempfile::tempdir().unwrap();
+    let pull_err = run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions {
+            compare_mode: ComparisonMode::Checksum,
+            ..PullSessionOptions::default()
+        },
+    )
+    .await
+    .expect_err("checksum pull against a no-checksum daemon must refuse");
+    let fault = pull_err
+        .downcast_ref::<SessionFault>()
+        .expect("refusal surfaces as a SessionFault");
+    assert_eq!(fault.code, session_error::Code::ChecksumDisabled);
+
     daemon.stop().await;
 }
 

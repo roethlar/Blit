@@ -366,10 +366,14 @@ impl Blit for BlitService {
         let peer = peer_addr_string(&request);
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
-        // codex otp-10a F3: --force-grpc-data applies to served
-        // sessions exactly as it did to the old push/pull_sync
-        // handlers — the responder then grants no TCP data plane.
-        let force_grpc_data = self.force_grpc_data;
+        // Operator policy applies to served sessions exactly as it did
+        // to the old handlers: --force-grpc-data grants no TCP data
+        // plane (codex otp-10a F3); --no-server-checksums refuses
+        // Checksum opens (otp-10b-1).
+        let policy = blit_core::transfer_session::ResponderPolicy {
+            force_in_stream: self.force_grpc_data,
+            refuse_checksum_compare: !self.server_checksums_enabled,
+        };
         let (tx, rx) = mpsc::channel(32);
         let inbound = request.into_inner();
         let metrics = Arc::clone(&self.metrics);
@@ -403,7 +407,7 @@ impl Blit for BlitService {
                     default_root,
                     inbound,
                     tx.clone(),
-                    force_grpc_data,
+                    policy,
                 ),
                 &tx,
                 &cancel_token,

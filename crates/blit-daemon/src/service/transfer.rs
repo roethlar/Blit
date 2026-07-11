@@ -34,8 +34,8 @@ use blit_core::generated::session_error::Code;
 use blit_core::generated::{SessionOpen, TransferFrame};
 use blit_core::transfer_session::transport::grpc_daemon_transport;
 use blit_core::transfer_session::{
-    run_responder, DestinationTarget, HelloConfig, OpenResolver, ResolvedEndpoint, SessionFault,
-    SourceResponderTarget,
+    run_responder, DestinationTarget, HelloConfig, OpenResolver, ResolvedEndpoint, ResponderPolicy,
+    SessionFault, SourceResponderTarget,
 };
 
 use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
@@ -108,10 +108,10 @@ pub(crate) async fn run_transfer_session(
     default_root: Option<RootExport>,
     inbound: Streaming<TransferFrame>,
     tx: mpsc::Sender<Result<TransferFrame, Status>>,
-    // codex otp-10a F3: the daemon's `--force-grpc-data` flag — the
-    // responder then never grants a TCP data plane, same as the old
-    // push/pull_sync handlers honored it.
-    force_grpc_data: bool,
+    // Operator policy from the daemon runtime config: `--force-grpc-data`
+    // (codex otp-10a F3) and `--no-server-checksums` (otp-10b-1) apply
+    // to served sessions exactly as they did to the old handlers.
+    policy: ResponderPolicy,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
     // The same module→root resolver serves both roles; only the one the
@@ -125,7 +125,7 @@ pub(crate) async fn run_transfer_session(
         transport,
         SourceResponderTarget::Resolve(source_resolver),
         DestinationTarget::Resolve(dest_resolver),
-        force_grpc_data,
+        policy,
     )
     .await;
     match outcome {

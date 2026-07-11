@@ -408,6 +408,109 @@ impl TransferSource for FilteredSource {
     }
 }
 
+/// Decorator that fills each scanned header's `checksum` by hashing the
+/// file's content through the inner source's own `open_file` (otp-10b-1:
+/// the SOURCE side of a `COMPARISON_MODE_CHECKSUM` session). Reading via
+/// the trait keeps it source-impl-agnostic — the same chokepoint
+/// reasoning as [`FilteredSource`], which it composes with (wrap OUTSIDE
+/// the filter so only in-scope files pay the hash).
+///
+/// A file that cannot be opened or read for hashing is recorded in
+/// `unreadable_paths` and dropped from the manifest — it could not have
+/// transferred either, and this matches the scan's own unreadable
+/// semantics (`ManifestComplete.scan_complete` turns false and callers
+/// that require a complete scan refuse).
+pub struct ChecksummingSource {
+    inner: Arc<dyn TransferSource>,
+}
+
+impl ChecksummingSource {
+    pub fn new(inner: Arc<dyn TransferSource>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl TransferSource for ChecksummingSource {
+    fn scan(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> (
+        mpsc::Receiver<FileHeader>,
+        tokio::task::JoinHandle<Result<u64>>,
+    ) {
+        let (mut header_rx, scan_handle) = self.inner.scan(filter, Arc::clone(&unreadable_paths));
+        let (tx, rx_hashed) = mpsc::channel::<FileHeader>(64);
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            while let Some(mut header) = header_rx.recv().await {
+                match hash_header_content(inner.as_ref(), &header).await {
+                    Ok(checksum) => header.checksum = checksum,
+                    Err(err) => {
+                        log::warn!(
+                            "checksum scan: cannot hash '{}': {err:#}",
+                            header.relative_path
+                        );
+                        if let Ok(mut guard) = unreadable_paths.lock() {
+                            guard.push(header.relative_path.clone());
+                        }
+                        continue;
+                    }
+                }
+                if tx.send(header).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (rx_hashed, scan_handle)
+    }
+
+    async fn prepare_payload(&self, payload: TransferPayload) -> Result<PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<Mutex<Vec<String>>>,
+    ) -> Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// Blake3 of one header's content via the source's `open_file`.
+/// Incremental 64 KiB reads keep memory flat; blake3 itself is fast
+/// enough that hashing inline with the (I/O-bound) read is the simple
+/// and adequate shape here.
+async fn hash_header_content(source: &dyn TransferSource, header: &FileHeader) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut reader = source.open_file(header).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let got = reader.read(&mut buf).await?;
+        if got == 0 {
+            break;
+        }
+        hasher.update(&buf[..got]);
+    }
+    Ok(hasher.finalize().as_bytes().to_vec())
+}
+
 async fn filter_headers(
     mut rx: mpsc::Receiver<FileHeader>,
     tx: mpsc::Sender<FileHeader>,

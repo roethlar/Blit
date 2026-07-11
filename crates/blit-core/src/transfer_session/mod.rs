@@ -37,7 +37,7 @@ use crate::generated::{
     SessionHello, SessionOpen, SourceDone, TarShardComplete, TarShardHeader, TransferFrame,
     TransferRole, TransferSummary,
 };
-use crate::manifest::{header_transfer_status, CompareOptions, FileStatus};
+use crate::manifest::{header_transfer_status, CompareMode, CompareOptions, FileStatus};
 use crate::remote::transfer::diff_planner;
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
 use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
@@ -55,7 +55,10 @@ use transport::{FrameRx, FrameTransport, FrameTx};
 /// `SessionHello` alongside the build id (D-2026-07-05-2).
 /// v2: `SessionError.relative_path` (otp-7b-2, the D-2026-07-09-1 Q2
 /// fault-summary rider).
-pub const CONTRACT_VERSION: u32 = 2;
+/// v3: `SessionError.Code::CHECKSUM_DISABLED` + populated
+/// `FileHeader.checksum` on a `COMPARISON_MODE_CHECKSUM` session
+/// (otp-10b-1 — content compare on the session).
+pub const CONTRACT_VERSION: u32 = 3;
 
 /// Payload chunk size on the in-stream carrier. Same unit the gRPC
 /// control plane uses today; the data plane (otp-4) has its own.
@@ -569,6 +572,21 @@ fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), Ses
     Ok(())
 }
 
+/// Operator policy a serving responder applies to every session it
+/// accepts (otp-10a F3 / otp-10b-1). Defaults are the permissive
+/// non-daemon posture; the daemon fills it from its runtime config.
+#[derive(Clone, Copy, Default)]
+pub struct ResponderPolicy {
+    /// `--force-grpc-data`: never grant a TCP data plane — every
+    /// served session rides the in-stream carrier regardless of what
+    /// the initiator asked for.
+    pub force_in_stream: bool,
+    /// `--no-server-checksums`: refuse `COMPARISON_MODE_CHECKSUM`
+    /// opens with `CHECKSUM_DISABLED` instead of hashing (or silently
+    /// degrading the compare).
+    pub refuse_checksum_compare: bool,
+}
+
 /// Outcome of the HELLO + OPEN phases.
 struct Negotiated {
     open: SessionOpen,
@@ -646,11 +664,7 @@ async fn responder_finish(
     local_role: TransferRole,
     validate_open: &OpenValidator,
     resolve_open: Option<&OpenResolver>,
-    // codex otp-10a F3: a serving daemon started with
-    // `--force-grpc-data` never grants a TCP data plane — the session
-    // then rides the in-stream carrier exactly as if the initiator had
-    // requested it. Non-daemon responders pass `false`.
-    force_in_stream: bool,
+    policy: &ResponderPolicy,
 ) -> Result<Negotiated> {
     // The initiator declares ITS role; this responder end must
     // hold the complement.
@@ -663,6 +677,20 @@ async fn responder_finish(
                 declared.as_str_name(),
                 local_role.as_str_name()
             )),
+        )
+        .await);
+    }
+    // otp-10b-1: an operator who disabled server-side checksum hashing
+    // refuses a content-compare session outright — the session never
+    // silently degrades a `--checksum` request to a weaker compare.
+    if policy.refuse_checksum_compare && open.compare_mode == ComparisonMode::Checksum as i32 {
+        return Err(notify_and_wrap(
+            transport,
+            SessionFault::new(
+                session_error::Code::ChecksumDisabled,
+                "checksum comparison is disabled on this daemon \
+                 (--no-server-checksums / server_checksums_enabled = false)",
+            ),
         )
         .await);
     }
@@ -710,7 +738,7 @@ async fn responder_finish(
     // travel as binary BLOCK/BLOCK_COMPLETE records on the sockets (the
     // otp-7a in-stream frames remain the fallback carrier), so the grant
     // is no longer suppressed for a resume session.
-    let responder_data_plane = if open.in_stream_bytes || force_in_stream {
+    let responder_data_plane = if open.in_stream_bytes || policy.force_in_stream {
         None
     } else {
         data_plane::prepare_responder_data_plane().await
@@ -791,14 +819,14 @@ async fn establish(
                 }
             };
             // Direct-responder establish (the in-process role suite):
-            // no daemon config in scope, so nothing forces in-stream.
+            // no daemon config in scope — permissive policy.
             responder_finish(
                 transport,
                 open,
                 local_role,
                 validate_open,
                 resolve_open,
-                false,
+                &ResponderPolicy::default(),
             )
             .await
         }
@@ -1250,6 +1278,19 @@ async fn source_send_half(
         }
         _ => Arc::clone(&source),
     };
+    // otp-10b-1: a Checksum session fills each manifest header's
+    // checksum so the DESTINATION can skip content-equal files
+    // regardless of mtime. Wrapped OUTSIDE the filter so only
+    // in-scope files pay the hash; a serving end that refuses to hash
+    // never gets here (CHECKSUM_DISABLED at OPEN).
+    let scan_source: Arc<dyn TransferSource> =
+        if negotiated.open.compare_mode == ComparisonMode::Checksum as i32 {
+            Arc::new(crate::remote::transfer::source::ChecksummingSource::new(
+                scan_source,
+            ))
+        } else {
+            scan_source
+        };
     // otp-10a: callers that must not treat a partial transfer as success
     // (the push verb, `blit move`'s source-delete gate) supply their own
     // accumulator via `SourceInstruments` and inspect it after the
@@ -2216,11 +2257,9 @@ pub async fn run_responder(
     transport: FrameTransport,
     source_target: SourceResponderTarget,
     dest_target: DestinationTarget,
-    // codex otp-10a F3: the serving daemon's `--force-grpc-data` —
-    // when true this responder never grants a TCP data plane, so every
-    // served session rides the in-stream carrier regardless of what
-    // the initiator asked for.
-    force_in_stream: bool,
+    // Operator policy from the serving daemon's runtime config
+    // (`--force-grpc-data`, `--no-server-checksums`).
+    policy: ResponderPolicy,
 ) -> Result<ResponderOutcome> {
     let mut transport = transport;
     exchange_hello(&mut transport, &hello).await?;
@@ -2251,7 +2290,7 @@ pub async fn run_responder(
                 TransferRole::Destination,
                 &destination_open_validator,
                 resolve,
-                force_in_stream,
+                &policy,
             )
             .await?;
             let dst_root = match negotiated.resolved_root.clone() {
@@ -2286,7 +2325,7 @@ pub async fn run_responder(
                 TransferRole::Source,
                 &source_open_validator,
                 resolve,
-                force_in_stream,
+                &policy,
             )
             .await?;
             let source: Arc<dyn TransferSource> = match source_target {
@@ -3224,12 +3263,24 @@ fn destination_needs(
         // (matches the push daemon's file_requires_upload).
         _ => None,
     };
+    // otp-10b-1: a Checksum session hashes the local candidate so a
+    // content-equal file SKIPS regardless of mtime (the old pull's
+    // `--checksum` behavior, now role-agnostic). Only the same-size
+    // case needs the hash — a size mismatch is already Modified — and
+    // a hash failure degrades to the empty checksum, whose
+    // `compare_file` arm conservatively transfers. This runs inside
+    // the diff's blocking-pool chunk (same rationale as the resume
+    // block hashing), so the hash never blocks the async loop.
+    let target_hash: Vec<u8> = match target {
+        Some((size, _)) if opts.mode == CompareMode::Checksum && size == header.size => {
+            crate::checksum::hash_file(&dst, crate::checksum::ChecksumType::Blake3)
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
     let status = header_transfer_status(
         header,
-        // Destination-side checksums are never precomputed; Checksum
-        // mode therefore transfers (the conservative arm of
-        // compare_file), matching what push does today.
-        target.map(|(size, mtime)| (size, mtime, &[] as &[u8])),
+        target.map(|(size, mtime)| (size, mtime, target_hash.as_slice())),
         opts,
     );
     Ok(match status {

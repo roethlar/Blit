@@ -1340,6 +1340,12 @@ message SessionError {
     DATA_PLANE_FAILED = 7;
     CANCELLED = 8;
     INTERNAL = 9;
+    // otp-10b: the responder's operator disabled checksum hashing
+    // (`--no-server-checksums` / `server_checksums_enabled = false`),
+    // so a `COMPARISON_MODE_CHECKSUM` open is refused at OPEN — the
+    // session never silently degrades a content-compare request to a
+    // weaker mode (contract v3).
+    CHECKSUM_DISABLED = 10;
   }
   Code code = 1;
   string message = 2;
