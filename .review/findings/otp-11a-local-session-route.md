@@ -120,6 +120,13 @@ New `crates/blit-core/tests/local_session.rs` (21):
   source file recorded in `unreadable_paths` while the copy continues
   (the move-gate signal); mirror subset keeps excluded dest entries;
   all-scope deletes through the filter.
+- Codex fix-round pins (+2, suite → 1512):
+  `resume_completes_stale_partial_byte_identical` (the local carrier's
+  block phase, design F5) and the in-crate
+  `mirror_refuses_when_availability_drops_after_clean_scan`
+  (vanishing-source stub — the deterministic apply-time R46-F2
+  trigger; a mode-000 fixture is caught at scan time instead,
+  guard-proven: guard disabled → FAILS → restored → passes).
 
 Guard proofs (mutation → failing pin → restore, run this session):
 
@@ -143,7 +150,15 @@ otp-11 regression pin
 verb tests.
 
 Perf gate (11a step 4): `scripts/bench_otp11_local_ab.sh` A/B —
-results recorded in `docs/bench/otp11-local-2026-07-11/README.md`.
+huge/tree/small cells PASS in both the original run (committed at
+`631255b`, landed after the slice commit — sequencing flagged by codex
+F6) and the hardened-harness rerun (F5). The no-op cell surfaced a
+REAL regression once measured over a 10k-file tree: the old path's
+change-journal skip (steady ~21 ms) vs the session's full
+enumerate+diff (~219 ms; faster than the old non-journal pass at
+610 ms). Per the slice doc's gate rule this blocks 11b on an owner
+decision — the journal capability retirement (D3) is exactly what the
+delta measures. Table: `docs/bench/otp11-local-2026-07-11/README.md`.
 
 ## Known gaps
 
@@ -152,11 +167,10 @@ results recorded in `docs/bench/otp11-local-2026-07-11/README.md`.
   deleted at 11b with the deletion proof and retirement accounting.
 - `TransferOutcome::JournalSkip` is now unreachable (no journal on the
   session route); the variant and its CLI line retire at 11b.
-- `--workers` no longer bounds a nested runtime (the session runs on
-  the ambient runtime; the apply pipeline uses the shared prefetch
-  discipline). The flag maps to nothing behavioral in 11a; its
-  disposition (inert vs removed) is settled at 11b with the option
-  re-home.
+- `--workers` no longer bounds a nested runtime; since the codex fix
+  round it maps to the apply pipeline's worker count when `debug_mode`
+  is set (the hidden CLI flag always sets it) — default stays 1, the
+  old streaming pipeline's shape (codex F7).
 - Planner-mix summary fields: `raw_bundle_*` always 0 on the session
   route (the payload planner emits File/TarShard); `--verbose` output
   reflects that, per the slice doc's Known gaps.

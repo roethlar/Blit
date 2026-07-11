@@ -82,9 +82,16 @@ satisfied in one process), `SessionOpen` validation and refusals with
 streaming with the same unreadable accumulation and
 `ManifestComplete{scan_complete}`, the destination-owned diff (the
 same `destination_needs` verdicts, `granted` dedup, `needed_paths`
-record), `NeedComplete`, the mirror scan-complete guard, the one
-delete pass at SourceDone (`mod.rs:2451`), the destination-computed
-summary and its final exchange. The delta: under the local carrier the
+record), `NeedComplete`, the mirror scan-complete guard (plus, on this
+carrier, the SourceDone apply-time unreadable guard — R46-F2's exact
+old posture, codex otp-11a F4), the one delete pass at SourceDone
+(`mod.rs:2451`), the destination-computed summary and its final
+exchange. Diff batching is session-uniform: BOTH carriers diff in
+`DEST_DIFF_CHUNK` batches (the wire session has granted needs this way
+since otp-4), so the local route inherits the session's start latency,
+not the old engine's 3-header eagerness — the streaming-overlap
+property (first work lands before a >chunk enumeration completes)
+ports as a pin at 11b (codex otp-11a F2 adjudication). The delta: under the local carrier the
 need-grant/payload phase collapses into the destination —
 `DestinationSessionConfig` gains an `Option<LocalApply>` (`src_root` +
 sink overrides) under which needed headers are planned
@@ -142,12 +149,17 @@ Summary synthesis (destination side sees everything):
 loops files then dirs separately — it returns the split so CLI output is
 unchanged; the wire `entries_deleted` stays the sum); `unreadable_paths` =
 `SourceInstruments.unreadable` (move's R47-F4 source-delete gate keeps its
-exact caller-side posture); `duration` measured at the entry; `outcome`:
-`SourceEmpty` (scanned==0), `UpToDate` (scanned>0, copied==0, nothing
-deleted), else `Transferred` — `JournalSkip` is retired with the journal
-(D3). Planner-mix fields (`tar_shard_*`, `raw_bundle_*`, `large_*`) are
-filled from the payload plan when cheaply available; `predictor_estimate`
-retires with the predictor (D3).
+exact caller-side posture); `duration` measured at the entry; `outcome`
+replicates the OLD strategy gate's reachability (codex otp-11a F8
+settled impl-vs-doc in favor of parity): `SourceEmpty`/`UpToDate` only
+on runs the old fast paths could reach (non-mirror, non-checksum,
+non-force_tar, default SizeMtime compare — mirror/checksum/SizeOnly
+runs always reported `Transferred` on the old streaming leg, and still
+do, so mirror deletion lines never hide behind an early-return
+outcome); `JournalSkip` is retired with the journal (D3). Planner-mix
+fields (`tar_shard_*`, `raw_bundle_*`, `large_*`) are filled from the
+payload plan when cheaply available; `predictor_estimate` retires with
+the predictor (D3).
 
 Option mapping: `mirror`+`delete_scope` → `mirror_enabled` +
 `MirrorMode::{FilteredSubset,All}`; `compare_mode`+`checksum` →

@@ -44,3 +44,47 @@ log, workspace `otp11_ab.1ODzqm`).
   session adds hello/open/manifest-frame overhead per run
   (~1–2 ms) and per-chunk diff scheduling, amortized by the shared
   planner/pipeline.
+
+## Rerun with the hardened harness (codex otp-11a F5 fix round)
+
+Same fixtures, harness now aborts on any binary failure; NEW = the
+fix-round build.
+
+| cell  | old median | new median | delta | verdict |
+|-------|-----------:|-----------:|------:|---------|
+| huge  |      21 ms |      21 ms |   ±0% | PASS    |
+| tree  |      33 ms |      33 ms |   ±0% | PASS    |
+| small |    1663 ms |    1696 ms | +2.0% | PASS    |
+| noop  |      20 ms |      23 ms | +15%  | FAIL*   |
+
+\* The 33-file noop cell measures startup jitter (3 ms delta on a
+~21 ms operation; the first run had NEW winning 27→24 ms). A focused
+follow-up cell was run to get a real signal — and found one:
+
+## noop10k — the change-journal finding (gate FAIL, owner question)
+
+No-op mirror over the already-synced 10,000-file tree, 5 runs,
+interleaved, per-binary presync + warmup absorbed in runs 1–2:
+
+| run | old | new |
+|-----|----:|----:|
+| 1 (cold) | 1637 ms | 1743 ms |
+| 2 | 610 ms | 231 ms |
+| 3 | 20 ms | 218 ms |
+| 4 | 22 ms | 219 ms |
+| 5 | 21 ms | 218 ms |
+| **steady median** | **~21 ms** | **~219 ms** |
+
+Reading: the OLD path's steady state is the **change-journal skip
+engaging** (FSEvents snapshot after runs 1–2 — the engine skips
+enumeration entirely). The session route's 219 ms is the full
+enumerate+diff — which BEATS the old path's own non-journal no-op
+pass (610 ms, run 2) but loses ~10× to the warm journal. The
+regression is exactly "journal capability retired" (slice doc D3),
+nothing else: cells measuring identical work all pass. Extrapolated,
+a repeated no-op over a 100k-file tree goes from ~tens of ms
+(journal-warm) to ~2 s (full re-stat, rsync-class behavior).
+
+Per the slice doc ("a failed cell blocks 11b until fixed") this is an
+OWNER decision before the deletion slice — options recorded in
+docs/STATE.md.

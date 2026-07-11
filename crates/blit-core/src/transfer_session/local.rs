@@ -72,6 +72,10 @@ pub struct LocalApply {
     /// `--dry-run`: the sink already refuses writes; the mirror delete
     /// pass runs in plan-only mode (counts, deletes nothing).
     pub(super) dry_run: bool,
+    /// Pipeline worker count: 1 (the old streaming pipeline's default
+    /// shape) unless the hidden `--workers` debug limiter set
+    /// `debug_mode` (codex otp-11a F7).
+    pub(super) sink_workers: usize,
     /// Shared unreadable-path accumulator (same Arc the source scan
     /// feeds): apply-side availability failures land here too, so
     /// `blit move`'s source-delete gate sees one merged list.
@@ -99,10 +103,22 @@ pub struct LocalApplyStats {
 /// A running local-apply pipeline: the destination diff queues
 /// payloads, `finish()` closes the queue and joins the pipeline for
 /// the write totals (the same join discipline as the data-plane
-/// receive).
+/// receive). A run dropped WITHOUT `finish()` — a session error or a
+/// cancelled future — aborts the pipeline task at its next payload
+/// boundary (codex otp-11a F3): the in-flight `spawn_blocking` write
+/// completes, queued payloads are dropped, and no write continues
+/// behind an operation that already returned.
 pub(super) struct LocalApplyRun {
     payload_tx: Option<mpsc::Sender<TransferPayload>>,
-    pipeline: tokio::task::JoinHandle<Result<SinkOutcome>>,
+    pipeline: Option<tokio::task::JoinHandle<Result<SinkOutcome>>>,
+}
+
+impl Drop for LocalApplyRun {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.pipeline {
+            handle.abort();
+        }
+    }
 }
 
 impl LocalApply {
@@ -113,11 +129,17 @@ impl LocalApply {
         let (payload_tx, payload_rx) =
             mpsc::channel::<TransferPayload>(DEFAULT_PAYLOAD_PREFETCH.max(1));
         let source = Arc::clone(&self.prepare_source);
-        let sink = Arc::clone(&self.sink);
+        // One pipeline worker per sink handle — the old streaming
+        // pipeline's default shape is one; the hidden `--workers`
+        // debug limiter (which always sets debug_mode) widens it
+        // (codex otp-11a F7).
+        let sinks: Vec<Arc<dyn TransferSink>> = (0..self.sink_workers.max(1))
+            .map(|_| Arc::clone(&self.sink))
+            .collect();
         let pipeline = tokio::spawn(async move {
             execute_sink_pipeline_streaming(
                 source,
-                vec![sink],
+                sinks,
                 payload_rx,
                 DEFAULT_PAYLOAD_PREFETCH,
                 progress.as_ref(),
@@ -126,7 +148,7 @@ impl LocalApply {
         });
         LocalApplyRun {
             payload_tx: Some(payload_tx),
-            pipeline,
+            pipeline: Some(pipeline),
         }
     }
 
@@ -192,7 +214,11 @@ impl LocalApplyRun {
     /// totals; surfaces the pipeline's own error as the root cause.
     pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
         self.payload_tx.take();
-        self.pipeline
+        let pipeline = self
+            .pipeline
+            .take()
+            .expect("local apply pipeline joined twice");
+        pipeline
             .await
             .map_err(|err| eyre!("local apply pipeline panicked: {err}"))?
     }
@@ -381,6 +407,11 @@ pub async fn run_local_session(
         plan_options,
         mirror_scope_filter: options.filter.clone_without_cache(),
         dry_run: options.dry_run,
+        sink_workers: if options.debug_mode {
+            options.workers.max(1)
+        } else {
+            1
+        },
         unreadable: Arc::clone(&unreadable),
         stats: Arc::clone(&stats),
     };
@@ -502,6 +533,15 @@ fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptio
     } else {
         TransferMode::Copy
     };
+    // `--null` runs keep the old `null_sink` tag: RunKind derivation
+    // keys on it (perf_history.rs), and a `"session"` tag would
+    // classify diagnostics runs as Real and contaminate profiling
+    // (codex otp-11a F9).
+    let fast_path = if options.null_sink {
+        "null_sink"
+    } else {
+        "session"
+    };
     let mut record = PerformanceRecord::new(
         mode,
         None,
@@ -509,7 +549,7 @@ fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptio
         summary.scanned_files,
         summary.scanned_bytes,
         snapshot,
-        Some("session".to_string()),
+        Some(fast_path.to_string()),
         0,
         summary.duration.as_millis(),
         0,
@@ -530,6 +570,152 @@ fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generated::{ComparisonMode, TransferSummary};
+    use crate::transfer_session::DestinationOutcome;
+
+    /// Delegates scan/prepare/open to a real fs source but drops one
+    /// path at `check_availability`, recording it unreadable — the
+    /// deterministic stand-in for a file vanishing between a CLEAN
+    /// scan and the apply (the window the SourceDone mirror guard
+    /// exists for; a mode-000 fixture is caught at scan time instead).
+    struct VanishingSource {
+        inner: Arc<dyn TransferSource>,
+        vanish: String,
+    }
+
+    #[async_trait]
+    impl TransferSource for VanishingSource {
+        fn scan(
+            &self,
+            filter: Option<FileFilter>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> (
+            mpsc::Receiver<FileHeader>,
+            tokio::task::JoinHandle<eyre::Result<u64>>,
+        ) {
+            self.inner.scan(filter, unreadable_paths)
+        }
+
+        async fn prepare_payload(
+            &self,
+            payload: TransferPayload,
+        ) -> eyre::Result<crate::remote::transfer::payload::PreparedPayload> {
+            self.inner.prepare_payload(payload).await
+        }
+
+        async fn check_availability(
+            &self,
+            headers: Vec<FileHeader>,
+            unreadable_paths: Arc<StdMutex<Vec<String>>>,
+        ) -> eyre::Result<Vec<FileHeader>> {
+            let (gone, available): (Vec<_>, Vec<_>) = headers
+                .into_iter()
+                .partition(|h| h.relative_path == self.vanish);
+            if !gone.is_empty() {
+                unreadable_paths
+                    .lock()
+                    .expect("accumulator lock")
+                    .push(self.vanish.clone());
+            }
+            Ok(available)
+        }
+
+        async fn open_file(
+            &self,
+            header: &FileHeader,
+        ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            self.inner.open_file(header).await
+        }
+
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+    }
+
+    /// R46-F2 carried onto the local carrier (codex otp-11a F4): a
+    /// source entry that vanishes AFTER a clean scan (recorded
+    /// unreadable by the apply's availability check) must refuse the
+    /// mirror at SourceDone, before any deletion — the old engine
+    /// refused mirror deletions on ANY unreadable entry.
+    #[tokio::test]
+    async fn mirror_refuses_when_availability_drops_after_clean_scan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir src");
+        std::fs::create_dir_all(&dst_root).expect("mkdir dst");
+        std::fs::write(src_root.join("ok.txt"), b"fine").expect("write");
+        std::fs::write(src_root.join("gone.txt"), b"vanishes").expect("write");
+        std::fs::write(dst_root.join("extraneous.txt"), b"would die").expect("write");
+
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: true,
+            mirror_enabled: true,
+            mirror_kind: MirrorMode::All as i32,
+            ..Default::default()
+        };
+        let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let fs_source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(src_root.clone()));
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            src_root.clone(),
+            dst_root.clone(),
+            FsSinkConfig::default(),
+        ));
+        let local_apply = LocalApply {
+            src_root: src_root.clone(),
+            sink,
+            prepare_source: Arc::new(VanishingSource {
+                inner: fs_source,
+                vanish: "gone.txt".to_string(),
+            }),
+            plan_options: PlanOptions::default(),
+            mirror_scope_filter: FileFilter::default(),
+            dry_run: false,
+            sink_workers: 1,
+            unreadable: Arc::clone(&unreadable),
+            stats: Arc::new(LocalApplyStats::default()),
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments {
+                progress: None,
+                unreadable: Some(Arc::clone(&unreadable)),
+                trace_data_plane: false,
+            },
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            instruments: DestinationInstruments::default(),
+            local_apply: Some(local_apply),
+        };
+        let (a, b) = in_process_pair();
+        let scan_source: Arc<dyn TransferSource> =
+            Arc::new(FsTransferSource::new(src_root.clone()));
+        let (_, dest_result): (
+            eyre::Result<TransferSummary>,
+            eyre::Result<DestinationOutcome>,
+        ) = tokio::join!(
+            run_source(source_cfg, a, scan_source),
+            run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+        );
+
+        let err = dest_result.expect_err("apply-time unreadable must refuse the mirror");
+        assert!(
+            format!("{err:#}").contains("could not be read during the transfer"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            dst_root.join("extraneous.txt").exists(),
+            "a refused mirror must not have deleted anything"
+        );
+    }
 
     #[test]
     fn dest_subtree_rel_detects_nesting() {

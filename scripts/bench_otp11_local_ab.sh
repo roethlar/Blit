@@ -72,12 +72,17 @@ print("fixtures ready")
 PY
 }
 
-# run_cell BIN CFG VERB SRC DST  -> prints elapsed ms
+# run_cell BIN CFG VERB SRC DST  -> prints elapsed ms, or FAIL on a
+# non-zero binary exit (a failed transfer must never produce a timing
+# that passes the gate).
 run_cell() {
   local bin=$1 cfg=$2 verb=$3 src=$4 dst=$5
   local t0 t1
   t0=$(python3 -c 'import time; print(int(time.time()*1000))')
-  "$bin" --config-dir "$cfg" "$verb" "$src" "$dst" --yes >/dev/null 2>&1
+  if ! "$bin" --config-dir "$cfg" "$verb" "$src" "$dst" --yes >/dev/null 2>&1; then
+    echo "FAIL"
+    return 0
+  fi
   t1=$(python3 -c 'import time; print(int(time.time()*1000))')
   echo $((t1 - t0))
 }
@@ -123,6 +128,10 @@ for cell in "${CELLS[@]}"; do
           ms=$(run_cell "$bin" "$cfg" mirror "$ROOT/src_tree" "$dst")
           ;;
       esac
+      if ! [[ $ms =~ ^[0-9]+$ ]]; then
+        log "cell=$cell run=$run $side: binary FAILED — gate aborted"
+        exit 1
+      fi
       if [[ $side == old ]]; then old_ms+=("$ms"); else new_ms+=("$ms"); fi
       log "cell=$cell run=$run $side=${ms}ms"
     done

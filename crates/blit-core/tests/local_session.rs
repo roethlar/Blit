@@ -647,6 +647,38 @@ async fn null_sink_counts_but_writes_nothing() -> Result<()> {
     Ok(())
 }
 
+/// Local `--resume` rides the carrier's block phase — the shared
+/// `resume_copy_file` primitive (design doc D2, codex design F5
+/// adjudication): a stale partial at the destination is completed
+/// byte-identical.
+#[tokio::test]
+async fn resume_completes_stale_partial_byte_identical() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(&dest)?;
+    let payload: Vec<u8> = (0u8..=255).cycle().take(4 * 1024 * 1024).collect();
+    fs::write(src.join("big.bin"), &payload)?;
+    // Stale partial: first half only, first byte drifted.
+    let mut partial = payload[..2 * 1024 * 1024].to_vec();
+    partial[0] = !partial[0];
+    fs::write(dest.join("big.bin"), &partial)?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            resume: true,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 1);
+    assert_eq!(fs::read(dest.join("big.bin"))?, payload);
+    Ok(())
+}
+
 /// An unreadable source file is skipped (readable siblings land) and
 /// recorded in `unreadable_paths` — the summary signal `blit move`'s
 /// caller-side source-delete gate (R47-F4) relies on.

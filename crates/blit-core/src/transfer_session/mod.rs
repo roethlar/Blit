@@ -3167,6 +3167,27 @@ async fn destination_session(
                     files_written = totals.files_written as u64;
                     bytes_written = totals.bytes_written;
                 }
+                // R46-F2 on the local carrier (codex otp-11a F4): the
+                // scan-complete guard fired at ManifestComplete, but the
+                // local apply's availability checks can record
+                // unreadables AFTER it (a file vanishing or losing
+                // permissions between enumeration and apply). The old
+                // engine refused mirror deletions on ANY unreadable
+                // entry; carry that exact posture — checked here, after
+                // the apply pipeline joined, before any deletion.
+                if mirror_enabled {
+                    if let Some(la) = &local_apply {
+                        let unreadable_count = la.unreadable.lock().map(|g| g.len()).unwrap_or(0);
+                        if unreadable_count != 0 {
+                            return Err(eyre::Report::new(SessionFault::internal(format!(
+                                "mirror refused: {unreadable_count} source entr{} could \
+                                 not be read during the transfer — deleting now could \
+                                 remove files the source still has",
+                                if unreadable_count == 1 { "y" } else { "ies" }
+                            ))));
+                        }
+                    }
+                }
                 let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.take() {
                     Some(run) => {
                         let totals = run.finish().await?;
@@ -3362,38 +3383,16 @@ async fn diff_chunk_and_apply_local(
         .scanned_bytes
         .fetch_add(chunk.iter().map(|h| h.size).sum::<u64>(), Ordering::Relaxed);
 
-    let dst_root_owned = dst_root.to_path_buf();
-    let canonical = canonical_dst_root.map(Path::to_path_buf);
-    let opts = compare_opts.clone();
-    // Same abort discipline as the wire diff (codex otp-10b-1 F3): a
-    // dropped session must be able to stop a Checksum chunk mid-hash.
-    let abort = Arc::new(AtomicBool::new(false));
-    let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
-    let needed: Vec<FileHeader> =
-        tokio::task::spawn_blocking(move || -> Result<Vec<FileHeader>> {
-            let mut needed = Vec::new();
-            for header in chunk {
-                if abort.load(Ordering::Acquire) {
-                    eyre::bail!("destination diff aborted: session ended");
-                }
-                match destination_needs(
-                    &header,
-                    &dst_root_owned,
-                    canonical.as_deref(),
-                    &opts,
-                    &abort,
-                )? {
-                    NeedVerdict::Skip => {}
-                    NeedVerdict::Transfer { .. } => needed.push(header),
-                }
-            }
-            Ok(needed)
-        })
-        .await
-        .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
+    // ONE diff core, both carriers (codex otp-11a F1): only the
+    // dispatch differs — the wire twin grants these to the source,
+    // this one plans and applies them in-process. The resume flag is
+    // meaningless here (the local carrier's block phase is
+    // sink-level).
+    let needed = diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts).await?;
 
     let fresh: Vec<FileHeader> = needed
         .into_iter()
+        .map(|(header, _)| header)
         .filter(|header| granted.insert(header.relative_path.clone()))
         .collect();
     if fresh.is_empty() {
@@ -3460,43 +3459,15 @@ async fn diff_chunk_and_send_needs(
     if chunk.is_empty() {
         return Ok(());
     }
-    let dst_root_owned = dst_root.to_path_buf();
-    let canonical = canonical_dst_root.map(Path::to_path_buf);
-    let opts = compare_opts.clone();
-    // codex otp-10b-1 F3: under Checksum compare this chunk hashes up
-    // to DEST_DIFF_CHUNK files — long enough that a dropped session
-    // (client disconnect, CancelJob) must be able to stop it. The
-    // guard's Drop flips the flag; the loop checks it per entry and
-    // the hasher per 64 KiB chunk.
-    let abort = Arc::new(AtomicBool::new(false));
-    let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
+    // ONE diff core, both carriers (codex otp-11a F1); plan D2: a need
+    // is resume-flagged only when the session negotiated resume AND a
+    // non-empty dest partial exists to diff against.
     let needed: Vec<(FileHeader, bool)> =
-        tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
-            let mut needed = Vec::new();
-            for header in chunk {
-                if abort.load(Ordering::Acquire) {
-                    eyre::bail!("destination diff aborted: session ended");
-                }
-                match destination_needs(
-                    &header,
-                    &dst_root_owned,
-                    canonical.as_deref(),
-                    &opts,
-                    &abort,
-                )? {
-                    NeedVerdict::Skip => {}
-                    NeedVerdict::Transfer { resume_eligible } => {
-                        // plan D2: a need is resume-flagged only when the
-                        // session negotiated resume AND a non-empty dest
-                        // partial exists to diff against.
-                        needed.push((header, resume_enabled && resume_eligible));
-                    }
-                }
-            }
-            Ok(needed)
-        })
-        .await
-        .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
+        diff_chunk_verdicts(chunk, dst_root, canonical_dst_root, compare_opts)
+            .await?
+            .into_iter()
+            .map(|(header, resume_eligible)| (header, resume_enabled && resume_eligible))
+            .collect();
 
     // Dedup on the ever-granted set (no lock — control-loop-local), then
     // insert the freshly granted paths into the shared `outstanding`
@@ -3563,6 +3534,52 @@ async fn diff_chunk_and_send_needs(
             .await?;
     }
     Ok(())
+}
+
+/// Stat-and-compare one manifest chunk on the blocking pool (2+
+/// syscalls per entry — the daemon's w4-4 chunked-check rationale),
+/// abortable when the session dies: under Checksum compare this chunk
+/// hashes up to DEST_DIFF_CHUNK files (codex otp-10b-1 F3), so the
+/// guard's Drop flips the flag, the loop checks it per entry, and the
+/// hasher per 64 KiB chunk. The ONE diff core for both carriers
+/// (codex otp-11a F1): `diff_chunk_and_send_needs` grants the result
+/// to the source over the wire; `diff_chunk_and_apply_local` plans and
+/// applies it in-process. Returns `(header, resume_eligible)` per
+/// entry that must transfer.
+async fn diff_chunk_verdicts(
+    chunk: Vec<FileHeader>,
+    dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
+    compare_opts: &CompareOptions,
+) -> Result<Vec<(FileHeader, bool)>> {
+    let dst_root_owned = dst_root.to_path_buf();
+    let canonical = canonical_dst_root.map(Path::to_path_buf);
+    let opts = compare_opts.clone();
+    let abort = Arc::new(AtomicBool::new(false));
+    let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
+    tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
+        let mut needed = Vec::new();
+        for header in chunk {
+            if abort.load(Ordering::Acquire) {
+                eyre::bail!("destination diff aborted: session ended");
+            }
+            match destination_needs(
+                &header,
+                &dst_root_owned,
+                canonical.as_deref(),
+                &opts,
+                &abort,
+            )? {
+                NeedVerdict::Skip => {}
+                NeedVerdict::Transfer { resume_eligible } => {
+                    needed.push((header, resume_eligible));
+                }
+            }
+        }
+        Ok(needed)
+    })
+    .await
+    .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))?
 }
 
 /// The destination diff's per-entry verdict (otp-7a widened it from a
