@@ -66,8 +66,10 @@ four, so they're stated here as settled, not open:
 - **Both local and remote-mediated routes** (was Q3): the owner wants one
   place that "sees them all" regardless of route — so this now covers every
   `TransferRoute` the CLI's `run_transfer` observes (`LocalToLocal`,
-  `LocalToRemote`, `RemoteToLocal`, `RemoteToRemoteRelay`,
-  `RemoteToRemoteDelegated`), for every arm that runs to completion inline.
+  `LocalToRemote`, `RemoteToLocal`, `RemoteToRemoteDelegated`; the
+  `RemoteToRemoteRelay` variant this paragraph originally listed was
+  deleted with `--relay-via-cli` at otp-10c-1, D-2026-07-11-1), for every
+  arm that runs to completion inline.
   **Correction (codex v2 review, Medium)**: the first pass at this
   paragraph claimed no arm ever takes a fire-and-forget path — false.
   `RemoteToRemoteDelegated` honors `--detach`
@@ -77,9 +79,9 @@ four, so they're stated here as settled, not open:
   — a post-Started failure never reaches `run_transfer`'s `Result` at all,
   detached or not. **Scope, corrected**: this plan covers every route's
   failure *up to the point the CLI stops observing it* — which is "the
-  whole thing" for `LocalToLocal`/`LocalToRemote`/`RemoteToLocal`/
-  `RemoteToRemoteRelay`, and "up to a successful `Started`" for a
-  `--detach`ed `RemoteToRemoteDelegated` transfer. A post-detach failure is
+  whole thing" for `LocalToLocal`/`LocalToRemote`/`RemoteToLocal`, and
+  "up to a successful `Started`" for a `--detach`ed
+  `RemoteToRemoteDelegated` transfer. A post-detach failure is
   explicitly out of scope (same boundary as the daemon's own
   `recents.jsonl`, which does cover it — see below), not a gap this plan
   claims to close. This does **not** mean merging with the daemon's own

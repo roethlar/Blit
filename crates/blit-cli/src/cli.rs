@@ -327,14 +327,12 @@ pub struct TransferArgs {
     /// of CLI connection state. Useful for long remote→remote
     /// transfers that should outlive the operator's shell.
     ///
-    /// Only valid for remote→remote transfers that use the
-    /// daemon-to-daemon delegated byte path (no `--relay-via-cli`,
-    /// not a `blit move`).
+    /// Only valid for remote→remote transfers (the daemon-to-daemon
+    /// delegated byte path), and not for `blit move`.
     ///
     /// Rejected with a clear error for:
     /// - local-source or local-destination transfers (CLI is in
     ///   the byte path)
-    /// - `--relay-via-cli` (CLI is in the byte path)
     /// - `blit move` (the source-delete step needs the CLI to
     ///   await transfer completion)
     #[arg(long)]

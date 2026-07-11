@@ -25,7 +25,7 @@ combinations:
 | local → local | `crates/blit-core/src/orchestrator/orchestrator.rs` (zero-copy cascade: `copy_file_range`, `clonefile`, ReFS block clone, `sendfile`, fallback to read/write) |
 | local → remote | `RemotePushClient` in `crates/blit-core/src/remote/push/client/mod.rs` |
 | remote → local | `RemotePullClient` in `crates/blit-core/src/remote/pull.rs` (`pull` for raw, `pull_sync` for compare-and-mirror) |
-| remote → remote | `RemoteTransferSource` (pull-from-A) wrapped into a push-to-B (relay) |
+| remote → remote | delegated: the destination daemon pulls directly from the source daemon (`DelegatedPull` trigger; payload bytes never cross the CLI host — the CLI relay was removed at otp-10c-1, D-2026-07-11-1) |
 
 Wire transport: dual-channel hybrid.
 
@@ -76,9 +76,9 @@ pub trait TransferSink: Send + Sync {
 
 Concrete implementations:
 
-- **Sources:** `FsTransferSource` (local filesystem walk),
-  `RemoteTransferSource` (pull from a remote daemon — used in the relay
-  case).
+- **Sources:** `FsTransferSource` (local filesystem walk — the only
+  source implementation; the relay-only `RemoteTransferSource` was
+  deleted at otp-10c-1, D-2026-07-11-1).
 - **Sinks:** `FsTransferSink` (local writes; uses zero-copy cascade for
   whole-file payloads, manual stream for receive payloads),
   `DataPlaneSink` (writes to a TCP stream wrapped in `DataPlaneSession`),

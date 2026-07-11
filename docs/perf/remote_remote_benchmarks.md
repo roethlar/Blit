@@ -1,6 +1,10 @@
 # Remote-to-Remote Benchmarks
 
-This page records direct delegation vs explicit CLI relay results.
+This page records delegated remote-to-remote results. (It originally
+compared direct delegation against the explicit CLI relay; the
+`--relay-via-cli` path was removed at otp-10c-1, D-2026-07-11-1, so
+delegation is the only remote→remote route and the relay leg is gone
+from the harness.)
 
 ## Harness
 
@@ -26,9 +30,8 @@ allowed_source_hosts = ["server-a.lan"]
 
 The script writes `logs/bench_remote_remote_<timestamp>/results.csv` with:
 
-- `direct`: default remote-to-remote path, CLI asks destination to pull from source.
-- `relay`: explicit `--relay-via-cli`, CLI pulls from source and pushes to destination.
-- `cli_data_plane_outbound_bytes`: env-gated counter from the CLI process. Direct runs should be `0`; relay runs should be roughly payload-sized.
+- `direct`: the remote-to-remote path — the CLI asks the destination to pull from the source.
+- `cli_data_plane_outbound_bytes`: counter from the CLI process (via `--diagnostics-counter-file`). Runs should report `0` — payload bytes never cross the CLI host.
 
 ## Results
 
@@ -38,4 +41,3 @@ on the target network.
 | Date | Source | Destination | Payload | Mode | Avg MiB/s | Best MiB/s | CLI Data-Plane Bytes | Notes |
 |------|--------|-------------|---------|------|-----------|------------|----------------------|-------|
 | TBD | TBD | TBD | TBD | direct | TBD | TBD | 0 expected | |
-| TBD | TBD | TBD | TBD | relay | TBD | TBD | payload-sized expected | |

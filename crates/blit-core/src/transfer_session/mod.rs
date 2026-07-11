@@ -1294,8 +1294,9 @@ async fn source_send_half(
     // SOURCE is the remote daemon responder — it, not the client, owns the
     // scan. Apply it through the universal `FilteredSource` decorator, the
     // single filter chokepoint every source impl routes through, rather
-    // than the per-impl `scan(filter)` arg which only `FsTransferSource`
-    // honors (`RemoteTransferSource` ignores it — codex otp-6a F1). A
+    // than the per-impl `scan(filter)` arg — a source impl is free to
+    // ignore that arg (the since-deleted relay source did; codex otp-6a
+    // F1), and the chokepoint makes filtering independent of it. A
     // default/absent filter scans everything (unchanged from otp-3). Globs
     // were validated at OPEN (`source_open_validator`), so the conversion
     // cannot fail on a validated open; map any error to a fault regardless.

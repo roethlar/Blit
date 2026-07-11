@@ -90,6 +90,49 @@ fn remote_to_remote_copy_delegates_directly_without_cli_byte_path() {
     );
 }
 
+/// codex otp-10c-1 F1: the POSITIVE control for the diagnostics
+/// counter. Every other assertion in this file is
+/// `cli_data_plane_outbound_bytes == 0`, and `read_counters` maps a
+/// missing or unreadable counter file to zero — so if the
+/// `--diagnostics-counter-file` wiring or the recording hook silently
+/// broke, the load-bearing zero pins above would stay green vacuously.
+/// A local→remote push puts the CLI in the byte path BY DESIGN (it is
+/// the session SOURCE; payloads leave through its TCP data plane), so
+/// the same flag, file, and parser must observe payload-sized bytes.
+#[test]
+fn local_to_remote_push_is_the_positive_counter_control() {
+    let ctx = DualDaemonContext::new(false);
+    let payload = vec![b'p'; 2 * 1024 * 1024];
+    let src_dir = ctx.workspace.join("push_src");
+    fs::create_dir_all(&src_dir).expect("mkdir push src");
+    fs::write(src_dir.join("payload.bin"), &payload).expect("write src file");
+
+    let counter = ctx.counter_path("positive_control");
+    let output = run_blit(
+        &ctx,
+        &[
+            "copy",
+            src_dir.to_str().expect("utf8 src path"),
+            &ctx.dest_remote(),
+        ],
+        Some(&counter),
+    );
+    assert_success(&output);
+    // No trailing slash on the source, so the rsync rule copies the
+    // directory itself into the module root.
+    assert_eq!(
+        fs::read(ctx.module_b_dir.join("push_src/payload.bin")).unwrap(),
+        payload
+    );
+
+    let counters = read_counters(&counter);
+    assert!(
+        counters.cli_data_plane_outbound_bytes >= payload.len() as u64,
+        "a CLI-source push must record payload-sized outbound data-plane \
+         bytes through the same counter the zero pins read; counters={counters:?}"
+    );
+}
+
 #[test]
 fn remote_to_remote_gate_reject_does_not_fall_back_to_relay() {
     let ctx = DualDaemonContext::new(false);

@@ -173,8 +173,9 @@ destination daemon because it changes the daemon's network surface:
 - **Default off.** A daemon will refuse `DelegatedPull` requests
   unless the operator sets `[delegation] allow_delegated_pull = true`.
   CLI clients that hit a daemon with delegation off receive a clear
-  upgrade-or-relay error and can fall back to `--relay-via-cli` to
-  route through the CLI host instead.
+  error naming the gate; delegation is the only remote→remote route
+  (D-2026-07-11-1), so the operator either enables it or transfers in
+  two hops (pull to a local path, then push).
 - **Why opt-in.** Allowing `DelegatedPull` lets any caller that can
   reach this daemon's control plane make the daemon initiate a TCP
   connection to a source endpoint of the caller's choosing. That is

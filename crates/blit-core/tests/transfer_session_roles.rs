@@ -1988,11 +1988,12 @@ async fn source_filter_limits_manifest_under_both_initiators() {
 
 /// A source that delegates everything to an inner `FsTransferSource` but
 /// deliberately IGNORES the `scan` filter argument (calls `inner.scan(None)`)
-/// — exactly how the real `RemoteTransferSource` behaves. Used to prove the
-/// session applies filters via the universal `FilteredSource` chokepoint, not
-/// via the per-impl `scan(filter)` arg (codex otp-6a F1). If the session ever
-/// reverts to threading the filter through `scan`, this source drops it and
-/// every file transfers.
+/// — the `TransferSource` contract permits that, and the since-deleted relay
+/// source (`RemoteTransferSource`, removed at otp-10c-1) really did it. Used
+/// to prove the session applies filters via the universal `FilteredSource`
+/// chokepoint, not via the per-impl `scan(filter)` arg (codex otp-6a F1). If
+/// the session ever reverts to threading the filter through `scan`, this
+/// source drops it and every file transfers.
 struct FilterIgnoringSource {
     inner: FsTransferSource,
 }
@@ -2007,7 +2008,8 @@ impl TransferSource for FilterIgnoringSource {
         tokio::sync::mpsc::Receiver<FileHeader>,
         tokio::task::JoinHandle<eyre::Result<u64>>,
     ) {
-        // The filter arg is discarded on purpose (models RemoteTransferSource).
+        // The filter arg is discarded on purpose (models a source impl
+        // that ignores it, as the deleted relay source did).
         self.inner.scan(None, unreadable)
     }
 
@@ -2038,9 +2040,10 @@ impl TransferSource for FilterIgnoringSource {
 #[tokio::test]
 async fn session_filters_via_chokepoint_not_scan_arg() {
     // otp-6a F1 (codex): filtering must not depend on the inner source
-    // honoring the scan(filter) argument — RemoteTransferSource ignores it.
-    // Drive a push session whose source ignores the scan arg; the filter
-    // must still apply because the session wraps it in FilteredSource.
+    // honoring the scan(filter) argument — the contract lets an impl
+    // ignore it (the deleted relay source did). Drive a push session
+    // whose source ignores the scan arg; the filter must still apply
+    // because the session wraps it in FilteredSource.
     let src = vec![
         ("keep.txt", b"a".to_vec(), 1_600_000_001),
         ("drop.log", b"b".to_vec(), 1_600_000_002),

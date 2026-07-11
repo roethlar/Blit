@@ -46,7 +46,7 @@ The core library containing all transfer logic, protocols, and platform abstract
 | Module | Responsibility |
 |--------|----------------|
 | `remote::transfer::pipeline` | `execute_sink_pipeline` + `execute_sink_pipeline_streaming` — the single entry point for every src→dst combination |
-| `remote::transfer::source` | `TransferSource` trait (read side) + `FsTransferSource`, `RemoteTransferSource` implementations |
+| `remote::transfer::source` | `TransferSource` trait (read side) + `FsTransferSource` implementation |
 | `remote::transfer::sink` | `TransferSink` trait (write side) + `FsTransferSink`, `DataPlaneSink`, `GrpcFallbackSink`, `NullSink` implementations |
 | `remote::transfer::payload` | `plan_transfer_payloads` — classifies files into tar shards / raw bundles / large-file payloads |
 | `orchestrator` | Local transfer entry: journal fast-path, mirror deletions, perf history; delegates execution to `execute_sink_pipeline` |
@@ -209,9 +209,10 @@ remote→remote — routes through the same pipeline. Only the concrete
 ### Source implementations
 
 - **`FsTransferSource`** — reads files from a local path; used for local→local
-  (client side) and for remote pull (daemon side).
-- **`RemoteTransferSource`** — reads files from another daemon via a
-  `RemotePullClient`; used for remote→remote transfers.
+  (client side) and for remote pull (daemon side). The only source
+  implementation: every transfer reads from the filesystem of whichever end
+  holds the data. (`RemoteTransferSource`, the CLI-relay read half, was
+  deleted with `--relay-via-cli` at otp-10c-1, D-2026-07-11-1.)
 
 ### Sink implementations
 
@@ -234,7 +235,7 @@ remote→remote — routes through the same pipeline. Only the concrete
 | local → remote (push, TCP) | `FsTransferSource` | N × `DataPlaneSink` |
 | local → remote (push, gRPC fallback) | `FsTransferSource` | `GrpcFallbackSink` |
 | remote → local (pull, TCP) | daemon's `FsTransferSource` | N × `DataPlaneSink` (on daemon) |
-| remote → remote | `RemoteTransferSource` | N × `DataPlaneSink` |
+| remote → remote (delegated) | source daemon's `FsTransferSource` | destination daemon's receive path (the CLI only triggers and relays progress) |
 
 ### Destination resolution
 
