@@ -90,5 +90,6 @@ go") — destructive-action policy says the owner names the go, so this
 stays deferred there rather than self-executed; the deletion proof is
 scoped to the workspace source tree until then.
 
-fix sha: (recorded after the fix commit — see REVIEW.md row)
-suite after fixes: 1480 → expected 1488 (+8 pins; gate results below)
+fix sha: `995e1cc`
+suite after fixes: 1480 → **1488** (+8 pins; gate green: fmt,
+clippy -D warnings, `cargo test --workspace --no-fail-fast` 1488/0)

@@ -48,28 +48,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     DEVLOG 2026-07-11 + `.review/`. **10b-1 (session checksum
     compare, contract v3) `[x]` CLOSED** (5/5 findings fixed;
     suite → 1581) and **10b-2 (pull verb rides `run_pull_session`) `[x]`
-    CLOSED through the codex loop** — verb cutover COMPLETE: one
-    chokepoint `blit_app run_remote_pull` (CLI copy/mirror/move-pull
-    + TUI F3); ONE args→compare mapping for BOTH verbs (push's
-    `--checksum` gate lifted; every compare flag + `--ignore-existing`
-    honored both directions); dest-side w6-1 progress + pull
-    `--trace-data-plane`; printers retype; mirror = the in-session
-    one delete rule; move maps IgnoreTimes/Checksum-only on EVERY
-    route (+ `--size-only` move gate). Codex round: 6 findings — 5
-    fixed (1 in part), 1 deferred to the M-C reshape (residue below);
-    the High trio: cancel-frame-during-purge now aborts deletions,
-    delegated move rode SizeMtime-then-delete (fixed + wire-pinned),
-    served sessions now record real kind/endpoint/metrics (pull =
-    PullSync rows again). Suite → **1605**, 12 guard-proof mutations
-    across both rounds. **10c-1 (`--relay-via-cli` removed,
-    D-2026-07-11-1) `[x]` CLOSED** — remote→remote is delegated-only;
-    relay route/gates/`RemoteTransferSource` deleted, push source
-    narrowed to `PathBuf`; codex 3/3 fixed. Suite → **1586** (20
-    relay-only tests retired, accounted; detail: DEVLOG 07-11 18:30).
-    Next: 10c-2 pure deletion — 4 drivers + `Push`/`PullSync` out of
-    tree AND proto (exclusive messages only), delegated spec builder
-    relocated, ported-test accounting + the DelegatedPull
-    no-payload-bytes assertion, file-by-file deletion proof.
+    CLOSED** — verb cutover COMPLETE: one chokepoint per verb shape
+    (`blit_app run_remote_push`/`run_remote_pull`, CLI + TUI); ONE
+    args→compare mapping for BOTH verbs; mirror = the in-session one
+    delete rule; move maps IgnoreTimes/Checksum-only on EVERY route.
+    Codex 5 fixed + 1 deferred (M-C reshape, residue below). Suite →
+    **1605**. **10c-1 (`--relay-via-cli`
+    removed, D-2026-07-11-1) `[x]`** — remote→remote is
+    delegated-only; relay route/gates/`RemoteTransferSource` deleted;
+    codex 3/3 fixed; suite → 1586. **10c-2 (THE CUTOVER DELETION)
+    `[x]` CLOSED — one transfer path by construction**: 4 drivers +
+    `Push`/`PullSync` + 13 exclusive messages out of tree AND proto
+    (−13.8k lines, no bridge); delegated spec builder relocated;
+    A/B pins → absolute; DelegatedPull no-payload proof recorded;
+    codex 6/6 accepted (F6 = the `725aa07` snapshot, owner-gated).
+    Suite 1586 → 1480 (106 retirements, all enumerated) → **1488**
+    (+8 pins; otp-13's ≥1483 floor met, margin +5 — re-check at
+    otp-11). Detail: DEVLOG 07-11 21:30 + `.review/`. Next:
+    **otp-11** — local transfers ride the in-process transport, the
+    separate local orchestration is deleted, local perf pins hold
+    (+ the deferred `compare_manifests` dead-code sweep).
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -87,9 +85,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
-   b-2), otp-8, otp-9 (a/b), otp-2 (zoey per-direction + otp-2w
-   Windows cross-direction) `[x]`. Current: **otp-10 (cutover +
-   deletion)**.
+   b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), **otp-10 (a, b-1/2,
+   c-1/2 — cutover + deletion DONE)** `[x]`. Current: **otp-11
+   (local transfers on the in-process transport)**.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -186,10 +184,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-11 (43rd, this session)** — **otp-10a, otp-10b-1, and
-  otp-10b-2 all closed through the codex loop** (suite 1555 → 1605);
-  the verb cutover is complete. In-flight: none; tree clean.
-  **Next**: otp-10c deletion per Now.
+- **2026-07-11 (44th, this session)** — **otp-10c CLOSED (10c-1 relay
+  removal on owner decision D-2026-07-11-1; 10c-2 the cutover
+  deletion, codex 3/3 + 6/6 fixed)** — the four drivers and
+  `Push`/`PullSync` no longer exist; suite 1605 → 1488. Push-state
+  refresh: origin/master = `6d37a22` (partial push landed outside
+  these sessions). In-flight: none; tree clean. **Next**: otp-11 per
+  Now. Owner asks pending: the `725aa07` worktree-snapshot `git rm -r`
+  go (now also codex otp-10c-2 F6).
+- **2026-07-11 (43rd)** — otp-10a/10b-1/10b-2 closed (1555 → 1605);
+  verb cutover complete.
 - **2026-07-10 (42nd)** @ `cccd89a` — otp-8, otp-9, otp-2/otp-2w all
   closed; otp-1..9 + otp-2 `[x]`; both benchmark baselines recorded.
   Machine-local facts (rig keys/toolchain/firewall/staged binaries,
