@@ -3124,7 +3124,7 @@ async fn destination_session(
                     // guard too — harmless, the task is already done.)
                     let abort = Arc::new(AtomicBool::new(false));
                     let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
-                    tokio::task::spawn_blocking(move || {
+                    let mut pass = tokio::task::spawn_blocking(move || {
                         mirror_delete_pass(
                             &dst,
                             &files,
@@ -3133,14 +3133,51 @@ async fn destination_session(
                             canonical.as_deref(),
                             &abort,
                         )
-                    })
-                    .await
-                    .map_err(|e| {
+                    });
+                    // codex otp-10b-2 F1: a PEER fault mid-purge (a
+                    // CancelJob on the serving source, a source-side
+                    // abort) arrives as a control frame — a bare await
+                    // here would leave it unread while deletions run to
+                    // completion behind a cancelled session. Race ONE
+                    // control-lane read against the pass (biased to the
+                    // frame, so an already-queued cancel aborts the pass
+                    // before its first delete); on any lane event, flip
+                    // the abort flag, let the pass wind down at its next
+                    // op, and surface the peer's fault instead of the
+                    // aborted pass's error.
+                    let mut peer_fault: Option<eyre::Report> = None;
+                    let joined = tokio::select! {
+                        biased;
+                        received = transport.recv() => {
+                            _abort_guard.0.store(true, Ordering::Release);
+                            peer_fault = Some(match received {
+                                Ok(Some(TransferFrame {
+                                    frame: Some(Frame::Error(err)),
+                                })) => eyre::Report::new(SessionFault::from_wire(err)),
+                                Ok(Some(other)) => violation(format!(
+                                    "unexpected {} during the mirror delete pass",
+                                    frame_name(&other.frame)
+                                )),
+                                Ok(None) => eyre::Report::new(SessionFault::internal(
+                                    "peer closed mid-session",
+                                )),
+                                Err(err) => err,
+                            });
+                            (&mut pass).await
+                        }
+                        joined = &mut pass => joined,
+                    };
+                    let pass_result = joined.map_err(|e| {
                         eyre::Report::new(SessionFault::internal(format!(
                             "mirror delete task panicked: {e}"
                         )))
-                    })?
-                    .map_err(|e| {
+                    })?;
+                    if let Some(fault) = peer_fault {
+                        // The peer's fault owns the outcome; the aborted
+                        // pass's own "aborted" error is its consequence.
+                        return Err(fault);
+                    }
+                    pass_result.map_err(|e| {
                         eyre::Report::new(SessionFault::internal(format!(
                             "mirror delete failed: {e:#}"
                         )))

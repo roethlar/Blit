@@ -38,31 +38,30 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     pull on BOTH rigs (Windows ×1.46–×2.38), carrier-insensitive on
     large — otp-12's interleaved old-vs-new discriminates code cost
     from platform write-path cost.
-  - **otp-10a `[x]` (CLOSED through the codex loop)**: the
-    push-shaped verb (CLI copy/mirror/move-push + relay + TUI F1,
-    one chokepoint: `blit_app run_remote_push`) rides
-    `run_push_session` with the full deferred wiring; codex round 8
-    findings, 7 fixed + F1 in part — **move now pushes
-    `IgnoreTimes`** (compare-skip + source-delete data loss,
-    mutation-proven; the copy-verb skip stays the owner question
-    below). Suite 1555 → **1576**. Detail: DEVLOG 2026-07-11 +
-    finding/verdict under `.review/`. Current: **10b pull-shaped
-    verb** — **10b-1 (session checksum compare, contract v3) `[x]`
-    CLOSED** (5/5 findings fixed; suite → 1581; DEVLOG + REVIEW
-    row) and **10b-2 (pull verb rides `run_pull_session`) LANDED —
-    codex round next**: one chokepoint `blit_app run_remote_pull`
-    (CLI copy/mirror/move-pull + TUI F3); ONE args→compare mapping
-    for BOTH verbs (`blit_app transfers/compare.rs` — push's
-    `--checksum` gate lifted; push now honors every compare flag +
-    `--ignore-existing`); dest-side w6-1 progress + pull
-    `--trace-data-plane` (`DestinationInstruments`); printers retype
-    to the session summary; mirror = the in-session one delete rule
-    (`apply_pull_mirror_purge` off the verb path); move-pull maps
-    IgnoreTimes/Checksum-only + NEW `--size-only` move gate (otp-10a
-    F1's hazard mirrored, binary-pinned incl. A/B vs old pull).
-    Suite → **1599**, fmt/clippy clean, 9 guard-proof mutations.
-    (`blit_utils` flake = pre-existing w9-3 class, proven at
-    `6d37a22` 2/8.) Then 10c deletion — 4
+  - **otp-10a `[x]` (CLOSED)**: the push-shaped verb (CLI
+    copy/mirror/move-push + relay + TUI F1, one chokepoint:
+    `blit_app run_remote_push`) rides `run_push_session` with the
+    full deferred wiring; codex round 8 findings, 7 fixed + F1 in
+    part — **move now pushes `IgnoreTimes`** (compare-skip +
+    source-delete data loss, mutation-proven; the copy-verb skip
+    stays the owner question below). Suite 1555 → 1576. Detail:
+    DEVLOG 2026-07-11 + `.review/`. **10b-1 (session checksum
+    compare, contract v3) `[x]` CLOSED** (5/5 findings fixed;
+    suite → 1581) and **10b-2 (pull verb rides `run_pull_session`) `[x]`
+    CLOSED through the codex loop** — verb cutover COMPLETE: one
+    chokepoint `blit_app run_remote_pull` (CLI copy/mirror/move-pull
+    + TUI F3); ONE args→compare mapping for BOTH verbs (push's
+    `--checksum` gate lifted; every compare flag + `--ignore-existing`
+    honored both directions); dest-side w6-1 progress + pull
+    `--trace-data-plane`; printers retype; mirror = the in-session
+    one delete rule; move maps IgnoreTimes/Checksum-only on EVERY
+    route (+ `--size-only` move gate). Codex round: 6 findings — 5
+    fixed (1 in part), 1 deferred to the M-C reshape (residue below);
+    the High trio: cancel-frame-during-purge now aborts deletions,
+    delegated move rode SizeMtime-then-delete (fixed + wire-pinned),
+    served sessions now record real kind/endpoint/metrics (pull =
+    PullSync rows again). Suite → **1605**, 12 guard-proof mutations
+    across both rounds. Next: 10c deletion — 4
     drivers + `Push`/`PullSync` out of tree AND proto, ported-test
     accounting + file-by-file deletion proof (incl. the
     DelegatedPull no-payload-bytes assertion; relay's PullSync-read
@@ -114,9 +113,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    tuning residue (w3-1 scoped it out); the source send half's bounded
    `dp.queue()` is not raced against control-lane events (deferred at
    codex otp-7b-1 F3; otp-8 F1 gave the in-stream sends a fault race —
-   residual: the narrow CANCELLED→INTERNAL decay, verdict file).
-   (The otp-9b "delegated Checksum degrades to transfer" gap closed at
-   otp-10b-1 — the session dest now hashes its diff candidates.)
+   residual: the narrow CANCELLED→INTERNAL decay, verdict file);
+   CLI progress monitor lives through the in-session mirror purge
+   (display-only ticks/avg dilution; fix = the M-C `AppProgressEvent`
+   phase reshape — deferred at codex otp-10b-2 F5).
 
 ## Authoritative docs right now
 
@@ -184,10 +184,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-11 (43rd, this session)** @ `15a164e` — **otp-10a closed
-  through the codex loop** (8-finding round; move → IgnoreTimes;
-  suite 1576). In-flight: none; tree clean. **Next**: otp-10b per
-  the staging in Now (10b-1 session checksum compare first).
+- **2026-07-11 (43rd, this session)** — **otp-10a, otp-10b-1, and
+  otp-10b-2 all closed through the codex loop** (suite 1555 → 1605);
+  the verb cutover is complete. In-flight: none; tree clean.
+  **Next**: otp-10c deletion per Now.
 - **2026-07-10 (42nd)** @ `cccd89a` — otp-8, otp-9, otp-2/otp-2w all
   closed; otp-1..9 + otp-2 `[x]`; both benchmark baselines recorded.
   Machine-local (this Mac): rig SSH keys installed (zoey root,

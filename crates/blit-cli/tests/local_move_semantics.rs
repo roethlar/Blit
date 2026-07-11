@@ -78,6 +78,55 @@ fn local_move_preserves_unrelated_destination_entries() {
     );
 }
 
+/// codex otp-10b-2 F3 (regression pin for otp-11): a same-size
+/// SAME-mtime destination file whose content differs must land the
+/// source bytes before move deletes the source. Today the non-mirror
+/// local path copies unconditionally, so this holds already; local
+/// move now also maps its compare through the move rule explicitly
+/// (IgnoreTimes / Checksum) so that when otp-11 puts local transfers
+/// on the session — whose diff WOULD skip this cell under SizeMtime —
+/// the move data-safety invariant survives the cutover. A skip here
+/// plus the source-delete is the otp-10a F1 data loss.
+#[test]
+fn local_move_lands_source_bytes_over_same_size_same_mtime_destination() {
+    let tmp = tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    fs::create_dir_all(&src).unwrap();
+    fs::create_dir_all(&dst).unwrap();
+
+    fs::write(src.join("clash.txt"), b"source-bytes").unwrap();
+    // Same size, different content, IDENTICAL mtime.
+    fs::write(dst.join("clash.txt"), b"dest---bytes").unwrap();
+    let src_mtime = filetime::FileTime::from_last_modification_time(
+        &fs::metadata(src.join("clash.txt")).unwrap(),
+    );
+    filetime::set_file_mtime(dst.join("clash.txt"), src_mtime).unwrap();
+
+    let mut cmd = Command::new(cli_bin());
+    cmd.arg("move")
+        .arg("--yes")
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}/", dst.display()));
+    let output = run_with_timeout(cmd, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "move failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(dst.join("clash.txt")).unwrap(),
+        b"source-bytes",
+        "move must land the source bytes before the source is deleted"
+    );
+    assert!(
+        !src.join("clash.txt").exists(),
+        "source deleted only after its bytes landed"
+    );
+}
+
 /// R47-F4 regression: `blit move SRC DST/` between two local paths
 /// must refuse to delete the source if the scan was incomplete.
 /// Pre-fix, the R46-F2 gate inside the orchestrator only fired

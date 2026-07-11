@@ -26,6 +26,13 @@ pub(crate) fn f3_pull_options(kind: f3pull::PullKind) -> blit_core::remote::pull
     blit_core::remote::pull::PullSyncOptions {
         mirror_mode: kind == PullKind::Mirror,
         require_complete_scan: kind == PullKind::Move,
+        // codex otp-10b-2 F2: a move deletes the remote source after
+        // the transfer, so its wire compare must never be
+        // metadata-shaped — ignore_times maps to IGNORE_TIMES with top
+        // precedence in the spec builder (delegated move is rejected
+        // upstream in the TUI today; this keeps the mapping safe if
+        // that gate ever loosens).
+        ignore_times: kind == PullKind::Move,
         ..blit_core::remote::pull::PullSyncOptions::default()
     }
 }
@@ -103,8 +110,9 @@ pub(crate) fn build_f1_push_execution(
     kind: f3pull::PullKind,
 ) -> blit_app::transfers::remote::PushExecution {
     use blit_app::endpoints::Endpoint;
+    use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
     use blit_app::transfers::remote::PushExecution;
-    use blit_core::generated::{ComparisonMode, MirrorMode};
+    use blit_core::generated::MirrorMode;
     let mirror = kind == f3pull::PullKind::Mirror;
     let remote_label = remote.display();
     PushExecution {
@@ -123,14 +131,16 @@ pub(crate) fn build_f1_push_execution(
         require_complete_scan: mirror,
         resume: false,
         resume_block_size: 0,
-        // codex otp-10a F1: a move deletes the local source after the
-        // push, so it must transfer every file unconditionally — a
-        // compare-mode skip of a same-size changed file would destroy
-        // the only copy. Copy/mirror keep the SizeMtime default.
+        // codex otp-10a F1 via the ONE mapping (codex otp-10b-2 F6):
+        // a move deletes the local source after the push, so it maps
+        // through `move_comparison_mode` (transfer unconditionally —
+        // the TUI exposes no compare toggles, so the flags are all
+        // default). Copy/mirror map through the copy mapping
+        // (SizeMtime default).
         compare_mode: if kind == f3pull::PullKind::Move {
-            ComparisonMode::IgnoreTimes
+            move_comparison_mode(CompareFlags::default())
         } else {
-            ComparisonMode::SizeMtime
+            comparison_mode(CompareFlags::default())
         },
         // No ignore-existing toggle on the F1 trigger.
         ignore_existing: false,

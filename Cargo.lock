@@ -398,6 +398,7 @@ dependencies = [
  "clap",
  "crossterm",
  "eyre",
+ "filetime",
  "ratatui",
  "serde",
  "serde_json",

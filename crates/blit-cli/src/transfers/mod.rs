@@ -373,49 +373,42 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         );
     }
 
-    // R54-F2 (data-loss), refreshed at otp-10b-2: reject `--force`,
-    // `--ignore-times`, and `--size-only` for move.
+    // R54-F2 (data-loss), refreshed at otp-10b-2 (and its codex F3):
+    // reject `--force`, `--ignore-times`, and `--size-only` for move.
     //
-    // Remote moves already transfer unconditionally (the session's
-    // move mapping is IgnoreTimes — or Checksum, the one skip that is
-    // content-proven safe — codex otp-10a F1), so `--force` /
-    // `--ignore-times` are redundant there. The LOCAL move path still
-    // falls through to size+mtime regardless of these flags (it rides
-    // the local orchestration until otp-11), so honoring them cannot
-    // be promised uniformly; a user relying on the flag on the one
-    // path that ignores it would hit the skip-then-delete data loss.
+    // Every move route — local, push, pull, delegated — now maps
+    // through the move compare rule (transfer unconditionally, or
+    // `--checksum` for the one skip that is content-proven safe;
+    // codex otp-10a F1 and its otp-10b-2 mirrors). That makes
+    // `--force` / `--ignore-times` pure no-ops on move: reject them
+    // rather than silently absorb them.
     //
-    // `--size-only` is worse than redundant: a size-only skip of a
-    // changed file followed by source-delete destroys the only copy —
-    // the exact hazard the move mapping exists to prevent. The old
-    // pull driver honored it on move; the gate closes that hole.
+    // `--size-only` is worse than redundant: honoring it would mean a
+    // size-only skip of a changed file followed by source-delete —
+    // destroying the only copy, the exact hazard the move mapping
+    // exists to prevent. The old pull driver honored it on move; the
+    // gate closes that hole.
     //
     // R55 still applies: escape hatches must not have the same
-    // data-loss class. `blit copy --checksum` is now honored on every
-    // remote direction (the session's Checksum compare is
-    // role-agnostic since otp-10b-1/2) and locally — or use
-    // `blit move --checksum`, which transfers exactly the files whose
-    // content differs and only skips proven-identical ones.
+    // data-loss class. `blit move --checksum` is honored on every
+    // route (the session's Checksum compare is role-agnostic since
+    // otp-10b-1/2; the local path honors it via R58-F7).
     if args.force {
         bail!(
-            "move does not support --force: remote moves already \
-             transfer every file unconditionally, and the local move \
-             path does not honor the flag (its size+mtime skip plus \
-             move's source-delete would lose data). Use \
-             `blit move --checksum` for a content-verified move, or \
-             `blit copy --checksum SRC DST` then remove the source \
-             once verified."
+            "move does not support --force: move already transfers \
+             every file unconditionally (a compare-mode skip before \
+             the source-delete could lose data), so the flag adds \
+             nothing. Use `blit move --checksum` to skip only files \
+             whose content is proven identical."
         );
     }
     if args.ignore_times {
         bail!(
-            "move does not support --ignore-times: remote moves \
-             already transfer every file unconditionally, and the \
-             local move path does not honor the flag (its size+mtime \
-             skip plus move's source-delete would lose data). Use \
-             `blit move --checksum` for a content-verified move, or \
-             `blit copy --checksum SRC DST` then remove the source \
-             once verified."
+            "move does not support --ignore-times: move already \
+             transfers every file unconditionally (a compare-mode \
+             skip before the source-delete could lose data), so the \
+             flag adds nothing. Use `blit move --checksum` to skip \
+             only files whose content is proven identical."
         );
     }
     if args.size_only {

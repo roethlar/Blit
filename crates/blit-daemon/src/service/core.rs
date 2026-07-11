@@ -377,23 +377,55 @@ impl Blit for BlitService {
         let (tx, rx) = mpsc::channel(32);
         let inbound = request.into_inner();
         let metrics = Arc::clone(&self.metrics);
-        metrics.inc_push();
         let guard = Arc::clone(&metrics).enter_transfer();
-        // Jobs row: registered with an empty endpoint (the module/path
-        // arrive in the SessionOpen, mid-handshake inside the session).
-        // Populating the row's endpoint from the open is a follow-up —
-        // the row still supports CancelJob and appears in GetState, and
-        // reuses ActiveJobKind::Push (daemon-receive = push-equivalent)
-        // until the kind taxonomy is revisited at cutover.
+        // Jobs row: registered with a Push placeholder and an empty
+        // endpoint — the KIND and module/path all arrive in the
+        // SessionOpen, mid-handshake inside the session. The on_open
+        // hook below (codex otp-10b-2 F4) fixes the row, counts the
+        // right metric, and emits the started event the moment the
+        // open resolves; the row supports CancelJob throughout.
         let job = self.active_jobs.register(
             ActiveJobKind::Push,
             peer.clone(),
             String::new(),
             String::new(),
         );
-        self.emit_transfer_started(&job, ActiveJobKind::Push, &peer, "", "");
         let started = std::time::Instant::now();
         let events_tx = self.events_tx();
+        let started_emitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let on_open: Arc<super::transfer::OnSessionOpen> = {
+            let updater = job.updater();
+            let active_jobs = self.active_jobs.clone();
+            let events_tx = self.events_tx();
+            let metrics = Arc::clone(&self.metrics);
+            let peer = peer.clone();
+            let started_emitted = Arc::clone(&started_emitted);
+            Arc::new(move |kind: ActiveJobKind, module: &str, path: &str| {
+                // The metric counts at open-resolve — the first point
+                // the daemon knows push- from pull-equivalent. A
+                // session refused in the handshake counts nothing
+                // (the old dispatchers counted refusals as pushes).
+                match kind {
+                    ActiveJobKind::Push => metrics.inc_push(),
+                    _ => metrics.inc_pull(),
+                }
+                updater.set_kind_and_endpoint(kind, module.to_string(), path.to_string());
+                started_emitted.store(true, std::sync::atomic::Ordering::Release);
+                let event = DaemonEvent {
+                    payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                        transfer_id: updater.transfer_id().to_string(),
+                        kind: kind.to_wire() as i32,
+                        peer: peer.clone(),
+                        module: module.to_string(),
+                        path: path.to_string(),
+                        start_unix_ms: updater.start_unix_ms(),
+                    })),
+                };
+                active_jobs.emit_event(&events_tx, updater.transfer_id(), event);
+            })
+        };
+        let active_jobs = self.active_jobs.clone();
+        let peer_for_task = peer;
 
         tokio::spawn(async move {
             let guard = guard;
@@ -408,12 +440,31 @@ impl Blit for BlitService {
                     inbound,
                     tx.clone(),
                     policy,
+                    on_open,
                 ),
                 &tx,
                 &cancel_token,
                 &metrics,
             )
             .await;
+            // A session that died before its open resolved never fired
+            // the hook: emit the started event now — with the
+            // registration placeholders, the pre-cutover dispatch-time
+            // shape — so subscribers still see a paired
+            // started/finished sequence.
+            if !started_emitted.load(std::sync::atomic::Ordering::Acquire) {
+                let event = DaemonEvent {
+                    payload: Some(daemon_event::Payload::TransferStarted(TransferStarted {
+                        transfer_id: job.transfer_id().to_string(),
+                        kind: ActiveJobKind::Push.to_wire() as i32,
+                        peer: peer_for_task.clone(),
+                        module: String::new(),
+                        path: String::new(),
+                        start_unix_ms: job.start_unix_ms(),
+                    })),
+                };
+                active_jobs.emit_event(&events_tx, job.transfer_id(), event);
+            }
             job.record_outcome(ok, err_msg.clone());
             let finished_event = build_transfer_finished_event(&job, ok, err_msg.as_deref());
             drop(job);

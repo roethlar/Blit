@@ -911,6 +911,40 @@ struct RecordedOutcome {
     error_message: String,
 }
 
+/// See [`ActiveJobGuard::updater`]. Same no-op-after-drain posture as
+/// [`ActiveJobGuard::set_endpoint`]: if the row is already gone (the
+/// client cancelled around the handshake), the update is silently
+/// skipped rather than re-inserting a drained row.
+#[derive(Clone)]
+pub struct ActiveJobUpdater {
+    inner: Arc<Inner>,
+    transfer_id: String,
+    start_unix_ms: u64,
+}
+
+impl ActiveJobUpdater {
+    pub fn transfer_id(&self) -> &str {
+        &self.transfer_id
+    }
+
+    pub fn start_unix_ms(&self) -> u64 {
+        self.start_unix_ms
+    }
+
+    /// Update the row's kind + endpoint in one lock acquisition —
+    /// the unified `Transfer` resolves all three from the same
+    /// `SessionOpen` (kind from the initiator's declared role,
+    /// module/path from the open's wire fields).
+    pub fn set_kind_and_endpoint(&self, kind: ActiveJobKind, module: String, path: String) {
+        let mut table = self.inner.table.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = table.get_mut(&self.transfer_id) {
+            entry.job.kind = kind;
+            entry.job.module = module;
+            entry.job.path = path;
+        }
+    }
+}
+
 impl ActiveJobGuard {
     /// Stable id assigned to this transfer. Exposed so handlers
     /// that want to surface the id in their wire response (M-C
@@ -973,6 +1007,20 @@ impl ActiveJobGuard {
         if let Some(entry) = table.get_mut(&self.transfer_id) {
             entry.job.module = module;
             entry.job.path = path;
+        }
+    }
+
+    /// Lightweight `'static` handle for updating this row from inside
+    /// a running handler (codex otp-10b-2 F4): the unified `Transfer`
+    /// learns its kind AND endpoint mid-handshake — from the
+    /// `SessionOpen`, inside the session future — after the guard has
+    /// moved into the dispatcher's spawned task, so the open hook
+    /// captures this instead of borrowing the guard.
+    pub fn updater(&self) -> ActiveJobUpdater {
+        ActiveJobUpdater {
+            inner: Arc::clone(&self.inner),
+            transfer_id: self.transfer_id.clone(),
+            start_unix_ms: self.start_unix_ms,
         }
     }
 

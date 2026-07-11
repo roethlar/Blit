@@ -19,14 +19,18 @@ pub async fn run_local_transfer(
     dest_path: &Path,
     mirror: bool,
 ) -> Result<LocalMirrorSummary> {
-    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, false).await
+    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, false, false).await
 }
 
-/// Same as [`run_local_transfer`] but the caller takes ownership
-/// of when (and whether) to print the final summary. Move uses
-/// this so a failure during source-delete can still surface as
-/// an error without first having emitted a successful-looking
-/// JSON document on stdout.
+/// Same as [`run_local_transfer`] but for the MOVE verb: the caller
+/// takes ownership of when (and whether) to print the final summary
+/// (a failure during source-delete can then surface without first
+/// emitting a successful-looking JSON document on stdout — R49-F3),
+/// and the compare maps through the move rule (codex otp-10b-2 F3):
+/// transfer unconditionally, or `--checksum` for the one skip that is
+/// content-proven safe — a SizeMtime skip of a same-size same-mtime
+/// changed file followed by the source-delete would destroy the only
+/// copy, the same otp-10a F1 hazard the remote move verbs closed.
 pub async fn run_local_transfer_deferred(
     ctx: &AppContext,
     args: &TransferArgs,
@@ -34,7 +38,7 @@ pub async fn run_local_transfer_deferred(
     dest_path: &Path,
     mirror: bool,
 ) -> Result<LocalMirrorSummary> {
-    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, true).await
+    run_local_transfer_inner(ctx, args, src_path, dest_path, mirror, true, true).await
 }
 
 /// Print the standard summary block for a completed local
@@ -52,7 +56,9 @@ pub fn print_local_transfer_summary(
     src_path: &Path,
     dest_path: &Path,
 ) -> Result<()> {
-    let options = build_local_options(ctx, args, mirror)?;
+    // Only presentation fields are read here; the compare mode (and
+    // thus the move_verb flag) is irrelevant to printing.
+    let options = build_local_options(ctx, args, mirror, false)?;
     if args.json {
         print_summary_json(mirror, summary, elapsed, src_path, dest_path);
     } else {
@@ -77,12 +83,13 @@ async fn run_local_transfer_inner(
     dest_path: &Path,
     mirror: bool,
     defer_output: bool,
+    move_verb: bool,
 ) -> Result<LocalMirrorSummary> {
     if !src_path.exists() {
         bail!("source path does not exist: {}", src_path.display());
     }
 
-    let options = build_local_options(ctx, args, mirror)?;
+    let options = build_local_options(ctx, args, mirror, move_verb)?;
     let dry_run = options.dry_run;
     let null_sink = options.null_sink;
     let json_output = args.json;
@@ -139,6 +146,7 @@ fn build_local_options(
     ctx: &AppContext,
     args: &TransferArgs,
     mirror: bool,
+    move_verb: bool,
 ) -> Result<LocalMirrorOptions> {
     use blit_core::orchestrator::{LocalCompareMode, LocalMirrorDeleteScope};
 
@@ -152,7 +160,25 @@ fn build_local_options(
     // pull.rs:538-547: ignore_times > force > size_only >
     // checksum > default. This keeps local and pull behaviorally
     // identical when given the same flag combination.
-    let compare_mode = if args.ignore_times {
+    //
+    // codex otp-10b-2 F3: a MOVE maps through the move rule instead
+    // (IgnoreTimes, or Checksum when asked) — the local twin of
+    // `blit_app::transfers::compare::move_comparison_mode`. Today the
+    // non-mirror local path copies unconditionally regardless of the
+    // compare mode (probed live at the F3 adjudication), so this is
+    // defense-in-depth; it becomes load-bearing at otp-11, when local
+    // transfers ride the session and its diff WOULD skip a same-size
+    // same-mtime changed file — which move's source-delete then turns
+    // into data loss. Pinned by
+    // `local_move_lands_source_bytes_over_same_size_same_mtime_destination`.
+    // The metadata flags are rejected on move upstream (R54-F2 gates).
+    let compare_mode = if move_verb {
+        if args.checksum {
+            LocalCompareMode::Checksum
+        } else {
+            LocalCompareMode::IgnoreTimes
+        }
+    } else if args.ignore_times {
         LocalCompareMode::IgnoreTimes
     } else if args.force {
         LocalCompareMode::Force

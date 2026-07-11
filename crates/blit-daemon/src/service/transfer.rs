@@ -39,7 +39,39 @@ use blit_core::transfer_session::{
 };
 
 use super::util::{resolve_contained_path, resolve_module, resolve_relative_path};
+use crate::active_jobs::ActiveJobKind;
 use crate::runtime::{ModuleConfig, RootExport};
+
+/// The dispatcher's open hook (codex otp-10b-2 F4): called exactly once
+/// per session, at the moment the received `SessionOpen` resolves
+/// successfully — the first point the daemon knows what kind of
+/// transfer it is serving (the initiator's declared role) and which
+/// module/path it targets. `core.rs::transfer` uses it to fix up the
+/// jobs row, count the right metric, and emit the `TransferStarted`
+/// event with real values instead of the Push/empty placeholders.
+pub(crate) type OnSessionOpen = dyn Fn(ActiveJobKind, &str, &str) + Send + Sync;
+
+/// Wrap an [`OpenResolver`] so a successful resolve also fires the
+/// dispatcher's open hook with this role's job kind and the open's
+/// wire module/path. A refused open never fires it — the session dies
+/// in the handshake and the placeholder row drains as before.
+fn with_open_hook(
+    inner: Box<OpenResolver>,
+    hook: Arc<OnSessionOpen>,
+    kind: ActiveJobKind,
+) -> Box<OpenResolver> {
+    Box::new(move |open: &SessionOpen| {
+        let fut = inner(open);
+        let hook = Arc::clone(&hook);
+        let module = open.module.clone();
+        let path = open.path.clone();
+        Box::pin(async move {
+            let resolved = fut.await?;
+            hook(kind, &module, &path);
+            Ok(resolved)
+        })
+    })
+}
 
 /// Map a resolver `tonic::Status` onto a `SessionError` code. blit-core
 /// is deliberately `Status`-free, so the daemon picks the wire code:
@@ -112,14 +144,28 @@ pub(crate) async fn run_transfer_session(
     // (codex otp-10a F3) and `--no-server-checksums` (otp-10b-1) apply
     // to served sessions exactly as they did to the old handlers.
     policy: ResponderPolicy,
+    // Fires once at a successful open resolve with this session's job
+    // kind + endpoint (codex otp-10b-2 F4).
+    on_open: Arc<OnSessionOpen>,
 ) -> Result<(), Status> {
     let transport = grpc_daemon_transport(tx, inbound);
     // The same module→root resolver serves both roles; only the one the
     // initiator's declared role selects is consulted. Two clones so each
     // target owns its resolver (the closure clones its captured handles
-    // per call, so this is cheap).
-    let source_resolver = make_open_resolver(Arc::clone(&modules), default_root.clone());
-    let dest_resolver = make_open_resolver(modules, default_root);
+    // per call, so this is cheap). Which resolver runs IS the kind: a
+    // consulted source-resolver means the daemon serves SOURCE (the
+    // client pulls — the old PullSync verbs' kind), a consulted
+    // dest-resolver means the daemon receives (push-equivalent).
+    let source_resolver = with_open_hook(
+        make_open_resolver(Arc::clone(&modules), default_root.clone()),
+        Arc::clone(&on_open),
+        ActiveJobKind::PullSync,
+    );
+    let dest_resolver = with_open_hook(
+        make_open_resolver(modules, default_root),
+        on_open,
+        ActiveJobKind::Push,
+    );
     let outcome = run_responder(
         HelloConfig::default(),
         transport,

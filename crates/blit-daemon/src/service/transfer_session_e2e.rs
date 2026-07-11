@@ -1271,6 +1271,61 @@ async fn pull_session_lands_bytes_over_in_stream_carrier() {
     daemon.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn served_sessions_record_their_kind_and_endpoint() {
+    // codex otp-10b-2 F4: post-cutover every verb rides `Transfer`, so
+    // the jobs taxonomy must come from the open — a pull-shaped session
+    // records PullSync (the old pull verbs' kind — CancelJob-capable,
+    // wire TransferKind::PullSync) and a push-shaped one records Push,
+    // both with the open's module, instead of the dispatch-time
+    // Push/empty placeholders the pre-fix handler left in place.
+    let daemon = Daemon::start(false).await;
+    write_tree(&daemon.dest_root, &small_tree());
+
+    let dest = tempfile::tempdir().unwrap();
+    run_pull_session(
+        &daemon.endpoint,
+        dest.path().to_path_buf(),
+        PullSessionOptions::default(),
+    )
+    .await
+    .expect("pull session");
+
+    let src = tempfile::tempdir().unwrap();
+    write_tree(src.path(), &small_tree());
+    run_push_session(
+        &daemon.endpoint,
+        Arc::new(FsTransferSource::new(src.path().to_path_buf())),
+        PushSessionOptions::default(),
+    )
+    .await
+    .expect("push session");
+
+    // The rows drain (and their TransferRecords land on the recents
+    // ring) when the daemon's spawned task drops its guard — bounded
+    // wait, the client RPCs have already returned.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let recent = loop {
+        let recent = daemon.active_jobs.recent();
+        if recent.len() >= 2 || std::time::Instant::now() > deadline {
+            break recent;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+
+    let pull = recent
+        .iter()
+        .find(|r| r.kind == crate::active_jobs::ActiveJobKind::PullSync)
+        .expect("the served pull must record kind PullSync");
+    assert_eq!(pull.module, "test", "pull row carries the open's module");
+    let push = recent
+        .iter()
+        .find(|r| r.kind == crate::active_jobs::ActiveJobKind::Push)
+        .expect("the served push must record kind Push");
+    assert_eq!(push.module, "test", "push row carries the open's module");
+    daemon.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // otp-9a: the pull session-client surface the delegated reroute (otp-9b)
 // consumes — mirror + filter through PullSessionOptions, and the caller's

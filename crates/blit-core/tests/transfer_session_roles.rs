@@ -18,8 +18,8 @@ use std::time::Duration;
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
     session_error, BlockHashList, ComparisonMode, FileHeader, FilterSpec, ManifestComplete,
-    MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings, SessionHello, SessionOpen,
-    TransferFrame, TransferRole, TransferSummary,
+    MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings, SessionError, SessionHello,
+    SessionOpen, SourceDone, TransferFrame, TransferRole, TransferSummary,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{PreparedPayload, TransferPayload};
@@ -1776,6 +1776,86 @@ async fn mirror_refused_when_source_scan_incomplete() {
     assert!(
         dst_root.join("victim.txt").exists(),
         "nothing may be deleted on a refused mirror"
+    );
+}
+
+#[tokio::test]
+async fn cancel_frame_during_mirror_purge_aborts_the_deletions() {
+    // codex otp-10b-2 F1: a peer fault (CancelJob on the serving
+    // source) arriving while the DESTINATION runs its mirror delete
+    // pass must abort the pass and surface the fault — not sit unread
+    // on the control lane while deletions run to completion behind a
+    // cancelled session. Scripted source peer: an EMPTY manifest makes
+    // every destination file extraneous, and the CANCELLED frame is
+    // queued right behind SourceDone — the purge race reads it (biased
+    // frame-first) and flips the abort flag before the pass's next
+    // filesystem op.
+    let tmp = tempfile::tempdir().unwrap();
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst_root).unwrap();
+    for i in 0..2000 {
+        let path = dst_root.join(format!("victim_{i:04}.txt"));
+        std::fs::write(&path, b"extraneous").unwrap();
+    }
+
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+        instruments: Default::default(),
+    };
+    let (mut peer, dest_transport) = in_process_pair();
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root.clone()),
+    ));
+
+    let mut open = basic_open(TransferRole::Source);
+    open.mirror_enabled = true;
+    open.mirror_kind = MirrorMode::All as i32;
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(wire(Frame::Open(open))).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Accept(_)));
+
+    // Empty complete scan → empty need list → the purge would delete
+    // all 2000 files. Queue the cancel right behind SourceDone.
+    peer.send(wire(Frame::ManifestComplete(ManifestComplete {
+        scan_complete: true,
+    })))
+    .await
+    .unwrap();
+    assert!(matches!(
+        recv_or_panic(&mut peer).await,
+        Frame::NeedComplete(_)
+    ));
+    peer.send(wire(Frame::SourceDone(SourceDone {})))
+        .await
+        .unwrap();
+    peer.send(wire(Frame::Error(SessionError {
+        code: session_error::Code::Cancelled as i32,
+        message: "job cancelled by operator".into(),
+        ..Default::default()
+    })))
+    .await
+    .unwrap();
+
+    let dest_err = tokio::time::timeout(SUITE_TIMEOUT, dest)
+        .await
+        .expect("destination must not hang mid-purge")
+        .unwrap()
+        .expect_err("a cancelled session must not report success");
+    assert_eq!(
+        fault_of(&dest_err).code,
+        session_error::Code::Cancelled,
+        "the peer's CANCELLED must own the outcome, got: {dest_err:#}"
+    );
+    let survivors = std::fs::read_dir(&dst_root).unwrap().count();
+    assert!(
+        survivors > 0,
+        "the purge must abort instead of deleting all 2000 entries \
+         behind a cancelled session"
     );
 }
 

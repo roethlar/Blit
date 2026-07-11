@@ -4148,6 +4148,16 @@ async fn perform_local_move(
     let options = blit_core::orchestrator::LocalMirrorOptions {
         mirror: false,
         perf_history: perf_history_enabled,
+        // codex otp-10b-2 F3: a move deletes the source after the
+        // copy, so its compare must never skip a changed file.
+        // Today the non-mirror local path copies unconditionally
+        // regardless; the explicit IgnoreTimes keeps that true when
+        // otp-11 puts local transfers on the session, whose diff
+        // WOULD skip a same-size same-mtime changed file under the
+        // SizeMtime default — and the delete below would then
+        // destroy the only copy (the local twin of the remote
+        // verbs' move mapping).
+        compare_mode: blit_core::orchestrator::LocalCompareMode::IgnoreTimes,
         ..Default::default()
     };
     let summary = blit_app::transfers::local::run(source, destination, options)
@@ -8805,6 +8815,38 @@ mod tests {
         assert!(!copy.mirror_mode);
         assert_eq!(copy.mirror_kind, MirrorMode::Off);
         assert!(!copy.require_complete_scan);
+    }
+
+    /// codex otp-10b-2 F3 (regression pin for otp-11): the TUI's
+    /// local move must land a same-size SAME-mtime changed file
+    /// before its source-delete. Today the non-mirror local path
+    /// copies unconditionally; the explicit IgnoreTimes mapping in
+    /// [`perform_local_move`] keeps that true when otp-11 puts local
+    /// transfers on the session, whose diff WOULD skip this cell
+    /// under the SizeMtime default — turning the delete into data
+    /// loss (the otp-10a F1 shape).
+    #[tokio::test]
+    async fn perform_local_move_lands_source_bytes_over_matching_metadata() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).expect("src dir");
+        std::fs::create_dir_all(&dst).expect("dst dir");
+        std::fs::write(src.join("clash.txt"), b"source-bytes").expect("src file");
+        std::fs::write(dst.join("clash.txt"), b"dest---bytes").expect("dst file");
+        let src_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(src.join("clash.txt")).expect("meta"),
+        );
+        filetime::set_file_mtime(dst.join("clash.txt"), src_mtime).expect("match mtime");
+
+        perform_local_move(&src, &dst).await.expect("move");
+
+        assert_eq!(
+            std::fs::read(dst.join("clash.txt")).expect("read dst"),
+            b"source-bytes",
+            "the source bytes must land before the source is deleted"
+        );
+        assert!(!src.exists(), "source removed after a successful move");
     }
 
     /// d-68: a remote source + remote dest copy routes to the

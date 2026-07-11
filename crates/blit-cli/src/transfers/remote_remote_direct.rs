@@ -23,7 +23,7 @@ pub async fn run_remote_to_remote_direct(
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     mirror_mode: bool,
-    require_complete_scan: bool,
+    move_verb: bool,
 ) -> Result<()> {
     // Copy/mirror callers: `--relay-via-cli` is a valid escape
     // hatch, so error messages mention it.
@@ -32,7 +32,7 @@ pub async fn run_remote_to_remote_direct(
         src,
         dst,
         mirror_mode,
-        require_complete_scan,
+        move_verb,
         false, // defer_output
         true,  // relay_fallback_suggestable
     )
@@ -52,18 +52,52 @@ pub async fn run_remote_to_remote_direct_deferred(
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     mirror_mode: bool,
-    require_complete_scan: bool,
+    move_verb: bool,
 ) -> Result<DeferredDelegatedState> {
     run_remote_to_remote_direct_inner(
         args,
         src,
         dst,
         mirror_mode,
-        require_complete_scan,
+        move_verb,
         true,  // defer_output
         false, // relay_fallback_suggestable — move refuses --relay-via-cli
     )
     .await
+}
+
+/// The delegated wire options, extracted for pinnability (codex
+/// otp-10b-2 F2). A MOVE deletes the remote source after the
+/// delegated transfer, so its compare must never produce a
+/// metadata-shaped skip: `ignore_times` is forced on unless the user
+/// asked for `--checksum` (a content-proven skip is safe) —
+/// `build_spec_from_options` maps ignore_times with top precedence,
+/// so this reproduces the verbs' `move_comparison_mode` through the
+/// old wire spec. Pre-fix a delegated move rode the SizeMtime
+/// default: a same-size changed destination file was skipped and the
+/// source-delete destroyed the only copy — the exact otp-10a F1
+/// hazard on the one route the cutover slice missed.
+/// `require_complete_scan` rides the same flag (R49-F2).
+fn delegated_pull_options(
+    args: &TransferArgs,
+    filter_spec: blit_core::generated::FilterSpec,
+    mirror_mode: bool,
+    move_verb: bool,
+) -> PullSyncOptions {
+    PullSyncOptions {
+        force_grpc: args.force_grpc,
+        mirror_mode,
+        delete_all_scope: args.delete_scope_all(),
+        filter: Some(filter_spec),
+        size_only: args.size_only,
+        ignore_times: args.ignore_times || (move_verb && !args.checksum),
+        ignore_existing: args.ignore_existing,
+        force: args.force,
+        checksum: args.checksum,
+        resume: args.resume,
+        block_size: 0,
+        require_complete_scan: move_verb,
+    }
 }
 
 // `DeferredDelegatedState` is now a type alias for
@@ -85,27 +119,12 @@ async fn run_remote_to_remote_direct_inner(
     src: RemoteEndpoint,
     dst: RemoteEndpoint,
     mirror_mode: bool,
-    require_complete_scan: bool,
+    move_verb: bool,
     defer_output: bool,
     relay_fallback_suggestable: bool,
 ) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
-    let options = PullSyncOptions {
-        force_grpc: args.force_grpc,
-        mirror_mode,
-        delete_all_scope: args.delete_scope_all(),
-        filter: Some(filter_spec),
-        size_only: args.size_only,
-        ignore_times: args.ignore_times,
-        ignore_existing: args.ignore_existing,
-        force: args.force,
-        checksum: args.checksum,
-        resume: args.resume,
-        block_size: 0,
-        // R49-F2: move arms set this true so the daemon refuses
-        // partial source scans before we delete the source.
-        require_complete_scan,
-    };
+    let options = delegated_pull_options(args, filter_spec, mirror_mode, move_verb);
 
     let show_progress = args.effective_progress() || args.verbose;
     let (progress_handle, progress_task) = spawn_progress_monitor_with_options(
@@ -283,3 +302,95 @@ fn describe_delegated_result(
 // moved to `blit_app::transfers::remote::tests` alongside the
 // implementations — see the a0-remote-helpers round-1 reopen
 // for the test-locality precedent.
+
+#[cfg(test)]
+mod delegated_options_tests {
+    use super::*;
+    use blit_core::generated::{ComparisonMode, FilterSpec};
+    use blit_core::remote::{RemoteEndpoint, RemotePullClient};
+
+    /// Minimal args for the option-mapping pins; only the compare
+    /// flags vary per test.
+    fn args(checksum: bool, size_only: bool) -> TransferArgs {
+        TransferArgs {
+            source: "a:/m/".into(),
+            destination: "b:/m/".into(),
+            dry_run: false,
+            checksum,
+            size_only,
+            ignore_times: false,
+            ignore_existing: false,
+            force: false,
+            verbose: false,
+            progress: false,
+            yes: true,
+            workers: None,
+            trace_data_plane: false,
+            force_grpc: false,
+            relay_via_cli: false,
+            detach: false,
+            resume: false,
+            retry: 0,
+            wait: 5,
+            null: false,
+            json: false,
+            exclude: vec![],
+            include: vec![],
+            files_from: None,
+            min_size: None,
+            max_size: None,
+            min_age: None,
+            max_age: None,
+            delete_scope: "subset".into(),
+        }
+    }
+
+    fn wire_compare(options: &PullSyncOptions) -> i32 {
+        let ep = RemoteEndpoint::parse("h:9031:/m/").expect("endpoint");
+        RemotePullClient::build_spec_from_options(&ep, options)
+            .expect("spec")
+            .compare_mode
+    }
+
+    /// codex otp-10b-2 F2: a delegated MOVE must never ride a
+    /// metadata-shaped compare — the dst daemon would skip a
+    /// same-size changed file and the CLI then deletes the remote
+    /// source (the otp-10a F1 data loss on the delegated route).
+    /// The wire spec must carry IGNORE_TIMES (or CHECKSUM when the
+    /// user asked — a content-proven skip is safe).
+    #[test]
+    fn delegated_move_transfers_unconditionally_on_the_wire() {
+        let opts = delegated_pull_options(&args(false, false), FilterSpec::default(), false, true);
+        assert!(opts.ignore_times, "move must force ignore_times");
+        assert!(opts.require_complete_scan, "move refuses partial scans");
+        assert_eq!(wire_compare(&opts), ComparisonMode::IgnoreTimes as i32);
+
+        let with_checksum =
+            delegated_pull_options(&args(true, false), FilterSpec::default(), false, true);
+        assert!(
+            !with_checksum.ignore_times,
+            "--checksum is the one safe skip: content-proven equality"
+        );
+        assert_eq!(
+            wire_compare(&with_checksum),
+            ComparisonMode::Checksum as i32
+        );
+    }
+
+    /// Copy/mirror keep the user's flags untouched (the old
+    /// delegated behavior) — no forced ignore_times, no scan gate.
+    #[test]
+    fn delegated_copy_passes_compare_flags_through() {
+        let opts = delegated_pull_options(&args(false, true), FilterSpec::default(), false, false);
+        assert!(!opts.ignore_times);
+        assert!(!opts.require_complete_scan);
+        assert_eq!(wire_compare(&opts), ComparisonMode::SizeOnly as i32);
+
+        let default_opts =
+            delegated_pull_options(&args(false, false), FilterSpec::default(), false, false);
+        assert_eq!(
+            wire_compare(&default_opts),
+            ComparisonMode::SizeMtime as i32
+        );
+    }
+}
