@@ -5,7 +5,7 @@ reviewer: gpt-5.6-sol (codex exec, read-only; raw output
 slice commit: `e82859e`
 verdict: NEEDS FIXES — 5 findings (1 High, 3 Med, 1 Low)
 adjudication: **5/5 accepted + fixed**
-fix sha: (appended below after commit)
+fix sha: `7d3a1f2`
 
 ## F1 (High) — hash failure dropped the header ⇒ silent absence
 

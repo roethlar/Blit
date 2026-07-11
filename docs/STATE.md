@@ -47,15 +47,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     mutation-proven; the copy-verb skip stays the owner question
     below). Suite 1555 → **1576**. Detail: DEVLOG 2026-07-11 +
     finding/verdict under `.review/`. Current: **10b pull-shaped
-    verb** — **10b-1 (session checksum compare) CODE LANDED (this
-    commit), codex review pending**: real content compare both
-    roles (SOURCE `ChecksummingSource`, DEST hashes same-size diff
-    candidates), `CHECKSUM_DISABLED` OPEN refusal for
-    `--no-server-checksums` daemons (contract v3), suite 1576 →
-    **1580**, 3 guard proofs; finding:
-    `.review/findings/otp-10b-1-session-checksum-compare.md`.
-    (`blit_utils` flake = pre-existing w9-3 class, proven at
-    `6d37a22` 2/8; commit msg has detail.) Then 10b-2 verb cutover
+    verb** — **10b-1 (session checksum compare, contract v3) `[x]`
+    CLOSED through the codex loop** (5/5 findings fixed, the High:
+    unhashable files emit with empty checksums instead of silently
+    dropping; suite → **1581**; DEVLOG 2026-07-11 10:00 + REVIEW
+    row). (`blit_utils` flake = pre-existing w9-3 class, proven at
+    `6d37a22` 2/8.) Next: 10b-2 verb cutover
     (run_pull_session; ONE args→compare
     mapping for BOTH verbs incl. lifting push's `--checksum` gate;
     dest-side w6-1 progress — `execute_receive_pipeline` takes the
