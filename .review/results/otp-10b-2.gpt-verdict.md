@@ -5,7 +5,7 @@ reviewer: gpt-5.6-sol (codex exec, read-only; raw output
 slice commit: `2014782`
 verdict: NEEDS FIXES — 3 High, 2 Med, 1 Low
 adjudication: **5 accepted (1 in part) + fixed, 1 deferred**
-fix sha: (appended below after the fix commit)
+fix sha: `3534ffa` (suite 1599 → 1605, full workspace 1605/0)
 
 ## F1 (High) — peer fault unread during the mirror delete pass
 
