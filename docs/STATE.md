@@ -114,8 +114,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    `dp.queue()` is not raced against control-lane events (deferred at
    codex otp-7b-1 F3; otp-8 F1 gave the in-stream sends a fault race —
    residual: the narrow CANCELLED→INTERNAL decay, verdict file).
-   Delegated Checksum compare degrades to transfer-for-verification
-   (otp-9b Known gap — session dest diff computes no local checksums).
+   (The otp-9b "delegated Checksum degrades to transfer" gap closed at
+   otp-10b-1 — the session dest now hashes its diff candidates.)
 
 ## Authoritative docs right now
 

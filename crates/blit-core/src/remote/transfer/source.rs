@@ -415,11 +415,12 @@ impl TransferSource for FilteredSource {
 /// reasoning as [`FilteredSource`], which it composes with (wrap OUTSIDE
 /// the filter so only in-scope files pay the hash).
 ///
-/// A file that cannot be opened or read for hashing is recorded in
-/// `unreadable_paths` and dropped from the manifest — it could not have
-/// transferred either, and this matches the scan's own unreadable
-/// semantics (`ManifestComplete.scan_complete` turns false and callers
-/// that require a complete scan refuse).
+/// A file that cannot be opened or read for hashing is still EMITTED,
+/// with an empty checksum — `compare_file`'s missing-checksum arm then
+/// transfers it unconditionally (codex otp-10b-1 F1: dropping it would
+/// let a pull "succeed" with the file silently absent, since only the
+/// SOURCE end sees its own unreadable list; a genuinely unreadable file
+/// then fails loudly at payload time like any other read failure).
 pub struct ChecksummingSource {
     inner: Arc<dyn TransferSource>,
 }
@@ -440,22 +441,28 @@ impl TransferSource for ChecksummingSource {
         mpsc::Receiver<FileHeader>,
         tokio::task::JoinHandle<Result<u64>>,
     ) {
-        let (mut header_rx, scan_handle) = self.inner.scan(filter, Arc::clone(&unreadable_paths));
+        let (mut header_rx, scan_handle) = self.inner.scan(filter, unreadable_paths);
         let (tx, rx_hashed) = mpsc::channel::<FileHeader>(64);
         let inner = Arc::clone(&self.inner);
+        // codex otp-10b-1 F2: the hashing task must not outlive its
+        // consumer by a whole (arbitrarily large) file — the stop probe
+        // is checked between 64 KiB hash chunks, bounding residual work
+        // after a session ends to one chunk.
+        let stop_probe = tx.clone();
         tokio::spawn(async move {
+            let stop = move || stop_probe.is_closed();
             while let Some(mut header) = header_rx.recv().await {
-                match hash_header_content(inner.as_ref(), &header).await {
-                    Ok(checksum) => header.checksum = checksum,
+                match hash_header_content(inner.as_ref(), &header, &stop).await {
+                    Ok(Some(checksum)) => header.checksum = checksum,
+                    // Receiver gone mid-hash — the session ended; stop.
+                    Ok(None) => break,
                     Err(err) => {
                         log::warn!(
-                            "checksum scan: cannot hash '{}': {err:#}",
+                            "checksum scan: cannot hash '{}', transferring \
+                             unconditionally: {err:#}",
                             header.relative_path
                         );
-                        if let Ok(mut guard) = unreadable_paths.lock() {
-                            guard.push(header.relative_path.clone());
-                        }
-                        continue;
+                        header.checksum = Vec::new();
                     }
                 }
                 if tx.send(header).await.is_err() {
@@ -495,20 +502,28 @@ impl TransferSource for ChecksummingSource {
 /// Blake3 of one header's content via the source's `open_file`.
 /// Incremental 64 KiB reads keep memory flat; blake3 itself is fast
 /// enough that hashing inline with the (I/O-bound) read is the simple
-/// and adequate shape here.
-async fn hash_header_content(source: &dyn TransferSource, header: &FileHeader) -> Result<Vec<u8>> {
+/// and adequate shape here. Returns `Ok(None)` when `stop` reports the
+/// consumer is gone (checked between chunks — codex otp-10b-1 F2).
+async fn hash_header_content(
+    source: &dyn TransferSource,
+    header: &FileHeader,
+    stop: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<Option<Vec<u8>>> {
     use tokio::io::AsyncReadExt;
     let mut reader = source.open_file(header).await?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
+        if stop() {
+            return Ok(None);
+        }
         let got = reader.read(&mut buf).await?;
         if got == 0 {
             break;
         }
         hasher.update(&buf[..got]);
     }
-    Ok(hasher.finalize().as_bytes().to_vec())
+    Ok(Some(hasher.finalize().as_bytes().to_vec()))
 }
 
 async fn filter_headers(
@@ -908,5 +923,118 @@ mod remote_bounded_read_tests {
             .await
             .unwrap();
         assert!(data.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod checksumming_source_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use tokio::sync::mpsc::channel;
+
+    /// Stub whose `open_file` serves bytes for every header except
+    /// ones named `unhashable*`, which error — the codex otp-10b-1 F1
+    /// shape (a file the scan listed but the hash pass cannot read).
+    struct HashStub {
+        headers: StdMutex<Option<Vec<FileHeader>>>,
+        root: PathBuf,
+    }
+
+    #[async_trait]
+    impl TransferSource for HashStub {
+        fn scan(
+            &self,
+            _filter: Option<FileFilter>,
+            _unreadable: Arc<Mutex<Vec<String>>>,
+        ) -> (
+            mpsc::Receiver<FileHeader>,
+            tokio::task::JoinHandle<Result<u64>>,
+        ) {
+            let headers = self.headers.lock().unwrap().take().unwrap_or_default();
+            let (tx, rx) = channel(64);
+            let count = headers.len() as u64;
+            let handle = tokio::spawn(async move {
+                for h in headers {
+                    if tx.send(h).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(count)
+            });
+            (rx, handle)
+        }
+
+        async fn prepare_payload(&self, _: TransferPayload) -> Result<PreparedPayload> {
+            unimplemented!()
+        }
+
+        async fn check_availability(
+            &self,
+            h: Vec<FileHeader>,
+            _: Arc<Mutex<Vec<String>>>,
+        ) -> Result<Vec<FileHeader>> {
+            Ok(h)
+        }
+
+        async fn open_file(
+            &self,
+            header: &FileHeader,
+        ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+            if header.relative_path.starts_with("unhashable") {
+                bail!("permission denied (stub)");
+            }
+            Ok(Box::new(std::io::Cursor::new(b"content".to_vec())))
+        }
+
+        fn root(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    fn header(rel: &str) -> FileHeader {
+        FileHeader {
+            relative_path: rel.into(),
+            size: 7,
+            mtime_seconds: 0,
+            permissions: 0,
+            checksum: vec![],
+        }
+    }
+
+    /// codex otp-10b-1 F1: an unhashable file must still be EMITTED —
+    /// with an empty checksum, so the destination's missing-checksum
+    /// arm transfers it unconditionally. Dropping it would let a pull
+    /// report success with the file silently absent (only the SOURCE
+    /// sees its own unreadable list). Hashable neighbors get real
+    /// checksums.
+    #[tokio::test]
+    async fn unhashable_files_are_emitted_with_empty_checksums() {
+        let stub = Arc::new(HashStub {
+            headers: StdMutex::new(Some(vec![header("ok.txt"), header("unhashable.txt")])),
+            root: PathBuf::from("/stub"),
+        });
+        let source = ChecksummingSource::new(stub);
+        let (mut rx, handle) = source.scan(None, Arc::default());
+
+        let mut got = std::collections::BTreeMap::new();
+        while let Some(h) = rx.recv().await {
+            got.insert(h.relative_path.clone(), h.checksum);
+        }
+        handle.await.unwrap().unwrap();
+
+        assert_eq!(
+            got.len(),
+            2,
+            "every scanned header is emitted, hashable or not"
+        );
+        assert_eq!(
+            got["ok.txt"],
+            blake3::hash(b"content").as_bytes().to_vec(),
+            "hashable files carry their real Blake3"
+        );
+        assert!(
+            got["unhashable.txt"].is_empty(),
+            "unhashable files carry the empty checksum (conservative transfer)"
+        );
     }
 }

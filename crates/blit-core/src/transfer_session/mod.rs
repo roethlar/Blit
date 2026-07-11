@@ -572,6 +572,18 @@ fn destination_open_validator(open: &SessionOpen) -> std::result::Result<(), Ses
     Ok(())
 }
 
+/// Flips an abort flag when dropped, so a blocking-pool pass whose
+/// awaiting future is dropped (client disconnect, CancelJob) stops at
+/// its next flag check instead of running to completion behind a dead
+/// session. Introduced for the mirror delete pass (codex otp-9b F2);
+/// the destination diff's hash chunks share it (codex otp-10b-1 F3).
+struct AbortFlagOnDrop(Arc<AtomicBool>);
+impl Drop for AbortFlagOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Operator policy a serving responder applies to every session it
 /// accepts (otp-10a F3 / otp-10b-1). Defaults are the permissive
 /// non-daemon posture; the daemon fills it from its runtime config.
@@ -3034,12 +3046,6 @@ async fn destination_session(
                     // stops deleting instead of running to completion
                     // behind a cancelled job. (A completed await drops the
                     // guard too — harmless, the task is already done.)
-                    struct AbortFlagOnDrop(Arc<AtomicBool>);
-                    impl Drop for AbortFlagOnDrop {
-                        fn drop(&mut self) {
-                            self.0.store(true, Ordering::Release);
-                        }
-                    }
                     let abort = Arc::new(AtomicBool::new(false));
                     let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
                     tokio::task::spawn_blocking(move || {
@@ -3129,11 +3135,27 @@ async fn diff_chunk_and_send_needs(
     let dst_root_owned = dst_root.to_path_buf();
     let canonical = canonical_dst_root.map(Path::to_path_buf);
     let opts = compare_opts.clone();
+    // codex otp-10b-1 F3: under Checksum compare this chunk hashes up
+    // to DEST_DIFF_CHUNK files — long enough that a dropped session
+    // (client disconnect, CancelJob) must be able to stop it. The
+    // guard's Drop flips the flag; the loop checks it per entry and
+    // the hasher per 64 KiB chunk.
+    let abort = Arc::new(AtomicBool::new(false));
+    let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
     let needed: Vec<(FileHeader, bool)> =
         tokio::task::spawn_blocking(move || -> Result<Vec<(FileHeader, bool)>> {
             let mut needed = Vec::new();
             for header in chunk {
-                match destination_needs(&header, &dst_root_owned, canonical.as_deref(), &opts)? {
+                if abort.load(Ordering::Acquire) {
+                    eyre::bail!("destination diff aborted: session ended");
+                }
+                match destination_needs(
+                    &header,
+                    &dst_root_owned,
+                    canonical.as_deref(),
+                    &opts,
+                    &abort,
+                )? {
                     NeedVerdict::Skip => {}
                     NeedVerdict::Transfer { resume_eligible } => {
                         // plan D2: a need is resume-flagged only when the
@@ -3233,6 +3255,7 @@ fn destination_needs(
     dst_root: &Path,
     canonical_dst_root: Option<&Path>,
     opts: &CompareOptions,
+    abort: &AtomicBool,
 ) -> Result<NeedVerdict> {
     let dst = match canonical_dst_root {
         Some(canonical) => {
@@ -3270,11 +3293,17 @@ fn destination_needs(
     // a hash failure degrades to the empty checksum, whose
     // `compare_file` arm conservatively transfers. This runs inside
     // the diff's blocking-pool chunk (same rationale as the resume
-    // block hashing), so the hash never blocks the async loop.
+    // block hashing), so the hash never blocks the async loop; the
+    // abort flag bounds it when the session dies (codex F3).
     let target_hash: Vec<u8> = match target {
         Some((size, _)) if opts.mode == CompareMode::Checksum && size == header.size => {
-            crate::checksum::hash_file(&dst, crate::checksum::ChecksumType::Blake3)
-                .unwrap_or_default()
+            match hash_file_abortable(&dst, abort) {
+                Ok(hash) => hash,
+                Err(_) if abort.load(Ordering::Acquire) => {
+                    eyre::bail!("destination diff aborted: session ended")
+                }
+                Err(_) => Vec::new(),
+            }
         }
         _ => Vec::new(),
     };
@@ -3296,6 +3325,29 @@ fn destination_needs(
         },
         _ => NeedVerdict::Skip,
     })
+}
+
+/// Blake3 of one whole local file, abortable between 64 KiB chunks —
+/// the destination diff's Checksum-mode hasher (codex otp-10b-1 F3:
+/// `checksum::hash_file` runs a whole file uninterruptibly; inside the
+/// diff's blocking chunk that must yield to a dead session's abort
+/// flag within one chunk).
+fn hash_file_abortable(path: &Path, abort: &AtomicBool) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        if abort.load(Ordering::Acquire) {
+            eyre::bail!("hash aborted: session ended");
+        }
+        let got = file.read(&mut buf)?;
+        if got == 0 {
+            break;
+        }
+        hasher.update(&buf[..got]);
+    }
+    Ok(hasher.finalize().as_bytes().to_vec())
 }
 
 /// otp-7a: hash the destination's existing partial for one

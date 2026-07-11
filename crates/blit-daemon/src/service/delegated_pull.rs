@@ -102,7 +102,9 @@ fn session_error_phase(err: &eyre::Report) -> blit_core::generated::delegated_pu
             | session_error::Code::ModuleUnknown
             | session_error::Code::ReadOnly
             | session_error::Code::DelegationRefused
-            | session_error::Code::ScanIncomplete,
+            | session_error::Code::ScanIncomplete
+            // otp-10b-1: refused at OPEN, before any transfer work.
+            | session_error::Code::ChecksumDisabled,
         ) => Phase::Negotiate,
         _ => Phase::Transfer,
     }
@@ -590,6 +592,13 @@ mod tests {
             "module is read-only",
         ));
         assert_eq!(session_error_phase(&refusal), Phase::Negotiate);
+
+        // otp-10b-1: an operator-policy refusal at OPEN → NEGOTIATE.
+        let checksum = eyre::Report::new(SessionFault::refusal(
+            session_error::Code::ChecksumDisabled,
+            "checksum comparison is disabled on this daemon",
+        ));
+        assert_eq!(session_error_phase(&checksum), Phase::Negotiate);
 
         // Mid-session abort (cancel) → TRANSFER.
         let cancel = eyre::Report::new(SessionFault::refusal(

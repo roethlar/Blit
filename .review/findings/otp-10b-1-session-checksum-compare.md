@@ -27,9 +27,10 @@ refusal, reborn as an OPEN refusal).
   through the inner source's own `open_file` (source-impl-agnostic,
   the `FilteredSource` chokepoint reasoning; composed OUTSIDE the
   filter so only in-scope files pay). A file that cannot be hashed is
-  recorded unreadable and dropped — it could not have transferred
-  either; `scan_complete` turns false exactly like a scan-time
-  failure. `source_send_half` wraps when
+  still EMITTED, with an empty checksum — the destination's
+  missing-checksum arm transfers it unconditionally (codex F1: the
+  original drop-and-mark-unreadable let a pull succeed with the file
+  silently absent). `source_send_half` wraps when
   `open.compare_mode == Checksum`.
 - **DESTINATION**: `destination_needs` hashes the local candidate —
   only when the mode is Checksum AND the sizes match (a size mismatch
@@ -73,6 +74,17 @@ refusal, reborn as an OPEN refusal).
 - Guard proofs by temporary mutation, run live: (K) drop the source
   wrap → skip pin fails; (L) drop the destination hashing → skip pin
   fails; (M) drop the refusal → refusal e2e fails. All restored.
+
+**Review round** (codex on `e82859e`: NEEDS FIXES, 5 findings — 5/5
+accepted + fixed; adjudication in
+`.review/results/otp-10b-1.gpt-verdict.md`): unhashable files emit
+with empty checksums instead of silently dropping (F1, High —
+byte-identity hole on pulls); the hashing task stops within one
+64 KiB chunk of its consumer dying (F2); the destination diff chunk
+is abort-bounded via the hoisted `AbortFlagOnDrop` + chunked
+`hash_file_abortable` (F3); `CHECKSUM_DISABLED` classifies as
+NEGOTIATE in the delegated phase map (F4); the stale STATE residue
+line rewritten (F5). Suite 1580 → 1581.
 
 **Known gaps**:
 
