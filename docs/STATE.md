@@ -187,11 +187,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **2026-07-11 (44th, this session)** — **otp-10c CLOSED (10c-1 relay
   removal on owner decision D-2026-07-11-1; 10c-2 the cutover
   deletion, codex 3/3 + 6/6 fixed)** — the four drivers and
-  `Push`/`PullSync` no longer exist; suite 1605 → 1488. Push-state
-  refresh: origin/master = `6d37a22` (partial push landed outside
-  these sessions). In-flight: none; tree clean. **Next**: otp-11 per
-  Now. Owner asks pending: the `725aa07` worktree-snapshot `git rm -r`
-  go (now also codex otp-10c-2 F6).
+  `Push`/`PullSync` no longer exist; suite 1605 → 1488. In-flight:
+  none; tree clean. **Next**: otp-11 per Now. Owner ask pending: the
+  `725aa07` snapshot `git rm -r` go (now also codex otp-10c-2 F6).
 - **2026-07-11 (43rd)** — otp-10a/10b-1/10b-2 closed (1555 → 1605);
   verb cutover complete.
 - **2026-07-10 (42nd)** @ `cccd89a` — otp-8, otp-9, otp-2/otp-2w all
