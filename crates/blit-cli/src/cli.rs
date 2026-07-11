@@ -317,14 +317,6 @@ pub struct TransferArgs {
     /// Force gRPC control-plane data path instead of hybrid TCP
     #[arg(long, help_heading = "Performance / debug")]
     pub force_grpc: bool,
-    /// Force legacy CLI relay for remote-to-remote transfers.
-    ///
-    /// By default, remote-to-remote transfers ask the destination daemon to
-    /// pull directly from the source daemon so payload bytes do not cross the
-    /// CLI host. Use this escape hatch when the destination cannot reach the
-    /// source but the CLI can reach both daemons, or for benchmarking.
-    #[arg(long, help_heading = "Performance / debug")]
-    pub relay_via_cli: bool,
     /// Fire-and-forget: hand the transfer to the destination
     /// daemon and exit as soon as it starts.
     ///

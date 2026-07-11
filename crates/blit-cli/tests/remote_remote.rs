@@ -78,11 +78,12 @@ fn remote_to_remote_copy_delegates_directly_without_cli_byte_path() {
         fs::read(ctx.module_b_dir.join("payload.bin")).unwrap(),
         payload
     );
+    // The load-bearing byte-path-isolation pin (and the otp-10 deletion
+    // proof's CLI half): a delegated remote→remote transfer moves its
+    // payload daemon-to-daemon — the CLI process sends ZERO data-plane
+    // bytes. Since otp-10c-1 there is no CLI relay source left in the
+    // tree, so this counter is the sole (and sufficient) observable.
     let counters = read_counters(&counter);
-    assert_eq!(
-        counters.remote_transfer_source_constructed, 0,
-        "direct path must not construct RemoteTransferSource"
-    );
     assert_eq!(
         counters.cli_data_plane_outbound_bytes, 0,
         "direct path must not send payload bytes from the CLI data plane"
@@ -112,88 +113,7 @@ fn remote_to_remote_gate_reject_does_not_fall_back_to_relay() {
     assert!(!ctx.module_b_dir.join("payload.bin").exists());
 
     let counters = read_counters(&counter);
-    assert_eq!(counters.remote_transfer_source_constructed, 0);
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
-}
-
-#[test]
-fn remote_to_remote_explicit_relay_uses_legacy_cli_byte_path() {
-    let ctx = DualDaemonContext::new(false);
-    let payload = vec![b'r'; 1024 * 1024];
-    fs::write(ctx.module_a_dir.join("relay.bin"), &payload).expect("write src file");
-
-    let counter = ctx.counter_path("relay");
-    let output = run_blit(
-        &ctx,
-        &[
-            "copy",
-            "--relay-via-cli",
-            &ctx.source_remote(),
-            &ctx.dest_remote(),
-        ],
-        Some(&counter),
-    );
-    assert_success(&output);
-
-    assert_eq!(
-        fs::read(ctx.module_b_dir.join("relay.bin")).unwrap(),
-        payload
-    );
-    let counters = read_counters(&counter);
-    assert!(
-        counters.remote_transfer_source_constructed > 0,
-        "--relay-via-cli must construct the relay source"
-    );
-    assert!(
-        counters.cli_data_plane_outbound_bytes >= payload.len() as u64,
-        "relay path should send payload-sized bytes through the CLI data plane; counters={counters:?}"
-    );
-}
-
-#[test]
-fn remote_to_remote_relay_transfers_nested_tree() {
-    // ue-r2-1h: the relay's enumeration (`scan_remote_files`) and
-    // per-file byte streaming (`open_remote_file`) moved from the
-    // deleted Pull RPC onto PullSync sessions (metadata-only scan +
-    // single-file force_grpc reads). A nested multi-file tree
-    // exercises both against the REAL daemon: recursive header
-    // enumeration with correct relative paths, then byte-identical
-    // per-file relay.
-    let ctx = DualDaemonContext::new(false);
-    let big = vec![b'B'; 512 * 1024];
-    fs::create_dir_all(ctx.module_a_dir.join("nested/deep")).expect("mkdirs");
-    fs::write(ctx.module_a_dir.join("top.bin"), &big).expect("write top");
-    fs::write(ctx.module_a_dir.join("nested/mid.txt"), b"middle file").expect("write mid");
-    fs::write(ctx.module_a_dir.join("nested/deep/leaf.txt"), b"leaf").expect("write leaf");
-
-    let counter = ctx.counter_path("relay_tree");
-    let output = run_blit(
-        &ctx,
-        &[
-            "copy",
-            "--relay-via-cli",
-            &ctx.source_remote(),
-            &ctx.dest_remote(),
-        ],
-        Some(&counter),
-    );
-    assert_success(&output);
-
-    assert_eq!(fs::read(ctx.module_b_dir.join("top.bin")).unwrap(), big);
-    assert_eq!(
-        fs::read(ctx.module_b_dir.join("nested/mid.txt")).unwrap(),
-        b"middle file"
-    );
-    assert_eq!(
-        fs::read(ctx.module_b_dir.join("nested/deep/leaf.txt")).unwrap(),
-        b"leaf"
-    );
-
-    let counters = read_counters(&counter);
-    assert!(
-        counters.remote_transfer_source_constructed > 0,
-        "--relay-via-cli must construct the relay source"
-    );
 }
 
 #[test]
@@ -228,7 +148,6 @@ fn stale_destination_unimplemented_does_not_fall_back_to_relay() {
     );
 
     let counters = read_counters(&counter);
-    assert_eq!(counters.remote_transfer_source_constructed, 0);
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
@@ -263,7 +182,6 @@ fn source_refuses_destination_negotiation_does_not_fall_back_to_relay() {
     );
 
     let counters = read_counters(&counter);
-    assert_eq!(counters.remote_transfer_source_constructed, 0);
     assert_eq!(counters.cli_data_plane_outbound_bytes, 0);
 }
 
@@ -300,7 +218,6 @@ fn assert_success(output: &std::process::Output) {
 #[derive(Debug, Default)]
 struct CounterValues {
     cli_data_plane_outbound_bytes: u64,
-    remote_transfer_source_constructed: u64,
 }
 
 fn read_counters(path: &Path) -> CounterValues {
@@ -315,16 +232,9 @@ fn read_counters(path: &Path) -> CounterValues {
             .next()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        match name {
-            "cli_data_plane_outbound_bytes" => {
-                out.cli_data_plane_outbound_bytes =
-                    out.cli_data_plane_outbound_bytes.saturating_add(value);
-            }
-            "remote_transfer_source_constructed" => {
-                out.remote_transfer_source_constructed =
-                    out.remote_transfer_source_constructed.saturating_add(value);
-            }
-            _ => {}
+        if name == "cli_data_plane_outbound_bytes" {
+            out.cli_data_plane_outbound_bytes =
+                out.cli_data_plane_outbound_bytes.saturating_add(value);
         }
     }
     out

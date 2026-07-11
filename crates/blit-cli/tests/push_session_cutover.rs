@@ -23,7 +23,6 @@ use std::sync::Arc;
 mod common;
 use common::TestContext;
 
-use blit_app::endpoints::Endpoint;
 use blit_app::transfers::remote::{run_remote_push, PushExecution};
 use blit_core::fs_enum::FileFilter;
 use blit_core::generated::{ComparisonMode, FilterSpec, MirrorMode};
@@ -45,7 +44,7 @@ fn module_endpoint(port: u16) -> RemoteEndpoint {
 /// A `PushExecution` with the verb defaults (`blit copy SRC host:/test/`).
 fn push_execution(src: &Path, port: u16) -> PushExecution {
     PushExecution {
-        source: Endpoint::Local(src.to_path_buf()),
+        source: src.to_path_buf(),
         remote: module_endpoint(port),
         filter: None,
         mirror_mode: false,
@@ -408,28 +407,6 @@ fn daemon_force_grpc_data_forces_the_in_stream_carrier() {
         "--force-grpc-data on the daemon must force the in-stream carrier"
     );
     assert_eq!(tree_contents(&ctx.module_dir), tree_contents(&src));
-}
-
-/// codex otp-10a F4: `--relay-via-cli --resume` is refused up front —
-/// the relay's remote source cannot serve resume block reads on the
-/// TCP data plane, so the combination would fault mid-transfer on the
-/// default carrier while succeeding on the forced in-stream one. The
-/// refusal needs no daemon: it fires before any connection.
-#[test]
-fn relay_source_with_resume_is_refused_before_any_connection() {
-    let execution = PushExecution {
-        source: Endpoint::Remote(module_endpoint(9)), // nothing listens on port 9
-        resume: true,
-        ..push_execution(Path::new("unused"), 9)
-    };
-    let err = match runtime().block_on(run_remote_push(execution, None)) {
-        Ok(_) => panic!("relay + resume must be refused"),
-        Err(err) => err,
-    };
-    assert!(
-        format!("{err:#}").contains("--resume is not supported with --relay-via-cli"),
-        "got: {err:#}"
-    );
 }
 
 /// `--resume` through the verb: a changed same-size destination file is

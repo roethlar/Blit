@@ -165,44 +165,9 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
                  (the CLI is in the byte path for any local endpoint, so \
                  disconnecting would drop the bytes)"
             ),
-            (Endpoint::Remote(_), Endpoint::Remote(_)) if args.relay_via_cli => bail!(
-                "--detach is incompatible with --relay-via-cli: the relay \
-                 path puts the CLI in the byte path, so detach would drop \
-                 the bytes. Drop --relay-via-cli to use the daemon-to-daemon \
-                 delegated path (which is the default for remote→remote)."
-            ),
             (Endpoint::Remote(_), Endpoint::Remote(_)) => {
                 // Delegated remote→remote — detach is valid.
             }
-        }
-    }
-
-    // audit-h1 round 2: refuse `mirror --relay-via-cli` for
-    // remote→remote BEFORE the destructive-confirm prompt below.
-    // Reviewer caught that the original h1 fix placed the gate
-    // inside the RemoteToRemoteRelay branch, AFTER this prompt —
-    // so an operator without --yes could defeat the data-loss
-    // guard by answering "no" (or EOF / empty stdin) and the
-    // process would exit 0 with no surfacing of the unsafe
-    // combination. The reject-gate must precede every user-
-    // interaction surface for the bail's intent to land.
-    //
-    // Same data-loss reasoning as the in-route comment below.
-    // Symmetric with the --detach reject-gate at line 161 above
-    // and with the `move --relay-via-cli` gate further down.
-    if mode.is_mirror() && args.relay_via_cli {
-        if let (Endpoint::Remote(_), Endpoint::Remote(_)) = (&src_endpoint, &dst_endpoint) {
-            bail!(
-                "mirror does not support --relay-via-cli with remote \
-                 endpoints: the legacy relay path does not verify \
-                 that the source-side scan was complete, so an \
-                 unreadable subtree on the source daemon would let \
-                 mirror's destination-purge step delete destination-\
-                 only files that may correspond to the unreadable \
-                 source entries. Drop --relay-via-cli to use the \
-                 direct delegated path, which enforces the \
-                 complete-scan gate."
-            );
         }
     }
 
@@ -231,7 +196,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
         }
     }
 
-    match select_transfer_route(src_endpoint, dst_endpoint, mode, args.relay_via_cli) {
+    match select_transfer_route(src_endpoint, dst_endpoint, mode) {
         TransferRoute::LocalToLocal { src, dst, mirror } => {
             if !src.exists() {
                 bail!("source path does not exist: {}", src.display());
@@ -246,7 +211,7 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
             }
             ensure_remote_push_supported(args)?;
             ensure_remote_destination_supported(&dst)?;
-            run_remote_push_transfer(args, Endpoint::Local(src), dst, mirror).await
+            run_remote_push_transfer(args, src, dst, mirror).await
         }
         TransferRoute::RemoteToLocal { src, dst, mirror } => {
             ensure_remote_pull_supported(args)?;
@@ -255,26 +220,6 @@ pub async fn run_transfer(ctx: &AppContext, args: &TransferArgs, mode: TransferK
                 args, src, &dst, mirror, false, // not a move — source survives
             )
             .await
-        }
-        TransferRoute::RemoteToRemoteRelay { src, dst, mirror } => {
-            ensure_remote_source_supported(&src)?;
-            ensure_remote_destination_supported(&dst)?;
-            // audit-h1 (data-loss): mirror is rejected up-front before
-            // any user-interaction surface (mirror confirm prompt) —
-            // see the gate above near line 180. The relay path's
-            // RemoteTransferSource::scan discards unreadable_paths,
-            // so for mirror this risks a destination-purge run on
-            // an incomplete source view. Copy is fine: no purge step.
-            // If a future change loosens the front gate, this branch
-            // would silently regress, so keep a debug_assert as
-            // defense-in-depth.
-            debug_assert!(
-                !mirror,
-                "audit-h1: mirror --relay-via-cli reaching the relay branch — \
-                 the front gate in run_transfer was bypassed",
-            );
-            ensure_remote_push_supported(args)?;
-            run_remote_push_transfer(args, Endpoint::Remote(src), dst, mirror).await
         }
         TransferRoute::RemoteToRemoteDelegated { src, dst, mirror } => {
             ensure_remote_source_supported(&src)?;
@@ -564,7 +509,7 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
             // transfer summary on stdout.
             let state = remote::run_remote_push_transfer_deferred(
                 args,
-                Endpoint::Local(src_path.clone()),
+                src_path.clone(),
                 remote.clone(),
                 false,
             )
@@ -584,30 +529,6 @@ pub async fn run_move(ctx: &AppContext, args: &TransferArgs) -> Result<()> {
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
             ensure_remote_source_supported(&src)?;
             ensure_remote_destination_supported(&dst)?;
-            // R50-F1 / R51-F2 (data-loss): reject `--relay-via-cli`
-            // for remote-source move. The relay path goes through
-            // `run_remote_push_transfer` → `RemoteTransferSource::
-            // scan` — since ue-r2-1h a metadata-only PullSync
-            // session, which deliberately does NOT set the spec's
-            // require_complete_scan (a copy relay keeps its
-            // historical send-what's-readable behavior), so a
-            // silently-partial scan is still possible on that path
-            // and we keep closing the move data-loss window by
-            // refusing the combination entirely. The direct
-            // delegated path (default) carries the
-            // require_complete_scan signal end-to-end.
-            if args.relay_via_cli {
-                bail!(
-                    "move does not support --relay-via-cli with a \
-                     remote source: the legacy relay path does not \
-                     verify that the source-side scan was complete, \
-                     so an unreadable subtree on the source daemon \
-                     would be silently lost when the source is \
-                     deleted. Drop --relay-via-cli to use the \
-                     direct delegated path, which enforces the \
-                     complete-scan gate."
-                );
-            }
             ensure_remote_pull_supported(args)?;
             // R49-F2: require_complete_scan=true so the source
             // daemon refuses partial scans before delete_remote_path
@@ -676,7 +597,6 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
-            relay_via_cli: false,
             detach: false,
             resume: false,
             retry: 0,
@@ -725,7 +645,6 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
-            relay_via_cli: false,
             detach: false,
             resume: false,
             retry: 0,
@@ -762,17 +681,9 @@ mod tests {
     /// reviewer caught that the original helper hardcoded
     /// `yes: true`, which let the mirror destructive-confirm
     /// prompt mask a missing reject-gate; all gate-rejection
-    /// tests now explicitly opt into the `yes` value they want
-    /// to exercise. `yes = true` for the original tests
-    /// (compat); `yes = false` for the new tests that pin the
-    /// gate must fire before any confirm prompt.
-    fn gate_args(
-        source: &str,
-        destination: &str,
-        detach: bool,
-        relay_via_cli: bool,
-        yes: bool,
-    ) -> TransferArgs {
+    /// tests explicitly opt into the `yes` value they want to
+    /// exercise.
+    fn gate_args(source: &str, destination: &str, detach: bool, yes: bool) -> TransferArgs {
         TransferArgs {
             source: source.to_string(),
             destination: destination.to_string(),
@@ -788,7 +699,6 @@ mod tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
-            relay_via_cli,
             detach,
             resume: false,
             retry: 0,
@@ -819,13 +729,7 @@ mod tests {
         let dst = tmp.path().join("dst");
         std::fs::create_dir_all(&src).unwrap();
         let ctx = ctx();
-        let args = gate_args(
-            src.to_str().unwrap(),
-            dst.to_str().unwrap(),
-            true,
-            false,
-            true,
-        );
+        let args = gate_args(src.to_str().unwrap(), dst.to_str().unwrap(), true, true);
         let err = runtime()
             .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
             .expect_err("local→local must reject --detach");
@@ -837,110 +741,13 @@ mod tests {
     }
 
     #[test]
-    fn detach_rejected_with_relay_via_cli() {
-        let ctx = ctx();
-        let args = gate_args("host-a:/m/", "host-b:/m/", true, true, true);
-        let err = runtime()
-            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
-            .expect_err("--relay-via-cli + --detach must bail");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("--detach is incompatible with --relay-via-cli"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
     fn detach_rejected_on_blit_move() {
         let ctx = ctx();
-        let args = gate_args("host-a:/m/", "host-b:/m/", true, false, true);
+        let args = gate_args("host-a:/m/", "host-b:/m/", true, true);
         let err = runtime()
             .block_on(run_move(&ctx, &args))
             .expect_err("move + --detach must bail");
         let msg = format!("{err:#}");
         assert!(msg.contains("move does not support --detach"), "got: {msg}");
-    }
-
-    /// audit-h1 regression: `blit mirror --relay-via-cli` between two
-    /// remote endpoints must refuse. The relay path's source scanner
-    /// (`RemoteTransferSource::scan`) discards `unreadable_paths`,
-    /// so the push handshake derives `scan_complete=true` even when
-    /// the source daemon had unreadable subtrees, and mirror's
-    /// destination-purge step would then delete destination-only
-    /// files that may correspond to the missing source entries.
-    ///
-    /// Symmetric with `detach_rejected_on_blit_move`'s
-    /// `move --relay-via-cli` rejection at line 568 of this file.
-    /// The bail fires before any RPC, so this test needs no live
-    /// daemon — the `host-a` / `host-b` endpoints are never
-    /// touched.
-    #[test]
-    fn mirror_rejected_with_relay_via_cli_for_remote_to_remote() {
-        let ctx = ctx();
-        let args = gate_args("host-a:/m/", "host-b:/m/", false, true, true);
-        let err = runtime()
-            .block_on(run_transfer(&ctx, &args, TransferKind::Mirror))
-            .expect_err("mirror + --relay-via-cli + remote→remote must bail");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("mirror does not support --relay-via-cli with remote endpoints"),
-            "got: {msg}"
-        );
-    }
-
-    /// audit-h1 negative: `blit copy --relay-via-cli` between two
-    /// remote endpoints must NOT hit the mirror reject-gate. Copy
-    /// has no destination-purge step, so an incomplete source scan
-    /// loses no data on the destination side; the audit-h1 gate
-    /// only applies to mirror.
-    ///
-    /// The error this raises is downstream (no daemon listening),
-    /// but the key assertion is that the audit-h1 mirror-relay
-    /// message does NOT appear — i.e., the copy path is not
-    /// regressing into a generic relay-rejection.
-    #[test]
-    fn copy_relay_via_cli_does_not_trip_mirror_gate() {
-        let ctx = ctx();
-        let args = gate_args("host-a:/m/", "host-b:/m/", false, true, true);
-        let err = runtime()
-            .block_on(run_transfer(&ctx, &args, TransferKind::Copy))
-            .expect_err("no daemon listening — should fail on connect, not on the mirror gate");
-        let msg = format!("{err:#}");
-        assert!(
-            !msg.contains("mirror does not support --relay-via-cli"),
-            "copy must not be rejected by the mirror-only audit-h1 gate; got: {msg}"
-        );
-    }
-
-    /// audit-h1 round 2: the reject-gate must fire BEFORE the mirror
-    /// destructive-confirm prompt. Before the round-2 fix the gate
-    /// lived inside the `RemoteToRemoteRelay` route branch, AFTER
-    /// the confirm prompt at line ~180. Without `--yes`, that meant
-    /// an operator could defeat the data-loss guard by answering "n"
-    /// (or hitting EOF on stdin) — the prompt would print "Aborted."
-    /// and the process would exit 0 with no surfacing of the unsafe
-    /// combination.
-    ///
-    /// This test reproduces the pre-fix bug shape (`yes: false`) and
-    /// asserts the bail message lands instead of an Aborted-and-Ok.
-    /// stdin is not provided; if the gate were absent the prompt's
-    /// `read_line` would hit EOF, `confirm_destructive_operation`
-    /// would return Ok(false), and `run_transfer` would return
-    /// Ok(()) — the test would fail at `expect_err`.
-    #[test]
-    fn mirror_rejected_with_relay_via_cli_when_no_yes() {
-        let ctx = ctx();
-        let args = gate_args("host-a:/m/", "host-b:/m/", false, true, false);
-        let err = runtime()
-            .block_on(run_transfer(&ctx, &args, TransferKind::Mirror))
-            .expect_err(
-                "audit-h1 round 2: gate must fire before the mirror confirm prompt; \
-                 a no/EOF answer must not silently abort with Ok(())",
-            );
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("mirror does not support --relay-via-cli with remote endpoints"),
-            "got: {msg}"
-        );
     }
 }

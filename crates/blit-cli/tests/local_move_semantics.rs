@@ -387,37 +387,3 @@ fn local_move_rejects_null_sink() {
         "src/file.txt must survive — move rejected before any work"
     );
 }
-
-/// R50-F1 / R51-F2 regression: `blit move --relay-via-cli` between
-/// two remote endpoints must refuse. The relay path goes through
-/// the legacy metadata-only Pull RPC whose enumeration discards
-/// EnumerationOutcome, so a partial source scan would silently
-/// succeed and the source would be deleted afterward.
-///
-/// The bail fires before any network IO, so this test doesn't
-/// need a live daemon — invalid endpoints (no daemon listening)
-/// would otherwise produce a connect error; we assert we see the
-/// rejection message first.
-#[test]
-fn remote_to_remote_move_rejects_relay_via_cli() {
-    let mut cmd = Command::new(cli_bin());
-    cmd.arg("move")
-        .arg("--yes")
-        .arg("--relay-via-cli")
-        .arg("127.0.0.1:12347:/srcmod/")
-        .arg("127.0.0.1:12348:/dstmod/");
-    let output = run_with_timeout(cmd, Duration::from_secs(15));
-    assert!(
-        !output.status.success(),
-        "remote-to-remote move with --relay-via-cli must fail; \
-         stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("move does not support --relay-via-cli with a remote source"),
-        "expected R50-F1/R51-F2 relay rejection, got stderr: {}",
-        stderr
-    );
-}

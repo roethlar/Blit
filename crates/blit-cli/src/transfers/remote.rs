@@ -1,6 +1,6 @@
 use crate::cli::TransferArgs;
 use eyre::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -13,7 +13,7 @@ use blit_app::transfers::remote::{
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
 use blit_core::remote::RemoteEndpoint;
 
-use blit_app::endpoints::{format_remote_endpoint, Endpoint};
+use blit_app::endpoints::format_remote_endpoint;
 
 /// CLI-facing alias for the library's pull-outcome struct — since
 /// otp-10b-2 the session verb outcome (`summary` + `dest_root`); the
@@ -169,7 +169,7 @@ fn verb_compare_flags(args: &TransferArgs) -> CompareFlags {
 
 pub async fn run_remote_push_transfer(
     args: &TransferArgs,
-    source: Endpoint,
+    source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<()> {
@@ -192,7 +192,7 @@ pub async fn run_remote_push_transfer(
 /// same-size dest-newer skip is the standing owner question).
 pub async fn run_remote_push_transfer_deferred(
     args: &TransferArgs,
-    source: Endpoint,
+    source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<DeferredPushState> {
@@ -241,7 +241,7 @@ fn emit_session_fault_summary(err: &eyre::Report) {
 
 async fn run_remote_push_transfer_inner(
     args: &TransferArgs,
-    source: Endpoint,
+    source: PathBuf,
     remote: RemoteEndpoint,
     mirror_mode: bool,
     move_verb: bool,

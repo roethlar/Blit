@@ -2,10 +2,9 @@
 //!
 //! Both the CLI's `run_transfer` and the future TUI's transfer
 //! launcher need to answer the same question: "given a parsed
-//! source endpoint, a parsed destination endpoint, the
-//! copy/mirror mode, and the user's `--relay-via-cli` choice,
-//! which transport path do we take?" This module owns the
-//! answer.
+//! source endpoint, a parsed destination endpoint, and the
+//! copy/mirror mode, which transport path do we take?" This
+//! module owns the answer.
 //!
 //! The verb-entry functions (`run_transfer`, `run_move`) stay
 //! in `blit-cli`; their bodies are dominated by CLI-shaped
@@ -13,8 +12,7 @@
 //! `blit rm`) and interactive prompts. The TUI will write its
 //! own entry-points that consume [`TransferRoute`] and the
 //! per-transport execution functions in
-//! [`crate::transfers::local`], [`crate::transfers::remote`],
-//! and [`crate::transfers::remote_remote_direct`] /
+//! [`crate::transfers::local`] and
 //! [`crate::transfers::remote`].
 
 use crate::endpoints::Endpoint;
@@ -43,8 +41,7 @@ impl TransferKind {
 
 /// Resolved transport choice for a transfer request. The
 /// dispatcher returns one of these by inspecting the
-/// `(source, destination)` endpoint pair plus the user's
-/// `--relay-via-cli` flag.
+/// `(source, destination)` endpoint pair.
 ///
 /// Each variant carries the data the matching execution
 /// function needs:
@@ -58,9 +55,8 @@ impl TransferKind {
 /// - [`TransferRoute::RemoteToRemoteDelegated`] → both
 ///   endpoints, used by the daemon-to-daemon
 ///   [`crate::transfers::remote::run_delegated_pull`] path.
-/// - [`TransferRoute::RemoteToRemoteRelay`] → both endpoints,
-///   used when the user opts into `--relay-via-cli` for
-///   remote-to-remote — the CLI hosts the byte path.
+///   Remote→remote is delegated-only: the CLI is never in the
+///   byte path (D-2026-07-11-1 removed `--relay-via-cli`).
 ///
 /// The `mirror` flag is reproduced on every variant so the
 /// caller doesn't need a parallel `mirror_mode` parameter; the
@@ -87,21 +83,10 @@ pub enum TransferRoute {
         dst: RemoteEndpoint,
         mirror: bool,
     },
-    RemoteToRemoteRelay {
-        src: RemoteEndpoint,
-        dst: RemoteEndpoint,
-        mirror: bool,
-    },
 }
 
 /// Pure function: pick the [`TransferRoute`] for the given
-/// endpoint pair, verb mode, and relay choice.
-///
-/// `relay_via_cli` only affects the remote→remote case. When
-/// true, the CLI host is in the byte path
-/// ([`TransferRoute::RemoteToRemoteRelay`]); when false, the
-/// daemon-to-daemon delegated pull
-/// ([`TransferRoute::RemoteToRemoteDelegated`]) is used.
+/// endpoint pair and verb mode.
 ///
 /// No I/O, no presentation, no error cases — the dispatch is
 /// total over `(Endpoint, Endpoint)`. CLI-side gates
@@ -109,12 +94,7 @@ pub enum TransferRoute {
 /// support gates) run before this function so they can produce
 /// CLI-shaped error messages with appropriate recovery
 /// guidance.
-pub fn select_transfer_route(
-    src: Endpoint,
-    dst: Endpoint,
-    kind: TransferKind,
-    relay_via_cli: bool,
-) -> TransferRoute {
+pub fn select_transfer_route(src: Endpoint, dst: Endpoint, kind: TransferKind) -> TransferRoute {
     let mirror = kind.is_mirror();
     match (src, dst) {
         (Endpoint::Local(src), Endpoint::Local(dst)) => {
@@ -127,11 +107,7 @@ pub fn select_transfer_route(
             TransferRoute::RemoteToLocal { src, dst, mirror }
         }
         (Endpoint::Remote(src), Endpoint::Remote(dst)) => {
-            if relay_via_cli {
-                TransferRoute::RemoteToRemoteRelay { src, dst, mirror }
-            } else {
-                TransferRoute::RemoteToRemoteDelegated { src, dst, mirror }
-            }
+            TransferRoute::RemoteToRemoteDelegated { src, dst, mirror }
         }
     }
 }
@@ -159,7 +135,7 @@ mod tests {
 
     #[test]
     fn local_to_local_copy_routes_to_local_to_local_non_mirror() {
-        let route = select_transfer_route(local("a"), local("b"), TransferKind::Copy, false);
+        let route = select_transfer_route(local("a"), local("b"), TransferKind::Copy);
         assert!(matches!(
             route,
             TransferRoute::LocalToLocal { mirror: false, .. }
@@ -168,7 +144,7 @@ mod tests {
 
     #[test]
     fn local_to_local_mirror_carries_mirror_true() {
-        let route = select_transfer_route(local("a"), local("b"), TransferKind::Mirror, false);
+        let route = select_transfer_route(local("a"), local("b"), TransferKind::Mirror);
         assert!(matches!(
             route,
             TransferRoute::LocalToLocal { mirror: true, .. }
@@ -177,37 +153,22 @@ mod tests {
 
     #[test]
     fn local_to_remote_routes_to_push() {
-        let route = select_transfer_route(local("a"), remote("h"), TransferKind::Copy, false);
+        let route = select_transfer_route(local("a"), remote("h"), TransferKind::Copy);
         assert!(matches!(route, TransferRoute::LocalToRemote { .. }));
     }
 
     #[test]
     fn remote_to_local_routes_to_pull() {
-        let route = select_transfer_route(remote("h"), local("a"), TransferKind::Copy, false);
+        let route = select_transfer_route(remote("h"), local("a"), TransferKind::Copy);
         assert!(matches!(route, TransferRoute::RemoteToLocal { .. }));
     }
 
     #[test]
-    fn remote_to_remote_without_relay_picks_delegated() {
-        let route = select_transfer_route(remote("a"), remote("b"), TransferKind::Copy, false);
+    fn remote_to_remote_picks_delegated() {
+        let route = select_transfer_route(remote("a"), remote("b"), TransferKind::Copy);
         assert!(matches!(
             route,
             TransferRoute::RemoteToRemoteDelegated { .. }
         ));
-    }
-
-    #[test]
-    fn remote_to_remote_with_relay_picks_relay() {
-        let route = select_transfer_route(remote("a"), remote("b"), TransferKind::Copy, true);
-        assert!(matches!(route, TransferRoute::RemoteToRemoteRelay { .. }));
-    }
-
-    #[test]
-    fn relay_via_cli_only_affects_remote_to_remote() {
-        // For non-remote-to-remote cases relay_via_cli is ignored.
-        let route = select_transfer_route(local("a"), local("b"), TransferKind::Copy, true);
-        assert!(matches!(route, TransferRoute::LocalToLocal { .. }));
-        let route = select_transfer_route(local("a"), remote("h"), TransferKind::Copy, true);
-        assert!(matches!(route, TransferRoute::LocalToRemote { .. }));
     }
 }

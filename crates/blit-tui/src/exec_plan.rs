@@ -109,14 +109,13 @@ pub(crate) fn build_f1_push_execution(
     remote: RemoteEndpoint,
     kind: f3pull::PullKind,
 ) -> blit_app::transfers::remote::PushExecution {
-    use blit_app::endpoints::Endpoint;
     use blit_app::transfers::compare::{comparison_mode, move_comparison_mode, CompareFlags};
     use blit_app::transfers::remote::PushExecution;
     use blit_core::generated::MirrorMode;
     let mirror = kind == f3pull::PullKind::Mirror;
     let remote_label = remote.display();
     PushExecution {
-        source: Endpoint::Local(local_source),
+        source: local_source,
         remote,
         // No filter UI on the F1 trigger — the session scans everything.
         filter: None,
@@ -172,9 +171,6 @@ pub(crate) fn build_delegated_execution(
         dst,
         options: f3_pull_options(kind),
         trace_data_plane: false,
-        // The TUI doesn't surface a `--relay-via-cli` toggle yet, so
-        // don't suggest it in transport-error hints.
-        relay_fallback_suggestable: false,
         dst_label,
         detach: false,
     }

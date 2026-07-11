@@ -28,8 +28,8 @@ pub(crate) struct ModuleConfig {
     /// (`[delegation]` master switch). Default true: when the daemon
     /// allows delegation globally, every module participates. Set to
     /// false on a specific module to opt that module out of being a
-    /// delegation destination, e.g. for sensitive modules where
-    /// operators should always go through the CLI relay.
+    /// delegation destination, e.g. for sensitive modules that must
+    /// never be written by daemon-to-daemon transfers.
     ///
     /// The override can only narrow the daemon-wide policy, never
     /// widen it: if `allow_delegated_pull = false` daemon-wide, this

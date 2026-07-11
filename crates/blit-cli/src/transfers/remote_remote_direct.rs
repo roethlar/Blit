@@ -25,8 +25,6 @@ pub async fn run_remote_to_remote_direct(
     mirror_mode: bool,
     move_verb: bool,
 ) -> Result<()> {
-    // Copy/mirror callers: `--relay-via-cli` is a valid escape
-    // hatch, so error messages mention it.
     run_remote_to_remote_direct_inner(
         args,
         src,
@@ -34,7 +32,6 @@ pub async fn run_remote_to_remote_direct(
         mirror_mode,
         move_verb,
         false, // defer_output
-        true,  // relay_fallback_suggestable
     )
     .await
     .map(|_| ())
@@ -43,10 +40,6 @@ pub async fn run_remote_to_remote_direct(
 /// R51-F4: move's variant of [`run_remote_to_remote_direct`].
 /// Returns the delegated summary instead of printing inline so
 /// the caller can defer output until after source-delete.
-///
-/// R53-F2: move refuses `--relay-via-cli` (R50-F1), so error
-/// messages must not point users at it — they'd be sent to a
-/// flag the same command rejects.
 pub async fn run_remote_to_remote_direct_deferred(
     args: &TransferArgs,
     src: RemoteEndpoint,
@@ -60,8 +53,7 @@ pub async fn run_remote_to_remote_direct_deferred(
         dst,
         mirror_mode,
         move_verb,
-        true,  // defer_output
-        false, // relay_fallback_suggestable — move refuses --relay-via-cli
+        true, // defer_output
     )
     .await
 }
@@ -121,7 +113,6 @@ async fn run_remote_to_remote_direct_inner(
     mirror_mode: bool,
     move_verb: bool,
     defer_output: bool,
-    relay_fallback_suggestable: bool,
 ) -> Result<DeferredDelegatedState> {
     let filter_spec = super::build_filter_spec(args)?;
     let options = delegated_pull_options(args, filter_spec, mirror_mode, move_verb);
@@ -140,7 +131,6 @@ async fn run_remote_to_remote_direct_inner(
         dst,
         options,
         trace_data_plane: args.trace_data_plane,
-        relay_fallback_suggestable,
         dst_label,
         // `--detach` is only honored on remote→remote
         // delegated pulls (this code path). `run_transfer`
@@ -327,7 +317,6 @@ mod delegated_options_tests {
             workers: None,
             trace_data_plane: false,
             force_grpc: false,
-            relay_via_cli: false,
             detach: false,
             resume: false,
             retry: 0,

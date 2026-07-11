@@ -47,7 +47,3 @@ pub(crate) fn record_cli_data_plane_outbound_bytes(bytes: u64) {
         record("cli_data_plane_outbound_bytes", bytes);
     }
 }
-
-pub(crate) fn record_remote_transfer_source_constructed() {
-    record("remote_transfer_source_constructed", 1);
-}

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Benchmark direct remote→remote delegation against the explicit CLI relay path.
+# Benchmark direct remote→remote delegation. (The CLI relay comparison
+# leg was removed with `--relay-via-cli` at otp-10c-1, D-2026-07-11-1.)
 #
 # Required environment:
 #   SRC_REMOTE=server-a:/bench/   # source module/directory endpoint
@@ -19,8 +20,8 @@
 #
 # The script uses the global `blit --diagnostics-counter-file PATH` CLI flag,
 # the same diagnostics-only instrumentation used by the integration tests, to
-# record CLI outbound data-plane payload bytes. Direct runs should report 0.
-# Relay runs should report roughly payload-sized byte counts.
+# record CLI outbound data-plane payload bytes. Runs should report 0 — the
+# delegated path never routes payload bytes through the CLI host.
 #
 # (audit-l39, 2026-06-04: this replaced the pre-0.1.1 BLIT_TEST_COUNTER_FILE
 # env var — env vars are out for app + diagnostic config. The flag is
@@ -113,10 +114,8 @@ log "Staging payload to source: $SRC_FILE"
 
 for run in $(seq 1 "$RUNS"); do
     DIRECT_DST=$(remote_join "$DST_REMOTE" "$BENCH_ID/direct_${run}.bin")
-    RELAY_DST=$(remote_join "$DST_REMOTE" "$BENCH_ID/relay_${run}.bin")
 
     run_copy direct "$run" "$SRC_FILE" "$DIRECT_DST" --yes
-    run_copy relay "$run" "$SRC_FILE" "$RELAY_DST" --yes --relay-via-cli
 done
 
 log "Results written to $LOG_DIR/results.csv"

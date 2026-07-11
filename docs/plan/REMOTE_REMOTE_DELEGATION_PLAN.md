@@ -14,6 +14,13 @@
 > / VPN / SSH tunnel). Body kept verbatim as a historical design
 > record per `RELEASE_PLAN_v2_2026-05-04.md` §5.2.
 
+> **Relay note (2026-07-11, D-2026-07-11-1):** the `--relay-via-cli`
+> escape hatch this plan designed as the legacy fallback was removed
+> at otp-10c-1 — remote→remote is delegated-only and the CLI is never
+> in the byte path. Every relay/fallback mention in the body below is
+> historical design record; the unreachable-source topology is served
+> by a manual two-hop (pull to a local path, then push it).
+
 **v2 changes vs v1 (in response to Round 21):**
 - §4.1 — `DelegatedPullRequest` now embeds existing `TransferOperationSpec`
   instead of duplicating fields (R21-F1).

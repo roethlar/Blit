@@ -12,9 +12,10 @@
 //! - [`run_pull_sync`] + [`apply_pull_mirror_purge`] +
 //!   [`PullSyncExecution`] / [`PullSyncOutcome`] /
 //!   [`PullExecutionOutcome`] — the OLD pull orchestration over
-//!   the PullSync RPC. No verb reaches it since otp-10b-2 (the
-//!   relay source and the delegated spec builder still ride the
-//!   pull client); it is deleted with the driver at otp-10c.
+//!   the PullSync RPC. No verb reaches it since otp-10b-2, and
+//!   the relay source died at otp-10c-1 (only the delegated spec
+//!   builder still rides the pull client); it is deleted with
+//!   the driver at otp-10c-2.
 //!
 //! - [`run_remote_pull`] + [`PullExecution`] +
 //!   [`PullVerbOutcome`] — pull entry-point orchestration on the
@@ -37,22 +38,22 @@
 //!   presentation into the library.
 //! - [`run_remote_push`] + [`PushExecution`] +
 //!   [`PushExecutionOutcome`] — push entry-point orchestration.
-//!   The library builds the `Arc<dyn TransferSource>` from the
-//!   [`Endpoint`] passed in (Local → `FsTransferSource`,
-//!   Remote → `RemoteTransferSource` over a pull-client) and
-//!   runs the unified transfer session as its SOURCE
-//!   (`run_push_session`, otp-10a) — the old per-direction
-//!   `RemotePushClient::push` driver is no longer reachable
-//!   from any verb and is deleted at otp-10c. The CLI-side
-//!   progress monitor stays in `blit-cli` (M-C
-//!   `AppProgressEvent` reshape is its own pause point).
+//!   The library wraps the local source root in an
+//!   `FsTransferSource` and runs the unified transfer session
+//!   as its SOURCE (`run_push_session`, otp-10a) — the old
+//!   per-direction `RemotePushClient::push` driver is no longer
+//!   reachable from any verb and is deleted at otp-10c. A push
+//!   source is local by construction: `--relay-via-cli` (the
+//!   one remote-source push shape) was removed at otp-10c-1
+//!   (D-2026-07-11-1). The CLI-side progress monitor stays in
+//!   `blit-cli` (M-C `AppProgressEvent` reshape is its own
+//!   pause point).
 //!
 //! No further `transfers/remote.rs` orchestration lives in
 //! `blit-cli` after this slice — the CLI's `transfers/remote.rs`
 //! retains only the clap-arg wrappers and presentation
 //! (progress monitor + JSON / human printers).
 
-use crate::endpoints::Endpoint;
 use blit_core::generated::delegated_pull_error::Phase as DelegatedPullPhase;
 use blit_core::generated::delegated_pull_progress::Payload as DelegatedPayload;
 use blit_core::generated::{
@@ -64,7 +65,7 @@ use blit_core::remote::pull::{PullSyncOptions, RemotePullReport};
 use blit_core::remote::transfer::session_client::{
     run_pull_session, run_push_session, PullSessionOptions, PushSessionOptions,
 };
-use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
+use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::RemoteTransferProgress;
 use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient};
 use eyre::{bail, eyre, Context, Result};
@@ -402,11 +403,11 @@ pub async fn apply_pull_mirror_purge(
 /// clap, no presentation. CLI builds this from `&TransferArgs`;
 /// the TUI builds it directly.
 ///
-/// `source` is the [`Endpoint`] the user picked (local path or
-/// a remote module). The library handles the dispatch internally:
-/// `Endpoint::Local(path)` → `FsTransferSource`,
-/// `Endpoint::Remote(endpoint)` → `RemoteTransferSource` over a
-/// pull-client connected at call time.
+/// `source` is the local source root (or single file) to push.
+/// It is a `PathBuf` by construction: a push SOURCE is always
+/// this host's filesystem — the removed `--relay-via-cli` was
+/// the only remote-source push shape (otp-10c-1,
+/// D-2026-07-11-1), so a remote source is unrepresentable here.
 ///
 /// `filter` is the wire `FilterSpec` (the CLI builds it via
 /// `blit_app::transfers::filter::build_spec`); it rides
@@ -417,7 +418,7 @@ pub async fn apply_pull_mirror_purge(
 /// choice (R59 #1 F2: `--mirror --include …` deletes only
 /// in-scope entries via `FilteredSubset`).
 pub struct PushExecution {
-    pub source: Endpoint,
+    pub source: PathBuf,
     pub remote: RemoteEndpoint,
     pub filter: Option<FilterSpec>,
     pub mirror_mode: bool,
@@ -463,10 +464,9 @@ pub struct PushExecutionOutcome {
 }
 
 /// Run a remote push end-to-end (otp-10a: the push-shaped verb on the
-/// unified transfer session): build the `Arc<dyn TransferSource>` from
-/// the [`Endpoint`] (resolving any pull-client connection for remote
-/// relay sources), then initiate one SOURCE-role `Transfer` session
-/// against the destination daemon via `run_push_session`. No
+/// unified transfer session): wrap the local source root in an
+/// `FsTransferSource`, then initiate one SOURCE-role `Transfer`
+/// session against the destination daemon via `run_push_session`. No
 /// mirror-purge step exists on the push side — mirror deletes happen
 /// on the DESTINATION (the one delete rule, otp-6b) and surface
 /// through the returned summary's `entries_deleted`.
@@ -494,42 +494,7 @@ pub async fn run_remote_push(
     execution: PushExecution,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<PushExecutionOutcome> {
-    // codex otp-10a F4: a relay source cannot serve the resume block
-    // phase on the TCP data plane (`RemoteTransferSource::prepare_payload`
-    // rejects composite ResumeFile payloads), so `--relay-via-cli
-    // --resume` would fault mid-transfer on the default carrier while
-    // succeeding on the forced in-stream one. Refuse the combination
-    // up front instead of leaving a carrier-divergent failure.
-    if execution.resume && matches!(execution.source, Endpoint::Remote(_)) {
-        bail!(
-            "--resume is not supported with --relay-via-cli: the relay's \
-             remote source cannot serve resume block reads on the TCP \
-             data plane. Drop --resume, or drop --relay-via-cli to use \
-             the direct delegated path."
-        );
-    }
-    let source: Arc<dyn TransferSource> = match execution.source {
-        Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
-        Endpoint::Remote(endpoint) => {
-            // `--relay-via-cli`: the CLI hosts the byte path, reading the
-            // remote source through the legacy pull client. The push half
-            // rides the session like any other source; the read half is
-            // resolved with the PullSync deletion at otp-10c.
-            let pull_client = RemotePullClient::connect(endpoint.clone())
-                .await
-                .with_context(|| {
-                    format!("connecting to source {}", endpoint.control_plane_uri())
-                })?;
-            // Resolve the source's root path from its `RemotePath`
-            // variant. Mirrors the pre-A.0 CLI code; semantics unchanged.
-            let root = match &endpoint.path {
-                RemotePath::Module { rel_path, .. } => rel_path.clone(),
-                RemotePath::Root { rel_path } => rel_path.clone(),
-                RemotePath::Discovery => PathBuf::from("."),
-            };
-            Arc::new(RemoteTransferSource::new(pull_client, root))
-        }
-    };
+    let source: Arc<dyn TransferSource> = Arc::new(FsTransferSource::new(execution.source));
 
     let options = PushSessionOptions {
         compare_mode: execution.compare_mode,
@@ -671,20 +636,11 @@ pub async fn run_remote_pull(
 /// Inputs for [`run_delegated_pull`]. Primitive fields only —
 /// no clap, no presentation. CLI builds this from
 /// `&TransferArgs`; the future TUI builds it directly.
-///
-/// `relay_fallback_suggestable` is a CLI-side knob baked into
-/// the error-mapping logic: when true (copy / mirror callers),
-/// error messages mention `--relay-via-cli` as an escape hatch;
-/// when false (move callers — `--relay-via-cli` is refused there
-/// per R53-F2), the hint is omitted so users aren't sent to a
-/// flag the same command rejects. Documented here because the
-/// library now owns the error mapping.
 pub struct DelegatedPullExecution {
     pub src: RemoteEndpoint,
     pub dst: RemoteEndpoint,
     pub options: PullSyncOptions,
     pub trace_data_plane: bool,
-    pub relay_fallback_suggestable: bool,
     pub dst_label: String,
     /// Detach the transfer from the calling CLI. When true,
     /// the destination daemon's `tx.closed()` race disarms,
@@ -740,31 +696,21 @@ fn report_bytes_progress(
 }
 
 /// Map a daemon-side `DelegatedPullError` to a human-readable
-/// CLI-facing report. Behavior is parameterized by
-/// `relay_fallback_suggestable` — see [`DelegatedPullExecution`]
-/// for the policy.
-pub fn map_delegated_error(
-    phase: i32,
-    message: &str,
-    relay_fallback_suggestable: bool,
-) -> eyre::Report {
+/// CLI-facing report.
+pub fn map_delegated_error(phase: i32, message: &str) -> eyre::Report {
     let phase = DelegatedPullPhase::try_from(phase).unwrap_or(DelegatedPullPhase::Unknown);
-    let relay_clause = if relay_fallback_suggestable {
-        ". Pass --relay-via-cli to route through the CLI host"
-    } else {
-        ""
-    };
-    let relay_clause_semi = if relay_fallback_suggestable {
-        "; pass --relay-via-cli to route through the CLI host"
-    } else {
-        ""
-    };
     match phase {
         DelegatedPullPhase::DelegationRejected => {
-            eyre!("delegation rejected by destination daemon: {message}{relay_clause}")
+            eyre!("delegation rejected by destination daemon: {message}")
         }
         DelegatedPullPhase::ConnectSource => {
-            eyre!("destination daemon cannot reach source ({message}){relay_clause_semi}")
+            // Remote→remote is delegated-only (D-2026-07-11-1 removed
+            // the CLI relay), so the unreachable-source topology has no
+            // flag to point at — the manual two-hop is the workaround.
+            eyre!(
+                "destination daemon cannot reach source ({message}); if this host can \
+                 reach both daemons, pull to a local path first, then push it"
+            )
         }
         DelegatedPullPhase::Negotiate => eyre!("source refused delegated pull: {message}"),
         DelegatedPullPhase::Transfer => eyre!("delegated transfer failed: {message}"),
@@ -853,26 +799,15 @@ where
         .with_context(|| format!("connecting to destination {}", execution.dst_label))?;
 
     let response = client.delegated_pull(request).await.map_err(|status| {
-        let relay_hint = if execution.relay_fallback_suggestable {
-            " or pass --relay-via-cli"
-        } else {
-            ""
-        };
-        let relay_clause = if execution.relay_fallback_suggestable {
-            "; pass --relay-via-cli to route through the CLI host"
-        } else {
-            ""
-        };
         if status.code() == Code::Unimplemented {
             eyre!(
                 "destination daemon does not implement DelegatedPull; upgrade the destination \
-                 daemon{relay_hint}"
+                 daemon"
             )
         } else if status.code() == Code::Unavailable {
             eyre!(
-                "destination daemon is unavailable for delegated pull ({}){}",
-                status.message(),
-                relay_clause
+                "destination daemon is unavailable for delegated pull ({})",
+                status.message()
             )
         } else {
             eyre!(
@@ -893,16 +828,7 @@ where
             Ok(None) => break,
             Err(status) => {
                 failure = Some(if status.code() == Code::Unavailable {
-                    let relay_clause = if execution.relay_fallback_suggestable {
-                        "; pass --relay-via-cli to route through the CLI host"
-                    } else {
-                        ""
-                    };
-                    eyre!(
-                        "delegation stream lost ({}){}",
-                        status.message(),
-                        relay_clause
-                    )
+                    eyre!("delegation stream lost ({})", status.message())
                 } else {
                     eyre!("delegation stream failed: {}", status.message())
                 });
@@ -926,11 +852,7 @@ where
                 break;
             }
             Some(DelegatedPayload::Error(error)) => {
-                failure = Some(map_delegated_error(
-                    error.phase,
-                    &error.upstream_message,
-                    execution.relay_fallback_suggestable,
-                ));
+                failure = Some(map_delegated_error(error.phase, &error.upstream_message));
                 break;
             }
             None => {}
@@ -1050,11 +972,9 @@ pub async fn run_delegated_pull_until_started(
                 drop(stream);
                 Ok((started, execution.dst))
             }
-            Some(DelegatedPayload::Error(error)) => Err(map_delegated_error(
-                error.phase,
-                &error.upstream_message,
-                execution.relay_fallback_suggestable,
-            )),
+            Some(DelegatedPayload::Error(error)) => {
+                Err(map_delegated_error(error.phase, &error.upstream_message))
+            }
             _ => Err(eyre!(
                 "delegated pull emitted a non-Started payload before Started"
             )),
@@ -1102,7 +1022,6 @@ mod tests {
             dst: endpoint,
             options: PullSyncOptions::default(),
             trace_data_plane: false,
-            relay_fallback_suggestable: false,
             dst_label: "x".to_string(),
             detach: false,
         };
