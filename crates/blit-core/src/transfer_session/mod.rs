@@ -44,7 +44,9 @@ use crate::remote::transfer::sink::{FsSinkConfig, FsTransferSink, TransferSink};
 use crate::remote::transfer::source::{FsTransferSource, TransferSource};
 use crate::remote::transfer::stall_guard::TRANSFER_STALL_TIMEOUT;
 use crate::remote::transfer::tar_safety::MAX_TAR_SHARD_BYTES;
-use crate::remote::transfer::{AbortOnDrop, FaultedPath, CONTROL_PLANE_CHUNK_SIZE};
+use crate::remote::transfer::{
+    AbortOnDrop, FaultedPath, RemoteTransferProgress, CONTROL_PLANE_CHUNK_SIZE,
+};
 use crate::transfer_plan::PlanOptions;
 use transport::{FrameRx, FrameTransport, FrameTx};
 
@@ -177,6 +179,32 @@ pub struct SourceSessionConfig {
     /// data plane at this end — a grant then faults, since the responder
     /// is waiting to accept sockets that would never arrive.
     pub data_plane_host: Option<String>,
+    /// Caller-side observability hooks (otp-10a). All default-off; the
+    /// daemon SOURCE responder runs with the defaults.
+    pub instruments: SourceInstruments,
+}
+
+/// Observability hooks a SOURCE-side caller can attach to its session
+/// (otp-10a — the push-shaped verb's progress line and `blit move`'s
+/// unreadable-scan gate ride these). Everything defaults to off; the
+/// session's behavior on the wire is identical either way.
+#[derive(Clone, Default)]
+pub struct SourceInstruments {
+    /// w6-1 progress events, reported exactly where the old push driver
+    /// reported them: `ManifestBatch` per received need batch (the
+    /// push-direction denominator — files the DESTINATION requested),
+    /// `Payload`/`FileComplete` per payload sent on either carrier.
+    pub progress: Option<RemoteTransferProgress>,
+    /// Shared accumulator for source paths the manifest scan could not
+    /// read. The session still streams what it can and reports
+    /// `ManifestComplete{scan_complete=false}`; callers that must not
+    /// treat a partial transfer as success (the push verb, `blit move`)
+    /// inspect this after the session returns. `None` = the session
+    /// keeps its own private accumulator (unchanged behavior).
+    pub unreadable: Option<Arc<StdMutex<Vec<String>>>>,
+    /// Emit `[data-plane-client]` connect traces on the data-plane
+    /// sockets this SOURCE acquires (`--trace-data-plane`).
+    pub trace_data_plane: bool,
 }
 
 pub struct DestinationSessionConfig {
@@ -862,6 +890,7 @@ pub async fn run_source(
     drive_source(
         cfg.plan_options,
         cfg.data_plane_host,
+        cfg.instruments,
         negotiated,
         transport,
         source,
@@ -877,6 +906,7 @@ pub async fn run_source(
 async fn drive_source(
     plan_options: PlanOptions,
     data_plane_host: Option<String>,
+    instruments: SourceInstruments,
     mut negotiated: Negotiated,
     transport: FrameTransport,
     source: Arc<dyn TransferSource>,
@@ -905,6 +935,10 @@ async fn drive_source(
         Arc::clone(&sent),
         Arc::clone(&manifest_sent),
         resume_negotiated(&negotiated.open),
+        // otp-10a: the recv half owns need-batch arrival, which is the
+        // push-direction progress denominator (contract on
+        // `ProgressEvent::ManifestBatch`: "push: need-list batches").
+        instruments.progress.clone(),
         SourceEventSender {
             tx: event_tx,
             fault_signal: fault_tx,
@@ -914,6 +948,7 @@ async fn drive_source(
     match source_send_half(
         plan_options,
         data_plane_host.as_deref(),
+        instruments,
         &negotiated,
         responder_data_plane,
         &mut tx,
@@ -946,6 +981,7 @@ async fn source_recv_half(
     sent: Arc<StdMutex<HashMap<String, FileHeader>>>,
     manifest_sent: Arc<AtomicBool>,
     resume_session: bool,
+    progress: Option<RemoteTransferProgress>,
     events: SourceEventSender,
 ) {
     loop {
@@ -966,6 +1002,16 @@ async fn source_recv_half(
         };
         match received.frame {
             Some(Frame::NeedBatch(batch)) => {
+                // otp-10a: the need list is the push-direction progress
+                // denominator ("N of M files"). Entries are unique by
+                // contract (a duplicate need faults below), so every
+                // batch is newly-requested work — same semantics as the
+                // old push driver's `report_manifest_batch`.
+                if let Some(p) = &progress {
+                    if !batch.entries.is_empty() {
+                        p.report_manifest_batch(batch.entries.len());
+                    }
+                }
                 for entry in batch.entries {
                     if entry.resume && !resume_session {
                         let _ = events.send(SourceEvent::Fault(SessionFault::protocol_violation(
@@ -1065,6 +1111,7 @@ struct ResumeSendState {
 async fn source_send_half(
     plan_options: PlanOptions,
     data_plane_host: Option<&str>,
+    instruments: SourceInstruments,
     negotiated: &Negotiated,
     responder_data_plane: Option<data_plane::ResponderDataPlane>,
     tx: &mut Box<dyn FrameTx>,
@@ -1097,6 +1144,7 @@ async fn source_send_half(
                 bound,
                 negotiated.open.receiver_capacity.as_ref(),
                 Arc::clone(&source),
+                &instruments,
             )
             .await?,
         ),
@@ -1115,6 +1163,7 @@ async fn source_send_half(
                         grant,
                         negotiated.accept.receiver_capacity.as_ref(),
                         Arc::clone(&source),
+                        &instruments,
                     )
                     .await?,
                 )
@@ -1159,7 +1208,11 @@ async fn source_send_half(
         }
         _ => Arc::clone(&source),
     };
-    let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+    // otp-10a: callers that must not treat a partial transfer as success
+    // (the push verb, `blit move`'s source-delete gate) supply their own
+    // accumulator via `SourceInstruments` and inspect it after the
+    // session returns; the wire behavior is identical either way.
+    let unreadable: Arc<StdMutex<Vec<String>>> = instruments.unreadable.clone().unwrap_or_default();
     let (mut header_rx, scan_handle) = scan_source.scan(None, Arc::clone(&unreadable));
     while let Some(header) = header_rx.recv().await {
         sent.lock()
@@ -1258,7 +1311,14 @@ async fn source_send_half(
                         fault = peer_fault_signalled(&mut fault_signal) => {
                             return Err(eyre::Report::new(fault));
                         }
-                        res = send_payload_records(tx, &source, plan_options, batch, &mut read_buf) => {
+                        res = send_payload_records(
+                            tx,
+                            &source,
+                            plan_options,
+                            batch,
+                            &mut read_buf,
+                            instruments.progress.as_ref(),
+                        ) => {
                             res?;
                         }
                     }
@@ -1801,17 +1861,31 @@ async fn send_payload_records(
     plan_options: PlanOptions,
     batch: Vec<FileHeader>,
     read_buf: &mut [u8],
+    progress: Option<&RemoteTransferProgress>,
 ) -> Result<()> {
     let payloads = diff_planner::plan_push_payloads(batch, source.root(), plan_options)?;
     // In-stream only: every shard's header frame must clear the tonic
     // frame limit (codex otp-8 F2). The data-plane branch keeps the
     // planner's shards whole — its records are not protobuf frames.
     let payloads = bound_in_stream_tar_headers(payloads, MAX_IN_STREAM_TAR_HEADER_BYTES);
+    // Progress convention (otp-10a): identical to the data-plane sink
+    // pipeline — per-file lane, planned manifest sizes, one
+    // `Payload{0, size}` + `FileComplete` pair per file after its
+    // record completes. Both carriers therefore report the same shape.
+    let report_files = |files: &[(String, u64)]| {
+        if let Some(p) = progress {
+            for (name, size) in files {
+                p.report_payload(0, *size);
+                p.report_file_complete(name.clone());
+            }
+        }
+    };
     for payload in payloads {
         match source.prepare_payload(payload).await? {
             PreparedPayload::File(header) => {
                 tx.send(frame(Frame::FileBegin(header.clone()))).await?;
                 if header.size == 0 {
+                    report_files(&[(header.relative_path.clone(), 0)]);
                     continue; // record complete at 0 cumulative bytes
                 }
                 let mut reader = source
@@ -1844,8 +1918,13 @@ async fn send_payload_records(
                     .await?;
                     remaining -= got as u64;
                 }
+                report_files(&[(header.relative_path.clone(), header.size)]);
             }
             PreparedPayload::TarShard { headers, data } => {
+                let shard_files: Vec<(String, u64)> = headers
+                    .iter()
+                    .map(|h| (h.relative_path.clone(), h.size))
+                    .collect();
                 tx.send(frame(Frame::TarShardHeader(TarShardHeader {
                     files: headers,
                     archive_size: data.len() as u64,
@@ -1861,6 +1940,7 @@ async fn send_payload_records(
                 }
                 tx.send(frame(Frame::TarShardComplete(TarShardComplete {})))
                     .await?;
+                report_files(&shard_files);
             }
             PreparedPayload::FileBlock { .. }
             | PreparedPayload::FileBlockComplete { .. }
@@ -2161,9 +2241,18 @@ pub async fn run_responder(
             // The SOURCE owns its planner knobs; a daemon-served source
             // has no client-supplied ones (§Transport selection). A SOURCE
             // responder binds+accepts its send sockets (otp-5b) — it never
-            // dials, so it needs no data-plane host.
-            let summary =
-                drive_source(PlanOptions::default(), None, negotiated, transport, source).await?;
+            // dials, so it needs no data-plane host. No instruments: the
+            // serving daemon has no progress line, and an incomplete scan
+            // already travels as `ManifestComplete{scan_complete}`.
+            let summary = drive_source(
+                PlanOptions::default(),
+                None,
+                SourceInstruments::default(),
+                negotiated,
+                transport,
+                source,
+            )
+            .await?;
             Ok(ResponderOutcome::Source(summary))
         }
         TransferRole::Unspecified => Err(notify_and_wrap(
@@ -3814,7 +3903,7 @@ mod tests {
             ..PlanOptions::default()
         };
         let mut read_buf = vec![0u8; IN_STREAM_CHUNK];
-        send_payload_records(&mut tx, &source, plan_options, batch, &mut read_buf)
+        send_payload_records(&mut tx, &source, plan_options, batch, &mut read_buf, None)
             .await
             .expect("in-stream send succeeds");
 

@@ -12,7 +12,7 @@ use blit_app::transfers::remote::{
 };
 use blit_core::remote::pull::PullSyncOptions;
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
-use blit_core::remote::{RemoteEndpoint, RemotePullReport, RemotePushReport};
+use blit_core::remote::{RemoteEndpoint, RemotePullReport};
 
 use blit_app::endpoints::{format_remote_endpoint, Endpoint};
 
@@ -170,7 +170,7 @@ pub async fn run_remote_push_transfer(
 }
 
 /// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
-/// the push report instead of printing inline so the caller can
+/// the push summary instead of printing inline so the caller can
 /// defer output until after source-delete.
 pub async fn run_remote_push_transfer_deferred(
     args: &TransferArgs,
@@ -182,16 +182,36 @@ pub async fn run_remote_push_transfer_deferred(
 }
 
 pub struct DeferredPushState {
-    pub report: blit_core::remote::push::RemotePushReport,
+    pub summary: blit_core::generated::TransferSummary,
     pub destination: String,
-    pub show_progress: bool,
 }
 
 pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState) {
     if args.json {
-        print_push_json(&state.report, &state.destination);
+        print_push_json(&state.summary, &state.destination);
     } else {
-        describe_push_result(&state.report, &state.destination, state.show_progress);
+        describe_push_result(&state.summary, &state.destination);
+    }
+}
+
+/// otp-10a: a failed session names the file a fault touched
+/// (D-2026-07-09-1) — surface that end-of-operation summary on stderr
+/// before the error propagates, so the operator sees which file to
+/// re-run for without digging through the error chain. Applies to
+/// both fault shapes: a `SessionFault` raised by a running session
+/// and a `TransferOpenRefusal` from a session that never opened
+/// (whose inner fault never names a file — `end_of_operation_summary`
+/// then returns `None` and nothing prints).
+fn emit_session_fault_summary(err: &eyre::Report) {
+    use blit_core::remote::transfer::session_client::TransferOpenRefusal;
+    use blit_core::transfer_session::SessionFault;
+    let fault = err.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<SessionFault>()
+            .or_else(|| cause.downcast_ref::<TransferOpenRefusal>().map(|r| &r.0))
+    });
+    if let Some(line) = fault.and_then(|f| f.end_of_operation_summary()) {
+        eprintln!("{line}");
     }
 }
 
@@ -210,11 +230,12 @@ async fn run_remote_push_transfer_inner(
         defer_output, // R53-F1: suppress the final progress line on move
     );
 
-    // Filter built by orchestrator-side helper from CLI args. The
-    // universal `FilteredSource` wrapper (single chokepoint, see
-    // remote/transfer/source.rs) applies it identically to local→remote,
-    // remote→remote, and local→local — full src/dst combination parity.
-    let filter = super::build_filter(args)?;
+    // Filter parity: the wire FilterSpec rides `SessionOpen.filter`
+    // (otp-10a); the session's SOURCE end applies it through the
+    // universal `FilteredSource` chokepoint and the daemon DESTINATION
+    // scopes mirror deletions with it — identical rules to what
+    // `--exclude/--include/--min-size/...` produce on pull.
+    let filter_spec = super::build_filter_spec(args)?;
 
     // R59 #1 F2: translate the user's --delete-scope flag to the wire
     // MirrorMode enum. Default to FilteredSubset so `push --include …
@@ -235,17 +256,19 @@ async fn run_remote_push_transfer_inner(
     let execution = PushExecution {
         source,
         remote: remote.clone(),
-        filter,
+        filter: Some(filter_spec),
         mirror_mode,
         mirror_kind,
         force_grpc: args.force_grpc,
         trace_data_plane: args.trace_data_plane,
         require_complete_scan: mirror_mode,
+        resume: args.resume,
+        resume_block_size: 0, // destination default (1 MiB)
         remote_label: format_remote_endpoint(&remote),
     };
 
     // Push has no caller-side destructive step (mirror-delete is
-    // daemon-side and surfaces via the report), so unlike the pull
+    // daemon-side and surfaces via the summary), so unlike the pull
     // lifecycle there is no need to drop the progress handle
     // *before* a follow-up library call — the monitor's lifetime
     // already matches the RPC.
@@ -256,11 +279,16 @@ async fn run_remote_push_transfer_inner(
         let _ = task.await;
     }
 
-    let outcome = outcome?;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            emit_session_fault_summary(&err);
+            return Err(err);
+        }
+    };
     let state = DeferredPushState {
-        report: outcome.report,
+        summary: outcome.summary,
         destination: outcome.destination,
-        show_progress,
     };
     if !defer_output {
         print_deferred_push_result(args, &state);
@@ -466,18 +494,20 @@ fn print_pull_json(
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
 
-fn print_push_json(report: &RemotePushReport, destination: &str) {
+fn print_push_json(summary: &blit_core::generated::TransferSummary, destination: &str) {
     use serde_json::json;
+    // otp-10a: the push verb reports the session's destination-computed
+    // summary. Keys that only the deleted driver could fill
+    // (files_requested, bytes_zero_copy, first_payload_ms) are gone;
+    // files_resumed is new with push-side --resume.
     let summary = json!({
         "operation": "push",
         "destination": destination,
-        "files_requested": report.files_requested.len(),
-        "files_transferred": report.summary.files_transferred,
-        "bytes_transferred": report.summary.bytes_transferred,
-        "bytes_zero_copy": report.summary.bytes_zero_copy,
-        "entries_deleted": report.summary.entries_deleted,
-        "tcp_fallback": report.summary.tcp_fallback_used,
-        "first_payload_ms": report.first_payload_elapsed.map(|d| d.as_millis() as u64),
+        "files_transferred": summary.files_transferred,
+        "bytes_transferred": summary.bytes_transferred,
+        "files_resumed": summary.files_resumed,
+        "entries_deleted": summary.entries_deleted,
+        "tcp_fallback": summary.in_stream_carrier_used,
     });
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
@@ -506,51 +536,33 @@ pub fn describe_pull_result(report: &RemotePullReport, dest_root: &Path) {
     }
 }
 
-pub fn describe_push_result(
-    report: &RemotePushReport,
-    destination: &str,
-    show_first_payload: bool,
-) {
-    let file_count = report.files_requested.len();
-    if file_count == 0 {
+pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, destination: &str) {
+    // otp-10a: the session's DESTINATION is the scorer; the old
+    // negotiation-phase lines (file counts scheduled, data port) died
+    // with the per-direction driver. `[gRPC fallback]` keeps its exact
+    // wording — it marks the session's in-stream byte carrier now.
+    if summary.files_transferred == 0 && summary.files_resumed == 0 {
         println!(
             "Remote already up to date; nothing to upload ({}).",
             destination
         );
-    } else if report.fallback_used {
-        println!(
-            "Negotiation complete: {} file(s) scheduled; using gRPC data fallback.",
-            file_count
-        );
-    } else if let Some(port) = report.data_port {
-        println!(
-            "Negotiation complete: {} file(s) scheduled; data port {} established.",
-            file_count, port
-        );
-    } else {
-        println!(
-            "Negotiation complete: {} file(s) scheduled; awaiting server summary.",
-            file_count
-        );
     }
-
-    let summary = &report.summary;
+    let resumed = if summary.files_resumed > 0 {
+        format!(" ({} resumed block-wise)", summary.files_resumed)
+    } else {
+        String::new()
+    };
     println!(
-        "Transfer complete: {} file(s), {} bytes (zero-copy {} bytes){}.",
+        "Transfer complete: {} file(s), {} bytes{}{}.",
         summary.files_transferred,
         summary.bytes_transferred,
-        summary.bytes_zero_copy,
-        if summary.tcp_fallback_used {
+        resumed,
+        if summary.in_stream_carrier_used {
             " [gRPC fallback]"
         } else {
             ""
         }
     );
-    if show_first_payload {
-        if let Some(elapsed) = report.first_payload_elapsed {
-            println!("First payload dispatched after {:.2?}.", elapsed);
-        }
-    }
     if summary.entries_deleted > 0 {
         let plural = if summary.entries_deleted == 1 {
             ""

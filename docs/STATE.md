@@ -2,11 +2,7 @@
 
 Last updated: 2026-07-10
 
-- 2026-07-04: Owner-approved dual push reached 3d8326b (origin: 10d89e0..3d8326b; gitea mirror: 2a77b9f..3d8326b). That push corrected a prior remote-name confusion; windows-latest CI on that push is the "meaningfully green" check referenced in prior notes.
-
-- Current session (2026-07-10, this one): **otp-8, otp-9 (a+b), and otp-2 (zoey per-direction + otp-2w Windows cross-direction) all landed and CLOSED through the codex loop** — code slices first, then the owner opened three rigs mid-session (zoey, the Windows box, skippy) and both benchmark baselines were recorded, reviewed (8- and 7-finding rounds, incl. a timing-overhead bug that forced a re-measure of both matrices), and committed. Verdicts in `.review/results/otp-{8,9a,9b,2,2w}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..9 + otp-2 [x]; **otp-10 is next and nothing holds it**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
-
-- Notes on push state (re-verified via `git ls-remote origin` at this handoff, as of `cccd89a`): origin/master is at `7f1c4b2`. Unpushed local commits: `7f1c4b2..HEAD` = **24** (otp-7b close through otp-2w close). windows-latest CI on the w9-3 harness fix rides the next push.
+- Prior session (2026-07-10, 42nd): **otp-8, otp-9 (a+b), and otp-2 (zoey per-direction + otp-2w Windows cross-direction) all landed and CLOSED through the codex loop** — code slices first, then the owner opened three rigs mid-session (zoey, the Windows box, skippy) and both benchmark baselines were recorded, reviewed (8- and 7-finding rounds, incl. a timing-overhead bug that forced a re-measure of both matrices), and committed. Verdicts in `.review/results/otp-{8,9a,9b,2,2w}.gpt-verdict.md`. ONE_TRANSFER_PATH otp-1..9 + otp-2 [x]. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state (re-verified via `git ls-remote origin` at that handoff, as of `cccd89a`): origin/master at `7f1c4b2`; unpushed local commits `7f1c4b2..HEAD` = **24** (otp-7b close through otp-2w close); windows-latest CI on the w9-3 harness fix rides the next push.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -46,17 +42,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     pull on BOTH rigs (Windows ×1.46–×2.38), carrier-insensitive on
     large — otp-12's interleaved old-vs-new discriminates code cost
     from platform write-path cost.
-  - Current: **otp-10 (cutover + deletion)** — staging sketch from
-    the survey: 10a push-shaped verb rides `run_push_session` (+ the
-    deferred verb wiring: PushSessionOptions mirror/filter,
-    `--force-grpc`, progress line via ByteProgressSink,
-    `end_of_operation_summary` print, resume flags; A/B parity pins
-    vs old push); 10b pull-shaped verb likewise (options exist since
-    9a); 10c deletion — 4 drivers + `Push`/`PullSync` RPCs out of
-    tree AND proto, no bridge, ported-test accounting + file-by-file
-    deletion proof (incl. DelegatedPull no-payload-bytes assertion).
-    Dispatch chokepoint: `blit-app/src/transfers/dispatch.rs`
-    (`TransferRoute`). otp-5b-3 (pull cancel) optional.
+  - Current: **otp-10 (cutover + deletion)** — **10a CODE LANDED
+    (this commit), codex review pending**: the push-shaped verb (CLI
+    copy/mirror/move-push + relay + TUI F1, one chokepoint:
+    `blit_app run_remote_push`) rides `run_push_session` with the
+    full deferred wiring, incl. the old-push unreadable-scan error
+    `blit move`'s source-delete gate relies on; outcome retyped to
+    the session `TransferSummary` so 10c stays pure deletion. Suite
+    1555 → **1562**; detail + Known gaps:
+    `.review/findings/otp-10a-push-verb-rides-session.md` + REVIEW
+    row. Next: 10b pull-shaped verb (options exist since 9a); 10c
+    deletion — 4 drivers + `Push`/`PullSync` out of tree AND proto,
+    ported-test accounting + file-by-file deletion proof (incl. the
+    DelegatedPull no-payload-bytes assertion; relay's PullSync-read
+    half decided there).
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified

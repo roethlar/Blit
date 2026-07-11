@@ -9,8 +9,10 @@
 //! over `BlitClient::transfer` and run the matching role driver; role is
 //! carried in `SessionOpen.initiator_role`, never a second code path.
 //!
-//! Not yet wired to CLI verbs — the verbs keep riding the old paths
-//! until the otp-10 cutover; today the parity tests drive this. Both push
+//! Verb wiring: the push-shaped verb (CLI `copy`/`mirror`/`move` to a
+//! remote destination, TUI F1 push) rides [`run_push_session`] since
+//! otp-10a via `blit_app::transfers::remote::run_remote_push`; the
+//! pull-shaped verb keeps riding the old driver until otp-10b. Both push
 //! (otp-4b) and pull (otp-5b) default to the TCP data plane; the in-stream
 //! carrier is the requested fallback either direction.
 
@@ -30,18 +32,17 @@ use crate::generated::{
 };
 use crate::remote::endpoint::{RemoteEndpoint, RemotePath};
 use crate::remote::transfer::source::TransferSource;
-use crate::remote::transfer::ByteProgressSink;
+use crate::remote::transfer::{ByteProgressSink, RemoteTransferProgress};
 use crate::transfer_plan::PlanOptions;
 use crate::transfer_session::transport::{grpc_client_transport, GRPC_CHANNEL_FRAMES};
 use crate::transfer_session::{
     run_destination, run_source, DestinationOutcome, DestinationSessionConfig, DestinationTarget,
-    HelloConfig, SessionEndpoint, SourceSessionConfig,
+    HelloConfig, SessionEndpoint, SourceInstruments, SourceSessionConfig,
 };
 
-/// The push-shaped subset of session options the landed slices support.
-/// Mirror and filters are refused at OPEN until their client wiring
-/// lands (the session itself honors them since otp-6), so they are
-/// intentionally absent here.
+/// The push-shaped session options. The full verb surface rides here
+/// since otp-10a (mirror, filters, progress, trace); the SOURCE owns
+/// the planner knobs, the DESTINATION owns the compare decision.
 pub struct PushSessionOptions {
     pub compare_mode: ComparisonMode,
     pub ignore_existing: bool,
@@ -60,6 +61,28 @@ pub struct PushSessionOptions {
     /// choose (currently 1 MiB). The destination clamps to its
     /// carrier's bounds either way. Ignored unless `resume` is true.
     pub resume_block_size: u32,
+    /// otp-10a: source-side scan filter, riding `SessionOpen.filter`
+    /// (the session honors it since otp-6a — this is the client
+    /// wiring; symmetric with [`PullSessionOptions::filter`]). This
+    /// SOURCE applies it to its own scan through the universal
+    /// `FilteredSource` chokepoint; the DESTINATION uses it to scope
+    /// mirror deletions. `None` scans everything.
+    pub filter: Option<FilterSpec>,
+    /// otp-10a: mirror on the session (otp-6b's one delete rule — the
+    /// daemon DESTINATION diffs the complete source manifest against
+    /// its tree at SourceDone and deletes extraneous entries locally).
+    /// Explicit enabled + scope per the contract; `MirrorMode::Off`
+    /// with `mirror_enabled` set is refused at OPEN.
+    pub mirror_enabled: bool,
+    pub mirror_kind: MirrorMode,
+    /// otp-10a: w6-1 progress events from this SOURCE's send side —
+    /// need batches as the denominator, `Payload`/`FileComplete` per
+    /// file sent on either carrier. The CLI progress line and the TUI
+    /// footer consume these exactly as they did from the old driver.
+    pub progress: Option<RemoteTransferProgress>,
+    /// otp-10a: emit `[data-plane-client]` connect traces on the data
+    /// plane sockets this SOURCE dials (`--trace-data-plane`).
+    pub trace_data_plane: bool,
 }
 
 impl Default for PushSessionOptions {
@@ -72,6 +95,11 @@ impl Default for PushSessionOptions {
             in_stream_bytes: false,
             resume: false,
             resume_block_size: 0,
+            filter: None,
+            mirror_enabled: false,
+            mirror_kind: MirrorMode::Off,
+            progress: None,
+            trace_data_plane: false,
         }
     }
 }
@@ -107,6 +135,12 @@ pub async fn run_push_session(
             enabled: true,
             block_size: options.resume_block_size,
         }),
+        // otp-10a: filter + mirror ride the open (otp-6a/6b session
+        // support; this is the client wiring, symmetric with pull's
+        // otp-9a).
+        filter: options.filter,
+        mirror_enabled: options.mirror_enabled,
+        mirror_kind: options.mirror_kind as i32,
         ..Default::default()
     };
 
@@ -122,6 +156,13 @@ pub async fn run_push_session(
         .into_inner();
     let transport = grpc_client_transport(out_tx, inbound);
 
+    // otp-10a: own the unreadable-scan accumulator so a partial source
+    // scan fails the push after the session completes — the old push
+    // driver's exact posture (send what's readable, then error), which
+    // `blit move`'s source-delete gate relies on: an error here means
+    // move never deletes a source whose files were silently skipped.
+    let unreadable: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+
     let cfg = SourceSessionConfig {
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
@@ -129,8 +170,30 @@ pub async fn run_push_session(
         // The initiator dials the data plane on the same host it reached
         // the control plane on (contract §Transport: initiator dials).
         data_plane_host: Some(endpoint.host.clone()),
+        instruments: SourceInstruments {
+            progress: options.progress,
+            unreadable: Some(Arc::clone(&unreadable)),
+            trace_data_plane: options.trace_data_plane,
+        },
     };
-    run_source(cfg, transport, source).await
+    let summary = run_source(cfg, transport, source).await?;
+
+    let unreadable = unreadable
+        .lock()
+        .map_err(|err| eyre!("unreadable-path accumulator poisoned: {err}"))?;
+    if !unreadable.is_empty() {
+        let preview: Vec<_> = unreadable.iter().take(5).cloned().collect();
+        let mut message = format!(
+            "{} file(s) were skipped due to permission or access errors: {}",
+            unreadable.len(),
+            preview.join(", ")
+        );
+        if unreadable.len() > preview.len() {
+            message.push_str(&format!(" (and {} more)", unreadable.len() - preview.len()));
+        }
+        return Err(eyre!(message));
+    }
+    Ok(summary)
 }
 
 /// The pull-shaped subset of session options the landed slices support.

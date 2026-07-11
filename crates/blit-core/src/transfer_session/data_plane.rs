@@ -65,7 +65,7 @@ use crate::remote::transfer::{
     SUB_TOKEN_LEN,
 };
 
-use super::SessionFault;
+use super::{SessionFault, SourceInstruments};
 
 /// The set of granted-but-not-yet-received needs, shared between the
 /// destination's control loop (which inserts each path before sending
@@ -620,6 +620,10 @@ pub(super) struct SourceDataPlane {
     source: Arc<dyn TransferSource>,
     session_token: Vec<u8>,
     pool: Arc<BufferPool>,
+    /// `[data-plane-client]` connect traces (`--trace-data-plane`,
+    /// otp-10a). Applied to the epoch-0 sockets at construction and to
+    /// each epoch-N resize socket in [`Self::add_stream`].
+    trace: bool,
     /// How each epoch-N resize socket is acquired (dial for the SOURCE
     /// initiator, accept for the SOURCE responder). The data plane grows
     /// mid-transfer in both cases; the control-lane resize choreography is
@@ -639,6 +643,7 @@ pub(super) async fn dial_source_data_plane(
     grant: &DataPlaneGrant,
     receiver_capacity: Option<&CapacityProfile>,
     source: Arc<dyn TransferSource>,
+    instruments: &SourceInstruments,
 ) -> Result<SourceDataPlane> {
     let initial = grant.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
@@ -658,6 +663,7 @@ pub(super) async fn dial_source_data_plane(
         dial.chunk_bytes(),
         dial.ceiling_max_streams().max(1),
     ));
+    let trace = instruments.trace_data_plane;
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(initial);
     for _ in 0..initial {
         let session = DataPlaneSession::connect(
@@ -666,7 +672,7 @@ pub(super) async fn dial_source_data_plane(
             &handshake,
             dial.chunk_bytes(),
             dial.prefetch_count(),
-            false,
+            trace,
             dial.tcp_buffer_bytes(),
             Arc::clone(&pool),
         )
@@ -685,6 +691,7 @@ pub(super) async fn dial_source_data_plane(
     let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
     let (control_tx, control_rx) = mpsc::unbounded_channel::<SinkControl>();
     let pipe_source = Arc::clone(&source);
+    let pipe_progress = instruments.progress.clone();
     // Bounded by AbortOnDrop: a fault on the control lane that drops the
     // SourceDataPlane aborts the pipeline task instead of leaking it.
     let pipeline = AbortOnDrop::new(tokio::spawn(async move {
@@ -693,7 +700,7 @@ pub(super) async fn dial_source_data_plane(
             sinks,
             payload_rx,
             prefetch,
-            None,
+            pipe_progress.as_ref(),
             Some(control_rx),
         )
         .await
@@ -706,6 +713,7 @@ pub(super) async fn dial_source_data_plane(
         source,
         session_token: grant.session_token.clone(),
         pool,
+        trace,
         // SOURCE initiator: each epoch-N resize socket is dialed to the
         // granted host:port.
         sockets: SourceSockets::Dial {
@@ -732,6 +740,7 @@ pub(super) async fn accept_source_data_plane(
     bound: ResponderDataPlane,
     receiver_capacity: Option<&CapacityProfile>,
     source: Arc<dyn TransferSource>,
+    instruments: &SourceInstruments,
 ) -> Result<SourceDataPlane> {
     let initial = bound.initial_streams.max(1) as usize;
     // The byte sender's dial, bounded by the receiver's advertised
@@ -750,12 +759,13 @@ pub(super) async fn accept_source_data_plane(
         dial.chunk_bytes(),
         dial.ceiling_max_streams().max(1),
     ));
+    let trace = instruments.trace_data_plane;
     let mut sinks: Vec<Arc<dyn TransferSink>> = Vec::with_capacity(initial);
     for _ in 0..initial {
         let socket = accept_authenticated(&bound.listener, &epoch0).await?;
         let session = DataPlaneSession::from_stream(
             socket,
-            false,
+            trace,
             dial.chunk_bytes(),
             dial.prefetch_count(),
             Arc::clone(&pool),
@@ -772,13 +782,14 @@ pub(super) async fn accept_source_data_plane(
     let (payload_tx, payload_rx) = mpsc::channel::<TransferPayload>(prefetch);
     let (control_tx, control_rx) = mpsc::unbounded_channel::<SinkControl>();
     let pipe_source = Arc::clone(&source);
+    let pipe_progress = instruments.progress.clone();
     let pipeline = AbortOnDrop::new(tokio::spawn(async move {
         execute_sink_pipeline_elastic(
             pipe_source,
             sinks,
             payload_rx,
             prefetch,
-            None,
+            pipe_progress.as_ref(),
             Some(control_rx),
         )
         .await
@@ -791,6 +802,7 @@ pub(super) async fn accept_source_data_plane(
         source,
         session_token: bound.session_token,
         pool,
+        trace,
         // SOURCE responder: each epoch-N resize socket is accepted off the
         // same listener epoch-0 came in on (otp-5b-2).
         sockets: SourceSockets::Accept {
@@ -861,7 +873,7 @@ impl SourceDataPlane {
                     &handshake,
                     self.dial.chunk_bytes(),
                     self.dial.prefetch_count(),
-                    false,
+                    self.trace,
                     self.dial.tcp_buffer_bytes(),
                     Arc::clone(&self.pool),
                 )
@@ -874,7 +886,7 @@ impl SourceDataPlane {
                 let socket = accept_authenticated(listener, &expected).await?;
                 DataPlaneSession::from_stream(
                     socket,
-                    false,
+                    self.trace,
                     self.dial.chunk_bytes(),
                     self.dial.prefetch_count(),
                     Arc::clone(&self.pool),

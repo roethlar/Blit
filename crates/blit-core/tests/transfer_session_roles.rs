@@ -135,6 +135,7 @@ async fn run_session_with_open(
         TransferRole::Unspecified => panic!("fixture must pick a role"),
     };
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: source_endpoint,
         plan_options,
@@ -461,6 +462,7 @@ async fn assert_resume_data_plane_invariant_across_roles(
             TransferRole::Unspecified => unreachable!(),
         };
         let source_cfg = SourceSessionConfig {
+            instruments: Default::default(),
             hello: HelloConfig::default(),
             endpoint: source_endpoint,
             plan_options: PlanOptions::default(),
@@ -1012,6 +1014,7 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             TransferRole::Unspecified => unreachable!(),
         };
         let source_cfg = SourceSessionConfig {
+            instruments: Default::default(),
             hello: HelloConfig::default(),
             endpoint: source_endpoint,
             plan_options: PlanOptions::default(),
@@ -1108,6 +1111,7 @@ async fn block_hashes_without_a_held_resume_need_fault_the_source() {
     write_tree(&src_root, &[("real.txt", b"real".to_vec(), 1_600_001_200)]);
 
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(resume_open(TransferRole::Source, RESUME_BS)),
         plan_options: PlanOptions::default(),
@@ -1177,6 +1181,7 @@ async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
         ..Default::default()
     };
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
         plan_options: PlanOptions::default(),
@@ -1253,6 +1258,7 @@ async fn pull_data_plane_single_stream_lands_bytes() {
         ..Default::default()
     };
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder, // binds + accepts + sends
         plan_options: PlanOptions::default(),
@@ -1323,6 +1329,7 @@ async fn pull_data_plane_shape_corrects_to_more_than_one_stream() {
         ..Default::default()
     };
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::Responder, // binds + accepts + sends
         plan_options: PlanOptions::default(),
@@ -1412,6 +1419,7 @@ async fn build_mismatch_refused_under_both_initiators() {
             _ => (SessionEndpoint::Responder, SessionEndpoint::initiator(open)),
         };
         let source_cfg = SourceSessionConfig {
+            instruments: Default::default(),
             hello: HelloConfig {
                 build_id: "0.1.0+aaaaaaaaaaaa".into(),
                 contract_version: CONTRACT_VERSION,
@@ -1472,6 +1480,7 @@ async fn contract_version_mismatch_is_refused() {
     std::fs::create_dir_all(&dst_root).unwrap();
 
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
@@ -1516,6 +1525,7 @@ async fn mirror_enabled_without_scope_is_refused() {
     let mut open = basic_open(TransferRole::Source);
     open.mirror_enabled = true; // no mirror_kind set → UNSPECIFIED
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
         plan_options: PlanOptions::default(),
@@ -1968,6 +1978,7 @@ async fn session_filters_via_chokepoint_not_scan_arg() {
         ..Default::default()
     });
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(open),
         plan_options: PlanOptions::default(),
@@ -2102,6 +2113,7 @@ async fn need_for_unknown_path_faults_the_source() {
     write_tree(&src_root, &[("real.txt", b"real".to_vec(), 1_600_000_000)]);
 
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
@@ -2156,6 +2168,7 @@ async fn resume_flagged_need_is_refused_in_non_resume_session() {
     write_tree(&src_root, &[("real.txt", b"real".to_vec(), 1_600_000_000)]);
 
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),
@@ -2215,6 +2228,7 @@ async fn need_complete_before_manifest_complete_faults_the_source() {
     write_tree(&src_root, &files);
 
     let source_cfg = SourceSessionConfig {
+        instruments: Default::default(),
         hello: HelloConfig::default(),
         endpoint: SessionEndpoint::initiator(basic_open(TransferRole::Source)),
         plan_options: PlanOptions::default(),

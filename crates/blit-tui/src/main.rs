@@ -3419,8 +3419,8 @@ fn spawn_f1_push(
         let result = match sent {
             Ok(outcome) => {
                 let transferred = (
-                    outcome.report.summary.files_transferred,
-                    outcome.report.summary.bytes_transferred,
+                    outcome.summary.files_transferred,
+                    outcome.summary.bytes_transferred,
                 );
                 match move_source {
                     // d-65: move — delete the local source only after

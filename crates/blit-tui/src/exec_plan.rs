@@ -54,14 +54,14 @@ pub(crate) fn build_f1_push_execution(
 ) -> blit_app::transfers::remote::PushExecution {
     use blit_app::endpoints::Endpoint;
     use blit_app::transfers::remote::PushExecution;
-    use blit_core::fs_enum::FileFilter;
     use blit_core::generated::MirrorMode;
     let mirror = kind == f3pull::PullKind::Mirror;
     let remote_label = remote.display();
     PushExecution {
         source: Endpoint::Local(local_source),
         remote,
-        filter: FileFilter::default(),
+        // No filter UI on the F1 trigger — the session scans everything.
+        filter: None,
         mirror_mode: mirror,
         mirror_kind: if mirror {
             MirrorMode::All
@@ -71,6 +71,8 @@ pub(crate) fn build_f1_push_execution(
         force_grpc: false,
         trace_data_plane: false,
         require_complete_scan: mirror,
+        resume: false,
+        resume_block_size: 0,
         remote_label,
     }
 }

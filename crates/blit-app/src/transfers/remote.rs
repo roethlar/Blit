@@ -37,10 +37,12 @@
 //!   The library builds the `Arc<dyn TransferSource>` from the
 //!   [`Endpoint`] passed in (Local → `FsTransferSource`,
 //!   Remote → `RemoteTransferSource` over a pull-client) and
-//!   wraps it in the [`FilteredSource`] before invoking
-//!   `RemotePushClient::push`. The CLI-side progress monitor
-//!   stays in `blit-cli` (M-C `AppProgressEvent` reshape is
-//!   its own pause point).
+//!   runs the unified transfer session as its SOURCE
+//!   (`run_push_session`, otp-10a) — the old per-direction
+//!   `RemotePushClient::push` driver is no longer reachable
+//!   from any verb and is deleted at otp-10c. The CLI-side
+//!   progress monitor stays in `blit-cli` (M-C
+//!   `AppProgressEvent` reshape is its own pause point).
 //!
 //! No further `transfers/remote.rs` orchestration lives in
 //! `blit-cli` after this slice — the CLI's `transfers/remote.rs`
@@ -48,21 +50,18 @@
 //! (progress monitor + JSON / human printers).
 
 use crate::endpoints::Endpoint;
-use blit_core::fs_enum::FileFilter;
 use blit_core::generated::delegated_pull_error::Phase as DelegatedPullPhase;
 use blit_core::generated::delegated_pull_progress::Payload as DelegatedPayload;
 use blit_core::generated::{
     BytesProgress, DelegatedPullRequest, DelegatedPullStarted, DelegatedPullSummary, FileHeader,
-    MirrorMode, RemoteSourceLocator,
+    FilterSpec, MirrorMode, RemoteSourceLocator, TransferSummary,
 };
 use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
 use blit_core::remote::pull::{PullSyncOptions, RemotePullReport};
-use blit_core::remote::push::RemotePushReport;
-use blit_core::remote::transfer::source::{
-    FilteredSource, FsTransferSource, RemoteTransferSource, TransferSource,
-};
+use blit_core::remote::transfer::session_client::{run_push_session, PushSessionOptions};
+use blit_core::remote::transfer::source::{FsTransferSource, RemoteTransferSource, TransferSource};
 use blit_core::remote::transfer::RemoteTransferProgress;
-use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient, RemotePushClient};
+use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePullClient};
 use eyre::{bail, eyre, Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -396,57 +395,70 @@ pub async fn apply_pull_mirror_purge(
 
 /// Inputs for [`run_remote_push`]. Primitive fields only — no
 /// clap, no presentation. CLI builds this from `&TransferArgs`;
-/// the future TUI builds it directly.
+/// the TUI builds it directly.
 ///
 /// `source` is the [`Endpoint`] the user picked (local path or
 /// a remote module). The library handles the dispatch internally:
 /// `Endpoint::Local(path)` → `FsTransferSource`,
 /// `Endpoint::Remote(endpoint)` → `RemoteTransferSource` over a
-/// pull-client connected at call time. The library then wraps
-/// the inner source with [`FilteredSource`] before invoking
-/// `RemotePushClient::push`, so the universal filter chokepoint
-/// (R49) applies on push the same way it applies on
-/// local→local and remote→remote.
+/// pull-client connected at call time.
 ///
-/// `filter` is the runtime `FileFilter` (not the wire
-/// `FilterSpec`); the CLI builds it via
-/// `blit_app::transfers::filter::build`. `mirror_kind`
-/// communicates the user's `--delete-scope` choice to the
-/// daemon (R59 #1 F2: `--mirror --include …` deletes only
+/// `filter` is the wire `FilterSpec` (the CLI builds it via
+/// `blit_app::transfers::filter::build_spec`); it rides
+/// `SessionOpen.filter`, where the session's SOURCE end applies
+/// it through the universal `FilteredSource` chokepoint (R49 /
+/// otp-6a) and the DESTINATION scopes mirror deletions with it.
+/// `mirror_kind` communicates the user's `--delete-scope`
+/// choice (R59 #1 F2: `--mirror --include …` deletes only
 /// in-scope entries via `FilteredSubset`).
 pub struct PushExecution {
     pub source: Endpoint,
     pub remote: RemoteEndpoint,
-    pub filter: FileFilter,
+    pub filter: Option<FilterSpec>,
     pub mirror_mode: bool,
     pub mirror_kind: MirrorMode,
     pub force_grpc: bool,
     pub trace_data_plane: bool,
     pub require_complete_scan: bool,
+    /// otp-10a: negotiate the resume block phase (`--resume`) — changed
+    /// destination partials are patched block-wise instead of
+    /// re-transferred whole. `resume_block_size` in bytes; 0 lets the
+    /// DESTINATION choose.
+    pub resume: bool,
+    pub resume_block_size: u32,
     pub remote_label: String,
 }
 
-/// Output of [`run_remote_push`]. `destination` is the
-/// caller-supplied `remote_label` echoed back — the printer
-/// consumes it. `show_progress` is intentionally **not** here;
-/// it's a CLI-side presentation hint that the CLI threads
-/// directly into its own `DeferredPushState`.
+/// Output of [`run_remote_push`]. `summary` is the
+/// destination-computed session [`TransferSummary`] (contract:
+/// the end that wrote the bytes attests to them);
+/// `in_stream_carrier_used` carries what the old report called
+/// `tcp_fallback_used`. `destination` is the caller-supplied
+/// `remote_label` echoed back — the printer consumes it.
+/// `show_progress` is intentionally **not** here; it's a
+/// CLI-side presentation hint that the CLI threads directly
+/// into its own `DeferredPushState`.
 pub struct PushExecutionOutcome {
-    pub report: RemotePushReport,
+    pub summary: TransferSummary,
     pub destination: String,
 }
 
-/// Run a remote push end-to-end: connect to the destination,
-/// build the `Arc<dyn TransferSource>` from the [`Endpoint`]
-/// (resolving any pull-client connection for remote sources),
-/// wrap it in the universal [`FilteredSource`], and invoke
-/// `RemotePushClient::push`. No mirror-purge step exists on
-/// the push side — mirror deletes happen on the daemon and
-/// surface through the returned [`RemotePushReport`].
+/// Run a remote push end-to-end (otp-10a: the push-shaped verb on the
+/// unified transfer session): build the `Arc<dyn TransferSource>` from
+/// the [`Endpoint`] (resolving any pull-client connection for remote
+/// relay sources), then initiate one SOURCE-role `Transfer` session
+/// against the destination daemon via `run_push_session`. No
+/// mirror-purge step exists on the push side — mirror deletes happen
+/// on the DESTINATION (the one delete rule, otp-6b) and surface
+/// through the returned summary's `entries_deleted`.
 ///
-/// `progress` is borrowed for the duration of the push RPC.
-/// The caller owns the channel + monitor task; this function
-/// never spawns or awaits the monitor. Standard lifecycle:
+/// A source scan that skips unreadable files fails the call after the
+/// transfer (the readable subset still lands) — same posture as the
+/// old driver; `blit move`'s source-delete gate relies on that error.
+///
+/// `progress` is borrowed for the duration of the session. The caller
+/// owns the channel + monitor task; this function never spawns or
+/// awaits the monitor. Standard lifecycle:
 ///
 /// ```text
 /// let (handle, task) = spawn_progress_monitor(...);
@@ -463,13 +475,13 @@ pub async fn run_remote_push(
     execution: PushExecution,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<PushExecutionOutcome> {
-    let mut client = RemotePushClient::connect(execution.remote.clone())
-        .await
-        .with_context(|| format!("connecting to {}", execution.remote.control_plane_uri()))?;
-
-    let inner: Arc<dyn TransferSource> = match execution.source {
+    let source: Arc<dyn TransferSource> = match execution.source {
         Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
         Endpoint::Remote(endpoint) => {
+            // `--relay-via-cli`: the CLI hosts the byte path, reading the
+            // remote source through the legacy pull client. The push half
+            // rides the session like any other source; the read half is
+            // resolved with the PullSync deletion at otp-10c.
             let pull_client = RemotePullClient::connect(endpoint.clone())
                 .await
                 .with_context(|| {
@@ -486,31 +498,31 @@ pub async fn run_remote_push(
         }
     };
 
-    let transfer_source: Arc<dyn TransferSource> =
-        Arc::new(FilteredSource::new(inner, execution.filter.clone()));
+    let options = PushSessionOptions {
+        require_complete_scan: execution.require_complete_scan,
+        // `--force-grpc`: the session's in-stream byte carrier is the
+        // gRPC-fallback lane (otp-8).
+        in_stream_bytes: execution.force_grpc,
+        resume: execution.resume,
+        resume_block_size: execution.resume_block_size,
+        filter: execution.filter,
+        mirror_enabled: execution.mirror_mode,
+        mirror_kind: if execution.mirror_mode {
+            execution.mirror_kind
+        } else {
+            MirrorMode::Off
+        },
+        progress: progress.cloned(),
+        trace_data_plane: execution.trace_data_plane,
+        ..PushSessionOptions::default()
+    };
 
-    let push_result = client
-        .push(
-            transfer_source.clone(),
-            &execution.filter,
-            execution.mirror_mode,
-            execution.mirror_kind,
-            execution.force_grpc,
-            execution.require_complete_scan,
-            progress,
-            execution.trace_data_plane,
-        )
+    let summary = run_push_session(&execution.remote, source, options)
         .await
-        .with_context(|| {
-            format!(
-                "negotiating push manifest for {} -> {}",
-                transfer_source.root().display(),
-                execution.remote_label
-            )
-        })?;
+        .with_context(|| format!("pushing to {}", execution.remote_label))?;
 
     Ok(PushExecutionOutcome {
-        report: push_result,
+        summary,
         destination: execution.remote_label,
     })
 }
