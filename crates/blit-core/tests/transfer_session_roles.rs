@@ -146,6 +146,7 @@ async fn run_session_with_open(
         endpoint: dest_endpoint,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root.to_path_buf()));
@@ -473,6 +474,7 @@ async fn assert_resume_data_plane_invariant_across_roles(
             endpoint: dest_endpoint,
             data_plane_host: dest_host,
             instruments: Default::default(),
+            local_apply: None,
         };
         let (a, b) = in_process_pair();
         let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -833,6 +835,7 @@ async fn file_record_for_resume_flagged_path_is_protocol_violation() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(
@@ -1025,6 +1028,7 @@ async fn mid_resume_source_fault_surfaces_cleanly_to_both_ends() {
             endpoint: dest_endpoint,
             data_plane_host: None,
             instruments: Default::default(),
+            local_apply: None,
         };
         let (a, b) = in_process_pair();
         let source: Arc<dyn TransferSource> = Arc::new(TruncatedReadSource {
@@ -1192,6 +1196,7 @@ async fn many_tiny_files_shape_correct_to_more_than_one_stream() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -1269,6 +1274,7 @@ async fn pull_data_plane_single_stream_lands_bytes() {
         endpoint: SessionEndpoint::initiator(open), // dials + receives
         data_plane_host: Some("127.0.0.1".into()),
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -1340,6 +1346,7 @@ async fn pull_data_plane_shape_corrects_to_more_than_one_stream() {
         endpoint: SessionEndpoint::initiator(open), // dials + receives
         data_plane_host: Some("127.0.0.1".into()),
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -1436,6 +1443,7 @@ async fn build_mismatch_refused_under_both_initiators() {
             endpoint: dest_endpoint,
             data_plane_host: None,
             instruments: Default::default(),
+            local_apply: None,
         };
         let (a, b) = in_process_pair();
         let source = Arc::new(FsTransferSource::new(src_root.clone()));
@@ -1494,6 +1502,7 @@ async fn contract_version_mismatch_is_refused() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
@@ -1536,6 +1545,7 @@ async fn mirror_enabled_without_scope_is_refused() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FsTransferSource::new(src_root));
@@ -1726,6 +1736,7 @@ async fn mirror_refused_when_source_scan_incomplete() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(
@@ -1803,6 +1814,7 @@ async fn cancel_frame_during_mirror_purge_aborts_the_deletions() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(
@@ -1877,6 +1889,7 @@ async fn incomplete_scan_refused_when_completeness_required() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(
@@ -2072,6 +2085,7 @@ async fn session_filters_via_chokepoint_not_scan_arg() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (a, b) = in_process_pair();
     let source = Arc::new(FilterIgnoringSource {
@@ -2133,6 +2147,7 @@ async fn payload_record_before_manifest_complete_is_protocol_violation() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(
@@ -2370,6 +2385,7 @@ async fn manifest_entry_after_manifest_complete_is_protocol_violation() {
         endpoint: SessionEndpoint::Responder,
         data_plane_host: None,
         instruments: Default::default(),
+        local_apply: None,
     };
     let (mut peer, dest_transport) = in_process_pair();
     let dest = tokio::spawn(run_destination(

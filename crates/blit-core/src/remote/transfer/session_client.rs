@@ -340,6 +340,7 @@ pub async fn run_pull_session_with_client(
             byte_progress: options.byte_progress,
             trace_data_plane: options.trace_data_plane,
         },
+        local_apply: None,
     };
     run_destination(cfg, transport, DestinationTarget::Fixed(dest_root)).await
 }

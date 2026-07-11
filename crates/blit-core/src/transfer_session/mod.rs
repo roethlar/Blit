@@ -14,7 +14,10 @@
 //! delegated otp-9 (see the slice list in the plan).
 
 mod data_plane;
+pub mod local;
 pub mod transport;
+
+pub use local::run_local_session;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -225,6 +228,15 @@ pub struct DestinationSessionConfig {
     /// daemon DESTINATION responder runs with the defaults. Symmetric
     /// with [`SourceSessionConfig::instruments`].
     pub instruments: DestinationInstruments,
+    /// otp-11: the LOCAL byte-carrier. When set, this destination
+    /// applies needed files in-process through the local sink instead
+    /// of requesting them from the source — no payload byte rides any
+    /// transport. Process-local config with no wire representation:
+    /// only [`local::run_local_session`] (which holds BOTH roots in
+    /// this process) can construct a [`local::LocalApply`], so no wire
+    /// peer can ever select it. `None` (every remote caller and the
+    /// daemon responder) keeps the wire carriers exactly as before.
+    pub local_apply: Option<local::LocalApply>,
 }
 
 /// Observability hooks a DESTINATION-side caller can attach to its
@@ -2242,6 +2254,7 @@ pub async fn run_destination(
         &dst_root,
         cfg.data_plane_host.as_deref(),
         cfg.instruments,
+        cfg.local_apply,
     )
     .await
 }
@@ -2256,6 +2269,7 @@ async fn drive_destination(
     dst_root: &Path,
     data_plane_host: Option<&str>,
     instruments: DestinationInstruments,
+    local_apply: Option<local::LocalApply>,
 ) -> Result<DestinationOutcome> {
     match destination_session(
         transport,
@@ -2263,6 +2277,7 @@ async fn drive_destination(
         dst_root,
         data_plane_host,
         instruments,
+        local_apply,
     )
     .await
     {
@@ -2351,6 +2366,9 @@ pub async fn run_responder(
                 &dst_root,
                 None,
                 DestinationInstruments::default(),
+                // The serving daemon never applies locally — the local
+                // carrier exists only inside run_local_session's process.
+                None,
             )
             .await?;
             Ok(ResponderOutcome::Destination(outcome))
@@ -2437,7 +2455,10 @@ fn tag_path(report: eyre::Report, path: &str) -> eyre::Report {
 /// otp-6b: the DESTINATION's mirror delete pass — the session's single
 /// delete rule. Plans (enumerate dest + diff against the complete source
 /// file set) and executes the extraneous deletions, all blocking FS work,
-/// so it runs on the blocking pool. Returns the count deleted.
+/// so it runs on the blocking pool. Returns `(files, dirs)` deleted —
+/// split so the local carrier's summary (otp-11) can report both; wire
+/// summaries carry the sum. `execute: false` (local `--dry-run` only)
+/// plans and counts without touching the filesystem.
 ///
 /// Every target is containment-checked against the canonical destination
 /// root before any filesystem op (the same chokepoint the sink write paths
@@ -2455,7 +2476,8 @@ fn mirror_delete_pass(
     tolerate_nonempty_dirs: bool,
     canonical_dst_root: Option<&Path>,
     abort: &AtomicBool,
-) -> Result<u64> {
+    execute: bool,
+) -> Result<(u64, u64)> {
     let plan = crate::mirror_planner::MirrorPlanner::new(false).plan_session_deletions(
         dst_root,
         source_files,
@@ -2483,17 +2505,22 @@ fn mirror_delete_pass(
         Ok(())
     };
 
-    let mut deleted = 0u64;
+    let mut deleted_files = 0u64;
+    let mut deleted_dirs = 0u64;
     for file in &plan.files {
         check_abort()?;
         contained(file)?;
+        if !execute {
+            deleted_files += 1;
+            continue;
+        }
         // Windows refuses to delete a read-only file; clear the attribute
         // first, matching the daemon purge (admin.rs) and local mirror
         // (engine/mirror.rs) executors (codex otp-6b F2).
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(file);
         match std::fs::remove_file(file) {
-            Ok(()) => deleted += 1,
+            Ok(()) => deleted_files += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(eyre::eyre!("mirror delete {}: {e}", file.display())),
         }
@@ -2501,10 +2528,14 @@ fn mirror_delete_pass(
     for dir in &plan.dirs {
         check_abort()?;
         contained(dir)?;
+        if !execute {
+            deleted_dirs += 1;
+            continue;
+        }
         #[cfg(windows)]
         crate::win_fs::clear_readonly_recursive(dir);
         match std::fs::remove_dir(dir) {
-            Ok(()) => deleted += 1,
+            Ok(()) => deleted_dirs += 1,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             // FilteredSubset: the dir still holds out-of-scope files the
             // filter excluded from enumeration; leaving it is the scope
@@ -2517,7 +2548,7 @@ fn mirror_delete_pass(
             Err(e) => return Err(eyre::eyre!("mirror delete dir {}: {e}", dir.display())),
         }
     }
-    Ok(deleted)
+    Ok((deleted_files, deleted_dirs))
 }
 
 async fn destination_session(
@@ -2526,6 +2557,7 @@ async fn destination_session(
     dst_root: &Path,
     data_plane_host: Option<&str>,
     instruments: DestinationInstruments,
+    local_apply: Option<local::LocalApply>,
 ) -> Result<DestinationOutcome> {
     // otp-10b-2: the receive side's w6-1 progress lane. Need batches are
     // the denominator (reported where they're emitted, below); per-file
@@ -2541,27 +2573,34 @@ async fn destination_session(
         include_deletions: false,
     };
     // src_root is only consumed by local File payloads, which never
-    // occur on a session destination (payload bytes arrive as records
-    // and go through the stream/tar write paths). `Arc` so the data-plane
-    // receive task (otp-4b) can share the one sink across sockets.
-    let mut sink = FsTransferSink::new(
-        PathBuf::new(),
-        dst_root.to_path_buf(),
-        FsSinkConfig {
-            preserve_times: true,
-            dry_run: false,
-            checksum: None,
-            resume: false,
-            compare_mode,
-        },
-    );
-    // otp-9a: applied payload bytes report against the caller's live
-    // counter (the delegated dst daemon's jobs row) through the sink's
-    // existing ByteProgressSink contract.
-    if let Some(bp) = instruments.byte_progress {
-        sink = sink.with_byte_progress(bp);
-    }
-    let sink = Arc::new(sink);
+    // occur on a WIRE session destination (payload bytes arrive as
+    // records and go through the stream/tar write paths); the LOCAL
+    // carrier (otp-11) brings its own fully-configured sink, where
+    // File payloads are the point. `Arc` so the data-plane receive
+    // task (otp-4b) can share the one sink across sockets.
+    let sink: Arc<dyn TransferSink> = match &local_apply {
+        Some(la) => Arc::clone(&la.sink),
+        None => {
+            let mut sink = FsTransferSink::new(
+                PathBuf::new(),
+                dst_root.to_path_buf(),
+                FsSinkConfig {
+                    preserve_times: true,
+                    dry_run: false,
+                    checksum: None,
+                    resume: false,
+                    compare_mode,
+                },
+            );
+            // otp-9a: applied payload bytes report against the caller's live
+            // counter (the delegated dst daemon's jobs row) through the sink's
+            // existing ByteProgressSink contract.
+            if let Some(bp) = instruments.byte_progress {
+                sink = sink.with_byte_progress(bp);
+            }
+            Arc::new(sink)
+        }
+    };
     // Same canonical-containment chokepoint the sink write paths use
     // (R46-F3), applied to diff stats so a hostile manifest path can't
     // make the destination stat outside its root.
@@ -2575,20 +2614,29 @@ async fn destination_session(
     // when mirroring) so the pass can diff it against the dest at SourceDone.
     let mirror_enabled = negotiated.open.mirror_enabled;
     let mirror_kind = MirrorMode::try_from(negotiated.open.mirror_kind).unwrap_or(MirrorMode::Off);
-    let mirror_filter: crate::fs_enum::FileFilter = if mirror_enabled
-        && mirror_kind == MirrorMode::FilteredSubset
-    {
-        match negotiated.open.filter.as_ref() {
-            Some(spec) if *spec != FilterSpec::default() => {
-                crate::remote::transfer::operation_spec::filter_from_spec(spec.clone()).map_err(
-                    |e| eyre::Report::new(SessionFault::internal(format!("invalid filter: {e:#}"))),
-                )?
+    let mirror_filter: crate::fs_enum::FileFilter =
+        if mirror_enabled && mirror_kind == MirrorMode::FilteredSubset {
+            // otp-11: the local carrier threads the user's FileFilter
+            // directly (process-local; no wire FilterSpec round-trip) —
+            // same type, same delete pass, same scope semantics.
+            if let Some(la) = &local_apply {
+                la.mirror_scope_filter.clone_without_cache()
+            } else {
+                match negotiated.open.filter.as_ref() {
+                    Some(spec) if *spec != FilterSpec::default() => {
+                        crate::remote::transfer::operation_spec::filter_from_spec(spec.clone())
+                            .map_err(|e| {
+                                eyre::Report::new(SessionFault::internal(format!(
+                                    "invalid filter: {e:#}"
+                                )))
+                            })?
+                    }
+                    _ => crate::fs_enum::FileFilter::default(),
+                }
             }
-            _ => crate::fs_enum::FileFilter::default(),
-        }
-    } else {
-        crate::fs_enum::FileFilter::default()
-    };
+        } else {
+            crate::fs_enum::FileFilter::default()
+        };
     let mut source_files: HashSet<String> = HashSet::new();
 
     // otp-7a: resume. Headers of resume-granted needs are retained so a
@@ -2634,7 +2682,7 @@ async fn destination_session(
     // max_streams — both directions resize (push arms+accepts, otp-4b-2;
     // pull dials, otp-5b-2), so both seed these from their epoch-0 streams.
     let recv_sink: Arc<dyn TransferSink> = Arc::new(data_plane::NeedListSink::new(
-        Arc::clone(&sink) as Arc<dyn TransferSink>,
+        Arc::clone(&sink),
         Arc::clone(&outstanding),
         // otp-7b: only a resume session accepts block records on the
         // data plane; the sink validates + claims them against the same
@@ -2741,6 +2789,11 @@ async fn destination_session(
     let mut files_written: u64 = 0;
     let mut bytes_written: u64 = 0;
 
+    // otp-11: the LOCAL carrier's apply pipeline — spawned before the
+    // loop so applies run concurrent with the diff, exactly as the
+    // data-plane receive does.
+    let mut local_run = local_apply.as_ref().map(|la| la.start(progress.clone()));
+
     loop {
         let received = match transport.recv().await? {
             Some(f) => f,
@@ -2766,21 +2819,36 @@ async fn destination_session(
                 pending.push(header);
                 if pending.len() >= DEST_DIFF_CHUNK {
                     let chunk = std::mem::take(&mut pending);
-                    diff_chunk_and_send_needs(
-                        transport,
-                        chunk,
-                        dst_root,
-                        canonical_dst_root.as_deref(),
-                        &compare_opts,
-                        resume_enabled,
-                        resume_block_size,
-                        &resume_headers,
-                        &mut granted,
-                        &outstanding,
-                        &mut needed_paths,
-                        progress.as_ref(),
-                    )
-                    .await?;
+                    if let Some(la) = &local_apply {
+                        diff_chunk_and_apply_local(
+                            la,
+                            &mut local_run,
+                            chunk,
+                            dst_root,
+                            canonical_dst_root.as_deref(),
+                            &compare_opts,
+                            &mut granted,
+                            &mut needed_paths,
+                            progress.as_ref(),
+                        )
+                        .await?;
+                    } else {
+                        diff_chunk_and_send_needs(
+                            transport,
+                            chunk,
+                            dst_root,
+                            canonical_dst_root.as_deref(),
+                            &compare_opts,
+                            resume_enabled,
+                            resume_block_size,
+                            &resume_headers,
+                            &mut granted,
+                            &outstanding,
+                            &mut needed_paths,
+                            progress.as_ref(),
+                        )
+                        .await?;
+                    }
                 }
             }
             Some(Frame::ManifestComplete(complete)) => {
@@ -2815,21 +2883,36 @@ async fn destination_session(
                     )));
                 }
                 let chunk = std::mem::take(&mut pending);
-                diff_chunk_and_send_needs(
-                    transport,
-                    chunk,
-                    dst_root,
-                    canonical_dst_root.as_deref(),
-                    &compare_opts,
-                    resume_enabled,
-                    resume_block_size,
-                    &resume_headers,
-                    &mut granted,
-                    &outstanding,
-                    &mut needed_paths,
-                    progress.as_ref(),
-                )
-                .await?;
+                if let Some(la) = &local_apply {
+                    diff_chunk_and_apply_local(
+                        la,
+                        &mut local_run,
+                        chunk,
+                        dst_root,
+                        canonical_dst_root.as_deref(),
+                        &compare_opts,
+                        &mut granted,
+                        &mut needed_paths,
+                        progress.as_ref(),
+                    )
+                    .await?;
+                } else {
+                    diff_chunk_and_send_needs(
+                        transport,
+                        chunk,
+                        dst_root,
+                        canonical_dst_root.as_deref(),
+                        &compare_opts,
+                        resume_enabled,
+                        resume_block_size,
+                        &resume_headers,
+                        &mut granted,
+                        &outstanding,
+                        &mut needed_paths,
+                        progress.as_ref(),
+                    )
+                    .await?;
+                }
                 // NeedComplete only after ManifestComplete received
                 // AND every entry diffed — both true here.
                 transport
@@ -2877,7 +2960,7 @@ async fn destination_session(
                         header.relative_path
                     )));
                 }
-                let outcome = receive_file_record(transport, &sink, &header).await?;
+                let outcome = receive_file_record(transport, sink.as_ref(), &header).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 // otp-10b-2: in-stream per-file progress, same convention
@@ -2900,7 +2983,8 @@ async fn destination_session(
                     &resume_headers,
                     &outstanding,
                 )?;
-                let outcome = receive_block_record(transport, &sink, &header, block).await?;
+                let outcome =
+                    receive_block_record(transport, sink.as_ref(), &header, block).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 files_resumed.fetch_add(1, Ordering::Relaxed);
@@ -2924,7 +3008,7 @@ async fn destination_session(
                     &resume_headers,
                     &outstanding,
                 )?;
-                let outcome = finish_block_record(&sink, &header, &complete).await?;
+                let outcome = finish_block_record(sink.as_ref(), &header, &complete).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 files_resumed.fetch_add(1, Ordering::Relaxed);
@@ -2980,7 +3064,7 @@ async fn destination_session(
                         .map(|h| h.relative_path.clone())
                         .collect()
                 });
-                let outcome = receive_tar_record(transport, &sink, shard).await?;
+                let outcome = receive_tar_record(transport, sink.as_ref(), shard).await?;
                 files_written += outcome.files_written as u64;
                 bytes_written += outcome.bytes_written;
                 if let Some(p) = &progress {
@@ -3073,6 +3157,16 @@ async fn destination_session(
                 // proxy let a peer substitute or duplicate paths).
                 // `finish()` drops the arm sender (no more resizes), joins
                 // the accept loop, and reports the settled stream count.
+                //
+                // otp-11: the LOCAL carrier joins its apply pipeline with
+                // the same discipline (drain every write, surface its
+                // error) and takes the write totals as this end's
+                // counters — the scorer stays the destination.
+                if let Some(run) = local_run.take() {
+                    let totals = run.finish().await?;
+                    files_written = totals.files_written as u64;
+                    bytes_written = totals.bytes_written;
+                }
                 let (in_stream_carrier_used, data_plane_streams) = match data_plane_recv.take() {
                     Some(run) => {
                         let totals = run.finish().await?;
@@ -3117,6 +3211,9 @@ async fn destination_session(
                     let files = std::mem::take(&mut source_files);
                     let filter = mirror_filter.clone_without_cache();
                     let tolerate_nonempty = mirror_kind == MirrorMode::FilteredSubset;
+                    // otp-11: `--dry-run` (local carrier only) plans the
+                    // pass without deleting; every wire session executes.
+                    let execute = local_apply.as_ref().is_none_or(|la| !la.dry_run);
                     // codex otp-9b F2: if THIS future is dropped while the
                     // blocking pass runs (client disconnect, CancelJob),
                     // the guard's Drop flips the abort flag and the pass
@@ -3133,6 +3230,7 @@ async fn destination_session(
                             tolerate_nonempty,
                             canonical.as_deref(),
                             &abort,
+                            execute,
                         )
                     });
                     // codex otp-10b-2 F1: a PEER fault mid-purge (a
@@ -3178,11 +3276,22 @@ async fn destination_session(
                         // pass's own "aborted" error is its consequence.
                         return Err(fault);
                     }
-                    pass_result.map_err(|e| {
+                    let (deleted_file_count, deleted_dir_count) = pass_result.map_err(|e| {
                         eyre::Report::new(SessionFault::internal(format!(
                             "mirror delete failed: {e:#}"
                         )))
-                    })?
+                    })?;
+                    // otp-11: the local summary reports the split; the
+                    // wire summary keeps the one entries_deleted count.
+                    if let Some(la) = &local_apply {
+                        la.stats
+                            .deleted_files
+                            .store(deleted_file_count, Ordering::Relaxed);
+                        la.stats
+                            .deleted_dirs
+                            .store(deleted_dir_count, Ordering::Relaxed);
+                    }
+                    deleted_file_count + deleted_dir_count
                 } else {
                     0
                 };
@@ -3216,6 +3325,107 @@ async fn destination_session(
             }
         }
     }
+}
+
+/// The LOCAL carrier's twin of [`diff_chunk_and_send_needs`] (otp-11):
+/// identical per-entry verdicts (the same [`destination_needs`] compare,
+/// the same `granted` dedup, the same `needed_paths` record), but the
+/// needed headers are planned into payloads and queued onto the
+/// in-process apply pipeline instead of being granted to the source —
+/// no frame is sent and nothing enters `outstanding`. Resume is
+/// sink-level on the local carrier (`FsSinkConfig.resume`), so no need
+/// is ever resume-flagged here.
+#[allow(clippy::too_many_arguments)]
+async fn diff_chunk_and_apply_local(
+    local: &local::LocalApply,
+    run: &mut Option<local::LocalApplyRun>,
+    chunk: Vec<FileHeader>,
+    dst_root: &Path,
+    canonical_dst_root: Option<&Path>,
+    compare_opts: &CompareOptions,
+    granted: &mut HashSet<String>,
+    needed_paths: &mut Vec<String>,
+    progress: Option<&RemoteTransferProgress>,
+) -> Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    // Scanned workload (post-filter, pre-diff) — the summary's
+    // scanned_files/scanned_bytes, folded where every manifest entry
+    // passes through.
+    local
+        .stats
+        .scanned_files
+        .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+    local
+        .stats
+        .scanned_bytes
+        .fetch_add(chunk.iter().map(|h| h.size).sum::<u64>(), Ordering::Relaxed);
+
+    let dst_root_owned = dst_root.to_path_buf();
+    let canonical = canonical_dst_root.map(Path::to_path_buf);
+    let opts = compare_opts.clone();
+    // Same abort discipline as the wire diff (codex otp-10b-1 F3): a
+    // dropped session must be able to stop a Checksum chunk mid-hash.
+    let abort = Arc::new(AtomicBool::new(false));
+    let _abort_guard = AbortFlagOnDrop(Arc::clone(&abort));
+    let needed: Vec<FileHeader> =
+        tokio::task::spawn_blocking(move || -> Result<Vec<FileHeader>> {
+            let mut needed = Vec::new();
+            for header in chunk {
+                if abort.load(Ordering::Acquire) {
+                    eyre::bail!("destination diff aborted: session ended");
+                }
+                match destination_needs(
+                    &header,
+                    &dst_root_owned,
+                    canonical.as_deref(),
+                    &opts,
+                    &abort,
+                )? {
+                    NeedVerdict::Skip => {}
+                    NeedVerdict::Transfer { .. } => needed.push(header),
+                }
+            }
+            Ok(needed)
+        })
+        .await
+        .map_err(|err| eyre::eyre!("destination diff task panicked: {err}"))??;
+
+    let fresh: Vec<FileHeader> = needed
+        .into_iter()
+        .filter(|header| granted.insert(header.relative_path.clone()))
+        .collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    for header in &fresh {
+        needed_paths.push(header.relative_path.clone());
+    }
+    if let Some(p) = progress {
+        p.report_manifest_batch(fresh.len());
+    }
+    let payloads = local.plan_chunk(fresh).await?;
+    for payload in payloads {
+        let queued = match run.as_ref() {
+            Some(r) => r.queue(payload).await.is_ok(),
+            None => false,
+        };
+        if !queued {
+            // The pipeline died mid-run: surface ITS error as the root
+            // cause — a bare "stopped early" would hide the write
+            // failure that killed it.
+            if let Some(r) = run.take() {
+                return Err(r
+                    .finish()
+                    .await
+                    .err()
+                    .unwrap_or_else(|| eyre::eyre!("local apply pipeline stopped early")));
+            }
+            return Err(eyre::eyre!("local apply pipeline stopped early"));
+        }
+    }
+    Ok(())
 }
 
 /// Stat-and-compare one chunk of manifest entries on the blocking
@@ -3617,7 +3827,7 @@ fn claim_resume_record(
 /// file records.
 async fn receive_block_record(
     transport: &mut FrameTransport,
-    sink: &FsTransferSink,
+    sink: &dyn TransferSink,
     header: &FileHeader,
     first: BlockTransfer,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
@@ -3703,7 +3913,7 @@ async fn receive_block_record(
 /// the size the manifest promised, exactly as a file record must
 /// complete at `header.size` bytes).
 async fn finish_block_record(
-    sink: &FsTransferSink,
+    sink: &dyn TransferSink,
     header: &FileHeader,
     complete: &BlockTransferComplete,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
@@ -3732,7 +3942,7 @@ async fn finish_block_record(
 /// cumulative bytes (contract §Transport selection).
 async fn receive_file_record(
     transport: &mut FrameTransport,
-    sink: &FsTransferSink,
+    sink: &dyn TransferSink,
     header: &FileHeader,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
     let (mut pipe_wr, mut pipe_rd) = tokio::io::duplex(FILE_RECORD_PIPE_BYTES);
@@ -3802,7 +4012,7 @@ async fn receive_file_record(
 /// and hand the archive to the sink's tar-safety unpack path.
 async fn receive_tar_record(
     transport: &mut FrameTransport,
-    sink: &FsTransferSink,
+    sink: &dyn TransferSink,
     shard: TarShardHeader,
 ) -> Result<crate::remote::transfer::SinkOutcome> {
     if shard.archive_size > MAX_TAR_SHARD_BYTES {
@@ -3893,6 +4103,7 @@ mod tests {
             false,
             Some(&elsewhere),
             &abort,
+            true,
         )
         .expect_err("a target outside the canonical root must refuse");
         assert!(
@@ -3913,9 +4124,10 @@ mod tests {
             false,
             Some(&real_root),
             &abort,
+            true,
         )
         .expect("in-root deletion proceeds");
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted, (1, 0));
         assert!(!dst.join("extraneous.txt").exists());
     }
 
@@ -4141,7 +4353,15 @@ mod tests {
         let filter = crate::fs_enum::FileFilter::default();
 
         let abort = AtomicBool::new(true);
-        let result = mirror_delete_pass(tmp.path(), &source_files, &filter, false, None, &abort);
+        let result = mirror_delete_pass(
+            tmp.path(),
+            &source_files,
+            &filter,
+            false,
+            None,
+            &abort,
+            true,
+        );
         assert!(result.is_err(), "an aborted pass reports the abort");
         assert!(
             tmp.path().join("extraneous.bin").exists(),
@@ -4150,9 +4370,17 @@ mod tests {
 
         // Un-aborted control: the same fixture deletes the entry.
         let abort = AtomicBool::new(false);
-        let deleted = mirror_delete_pass(tmp.path(), &source_files, &filter, false, None, &abort)
-            .expect("pass succeeds");
-        assert_eq!(deleted, 1);
+        let deleted = mirror_delete_pass(
+            tmp.path(),
+            &source_files,
+            &filter,
+            false,
+            None,
+            &abort,
+            true,
+        )
+        .expect("pass succeeds");
+        assert_eq!(deleted, (1, 0));
         assert!(!tmp.path().join("extraneous.bin").exists());
     }
 

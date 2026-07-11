@@ -415,6 +415,15 @@ fn write_file_payload(
     header: &FileHeader,
     config: &FsSinkConfig,
 ) -> Result<SinkOutcome> {
+    // An empty relative_path means "the root itself" — the enumeration
+    // root was a single file (same rule as FsTransferSource::open_file):
+    // joining "" can yield a trailing-slash form the OS reads as
+    // "descend into", which fails with ENOTDIR on a regular file. The
+    // local session route (otp-11) is the first caller to send a
+    // file-root File payload through here.
+    if header.relative_path.is_empty() {
+        return copy_root_file_payload(src_root, dst_root, header, config);
+    }
     let src = src_root.join(&header.relative_path);
     // R47-F1: the FsTransferSink::write_payload arm for
     // PreparedPayload::File hit this helper, which previously
@@ -443,6 +452,30 @@ fn write_file_payload(
         }
     };
 
+    copy_resolved_file_payload(&src, &dst, header, config)
+}
+
+/// The file-root identity case of [`write_file_payload`]: `src_root`
+/// IS the file and `dst_root` IS the exact target path, so there is
+/// nothing to join and nothing to containment-check — the configured
+/// root cannot escape itself.
+fn copy_root_file_payload(
+    src_root: &Path,
+    dst_root: &Path,
+    header: &FileHeader,
+    config: &FsSinkConfig,
+) -> Result<SinkOutcome> {
+    copy_resolved_file_payload(src_root, dst_root, header, config)
+}
+
+/// Shared tail of the File-payload write: dry-run gate, parent mkdir,
+/// resume/compare/copy cascade, mtime preservation.
+fn copy_resolved_file_payload(
+    src: &Path,
+    dst: &Path,
+    header: &FileHeader,
+    config: &FsSinkConfig,
+) -> Result<SinkOutcome> {
     // R58-F4: dry-run must be side-effect-free. Bail before the
     // parent-mkdir so a dry-run doesn't create destination
     // directories on disk.
@@ -462,23 +495,23 @@ fn write_file_payload(
     let mut clone_succeeded = false;
 
     if config.resume {
-        let outcome = resume_copy_file(&src, &dst, 0)
+        let outcome = resume_copy_file(src, dst, 0)
             .with_context(|| format!("resume copy {}", header.relative_path))?;
         did_copy = outcome.bytes_transferred > 0;
-    } else if crate::copy::file_needs_copy_with_mode(&src, &dst, config.compare_mode)? {
+    } else if crate::copy::file_needs_copy_with_mode(src, dst, config.compare_mode)? {
         let sizer = BufferSizer::default();
         let logger = NoopLogger;
-        let outcome = copy_file(&src, &dst, &sizer, false, &logger)
+        let outcome = copy_file(src, dst, &sizer, false, &logger)
             .with_context(|| format!("copy {}", header.relative_path))?;
         did_copy = true;
         clone_succeeded = outcome.clone_succeeded;
     }
 
     if config.preserve_times && did_copy && !clone_succeeded {
-        if let Ok(meta) = std::fs::metadata(&src) {
+        if let Ok(meta) = std::fs::metadata(src) {
             if let Ok(modified) = meta.modified() {
                 let ft = FileTime::from_system_time(modified);
-                if let Err(e) = filetime::set_file_mtime(&dst, ft) {
+                if let Err(e) = filetime::set_file_mtime(dst, ft) {
                     log::warn!("set mtime on {}: {}", dst.display(), e);
                 }
             }

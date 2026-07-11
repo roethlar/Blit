@@ -1,0 +1,550 @@
+//! Local transfers on the unified session (otp-11,
+//! `docs/plan/OTP11_LOCAL_SESSION.md`).
+//!
+//! [`run_local_session`] joins both role drivers over
+//! [`super::transport::in_process_pair`] — the same choreography as every
+//! remote session (manifest streaming, destination-owned diff, the one
+//! mirror delete rule, the destination-computed summary) — with the
+//! LOCAL byte-carrier: a [`LocalApply`] extension on the destination
+//! config under which needed files are applied in-process through the
+//! shared payload planner and [`FsTransferSink`] (clonefile /
+//! block-clone / copy_file_range where the platform has them), so no
+//! payload byte rides any transport. `LocalApply` is process-local
+//! config with no wire representation: only a caller holding BOTH
+//! roots — this entry — can construct it (D-2026-07-05-3's
+//! capability-selected write strategy, never role or initiator).
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
+
+use async_trait::async_trait;
+use eyre::{eyre, Context, Result};
+use tokio::sync::mpsc;
+
+use crate::engine::{
+    LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions, LocalMirrorSummary,
+    TransferOutcome,
+};
+use crate::fs_enum::FileFilter;
+use crate::generated::{FileHeader, MirrorMode, SessionOpen, TransferRole};
+use crate::path_posix::relative_path_to_posix;
+use crate::remote::transfer::payload::{TransferPayload, DEFAULT_PAYLOAD_PREFETCH};
+use crate::remote::transfer::pipeline::execute_sink_pipeline_streaming;
+use crate::remote::transfer::sink::{
+    FsSinkConfig, FsTransferSink, NullSink, SinkOutcome, TransferSink,
+};
+use crate::remote::transfer::source::{FilteredSource, FsTransferSource, TransferSource};
+use crate::remote::transfer::RemoteTransferProgress;
+use crate::transfer_plan::PlanOptions;
+
+use super::transport::in_process_pair;
+use super::{
+    run_destination, run_source, DestinationInstruments, DestinationSessionConfig,
+    DestinationTarget, HelloConfig, SessionEndpoint, SourceInstruments, SourceSessionConfig,
+};
+
+/// Process-local destination extension: apply needed files in-process
+/// instead of requesting them from the source. Constructed only by
+/// [`run_local_session`] — the fields are crate-private, so no caller
+/// outside this crate (and no wire peer, which has no representation
+/// for it at all) can select the local carrier.
+pub struct LocalApply {
+    /// Source root for the payload planner (absolute paths =
+    /// `src_root.join(relative_path)`).
+    pub(super) src_root: PathBuf,
+    /// The pre-built local write backend (FsTransferSink with the full
+    /// user config, or NullSink under `--null`).
+    pub(super) sink: Arc<dyn TransferSink>,
+    /// Unfiltered source used by the apply pipeline to prepare
+    /// payloads (tar builds, availability checks). Filtering already
+    /// happened at scan time; prepare only reads planned entries.
+    pub(super) prepare_source: Arc<dyn TransferSource>,
+    /// Planner knobs for grouping needed headers into payloads —
+    /// the same planner the session source uses for its needs.
+    pub(super) plan_options: PlanOptions,
+    /// Mirror delete scope under `MirrorMode::FilteredSubset`: the
+    /// user's `FileFilter` directly (process-local twin of deriving it
+    /// from the wire `SessionOpen.filter` — same type, same delete
+    /// pass).
+    pub(super) mirror_scope_filter: FileFilter,
+    /// `--dry-run`: the sink already refuses writes; the mirror delete
+    /// pass runs in plan-only mode (counts, deletes nothing).
+    pub(super) dry_run: bool,
+    /// Shared unreadable-path accumulator (same Arc the source scan
+    /// feeds): apply-side availability failures land here too, so
+    /// `blit move`'s source-delete gate sees one merged list.
+    pub(super) unreadable: Arc<StdMutex<Vec<String>>>,
+    /// Counters the entry folds into [`LocalMirrorSummary`] afterward.
+    pub(super) stats: Arc<LocalApplyStats>,
+}
+
+/// Destination-side counters for the local summary. Atomics because
+/// the diff loop (control lane) and the delete pass (SourceDone arm)
+/// write them at different points of the session.
+#[derive(Default)]
+pub struct LocalApplyStats {
+    pub(super) scanned_files: AtomicU64,
+    pub(super) scanned_bytes: AtomicU64,
+    pub(super) tar_shard_tasks: AtomicU64,
+    pub(super) tar_shard_files: AtomicU64,
+    pub(super) tar_shard_bytes: AtomicU64,
+    pub(super) large_tasks: AtomicU64,
+    pub(super) large_bytes: AtomicU64,
+    pub(super) deleted_files: AtomicU64,
+    pub(super) deleted_dirs: AtomicU64,
+}
+
+/// A running local-apply pipeline: the destination diff queues
+/// payloads, `finish()` closes the queue and joins the pipeline for
+/// the write totals (the same join discipline as the data-plane
+/// receive).
+pub(super) struct LocalApplyRun {
+    payload_tx: Option<mpsc::Sender<TransferPayload>>,
+    pipeline: tokio::task::JoinHandle<Result<SinkOutcome>>,
+}
+
+impl LocalApply {
+    /// Spawn the apply pipeline — the shared streaming sink pipeline
+    /// (prefetched prepares, blocking-pool writes) over this config's
+    /// sink.
+    pub(super) fn start(&self, progress: Option<RemoteTransferProgress>) -> LocalApplyRun {
+        let (payload_tx, payload_rx) =
+            mpsc::channel::<TransferPayload>(DEFAULT_PAYLOAD_PREFETCH.max(1));
+        let source = Arc::clone(&self.prepare_source);
+        let sink = Arc::clone(&self.sink);
+        let pipeline = tokio::spawn(async move {
+            execute_sink_pipeline_streaming(
+                source,
+                vec![sink],
+                payload_rx,
+                DEFAULT_PAYLOAD_PREFETCH,
+                progress.as_ref(),
+            )
+            .await
+        });
+        LocalApplyRun {
+            payload_tx: Some(payload_tx),
+            pipeline,
+        }
+    }
+
+    /// Group one diff chunk's needed headers into payloads, folding
+    /// the planner-mix counters. Unavailable (unreadable) entries are
+    /// dropped into the shared accumulator and skipped — the old local
+    /// pipeline's copy-what-is-readable posture; the caller-side move
+    /// gate refuses the source delete when the list is non-empty.
+    pub(super) async fn plan_chunk(&self, needed: Vec<FileHeader>) -> Result<Vec<TransferPayload>> {
+        if needed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let available = self
+            .prepare_source
+            .check_availability(needed, Arc::clone(&self.unreadable))
+            .await?;
+        let payloads = crate::remote::transfer::payload::plan_transfer_payloads(
+            available,
+            &self.src_root,
+            self.plan_options,
+        )?;
+        for payload in &payloads {
+            match payload {
+                TransferPayload::TarShard { headers } => {
+                    self.stats.tar_shard_tasks.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .tar_shard_files
+                        .fetch_add(headers.len() as u64, Ordering::Relaxed);
+                    self.stats.tar_shard_bytes.fetch_add(
+                        headers.iter().map(|h| h.size).sum::<u64>(),
+                        Ordering::Relaxed,
+                    );
+                }
+                TransferPayload::File(header) => {
+                    self.stats.large_tasks.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .large_bytes
+                        .fetch_add(header.size, Ordering::Relaxed);
+                }
+                // The local planner emits only File/TarShard; resume
+                // block payloads are receive-side wire shapes.
+                _ => {}
+            }
+        }
+        Ok(payloads)
+    }
+}
+
+impl LocalApplyRun {
+    /// Queue one payload (bounded — the diff loop inherits the
+    /// pipeline's backpressure, exactly as the wire carriers lean on
+    /// transport backpressure).
+    pub(super) async fn queue(&self, payload: TransferPayload) -> Result<()> {
+        self.payload_tx
+            .as_ref()
+            .expect("local apply queue used after finish")
+            .send(payload)
+            .await
+            .map_err(|_| eyre!("local apply pipeline stopped early"))
+    }
+
+    /// Close the queue and join the pipeline. Returns the write
+    /// totals; surfaces the pipeline's own error as the root cause.
+    pub(super) async fn finish(mut self) -> Result<SinkOutcome> {
+        self.payload_tx.take();
+        self.pipeline
+            .await
+            .map_err(|err| eyre!("local apply pipeline panicked: {err}"))?
+    }
+}
+
+/// Source wrapper that drops manifest entries under the destination
+/// subtree when the destination sits inside the source — the session
+/// twin of the old engine's `exclude_dest_subtree` (pinned by
+/// `nested_destination_does_not_self_copy`: without it, each run
+/// re-copies the destination into itself one level deeper).
+struct DestSubtreeExcludedSource {
+    inner: Arc<dyn TransferSource>,
+    /// POSIX-form relative path of the destination under the source
+    /// root (no trailing slash).
+    exclude_rel: String,
+}
+
+#[async_trait]
+impl TransferSource for DestSubtreeExcludedSource {
+    fn scan(
+        &self,
+        filter: Option<FileFilter>,
+        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+    ) -> (
+        mpsc::Receiver<FileHeader>,
+        tokio::task::JoinHandle<Result<u64>>,
+    ) {
+        let (mut inner_rx, inner_handle) = self.inner.scan(filter, unreadable_paths);
+        let (tx, rx) = mpsc::channel(64);
+        let exact = self.exclude_rel.clone();
+        let prefix = format!("{}/", self.exclude_rel);
+        let handle = tokio::spawn(async move {
+            let mut forwarded = 0u64;
+            while let Some(header) = inner_rx.recv().await {
+                if header.relative_path == exact || header.relative_path.starts_with(&prefix) {
+                    continue;
+                }
+                forwarded += 1;
+                if tx.send(header).await.is_err() {
+                    break;
+                }
+            }
+            inner_handle
+                .await
+                .map_err(|err| eyre!("manifest scan task panicked: {err}"))??;
+            Ok(forwarded)
+        });
+        (rx, handle)
+    }
+
+    async fn prepare_payload(
+        &self,
+        payload: TransferPayload,
+    ) -> Result<crate::remote::transfer::payload::PreparedPayload> {
+        self.inner.prepare_payload(payload).await
+    }
+
+    async fn check_availability(
+        &self,
+        headers: Vec<FileHeader>,
+        unreadable_paths: Arc<StdMutex<Vec<String>>>,
+    ) -> Result<Vec<FileHeader>> {
+        self.inner
+            .check_availability(headers, unreadable_paths)
+            .await
+    }
+
+    async fn open_file(
+        &self,
+        header: &FileHeader,
+    ) -> Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+        self.inner.open_file(header).await
+    }
+
+    fn root(&self) -> &Path {
+        self.inner.root()
+    }
+}
+
+/// The destination's POSIX relative path under the source root, when
+/// (and only when) it nests inside it. Same lexical check the old
+/// engine used.
+fn dest_subtree_rel(src_root: &Path, dst_root: &Path) -> Option<String> {
+    match dst_root.strip_prefix(src_root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => Some(relative_path_to_posix(rel)),
+        _ => None,
+    }
+}
+
+/// Run one LOCAL transfer as a full session: both role drivers joined
+/// over the in-process pair, bytes applied through [`LocalApply`].
+/// This is the ONLY local transfer entry (D-2026-07-05-1) — the
+/// `blit_app::transfers::local::run` chokepoint (CLI + TUI) rides it.
+pub async fn run_local_session(
+    src_root: &Path,
+    dst_root: &Path,
+    options: LocalMirrorOptions,
+) -> Result<LocalMirrorSummary> {
+    let started = Instant::now();
+
+    if !src_root.exists() {
+        return Err(eyre!("source path does not exist: {}", src_root.display()));
+    }
+    if !options.dry_run {
+        if let Some(parent) = dst_root.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create destination parent {}", parent.display())
+            })?;
+        }
+    }
+
+    let compare_mode = options
+        .compare_mode
+        .resolve_comparison_mode(options.checksum);
+    let mirror_kind = if options.mirror {
+        match options.delete_scope {
+            LocalMirrorDeleteScope::FilteredSubset => MirrorMode::FilteredSubset,
+            LocalMirrorDeleteScope::All => MirrorMode::All,
+        }
+    } else {
+        MirrorMode::Off
+    };
+    let open = SessionOpen {
+        initiator_role: TransferRole::Source as i32,
+        compare_mode: compare_mode as i32,
+        ignore_existing: options.ignore_existing,
+        // The local carrier moves no bytes on any lane; in-stream keeps
+        // the responder from binding a TCP data plane.
+        in_stream_bytes: true,
+        mirror_enabled: options.mirror,
+        mirror_kind: mirror_kind as i32,
+        ..Default::default()
+    };
+
+    // One merged unreadable list: scan-side (source instruments) and
+    // apply-side (availability checks) — the move gate reads it whole.
+    let unreadable: Arc<StdMutex<Vec<String>>> = Arc::default();
+
+    // Source chain: fs source → user filter (the universal
+    // FilteredSource chokepoint, same as push/pull) → dest-subtree
+    // exclusion when dst nests inside src.
+    let fs_source: Arc<dyn TransferSource> =
+        Arc::new(FsTransferSource::new(src_root.to_path_buf()));
+    let filtered: Arc<dyn TransferSource> = Arc::new(FilteredSource::new(
+        Arc::clone(&fs_source),
+        options.filter.clone_without_cache(),
+    ));
+    let scan_source: Arc<dyn TransferSource> = match dest_subtree_rel(src_root, dst_root) {
+        Some(exclude_rel) => Arc::new(DestSubtreeExcludedSource {
+            inner: filtered,
+            exclude_rel,
+        }),
+        None => filtered,
+    };
+
+    // Local write backend — the old orchestrator's exact construction.
+    let sink: Arc<dyn TransferSink> = if options.null_sink {
+        Arc::new(NullSink::new())
+    } else {
+        Arc::new(FsTransferSink::new(
+            src_root.to_path_buf(),
+            dst_root.to_path_buf(),
+            FsSinkConfig {
+                preserve_times: options.preserve_times,
+                dry_run: options.dry_run,
+                checksum: if options.checksum {
+                    Some(crate::checksum::ChecksumType::Blake3)
+                } else {
+                    None
+                },
+                resume: options.resume,
+                compare_mode,
+            },
+        ))
+    };
+
+    let stats = Arc::new(LocalApplyStats::default());
+    let plan_options = PlanOptions {
+        force_tar: options.force_tar,
+        ..PlanOptions::default()
+    };
+    let local_apply = LocalApply {
+        src_root: src_root.to_path_buf(),
+        sink,
+        prepare_source: Arc::clone(&fs_source),
+        plan_options,
+        mirror_scope_filter: options.filter.clone_without_cache(),
+        dry_run: options.dry_run,
+        unreadable: Arc::clone(&unreadable),
+        stats: Arc::clone(&stats),
+    };
+
+    let source_cfg = SourceSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::initiator(open),
+        plan_options: PlanOptions::default(),
+        data_plane_host: None,
+        instruments: SourceInstruments {
+            progress: None,
+            unreadable: Some(Arc::clone(&unreadable)),
+            trace_data_plane: false,
+        },
+    };
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+        instruments: DestinationInstruments::default(),
+        local_apply: Some(local_apply),
+    };
+
+    let (a, b) = in_process_pair();
+    let (source_result, dest_result) = tokio::join!(
+        run_source(source_cfg, a, scan_source),
+        run_destination(
+            dest_cfg,
+            b,
+            DestinationTarget::Fixed(dst_root.to_path_buf())
+        ),
+    );
+    // The destination is the scorer and holds the primary fault
+    // (refusals, apply failures, delete failures); a source-only
+    // failure (scan abort) surfaces when the destination succeeded.
+    let outcome = match dest_result {
+        Ok(outcome) => {
+            source_result?;
+            outcome
+        }
+        Err(err) => return Err(err),
+    };
+
+    let scanned_files = stats.scanned_files.load(Ordering::Relaxed) as usize;
+    let scanned_bytes = stats.scanned_bytes.load(Ordering::Relaxed);
+    let unreadable_paths = unreadable
+        .lock()
+        .map_err(|err| eyre!("unreadable-path accumulator poisoned: {err}"))?
+        .clone();
+
+    // Outcome classification mirrors the old fast-path gate (strategy
+    // gate: mirror / checksum / force_tar / non-SizeMtime compare all
+    // forced streaming, which always reported Transferred).
+    let fast_path_shape = !options.mirror
+        && !options.checksum
+        && !options.force_tar
+        && matches!(options.compare_mode, LocalCompareMode::SizeMtime);
+    let copied_files = outcome.summary.files_transferred as usize;
+    let outcome_class = if fast_path_shape && scanned_files == 0 {
+        TransferOutcome::SourceEmpty
+    } else if fast_path_shape && copied_files == 0 {
+        TransferOutcome::UpToDate
+    } else {
+        TransferOutcome::Transferred
+    };
+
+    let summary = LocalMirrorSummary {
+        planned_files: outcome.needed_paths.len(),
+        copied_files,
+        total_bytes: outcome.summary.bytes_transferred,
+        scanned_files,
+        scanned_bytes,
+        deleted_files: stats.deleted_files.load(Ordering::Relaxed) as usize,
+        deleted_dirs: stats.deleted_dirs.load(Ordering::Relaxed) as usize,
+        dry_run: options.dry_run,
+        duration: started.elapsed(),
+        tar_shard_tasks: stats.tar_shard_tasks.load(Ordering::Relaxed) as usize,
+        tar_shard_files: stats.tar_shard_files.load(Ordering::Relaxed) as usize,
+        tar_shard_bytes: stats.tar_shard_bytes.load(Ordering::Relaxed),
+        raw_bundle_tasks: 0,
+        raw_bundle_files: 0,
+        raw_bundle_bytes: 0,
+        large_tasks: stats.large_tasks.load(Ordering::Relaxed) as usize,
+        large_bytes: stats.large_bytes.load(Ordering::Relaxed),
+        outcome: outcome_class,
+        predictor_estimate: None,
+        unreadable_paths,
+    };
+
+    record_local_history(&summary, &options);
+
+    Ok(summary)
+}
+
+/// Perf-history row for a local session run (D3 in the slice doc:
+/// `blit profile` keeps its local data feed; the predictor and its
+/// planner/transfer split retired with the engine, so the whole wall
+/// time lands in `transfer_duration_ms`).
+fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptions) {
+    use crate::perf_history::{
+        append_local_record, OptionSnapshot, PerformanceRecord, TransferMode,
+    };
+    if !options.perf_history {
+        return;
+    }
+    let snapshot = OptionSnapshot {
+        dry_run: options.dry_run,
+        preserve_symlinks: options.preserve_symlinks,
+        include_symlinks: options.include_symlinks,
+        skip_unchanged: options.skip_unchanged,
+        checksum: options.checksum,
+        compare_mode: options
+            .compare_mode
+            .resolve_compare_snapshot(options.checksum),
+        workers: options.workers,
+    };
+    let mode = if options.mirror {
+        TransferMode::Mirror
+    } else {
+        TransferMode::Copy
+    };
+    let mut record = PerformanceRecord::new(
+        mode,
+        None,
+        None,
+        summary.scanned_files,
+        summary.scanned_bytes,
+        snapshot,
+        Some("session".to_string()),
+        0,
+        summary.duration.as_millis(),
+        0,
+        0,
+    );
+    record.tar_shard_tasks = summary.tar_shard_tasks as u32;
+    record.tar_shard_files = summary.tar_shard_files as u32;
+    record.tar_shard_bytes = summary.tar_shard_bytes;
+    record.large_tasks = summary.large_tasks as u32;
+    record.large_bytes = summary.large_bytes;
+    if let Err(err) = append_local_record(&record) {
+        if options.verbose {
+            eprintln!("Failed to update performance history: {err:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dest_subtree_rel_detects_nesting() {
+        assert_eq!(
+            dest_subtree_rel(Path::new("/a/src"), Path::new("/a/src/nested/dst")),
+            Some("nested/dst".to_string())
+        );
+        assert_eq!(
+            dest_subtree_rel(Path::new("/a/src"), Path::new("/a/dst")),
+            None
+        );
+        // dst == src is not a nested-subtree shape (strip yields empty).
+        assert_eq!(
+            dest_subtree_rel(Path::new("/a/src"), Path::new("/a/src")),
+            None
+        );
+    }
+}
