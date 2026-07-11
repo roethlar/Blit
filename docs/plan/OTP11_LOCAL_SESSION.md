@@ -53,12 +53,17 @@ Load-bearing facts:
   acceptable for local: it would replace a ~instant same-volume clone with a
   full read+write of every byte — the 1 GiB local perf pin would fail by
   orders of magnitude on APFS/ReFS.
-- Symlinks: parity holds with no work. The old local path enumerates symlink
-  entries (`LocalMirrorOptions.include_symlinks` default true) but every
-  consumer drops them (`EnumeratedEntry::into_file_entry` → `None`
-  (`enumeration.rs:317`), the strategy fold matches `File` only
-  (`engine/strategy.rs:120`), `fs_enum::enumerate_symlinks` is caller-less).
-  Neither the old local path nor the session copies symlinks today.
+- Symlinks: parity holds for every REACHABLE option value (codex design
+  F6 scoped this claim). With the production defaults the old local
+  path enumerates symlink entries but every consumer drops them
+  (`EnumeratedEntry::into_file_entry` → `None` (`enumeration.rs:317`),
+  the strategy fold matches `File` only (`engine/strategy.rs:120`),
+  `fs_enum::enumerate_symlinks` is caller-less) — neither path copies
+  symlinks. The divergent axes (`preserve_symlinks=false` made the old
+  walker follow links; `skip_unchanged=false` forced copies) are
+  unreachable from any production caller (the CLI never sets them; the
+  TUI transfer path uses defaults; `screens/f4.rs` is the browse
+  screen) and retire with the options re-home at 11b.
 - `copy/` and `engine/dial.rs` are NOT deletable: `remote/transfer/sink.rs:15,468`,
   `diff_planner.rs:146`, `transfer_session/mod.rs:31`, `mirror_planner.rs:7`
   consume `copy/`; `transfer_session/{data_plane.rs:53, mod.rs:785,2200}`
@@ -68,19 +73,28 @@ Load-bearing facts:
 
 ### D1 — byte-carrier: destination-side local apply (no bytes on any transport)
 
-The local route runs the UNCHANGED session choreography — hello (exact-match
-build identity, trivially satisfied in one process), `SessionOpen` with
-`in_stream_bytes:true` (no data plane granted), source streams its manifest,
-destination diffs incrementally (one diff owner), mirror = the one delete pass
-at SourceDone (`mod.rs:2451`), destination scores and sends the one summary —
-with one process-local extension: `DestinationSessionConfig` gains an
-`Option<LocalApply>` carrying `src_root` + sink overrides. When set, the
-destination applies each needed header itself through the existing payload
-planner (`plan_transfer_payloads`) and pipeline into an
-`FsTransferSink::new(src_root, dst_root, cfg)` — i.e. `PreparedPayload::File`
-/ `TarShard` exactly as the old local pipeline, with the same parallelism and
-the same zero-copy primitives. No need is ever sent to the source; the source
-streams the manifest, accumulates unreadables, and sends SourceDone.
+The local route runs the session with one precisely-bounded carrier
+delta (stated explicitly — codex design F1 rejected this section's
+earlier "unchanged choreography" overclaim). Shared,
+function-for-function: hello (exact-match build identity, trivially
+satisfied in one process), `SessionOpen` validation and refusals with
+`in_stream_bytes:true` (no data plane granted), source manifest
+streaming with the same unreadable accumulation and
+`ManifestComplete{scan_complete}`, the destination-owned diff (the
+same `destination_needs` verdicts, `granted` dedup, `needed_paths`
+record), `NeedComplete`, the mirror scan-complete guard, the one
+delete pass at SourceDone (`mod.rs:2451`), the destination-computed
+summary and its final exchange. The delta: under the local carrier the
+need-grant/payload phase collapses into the destination —
+`DestinationSessionConfig` gains an `Option<LocalApply>` (`src_root` +
+sink overrides) under which needed headers are planned
+(`plan_transfer_payloads`) and applied in-process into an
+`FsTransferSink::new(src_root, dst_root, cfg)` — i.e.
+`PreparedPayload::File`/`TarShard` exactly as the old local pipeline,
+same parallelism, same zero-copy primitives. No NeedBatch is sent, the
+source serves no payloads, and nothing enters `outstanding` (a payload
+record arriving anyway still violates). The source streams the
+manifest, accumulates unreadables, and sends SourceDone.
 
 Why this is one path, not a second one: the parent plan already frames
 carriers as transport facts inside the same session ("the gRPC-fallback lane
@@ -90,9 +104,16 @@ transfer path") and D-2026-07-05-3 fixes the receive sink as a
 capability and payload type, never role or initiator". Local apply is that
 seam's same-process strategy: selected by a capability only the process that
 holds BOTH roots can construct (it is config, not wire — a remote peer
-structurally cannot request it; nothing is negotiated). Choreography, diff
-ownership, delete rule, refusals, and the summary shape are byte-identical to
-the remote session.
+structurally cannot request it; nothing is negotiated). The owner's
+invariant (direction/initiator/verb never select code) is preserved in
+its own terms: local↔local has no direction/initiator asymmetry, and
+every semantic layer — compare, planner, sink, delete rule, refusals,
+summary — is the same code every remote session runs. The rejected
+alternative (relaying payload bytes through frames or loopback TCP)
+keeps the payload phase textually identical but loses same-volume
+clonefile/block-clone by orders of magnitude — failing this plan's own
+perf gate. At 11b, `docs/TRANSFER_SESSION.md` gains a short "Local
+carrier" note so the contract doc names the delta explicitly.
 
 `needed_paths`, the diff decisions, `require_complete_scan`/`ScanIncomplete`,
 and the both-ends-summary-equality invariant all carry unchanged. The
@@ -135,8 +156,15 @@ Option mapping: `mirror`+`delete_scope` → `mirror_enabled` +
 `dry_run` → sink cfg + the delete pass is skipped (deleted counts report the
 plan, matching today's `!options.dry_run` execute gate); `null_sink` →
 `NullSink` swap at the seam (diff still runs against the real dest);
-`resume` → sink-level `FsSinkConfig.resume` (the old local resume mechanism;
-the wire block phase stays remote-only — `SessionOpen.resume` unset);
+`resume` → sink-level `FsSinkConfig.resume` — the local carrier's
+block phase (codex design F5): the same resume semantic (hash the
+partial, rewrite only differing blocks, full-file fallback) executed
+by the shared `resume_copy_file` primitive without serializing block
+records that the same process would immediately deserialize;
+`SessionOpen.resume` stays unset (running the wire block phase over
+in-process frames would relay every changed block's bytes — the relay
+this carrier exists to avoid). Pinned by a local `--resume` behavior
+test;
 `preserve_times` → sink cfg; `workers` → the apply pipeline's concurrency
 argument (same knob the old streaming pipeline took).
 
@@ -147,8 +175,16 @@ rather than being rebuilt beside the session; none is on the parent plan's
 capability-parity list:
 
 - **Change-journal skip** (`change_journal/`, `engine/journal.rs`): retired.
-  Second-run no-op now costs one enumerate+diff (measured in the bench gate).
-  `TransferOutcome::JournalSkip` and its CLI line die.
+  Second-run no-op now costs one enumerate+diff — the same work class
+  as the old `no_work` fast path, which ALSO ran a full enumerate +
+  per-entry `should_copy_entry` stat pass (`engine/strategy.rs`); the
+  journal skip engaged only with a prior snapshot on journal-capable
+  filesystems (the retired no-op pin itself asserted `no_work`, not
+  `journal_skip`), so the A/B no-op cell measures a fair fight (codex
+  design F8). On journal-capable systems with very large unchanged
+  trees the journal skip was an absolute-time win the session route
+  does not reproduce — carried in Known gaps. The measured gate
+  stands. `TransferOutcome::JournalSkip` and its CLI line die.
 - **Auto-tune + tuning windows** (`auto_tune/`, `engine/tuning.rs`): retired;
   the session's dial + sf-2 shape correction is the one stream policy.
 - **Predictor** (`engine/history.rs::update_predictor`, strategy selection
@@ -205,29 +241,54 @@ retired here with `auto_tune/`.
    `compare_file`, `CompareMode`, `CompareOptions`, `FileStatus` SURVIVE
    (live via the session diff, `mod.rs:3431`).
 4. Stranded-by-this-slice dead code: `diff_planner::plan_local_mirror` +
-   `LocalDiffInputs` (+4 in-file tests), `pipeline::execute_sink_pipeline_streaming`
-   (the session uses `_elastic`). Pre-existing unrelated dead code
-   (`delete.rs`, `zero_copy.rs::sendfile_chunk`) is NOT swept here — noted in
-   Known gaps for a separate sweep.
-5. Deletion proof in the otp-10c-2 format (file-by-file, DELETED WHOLE with
+   `LocalDiffInputs` (+4 in-file tests). NOT
+   `pipeline::execute_sink_pipeline_streaming` — 11a made it the local
+   apply pipeline, a live production caller; it and its tests stay
+   (codex design F9, reversed by implementation). Pre-existing
+   unrelated dead code (`delete.rs`, `zero_copy.rs::sendfile_chunk`)
+   is NOT swept here — noted in Known gaps for a separate sweep.
+5. Sink defense-layer alignment decision (codex design F3): the
+   File-payload write re-check (`file_needs_copy_with_checksum_type`:
+   size → first/last-MiB partial hash → mtime tolerance) can skip a
+   file the session diff flagged, counting it `files_written` — the
+   OLD local pipeline's exact behavior and accounting, preserved by
+   11a. 11b settles whether the re-check aligns with
+   `header_transfer_status` (the one compare owner) or is retired for
+   session-driven writes; either way local and remote counting stop
+   diverging inside the tolerance window.
+6. Deletion proof in the otp-10c-2 format (file-by-file, DELETED WHOLE with
    line/test counts, relocations called out, grep proof over `crates/` +
    live docs), completing the acceptance criteria's "separate local
    orchestration path" line.
-6. Retirement accounting in the otp-10c-2 categories, summing exactly;
+7. Retirement accounting in the otp-10c-2 categories, summing exactly;
    ≥1483 floor re-checked with real pins.
 
-## Test-floor arithmetic (pre-slice plan)
+## Test-floor arithmetic (amended per codex design F10)
 
-Baseline 1488/0 (verified this session). Retire-if-nothing-ported: 16
-orchestrator unit + 19 engine-non-dial unit + 6 auto_tune + 10 blit-core
-integration + ~15 compare_manifests block + 4 plan_local_mirror = ~70.
-Ports/conversions in 11a cover the 16+10 as session-local pins (≥26 back),
-manifest's live-half tests stay, and the new local-session e2e pins (dry-run,
-null, mirror scopes, move gate, single-file, unreadable, delete-scope split)
-add on top. Target: ≥1483 after 11b with margin, met by real pins, not a
-re-baseline. Windows parity (`scripts/windows/run-blit-tests.ps1`) required —
-`copy/windows.rs`'s 6 cfg(windows) tests ride the shared `copy/` module,
-which does not move.
+Post-11a suite: 1510/0 (baseline 1488 + the 22 landed 11a pins).
+11b retirements, exact: 16 orchestrator unit + 19 engine-non-dial unit
+(strategy 3, streaming_plan 2, tuning 12, history 2) + 6 auto_tune +
+10 blit-core integration (local_transfers 7, predictor_streaming 2,
+engine_streaming_plan 1) + 16 manifest `compare_manifests` block (ALL
+16 drive `compare_manifests`; none pins `header_transfer_status`
+directly — the earlier "live-half tests stay" claim was wrong) +
+4 `plan_local_mirror` = **71** → 1439 without replacements; the
+end-of-plan ≥1483 floor needs **≈ +44 real pins** by otp-13. Named
+closure sources for 11b: direct `header_transfer_status` unit ports
+(~8 — the live compare owner deserves direct pins), local `--resume`
+behavior pins (2), un-consolidating the 11a orchestrator ports back
+toward 1:1 (+4–6), `record_local_history` contract ports of the
+history.rs R44-F1 tests (2), `mirror_delete_pass` execute/plan unit
+pins (2), a session streaming-overlap port of
+`first_work_lands_before_enumeration_completes` (1), plus new
+session-edge pins (cancel-drop, empty-source mirror full-delete,
+nested-ENOTEMPTY delete-scope, single-file×{dry-run,force} shapes).
+Whatever residual remains after 11b is carried as an explicit deficit
+line to the otp-13 checklist walk — the floor is met by real pins,
+never a re-baseline. `dial.rs` (15), `copy/file_copy` (7 + 6
+cfg(windows)), and the pipeline-streaming tests are relocations or
+keeps, not retirements. Windows parity
+(`scripts/windows/run-blit-tests.ps1`) required.
 
 ## Known gaps / owner-visible changes
 
