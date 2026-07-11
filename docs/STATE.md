@@ -186,15 +186,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-12 (45th, this session)** — **otp-11a CLOSED through the
-  codex loop (design doc + slice + fix round + the journal-hole
-  investigation; suite 1488 → 1513; perf gate PASS against sound
-  baselines — the old 21 ms journal skip proven unsound, repro
-  recorded)**. In-flight: none; tree clean. **Next**: otp-11b
-  (unblocked). (Mid-session full-suite "failures" = dirty-tree
-  BUILD_MISMATCH sampling artifacts; clean rebuild converged them.)
+- **2026-07-12 (45th, this session)** — **otp-11a CLOSED (design doc
+  + slice + fix round + the journal-hole investigation; suite 1488 →
+  1513; perf gate PASS against sound baselines — the old 21 ms
+  journal skip proven unsound, repro recorded)**. In-flight: ⚠ the
+  ADDENDUM `d74c1ac`'s codex review is PENDING (codex quota
+  exhausted; retry after reset, record to
+  `.review/results/otp-11a-addendum.codex.md`) — run BEFORE otp-11b.
+  Tree clean otherwise.
 - **2026-07-11 (44th)** — otp-10c closed (relay removal + the cutover
   deletion); suite 1605 → 1488. Owner ask pending: `725aa07` snapshot.
-- **2026-07-11 (43rd)** — otp-10a/10b-1/10b-2 closed (1555 → 1605);
-  verb cutover complete.
+- **2026-07-11 (43rd)** — otp-10a/10b closed; verb cutover complete.
 - *(42nd and earlier pruned to the cap — see DEVLOG 2026-07-06..12.)*
