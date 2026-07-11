@@ -51,11 +51,21 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     mutation-proven; the copy-verb skip stays the owner question
     below). Suite 1555 → **1576**. Detail: DEVLOG 2026-07-11 +
     finding/verdict under `.review/`. Current: **10b pull-shaped
-    verb** (one args→open compare-flag mapping for both verbs lands
-    there); then 10c deletion — 4 drivers + `Push`/`PullSync` out of
-    tree AND proto, ported-test accounting + file-by-file deletion
-    proof (incl. the DelegatedPull no-payload-bytes assertion;
-    relay's PullSync-read half decided there).
+    verb**, staged: 10b-1 session checksum compare (old pull's
+    `--checksum` content-skip; the session's Checksum mode today
+    transfers everything — SOURCE hashes on a Checksum open, DEST
+    hashes diff candidates, daemon `--no-server-checksums` refuses
+    at OPEN so the checksum-negotiation e2es keep their refusal
+    shape); 10b-2 verb cutover (run_pull_session; ONE args→compare
+    mapping for BOTH verbs incl. lifting push's `--checksum` gate;
+    dest-side w6-1 progress — `execute_receive_pipeline` takes the
+    handle, session passes None; printers retype; mirror retires
+    `apply_pull_mirror_purge` from the verb path; move-pull adopts
+    IgnoreTimes, F1's hazard mirrored). Then 10c deletion — 4
+    drivers + `Push`/`PullSync` out of tree AND proto, ported-test
+    accounting + file-by-file deletion proof (incl. the
+    DelegatedPull no-payload-bytes assertion; relay's PullSync-read
+    half decided there).
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -148,12 +158,6 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(RESOLVED 2026-07-10 — owner)** Asymmetric-rig acceptance
-  question: the owner designated Mac↔Windows as the closer-spec pair
-  for the cross-direction half (recorded as otp-2w, see Now); zoey
-  stays per-direction-only per D-2026-07-05-1. otp-12 runs both:
-  per-direction converge-up on zoey, both halves on the Windows pair
-  (interleaved A/B for push cells on both rigs).
 - **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
   same-size + dest-NEWER — old push clobbers, session adopts **data-safe
   SKIP** (converge-up; `--force` still overwrites; pinned by
@@ -179,13 +183,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-10 (42nd)** @ `cccd89a` — **otp-8, otp-9, otp-2/otp-2w
-  all closed through the codex loop; otp-1..9 + otp-2 `[x]`; both
-  benchmark baselines recorded on owner-opened rigs.** In-flight:
-  none; tree clean. **Exact first action next session**: implement
-  **otp-10a** — the push-shaped verb rides `run_push_session` per the
-  staging sketch in Now (dispatch chokepoint
-  `blit-app/src/transfers/dispatch.rs`); codex loop per sub-slice.
+- **2026-07-11 (43rd, this session)** @ `15a164e` — **otp-10a closed
+  through the codex loop** (8-finding round; move → IgnoreTimes;
+  suite 1576). In-flight: none; tree clean. **Next**: otp-10b per
+  the staging in Now (10b-1 session checksum compare first).
+- **2026-07-10 (42nd)** @ `cccd89a` — otp-8, otp-9, otp-2/otp-2w all
+  closed; otp-1..9 + otp-2 `[x]`; both benchmark baselines recorded.
   Machine-local (this Mac): rig SSH keys installed (zoey root,
   Windows michael@10.1.10.173, skippy admin); NOPASSWD purge sudoers
   rule; zig/cargo-zigbuild toolchain; ssh ControlMaster sockets.
@@ -193,7 +196,4 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   purge script; zoey keeps `e757dcc` binaries in blit-temp (for
   otp-12 interleaved A/B), Windows repo checkout is DETACHED at
   `0f922de` with the owner's prior state stashed (`bench-cargo-lock`).
-- **2026-07-10 (41st)** @ `d48351d` — otp-7b closed through the codex
-  loop; otp-1..7 `[x]`; suite → 1550. Process note: codex runs
-  gpt-5.6-sol; one round was delayed ~1 h by a codex usage limit.
-- *(40th and earlier pruned to the cap — see DEVLOG 2026-07-06..10.)*
+- *(41st and earlier pruned to the cap — see DEVLOG 2026-07-06..11.)*
