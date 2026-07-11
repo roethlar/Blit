@@ -6,7 +6,7 @@ slice commit: `0fbc966`
 verdict: NEEDS FIXES — 8 findings (3 High, 4 Med, 1 Low)
 adjudication: **7 accepted + fixed; F1 accepted in part (move half
 fixed, copy half deferred to the standing owner question)**
-fix sha: (appended below after commit)
+fix sha: `6b292ed`
 
 ## F1 (High) — SizeMtime same-size-newer skip + move deletes the source
 
