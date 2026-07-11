@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
-- Recent sessions (2026-07-11, 43rd–44th): **verb cutover complete (otp-10a, 10b-1, 10b-2) and otp-10c-1 closed through the codex loop** — `--relay-via-cli` removed on an owner decision (D-2026-07-11-1); remote→remote is delegated-only. ONE_TRANSFER_PATH otp-1..9 + otp-2 + 10a/10b/10c-1 `[x]`; suite **1586**. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked (partial push landed outside these sessions; count re-verified 2026-07-11).
+- Recent sessions (2026-07-11/12, 44th–45th): **otp-10 fully closed (cutover + deletion) and otp-11a closed through the codex loop** — local transfers ride the session (in-process transport + local byte-carrier); the deletion slice 11b is BLOCKED on one owner question (change-journal retirement cost, Blocked below). Suite **1512**. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -29,55 +29,43 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     Suite → **1555** (as of `1ce73b5`; later commits are
     bench/docs-only). SizeMtime = data-safe skip (open Q below).
     Per-slice detail: DEVLOG 2026-07-10 entries + `.review/`.
-  - **otp-2 `[x]` (both halves).** zoey rig = PER-DIRECTION
-    reference (hardware-asymmetric, D-2026-07-05-1); Mac↔Windows =
-    cross-direction rig (**otp-2w**, owner-designated). Harnesses
+  - **otp-2 `[x]` (both halves).** zoey = PER-DIRECTION reference;
+    Mac↔Windows = cross-direction rig (otp-2w). Harnesses
     `scripts/bench_otp2{,w}_baseline.sh`, evidence
-    `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`; July tmpfs
-    data re-labeled wire-reference. Key reading: old push trails old
-    pull on BOTH rigs (Windows ×1.46–×2.38), carrier-insensitive on
-    large — otp-12's interleaved old-vs-new discriminates code cost
-    from platform write-path cost.
-  - **otp-10a `[x]` (CLOSED)**: the push-shaped verb (CLI
-    copy/mirror/move-push + relay + TUI F1, one chokepoint:
-    `blit_app run_remote_push`) rides `run_push_session` with the
-    full deferred wiring; codex round 8 findings, 7 fixed + F1 in
-    part — **move now pushes `IgnoreTimes`** (compare-skip +
-    source-delete data loss, mutation-proven; the copy-verb skip
-    stays the owner question below). Suite 1555 → 1576. Detail:
-    DEVLOG 2026-07-11 + `.review/`. **10b-1 (session checksum
-    compare, contract v3) `[x]` CLOSED** (5/5 findings fixed;
-    suite → 1581) and **10b-2 (pull verb rides `run_pull_session`) `[x]`
-    CLOSED** — verb cutover COMPLETE: one chokepoint per verb shape
-    (`blit_app run_remote_push`/`run_remote_pull`, CLI + TUI); ONE
-    args→compare mapping for BOTH verbs; mirror = the in-session one
-    delete rule; move maps IgnoreTimes/Checksum-only on EVERY route.
-    Codex 5 fixed + 1 deferred (M-C reshape, residue below). Suite →
-    **1605**. **10c-1 (`--relay-via-cli`
-    removed, D-2026-07-11-1) `[x]`** — remote→remote is
-    delegated-only; relay route/gates/`RemoteTransferSource` deleted;
-    codex 3/3 fixed; suite → 1586. **10c-2 (THE CUTOVER DELETION)
-    `[x]` CLOSED — one transfer path by construction**: 4 drivers +
-    `Push`/`PullSync` + 13 exclusive messages out of tree AND proto
-    (−13.8k lines, no bridge); delegated spec builder relocated;
-    A/B pins → absolute; DelegatedPull no-payload proof recorded;
-    codex 6/6 accepted (F6 = the `725aa07` snapshot, owner-gated).
-    Suite 1586 → 1480 (106 retirements, all enumerated) → **1488**
-    (+8 pins; otp-13's ≥1483 floor met, margin +5 — re-check at
-    otp-11). Detail: DEVLOG 07-11 21:30 + `.review/`. Next:
-    **otp-11** — local transfers ride the in-process transport, the
-    separate local orchestration is deleted, local perf pins hold
-    (+ the deferred `compare_manifests` dead-code sweep).
+    `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`. Key reading:
+    old push trails old pull on BOTH rigs — otp-12's interleaved
+    old-vs-new discriminates code cost from platform write-path cost.
+  - **otp-10 `[x]` CLOSED (a, b-1/2, c-1/2)** — verb cutover + THE
+    CUTOVER DELETION: one chokepoint per verb shape (`blit_app
+    run_remote_push`/`run_remote_pull`), ONE args→compare mapping,
+    move maps IgnoreTimes/Checksum-only on every route; relay removed
+    (D-2026-07-11-1); 4 drivers + `Push`/`PullSync` + 13 messages out
+    of tree AND proto (−13.8k lines, no bridge); DelegatedPull
+    no-payload proof recorded. Suite 1555 → … → **1488**. Per-slice
+    detail: DEVLOG 2026-07-11 entries + `.review/`.
+  - **otp-11a `[x]` CLOSED (the local route; deletion is 11b)** —
+    slice design `docs/plan/OTP11_LOCAL_SESSION.md` (D1–D3,
+    codex-reviewed): local transfers ride the session
+    (`run_local_session`, both role drivers over `in_process_pair`);
+    the LOCAL byte-carrier = process-local `LocalApply` (no wire
+    shape — the destination plans + applies needs in-process through
+    `FsTransferSink`, clonefile/block-clone preserved); the `blit_app`
+    local chokepoint re-pointed, CLI/TUI untouched, all verb + move
+    data-loss regression pins green; old orchestration in-tree but
+    production-caller-less (11b deletes it). Design codex 10 + slice
+    codex 9 findings adjudicated (`.review/results/otp-11{-design,a}.*`).
+    Perf gate: huge/tree/small PASS (1 GiB local = 22 ms both — clone
+    kept); **noop10k FAIL → the journal question in Blocked**.
+    Suite 1488 → **1512**. Detail: DEVLOG 2026-07-12.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
   baseline. Principle stands: ceiling-driven, never competitor-relative
   (D-2026-07-04-4; a ≥25% margin answer was retracted — do not
   re-litigate). Evidence `docs/bench/10gbe-2026-07-05/`.
-- **Background (2026-07-04/05, all `[x]`)**: REV4 code-complete +
-  measurement gates DATA-COMPLETE (push/pull ≈ 9.5 of 9.88 Gbit/s; owner
-  declarations pending in Blocked); 10 GbE session done; w9-3 + review rows
-  landed. Codex loop governs all changes (D-2026-07-04-1; DEVLOG 07-04/05).
+- **Background (2026-07-04/05, all `[x]`)**: REV4 code-complete, gates
+  DATA-COMPLETE (declarations pending in Blocked); codex loop governs
+  all changes (D-2026-07-04-1; DEVLOG 07-04/05).
 
 ## Queue (ordered)
 
@@ -85,9 +73,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    the only work item until it ships**: slices otp-1..13 through the
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
-   b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), **otp-10 (a, b-1/2,
-   c-1/2 — cutover + deletion DONE)** `[x]`. Current: **otp-11
-   (local transfers on the in-process transport)**.
+   b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
+   c-1/2), **otp-11a** `[x]`. Current: **otp-11b (the local
+   orchestration deletion + compare_manifests sweep + retirement
+   accounting, ≈+44 pins)** — BLOCKED on the journal owner question
+   (Blocked below).
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -150,15 +140,26 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   with July binaries + bench.toml; /tmp and /home are noexec there);
   skippy also available for Mac↔Linux cells "if needed" (owner).
   zoey = per-direction rig; Windows pair = cross-direction rig.
-- **Three 10 GbE gate declarations**: ue-1 pass/fail, ue-2 pass/fail
-  or re-scope, REV4 → Shipped. (Zero-copy a/b/c RESOLVED —
-  D-2026-07-05-3; skippy CPU data stays in DEVLOG + DIAGNOSIS.md.)
+- **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
+  re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 - **Push go**: origin/master = `6d37a22` (re-verified via `ls-remote`
   2026-07-11 — a partial push landed outside these sessions); unpushed
   `6d37a22..HEAD` (12 at the 10c-1 record). Awaits the ref-listing +
   approval flow; windows-latest CI on the w9-3 fix rides it.
 - **otp-5b-3** (pull mid-transfer cancel e2e, marked optional): pick
   up while otp-10 runs, or drop? — standing question.
+- **NEW (otp-11a, 2026-07-12): the change-journal question — blocks
+  otp-11b.** Measured (`docs/bench/otp11-local-2026-07-11/README.md`):
+  repeated no-op mirror, 10k files — old path ~21 ms (its journal skip
+  engages after 1–2 runs) vs session ~219 ms (full enumerate+diff,
+  which beats the old NON-journal pass, 610 ms). Retiring the journal
+  (slice doc D3) is what the delta measures. Options: **(a)** accept —
+  repeated no-ops cost a full re-stat (rsync-class, ~2 s/100k files),
+  `change_journal/` dies at 11b; **(b)** keep it as a pre-session
+  no-op short-circuit (~600 LOC; a local-only fast path in front of
+  the one path — the class of side apparatus the directive kills);
+  **(c)** = (a) now + file journal-assisted no-op detection as a
+  future SESSION capability (both carriers). Rec: (a) or (c).
 
 ## Open questions
 
@@ -184,16 +185,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-11 (44th, this session)** — **otp-10c CLOSED (10c-1 relay
-  removal on owner decision D-2026-07-11-1; 10c-2 the cutover
-  deletion, codex 3/3 + 6/6 fixed)** — the four drivers and
-  `Push`/`PullSync` no longer exist; suite 1605 → 1488. In-flight:
-  none; tree clean. **Next**: otp-11 per Now. Owner ask pending: the
-  `725aa07` snapshot `git rm -r` go (now also codex otp-10c-2 F6).
+- **2026-07-12 (45th, this session)** — **otp-11a CLOSED through the
+  codex loop (design doc + slice + fix round; suite 1488 → 1512;
+  perf gate huge/tree/small PASS, 1 GiB clone kept)**. In-flight:
+  none; tree clean. **Next**: owner answers the change-journal
+  question (Blocked) → otp-11b. (Mid-session full-suite "failures" =
+  dirty-tree BUILD_MISMATCH sampling artifacts; clean rebuild
+  converged them.)
+- **2026-07-11 (44th)** — otp-10c closed (relay removal
+  D-2026-07-11-1 + the cutover deletion); suite 1605 → 1488. Owner
+  ask pending: the `725aa07` snapshot `git rm -r` go (otp-10c-2 F6).
 - **2026-07-11 (43rd)** — otp-10a/10b-1/10b-2 closed (1555 → 1605);
   verb cutover complete.
-- **2026-07-10 (42nd)** @ `cccd89a` — otp-8, otp-9, otp-2/otp-2w all
-  closed; otp-1..9 + otp-2 `[x]`; both benchmark baselines recorded.
-  Machine-local facts (rig keys/toolchain/firewall/staged binaries,
-  incl. zoey's `e757dcc` pair for otp-12 A/B) → `.agents/machines.md`.
-- *(41st and earlier pruned to the cap — see DEVLOG 2026-07-06..11.)*
+- *(42nd and earlier pruned to the cap — see DEVLOG 2026-07-06..12.)*

@@ -120,7 +120,11 @@ keep the `null_sink` tag; real runs record `session`.
 7 accepted-and-fixed (F1-dedup, F3, F4, F5, F6, F7, F9), 1 accepted as
 doc defect (F8 — doc amended, impl kept for parity), 1 rejected as a
 regression while accepting the fact (F2 — session-uniform batching,
-overlap pin ports at 11b). Fix sha: (appended below after the gate).
-Suite 1510 → 1512 (+2 fix-round pins). Guard proofs this round:
-apply-time mirror guard mutation → vanishing-source pin FAILS →
-restored → passes.
+overlap pin ports at 11b). Fix sha: `e445e8d` (gate green: fmt,
+clippy -D warnings, cargo test --workspace 1512/0, 2 ignored — after a
+consistent clean rebuild; two earlier full-suite "failures" were
+BUILD_MISMATCH artifacts of e2e binaries carrying different
+dirty-tree digests from mid-edit builds, i.e. D-2026-07-05-2 refusing
+correctly). Suite 1510 → 1512 (+2 fix-round pins). Guard proofs this
+round: apply-time mirror guard mutation → vanishing-source pin FAILS
+→ restored → passes.
