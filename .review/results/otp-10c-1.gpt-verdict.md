@@ -68,5 +68,6 @@ REVIEW moot row, this record), the dated records above, and comments
 inside files otp-10c-2 deletes whole (`remote/pull.rs`,
 `grpc_fallback.rs` scope lists) — left for that slice's sweep.
 
-fix sha: (recorded after the fix commit — see REVIEW.md row)
-suite after fixes: 1585 → 1586 (+1 positive control; gate green)
+fix sha: `27bef56`
+suite after fixes: 1585 → 1586 (+1 positive control; gate green:
+fmt, clippy -D warnings, cargo test --workspace 1586/0)
