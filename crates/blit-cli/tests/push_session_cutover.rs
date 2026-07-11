@@ -26,7 +26,7 @@ use common::TestContext;
 use blit_app::endpoints::Endpoint;
 use blit_app::transfers::remote::{run_remote_push, PushExecution};
 use blit_core::fs_enum::FileFilter;
-use blit_core::generated::{FilterSpec, MirrorMode};
+use blit_core::generated::{ComparisonMode, FilterSpec, MirrorMode};
 use blit_core::remote::transfer::source::FsTransferSource;
 use blit_core::remote::transfer::{ProgressEvent, ProgressTotals, RemoteTransferProgress};
 use blit_core::remote::{RemoteEndpoint, RemotePath, RemotePushClient};
@@ -55,6 +55,7 @@ fn push_execution(src: &Path, port: u16) -> PushExecution {
         require_complete_scan: false,
         resume: false,
         resume_block_size: 0,
+        compare_mode: ComparisonMode::SizeMtime,
         remote_label: format!("127.0.0.1:{port}:/test/"),
     }
 }
@@ -339,6 +340,97 @@ fn push_verb_fails_when_source_has_unreadable_entries() {
     );
 }
 
+/// codex otp-10a F1: a move-shaped push (`ComparisonMode::IgnoreTimes`)
+/// must transfer a same-size file even when the destination copy is
+/// NEWER — move deletes the source afterwards, so a compare-mode skip
+/// of content that silently differs would destroy the only copy of the
+/// source bytes. The copy-shaped default (SizeMtime) skips this cell by
+/// design (the standing owner question); move must not.
+#[test]
+fn move_shaped_push_transfers_same_size_newer_destination() {
+    let ctx = TestContext::new();
+    let src = ctx.workspace.join("src");
+    fs::create_dir_all(&src).expect("src dir");
+    fs::write(src.join("data.bin"), b"source-bytes").expect("write source");
+
+    // Same size, different content, NEWER mtime at the destination.
+    fs::write(ctx.module_dir.join("data.bin"), b"dest---bytes").expect("seed dest");
+    let newer = filetime::FileTime::from_unix_time(
+        filetime::FileTime::from_last_modification_time(
+            &fs::metadata(src.join("data.bin")).expect("meta"),
+        )
+        .unix_seconds()
+            + 60,
+        0,
+    );
+    filetime::set_file_mtime(ctx.module_dir.join("data.bin"), newer).expect("bump dest mtime");
+
+    runtime().block_on(async {
+        let execution = PushExecution {
+            compare_mode: ComparisonMode::IgnoreTimes,
+            ..push_execution(&src, ctx.daemon_port)
+        };
+        run_remote_push(execution, None)
+            .await
+            .expect("move-shaped push")
+    });
+
+    assert_eq!(
+        fs::read(ctx.module_dir.join("data.bin")).expect("read dest"),
+        b"source-bytes",
+        "move-shaped push must land the source bytes before the source is deleted"
+    );
+}
+
+/// codex otp-10a F3: a daemon started with `--force-grpc-data` never
+/// grants a TCP data plane — a session push against it rides the
+/// in-stream carrier even though the client did not ask for it, the
+/// same server-side force the old push handler honored.
+#[test]
+fn daemon_force_grpc_data_forces_the_in_stream_carrier() {
+    let ctx = TestContext::builder()
+        .extra_daemon_args(["--force-grpc-data"])
+        .build();
+    let src = ctx.workspace.join("src");
+    write_fixture(&src);
+
+    let summary = runtime()
+        .block_on(run_remote_push(
+            push_execution(&src, ctx.daemon_port), // client does NOT force
+            None,
+        ))
+        .expect("push against a fallback-forced daemon")
+        .summary;
+
+    assert!(
+        summary.in_stream_carrier_used,
+        "--force-grpc-data on the daemon must force the in-stream carrier"
+    );
+    assert_eq!(tree_contents(&ctx.module_dir), tree_contents(&src));
+}
+
+/// codex otp-10a F4: `--relay-via-cli --resume` is refused up front —
+/// the relay's remote source cannot serve resume block reads on the
+/// TCP data plane, so the combination would fault mid-transfer on the
+/// default carrier while succeeding on the forced in-stream one. The
+/// refusal needs no daemon: it fires before any connection.
+#[test]
+fn relay_source_with_resume_is_refused_before_any_connection() {
+    let execution = PushExecution {
+        source: Endpoint::Remote(module_endpoint(9)), // nothing listens on port 9
+        resume: true,
+        ..push_execution(Path::new("unused"), 9)
+    };
+    let err = match runtime().block_on(run_remote_push(execution, None)) {
+        Ok(_) => panic!("relay + resume must be refused"),
+        Err(err) => err,
+    };
+    assert!(
+        format!("{err:#}").contains("--resume is not supported with --relay-via-cli"),
+        "got: {err:#}"
+    );
+}
+
 /// `--resume` through the verb: a changed same-size destination file is
 /// patched block-wise (`files_resumed` scored) and lands byte-identical.
 #[test]
@@ -373,13 +465,17 @@ fn push_verb_resume_patches_changed_partials_blockwise() {
     );
     filetime::set_file_mtime(src.join("patch.bin"), bumped).expect("bump mtime");
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
     let summary = runtime()
         .block_on(async {
+            let progress = RemoteTransferProgress::new(tx);
             let execution = PushExecution {
                 resume: true,
                 ..push_execution(&src, ctx.daemon_port)
             };
-            run_remote_push(execution, None).await.expect("resume push")
+            run_remote_push(execution, Some(&progress))
+                .await
+                .expect("resume push")
         })
         .summary;
 
@@ -388,5 +484,67 @@ fn push_verb_resume_patches_changed_partials_blockwise() {
         fs::read(ctx.module_dir.join("patch.bin")).expect("read dest"),
         v2,
         "patched destination must match the new source"
+    );
+
+    // codex otp-10a F6: a resumed file reports w6-1 progress like any
+    // other — counted once on the per-file lane, bytes = the stale
+    // blocks actually sent (less than the whole file).
+    let mut totals = ProgressTotals::default();
+    while let Ok(event) = rx.try_recv() {
+        totals.apply(&event);
+    }
+    assert_eq!(
+        totals.manifest_files, 1,
+        "the resumed need is the denominator"
+    );
+    assert_eq!(totals.files, 1, "a resumed file completes exactly once");
+    assert!(
+        totals.bytes > 0 && totals.bytes < v2.len() as u64,
+        "resume progress reports the stale blocks sent, got {} of {}",
+        totals.bytes,
+        v2.len()
+    );
+
+    // Same contract on the in-stream carrier (`send_resume_block_records`
+    // reports independently of the data-plane pipeline): change the file
+    // again and resume with the forced fallback.
+    let mut v3 = v2.clone();
+    for b in &mut v3[..4096] {
+        *b ^= 0xAA;
+    }
+    fs::write(src.join("patch.bin"), &v3).expect("write v3");
+    let bumped_again = filetime::FileTime::from_unix_time(bumped.unix_seconds() + 5, 0);
+    filetime::set_file_mtime(src.join("patch.bin"), bumped_again).expect("bump mtime again");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
+    let summary = runtime()
+        .block_on(async {
+            let progress = RemoteTransferProgress::new(tx);
+            let execution = PushExecution {
+                resume: true,
+                force_grpc: true,
+                ..push_execution(&src, ctx.daemon_port)
+            };
+            run_remote_push(execution, Some(&progress))
+                .await
+                .expect("in-stream resume push")
+        })
+        .summary;
+    assert_eq!(summary.files_resumed, 1, "in-stream resume still resumes");
+    let mut totals = ProgressTotals::default();
+    while let Ok(event) = rx.try_recv() {
+        totals.apply(&event);
+    }
+    assert_eq!(totals.files, 1, "in-stream resumed file completes once");
+    assert!(
+        totals.bytes > 0 && totals.bytes < v3.len() as u64,
+        "in-stream resume reports stale blocks, got {} of {}",
+        totals.bytes,
+        v3.len()
+    );
+    assert_eq!(
+        fs::read(ctx.module_dir.join("patch.bin")).expect("read dest"),
+        v3,
+        "in-stream patched destination must match the new source"
     );
 }

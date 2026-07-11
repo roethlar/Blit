@@ -53,8 +53,8 @@ use crate::endpoints::Endpoint;
 use blit_core::generated::delegated_pull_error::Phase as DelegatedPullPhase;
 use blit_core::generated::delegated_pull_progress::Payload as DelegatedPayload;
 use blit_core::generated::{
-    BytesProgress, DelegatedPullRequest, DelegatedPullStarted, DelegatedPullSummary, FileHeader,
-    FilterSpec, MirrorMode, RemoteSourceLocator, TransferSummary,
+    BytesProgress, ComparisonMode, DelegatedPullRequest, DelegatedPullStarted,
+    DelegatedPullSummary, FileHeader, FilterSpec, MirrorMode, RemoteSourceLocator, TransferSummary,
 };
 use blit_core::path_safety::{canonical_dest_root, safe_join_contained};
 use blit_core::remote::pull::{PullSyncOptions, RemotePullReport};
@@ -426,6 +426,14 @@ pub struct PushExecution {
     /// DESTINATION choose.
     pub resume: bool,
     pub resume_block_size: u32,
+    /// How the DESTINATION decides which files it needs. Copy/mirror
+    /// verbs pass `SizeMtime` (the historical default; its same-size
+    /// dest-newer skip is the standing owner question in STATE). Move
+    /// verbs MUST pass `IgnoreTimes` (codex otp-10a F1): move deletes
+    /// the source on success, so every source file's bytes must be at
+    /// the destination — a compare-mode skip of a same-size file whose
+    /// content differs would otherwise let move destroy the only copy.
+    pub compare_mode: ComparisonMode,
     pub remote_label: String,
 }
 
@@ -475,6 +483,20 @@ pub async fn run_remote_push(
     execution: PushExecution,
     progress: Option<&RemoteTransferProgress>,
 ) -> Result<PushExecutionOutcome> {
+    // codex otp-10a F4: a relay source cannot serve the resume block
+    // phase on the TCP data plane (`RemoteTransferSource::prepare_payload`
+    // rejects composite ResumeFile payloads), so `--relay-via-cli
+    // --resume` would fault mid-transfer on the default carrier while
+    // succeeding on the forced in-stream one. Refuse the combination
+    // up front instead of leaving a carrier-divergent failure.
+    if execution.resume && matches!(execution.source, Endpoint::Remote(_)) {
+        bail!(
+            "--resume is not supported with --relay-via-cli: the relay's \
+             remote source cannot serve resume block reads on the TCP \
+             data plane. Drop --resume, or drop --relay-via-cli to use \
+             the direct delegated path."
+        );
+    }
     let source: Arc<dyn TransferSource> = match execution.source {
         Endpoint::Local(path) => Arc::new(FsTransferSource::new(path)),
         Endpoint::Remote(endpoint) => {
@@ -499,6 +521,7 @@ pub async fn run_remote_push(
     };
 
     let options = PushSessionOptions {
+        compare_mode: execution.compare_mode,
         require_complete_scan: execution.require_complete_scan,
         // `--force-grpc`: the session's in-stream byte carrier is the
         // gRPC-fallback lane (otp-8).

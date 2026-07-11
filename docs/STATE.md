@@ -42,20 +42,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     pull on BOTH rigs (Windows ×1.46–×2.38), carrier-insensitive on
     large — otp-12's interleaved old-vs-new discriminates code cost
     from platform write-path cost.
-  - Current: **otp-10 (cutover + deletion)** — **10a CODE LANDED
-    (this commit), codex review pending**: the push-shaped verb (CLI
-    copy/mirror/move-push + relay + TUI F1, one chokepoint:
-    `blit_app run_remote_push`) rides `run_push_session` with the
-    full deferred wiring, incl. the old-push unreadable-scan error
-    `blit move`'s source-delete gate relies on; outcome retyped to
-    the session `TransferSummary` so 10c stays pure deletion. Suite
-    1555 → **1562**; detail + Known gaps:
-    `.review/findings/otp-10a-push-verb-rides-session.md` + REVIEW
-    row. Next: 10b pull-shaped verb (options exist since 9a); 10c
-    deletion — 4 drivers + `Push`/`PullSync` out of tree AND proto,
-    ported-test accounting + file-by-file deletion proof (incl. the
-    DelegatedPull no-payload-bytes assertion; relay's PullSync-read
-    half decided there).
+  - **otp-10a `[x]` (CLOSED through the codex loop)**: the
+    push-shaped verb (CLI copy/mirror/move-push + relay + TUI F1,
+    one chokepoint: `blit_app run_remote_push`) rides
+    `run_push_session` with the full deferred wiring; codex round 8
+    findings, 7 fixed + F1 in part — **move now pushes
+    `IgnoreTimes`** (compare-skip + source-delete data loss,
+    mutation-proven; the copy-verb skip stays the owner question
+    below). Suite 1555 → **1576**. Detail: DEVLOG 2026-07-11 +
+    finding/verdict under `.review/`. Current: **10b pull-shaped
+    verb** (one args→open compare-flag mapping for both verbs lands
+    there); then 10c deletion — 4 drivers + `Push`/`PullSync` out of
+    tree AND proto, ported-test accounting + file-by-file deletion
+    proof (incl. the DelegatedPull no-payload-bytes assertion;
+    relay's PullSync-read half decided there).
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified

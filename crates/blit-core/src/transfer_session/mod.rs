@@ -250,6 +250,15 @@ pub struct SessionFault {
     /// ends can name it, wherever the fault originated. Structured
     /// identity, never scraped from the message.
     pub relative_path: Option<String>,
+    /// codex otp-10a F5: the `io::ErrorKind` of the underlying I/O
+    /// failure, when this fault stringified a report that carried one.
+    /// `SessionFault` replaces the original error chain as the
+    /// drivers' error payload, which would otherwise strip the signal
+    /// the retry classifier (`remote::retry::is_retryable`) keys on —
+    /// a mid-transfer socket reset must stay retryable under
+    /// `--retry`. Local evidence only: faults received from the peer
+    /// (`from_wire`) carry `None`.
+    pub io_kind: Option<std::io::ErrorKind>,
 }
 
 impl SessionFault {
@@ -261,7 +270,19 @@ impl SessionFault {
             peer_build_id: String::new(),
             peer_notified: false,
             relative_path: None,
+            io_kind: None,
         }
+    }
+
+    /// Capture the underlying `io::ErrorKind` from the report this
+    /// fault is about to replace (codex otp-10a F5). Call at every
+    /// site that stringifies an eyre chain into a fault.
+    fn with_io_kind_from(mut self, report: &eyre::Report) -> Self {
+        self.io_kind = report
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .map(|io_err| io_err.kind());
+        self
     }
 
     /// Attach the file identity this fault concerns (otp-7b-2).
@@ -327,6 +348,9 @@ impl SessionFault {
             // Explicit wire presence (codex 7b-2 G1): "" is the valid
             // identity of a single-file-root transfer, not absence.
             relative_path: err.relative_path,
+            // Peer-reported fault: no local I/O evidence (codex
+            // otp-10a F5 — io_kind is local-transport testimony only).
+            io_kind: None,
         }
     }
 
@@ -359,7 +383,9 @@ fn fault_from_report(report: eyre::Report) -> SessionFault {
     match report.downcast::<SessionFault>() {
         Ok(fault) => fault,
         Err(other) => {
-            let fault = SessionFault::internal(format!("{other:#}"));
+            // codex otp-10a F5: stringifying the chain would strip the
+            // io::ErrorKind the retry classifier keys on — carry it.
+            let fault = SessionFault::internal(format!("{other:#}")).with_io_kind_from(&other);
             match other.downcast_ref::<FaultedPath>() {
                 Some(FaultedPath(path)) => fault.with_path(path.clone()),
                 None => fault,
@@ -600,6 +626,7 @@ async fn exchange_hello(transport: &mut FrameTransport, hello: &HelloConfig) -> 
             peer_build_id: peer_hello.build_id.clone(),
             peer_notified: false,
             relative_path: None,
+            io_kind: None,
         };
         return Err(notify_and_wrap(transport, fault).await);
     }
@@ -619,6 +646,11 @@ async fn responder_finish(
     local_role: TransferRole,
     validate_open: &OpenValidator,
     resolve_open: Option<&OpenResolver>,
+    // codex otp-10a F3: a serving daemon started with
+    // `--force-grpc-data` never grants a TCP data plane — the session
+    // then rides the in-stream carrier exactly as if the initiator had
+    // requested it. Non-daemon responders pass `false`.
+    force_in_stream: bool,
 ) -> Result<Negotiated> {
     // The initiator declares ITS role; this responder end must
     // hold the complement.
@@ -678,7 +710,7 @@ async fn responder_finish(
     // travel as binary BLOCK/BLOCK_COMPLETE records on the sockets (the
     // otp-7a in-stream frames remain the fallback carrier), so the grant
     // is no longer suppressed for a resume session.
-    let responder_data_plane = if open.in_stream_bytes {
+    let responder_data_plane = if open.in_stream_bytes || force_in_stream {
         None
     } else {
         data_plane::prepare_responder_data_plane().await
@@ -758,7 +790,17 @@ async fn establish(
                     .await)
                 }
             };
-            responder_finish(transport, open, local_role, validate_open, resolve_open).await
+            // Direct-responder establish (the in-process role suite):
+            // no daemon config in scope, so nothing forces in-stream.
+            responder_finish(
+                transport,
+                open,
+                local_role,
+                validate_open,
+                resolve_open,
+                false,
+            )
+            .await
         }
     }
 }
@@ -1368,7 +1410,13 @@ async fn source_send_half(
                             fault = peer_fault_signalled(&mut fault_signal) => {
                                 return Err(eyre::Report::new(fault));
                             }
-                            res = send_resume_block_records(tx, &source, &header, &hashes) => {
+                            res = send_resume_block_records(
+                                tx,
+                                &source,
+                                &header,
+                                &hashes,
+                                instruments.progress.as_ref(),
+                            ) => {
                                 res.map_err(|e| tag_path(e, &header.relative_path))?;
                             }
                         }
@@ -1976,6 +2024,7 @@ async fn send_resume_block_records(
     source: &Arc<dyn TransferSource>,
     header: &FileHeader,
     hashes: &BlockHashList,
+    progress: Option<&RemoteTransferProgress>,
 ) -> Result<()> {
     use crate::remote::transfer::resume_diff::{ResumeBlockDiff, ResumeDiffEvent};
     // block_size was range-validated when the BlockHashList arrived
@@ -1990,9 +2039,11 @@ async fn send_resume_block_records(
         hashes.hashes.clone(),
     )
     .await?;
+    let mut stale_bytes: u64 = 0;
     while let Some(event) = diff.next_event().await? {
         match event {
             ResumeDiffEvent::Stale { offset, bytes } => {
+                stale_bytes += bytes.len() as u64;
                 tx.send(frame(Frame::Block(BlockTransfer {
                     relative_path: header.relative_path.clone(),
                     offset,
@@ -2008,6 +2059,13 @@ async fn send_resume_block_records(
         total_bytes: header.size,
     })))
     .await?;
+    // codex otp-10a F6: a resumed file finishes like any other (w6-1:
+    // per-file lane, counted once); its bytes are the stale blocks
+    // actually sent — the same convention as the data-plane carrier.
+    if let Some(p) = progress {
+        p.report_payload(0, stale_bytes);
+        p.report_file_complete(header.relative_path.clone());
+    }
     Ok(())
 }
 
@@ -2158,6 +2216,11 @@ pub async fn run_responder(
     transport: FrameTransport,
     source_target: SourceResponderTarget,
     dest_target: DestinationTarget,
+    // codex otp-10a F3: the serving daemon's `--force-grpc-data` —
+    // when true this responder never grants a TCP data plane, so every
+    // served session rides the in-stream carrier regardless of what
+    // the initiator asked for.
+    force_in_stream: bool,
 ) -> Result<ResponderOutcome> {
     let mut transport = transport;
     exchange_hello(&mut transport, &hello).await?;
@@ -2188,6 +2251,7 @@ pub async fn run_responder(
                 TransferRole::Destination,
                 &destination_open_validator,
                 resolve,
+                force_in_stream,
             )
             .await?;
             let dst_root = match negotiated.resolved_root.clone() {
@@ -2222,6 +2286,7 @@ pub async fn run_responder(
                 TransferRole::Source,
                 &source_open_validator,
                 resolve,
+                force_in_stream,
             )
             .await?;
             let source: Arc<dyn TransferSource> = match source_target {
@@ -3581,6 +3646,29 @@ mod tests {
         assert!(!git.is_empty(), "git component must be non-empty");
     }
 
+    /// codex otp-10a F5: converting a driver error into a
+    /// `SessionFault` stringifies the chain, which would strip the
+    /// `io::ErrorKind` the retry classifier keys on — the fault must
+    /// carry it. A chain with no I/O source stays kind-less (fatal to
+    /// the classifier, as before).
+    #[test]
+    fn fault_from_report_captures_the_underlying_io_kind() {
+        let io_report = eyre::Report::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "peer reset",
+        ))
+        .wrap_err("sending payload record");
+        let fault = fault_from_report(io_report);
+        assert_eq!(fault.io_kind, Some(std::io::ErrorKind::ConnectionReset));
+
+        let plain = fault_from_report(eyre::eyre!("path escapes module root"));
+        assert_eq!(plain.io_kind, None);
+
+        // An already-typed fault passes through untouched.
+        let typed = fault_from_report(eyre::Report::new(SessionFault::internal("x")));
+        assert_eq!(typed.io_kind, None);
+    }
+
     /// otp-4b-3: a data-plane break during the drain prefers the peer's
     /// framed reason. When the receive half has forwarded a
     /// `SessionError{CANCELLED}` on the control lane, `prefer_peer_fault`
@@ -3598,6 +3686,7 @@ mod tests {
             peer_build_id: String::new(),
             peer_notified: true,
             relative_path: None,
+            io_kind: None,
         }))
         .expect("send fault");
 
@@ -3637,6 +3726,7 @@ mod tests {
             peer_build_id: String::new(),
             peer_notified: true,
             relative_path: None,
+            io_kind: None,
         }))
         .expect("send fault");
 
@@ -3745,6 +3835,7 @@ mod tests {
             peer_build_id: "1.0+bbb".into(),
             peer_notified: false,
             relative_path: None,
+            io_kind: None,
         };
         let wire = fault.to_wire();
         let back = SessionFault::from_wire(wire);

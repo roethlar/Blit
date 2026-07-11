@@ -97,6 +97,14 @@ fn dp_fault(msg: impl Into<String>) -> eyre::Report {
     eyre::Report::new(SessionFault::refusal(Code::DataPlaneFailed, msg))
 }
 
+/// [`dp_fault`] for failures that stringify an underlying I/O-bearing
+/// report (socket dials): carry the `io::ErrorKind` so the retry
+/// classifier still sees a transient transport condition (codex
+/// otp-10a F5).
+fn dp_fault_io(err: &eyre::Report, msg: impl Into<String>) -> eyre::Report {
+    eyre::Report::new(SessionFault::refusal(Code::DataPlaneFailed, msg).with_io_kind_from(err))
+}
+
 // ---------------------------------------------------------------------------
 // Responder (DESTINATION) — bind, grant, accept, receive
 // ---------------------------------------------------------------------------
@@ -494,7 +502,12 @@ pub(super) async fn dial_destination_data_plane(
         // data-plane dial, both directions).
         let socket = dial_data_plane(&addr, &handshake, None)
             .await
-            .map_err(|err| dp_fault(format!("dialing session data plane (receive): {err:#}")))?;
+            .map_err(|err| {
+                dp_fault_io(
+                    &err,
+                    format!("dialing session data plane (receive): {err:#}"),
+                )
+            })?;
         streams += 1;
         spawn_receive(&mut receives, socket, &sink);
     }
@@ -523,7 +536,12 @@ impl InitiatorReceivePlaneRun {
         let addr = format!("{}:{}", self.host, self.tcp_port);
         let socket = dial_data_plane(&addr, &handshake, None)
             .await
-            .map_err(|err| dp_fault(format!("dialing resize data plane (receive): {err:#}")))?;
+            .map_err(|err| {
+                dp_fault_io(
+                    &err,
+                    format!("dialing resize data plane (receive): {err:#}"),
+                )
+            })?;
         self.streams += 1;
         spawn_receive(&mut self.receives, socket, &self.sink);
         Ok(())
@@ -677,7 +695,7 @@ pub(super) async fn dial_source_data_plane(
             Arc::clone(&pool),
         )
         .await
-        .map_err(|err| dp_fault(format!("dialing session data plane: {err:#}")))?;
+        .map_err(|err| dp_fault_io(&err, format!("dialing session data plane: {err:#}")))?;
         // The source-side sink never reads its dst_root (it only sends);
         // `root()` is consulted by the relay/receive case, not here.
         sinks.push(Arc::new(DataPlaneSink::new(
@@ -878,7 +896,7 @@ impl SourceDataPlane {
                     Arc::clone(&self.pool),
                 )
                 .await
-                .map_err(|err| dp_fault(format!("dialing resize data socket: {err:#}")))?
+                .map_err(|err| dp_fault_io(&err, format!("dialing resize data socket: {err:#}")))?
             }
             SourceSockets::Accept { listener } => {
                 let mut expected = self.session_token.clone();

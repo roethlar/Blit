@@ -8742,6 +8742,28 @@ mod tests {
         }
     }
 
+    /// codex otp-10a F1: a move deletes the local source after the
+    /// push, so its execution must transfer every file unconditionally
+    /// (`IgnoreTimes`) — a compare-mode skip of a same-size changed
+    /// file would let the delete destroy the only copy of its bytes.
+    /// Copy/mirror keep the SizeMtime default.
+    #[test]
+    fn build_f1_push_execution_move_transfers_unconditionally() {
+        use blit_core::generated::ComparisonMode;
+        let remote = RemoteEndpoint::parse("nas:9031:/home/").expect("remote");
+        let mv = build_f1_push_execution(
+            std::path::PathBuf::from("/tmp/src"),
+            remote.clone(),
+            f3pull::PullKind::Move,
+        );
+        assert_eq!(mv.compare_mode, ComparisonMode::IgnoreTimes);
+        for kind in [f3pull::PullKind::Copy, f3pull::PullKind::Mirror] {
+            let ex =
+                build_f1_push_execution(std::path::PathBuf::from("/tmp/src"), remote.clone(), kind);
+            assert_eq!(ex.compare_mode, ComparisonMode::SizeMtime, "{kind:?}");
+        }
+    }
+
     /// d-68: a remote source + remote dest copy routes to the
     /// delegated path (reusing the F1 push footer, flagged
     /// `delegated`) — NOT the remote→local pull machine.

@@ -125,6 +125,18 @@ named pin run, then restored):
 - drop the force-grpc mapping → carrier pin fails;
 - drop the resume mapping → resume pin fails (files_resumed 0).
 
+**Review round** (codex on `0fbc966`: NEEDS FIXES, 8 findings — 7
+accepted + fixed, F1 accepted in part; adjudication + guard proofs in
+`.review/results/otp-10a.gpt-verdict.md`): move pushes with
+`IgnoreTimes` (F1 — the compare-mode skip + source-delete data-loss
+window, mutation-proven); wire paths POSIX-normalized in
+`endpoint_module_path` (F2); daemon `--force-grpc-data` honored by
+served sessions (F3); relay+resume refused up front (F4);
+`SessionFault.io_kind` keeps `--retry` classification alive across
+the fault boundary (F5); resumed files report w6-1 progress on both
+carriers (F6); fault-summary extraction unit-pinned (F7);
+`build_spec` validates globs pre-connection (F8). Suite 1562 → 1576.
+
 **Known gaps**:
 
 - Output shape changed with the report retype (unshipped product, no
@@ -136,16 +148,28 @@ named pin run, then restored):
 - `first_payload_elapsed` and `data_plane_streams` verb-level
   observability died with the old report; sf-2 stream-count pins live
   at the session layer (otp-4b-2), so nothing is unguarded.
-- `--checksum` on push stays gate-rejected; compare-mode flag wiring
+- COPY-verb compare semantics: the session's same-size dest-newer
+  data-safe skip remains the standing owner question (STATE, otp-4a);
+  `--checksum` on push stays gate-rejected; compare-mode flag wiring
   (`--size-only`/`--ignore-times`/`--force`/`--ignore-existing`, today
   silently ignored by old push — the R54 gaps) is deferred to otp-10b
-  so both verbs get ONE args→open mapping.
+  so both verbs get ONE args→open mapping. Move no longer depends on
+  that question (it transfers unconditionally — codex F1). The
+  R54-F2/R55 move bail texts for `--force`/`--ignore-times` now
+  OVERSTATE the local→remote risk (the push arm no longer skips);
+  their local→local rationale still holds, so the gates stay —
+  reword with the 10b compare-mode wiring.
 - The relay path's source-read half still rides PullSync
   (`RemoteTransferSource`); its fate (session-read adapter or removal)
-  is the otp-10c PullSync-deletion decision.
-- In-stream resume records report no per-file progress events —
-  matches the data-plane pipeline's `ResumeFile` posture; the live
-  line may undercount resumed files, summary counts are authoritative.
+  is the otp-10c PullSync-deletion decision. Relay+resume is refused
+  (codex F4) until then.
+- `SessionFault.io_kind` is captured at `fault_from_report` and the
+  four data-plane dial sites; other direct fault constructions (e.g.
+  responder-side accept errors) stay kind-less — the daemon never
+  retries, so nothing consumes them today.
+- Move re-uploads unchanged files (IgnoreTimes) — the price of
+  delete-safety without a push-side checksum compare; revisit if
+  checksum compare lands on the session.
 - Old push soft-skipped files that vanished mid-transfer
   (`check_availability` → skip + end-of-push error); the session
   faults naming the file. Both end in an error; move stays safe.

@@ -204,13 +204,21 @@ pub async fn execute_sink_pipeline_elastic(
                             .iter()
                             .map(|h| (h.relative_path.clone(), h.size))
                             .collect(),
-                        // Resume-block payloads patch existing files; no
-                        // file-completion event from one-block-at-a-time.
-                        // The composite ResumeFile rides the session data
-                        // plane, which reports no per-file progress here.
+                        // Raw resume-block payloads patch existing files;
+                        // no file-completion event from one-block-at-a-
+                        // time. The composite ResumeFile IS one whole
+                        // file's phase — reported below from the outcome,
+                        // because its byte count (stale blocks only) is
+                        // known only after the write (codex otp-10a F6).
                         PreparedPayload::FileBlock { .. }
                         | PreparedPayload::FileBlockComplete { .. }
                         | PreparedPayload::ResumeFile { .. } => Vec::new(),
+                    };
+                    let resumed_file: Option<String> = match &prepared {
+                        PreparedPayload::ResumeFile { header, .. } => {
+                            Some(header.relative_path.clone())
+                        }
+                        _ => None,
                     };
                     let outcome = sink
                         .write_payload(prepared)
@@ -224,6 +232,13 @@ pub async fn execute_sink_pipeline_elastic(
                         for (name, size) in &files {
                             p.report_payload(0, *size);
                             p.report_file_complete(name.clone());
+                        }
+                        // A resumed file finishes like any other (w6-1:
+                        // counted once, per-file lane); its bytes are the
+                        // stale blocks actually sent.
+                        if let Some(name) = resumed_file {
+                            p.report_payload(0, outcome.bytes_written);
+                            p.report_file_complete(name);
                         }
                     }
                     let mut t = total.lock().unwrap();

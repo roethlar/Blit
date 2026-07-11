@@ -20,11 +20,21 @@ use std::io;
 /// Retryable = the error chain contains a `std::io::Error` whose kind is
 /// a transient transport condition, which is exactly what a mid-transfer
 /// network drop or the audit-1c `StallGuard` timeout surfaces.
+///
+/// The unified session reports its failures as `SessionFault` values
+/// that REPLACE the original chain (the fault is what crosses the wire
+/// and the driver boundary), so the fault carries the underlying
+/// `io::ErrorKind` in `SessionFault::io_kind` and classifies here by
+/// the same kind set (codex otp-10a F5) — a mid-transfer socket reset
+/// stays retryable under `--retry` on the session paths.
 pub fn is_retryable(err: &eyre::Report) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<io::Error>()
             .is_some_and(|io_err| is_retryable_io_kind(io_err.kind()))
+            || cause
+                .downcast_ref::<crate::transfer_session::SessionFault>()
+                .is_some_and(|fault| fault.io_kind.is_some_and(is_retryable_io_kind))
     })
 }
 
@@ -104,5 +114,33 @@ mod tests {
             .wrap_err("layer 2")
             .wrap_err("layer 3");
         assert!(is_retryable(&deep));
+    }
+
+    /// codex otp-10a F5: a `SessionFault` replaces the original error
+    /// chain at the session-driver boundary, so its captured `io_kind`
+    /// must classify exactly as the raw io::Error would — retryable
+    /// kinds retry, fatal kinds and kind-less faults do not.
+    #[test]
+    fn session_fault_io_kind_classifies_like_the_raw_error() {
+        use crate::generated::session_error::Code;
+        use crate::transfer_session::SessionFault;
+
+        let fault = |io_kind: Option<io::ErrorKind>| {
+            eyre::Report::new(SessionFault {
+                code: Code::DataPlaneFailed,
+                message: "dialing session data plane: reset".into(),
+                local_build_id: String::new(),
+                peer_build_id: String::new(),
+                peer_notified: false,
+                relative_path: None,
+                io_kind,
+            })
+            .wrap_err("pushing to host:/mod/")
+        };
+
+        assert!(is_retryable(&fault(Some(io::ErrorKind::ConnectionReset))));
+        assert!(is_retryable(&fault(Some(io::ErrorKind::TimedOut))));
+        assert!(!is_retryable(&fault(Some(io::ErrorKind::PermissionDenied))));
+        assert!(!is_retryable(&fault(None)), "kind-less faults stay fatal");
     }
 }

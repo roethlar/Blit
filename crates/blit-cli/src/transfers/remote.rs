@@ -164,21 +164,43 @@ pub async fn run_remote_push_transfer(
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<()> {
-    run_remote_push_transfer_inner(args, source, remote, mirror_mode, false)
-        .await
-        .map(|_| ())
+    run_remote_push_transfer_inner(
+        args,
+        source,
+        remote,
+        mirror_mode,
+        blit_core::generated::ComparisonMode::SizeMtime,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// R51-F4: move's variant of [`run_remote_push_transfer`]. Returns
 /// the push summary instead of printing inline so the caller can
 /// defer output until after source-delete.
+///
+/// codex otp-10a F1: move pushes with `IgnoreTimes` (transfer every
+/// file unconditionally). Move deletes the source on success, so a
+/// compare-mode skip of a same-size file whose content differs would
+/// destroy the only copy of the source bytes; always-transfer makes
+/// the delete safe by construction. Copy/mirror keep `SizeMtime`
+/// (whose same-size dest-newer skip is the standing owner question).
 pub async fn run_remote_push_transfer_deferred(
     args: &TransferArgs,
     source: Endpoint,
     remote: RemoteEndpoint,
     mirror_mode: bool,
 ) -> Result<DeferredPushState> {
-    run_remote_push_transfer_inner(args, source, remote, mirror_mode, true).await
+    run_remote_push_transfer_inner(
+        args,
+        source,
+        remote,
+        mirror_mode,
+        blit_core::generated::ComparisonMode::IgnoreTimes,
+        true,
+    )
+    .await
 }
 
 pub struct DeferredPushState {
@@ -195,22 +217,28 @@ pub fn print_deferred_push_result(args: &TransferArgs, state: &DeferredPushState
 }
 
 /// otp-10a: a failed session names the file a fault touched
-/// (D-2026-07-09-1) — surface that end-of-operation summary on stderr
-/// before the error propagates, so the operator sees which file to
-/// re-run for without digging through the error chain. Applies to
-/// both fault shapes: a `SessionFault` raised by a running session
-/// and a `TransferOpenRefusal` from a session that never opened
-/// (whose inner fault never names a file — `end_of_operation_summary`
-/// then returns `None` and nothing prints).
-fn emit_session_fault_summary(err: &eyre::Report) {
+/// (D-2026-07-09-1) — extract that end-of-operation summary from the
+/// error chain, so the operator sees which file to re-run for without
+/// digging through it. Applies to both fault shapes: a `SessionFault`
+/// raised by a running session and a `TransferOpenRefusal` from a
+/// session that never opened (whose inner fault never names a file —
+/// `end_of_operation_summary` then returns `None`). Extraction is
+/// split from the printing so the chain-walking is unit-pinned
+/// (codex otp-10a F7).
+fn session_fault_summary(err: &eyre::Report) -> Option<String> {
     use blit_core::remote::transfer::session_client::TransferOpenRefusal;
     use blit_core::transfer_session::SessionFault;
-    let fault = err.chain().find_map(|cause| {
-        cause
-            .downcast_ref::<SessionFault>()
-            .or_else(|| cause.downcast_ref::<TransferOpenRefusal>().map(|r| &r.0))
-    });
-    if let Some(line) = fault.and_then(|f| f.end_of_operation_summary()) {
+    err.chain()
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<SessionFault>()
+                .or_else(|| cause.downcast_ref::<TransferOpenRefusal>().map(|r| &r.0))
+        })
+        .and_then(|fault| fault.end_of_operation_summary())
+}
+
+fn emit_session_fault_summary(err: &eyre::Report) {
+    if let Some(line) = session_fault_summary(err) {
         eprintln!("{line}");
     }
 }
@@ -220,6 +248,7 @@ async fn run_remote_push_transfer_inner(
     source: Endpoint,
     remote: RemoteEndpoint,
     mirror_mode: bool,
+    compare_mode: blit_core::generated::ComparisonMode,
     defer_output: bool,
 ) -> Result<DeferredPushState> {
     let show_progress = args.effective_progress() || args.verbose;
@@ -264,6 +293,7 @@ async fn run_remote_push_transfer_inner(
         require_complete_scan: mirror_mode,
         resume: args.resume,
         resume_block_size: 0, // destination default (1 MiB)
+        compare_mode,
         remote_label: format_remote_endpoint(&remote),
     };
 
@@ -582,3 +612,63 @@ pub fn describe_push_result(summary: &blit_core::generated::TransferSummary, des
 // The CLI now relies on those library-local tests; this
 // module's test surface is reserved for CLI-entry-point
 // behavior.
+
+#[cfg(test)]
+mod session_fault_summary_tests {
+    use super::session_fault_summary;
+    use blit_core::generated::session_error::Code;
+    use blit_core::remote::transfer::session_client::TransferOpenRefusal;
+    use blit_core::transfer_session::SessionFault;
+
+    fn fault_with_path(path: &str) -> SessionFault {
+        SessionFault {
+            code: Code::Internal,
+            message: "'big.bin' hit EOF with 42 bytes still promised".into(),
+            local_build_id: String::new(),
+            peer_build_id: String::new(),
+            peer_notified: true,
+            relative_path: Some(path.into()),
+            io_kind: None,
+        }
+    }
+
+    /// The verb-level print's contract (D-2026-07-09-1 Q2): the
+    /// summary extracted from a real, context-wrapped verb error names
+    /// the affected file and suggests a re-run.
+    #[test]
+    fn names_the_file_and_suggests_a_rerun_through_context_layers() {
+        let err = eyre::Report::new(fault_with_path("big.bin"))
+            .wrap_err("pushing to 127.0.0.1:9031:/test/");
+        let line = session_fault_summary(&err).expect("fault with a path yields a summary");
+        assert!(line.contains("affected file: big.bin"), "got: {line}");
+        assert!(line.contains("re-run"), "got: {line}");
+    }
+
+    /// An open-time refusal wraps its fault in `TransferOpenRefusal`;
+    /// the extraction must reach through it. Open faults carry no file
+    /// (nothing transferred yet) — no summary, nothing printed.
+    #[test]
+    fn open_refusals_without_a_file_yield_no_summary() {
+        let mut fault = fault_with_path("x");
+        fault.relative_path = None;
+        let err = eyre::Report::new(TransferOpenRefusal(fault)).wrap_err("pushing to host:/mod/");
+        assert!(session_fault_summary(&err).is_none());
+    }
+
+    /// A refusal whose inner fault DOES name a file still summarizes —
+    /// the downcast reaches the inner fault through the wrapper.
+    #[test]
+    fn open_refusal_with_a_file_summarizes_through_the_wrapper() {
+        let err = eyre::Report::new(TransferOpenRefusal(fault_with_path("nested/f.txt")))
+            .wrap_err("pushing");
+        let line = session_fault_summary(&err).expect("inner fault names a file");
+        assert!(line.contains("affected file: nested/f.txt"), "got: {line}");
+    }
+
+    /// Non-session errors (connect failures, arg errors) never print a
+    /// transfer-abort block.
+    #[test]
+    fn plain_errors_yield_no_summary() {
+        assert!(session_fault_summary(&eyre::eyre!("connection refused")).is_none());
+    }
+}

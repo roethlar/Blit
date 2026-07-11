@@ -54,7 +54,7 @@ pub(crate) fn build_f1_push_execution(
 ) -> blit_app::transfers::remote::PushExecution {
     use blit_app::endpoints::Endpoint;
     use blit_app::transfers::remote::PushExecution;
-    use blit_core::generated::MirrorMode;
+    use blit_core::generated::{ComparisonMode, MirrorMode};
     let mirror = kind == f3pull::PullKind::Mirror;
     let remote_label = remote.display();
     PushExecution {
@@ -73,6 +73,15 @@ pub(crate) fn build_f1_push_execution(
         require_complete_scan: mirror,
         resume: false,
         resume_block_size: 0,
+        // codex otp-10a F1: a move deletes the local source after the
+        // push, so it must transfer every file unconditionally — a
+        // compare-mode skip of a same-size changed file would destroy
+        // the only copy. Copy/mirror keep the SizeMtime default.
+        compare_mode: if kind == f3pull::PullKind::Move {
+            ComparisonMode::IgnoreTimes
+        } else {
+            ComparisonMode::SizeMtime
+        },
         remote_label,
     }
 }

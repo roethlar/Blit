@@ -330,18 +330,60 @@ pub async fn run_pull_session_with_client(
 
 /// Derive the wire `(module, path)` from a resolved endpoint. Empty
 /// module targets the daemon's default root export; a discovery-form
-/// endpoint is not resolvable to a transfer target.
+/// endpoint is not resolvable to a transfer target. The path is
+/// POSIX-normalized (codex otp-10a F2): a `rel_path` that went through
+/// `PathBuf::join` (the CLI's rsync destination-resolution rule does)
+/// carries native `\` separators on Windows, and `to_string_lossy`
+/// would put them on the wire verbatim — a Unix daemon then creates a
+/// literal `sub\dir` entry. Every wire-bound relative path routes
+/// through `path_posix` (the win-1 rule).
 fn endpoint_module_path(endpoint: &RemoteEndpoint) -> Result<(String, String)> {
+    use crate::path_posix::relative_path_to_posix;
     match &endpoint.path {
         RemotePath::Module { module, rel_path } => {
-            Ok((module.clone(), rel_path.to_string_lossy().into_owned()))
+            Ok((module.clone(), relative_path_to_posix(rel_path)))
         }
-        RemotePath::Root { rel_path } => {
-            Ok((String::new(), rel_path.to_string_lossy().into_owned()))
-        }
+        RemotePath::Root { rel_path } => Ok((String::new(), relative_path_to_posix(rel_path))),
         RemotePath::Discovery => Err(eyre!(
             "a transfer session needs a resolved module or root endpoint, not a discovery form"
         )),
+    }
+}
+
+#[cfg(test)]
+mod endpoint_module_path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn endpoint(rel_path: PathBuf) -> RemoteEndpoint {
+        RemoteEndpoint {
+            host: "h".into(),
+            port: 9031,
+            path: RemotePath::Module {
+                module: "m".into(),
+                rel_path,
+            },
+        }
+    }
+
+    /// codex otp-10a F2: a rel_path assembled via `PathBuf::join` (the
+    /// rsync destination-resolution rule appends the source file name
+    /// this way) must reach the wire in POSIX form on every platform —
+    /// on Windows the joined form carries a native `\` that would
+    /// otherwise land verbatim in `SessionOpen.path`.
+    #[test]
+    fn joined_rel_path_reaches_the_wire_in_posix_form() {
+        let rel = PathBuf::from("sub").join("dir").join("file.txt");
+        let (module, path) = endpoint_module_path(&endpoint(rel)).expect("module form resolves");
+        assert_eq!(module, "m");
+        assert_eq!(path, "sub/dir/file.txt");
+    }
+
+    /// Empty rel_path is the module-root identity ("" on the wire).
+    #[test]
+    fn empty_rel_path_is_the_module_root() {
+        let (_, path) = endpoint_module_path(&endpoint(PathBuf::new())).expect("resolves");
+        assert_eq!(path, "");
     }
 }
 

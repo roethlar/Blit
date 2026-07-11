@@ -366,6 +366,10 @@ impl Blit for BlitService {
         let peer = peer_addr_string(&request);
         let modules = Arc::clone(&self.modules);
         let default_root = self.default_root.clone();
+        // codex otp-10a F3: --force-grpc-data applies to served
+        // sessions exactly as it did to the old push/pull_sync
+        // handlers — the responder then grants no TCP data plane.
+        let force_grpc_data = self.force_grpc_data;
         let (tx, rx) = mpsc::channel(32);
         let inbound = request.into_inner();
         let metrics = Arc::clone(&self.metrics);
@@ -394,7 +398,13 @@ impl Blit for BlitService {
             // Session variant: cancel surfaces as a framed
             // SessionError{CANCELLED}, not a bare Status (codex F1).
             let (ok, err_msg) = resolve_transfer_session_outcome(
-                super::transfer::run_transfer_session(modules, default_root, inbound, tx.clone()),
+                super::transfer::run_transfer_session(
+                    modules,
+                    default_root,
+                    inbound,
+                    tx.clone(),
+                    force_grpc_data,
+                ),
                 &tx,
                 &cancel_token,
                 &metrics,

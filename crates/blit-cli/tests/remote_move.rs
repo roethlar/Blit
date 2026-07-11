@@ -43,6 +43,64 @@ fn test_remote_move_local_to_remote() {
     );
 }
 
+/// codex otp-10a F1: `blit move` to a remote destination must land the
+/// source bytes even when the destination already holds a SAME-SIZE,
+/// NEWER file — the copy-shaped SizeMtime compare would skip that cell,
+/// and move's source-delete would then destroy the only copy of the
+/// source content. The move verb pushes with IgnoreTimes (transfer
+/// unconditionally), so the destination ends with the source bytes and
+/// deleting the source is safe.
+#[test]
+fn move_lands_source_bytes_over_same_size_newer_destination() {
+    let ctx = TestContext::new();
+    let src_dir = ctx.workspace.join("src");
+    fs::create_dir_all(&src_dir).expect("src dir");
+    let src_file = src_dir.join("clash.txt");
+    fs::write(&src_file, "source-bytes").expect("write source");
+
+    // Same size, different content, newer mtime at the destination.
+    let dest_file = ctx.module_dir.join("clash.txt");
+    fs::write(&dest_file, "dest---bytes").expect("seed dest");
+    let newer = filetime::FileTime::from_unix_time(
+        filetime::FileTime::from_last_modification_time(
+            &fs::metadata(&src_file).expect("src meta"),
+        )
+        .unix_seconds()
+            + 60,
+        0,
+    );
+    filetime::set_file_mtime(&dest_file, newer).expect("bump dest mtime");
+
+    let src_arg = format!("{}/", src_dir.display());
+    let dest_remote = format!("127.0.0.1:{}:/test/", ctx.daemon_port);
+    let mut cli_cmd = Command::new(&ctx.cli_bin);
+    cli_cmd
+        .arg("--config-dir")
+        .arg(&ctx.config_dir)
+        .arg("move")
+        .arg("--yes")
+        .arg(&src_arg)
+        .arg(&dest_remote);
+
+    let output = run_with_timeout(cli_cmd, Duration::from_secs(60));
+    assert!(
+        output.status.success(),
+        "blit move failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(&dest_file).expect("read dest"),
+        b"source-bytes",
+        "move must overwrite the same-size-newer destination with the source bytes"
+    );
+    assert!(
+        !src_file.exists(),
+        "source deleted only after its bytes landed"
+    );
+}
+
 #[test]
 fn test_remote_move_remote_to_local() {
     let ctx = TestContext::new();

@@ -117,6 +117,16 @@ pub fn build_spec(inputs: &FilterInputs<'_>) -> Result<blit_core::generated::Fil
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
     }
+    // codex otp-10a F8: validate the globs at construction time, like
+    // `build` does (R58-F12) — a malformed `--include`/`--exclude`
+    // must fail before any connection is opened, not when the session
+    // end validates the spec at OPEN.
+    let mut probe = FileFilter::default();
+    probe.include_files = spec.include.clone();
+    probe.exclude_files = spec.exclude.clone();
+    probe
+        .validate_globs()
+        .map_err(|msg| eyre!("invalid filter pattern: {msg}"))?;
     Ok(spec)
 }
 
@@ -216,5 +226,18 @@ mod tests {
             Some(parse_duration("1h").unwrap().as_secs())
         );
         assert_eq!(spec.max_age_secs, None);
+    }
+
+    /// codex otp-10a F8: the wire-spec builder rejects malformed globs
+    /// up front, exactly like `build` — a bad `--exclude` on a push
+    /// verb must fail before any connection is opened.
+    #[test]
+    fn build_spec_rejects_malformed_glob_before_any_connection() {
+        let exc = vec!["a[".to_string()]; // unclosed character class
+        let err = build_spec(&inputs(&[], &exc)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid filter pattern"),
+            "expected a glob-pattern pointer, got: {err:#}"
+        );
     }
 }
