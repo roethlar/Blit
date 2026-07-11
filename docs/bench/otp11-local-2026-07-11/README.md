@@ -61,7 +61,7 @@ fix-round build.
 ~21 ms operation; the first run had NEW winning 27→24 ms). A focused
 follow-up cell was run to get a real signal — and found one:
 
-## noop10k — the change-journal finding (gate FAIL, owner question)
+## noop10k — the change-journal cell (RESOLVED: the old fast path was unsound)
 
 No-op mirror over the already-synced 10,000-file tree, 5 runs,
 interleaved, per-binary presync + warmup absorbed in runs 1–2:
@@ -75,16 +75,48 @@ interleaved, per-binary presync + warmup absorbed in runs 1–2:
 | 5 | 21 ms | 218 ms |
 | **steady median** | **~21 ms** | **~219 ms** |
 
-Reading: the OLD path's steady state is the **change-journal skip
-engaging** (FSEvents snapshot after runs 1–2 — the engine skips
-enumeration entirely). The session route's 219 ms is the full
-enumerate+diff — which BEATS the old path's own non-journal no-op
-pass (610 ms, run 2) but loses ~10× to the warm journal. The
-regression is exactly "journal capability retired" (slice doc D3),
-nothing else: cells measuring identical work all pass. Extrapolated,
-a repeated no-op over a 100k-file tree goes from ~tens of ms
-(journal-warm) to ~2 s (full re-stat, rsync-class behavior).
+The OLD path's steady state is its change-journal skip engaging. The
+owner rejected both "accept the 219 ms" and "keep the journal
+shortcut" (FAST vs SIMPLE) — and the investigation of the real fix
+found the 21 ms was **unsound**: on macOS/Linux the probe's
+`NoChanges` verdict decays to ROOT-directory mtime equality whenever
+the global event counter moved (it always has, between runs), and a
+deep file modification never touches the root dir's mtime.
 
-Per the slice doc ("a failed cell blocks 11b until fixed") this is an
-OWNER decision before the deletion slice — options recorded in
-docs/STATE.md.
+**Reproduced against the pre-otp-11 binary (`blit-old` @ `d2bd843`,
+2026-07-12)** — warm the journal with 3 mirror runs, modify
+`src/sub/deep.txt`, mirror again:
+
+```
+== run4 (after DEEP modification) ==
+Journal probe src state=NoChanges snapshot=true path=.../src
+Journal probe dest state=NoChanges snapshot=true path=.../dst/src
+Filesystem journal fast-path: source/destination unchanged; skipping planner.
+Up to date: filesystem journal reports no changes (in 739.08µs)
+== source deep file: v2-CHANGED
+== dest   deep file: v1        <- SILENT DATA LOSS: the change never syncs
+```
+
+(`compare_macos`/`compare_linux` in `change_journal/snapshot.rs`:
+`event_id`/`ctime` mismatch falls back to `root_mtime` equality;
+`engine/mod.rs` consumed `NoChanges && NoChanges` → skip. The Windows
+strict-USN arm is sound but rarely hits; its mtime fallback has the
+same hole.)
+
+**Verdict for the cell**: the 21 ms target is fraudulent FAST — it
+violates RELIABLE (a mirror that reports "Up to date" while source
+and destination differ). The sound-vs-sound comparison is old run 2
+(610 ms, full pass + snapshot write) vs the session (219 ms): the
+session route is **2.8× faster than every sound no-op in the tree**
+— the cell PASSES the converge-up gate against the honest baseline.
+The 11b deletion of `change_journal/` + the engine's skip now removes
+a data-loss bug, not a feature. Pinned on the session route by
+`deep_modification_after_warm_runs_syncs`
+(`crates/blit-core/tests/local_session.rs`) so no future optimization
+reintroduces the shape.
+
+The principled O(changes) tier — journal-assisted no-op done SOUNDLY
+(USN range replay; FSEvents historical replay honoring must-rescan;
+fail-open to the full session) as a negotiated SESSION capability
+(both roles, both carriers, remote no-ops included) — is filed as
+designed future work in the slice doc, not resurrected apparatus.

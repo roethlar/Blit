@@ -186,17 +186,32 @@ Per D-2026-07-05-1 ("anything else does not exist") these die with the engine
 rather than being rebuilt beside the session; none is on the parent plan's
 capability-parity list:
 
-- **Change-journal skip** (`change_journal/`, `engine/journal.rs`): retired.
-  Second-run no-op now costs one enumerate+diff — the same work class
-  as the old `no_work` fast path, which ALSO ran a full enumerate +
-  per-entry `should_copy_entry` stat pass (`engine/strategy.rs`); the
-  journal skip engaged only with a prior snapshot on journal-capable
-  filesystems (the retired no-op pin itself asserted `no_work`, not
-  `journal_skip`), so the A/B no-op cell measures a fair fight (codex
-  design F8). On journal-capable systems with very large unchanged
-  trees the journal skip was an absolute-time win the session route
-  does not reproduce — carried in Known gaps. The measured gate
-  stands. `TransferOutcome::JournalSkip` and its CLI line die.
+- **Change-journal skip** (`change_journal/`, `engine/journal.rs`):
+  retired — and the retirement removes a PROVEN data-loss bug, not a
+  feature (2026-07-12; supersedes the earlier codex-design-F8
+  reading). The probe's macOS/Linux `NoChanges` verdict decays to
+  ROOT-dir mtime equality whenever the global event counter moved
+  (always, between runs), and deep modifications never touch the root
+  dir's mtime — reproduced against the pre-otp-11 binary: warm
+  journal + modify `src/sub/deep.txt` → "Up to date", destination
+  stale (transcript: `docs/bench/otp11-local-2026-07-11/README.md`).
+  The honest sound-vs-sound no-op baseline is the old path's full
+  pass (610 ms on 10k files); the session's 219 ms beats it 2.8× —
+  the no-op gate cell PASSES against that baseline. Pinned on the
+  session route by `deep_modification_after_warm_runs_syncs`.
+  `TransferOutcome::JournalSkip` and its CLI line die.
+  **Filed future capability (design sketch, own slice set after this
+  plan ships)**: journal-assisted no-op done SOUNDLY as a negotiated
+  SESSION phase — each end probes ITS root with real journal replay
+  (Windows: USN range read since the stored USN; macOS: FSEvents
+  historical replay since the stored event id, honoring
+  must-rescan/dropped-event flags; Linux: unsupported), memos pair
+  via a sync nonce recorded by both ends at the last completed
+  session, any doubt fails open to the full session. One
+  implementation, both roles, both carriers — remote no-ops skip
+  manifest streaming too. New wire surface (open/accept fields) +
+  platform work: follows the wire-contract discipline as its own
+  reviewed slice set.
 - **Auto-tune + tuning windows** (`auto_tune/`, `engine/tuning.rs`): retired;
   the session's dial + sf-2 shape correction is the one stream policy.
 - **Predictor** (`engine/history.rs::update_predictor`, strategy selection
@@ -304,10 +319,13 @@ keeps, not retirements. Windows parity
 
 ## Known gaps / owner-visible changes
 
-- Journal fast-path skip, auto-tune, and predictor training retire with the
-  engine (D3) — behavior change is limited to second-run wall time on very
-  large unchanged trees (bench-gated) and `blit profile`'s predictor columns
-  going stale for local runs.
+- Auto-tune and predictor training retire with the engine (D3);
+  `blit profile`'s predictor columns go stale for local runs. The
+  journal skip's retirement is a RELIABILITY FIX (proven silent
+  data loss on deep modifications — D3); repeated no-op wall time on
+  unchanged trees is 2.8× BETTER than the old sound pass and O(N)
+  worse than the old unsound skip, with the sound O(changes) tier
+  filed as a future session capability (D3).
 - `TransferOutcome::JournalSkip` CLI line disappears; `--verbose` planner-mix
   block reflects the payload plan (raw-bundle counters may read 0 if the
   session plan doesn't use that task kind locally).

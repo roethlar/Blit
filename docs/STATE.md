@@ -55,8 +55,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     production-caller-less (11b deletes it). Design codex 10 + slice
     codex 9 findings adjudicated (`.review/results/otp-11{-design,a}.*`).
     Perf gate: huge/tree/small PASS (1 GiB local = 22 ms both — clone
-    kept); **noop10k FAIL → the journal question in Blocked**.
-    Suite 1488 → **1512**. Detail: DEVLOG 2026-07-12.
+    kept); no-op cell RESOLVED — the old journal skip was proven
+    unsound (Blocked below); sound-vs-sound the session wins 2.8×.
+    Suite 1488 → **1513**. Detail: DEVLOG 2026-07-12.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -76,8 +77,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
    c-1/2), **otp-11a** `[x]`. Current: **otp-11b (the local
    orchestration deletion + compare_manifests sweep + retirement
-   accounting, ≈+44 pins)** — BLOCKED on the journal owner question
-   (Blocked below).
+   accounting, ≈+44 pins)** — unblocked (journal question RESOLVED,
+   Blocked below).
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -148,18 +149,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   approval flow; windows-latest CI on the w9-3 fix rides it.
 - **otp-5b-3** (pull mid-transfer cancel e2e, marked optional): pick
   up while otp-10 runs, or drop? — standing question.
-- **NEW (otp-11a, 2026-07-12): the change-journal question — blocks
-  otp-11b.** Measured (`docs/bench/otp11-local-2026-07-11/README.md`):
-  repeated no-op mirror, 10k files — old path ~21 ms (its journal skip
-  engages after 1–2 runs) vs session ~219 ms (full enumerate+diff,
-  which beats the old NON-journal pass, 610 ms). Retiring the journal
-  (slice doc D3) is what the delta measures. Options: **(a)** accept —
-  repeated no-ops cost a full re-stat (rsync-class, ~2 s/100k files),
-  `change_journal/` dies at 11b; **(b)** keep it as a pre-session
-  no-op short-circuit (~600 LOC; a local-only fast path in front of
-  the one path — the class of side apparatus the directive kills);
-  **(c)** = (a) now + file journal-assisted no-op detection as a
-  future SESSION capability (both carriers). Rec: (a) or (c).
+- ~~The change-journal question~~ **RESOLVED 2026-07-12 (owner:
+  "neither option passes — figure out a real fix"; the premise was
+  false)**: the old 21 ms journal skip was UNSOUND — `NoChanges`
+  decays to root-dir mtime equality, so deep modifications silently
+  never synced (REPRODUCED against the pre-otp-11 binary; transcript
+  in `docs/bench/otp11-local-2026-07-11/README.md`). Sound-vs-sound
+  the session no-op wins 2.8× (219 ms vs 610 ms/10k) → gate passes;
+  11b's journal deletion removes a data-loss bug. Pinned:
+  `deep_modification_after_warm_runs_syncs`. Sound O(changes) no-op
+  (journal REPLAY as a session phase, both carriers) filed as future
+  capability — slice doc D3. **otp-11b is UNBLOCKED.**
 
 ## Open questions
 
@@ -186,12 +186,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Handoff log (newest first, keep ≤ 3)
 
 - **2026-07-12 (45th, this session)** — **otp-11a CLOSED through the
-  codex loop (design doc + slice + fix round; suite 1488 → 1512;
-  perf gate huge/tree/small PASS, 1 GiB clone kept)**. In-flight:
-  none; tree clean. **Next**: owner answers the change-journal
-  question (Blocked) → otp-11b. (Mid-session full-suite "failures" =
-  dirty-tree BUILD_MISMATCH sampling artifacts; clean rebuild
-  converged them.)
+  codex loop (design doc + slice + fix round + the journal-hole
+  investigation; suite 1488 → 1513; perf gate PASS against sound
+  baselines — the old 21 ms journal skip proven unsound, repro
+  recorded)**. In-flight: none; tree clean. **Next**: otp-11b
+  (unblocked). (Mid-session full-suite "failures" = dirty-tree
+  BUILD_MISMATCH sampling artifacts; clean rebuild converged them.)
 - **2026-07-11 (44th)** — otp-10c closed (relay removal
   D-2026-07-11-1 + the cutover deletion); suite 1605 → 1488. Owner
   ask pending: the `725aa07` snapshot `git rm -r` go (otp-10c-2 F6).

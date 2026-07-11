@@ -647,6 +647,40 @@ async fn null_sink_counts_but_writes_nothing() -> Result<()> {
     Ok(())
 }
 
+/// The old engine's journal fast path silently skipped DEEP
+/// modifications: its macOS/Linux `NoChanges` verdict decayed to
+/// ROOT-dir mtime equality, which a write to `src/sub/deep.txt` never
+/// touches — reproduced against the pre-otp-11 binary 2026-07-12
+/// ("Up to date" while src/dest differed; transcript in
+/// `docs/bench/otp11-local-2026-07-11/README.md`). The session route
+/// diffs every run: a deep change after warm repeated runs MUST land.
+#[tokio::test]
+async fn deep_modification_after_warm_runs_syncs() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(src.join("sub"))?;
+    fs::write(src.join("sub/deep.txt"), b"v1")?;
+    fs::write(src.join("top.txt"), b"top")?;
+
+    let opts = || LocalMirrorOptions {
+        mirror: true,
+        ..options()
+    };
+    for _ in 0..3 {
+        run_local_session(&src, &dest, opts()).await?;
+    }
+
+    // A deep content write leaves the root dir's mtime untouched —
+    // the exact shape the old fast path lost. Different length so the
+    // diff verdict is deterministic within one mtime second.
+    fs::write(src.join("sub/deep.txt"), b"v2-now-longer")?;
+    let after = run_local_session(&src, &dest, opts()).await?;
+    assert_eq!(after.copied_files, 1, "the deep change must transfer");
+    assert_eq!(fs::read(dest.join("sub/deep.txt"))?, b"v2-now-longer");
+    Ok(())
+}
+
 /// Local `--resume` rides the carrier's block phase — the shared
 /// `resume_copy_file` primitive (design doc D2, codex design F5
 /// adjudication): a stale partial at the destination is completed
