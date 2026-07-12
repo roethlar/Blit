@@ -1,7 +1,7 @@
 use crate::cli::TransferArgs;
 use crate::context::AppContext;
 use blit_app::display::format_bytes;
-use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
+use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary, TransferOutcome};
 use eyre::{bail, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -98,7 +98,7 @@ async fn run_local_transfer_inner(
     let workers = options.workers;
     if debug_mode {
         eprintln!(
-            "blit: debug: worker limiter active – FAST planner auto-tuning capped to {workers} thread(s)."
+            "blit: debug: worker limiter active – local apply pipeline capped to {workers} worker(s)."
         );
     }
 
@@ -148,10 +148,10 @@ fn build_local_options(
     mirror: bool,
     move_verb: bool,
 ) -> Result<LocalMirrorOptions> {
-    use blit_core::orchestrator::{LocalCompareMode, LocalMirrorDeleteScope};
+    use blit_core::transfer_session::{LocalCompareMode, LocalMirrorDeleteScope};
 
     // R58-F7: translate the per-flag CLI args into the unified
-    // LocalCompareMode enum. The orchestrator then routes to the
+    // LocalCompareMode enum. The session then resolves it onto the
     // proper ComparisonMode for the diff_planner. Pre-fix only
     // --checksum was honored; --size-only / --ignore-times /
     // --force were silently dropped.
@@ -258,17 +258,10 @@ fn print_summary(
     // "transferred N files" case. Previously all four printed identically,
     // which masked two classes of bugs (rsync-semantics, single-file noop).
     match summary.outcome {
-        TransferOutcome::JournalSkip => {
-            println!(
-                "Up to date: filesystem journal reports no changes{} (in {:.2?})",
-                suffix, duration
-            );
-            return;
-        }
         TransferOutcome::UpToDate => {
             println!(
                 "Up to date: {} files examined, 0 changed{} (in {:.2?})",
-                summary.planned_files, suffix, duration
+                summary.scanned_files, suffix, duration
             );
             return;
         }
@@ -356,7 +349,6 @@ fn print_summary_json(
     };
     let outcome = match summary.outcome {
         TransferOutcome::Transferred => "transferred",
-        TransferOutcome::JournalSkip => "journal_skip",
         TransferOutcome::UpToDate => "up_to_date",
         TransferOutcome::SourceEmpty => "source_empty",
     };
@@ -365,7 +357,7 @@ fn print_summary_json(
         "source": src.to_string_lossy(),
         "destination": dst.to_string_lossy(),
         "files_transferred": summary.copied_files,
-        "files_examined": summary.planned_files,
+        "files_examined": summary.scanned_files,
         "total_bytes": summary.total_bytes,
         "deleted_files": summary.deleted_files,
         "deleted_dirs": summary.deleted_dirs,

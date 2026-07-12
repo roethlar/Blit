@@ -1017,6 +1017,24 @@ mod tests {
         }
     }
 
+    /// otp-11a: a file-root File payload (empty relative_path — the
+    /// enumeration root was a single file) writes dst_root itself;
+    /// the joins would otherwise produce trailing-slash paths that
+    /// fail ENOTDIR on a regular file. The local carrier is the only
+    /// producer of this shape.
+    #[test]
+    fn file_root_payload_copies_root_to_root() {
+        let tmp = tempdir().unwrap();
+        let src = tmp.path().join("src.bin");
+        let dst = tmp.path().join("dst.bin");
+        std::fs::write(&src, b"root payload").unwrap();
+        let header = make_file_header("", b"root payload".len() as u64);
+        let outcome =
+            write_file_payload(&src, &dst, None, &header, &FsSinkConfig::default()).unwrap();
+        assert_eq!(outcome.files_written, 1);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"root payload");
+    }
+
     #[tokio::test]
     async fn fs_sink_copies_file() {
         let tmp = tempdir().unwrap();

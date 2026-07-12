@@ -73,7 +73,7 @@ pub const TCP_KEEPALIVE_RETRIES: u32 = 5;
 ///   clamp); a failure here should be visible to operators chasing a
 ///   sysctl/rlimit mismatch, never fatal. `None` = kernel default —
 ///   the value is a connect-time snapshot of
-///   [`TransferDial::tcp_buffer_bytes`](crate::engine::TransferDial::tcp_buffer_bytes)
+///   [`TransferDial::tcp_buffer_bytes`](crate::dial::TransferDial::tcp_buffer_bytes)
 ///   where a dial is in scope (epoch-0 sockets therefore run kernel
 ///   defaults; resize-ADD sockets get the ramped size), and `None`
 ///   where none is (the pull client and the daemon push receiver hold

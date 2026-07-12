@@ -3074,7 +3074,7 @@ struct VerifyReply {
 struct TransferReply {
     request_id: u64,
     kind: transfer::TransferKind,
-    result: Result<blit_core::orchestrator::LocalMirrorSummary, String>,
+    result: Result<blit_core::transfer_session::LocalMirrorSummary, String>,
 }
 
 /// d-53: sequential batch-pull state. `P` on F3 pulls every
@@ -4064,7 +4064,7 @@ fn prepare_local_transfer(
 /// `blit_app::transfers::local::run`. The caller has
 /// already validated + resolved both paths through
 /// [`prepare_local_transfer`], so this just forwards them
-/// to the orchestrator and ferries the reply back.
+/// to the local session and ferries the reply back.
 ///
 /// `perf_history` is read from on-disk config at call time
 /// — matches the CLI's `ctx.perf_history_enabled` snapshot
@@ -4081,7 +4081,7 @@ fn spawn_local_transfer(
 ) {
     tokio::spawn(async move {
         let perf_history_enabled = blit_core::perf_history::perf_history_enabled().unwrap_or(true);
-        let options = blit_core::orchestrator::LocalMirrorOptions {
+        let options = blit_core::transfer_session::LocalMirrorOptions {
             mirror: matches!(kind, transfer::TransferKind::Mirror),
             perf_history: perf_history_enabled,
             ..Default::default()
@@ -4141,9 +4141,9 @@ fn spawn_local_move(
 async fn perform_local_move(
     source: &std::path::Path,
     destination: &std::path::Path,
-) -> Result<blit_core::orchestrator::LocalMirrorSummary, String> {
+) -> Result<blit_core::transfer_session::LocalMirrorSummary, String> {
     let perf_history_enabled = blit_core::perf_history::perf_history_enabled().unwrap_or(true);
-    let options = blit_core::orchestrator::LocalMirrorOptions {
+    let options = blit_core::transfer_session::LocalMirrorOptions {
         mirror: false,
         perf_history: perf_history_enabled,
         // codex otp-10b-2 F3: a move deletes the source after the
@@ -4155,7 +4155,7 @@ async fn perform_local_move(
         // SizeMtime default — and the delete below would then
         // destroy the only copy (the local twin of the remote
         // verbs' move mapping).
-        compare_mode: blit_core::orchestrator::LocalCompareMode::IgnoreTimes,
+        compare_mode: blit_core::transfer_session::LocalCompareMode::IgnoreTimes,
         ..Default::default()
     };
     let summary = blit_app::transfers::local::run(source, destination, options)

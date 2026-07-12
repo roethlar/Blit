@@ -214,11 +214,28 @@ push/pull-specific message.
   design-4-proven fallback ordering, so manifest frames and payload
   records never interleave. DESTINATION-lane frames (need batches,
   acks, summary) are unaffected — they travel the other direction.
-- **Local (in-process):** the identical session state machine runs
-  with both roles in one process over an in-process frame channel —
-  no RPC, no sockets (otp-11). Strategy selection (tar-shard vs
-  file vs block) is planner-owned and reads workload shape +
-  capability, never role/initiator/transport.
+- **Local (in-process, otp-11):** both roles run in one process over
+  the in-process frame channel — no RPC, no sockets — with the LOCAL
+  byte-carrier: a process-local destination extension (`LocalApply`,
+  crate-private, NO wire representation — a peer structurally cannot
+  select it) under which the need-grant/payload phase collapses into
+  the destination, which plans the needed headers
+  (`plan_transfer_payloads`) and applies them in-process through the
+  filesystem sink (clonefile / block-clone / copy_file_range), so no
+  payload byte rides any lane. Everything else is the shared state
+  machine verbatim: hello (exact-match build identity), open
+  validation/refusals, manifest streaming + `ManifestComplete
+  {scan_complete}`, the destination-owned diff (`DEST_DIFF_CHUNK`
+  batching, both carriers), `NeedComplete`, the mirror guards + the
+  one delete pass at SourceDone, the destination-computed summary. No
+  NeedBatch is sent and nothing enters the outstanding set — a
+  payload record arriving anyway is `PROTOCOL_VIOLATION`. Resume on
+  this carrier is the sink-level block phase (`resume_copy_file`:
+  hash the partial, rewrite differing blocks, full-file fallback) —
+  the same resume semantic without serializing block records the
+  same process would immediately deserialize. Strategy selection
+  (tar-shard vs file vs block) stays planner-owned and reads workload
+  shape + capability, never role/initiator/transport.
 
 ## Errors, cancel, stall
 

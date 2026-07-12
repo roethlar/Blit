@@ -31,7 +31,7 @@ pub struct FilterInputs<'a> {
 
 /// Build a `FileFilter` from filter inputs. Used by every command
 /// (copy/mirror/move/check) so filter behavior is identical
-/// regardless of which CLI verb invoked it. The orchestrator-side
+/// regardless of which CLI verb invoked it. The transfer-side
 /// helper — not the leaf code — is what calculates the filter.
 ///
 /// Validates glob patterns at construction time and surfaces
@@ -53,7 +53,7 @@ pub fn build(inputs: &FilterInputs<'_>) -> Result<FileFilter> {
         filter.max_age = Some(parse_duration(s).with_context(|| format!("--max-age {s}"))?);
     }
     if filter.min_age.is_some() || filter.max_age.is_some() {
-        // Captured once per command invocation — calculated by orchestrator-side
+        // Captured once per command invocation — calculated by transfer-side
         // helper, not by leaf code each time `allows_entry` is called.
         filter.reference_time = Some(SystemTime::now());
     }

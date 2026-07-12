@@ -14,11 +14,11 @@
 //! `LocalMirrorOptions` from its Verify form — same shape, no clap
 //! coupling.
 
-use blit_core::orchestrator::{LocalMirrorOptions, LocalMirrorSummary};
+use blit_core::transfer_session::{LocalMirrorOptions, LocalMirrorSummary};
 use eyre::{Context, Result};
 use std::path::Path;
 
-pub use blit_core::orchestrator::TransferOutcome;
+pub use blit_core::transfer_session::TransferOutcome;
 
 /// Run a local→local copy / mirror to completion as one transfer
 /// session. Returns the summary verbatim; caller handles presentation

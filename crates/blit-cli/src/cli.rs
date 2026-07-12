@@ -218,7 +218,7 @@ pub struct TransferArgs {
     /// Perform a dry run without making changes
     #[arg(long)]
     pub dry_run: bool,
-    /// Keep verbose logs from the orchestrator
+    /// Keep verbose transfer logs
     #[arg(long, short = 'v')]
     pub verbose: bool,
     /// Show an interactive progress indicator.

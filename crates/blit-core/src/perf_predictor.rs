@@ -93,11 +93,10 @@ impl PredictorCoefficients {
 }
 
 /// Two coefficient sets per profile — one for planner duration, one
-/// for transfer duration. The decision-time consumer (orchestrator
-/// fast-path Tiny extension) needs both to compare predicted-planner
-/// against predicted-transfer; older v1 state only learned planner
-/// duration, and `derive_local_plan_tuning` was the only loop that
-/// closed (reading JSONL directly, bypassing the predictor entirely).
+/// for transfer duration. Historical shape from the engine era (its
+/// decision-time consumer, the fast-path Tiny extension, retired at
+/// otp-11b); kept because persisted v2 state carries both and
+/// `blit profile` surfaces them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurationCoefficients {
     pub planner: PredictorCoefficients,

@@ -48,13 +48,12 @@ pub enum TransferMode {
     Mirror,
 }
 
-/// Measurement lane for a [`PerformanceRecord`]. Determines whether the
-/// record is eligible to feed real-transfer predictor training or local
-/// auto-tune aggregates. R56-F1: pre-fix, `derive_local_plan_tuning`
-/// read every record indiscriminately, so dry-run records (zero writes)
-/// and null-sink benchmarks (zero writes by definition) taught the
-/// tuner that destination writes were free. Filtering by `run_kind ==
-/// Real` is the single chokepoint that closes that contamination.
+/// Measurement lane for a [`PerformanceRecord`]. Determines whether
+/// the record is eligible to feed real-transfer aggregates. R56-F1
+/// (historical, engine era): dry-run and null-sink records taught the
+/// since-retired tuner that destination writes were free; filtering by
+/// `run_kind == Real` is the single chokepoint that closes that class
+/// of contamination for any consumer (`blit profile` today).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {

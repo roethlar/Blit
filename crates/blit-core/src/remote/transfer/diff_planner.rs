@@ -26,7 +26,7 @@ use std::path::Path;
 
 use eyre::{Context, Result};
 
-use crate::generated::{ComparisonMode, FileHeader};
+use crate::generated::FileHeader;
 use crate::remote::transfer::payload::{plan_transfer_payloads, TransferPayload};
 use crate::transfer_plan::PlanOptions;
 
@@ -51,104 +51,18 @@ pub fn plan_push_payloads(
     plan_transfer_payloads(headers, source_root, plan_options).context("planning push payloads")
 }
 
-/// Input bundle for the local-mirror diff stage. Origin and target
-/// are co-located (both on the same filesystem), so the comparison
-/// can stat the destination directly without a wire roundtrip.
-pub struct LocalDiffInputs<'a> {
-    /// Source-rooted absolute path. Headers' `relative_path` is
-    /// joined under this to find the source bytes.
-    pub src_root: &'a Path,
-    /// Destination-rooted absolute path. Headers' `relative_path` is
-    /// joined under this to compare against existing target state.
-    pub dst_root: &'a Path,
-    /// How to decide whether a target-existing file matches.
-    pub compare_mode: ComparisonMode,
-    /// When true, skip any file the destination already has,
-    /// regardless of `compare_mode`. Orthogonal axis; matches the
-    /// `ignore_existing` field on `TransferOperationSpec`.
-    pub ignore_existing: bool,
-    /// Knobs for the tar / large / raw planner (unchanged from the
-    /// pre-extraction call site).
-    pub plan_options: PlanOptions,
-    /// When false, every source header passes the comparison stage —
-    /// equivalent to `--ignore-times`/`--force` in user-facing terms.
-    /// Used by the orchestrator when its `skip_unchanged` flag is off.
-    pub skip_unchanged: bool,
-}
-
-/// Filter source headers down to those that need transferring against
-/// a local destination, then plan the surviving headers into payloads.
-///
-/// This is the single entry point the local-mirror path uses. Future
-/// origin paths (push client, pull daemon) will gain their own entry
-/// points on this module — same diff + planning algorithm, different
-/// "where the destination lives" assumption.
-pub fn plan_local_mirror(
-    source_headers: Vec<FileHeader>,
-    inputs: LocalDiffInputs<'_>,
-) -> Result<Vec<TransferPayload>> {
-    let headers_to_copy = if inputs.skip_unchanged {
-        filter_unchanged(
-            &source_headers,
-            inputs.src_root,
-            inputs.dst_root,
-            inputs.compare_mode,
-            inputs.ignore_existing,
-        )
-    } else {
-        source_headers
-    };
-
-    plan_transfer_payloads(headers_to_copy, inputs.src_root, inputs.plan_options)
-        .context("planning payloads after diff stage")
-}
-
-/// Drop headers whose destination file already matches the source
-/// under the chosen comparison mode. Keeps headers that need transfer.
-///
-/// `ignore_existing` is the orthogonal "skip if dst exists" axis from
-/// `TransferOperationSpec`: when true, present destination files are
-/// dropped before `compare_mode` is consulted at all.
-///
-/// This is the local-mirror flavor: it stats the destination directly.
-/// Remote-source variants (where the destination manifest arrives over
-/// the wire) live in their own helpers — TBD step 4.
-///
-/// Every `ComparisonMode` variant is implemented (R2-F1). `Unspecified`
-/// behaves as `SizeMtime` (the historical default) — callers should fold
-/// `Unspecified` away via `NormalizedTransferOperation::from_spec`
-/// before reaching this function, but we accept it defensively.
-pub fn filter_unchanged(
-    headers: &[FileHeader],
-    src_root: &Path,
-    dst_root: &Path,
-    compare_mode: ComparisonMode,
-    ignore_existing: bool,
-) -> Vec<FileHeader> {
-    headers
-        .iter()
-        .filter(|h| {
-            let src = src_root.join(&h.relative_path);
-            let dst = dst_root.join(&h.relative_path);
-            if ignore_existing && dst.exists() {
-                return false;
-            }
-            local_needs_copy(&src, &dst, compare_mode).unwrap_or(true)
-        })
-        .cloned()
-        .collect()
-}
-
-/// Per-mode comparison predicate. Delegates to the centralized helper
-/// in `copy::compare` so the diff planner, the single-file copy path,
-/// and the sink all share one decision tree.
-fn local_needs_copy(src: &Path, dst: &Path, mode: ComparisonMode) -> Result<bool> {
-    crate::copy::file_needs_copy_with_mode(src, dst, mode)
-}
+// (`LocalDiffInputs` / `plan_local_mirror` / `filter_unchanged` died at
+// otp-11b with their last caller, the engine's streaming plan — the
+// local route diffs through the session's `destination_needs` and
+// plans through `plan_transfer_payloads` like every other carrier. The
+// per-mode decision tree they delegated to lives on in
+// `copy::file_needs_copy_with_mode` — the sink's defense layer —
+// pinned directly below.)
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generated::ComparisonMode;
 
     /// Build src+dst trees with the given (relative_path, content)
     /// pairs on each side. Returns (src_root, dst_root, _tempdir).
@@ -199,14 +113,17 @@ mod tests {
         );
     }
 
-    fn kept_paths(kept: &[FileHeader]) -> Vec<String> {
-        let mut v: Vec<String> = kept.iter().map(|h| h.relative_path.clone()).collect();
-        v.sort();
-        v
+    fn needs_copy(src_root: &Path, dst_root: &Path, rel: &str, mode: ComparisonMode) -> bool {
+        crate::copy::file_needs_copy_with_mode(&src_root.join(rel), &dst_root.join(rel), mode)
+            .unwrap()
     }
 
+    // Direct pins on `copy::file_needs_copy_with_mode` — the one
+    // per-mode decision tree the sink's defense layer runs (converted
+    // from the retired `filter_unchanged` pins at otp-11b).
+
     #[test]
-    fn size_mtime_drops_matching_files() {
+    fn size_mtime_drops_matching_keeps_changed() {
         let (src, dst, _tmp) = make_trees(
             &[("same.txt", b"matching content"), ("diff.txt", b"new")],
             &[
@@ -215,29 +132,37 @@ mod tests {
             ],
         );
         sync_mtimes(&src, &dst, "same.txt");
-
-        let headers = vec![header("same.txt", 16), header("diff.txt", 3)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime, false);
-        assert_eq!(kept_paths(&kept), vec!["diff.txt"]);
+        assert!(!needs_copy(
+            &src,
+            &dst,
+            "same.txt",
+            ComparisonMode::SizeMtime
+        ));
+        assert!(needs_copy(
+            &src,
+            &dst,
+            "diff.txt",
+            ComparisonMode::SizeMtime
+        ));
     }
 
     #[test]
     fn size_mtime_keeps_missing_dest() {
         let (src, dst, _tmp) = make_trees(&[("only.txt", b"hi")], &[]);
-        let headers = vec![header("only.txt", 2)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime, false);
-        assert_eq!(kept.len(), 1);
+        assert!(needs_copy(
+            &src,
+            &dst,
+            "only.txt",
+            ComparisonMode::SizeMtime
+        ));
     }
 
     #[test]
     fn size_only_ignores_mtime_when_sizes_match() {
         let (src, dst, _tmp) = make_trees(&[("same.txt", b"abcdef")], &[("same.txt", b"abcdef")]);
-        // Don't sync mtimes — they'll differ. SizeOnly should still drop
-        // the entry because content sizes match.
-        let headers = vec![header("same.txt", 6)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly, false);
+        // Mtimes deliberately unsynced — SizeOnly must not care.
         assert!(
-            kept.is_empty(),
+            !needs_copy(&src, &dst, "same.txt", ComparisonMode::SizeOnly),
             "SizeOnly must skip files with matching size regardless of mtime"
         );
     }
@@ -245,50 +170,24 @@ mod tests {
     #[test]
     fn size_only_keeps_size_mismatch() {
         let (src, dst, _tmp) = make_trees(&[("file.txt", b"longer")], &[("file.txt", b"short")]);
-        let headers = vec![header("file.txt", 6)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeOnly, false);
-        assert_eq!(kept.len(), 1);
+        assert!(needs_copy(&src, &dst, "file.txt", ComparisonMode::SizeOnly));
     }
 
     #[test]
     fn ignore_times_always_copies() {
-        let (src, dst, _tmp) = make_trees(
-            &[("a.txt", b"x"), ("b.txt", b"y")],
-            &[("a.txt", b"x"), ("b.txt", b"y")],
-        );
+        let (src, dst, _tmp) = make_trees(&[("a.txt", b"x")], &[("a.txt", b"x")]);
         sync_mtimes(&src, &dst, "a.txt");
-        sync_mtimes(&src, &dst, "b.txt");
-        let headers = vec![header("a.txt", 1), header("b.txt", 1)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::IgnoreTimes, false);
-        assert_eq!(kept.len(), 2, "IgnoreTimes must always copy");
+        assert!(
+            needs_copy(&src, &dst, "a.txt", ComparisonMode::IgnoreTimes),
+            "IgnoreTimes must always copy"
+        );
     }
 
     #[test]
     fn force_always_copies() {
         let (src, dst, _tmp) = make_trees(&[("a.txt", b"x")], &[("a.txt", b"x")]);
         sync_mtimes(&src, &dst, "a.txt");
-        let headers = vec![header("a.txt", 1)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Force, false);
-        assert_eq!(kept.len(), 1);
-    }
-
-    #[test]
-    fn ignore_existing_skips_existing_regardless_of_mode() {
-        // ignore_existing is orthogonal to compare_mode: even Force,
-        // which would otherwise always copy, must respect it.
-        let (src, dst, _tmp) = make_trees(
-            &[("a.txt", b"new"), ("b.txt", b"only-on-src")],
-            &[("a.txt", b"old")],
-        );
-        let headers = vec![header("a.txt", 3), header("b.txt", 11)];
-        // Use SizeMtime as the mode (Force+ignore_existing is rejected
-        // at the spec normalizer); we still expect a.txt to be skipped.
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::SizeMtime, true);
-        assert_eq!(
-            kept_paths(&kept),
-            vec!["b.txt"],
-            "ignore_existing keeps only files missing on dest"
-        );
+        assert!(needs_copy(&src, &dst, "a.txt", ComparisonMode::Force));
     }
 
     #[test]
@@ -297,11 +196,9 @@ mod tests {
             &[("same.txt", b"identical bytes")],
             &[("same.txt", b"identical bytes")],
         );
-        // Don't sync mtimes — Checksum mode shouldn't care about mtime.
-        let headers = vec![header("same.txt", 15)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum, false);
+        // Mtimes deliberately unsynced — Checksum hashes content.
         assert!(
-            kept.is_empty(),
+            !needs_copy(&src, &dst, "same.txt", ComparisonMode::Checksum),
             "Checksum should skip byte-identical files regardless of mtime"
         );
     }
@@ -310,83 +207,51 @@ mod tests {
     fn checksum_keeps_content_diff() {
         let (src, dst, _tmp) =
             make_trees(&[("a.txt", b"hello world")], &[("a.txt", b"goodbye foo")]);
-        let headers = vec![header("a.txt", 11)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Checksum, false);
-        assert_eq!(kept.len(), 1);
+        assert!(needs_copy(&src, &dst, "a.txt", ComparisonMode::Checksum));
     }
 
     #[test]
-    fn plan_local_mirror_skip_unchanged_off_passes_all_headers() {
-        // R2-F4: when skip_unchanged=false the comparison stage is
-        // bypassed, so identical files still appear in the planned
-        // payloads. Equivalent to user-side --ignore-times / --force.
-        let (src, dst, _tmp) = make_trees(
-            &[("a.txt", b"x"), ("b.txt", b"y")],
-            &[("a.txt", b"x"), ("b.txt", b"y")],
-        );
-        sync_mtimes(&src, &dst, "a.txt");
-        sync_mtimes(&src, &dst, "b.txt");
+    fn unspecified_folds_to_size_mtime() {
+        // Callers normalize Unspecified away, but the decision tree
+        // accepts it defensively as the historical default.
+        let (src, dst, _tmp) = make_trees(&[("same.txt", b"x")], &[("same.txt", b"x")]);
+        sync_mtimes(&src, &dst, "same.txt");
+        assert!(!needs_copy(
+            &src,
+            &dst,
+            "same.txt",
+            ComparisonMode::Unspecified
+        ));
+    }
+
+    // Direct pins on `plan_transfer_payloads` — the one payload
+    // planner every carrier uses (converted from the retired
+    // `plan_local_mirror` pins at otp-11b; the diff half of those
+    // compositions is pinned on the session route).
+
+    #[test]
+    fn planner_keeps_every_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"x").unwrap();
+        std::fs::write(src.join("b.txt"), b"y").unwrap();
         let headers = vec![header("a.txt", 1), header("b.txt", 1)];
-        let planned = plan_local_mirror(
-            headers,
-            LocalDiffInputs {
-                src_root: &src,
-                dst_root: &dst,
-                compare_mode: ComparisonMode::SizeMtime,
-                ignore_existing: false,
-                plan_options: PlanOptions::default(),
-                skip_unchanged: false,
-            },
-        )
-        .unwrap();
+        let planned = plan_transfer_payloads(headers, &src, PlanOptions::default()).unwrap();
         assert_eq!(
             crate::remote::transfer::payload::payload_file_count(&planned),
             2,
-            "skip_unchanged=false must keep matching files in the plan"
+            "the planner must keep every header it is given"
         );
     }
 
     #[test]
-    fn plan_local_mirror_skip_unchanged_on_drops_matching_files() {
-        // Counterpart to the above — confirms skip_unchanged=true
-        // does drop matching files (the historical behavior).
-        let (src, dst, _tmp) = make_trees(
-            &[("a.txt", b"x"), ("b.txt", b"y")],
-            &[("a.txt", b"x"), ("b.txt", b"y")],
-        );
-        sync_mtimes(&src, &dst, "a.txt");
-        sync_mtimes(&src, &dst, "b.txt");
-        let headers = vec![header("a.txt", 1), header("b.txt", 1)];
-        let planned = plan_local_mirror(
-            headers,
-            LocalDiffInputs {
-                src_root: &src,
-                dst_root: &dst,
-                compare_mode: ComparisonMode::SizeMtime,
-                ignore_existing: false,
-                plan_options: PlanOptions::default(),
-                skip_unchanged: true,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            crate::remote::transfer::payload::payload_file_count(&planned),
-            0,
-            "skip_unchanged=true must drop matching files before planning"
-        );
-    }
-
-    #[test]
-    fn plan_local_mirror_batches_many_small_files_into_tar_shard() {
-        // R2-F4 tar-shard batching boundary: 50 tiny files in the
-        // small bucket (<64KiB) should produce at least one TarShard
-        // payload from the planner. We only assert that *some* tar
-        // shard exists — the exact mix depends on the planner's
-        // adaptive thresholds, which are tuning concerns rather than
-        // a contract.
+    fn planner_batches_many_small_files_into_tar_shard() {
+        // Tar-shard batching boundary: 50 tiny files should produce at
+        // least one TarShard payload. Only "some tar shard exists" is
+        // the contract — the exact mix is adaptive tuning.
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
-        let dst = tmp.path().join("dst");
         std::fs::create_dir_all(&src).unwrap();
         let mut headers = Vec::with_capacity(50);
         for i in 0..50 {
@@ -394,18 +259,7 @@ mod tests {
             std::fs::write(src.join(&name), b"tiny").unwrap();
             headers.push(header(&name, 4));
         }
-        let planned = plan_local_mirror(
-            headers,
-            LocalDiffInputs {
-                src_root: &src,
-                dst_root: &dst, // doesn't exist; skip_unchanged=false avoids stat
-                compare_mode: ComparisonMode::SizeMtime,
-                ignore_existing: false,
-                plan_options: PlanOptions::default(),
-                skip_unchanged: false,
-            },
-        )
-        .unwrap();
+        let planned = plan_transfer_payloads(headers, &src, PlanOptions::default()).unwrap();
         let tar_shards = planned
             .iter()
             .filter(|p| matches!(p, TransferPayload::TarShard { .. }))
@@ -419,9 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_local_mirror_force_tar_groups_even_a_few_files() {
-        // PlanOptions::force_tar=true should always produce tar shards
-        // regardless of file size distribution.
+    fn planner_force_tar_groups_even_a_few_files() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -438,33 +290,10 @@ mod tests {
             force_tar: true,
             ..PlanOptions::default()
         };
-        let planned = plan_local_mirror(
-            headers,
-            LocalDiffInputs {
-                src_root: &src,
-                dst_root: &src.join("nope"),
-                compare_mode: ComparisonMode::SizeMtime,
-                ignore_existing: false,
-                plan_options,
-                skip_unchanged: false,
-            },
-        )
-        .unwrap();
+        let planned = plan_transfer_payloads(headers, &src, plan_options).unwrap();
         let has_tar = planned
             .iter()
             .any(|p| matches!(p, TransferPayload::TarShard { .. }));
         assert!(has_tar, "force_tar must produce a TarShard payload");
-    }
-
-    #[test]
-    fn unspecified_folds_to_size_mtime() {
-        // The orchestrator never sends Unspecified after normalization,
-        // but defensively the planner should treat it as the historical
-        // default (matches what NormalizedTransferOperation::from_spec does).
-        let (src, dst, _tmp) = make_trees(&[("same.txt", b"x")], &[("same.txt", b"x")]);
-        sync_mtimes(&src, &dst, "same.txt");
-        let headers = vec![header("same.txt", 1)];
-        let kept = filter_unchanged(&headers, &src, &dst, ComparisonMode::Unspecified, false);
-        assert!(kept.is_empty());
     }
 }

@@ -44,7 +44,7 @@ impl Default for PlanOptions {
 /// The heuristics mirror the original `net_async::client::build_plan` logic so that
 /// every mode (push, pull, local) can share the same task ordering. Wire
 /// chunk sizing is NOT planned here — it is owned by the live
-/// [`crate::engine::TransferDial`] (w2-2: this module's static 16/32 MiB
+/// [`crate::dial::TransferDial`] (w2-2: this module's static 16/32 MiB
 /// chunk ladder was dead policy — every remote path overrode it from the
 /// dial and no consumer read the planned value).
 pub fn build_plan(

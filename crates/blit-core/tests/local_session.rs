@@ -7,11 +7,11 @@
 //! observable contract on the session route.
 
 use blit_core::config;
-use blit_core::orchestrator::{
-    LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions, TransferOutcome,
-};
 use blit_core::perf_history;
 use blit_core::transfer_session::run_local_session;
+use blit_core::transfer_session::{
+    LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions, TransferOutcome,
+};
 use eyre::Result;
 use std::fs;
 use std::path::PathBuf;
@@ -644,6 +644,423 @@ async fn null_sink_counts_but_writes_nothing() -> Result<()> {
         !dest.exists(),
         "the null sink must never create the destination"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// otp-11b floor-restoration pins (the slice doc's closure plan): each
+// pins live session-route behavior the retired engine tests used to
+// cover from the outside, or new surface the route added.
+// ---------------------------------------------------------------------------
+
+/// Mirror from an EMPTY source deletes everything at the destination —
+/// mirror semantics, not an error (the CLI's destructive-confirm owns
+/// the UX guard).
+#[tokio::test]
+async fn mirror_from_empty_source_deletes_destination_tree() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(dest.join("sub"))?;
+    fs::write(dest.join("a.txt"), b"old")?;
+    fs::write(dest.join("sub/b.txt"), b"old")?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            mirror: true,
+            ..options()
+        },
+    )
+    .await?;
+    assert!(!dest.join("a.txt").exists());
+    assert!(!dest.join("sub").exists());
+    assert_eq!(summary.deleted_files, 2);
+    assert_eq!(summary.deleted_dirs, 1);
+    Ok(())
+}
+
+/// Deep-nested extraneous trees delete whole under mirror, with the
+/// split counters accounting every level (files then dirs
+/// deepest-first — the one delete rule's ordering).
+#[tokio::test]
+async fn mirror_deletes_nested_extraneous_tree_with_split_counts() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::write(src.join("keep.txt"), b"keep")?;
+    fs::create_dir_all(dest.join("stale/deeper/deepest"))?;
+    fs::write(dest.join("stale/one.txt"), b"x")?;
+    fs::write(dest.join("stale/deeper/two.txt"), b"x")?;
+    fs::write(dest.join("stale/deeper/deepest/three.txt"), b"x")?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            mirror: true,
+            ..options()
+        },
+    )
+    .await?;
+    assert!(!dest.join("stale").exists());
+    assert_eq!(summary.deleted_files, 3);
+    assert_eq!(summary.deleted_dirs, 3);
+    assert!(dest.join("keep.txt").exists());
+    Ok(())
+}
+
+/// `--ignore-times` transfers an unchanged TREE unconditionally
+/// through the session route (the move rule's mapping, e2e).
+#[tokio::test]
+async fn ignore_times_recopies_unchanged_tree() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::write(src.join("a.txt"), b"one")?;
+    fs::write(src.join("b.txt"), b"two")?;
+
+    let first = run_local_session(&src, &dest, options()).await?;
+    assert_eq!(first.copied_files, 2);
+
+    let again = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            compare_mode: LocalCompareMode::IgnoreTimes,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(again.copied_files, 2, "IgnoreTimes must always transfer");
+    Ok(())
+}
+
+/// `--checksum` on the session-local route: same size + same mtime but
+/// different CONTENT transfers (the cell `--checksum` exists for).
+#[tokio::test]
+async fn checksum_transfers_same_size_same_mtime_content_change() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(&dest)?;
+    fs::write(src.join("f.bin"), b"AAAA")?;
+    fs::write(dest.join("f.bin"), b"BBBB")?;
+    let mtime = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(src.join("f.bin"), mtime)?;
+    filetime::set_file_mtime(dest.join("f.bin"), mtime)?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            compare_mode: LocalCompareMode::Checksum,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 1);
+    assert_eq!(fs::read(dest.join("f.bin"))?, b"AAAA");
+    Ok(())
+}
+
+/// `--checksum`: content-equal files SKIP even when mtimes differ.
+#[tokio::test]
+async fn checksum_skips_content_equal_despite_mtime() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(&dest)?;
+    fs::write(src.join("f.bin"), b"identical")?;
+    fs::write(dest.join("f.bin"), b"identical")?;
+    filetime::set_file_mtime(
+        dest.join("f.bin"),
+        filetime::FileTime::from_unix_time(1_500_000_000, 0),
+    )?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            compare_mode: LocalCompareMode::Checksum,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 0);
+    Ok(())
+}
+
+/// `--ignore-existing` over a tree: present destination entries are
+/// untouched regardless of differences; absent ones land.
+#[tokio::test]
+async fn ignore_existing_tree_keeps_existing_lands_missing() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(&dest)?;
+    fs::write(src.join("exists.txt"), b"new content longer")?;
+    fs::write(src.join("missing.txt"), b"lands")?;
+    fs::write(dest.join("exists.txt"), b"old")?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            ignore_existing: true,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 1);
+    assert_eq!(fs::read(dest.join("exists.txt"))?, b"old");
+    assert_eq!(fs::read(dest.join("missing.txt"))?, b"lands");
+    Ok(())
+}
+
+/// Mirror scope under an INCLUDE filter: out-of-scope destination
+/// entries survive a FilteredSubset mirror.
+#[tokio::test]
+async fn mirror_subset_include_filter_scopes_deletions() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(&dest)?;
+    fs::write(src.join("data.csv"), b"in scope")?;
+    fs::write(dest.join("stale.csv"), b"in scope, extraneous")?;
+    fs::write(dest.join("keep.log"), b"out of scope")?;
+
+    let mut opts = options();
+    opts.mirror = true;
+    opts.filter.include_files = vec!["*.csv".to_string()];
+    let summary = run_local_session(&src, &dest, opts).await?;
+    assert!(
+        !dest.join("stale.csv").exists(),
+        "in-scope extraneous entry must delete"
+    );
+    assert!(
+        dest.join("keep.log").exists(),
+        "out-of-scope entry must survive FilteredSubset"
+    );
+    assert_eq!(summary.deleted_files, 1);
+    Ok(())
+}
+
+/// Dry-run over a single-file root: nothing created, the plan
+/// reported.
+#[tokio::test]
+async fn dry_run_single_file_creates_nothing() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("one.bin");
+    let dest = tmp.path().join("out/dest.bin");
+    fs::write(&src, b"payload")?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            dry_run: true,
+            ..options()
+        },
+    )
+    .await?;
+    assert!(summary.dry_run);
+    assert!(!dest.exists());
+    assert!(
+        !tmp.path().join("out").exists(),
+        "dry run must not create the destination parent chain"
+    );
+    assert_eq!(summary.planned_files, 1, "the plan still reports the copy");
+    Ok(())
+}
+
+/// A single-file copy into a missing nested parent chain creates it
+/// (the sink's parent mkdir), and Force re-copies over an identical
+/// destination file root.
+#[tokio::test]
+async fn single_file_nested_parent_creation_and_force_recopy() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("one.bin");
+    let dest = tmp.path().join("a/b/c/dest.bin");
+    fs::write(&src, b"payload")?;
+
+    let first = run_local_session(&src, &dest, options()).await?;
+    assert_eq!(first.copied_files, 1);
+    assert_eq!(fs::read(&dest)?, b"payload");
+
+    let forced = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            compare_mode: LocalCompareMode::Force,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(forced.copied_files, 1, "Force must re-copy the file root");
+    Ok(())
+}
+
+/// `--resume` against a FRESH destination falls back to a plain full
+/// copy (nothing to patch), byte-identical.
+#[tokio::test]
+async fn resume_fresh_destination_full_copies() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    let payload: Vec<u8> = (0u8..=255).cycle().take(512 * 1024).collect();
+    fs::write(src.join("big.bin"), &payload)?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            resume: true,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 1);
+    assert_eq!(fs::read(dest.join("big.bin"))?, payload);
+    Ok(())
+}
+
+/// An unreadable source SUBDIRECTORY on a plain copy: the readable
+/// remainder lands, the scan incompleteness is carried in
+/// `unreadable_paths` (the move gate's signal), and the copy succeeds.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_subdir_plain_copy_continues_and_records() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(src.join("locked"))?;
+    fs::write(src.join("ok.txt"), b"readable")?;
+    fs::write(src.join("locked/hidden.txt"), b"unreadable")?;
+    fs::set_permissions(src.join("locked"), fs::Permissions::from_mode(0o000))?;
+
+    let result = run_local_session(&src, &dest, options()).await;
+    fs::set_permissions(src.join("locked"), fs::Permissions::from_mode(0o755))?;
+    let summary = result?;
+
+    assert_eq!(fs::read(dest.join("ok.txt"))?, b"readable");
+    assert!(
+        !summary.unreadable_paths.is_empty(),
+        "the unreadable subdir must be recorded"
+    );
+    Ok(())
+}
+
+/// SizeOnly transfers on a size mismatch even when mtimes match (the
+/// counterpart of the same-size skip pin).
+#[tokio::test]
+async fn size_only_transfers_size_mismatch_same_mtime() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::create_dir_all(&dest)?;
+    fs::write(src.join("f.txt"), b"longer content")?;
+    fs::write(dest.join("f.txt"), b"short")?;
+    let mtime = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(src.join("f.txt"), mtime)?;
+    filetime::set_file_mtime(dest.join("f.txt"), mtime)?;
+
+    let summary = run_local_session(
+        &src,
+        &dest,
+        LocalMirrorOptions {
+            compare_mode: LocalCompareMode::SizeOnly,
+            ..options()
+        },
+    )
+    .await?;
+    assert_eq!(summary.copied_files, 1);
+    assert_eq!(fs::read(dest.join("f.txt"))?, b"longer content");
+    Ok(())
+}
+
+/// `--delete-scope all` deletes a NESTED excluded-only destination
+/// tree the filter would have protected under FilteredSubset
+/// (R58-F6's All-scope contract on the session route).
+#[tokio::test]
+async fn mirror_all_scope_deletes_nested_excluded_only_dirs() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    fs::write(src.join("data.txt"), b"data")?;
+    fs::create_dir_all(dest.join("logs/archive"))?;
+    fs::write(dest.join("logs/app.log"), b"excluded")?;
+    fs::write(dest.join("logs/archive/old.log"), b"excluded")?;
+
+    let mut opts = options();
+    opts.mirror = true;
+    opts.delete_scope = LocalMirrorDeleteScope::All;
+    opts.filter.exclude_files = vec!["*.log".to_string()];
+    let summary = run_local_session(&src, &dest, opts).await?;
+    assert!(
+        !dest.join("logs").exists(),
+        "All scope must delete through the filter, nested dirs included"
+    );
+    assert_eq!(summary.deleted_files, 2);
+    assert_eq!(summary.deleted_dirs, 2);
+    Ok(())
+}
+
+/// The planner-mix stats fold: a many-small-file tree reports its
+/// tar-shard grouping in the summary (the `--verbose` planner-mix
+/// block's data source on the session route).
+#[tokio::test]
+async fn planner_mix_stats_populated_for_small_tree() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    for idx in 0..50 {
+        fs::write(src.join(format!("f{idx:03}.txt")), b"tiny")?;
+    }
+
+    let summary = run_local_session(&src, &dest, options()).await?;
+    assert_eq!(summary.copied_files, 50);
+    assert!(
+        summary.tar_shard_tasks >= 1,
+        "small files must report tar-shard grouping"
+    );
+    assert_eq!(
+        summary.tar_shard_files + summary.large_tasks,
+        50,
+        "every copied file is accounted to exactly one planner bucket"
+    );
+    Ok(())
+}
+
+/// Scanned-byte accounting across diff chunks: `scanned_bytes` is the
+/// exact post-filter source workload for a >1-chunk tree.
+#[tokio::test]
+async fn scanned_bytes_accumulate_across_chunks() -> Result<()> {
+    let tmp = tempdir()?;
+    let src = tmp.path().join("src");
+    let dest = tmp.path().join("dest");
+    fs::create_dir_all(&src)?;
+    for idx in 0..150 {
+        fs::write(src.join(format!("f{idx:03}.bin")), vec![0u8; 100])?;
+    }
+
+    let summary = run_local_session(&src, &dest, options()).await?;
+    assert_eq!(summary.scanned_files, 150);
+    assert_eq!(summary.scanned_bytes, 150 * 100);
     Ok(())
 }
 

@@ -20,7 +20,7 @@
 //! `blit_app::transfers::local::run`, identical to the
 //! CLI's `blit copy` / `blit mirror` code path.
 
-use blit_core::orchestrator::LocalMirrorSummary;
+use blit_core::transfer_session::LocalMirrorSummary;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -23,10 +23,6 @@ use async_trait::async_trait;
 use eyre::{eyre, Context, Result};
 use tokio::sync::mpsc;
 
-use crate::engine::{
-    LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions, LocalMirrorSummary,
-    TransferOutcome,
-};
 use crate::fs_enum::FileFilter;
 use crate::generated::{FileHeader, MirrorMode, SessionOpen, TransferRole};
 use crate::path_posix::relative_path_to_posix;
@@ -44,6 +40,206 @@ use super::{
     run_destination, run_source, DestinationInstruments, DestinationSessionConfig,
     DestinationTarget, HelloConfig, SessionEndpoint, SourceInstruments, SourceSessionConfig,
 };
+
+// ---------------------------------------------------------------------------
+// The local option/summary surface (re-homed from the deleted
+// engine/options.rs + engine/summary.rs at otp-11b — the engine died;
+// these types are the app-facing local contract, D2 of the slice doc).
+// ---------------------------------------------------------------------------
+
+/// Scope of mirror deletions. Matches the wire-side `MirrorMode` enum
+/// (FilteredSubset / All). R58-F6 brought local up to parity with the
+/// remote paths' wire `MirrorMode` scope.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LocalMirrorDeleteScope {
+    /// Default: only delete destination entries that the source-side
+    /// filter would have allowed. Files matching `--exclude` patterns
+    /// at the destination are left alone, because they're not in
+    /// scope for this mirror operation.
+    #[default]
+    FilteredSubset,
+    /// Delete every destination entry not present at the source,
+    /// regardless of filter scope. Selected via `--delete-scope all`.
+    All,
+}
+
+/// Local comparison policy. Mirrors the wire-side `ComparisonMode` enum
+/// so local copy/mirror behaves the same as a same-options remote run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LocalCompareMode {
+    /// Default size + mtime. Skip if both match.
+    #[default]
+    SizeMtime,
+    /// Compare by Blake3 checksum. Slow but content-accurate.
+    Checksum,
+    /// Compare by size only. Mtime differences are ignored.
+    SizeOnly,
+    /// Transfer regardless of target state.
+    Force,
+    /// Transfer all files unconditionally (--ignore-times). Same
+    /// outcome as Force at the planner level; kept as a separate
+    /// variant so the user's intent is preserved in summaries.
+    IgnoreTimes,
+}
+
+impl LocalCompareMode {
+    /// Resolve onto the unified wire-side `ComparisonMode`, honoring
+    /// the legacy `checksum: bool` under the default `SizeMtime`
+    /// (back-compat: `--checksum` callers that haven't migrated to
+    /// `compare_mode` keep their behavior). ue-r2-1c: the single home
+    /// for this translation.
+    pub fn resolve_comparison_mode(
+        self,
+        legacy_checksum: bool,
+    ) -> crate::generated::ComparisonMode {
+        use crate::generated::ComparisonMode;
+        match self {
+            LocalCompareMode::Checksum => ComparisonMode::Checksum,
+            LocalCompareMode::SizeOnly => ComparisonMode::SizeOnly,
+            LocalCompareMode::Force => ComparisonMode::Force,
+            LocalCompareMode::IgnoreTimes => ComparisonMode::IgnoreTimes,
+            LocalCompareMode::SizeMtime => {
+                if legacy_checksum {
+                    ComparisonMode::Checksum
+                } else {
+                    ComparisonMode::SizeMtime
+                }
+            }
+        }
+    }
+
+    /// Same resolution, onto the perf-history snapshot enum (tuning
+    /// buckets key on the full comparison policy — R59 finding #5).
+    pub(crate) fn resolve_compare_snapshot(
+        self,
+        legacy_checksum: bool,
+    ) -> crate::perf_history::CompareModeSnapshot {
+        use crate::perf_history::CompareModeSnapshot;
+        match self {
+            LocalCompareMode::Checksum => CompareModeSnapshot::Checksum,
+            LocalCompareMode::SizeOnly => CompareModeSnapshot::SizeOnly,
+            LocalCompareMode::Force => CompareModeSnapshot::Force,
+            LocalCompareMode::IgnoreTimes => CompareModeSnapshot::IgnoreTimes,
+            LocalCompareMode::SizeMtime => {
+                if legacy_checksum {
+                    CompareModeSnapshot::Checksum
+                } else {
+                    CompareModeSnapshot::SizeMtime
+                }
+            }
+        }
+    }
+}
+
+/// Options for executing a local mirror/copy operation. The dead
+/// engine-era axes (`force_tar`, `preserve_symlinks`,
+/// `include_symlinks`, `skip_unchanged`) retired with the engine at
+/// otp-11b — none was reachable from any production caller (slice doc
+/// D2/F6 adjudication).
+#[derive(Clone, Debug)]
+pub struct LocalMirrorOptions {
+    pub filter: FileFilter,
+    pub mirror: bool,
+    pub dry_run: bool,
+    pub progress: bool,
+    pub verbose: bool,
+    pub perf_history: bool,
+    /// Skip any file the destination already has, regardless of
+    /// comparison mode. Orthogonal to `checksum`; matches the wire
+    /// `ignore_existing` for full route parity.
+    pub ignore_existing: bool,
+    pub checksum: bool,
+    /// R58-F7: comparison policy — `--size-only` / `--ignore-times` /
+    /// `--force` honored on local copy/mirror the same way the remote
+    /// routes honor them.
+    pub compare_mode: LocalCompareMode,
+    /// R58-F6: delete-scope policy for mirror. Only consulted when
+    /// `mirror == true`.
+    pub delete_scope: LocalMirrorDeleteScope,
+    /// The hidden `--workers` debug limiter (always paired with
+    /// `debug_mode`); bounds the apply pipeline's worker count.
+    pub workers: usize,
+    pub preserve_times: bool,
+    pub debug_mode: bool,
+    /// Resume interrupted transfers using block-level comparison (the
+    /// local carrier's sink-level block phase).
+    pub resume: bool,
+    /// Discard writes (NullSink). Measures source read + pipeline
+    /// throughput.
+    pub null_sink: bool,
+}
+
+impl Default for LocalMirrorOptions {
+    fn default() -> Self {
+        Self {
+            filter: FileFilter::default(),
+            mirror: false,
+            dry_run: false,
+            progress: false,
+            verbose: false,
+            perf_history: true,
+            ignore_existing: false,
+            checksum: false,
+            compare_mode: LocalCompareMode::default(),
+            delete_scope: LocalMirrorDeleteScope::default(),
+            workers: num_cpus::get().max(1),
+            preserve_times: true,
+            debug_mode: false,
+            resume: false,
+            null_sink: false,
+        }
+    }
+}
+
+/// Why a transfer copied zero files. `JournalSkip` retired at otp-11b
+/// with the unsound engine journal fast path (proven silent data loss
+/// — see `docs/bench/otp11-local-2026-07-11/README.md`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum TransferOutcome {
+    /// Normal case: some work was attempted (files examined, possibly copied).
+    #[default]
+    Transferred,
+    /// The run examined the source and found it up to date with the dest.
+    UpToDate,
+    /// The run examined the source and it contained zero files.
+    SourceEmpty,
+}
+
+/// Summary of a local transfer execution.
+///
+///   - `scanned_files` / `scanned_bytes`: the source-side workload
+///     observed by enumeration (post-filter, pre-diff).
+///   - `planned_files`: entries the diff decided to transfer.
+///   - `copied_files`: what the apply pipeline actually wrote.
+///   - `total_bytes`: bytes the pipeline wrote — distinct from
+///     `scanned_bytes` on incremental runs.
+#[derive(Clone, Debug, Default)]
+pub struct LocalMirrorSummary {
+    pub planned_files: usize,
+    pub copied_files: usize,
+    pub total_bytes: u64,
+    pub scanned_files: usize,
+    pub scanned_bytes: u64,
+    pub deleted_files: usize,
+    pub deleted_dirs: usize,
+    pub dry_run: bool,
+    pub duration: std::time::Duration,
+    pub tar_shard_tasks: usize,
+    pub tar_shard_files: usize,
+    pub tar_shard_bytes: u64,
+    pub raw_bundle_tasks: usize,
+    pub raw_bundle_files: usize,
+    pub raw_bundle_bytes: u64,
+    pub large_tasks: usize,
+    pub large_bytes: u64,
+    /// Classifier for the CLI summary line.
+    pub outcome: TransferOutcome,
+    /// R47-F4: source-side paths that couldn't be scanned or read.
+    /// Destructive follow-ups in the caller — most importantly
+    /// `blit move`'s source-side delete — MUST inspect this and
+    /// refuse when non-empty.
+    pub unreadable_paths: Vec<String>,
+}
 
 /// Process-local destination extension: apply needed files in-process
 /// instead of requesting them from the source. Constructed only by
@@ -396,15 +592,11 @@ pub async fn run_local_session(
     };
 
     let stats = Arc::new(LocalApplyStats::default());
-    let plan_options = PlanOptions {
-        force_tar: options.force_tar,
-        ..PlanOptions::default()
-    };
     let local_apply = LocalApply {
         src_root: src_root.to_path_buf(),
         sink,
         prepare_source: Arc::clone(&fs_source),
-        plan_options,
+        plan_options: PlanOptions::default(),
         mirror_scope_filter: options.filter.clone_without_cache(),
         dry_run: options.dry_run,
         sink_workers: if options.debug_mode {
@@ -463,11 +655,10 @@ pub async fn run_local_session(
         .clone();
 
     // Outcome classification mirrors the old fast-path gate (strategy
-    // gate: mirror / checksum / force_tar / non-SizeMtime compare all
+    // gate: mirror / checksum / non-SizeMtime compare all
     // forced streaming, which always reported Transferred).
     let fast_path_shape = !options.mirror
         && !options.checksum
-        && !options.force_tar
         && matches!(options.compare_mode, LocalCompareMode::SizeMtime);
     let copied_files = outcome.summary.files_transferred as usize;
     let outcome_class = if fast_path_shape && scanned_files == 0 {
@@ -497,7 +688,6 @@ pub async fn run_local_session(
         large_tasks: stats.large_tasks.load(Ordering::Relaxed) as usize,
         large_bytes: stats.large_bytes.load(Ordering::Relaxed),
         outcome: outcome_class,
-        predictor_estimate: None,
         unreadable_paths,
     };
 
@@ -511,17 +701,35 @@ pub async fn run_local_session(
 /// planner/transfer split retired with the engine, so the whole wall
 /// time lands in `transfer_duration_ms`).
 fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptions) {
-    use crate::perf_history::{
-        append_local_record, OptionSnapshot, PerformanceRecord, TransferMode,
-    };
     if !options.perf_history {
         return;
     }
+    let record = build_local_record(summary, options);
+    if let Err(err) = crate::perf_history::append_local_record(&record) {
+        if options.verbose {
+            eprintln!("Failed to update performance history: {err:?}");
+        }
+    }
+}
+
+/// Construct the local session's [`PerformanceRecord`] without
+/// touching disk — split from the writer so the record-shape contract
+/// (R44-F1's "train and query on the same feature vector" invariant,
+/// carried forward as "record scanned features") stays unit-testable,
+/// the same rationale the engine's `build_performance_record` had.
+fn build_local_record(
+    summary: &LocalMirrorSummary,
+    options: &LocalMirrorOptions,
+) -> crate::perf_history::PerformanceRecord {
+    use crate::perf_history::{OptionSnapshot, PerformanceRecord, TransferMode};
     let snapshot = OptionSnapshot {
         dry_run: options.dry_run,
-        preserve_symlinks: options.preserve_symlinks,
-        include_symlinks: options.include_symlinks,
-        skip_unchanged: options.skip_unchanged,
+        // The engine-era option axes retired at otp-11b; the persisted
+        // snapshot schema keeps the fields — record the historical
+        // defaults (the only values production ever produced).
+        preserve_symlinks: true,
+        include_symlinks: true,
+        skip_unchanged: true,
         checksum: options.checksum,
         compare_mode: options
             .compare_mode
@@ -560,11 +768,7 @@ fn record_local_history(summary: &LocalMirrorSummary, options: &LocalMirrorOptio
     record.tar_shard_bytes = summary.tar_shard_bytes;
     record.large_tasks = summary.large_tasks as u32;
     record.large_bytes = summary.large_bytes;
-    if let Err(err) = append_local_record(&record) {
-        if options.verbose {
-            eprintln!("Failed to update performance history: {err:?}");
-        }
-    }
+    record
 }
 
 #[cfg(test)]
@@ -731,6 +935,323 @@ mod tests {
         assert_eq!(
             dest_subtree_rel(Path::new("/a/src"), Path::new("/a/src")),
             None
+        );
+    }
+
+    /// R44-F1 carried forward: the record's `(file_count, total_bytes)`
+    /// are the SCANNED features, not the copied counts.
+    #[test]
+    fn local_record_uses_scanned_features_not_copied() {
+        let summary = LocalMirrorSummary {
+            scanned_files: 1000,
+            scanned_bytes: 10 * 1024 * 1024,
+            planned_files: 5,
+            copied_files: 5,
+            total_bytes: 100 * 1024,
+            duration: std::time::Duration::from_millis(200),
+            ..LocalMirrorSummary::default()
+        };
+        let record = build_local_record(&summary, &LocalMirrorOptions::default());
+        assert_eq!(record.file_count, 1000);
+        assert_eq!(record.total_bytes, summary.scanned_bytes);
+        assert_eq!(record.transfer_duration_ms, 200);
+        assert_eq!(record.fast_path.as_deref(), Some("session"));
+    }
+
+    /// Bucket-shape fields still reflect actual apply activity.
+    #[test]
+    fn local_record_carries_bucket_counters() {
+        let summary = LocalMirrorSummary {
+            scanned_files: 100,
+            scanned_bytes: 1_000_000,
+            tar_shard_tasks: 2,
+            tar_shard_files: 7,
+            tar_shard_bytes: 30_000,
+            large_tasks: 1,
+            large_bytes: 5_000,
+            ..LocalMirrorSummary::default()
+        };
+        let record = build_local_record(&summary, &LocalMirrorOptions::default());
+        assert_eq!(record.tar_shard_tasks, 2);
+        assert_eq!(record.tar_shard_files, 7);
+        assert_eq!(record.tar_shard_bytes, 30_000);
+        assert_eq!(record.large_tasks, 1);
+        assert_eq!(record.large_bytes, 5_000);
+    }
+
+    /// codex otp-11a F9: `--null` runs keep the `null_sink` tag so
+    /// RunKind derivation classifies them as diagnostics, and dry-run
+    /// records carry `dry_run` for the same lane split.
+    #[test]
+    fn local_record_null_and_dry_run_lanes() {
+        use crate::perf_history::RunKind;
+        let summary = LocalMirrorSummary::default();
+        let null = build_local_record(
+            &summary,
+            &LocalMirrorOptions {
+                null_sink: true,
+                ..LocalMirrorOptions::default()
+            },
+        );
+        assert_eq!(null.fast_path.as_deref(), Some("null_sink"));
+        assert_eq!(null.run_kind, RunKind::NullSink);
+        let dry = build_local_record(
+            &summary,
+            &LocalMirrorOptions {
+                dry_run: true,
+                ..LocalMirrorOptions::default()
+            },
+        );
+        assert_eq!(dry.run_kind, RunKind::DryRun);
+    }
+
+    /// ue-r2-1c single-home mapping: every `LocalCompareMode` variant
+    /// resolves onto its wire `ComparisonMode`, and the legacy
+    /// `--checksum` bool upgrades the SizeMtime default only.
+    #[test]
+    fn compare_mode_resolves_onto_wire_enum() {
+        assert_eq!(
+            LocalCompareMode::SizeMtime.resolve_comparison_mode(false),
+            ComparisonMode::SizeMtime
+        );
+        assert_eq!(
+            LocalCompareMode::SizeMtime.resolve_comparison_mode(true),
+            ComparisonMode::Checksum
+        );
+        assert_eq!(
+            LocalCompareMode::Checksum.resolve_comparison_mode(false),
+            ComparisonMode::Checksum
+        );
+        assert_eq!(
+            LocalCompareMode::SizeOnly.resolve_comparison_mode(true),
+            ComparisonMode::SizeOnly,
+            "legacy checksum must not override an explicit non-default mode"
+        );
+        assert_eq!(
+            LocalCompareMode::Force.resolve_comparison_mode(false),
+            ComparisonMode::Force
+        );
+        assert_eq!(
+            LocalCompareMode::IgnoreTimes.resolve_comparison_mode(false),
+            ComparisonMode::IgnoreTimes
+        );
+    }
+
+    /// The perf-history snapshot mapping mirrors the wire mapping
+    /// (tuning buckets key on the full comparison policy, R59 #5).
+    #[test]
+    fn compare_mode_resolves_onto_snapshot_enum() {
+        use crate::perf_history::CompareModeSnapshot;
+        assert_eq!(
+            LocalCompareMode::SizeMtime.resolve_compare_snapshot(true),
+            CompareModeSnapshot::Checksum
+        );
+        assert_eq!(
+            LocalCompareMode::IgnoreTimes.resolve_compare_snapshot(false),
+            CompareModeSnapshot::IgnoreTimes
+        );
+        assert_eq!(
+            LocalCompareMode::SizeMtime.resolve_compare_snapshot(false),
+            CompareModeSnapshot::SizeMtime
+        );
+    }
+
+    /// The dest-subtree exclusion wrapper forwards everything outside
+    /// the excluded prefix and drops everything under it (the manifest
+    /// the destination diff sees never contains the destination).
+    #[tokio::test]
+    async fn dest_subtree_excluded_source_filters_the_stream() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        std::fs::create_dir_all(src_root.join("backup")).expect("mkdir");
+        std::fs::write(src_root.join("a.txt"), b"keep").expect("write");
+        std::fs::write(src_root.join("b.txt"), b"keep").expect("write");
+        std::fs::write(src_root.join("backup/old.txt"), b"drop").expect("write");
+
+        let wrapper = DestSubtreeExcludedSource {
+            inner: Arc::new(FsTransferSource::new(src_root.clone())),
+            exclude_rel: "backup".to_string(),
+        };
+        let (mut rx, handle) = wrapper.scan(None, Arc::default());
+        let mut forwarded = Vec::new();
+        while let Some(h) = rx.recv().await {
+            forwarded.push(h.relative_path);
+        }
+        forwarded.sort();
+        assert_eq!(forwarded, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        let count = handle.await.expect("join").expect("scan");
+        assert_eq!(count, 2, "the forwarded count excludes the subtree");
+    }
+
+    /// The streaming-overlap property, ported from the engine's
+    /// `first_work_lands_before_enumeration_completes`: with more than
+    /// one diff chunk of files, the first destination writes land
+    /// while the source scan is still running. A gating source holds
+    /// the manifest stream open after `DEST_DIFF_CHUNK` + a few
+    /// entries until the test observes a file at the destination.
+    #[tokio::test]
+    async fn first_apply_lands_before_enumeration_completes() {
+        use tokio::sync::oneshot;
+
+        struct GatedSource {
+            inner: Arc<dyn TransferSource>,
+            gate: StdMutex<Option<oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl TransferSource for GatedSource {
+            fn scan(
+                &self,
+                filter: Option<FileFilter>,
+                unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            ) -> (
+                mpsc::Receiver<FileHeader>,
+                tokio::task::JoinHandle<eyre::Result<u64>>,
+            ) {
+                let (mut inner_rx, inner_handle) = self.inner.scan(filter, unreadable_paths);
+                let (tx, rx) = mpsc::channel(8);
+                let gate = self
+                    .gate
+                    .lock()
+                    .expect("gate lock")
+                    .take()
+                    .expect("scan called once");
+                let handle = tokio::spawn(async move {
+                    let mut forwarded = 0u64;
+                    let mut gate = Some(gate);
+                    while let Some(h) = inner_rx.recv().await {
+                        forwarded += 1;
+                        if tx.send(h).await.is_err() {
+                            break;
+                        }
+                        // Hold the manifest open once a full diff chunk
+                        // (plus slack) is out, until the gate fires.
+                        if forwarded == 160 {
+                            if let Some(g) = gate.take() {
+                                let _ = g.await;
+                            }
+                        }
+                    }
+                    inner_handle
+                        .await
+                        .map_err(|err| eyre!("scan task panicked: {err}"))??;
+                    Ok(forwarded)
+                });
+                (rx, handle)
+            }
+
+            async fn prepare_payload(
+                &self,
+                payload: TransferPayload,
+            ) -> eyre::Result<crate::remote::transfer::payload::PreparedPayload> {
+                self.inner.prepare_payload(payload).await
+            }
+
+            async fn check_availability(
+                &self,
+                headers: Vec<FileHeader>,
+                unreadable_paths: Arc<StdMutex<Vec<String>>>,
+            ) -> eyre::Result<Vec<FileHeader>> {
+                self.inner
+                    .check_availability(headers, unreadable_paths)
+                    .await
+            }
+
+            async fn open_file(
+                &self,
+                header: &FileHeader,
+            ) -> eyre::Result<Box<dyn tokio::io::AsyncRead + Unpin + Send>> {
+                self.inner.open_file(header).await
+            }
+
+            fn root(&self) -> &Path {
+                self.inner.root()
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = tmp.path().join("src");
+        let dst_root = tmp.path().join("dst");
+        std::fs::create_dir_all(&src_root).expect("mkdir");
+        std::fs::create_dir_all(&dst_root).expect("mkdir");
+        for i in 0..200 {
+            std::fs::write(src_root.join(format!("f{i:03}.txt")), b"payload").expect("write");
+        }
+
+        let (gate_tx, gate_rx) = oneshot::channel();
+        // Watcher: fire the gate as soon as ANY file lands at the dest —
+        // proof that apply work started before the scan completed.
+        let dst_watch = dst_root.clone();
+        let watcher = tokio::spawn(async move {
+            for _ in 0..1000 {
+                let landed = std::fs::read_dir(&dst_watch)
+                    .map(|d| d.count())
+                    .unwrap_or(0);
+                if landed > 0 {
+                    let _ = gate_tx.send(());
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            false
+        });
+
+        let scan_source: Arc<dyn TransferSource> = Arc::new(GatedSource {
+            inner: Arc::new(FsTransferSource::new(src_root.clone())),
+            gate: StdMutex::new(Some(gate_rx)),
+        });
+        let sink: Arc<dyn TransferSink> = Arc::new(FsTransferSink::new(
+            src_root.clone(),
+            dst_root.clone(),
+            FsSinkConfig::default(),
+        ));
+        let local_apply = LocalApply {
+            src_root: src_root.clone(),
+            sink,
+            prepare_source: Arc::new(FsTransferSource::new(src_root.clone())),
+            plan_options: PlanOptions::default(),
+            mirror_scope_filter: FileFilter::default(),
+            dry_run: false,
+            sink_workers: 1,
+            unreadable: Arc::default(),
+            stats: Arc::new(LocalApplyStats::default()),
+        };
+        let open = SessionOpen {
+            initiator_role: TransferRole::Source as i32,
+            compare_mode: ComparisonMode::SizeMtime as i32,
+            in_stream_bytes: true,
+            ..Default::default()
+        };
+        let source_cfg = SourceSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::initiator(open),
+            plan_options: PlanOptions::default(),
+            data_plane_host: None,
+            instruments: SourceInstruments::default(),
+        };
+        let dest_cfg = DestinationSessionConfig {
+            hello: HelloConfig::default(),
+            endpoint: SessionEndpoint::Responder,
+            data_plane_host: None,
+            instruments: DestinationInstruments::default(),
+            local_apply: Some(local_apply),
+        };
+        let (a, b) = in_process_pair();
+        let (source_result, dest_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                tokio::join!(
+                    run_source(source_cfg, a, scan_source),
+                    run_destination(dest_cfg, b, DestinationTarget::Fixed(dst_root.clone())),
+                )
+            })
+            .await
+            .expect("session timed out — apply never overlapped the gated scan");
+        source_result.expect("source");
+        let outcome = dest_result.expect("destination");
+        assert_eq!(outcome.summary.files_transferred, 200);
+        assert!(
+            watcher.await.expect("watcher"),
+            "a destination write must land before enumeration completes"
         );
     }
 }

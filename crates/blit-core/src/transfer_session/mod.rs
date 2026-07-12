@@ -17,7 +17,10 @@ mod data_plane;
 pub mod local;
 pub mod transport;
 
-pub use local::run_local_session;
+pub use local::{
+    run_local_session, LocalCompareMode, LocalMirrorDeleteScope, LocalMirrorOptions,
+    LocalMirrorSummary, TransferOutcome,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -794,7 +797,7 @@ async fn responder_finish(
         // open (D-2026-06-20-1/-2); consumed by the dial when
         // the data plane lands (otp-4b).
         receiver_capacity: if local_role == TransferRole::Destination {
-            Some(crate::engine::local_receiver_capacity())
+            Some(crate::dial::local_receiver_capacity())
         } else {
             None
         },
@@ -2209,7 +2212,7 @@ pub async fn run_destination(
             // Dial contract: the byte receiver advertises capacity in
             // its open when it is the initiator (contract §Invariants 5).
             if open.receiver_capacity.is_none() {
-                open.receiver_capacity = Some(crate::engine::local_receiver_capacity());
+                open.receiver_capacity = Some(crate::dial::local_receiver_capacity());
             }
             SessionEndpoint::Initiator { open }
         }
@@ -2565,12 +2568,11 @@ async fn destination_session(
     let progress = instruments.progress;
     let compare_mode = ComparisonMode::try_from(negotiated.open.compare_mode)
         .unwrap_or(ComparisonMode::Unspecified);
+    // Session deletions run via the otp-6b mirror pass (a whole-tree
+    // diff at SourceDone), never a per-entry flag.
     let compare_opts = CompareOptions {
         mode: compare_mode.into(),
         ignore_existing: negotiated.open.ignore_existing,
-        // Session deletions run via the otp-6b mirror pass (a whole-tree diff
-        // at SourceDone), not the per-entry transfer-status diff below.
-        include_deletions: false,
     };
     // src_root is only consumed by local File payloads, which never
     // occur on a WIRE session destination (payload bytes arrive as
@@ -3596,8 +3598,8 @@ enum NeedVerdict {
 
 /// Does the destination need this manifest entry? Stats its own file
 /// and delegates the verdict to `manifest::header_transfer_status` —
-/// the same mode-aware owner `compare_manifests` uses, fed from a
-/// live stat instead of a materialized target manifest.
+/// the one mode-aware compare owner - fed from a live stat instead
+/// of a materialized target manifest.
 fn destination_needs(
     header: &FileHeader,
     dst_root: &Path,
@@ -4146,6 +4148,57 @@ mod tests {
         .expect("in-root deletion proceeds");
         assert_eq!(deleted, (1, 0));
         assert!(!dst.join("extraneous.txt").exists());
+    }
+
+    /// otp-11b: plan-only mode (the local carrier's dry-run) counts
+    /// the full plan without deleting anything.
+    #[test]
+    fn mirror_delete_pass_plan_only_counts_without_deleting() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("stale-dir")).expect("mkdir");
+        std::fs::write(tmp.path().join("stale-dir/f.txt"), b"x").expect("write");
+        std::fs::write(tmp.path().join("stale.txt"), b"x").expect("write");
+        let source_files: HashSet<String> = HashSet::new();
+        let filter = crate::fs_enum::FileFilter::default();
+        let abort = AtomicBool::new(false);
+        let counts = mirror_delete_pass(
+            tmp.path(),
+            &source_files,
+            &filter,
+            false,
+            None,
+            &abort,
+            false,
+        )
+        .expect("plan-only pass");
+        assert_eq!(counts, (2, 1));
+        assert!(tmp.path().join("stale.txt").exists());
+        assert!(tmp.path().join("stale-dir/f.txt").exists());
+    }
+
+    /// otp-11b: the split counters — files and dirs accounted
+    /// separately across nesting (the local summary's split).
+    #[test]
+    fn mirror_delete_pass_splits_file_and_dir_counts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("d1/d2")).expect("mkdir");
+        std::fs::write(tmp.path().join("d1/a.txt"), b"x").expect("write");
+        std::fs::write(tmp.path().join("d1/d2/b.txt"), b"x").expect("write");
+        let source_files: HashSet<String> = HashSet::new();
+        let filter = crate::fs_enum::FileFilter::default();
+        let abort = AtomicBool::new(false);
+        let counts = mirror_delete_pass(
+            tmp.path(),
+            &source_files,
+            &filter,
+            false,
+            None,
+            &abort,
+            true,
+        )
+        .expect("pass");
+        assert_eq!(counts, (2, 2));
+        assert!(!tmp.path().join("d1").exists());
     }
 
     #[test]

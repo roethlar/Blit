@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::buffer::BufferPool;
-use crate::engine::{initial_stream_proposal, local_receiver_capacity, TransferDial};
+use crate::dial::{initial_stream_proposal, local_receiver_capacity, TransferDial};
 use crate::generated::{session_error::Code, CapacityProfile, DataPlaneGrant, FileHeader};
 use crate::remote::transfer::payload::{PreparedPayload, TransferPayload};
 use crate::remote::transfer::pipeline::execute_receive_pipeline;

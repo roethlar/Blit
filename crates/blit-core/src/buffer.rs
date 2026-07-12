@@ -158,7 +158,7 @@ mod tests {
 /// **Integration with the engine**: This pool does NOT define default sizes.
 /// Data-plane paths construct it via [`BufferPool::for_data_plane`], which
 /// owns the sizing formula and the available-memory cap; the chunk size
-/// comes from the live dial (`crate::engine::TransferDial`).
+/// comes from the live dial (`crate::dial::TransferDial`).
 ///
 /// # Example
 /// ```ignore

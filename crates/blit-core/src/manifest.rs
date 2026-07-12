@@ -4,7 +4,6 @@
 //! operations to determine which files need to be transferred.
 
 use crate::generated::{ComparisonMode, FileHeader};
-use std::collections::HashMap;
 
 /// How to compare files between source and target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -51,115 +50,26 @@ pub enum FileStatus {
     SkippedExisting,
 }
 
-/// Result of comparing a single file.
-#[derive(Debug, Clone)]
-pub struct FileComparison {
-    pub relative_path: String,
-    pub status: FileStatus,
-    /// Size of the source file (for transfer planning).
-    pub size: u64,
-}
-
-/// Result of comparing two manifests.
-#[derive(Debug, Default)]
-pub struct ManifestDiff {
-    /// Files that need to be transferred (new or modified).
-    pub files_to_transfer: Vec<FileComparison>,
-    /// Files that exist on target but not on source (for mirror mode deletion).
-    pub files_to_delete: Vec<String>,
-    /// Total bytes that need to be transferred.
-    pub bytes_to_transfer: u64,
-    /// Total files on source.
-    pub source_file_count: usize,
-    /// Total files on target.
-    pub target_file_count: usize,
-}
-
-/// Options for manifest comparison.
+/// Options for the per-entry manifest comparison.
+/// (`include_deletions` and the materialized `compare_manifests`
+/// aggregate died at otp-11b with their last caller — session
+/// deletions are the otp-6b mirror pass, a whole-tree diff at
+/// SourceDone, never a per-entry flag.)
 #[derive(Debug, Clone, Default)]
 pub struct CompareOptions {
     /// How to compare files.
     pub mode: CompareMode,
     /// If true, skip files that already exist on target (regardless of differences).
     pub ignore_existing: bool,
-    /// If true, track files to delete for mirror mode.
-    pub include_deletions: bool,
 }
 
-/// Compare source manifest against target manifest to determine what needs transferring.
-///
-/// For push: source = client files, target = server files
-/// For pull: source = server files, target = client files
-///
-/// # Arguments
-/// * `source` - Files on the source side (what we have)
-/// * `target` - Files on the target side (what exists at destination)
-/// * `options` - Comparison options controlling behavior
-pub fn compare_manifests(
-    source: &[FileHeader],
-    target: &[FileHeader],
-    options: &CompareOptions,
-) -> ManifestDiff {
-    let mut diff = ManifestDiff {
-        source_file_count: source.len(),
-        target_file_count: target.len(),
-        ..Default::default()
-    };
-
-    // Build lookup from target manifest: path -> (size, mtime, checksum)
-    let target_map: HashMap<&str, (u64, i64, &[u8])> = target
-        .iter()
-        .map(|h| {
-            (
-                h.relative_path.as_str(),
-                (h.size, h.mtime_seconds, h.checksum.as_slice()),
-            )
-        })
-        .collect();
-
-    // Compare each source file against target
-    for src in source {
-        let status = header_transfer_status(
-            src,
-            target_map
-                .get(src.relative_path.as_str())
-                .map(|&(size, mtime, checksum)| (size, mtime, checksum)),
-            options,
-        );
-
-        if status == FileStatus::New || status == FileStatus::Modified {
-            diff.bytes_to_transfer += src.size;
-            diff.files_to_transfer.push(FileComparison {
-                relative_path: src.relative_path.clone(),
-                status,
-                size: src.size,
-            });
-        }
-    }
-
-    // Track deletions for mirror mode
-    if options.include_deletions {
-        let source_set: std::collections::HashSet<&str> =
-            source.iter().map(|h| h.relative_path.as_str()).collect();
-
-        for target_file in target {
-            if !source_set.contains(target_file.relative_path.as_str()) {
-                diff.files_to_delete.push(target_file.relative_path.clone());
-            }
-        }
-    }
-
-    diff
-}
-
-/// Per-entry form of [`compare_manifests`]: status of one source
-/// header against the target's view of the same path —
-/// `Some((size, mtime_seconds, checksum))` when the target has the
-/// path, `None` when it doesn't. This is the single owner of the
-/// mode-aware header-vs-target decision; `compare_manifests` and the
-/// unified `transfer_session` destination diff (which stats its own
+/// Status of one source header against the target's view of the same
+/// path — `Some((size, mtime_seconds, checksum))` when the target has
+/// the path, `None` when it doesn't. The single owner of the
+/// mode-aware header-vs-target decision: the unified
+/// `transfer_session` destination diff (which stats its own
 /// filesystem per entry instead of materializing a full target
-/// manifest) both call it.
+/// manifest) calls it for every manifest entry.
 pub fn header_transfer_status(
     src: &FileHeader,
     target: Option<(u64, i64, &[u8])>,
@@ -250,181 +160,17 @@ fn compare_file(
 
 #[cfg(test)]
 mod tests {
+    //! Direct pins on `header_transfer_status` — the live per-entry
+    //! compare owner every session diff routes through. Converted 1:1
+    //! from the retired `compare_manifests` test block at otp-11b
+    //! (the three aggregate-shape tests — empty manifests, deletion
+    //! tracking, the mixed scenario — retired with the aggregate;
+    //! deletions are pinned on the session mirror pass).
+
     use super::*;
 
     fn header(path: &str, size: u64, mtime: i64) -> FileHeader {
-        FileHeader {
-            relative_path: path.to_string(),
-            size,
-            mtime_seconds: mtime,
-            permissions: 0o644,
-            checksum: vec![],
-        }
-    }
-
-    fn default_opts() -> CompareOptions {
-        CompareOptions::default()
-    }
-
-    fn opts_with_deletions() -> CompareOptions {
-        CompareOptions {
-            include_deletions: true,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_empty_manifests() {
-        let diff = compare_manifests(&[], &[], &default_opts());
-        assert!(diff.files_to_transfer.is_empty());
-        assert!(diff.files_to_delete.is_empty());
-        assert_eq!(diff.bytes_to_transfer, 0);
-    }
-
-    #[test]
-    fn test_all_new_files() {
-        let source = vec![header("a.txt", 100, 1000), header("b.txt", 200, 1000)];
-        let target = vec![];
-
-        let diff = compare_manifests(&source, &target, &default_opts());
-        assert_eq!(diff.files_to_transfer.len(), 2);
-        assert_eq!(diff.bytes_to_transfer, 300);
-        assert!(diff
-            .files_to_transfer
-            .iter()
-            .all(|f| f.status == FileStatus::New));
-    }
-
-    #[test]
-    fn test_unchanged_files() {
-        let source = vec![header("a.txt", 100, 1000)];
-        let target = vec![header("a.txt", 100, 1000)];
-
-        let diff = compare_manifests(&source, &target, &default_opts());
-        assert!(diff.files_to_transfer.is_empty());
-        assert_eq!(diff.bytes_to_transfer, 0);
-    }
-
-    #[test]
-    fn test_modified_by_size() {
-        let source = vec![header("a.txt", 200, 1000)];
-        let target = vec![header("a.txt", 100, 1000)];
-
-        let diff = compare_manifests(&source, &target, &default_opts());
-        assert_eq!(diff.files_to_transfer.len(), 1);
-        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
-        assert_eq!(diff.bytes_to_transfer, 200);
-    }
-
-    #[test]
-    fn test_modified_by_mtime() {
-        let source = vec![header("a.txt", 100, 2000)];
-        let target = vec![header("a.txt", 100, 1000)];
-
-        let diff = compare_manifests(&source, &target, &default_opts());
-        assert_eq!(diff.files_to_transfer.len(), 1);
-        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
-    }
-
-    #[test]
-    fn test_target_newer_unchanged() {
-        // If target is newer, we don't overwrite (source is not newer) - safe default
-        let source = vec![header("a.txt", 100, 1000)];
-        let target = vec![header("a.txt", 100, 2000)];
-
-        let diff = compare_manifests(&source, &target, &default_opts());
-        assert!(diff.files_to_transfer.is_empty());
-    }
-
-    #[test]
-    fn test_force_mode_overwrites_newer() {
-        // Force mode should transfer even if target is newer
-        let source = vec![header("a.txt", 100, 1000)];
-        let target = vec![header("a.txt", 100, 2000)];
-
-        let opts = CompareOptions {
-            mode: CompareMode::Force,
-            ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert_eq!(diff.files_to_transfer.len(), 1);
-        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
-    }
-
-    #[test]
-    fn test_size_only_mode() {
-        // Size-only ignores mtime differences
-        let source = vec![header("a.txt", 100, 2000)];
-        let target = vec![header("a.txt", 100, 1000)];
-
-        let opts = CompareOptions {
-            mode: CompareMode::SizeOnly,
-            ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert!(diff.files_to_transfer.is_empty()); // Same size, so unchanged
-    }
-
-    #[test]
-    fn test_ignore_times_mode() {
-        // Ignore-times transfers everything unconditionally
-        let source = vec![header("a.txt", 100, 1000)];
-        let target = vec![header("a.txt", 100, 1000)]; // Identical file
-
-        let opts = CompareOptions {
-            mode: CompareMode::IgnoreTimes,
-            ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert_eq!(diff.files_to_transfer.len(), 1);
-    }
-
-    #[test]
-    fn test_ignore_existing() {
-        // Ignore-existing skips all files that exist on target
-        let source = vec![
-            header("exists.txt", 200, 2000), // Modified, but should be skipped
-            header("new.txt", 100, 1000),    // New, should transfer
-        ];
-        let target = vec![header("exists.txt", 100, 1000)];
-
-        let opts = CompareOptions {
-            ignore_existing: true,
-            ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert_eq!(diff.files_to_transfer.len(), 1);
-        assert_eq!(diff.files_to_transfer[0].relative_path, "new.txt");
-    }
-
-    #[test]
-    fn test_deletions_for_mirror() {
-        let source = vec![header("a.txt", 100, 1000)];
-        let target = vec![header("a.txt", 100, 1000), header("b.txt", 200, 1000)];
-
-        let diff = compare_manifests(&source, &target, &opts_with_deletions());
-        assert!(diff.files_to_transfer.is_empty());
-        assert_eq!(diff.files_to_delete.len(), 1);
-        assert_eq!(diff.files_to_delete[0], "b.txt");
-    }
-
-    #[test]
-    fn test_mixed_scenario() {
-        let source = vec![
-            header("unchanged.txt", 100, 1000),
-            header("modified.txt", 200, 2000),
-            header("new.txt", 300, 1000),
-        ];
-        let target = vec![
-            header("unchanged.txt", 100, 1000),
-            header("modified.txt", 150, 1000),
-            header("deleted.txt", 50, 1000),
-        ];
-
-        let diff = compare_manifests(&source, &target, &opts_with_deletions());
-        assert_eq!(diff.files_to_transfer.len(), 2); // modified + new
-        assert_eq!(diff.files_to_delete.len(), 1); // deleted
-        assert_eq!(diff.bytes_to_transfer, 500); // 200 + 300
+        header_with_checksum(path, size, mtime, vec![])
     }
 
     fn header_with_checksum(path: &str, size: u64, mtime: i64, checksum: Vec<u8>) -> FileHeader {
@@ -437,63 +183,198 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_checksum_mode_same_checksum_skips() {
-        // Same size and same checksum - should skip
-        let checksum = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        let source = vec![header_with_checksum("a.txt", 100, 1000, checksum.clone())];
-        let target = vec![header_with_checksum("a.txt", 100, 2000, checksum)]; // different mtime
+    fn status(src: &FileHeader, target: Option<&FileHeader>, opts: &CompareOptions) -> FileStatus {
+        header_transfer_status(
+            src,
+            target.map(|t| (t.size, t.mtime_seconds, t.checksum.as_slice())),
+            opts,
+        )
+    }
 
-        let opts = CompareOptions {
-            mode: CompareMode::Checksum,
+    fn mode_opts(mode: CompareMode) -> CompareOptions {
+        CompareOptions {
+            mode,
             ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert!(diff.files_to_transfer.is_empty()); // Checksums match, no transfer
+        }
     }
 
     #[test]
-    fn test_checksum_mode_different_checksum_transfers() {
-        // Same size but different checksum - should transfer
-        let source = vec![header_with_checksum("a.txt", 100, 1000, vec![1, 2, 3, 4])];
-        let target = vec![header_with_checksum("a.txt", 100, 1000, vec![5, 6, 7, 8])];
-
-        let opts = CompareOptions {
-            mode: CompareMode::Checksum,
-            ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert_eq!(diff.files_to_transfer.len(), 1);
-        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
+    fn absent_target_is_new() {
+        let src = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, None, &CompareOptions::default()),
+            FileStatus::New
+        );
     }
 
     #[test]
-    fn test_checksum_mode_no_checksums_transfers() {
-        // Same size but no checksums available - should transfer for verification
-        let source = vec![header("a.txt", 100, 1000)]; // empty checksum
-        let target = vec![header("a.txt", 100, 1000)]; // empty checksum
-
-        let opts = CompareOptions {
-            mode: CompareMode::Checksum,
-            ..Default::default()
-        };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert_eq!(diff.files_to_transfer.len(), 1);
-        assert_eq!(diff.files_to_transfer[0].status, FileStatus::Modified);
+    fn matching_size_and_mtime_is_unchanged() {
+        let src = header("a.txt", 100, 1000);
+        let dst = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, Some(&dst), &CompareOptions::default()),
+            FileStatus::Unchanged
+        );
     }
 
     #[test]
-    fn test_checksum_mode_size_differs_transfers() {
-        // Different size - should transfer regardless of checksum
-        let checksum = vec![1, 2, 3, 4];
-        let source = vec![header_with_checksum("a.txt", 200, 1000, checksum.clone())];
-        let target = vec![header_with_checksum("a.txt", 100, 1000, checksum)];
+    fn size_difference_is_modified() {
+        let src = header("a.txt", 200, 1000);
+        let dst = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, Some(&dst), &CompareOptions::default()),
+            FileStatus::Modified
+        );
+    }
 
+    #[test]
+    fn newer_source_mtime_is_modified() {
+        let src = header("a.txt", 100, 2000);
+        let dst = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, Some(&dst), &CompareOptions::default()),
+            FileStatus::Modified
+        );
+    }
+
+    /// The data-safe default (otp-4a owner ack): same size, NEWER
+    /// destination — skip, never clobber.
+    #[test]
+    fn newer_target_is_unchanged_safe_default() {
+        let src = header("a.txt", 100, 1000);
+        let dst = header("a.txt", 100, 2000);
+        assert_eq!(
+            status(&src, Some(&dst), &CompareOptions::default()),
+            FileStatus::Unchanged
+        );
+    }
+
+    /// R58-F9: Force means "transfer regardless of target state" — the
+    /// compare layer must not second-guess, even a newer target.
+    #[test]
+    fn force_overwrites_newer_target() {
+        let src = header("a.txt", 100, 1000);
+        let dst = header("a.txt", 100, 2000);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::Force)),
+            FileStatus::Modified
+        );
+    }
+
+    #[test]
+    fn size_only_ignores_mtime_difference() {
+        let src = header("a.txt", 100, 2000);
+        let dst = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::SizeOnly)),
+            FileStatus::Unchanged
+        );
+    }
+
+    #[test]
+    fn ignore_times_transfers_identical_file() {
+        let src = header("a.txt", 100, 1000);
+        let dst = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::IgnoreTimes)),
+            FileStatus::Modified
+        );
+    }
+
+    /// `--ignore-existing`: any existing target skips regardless of
+    /// differences; absent targets still transfer.
+    #[test]
+    fn ignore_existing_skips_existing_but_not_new() {
         let opts = CompareOptions {
-            mode: CompareMode::Checksum,
+            ignore_existing: true,
             ..Default::default()
         };
-        let diff = compare_manifests(&source, &target, &opts);
-        assert_eq!(diff.files_to_transfer.len(), 1);
+        let modified_src = header("exists.txt", 200, 2000);
+        let dst = header("exists.txt", 100, 1000);
+        assert_eq!(
+            status(&modified_src, Some(&dst), &opts),
+            FileStatus::SkippedExisting
+        );
+        let new_src = header("new.txt", 100, 1000);
+        assert_eq!(status(&new_src, None, &opts), FileStatus::New);
+    }
+
+    /// Checksum mode: content-equal skips even with a different mtime
+    /// (the cell `--checksum` exists for).
+    #[test]
+    fn checksum_same_checksum_skips_despite_mtime() {
+        let sum = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let src = header_with_checksum("a.txt", 100, 1000, sum.clone());
+        let dst = header_with_checksum("a.txt", 100, 2000, sum);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::Checksum)),
+            FileStatus::Unchanged
+        );
+    }
+
+    #[test]
+    fn checksum_different_checksum_transfers() {
+        let src = header_with_checksum("a.txt", 100, 1000, vec![1, 2, 3, 4]);
+        let dst = header_with_checksum("a.txt", 100, 1000, vec![5, 6, 7, 8]);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::Checksum)),
+            FileStatus::Modified
+        );
+    }
+
+    /// Missing checksums under Checksum mode transfer conservatively
+    /// (server checksums disabled ⇒ content cannot be verified).
+    #[test]
+    fn checksum_missing_checksums_transfer_conservatively() {
+        let src = header("a.txt", 100, 1000);
+        let dst = header("a.txt", 100, 1000);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::Checksum)),
+            FileStatus::Modified
+        );
+    }
+
+    /// `ignore_existing` wins BEFORE the mode is consulted — even
+    /// Checksum-mode candidates skip when the target exists.
+    #[test]
+    fn ignore_existing_wins_over_checksum_mode() {
+        let opts = CompareOptions {
+            mode: CompareMode::Checksum,
+            ignore_existing: true,
+        };
+        let src = header_with_checksum("a.txt", 100, 1000, vec![1, 2]);
+        let dst = header_with_checksum("a.txt", 100, 1000, vec![3, 4]);
+        assert_eq!(status(&src, Some(&dst), &opts), FileStatus::SkippedExisting);
+    }
+
+    /// Every mode reports an absent target as New (the mode only
+    /// applies once a target exists).
+    #[test]
+    fn absent_target_is_new_in_every_mode() {
+        for mode in [
+            CompareMode::Default,
+            CompareMode::SizeOnly,
+            CompareMode::IgnoreTimes,
+            CompareMode::Force,
+            CompareMode::Checksum,
+        ] {
+            let src = header("a.txt", 100, 1000);
+            assert_eq!(
+                status(&src, None, &mode_opts(mode)),
+                FileStatus::New,
+                "mode {mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checksum_size_difference_transfers_without_hashing() {
+        let sum = vec![1, 2, 3, 4];
+        let src = header_with_checksum("a.txt", 200, 1000, sum.clone());
+        let dst = header_with_checksum("a.txt", 100, 1000, sum);
+        assert_eq!(
+            status(&src, Some(&dst), &mode_opts(CompareMode::Checksum)),
+            FileStatus::Modified
+        );
     }
 }
