@@ -72,7 +72,8 @@ kill that lead.
   on NTFS) plus whatever the pf-1 trace names; zoey showing 1.105 says
   the residue is not Windows-only.
 - **H4 (P2) — NARROWED (review 2026-07-12)**: binary record framing is
-  unchanged since `0f922de` (`dial.rs`), and old small push ALSO
+  unchanged since `0f922de` (`remote/transfer/data_plane.rs`; the
+  earlier `dial.rs` attribution was wrong), and old small push ALSO
   opened at one stream (after its 128-file early flush) then resized
   live — so neither framing nor "fixed-count opening" discriminates.
   What survives of H4 is ramp cadence/shard-boundary timing only, and
@@ -88,6 +89,21 @@ kill that lead.
   the one-token/one-ADD contract (`TRANSFER_SESSION.md` §Phase
   ordering), so any H5 fix triggers this plan's Contract
   stop-and-amend rule BEFORE implementation.
+- **H6 (P2; added by review round 2, 2026-07-12)**: per-member
+  need-claim locking on the TCP receive plane — TCP receive
+  (`NeedListSink`) takes a separate mutex/hash-set claim per member
+  (`transfer_session/data_plane.rs:1167`), while the gRPC path claims
+  a whole shard under one lock (`transfer_session/mod.rs:3047`).
+  TCP-only and per-member (so small-file-heavy) — matches the P2
+  signature independently of H5. Discriminated by the pf-1 per-member
+  locking timings (Method 3(e), now unconditional). Historical
+  control (review round 2): check whether the `NeedListSink`
+  per-member claim already exists at 0f922de — if it does, H6 must
+  name what in the new layout multiplies claim frequency (need-batch
+  shape per Method 3(c)), otherwise a pre-existing lock cannot alone
+  explain a regression introduced after 0f922de. If H6 is confirmed,
+  the P2 fix bar applies unchanged (≤ 1.10 against BOTH references,
+  BOTH rigs); no separate bar is granted.
 
 ## Method (the investigation slice — no behavior changes)
 
@@ -103,22 +119,35 @@ kill that lead.
    the timing-harness variant MUST add a TCP-carrier mode; it reports
    phase timings per layout for mixed and small fixtures. A positive
    layout-dependent delta in a named phase confirms; local ABSENCE
-   does not kill H1 (loopback removes the Windows↔Mac topology) — an
-   H-kill needs either local reproduction or a rig-side instrumented
-   run.
+   does not kill H1 (loopback removes the Windows↔Mac topology). So
+   that H1 stays falsifiable: if the local run is negative, pf-1
+   REQUIRES the rig-side instrumented run on netwatch-01 (same spans,
+   CELLS fixtures) before pf-1 may close — every hypothesis exits
+   pf-1 confirmed or killed, never "unfalsified" (review round 2).
 3. **Historical control, then bisect P2**: old push is deleted from
    HEAD but NOT unavailable — the pinned `0f922de` source and binaries
    build and run; the control is an old-vs-new run on identical
-   fixtures with the same instrumentation. Experiments, corrected per
+   fixtures. The new tracing spans do NOT exist in `0f922de` (review
+   round 2), so the control is observed externally — phase boundaries
+   from wire + filesystem timestamps and stdout progress, with event
+   semantics mapped span-for-span to the new names — or, where that is
+   too coarse, a minimal probe backport onto the pinned `0f922de`
+   source with identical event names. Either way every timed
+   configuration runs an instrumentation-on/off pair to bound observer
+   overhead (per-member tracing across ~10k files can perturb a
+   double-digit share of the measured gap). Experiments, corrected per
    review 2026-07-12: (a) precreate-vs-not stays but is
    environmental-only (it cannot attribute code); (b) the flush/
    instrument toggles missed the tar-shard path — instrument the
-   tar-shard write path itself; (c) DROPPED — the ramp pin reproduces
-   the same one-stream opening old push already had, so it
-   discriminates nothing; (d) NEW, for H5: measure the
+   tar-shard write path itself; (c) REPLACED (review round 2) — the
+   ramp pin discriminated nothing (old push also opened at one
+   stream), but H4 keeps a code-level counterfactual: a batch-cadence
+   replay toggle that processes need batches at the recorded old-push
+   shard-boundary cadence; (d) NEW, for H5: measure the
    manifest-complete→first-TCP-payload gap new vs old (overlap
-   experiment); (e) per-member locking/framing timings only if the
-   pf-1 trace implicates them.
+   experiment); (e) per-member locking/framing timings are now an
+   unconditional pf-1 measurement (they discriminate H6), not
+   contingent on the trace implicating them.
 4. Every experiment lands as a committed probe record under
    `docs/bench/otp12-perf-<date>/` (timings + the flag matrix), codex
    loop per slice as usual.
@@ -138,6 +167,12 @@ kill that lead.
 - P2 fixed ⇔ `push_tcp_small` ≤ 1.10 against BOTH references
   (same-session AND committed) on BOTH rigs (CELLS sessions), grpc
   small parity unregressed against both.
+- Cross-direction converge-up is a SEPARATE bar (review round 2):
+  every final cross-direction row must still meet the parent plan's
+  new-vs-old ceiling (`ONE_TRANSFER_PATH.md` acceptance) or satisfy
+  the registered platform-residue discriminator — invariance plus the
+  per-direction bars alone would pass if a "fix" slowed BOTH layouts
+  equally, violating converge-up.
 - No suite regressions; the floor is ≥ the CURRENT count (1484 —
   ≥1483 would permit silently losing a test); any new pins carry
   guard proofs (temporary revert) per the loop.
