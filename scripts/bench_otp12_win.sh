@@ -378,6 +378,12 @@ drop_caches() {   # $1 = run label; sets RUN_DRAIN (pair-voiding, D2)
     local outcome
     outcome=$(drain_host || true)
     RUN_DRAIN=${outcome:-DRAIN-ERROR}
+    # Strip CRs BEFORE this lands in runs.csv: pwsh emits CRLF, and a
+    # bare \r mid-row makes python's universal-newline csv reader split
+    # the row before its `valid` field — every comparison then reads
+    # INCOMPLETE (found live: the whole first e21cf84 session verdicted
+    # INCOMPLETE off 196 perfectly valid runs).
+    RUN_DRAIN=${RUN_DRAIN//$'\r'/}
     RUN_DRAIN=${RUN_DRAIN// /_}
     echo "$1: $RUN_DRAIN" >> "$OUT_DIR/drain.log"
     [[ "$RUN_DRAIN" == drained* ]] || log "  WARNING: $1 window UNDRAINED ($RUN_DRAIN) — pair voided, will re-run"
