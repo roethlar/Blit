@@ -196,9 +196,10 @@ capability-parity list:
   journal + modify `src/sub/deep.txt` → "Up to date", destination
   stale (transcript: `docs/bench/otp11-local-2026-07-11/README.md`).
   The honest sound-vs-sound no-op baseline is the old path's full
-  pass (610 ms on 10k files); the session's 219 ms beats it 2.8× —
-  the no-op gate cell PASSES against that baseline. Pinned on the
-  session route by `deep_modification_after_warm_runs_syncs`.
+  pass, certified by 5-run medians with its journal cache cleared per
+  run (507 ms on 10k files); the session's 226 ms beats it 2.2× — the
+  no-op gate cell PASSES against that baseline. Pinned on the session
+  route by `deep_modification_after_warm_runs_syncs`.
   `TransferOutcome::JournalSkip` and its CLI line die.
   **Filed future capability (design sketch, own slice set after this
   plan ships)**: journal-assisted no-op done SOUNDLY as a negotiated
@@ -292,15 +293,16 @@ retired here with `auto_tune/`.
 
 ## Test-floor arithmetic (amended per codex design F10)
 
-Post-11a suite: 1510/0 (baseline 1488 + the 22 landed 11a pins).
-11b retirements, exact: 16 orchestrator unit + 19 engine-non-dial unit
-(strategy 3, streaming_plan 2, tuning 12, history 2) + 6 auto_tune +
-10 blit-core integration (local_transfers 7, predictor_streaming 2,
+Post-11a suite: 1513/0 (baseline 1488 + the 22 landed 11a pins + the
+2 fix-round pins + the journal-hole regression pin). 11b retirements,
+exact: 16 orchestrator unit + 19 engine-non-dial unit (strategy 3,
+streaming_plan 2, tuning 12, history 2) + 6 auto_tune + 10 blit-core
+integration (local_transfers 7, predictor_streaming 2,
 engine_streaming_plan 1) + 16 manifest `compare_manifests` block (ALL
 16 drive `compare_manifests`; none pins `header_transfer_status`
 directly — the earlier "live-half tests stay" claim was wrong) +
-4 `plan_local_mirror` = **71** → 1439 without replacements; the
-end-of-plan ≥1483 floor needs **≈ +44 real pins** by otp-13. Named
+4 `plan_local_mirror` = **71** → 1442 without replacements; the
+end-of-plan ≥1483 floor needs **≈ +41 real pins** by otp-13. Named
 closure sources for 11b: direct `header_transfer_status` unit ports
 (~8 — the live compare owner deserves direct pins), local `--resume`
 behavior pins (2), un-consolidating the 11a orchestrator ports back

@@ -78,10 +78,9 @@ interleaved, per-binary presync + warmup absorbed in runs 1–2:
 The OLD path's steady state is its change-journal skip engaging. The
 owner rejected both "accept the 219 ms" and "keep the journal
 shortcut" (FAST vs SIMPLE) — and the investigation of the real fix
-found the 21 ms was **unsound**: on macOS/Linux the probe's
-`NoChanges` verdict decays to ROOT-directory mtime equality whenever
-the global event counter moved (it always has, between runs), and a
-deep file modification never touches the root dir's mtime.
+found the 21 ms was **unsound**: the probe's `NoChanges` verdict
+rests on root-dir metadata that a deep file modification never
+touches (per-platform mechanism under the verdict below).
 
 **Reproduced against the pre-otp-11 binary (`blit-old` @ `d2bd843`,
 2026-07-12)** — warm the journal with 3 mirror runs, modify
@@ -105,10 +104,29 @@ same hole.)
 
 **Verdict for the cell**: the 21 ms target is fraudulent FAST — it
 violates RELIABLE (a mirror that reports "Up to date" while source
-and destination differ). The sound-vs-sound comparison is old run 2
-(610 ms, full pass + snapshot write) vs the session (219 ms): the
-session route is **2.8× faster than every sound no-op in the tree**
-— the cell PASSES the converge-up gate against the honest baseline.
+and destination differ). The mechanism per platform: macOS's
+event-id arm always differs across runs (global counter), so its
+root-MTIME fallback decides; Linux's FIRST arm is the root dir's
+CTIME, which a deep write also leaves equal — it never reaches the
+fallback; Windows's strict-USN arm is sound but requires a
+write-quiet volume, decaying to the same mtime fallback otherwise.
+
+**Certified sound-vs-sound cell** (codex addendum A1: the earlier
+610 ms figure was a single observation): the old binary re-run with
+its journal cache removed before each run (probe → Unknown → its
+SOUND full no-op pass), 5 interleaved runs, medians:
+
+| run | old (sound) | new |
+|-----|----:|----:|
+| 1 (cold) | 1751 ms | 1834 ms |
+| 2 | 519 ms | 223 ms |
+| 3 | 507 ms | 226 ms |
+| 4 | 507 ms | 226 ms |
+| 5 | 505 ms | 225 ms |
+| **median** | **507 ms** | **226 ms** |
+
+The session route is **2.2× faster than the old path's sound no-op —
+the cell PASSES the converge-up gate against the honest baseline.**
 The 11b deletion of `change_journal/` + the engine's skip now removes
 a data-loss bug, not a feature. Pinned on the session route by
 `deep_modification_after_warm_runs_syncs`

@@ -648,12 +648,16 @@ async fn null_sink_counts_but_writes_nothing() -> Result<()> {
 }
 
 /// The old engine's journal fast path silently skipped DEEP
-/// modifications: its macOS/Linux `NoChanges` verdict decayed to
-/// ROOT-dir mtime equality, which a write to `src/sub/deep.txt` never
-/// touches — reproduced against the pre-otp-11 binary 2026-07-12
-/// ("Up to date" while src/dest differed; transcript in
-/// `docs/bench/otp11-local-2026-07-11/README.md`). The session route
-/// diffs every run: a deep change after warm repeated runs MUST land.
+/// modifications: its `NoChanges` verdict rested on root-dir
+/// metadata a deep write never touches (macOS: the event-id arm
+/// always differs across runs, so the root-MTIME fallback decides;
+/// Linux: the FIRST arm is the root dir's CTIME, equally untouched;
+/// Windows: the strict-USN arm needs a write-quiet volume, decaying
+/// to the same mtime fallback) — reproduced against the pre-otp-11
+/// binary 2026-07-12 ("Up to date" while src/dest differed;
+/// transcript in `docs/bench/otp11-local-2026-07-11/README.md`). The
+/// session route diffs every run: a deep change after warm repeated
+/// runs MUST land.
 #[tokio::test]
 async fn deep_modification_after_warm_runs_syncs() -> Result<()> {
     let tmp = tempdir()?;

@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-12
 
-- Recent sessions (2026-07-11/12, 44th–45th): **otp-10 fully closed (cutover + deletion) and otp-11a closed through the codex loop** — local transfers ride the session (in-process transport + local byte-carrier); the deletion slice 11b is BLOCKED on one owner question (change-journal retirement cost, Blocked below). Suite **1512**. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked.
+- Recent sessions (2026-07-11/12, 44th–45th): **otp-10 fully closed (cutover + deletion) and otp-11a closed through the codex loop** — local transfers ride the session (in-process transport + local byte-carrier); the journal question RESOLVED (old fast path proven unsound; sound-vs-sound the session wins 2.2×) so **otp-11b is unblocked**. Suite **1513**. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -154,7 +154,8 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   decays to root-dir mtime equality, so deep modifications silently
   never synced (REPRODUCED against the pre-otp-11 binary; transcript
   in `docs/bench/otp11-local-2026-07-11/README.md`). Sound-vs-sound
-  the session no-op wins 2.8× (219 ms vs 610 ms/10k) → gate passes;
+  the session no-op wins 2.2× (226 vs 507 ms/10k, 5-run medians) →
+  gate passes;
   11b's journal deletion removes a data-loss bug. Pinned:
   `deep_modification_after_warm_runs_syncs`. Sound O(changes) no-op
   (journal REPLAY as a session phase, both carriers) filed as future
@@ -187,13 +188,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 ## Handoff log (newest first, keep ≤ 3)
 
 - **2026-07-12 (45th, this session)** — **otp-11a CLOSED (design doc
-  + slice + fix round + the journal-hole investigation; suite 1488 →
-  1513; perf gate PASS against sound baselines — the old 21 ms
-  journal skip proven unsound, repro recorded)**. In-flight: ⚠ the
-  ADDENDUM `d74c1ac`'s codex review is PENDING (codex quota
-  exhausted; retry after reset, record to
-  `.review/results/otp-11a-addendum.codex.md`) — run BEFORE otp-11b.
-  Tree clean otherwise.
+  + slice + fix round + the journal-hole investigation + addendum
+  review; suite 1488 → 1513; perf gate PASS against CERTIFIED sound
+  baselines — the old 21 ms journal skip proven unsound, repro
+  recorded, codex-confirmed)**. In-flight: none; tree clean.
+  **Next**: otp-11b (unblocked).
 - **2026-07-11 (44th)** — otp-10c closed (relay removal + the cutover
   deletion); suite 1605 → 1488. Owner ask pending: `725aa07` snapshot.
 - **2026-07-11 (43rd)** — otp-10a/10b closed; verb cutover complete.
