@@ -273,7 +273,10 @@ old scripts, both recorded sharp edges:
 - **Multi-token flags ride an array**, not an unquoted scalar.
 
 CSV schema (all rigs):
-`runs.csv`: `cell,arm,build,initiator,run,ms,flush_ms,exit,drain`
+`runs.csv`: `cell,arm,build,initiator,run,ms,flush_ms,exit,drain,valid`
+(`valid` = the PAIR's fate under the D2 valid-run rule — an
+individually-clean run whose partner voided reads `no`; amended at the
+12a harness slice)
 `summary.csv`:
 `cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted`
 (medians over valid runs only — the D2 valid-run rule)
