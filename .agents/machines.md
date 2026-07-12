@@ -8,18 +8,19 @@
 - zig + cargo-zigbuild toolchain (aarch64-musl static daemon builds).
 - ssh ControlMaster sockets configured for the rigs.
 
-## Additional Linux hosts (owner-offered 2026-07-12: "you can build
-## binaries for linux")
+## Additional Linux hosts — BUILD ONLY (owner rule, 2026-07-12)
+
+Owner: "Use it only for building binaries. Same with the VM. Build
+only if needed." Neither is a benchmark end, ever — and native builds
+there are a FALLBACK only (the Mac's zigbuild already cross-compiles
+every Linux target in play).
 
 - `michael@magneto` — Arch Linux x86_64 (kernel 7.1.3-arch1-1), 4
-  cores, 32 GiB RAM; active NIC `enp1s0f1` is **10 GbE** (dual-port
-  card, second port + 2 onboard ports down). ssh key auth works.
-  Probed 2026-07-12. Target: plain `x86_64-unknown-linux-musl`
-  zigbuild (same recipe as skippy staging).
-- Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Functional
-  smoke target only: it shares the Mac's physical disk and carries
-  virtualization timing noise, so it is NOT a verdict-cell end for
-  otp-12 evidence.
+  cores, 32 GiB RAM, 10 GbE. **Busy BitTorrent machine** — do not
+  benchmark against it or load it. ssh key auth works (probed
+  2026-07-12).
+- Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Build-only
+  fallback likewise.
 
 ## Rig residue (recorded 2026-07-10)
 
