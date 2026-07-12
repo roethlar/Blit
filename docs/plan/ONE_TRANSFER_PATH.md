@@ -114,6 +114,12 @@ no second code path to differ.
       (large / 10k-small / mixed): wall time initiating from end A vs
       end B, and via push-verb vs pull-verb, differs only within
       run-to-run noise (±10%). Matrix committed as evidence.
+      (Instantiation: no same-fs-class 10 GbE pair exists in the
+      fleet; the owner designated Mac↔Windows as the closest-spec
+      cross-direction rig, 2026-07-10 — otp-2w README §Status. The
+      invariance A/B stays valid there because both arms of a pair
+      share the same endpoints, so endpoint asymmetry cancels within
+      each pair; cross-direction evaluation per D-2026-07-12-1.)
 - [ ] **Converge up, measured (codex F4)**: before cutover, the
       corrected symmetric-fs harness records a per-cell baseline of
       the OLD paths, both directions; after cutover, every unified

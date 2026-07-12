@@ -101,13 +101,16 @@ a substitution records fresh baselines and is per-direction only.
 
 ### D1 — matched-pair interleaved A/B (build identity is the axis)
 
-Each comparison alternates arms per run — `old,new,old,new,…` (rig Z/W
-converge-up) or `delegated,direct,…` (rig D) — with `RUNS=4` per arm (8
-timed runs per comparison). Interleaving is the verdict method, not a
-nicety: zoey's tiered write path never fully stops being stateful (otp-2
-README §Run-to-run stability) and interleaving holds Defender state equal
-across arms on Windows (otp-2w README §Readings). Arm swap = stop one
-daemon pair, start the other (PID-scoped, stale-refusal preserved), always
+Each comparison interleaves arms in the deterministic counterbalanced
+order `A,B,B,A,A,B,B,A` (ABBA per pair-of-pairs — each arm leads half the
+pairs, so arm never confounds with within-pair position on the stateful
+rigs; pre-registered, no randomness, codex design F5) with `RUNS=4` per
+arm (8 timed runs per comparison). A = `old` (rig Z/W converge-up) or
+`delegated` (rig D). Interleaving is the verdict method, not a nicety:
+zoey's tiered write path never fully stops being stateful (otp-2 README
+§Run-to-run stability) and interleaving holds Defender state equal across
+arms on Windows (otp-2w README §Readings). Arm swap = stop one daemon
+pair, start the other (PID-scoped, stale-refusal preserved), always
 outside the timed window. Old arms exist only where an old baseline exists
 (rigs Z and W); invariance and delegated arms are new-build only — the old
 path is known non-invariant (the plan's founding defect) and has no
@@ -126,13 +129,28 @@ sha256 manifest recorded in the evidence (Known gaps).
 
 All statistics per the recorded baselines: integer ms; median of 4, even
 count = floor of the mean of the middle two; per-cell spread
-`(max−min)/min` recorded; undrained runs flagged loudly, never silent.
+`(max−min)/min` recorded.
 
-- **Per-direction converge-up (rigs Z and W, hard bar)**:
-  `new_median ≤ old_median × 1.10`, old = the same-session interleaved arm.
-  The committed 2026-07-10 medians appear as a corroboration column; a
-  large disagreement between same-session old and the recorded baseline is
-  flagged (rig state changed) but the same-session pair is the comparison.
+**Valid-run rule (codex design F7)**: a run with a nonzero blit exit OR an
+undrained pre-run window VOIDS its whole interleave pair (both arms at
+that counterbalance position); the pair is re-run — appended at the same
+position in the order — until `RUNS` valid pairs exist, capped at 2×RUNS
+pair attempts per comparison. At the cap the cell is recorded
+`INCOMPLETE` with its drain log: surfaced, never a silent pass and never
+a median over fewer than RUNS valid runs.
+
+- **Per-direction converge-up (rigs Z and W, hard bar)**: a clean PASS
+  requires `new_median ≤ ×1.10` of **BOTH** references — the same-session
+  interleaved old arm AND the committed 2026-07-10 baseline median for
+  that cell (codex design F2: the fixed pre-cutover bar must not be
+  loosened by a slower old rerun). A cell passing same-session but
+  failing the committed reference is recorded `FAIL-REFERENCE-DRIFT` and
+  gets one pre-registered fresh-session re-run; a persisting drift stands
+  as a recorded failure for the otp-13 walk. **Every unified arm of a
+  data direction — both initiators on rig W, both blocks — must meet
+  these bars independently** (codex design F3: the invariance ratio is an
+  additional constraint, never a substitute ceiling — otherwise
+  tolerances compound to 1.21×).
 - **Invariance (rig W, hard bar — the owner's sentence)**: per fixture ×
   carrier × data direction, arm A (Mac-initiated) vs arm B
   (Windows-initiated): `max(A,B)/min(A,B) ≤ 1.10`. TCP rows are the verdict
@@ -175,11 +193,12 @@ New plumbing this requires, each keyed by ROLE not verb:
 
 1. **A daemon on the Mac** (new build only): config written like the rig
    scripts do today (`[daemon] bind/port/no_mdns` + `[[module]] name =
-   "bench"` pointing at `$MAC_MODULE_ROOT`, default
-   `$MAC_WORK/mac-module`), local launch, pid file, stale-refusal,
-   PID-scoped teardown. `src_<w>` fixture dirs are exposed inside the
-   module root (moved/staged once, untimed). macOS application firewall
-   must admit `blit-daemon` — gated by a preflight smoke transfer from
+   "bench"` pointing at `$MAC_MODULE_ROOT`, **default `$MAC_WORK`
+   itself** — the module exports the exact fixture trees arm A pushes,
+   so both initiators read the same physical inodes; no fixture copy or
+   move on the Mac (codex design F6)), local launch, pid file,
+   stale-refusal, PID-scoped teardown. macOS application firewall must
+   admit `blit-daemon` — gated by a preflight smoke transfer from
    Windows, not assumed.
 2. **A Windows client** (`blit.exe`, new build, built natively alongside
    the daemon). Its timed window is measured ON Windows —
@@ -245,14 +264,16 @@ precedent: duplicate the shape, don't refactor recorded evidence;
 old scripts, both recorded sharp edges:
 
 - **Exit codes are checked**: the old harnesses swallow the blit exit code
-  inside the timed window; otp-12 records it per run and a nonzero exit
-  VOIDS the run (`exit` column; the row is excluded from medians and
-  flagged) — a failed transfer must never contribute a time.
+  inside the timed window; otp-12 records it per run (`exit` column) and a
+  nonzero exit voids the interleave pair per the D2 valid-run rule — a
+  failed transfer must never contribute a time.
 - **Multi-token flags ride an array**, not an unquoted scalar.
 
 CSV schema (all rigs):
 `runs.csv`: `cell,arm,build,initiator,run,ms,flush_ms,exit,drain`
-`summary.csv`: `cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs`
+`summary.csv`:
+`cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted`
+(medians over valid runs only — the D2 valid-run rule)
 `verdicts.csv`: `comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome`
 where `cell` = `<fixture>_<direction>_<carrier>`, `arm` ∈
 `old|new|mac_init|win_init|delegated|direct`, `build` = short sha,
@@ -266,7 +287,7 @@ destination is fresh and never-seen (`SESSION_TAG` + arm + run in the
 path).
 
 New env knobs: `MAC_HOST` (the Mac's 10 GbE IP — required, no default),
-`MAC_MODULE_ROOT` (default `$MAC_WORK/mac-module`), `SKIPPY_SSH` (default
+`MAC_MODULE_ROOT` (default `$MAC_WORK` — see D3), `SKIPPY_SSH` (default
 `admin@skippy`), `SKIPPY_HOST`, `SKIPPY_BIN` (default
 `/mnt/generic-pool/video/blit-bin`), `SKIPPY_DISK_REGEX`,
 `OLD_SHA_ZOEY=e757dcc`, `OLD_SHA_WIN=0f922de`.
@@ -326,8 +347,9 @@ state).
   ephemeral ports, so the smoke IS the firewall test).
 - **otp-12d — assembly**: `docs/bench/otp12-acceptance-<date>/README.md` —
   the plan-level verdict matrix assembling every comparison row
-  criterion-by-criterion (the artifact otp-13 walks), plus the plan's
-  acceptance-criteria checkbox edits. Docs-only commit.
+  criterion-by-criterion (the artifact otp-13 walks). Docs-only commit.
+  The plan's acceptance-criteria checkboxes are NOT flipped here — that
+  is the otp-13 owner walk (codex design F4; checkpoints are owner-only).
 
 Rig order may flex with availability; 12d requires all three.
 
