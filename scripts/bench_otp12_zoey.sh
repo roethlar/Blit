@@ -50,10 +50,12 @@
 #     D-2026-07-05-2 handshake refuses the pair); zoey daemon zigbuilt
 #     (aarch64-musl, static) at the SAME commit and staged at
 #     $ZOEY_TEMP/blit-daemon-<sha>.
-#   * OLD pair: Mac client rebuilt at $OLD_SHA in a detached worktree
-#     and staged at $MAC_WORK/bins/blit-$OLD_SHA; zoey's pinned old
-#     daemon at $ZOEY_TEMP/blit-daemon (.agents/machines.md staging,
-#     kept for otp-12).
+#   * OLD pair: BOTH ends rebuilt clean at $OLD_SHA (Mac client in a
+#     detached worktree -> $MAC_WORK/bins/blit-$OLD_SHA; zoey daemon
+#     zigbuilt and staged as $ZOEY_TEMP/blit-daemon-$OLD_SHA). The
+#     unqualified 2026-07-10 staging at $ZOEY_TEMP/blit-daemon FAILED
+#     provenance (dirty 731023b — otp-2 README correction) and is
+#     never used.
 #   * The OLD pair predates the handshake: its provenance is the
 #     staging record — this script records sha256 of every binary into
 #     staging-manifest.txt. The NEW pair's smoke transfer doubles as
@@ -159,16 +161,32 @@ preflight() {
     # too — they postdate otp-3).
     # -a + LC_ALL=C are load-bearing: BSD grep on macOS silently
     # misses matches inside binaries without them (UTF-8 line
-    # handling) — observed live against a binary that provably embeds
-    # the id (2026-07-12 staging session).
-    LC_ALL=C grep -qa "$NEW_SHA" "$NEW_BLIT" \
-        || die "$NEW_BLIT does not embed $NEW_SHA — rebuild at the run commit (stale target/release?)"
-    LC_ALL=C grep -qa "$OLD_SHA" "$OLD_BLIT" \
-        || die "$OLD_BLIT does not embed $OLD_SHA — restage the old client"
-    zssh "grep -qa '$NEW_SHA' '$NEW_DAEMON'" \
-        || die "$NEW_DAEMON does not embed $NEW_SHA — restage the new daemon"
-    zssh "grep -qa '$OLD_SHA' '$OLD_DAEMON'" \
-        || die "$OLD_DAEMON does not embed $OLD_SHA — the staged old daemon is not the pinned pair"
+    # handling). The pattern is the BUILD-ID form "+<sha>" — a bare
+    # sha false-positives on build-directory paths cargo embeds
+    # (codex otp-12a-run F1: the e757dcc client's only bare match was
+    # the worktree path). This still cannot distinguish a clean id
+    # from "<sha>.dirty.…" — the clean-tree die above covers the new
+    # arm at run time; old-arm cleanliness rests on the build
+    # procedure (detached worktree = clean by construction) + the
+    # sha256 manifest.
+    LC_ALL=C grep -qa "+$NEW_SHA" "$NEW_BLIT" \
+        || die "$NEW_BLIT does not embed +$NEW_SHA — rebuild at the run commit (stale target/release?)"
+    zssh "grep -qa '+$NEW_SHA' '$NEW_DAEMON'" \
+        || die "$NEW_DAEMON does not embed +$NEW_SHA — restage the new daemon"
+    zssh "grep -qa '+$OLD_SHA' '$OLD_DAEMON'" \
+        || die "$OLD_DAEMON does not embed +$OLD_SHA — the staged old daemon is not the pinned pair"
+    # Pre-cutover CLIENT binaries embed NO greppable build id (codex
+    # otp-12a-run F1, verified against the e757dcc client). Where the
+    # id exists we require it; otherwise the operator must explicitly
+    # acknowledge that old-client provenance = the documented
+    # clean-worktree rebuild + the manifest hash, not a binary check.
+    if LC_ALL=C grep -qa "+$OLD_SHA" "$OLD_BLIT"; then
+        :
+    elif [[ "${OLD_CLIENT_PROVENANCE_BY_BUILD:-0}" == 1 ]]; then
+        log "old client: no embedded +$OLD_SHA id (pre-cutover binary); provenance = clean-worktree build procedure + manifest (explicitly acknowledged)"
+    else
+        die "$OLD_BLIT does not embed +$OLD_SHA; if it is a pre-cutover client rebuilt clean per D6, re-run with OLD_CLIENT_PROVENANCE_BY_BUILD=1"
+    fi
     # Stale-daemon refusal (the otp-2w F2 posture, new on this rig): a
     # leftover daemon would mask a bind failure and get benchmarked in
     # place of the arm's build.
@@ -586,6 +604,15 @@ main() {
         if want_cell "pull_tcp_${w}";  then run_comparison "pull_tcp_${w}"  pull "${REMOTE}pull_src_$w/src_$w/"; fi
         if want_cell "pull_grpc_${w}"; then run_comparison "pull_grpc_${w}" pull "${REMOTE}pull_src_$w/src_$w/" --force-grpc; fi
     done
+    # A mistyped CELLS entry must not exit 0 with empty evidence
+    # (codex otp-12a-run F5).
+    if [[ -n "$CELLS" ]]; then
+        local c
+        for c in ${CELLS//,/ }; do
+            grep -q "^$c," "$META" \
+                || die "CELLS entry '$c' matched no comparison — nothing was measured for it"
+        done
+    fi
 
     stop_daemon
     compute_verdicts

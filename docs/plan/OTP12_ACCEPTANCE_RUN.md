@@ -178,6 +178,12 @@ a median over fewer than RUNS valid runs.
 Escalation rule (pre-registered, not ad-hoc): if a comparison straddles its
 bar and either arm's spread exceeds 25%, that comparison reruns at RUNS=8
 interleaved in a fresh session; both sessions are committed.
+**Supersession (amended 2026-07-12, codex otp-12a-run F2 — the original
+text defined the trigger but not which session governs): the RUNS=8
+escalation session's medians govern the escalated comparison's combined
+outcome — more data where noise or a straddle made RUNS=4 undecidable is
+the escalation's entire purpose. The RUNS=4 rows stay committed and
+visible; the otp-13 walk sees both sessions.**
 
 ### D3 — reverse-initiator arms (rig W invariance; first-of-kind plumbing)
 

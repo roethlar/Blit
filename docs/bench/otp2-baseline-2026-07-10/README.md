@@ -19,10 +19,11 @@ recorded run used the harness as of `ceea6ed`+review fixes.
 > daemon end actually ran — embeds build id `0.1.0+731023bfc8a1.dirty.…`,
 > i.e. a DIRTY build of `731023b`, not `e757dcc` as claimed above.
 > `git diff 731023b e757dcc -- crates proto Cargo.toml Cargo.lock` is
-> empty, so the committed daemon code is identical between the two
-> commits and these medians most plausibly stand (the working-tree dirt
-> at build time was the in-progress otp-2 harness/docs); but a dirty
-> build's content is unprovable after the fact. otp-12a therefore runs
+> empty, so the COMMITTED daemon code is identical between the two
+> commits; the dirt's content, however, is unknowable after the fact —
+> the in-progress otp-2 harness/docs are a plausible candidate, but
+> that cannot be established, so treat these medians as carrying that
+> residual uncertainty. otp-12a therefore runs
 > its old arm on a CLEAN `e757dcc` rebuild staged separately
 > (`blit-daemon-e757dcc`), keeps this dataset as the committed reference
 > per OTP12 D2, and the pre-registered `FAIL-REFERENCE-DRIFT` outcome

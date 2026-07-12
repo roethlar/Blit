@@ -30,6 +30,15 @@ rule). Zero voided pairs in any recorded session.
   (`ce36da3` lineage), suite 1484.
 - sha256 of every binary + the committed reference CSV:
   `staging-manifest.txt` / `escalation-staging-manifest.txt`.
+- **Old-client provenance basis (codex otp-12a-run F1)**: pre-cutover
+  client binaries embed no greppable build id (the daemon does; the
+  client's only bare-sha match is a cargo-embedded build-directory
+  path), so the harness's binary check cannot establish the old
+  client post-hoc. Its provenance here is the build procedure — a
+  clean detached worktree at `e757dcc` built in the recorded session —
+  pinned by the manifest sha256. The harness now requires the `+<sha>`
+  id form where it exists and an explicit
+  `OLD_CLIENT_PROVENANCE_BY_BUILD=1` acknowledgment where it cannot.
 
 ## Sessions
 
@@ -52,7 +61,7 @@ rule). Zero voided pairs in any recorded session.
 
 | comparison | new ms | old same-session | ratio | committed | ratio | combined |
 |------------|-------:|-----------------:|------:|----------:|------:|----------|
-| push_tcp_large  | 2464 | 2570 | 0.959 | 2702 | 0.912 | **PASS** (RUNS=8; the RUNS=4 FAIL-BOTH was noise — new arm spread was 100%, its best run beat the old median) |
+| push_tcp_large  | 2464 | 2570 | 0.959 | 2702 | 0.912 | **PASS** (RUNS=8 governs per the D2 supersession rule, recorded as a dated amendment after this run surfaced the gap — codex otp-12a-run F2; the RUNS=4 session read FAIL-BOTH at 100% new-arm spread and stays committed in `runs.csv`) |
 | push_grpc_large | 4567 | 4369 | 1.045 | 4510 | 1.013 | **PASS** |
 | pull_tcp_large  | 2167 | 2177 | 0.995 | 1744 | 1.243 | **FAIL-REFERENCE-DRIFT** (persisted at RUNS=8; see Drift) |
 | pull_grpc_large | 2702 | 2706 | 0.999 | 2585 | 1.045 | **PASS** |
@@ -70,27 +79,32 @@ non-PASS cells carried to the otp-13 walk with the analysis below.
 
 ## Drift analysis (pull_tcp_large)
 
-The drift is provably rig-side, not the unified path's: the OLD arm —
-the same old-path code the committed baseline measured — ran 2177 ms
-median this session vs its own committed 1744 ms (**1.248×**), while
-new-vs-old same-session is **0.995** (the unified path is not slower
-than the old path on this rig, this day). The rig's large-pull speed
-changed between 2026-07-10 and 2026-07-12 (uptime 22 days; an owner-side
-maintenance touched the box on 07-11). Per D2 a persisting drift stands
-recorded, never silently excused.
+The strongest available evidence puts the drift rig-side, not the
+unified path's: the OLD arm ran 2177 ms median this session vs the
+committed 1744 ms (**1.248×**), while new-vs-old same-session is
+**0.995** — whatever slowed large pulls slowed both arms alike, and the
+unified path is not slower than the old path on this rig, this day.
+This is correlation plus same-session parity, not proof (codex
+otp-12a-run F3): the committed baseline's daemon was itself the
+mislabeled dirty build (see Builds), so a code-content confound in the
+reference cannot be fully excluded, and the rig changed between
+2026-07-10 and 2026-07-12 (uptime 22 days; owner-side maintenance
+touched the box on 07-11). Per D2 a persisting drift stands recorded,
+never silently excused.
 
 ## The marginal same-session gap (push_tcp_small)
 
 Reproducible across both sessions (1.109 at RUNS=4, **1.105** at RUNS=8
 with tight spreads: new 16.7%, old 18.7%) — a real ≈10.5% same-session
 gap, 0.5% over the ±10% noise bar, on this cell only. Context the walk
-needs: the unified path BEATS the committed old-path baseline by 6.5%
-(3984 vs 4263) — the rig ran small pushes ~15% faster today than on
-07-10 in both arms, and against that faster old arm the session sits a
-hair over the bar. Every other small/mixed cell has the unified path at
-or ahead of old (pull_grpc_small 0.909, push_grpc_small 1.001,
-pull_tcp_small 1.005). If a per-cell look is wanted, it is a
-post-otp-12 item; nothing here blocks otp-12b/c mechanically.
+needs (stated per the CSVs, codex otp-12a-run F4): the OLD arm ran
+15.4% faster this session than its own committed baseline (3605 vs
+4263); the unified path still beats that committed baseline by 6.5%
+(3984 vs 4263) but sits 10.5% behind the faster same-session old arm.
+The neighboring small/mixed same-session ratios for reference:
+pull_grpc_small 0.909, push_grpc_small 1.001, pull_tcp_small 1.005,
+push_tcp_mixed 1.043. If a per-cell look is wanted, it is a post-otp-12
+item; nothing here blocks otp-12b/c mechanically.
 
 ## Reproduction
 
