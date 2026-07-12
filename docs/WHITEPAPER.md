@@ -22,7 +22,7 @@ combinations:
 
 | Combination | Implementation |
 |---|---|
-| local → local | `crates/blit-core/src/orchestrator/orchestrator.rs` (zero-copy cascade: `copy_file_range`, `clonefile`, ReFS block clone, `sendfile`, fallback to read/write) |
+| local → local | the unified transfer session over the in-process transport (`run_local_session` → `crates/blit-core/src/transfer_session/local.rs`, otp-11): the destination applies needs in-process through the shared sink's zero-copy cascade (`copy_file_range`, `clonefile`, ReFS block clone, `sendfile`, fallback to read/write); the old `TransferOrchestrator`/engine path was deleted at otp-11b |
 | local → remote | the unified transfer session as SOURCE (`run_push_session` → `crates/blit-core/src/transfer_session/`); the old `RemotePushClient` driver was deleted at otp-10c-2 |
 | remote → local | the unified transfer session as DESTINATION (`run_pull_session`); the old `RemotePullClient` driver was deleted at otp-10c-2 |
 | remote → remote | delegated: the destination daemon pulls directly from the source daemon (`DelegatedPull` trigger; payload bytes never cross the CLI host — the CLI relay was removed at otp-10c-1, D-2026-07-11-1) |
@@ -307,7 +307,15 @@ final `chunk_bytes` (network framing) is also adaptive (16 vs 32 MiB).
 
 ## 5. Adaptive tuning surface
 
-`crates/blit-core/src/auto_tune.rs` produces `TuningParams` from an
+**HISTORICAL (retired at otp-11b, 2026-07-12)**: `auto_tune/`, the
+predictor's training loop, and the engine that consumed them were
+deleted with the local orchestration; the live stream policy is the
+session dial (`crates/blit-core/src/dial.rs`) + sf-2 shape
+correction, and `perf_history`/`perf_predictor` persist for
+`blit profile` display only. The section below describes the
+pre-otp-11 design.
+
+`crates/blit-core/src/auto_tune.rs` produced `TuningParams` from an
 observed size hint and persisted history.
 
 ```rust
@@ -679,18 +687,17 @@ In rough order of likely yield:
 3. **The receive pipeline unification** — sink trait, `write_file_stream`,
    `execute_receive_pipeline`, `WireReader → take`. New code, exposed
    to all push and pull receive paths.
-4. **`auto_tune.rs` + `perf_predictor.rs`** — the adaptive tuning
-   surface. What it covers (chunk_bytes, streams) and what it doesn't
-   (manifest batching, anything receive-side).
+4. ~~`auto_tune.rs` + `perf_predictor.rs`~~ — retired at otp-11b (the
+   engine and its tuning loop died; the dial owns stream policy).
 5. **The data plane wire format encoders/decoders** —
    `data_plane.rs::send_*` and `pipeline.rs::execute_receive_pipeline`.
    Field order changes (e.g. recent mtime+perms inline addition) need
    to stay in sync between sender and receiver.
 6. **Resume protocol (`stream_via_data_plane_resume`)** — least
    exercised, most state.
-7. **`change_journal/` subsystem** — three platform-specific
-   implementations (Linux, macOS FSEvents, Windows USN). Drives the
-   no-op fast path.
+7. ~~`change_journal/` subsystem~~ — deleted at otp-11b: its no-op
+   fast path was proven UNSOUND (silent data loss on deep
+   modifications; `docs/bench/otp11-local-2026-07-11/README.md`).
 
 Specific questions a reviewer could answer:
 

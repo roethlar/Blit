@@ -302,14 +302,17 @@ fn print_summary(
         } else {
             0.0
         };
+        // codex otp-11b B4: the session's apply pipeline runs one sink
+        // worker unless the hidden debug limiter widened it — print
+        // the EFFECTIVE count, not the options default (num_cpus).
         println!(
             "• Throughput: {}/s | Workers used: {}",
             format_bytes(throughput as u64),
-            workers
+            if debug_mode { workers } else { 1 }
         );
     }
     if debug_mode {
-        println!("• Debug limiter active – worker cap {} thread(s)", workers);
+        println!("• Debug limiter active – worker cap {} worker(s)", workers);
     }
 
     if verbose {

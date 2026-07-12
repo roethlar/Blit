@@ -35,7 +35,8 @@ deleted with the engine.
   `journal.rs` 72; `tuning.rs` 592 (12); `options.rs` 157 +
   `summary.rs` 121 — types re-homed, see below).
 - `src/engine/dial.rs` → **RELOCATED VERBATIM** → `src/dial.rs`
-  (1,051 lines; 15 tests carry; consumers re-pointed:
+  (1,051 lines; 17 tests carry (count corrected per codex B6);
+  blob-identical old/new per the reviewer; consumers re-pointed:
   `transfer_session/{mod,data_plane}.rs` + doc-comment paths).
 - `src/local_worker.rs` — DELETED WHOLE (139; `copy_paths_blocking`,
   `copy_large_blocking`).
@@ -165,10 +166,13 @@ wins over Checksum; absent-target New in every mode), 1 sink file-root
 pin (`file_root_payload_copies_root_to_root` — the 11a ENOTDIR fix at
 unit level).
 
-**Arithmetic:** 1513 − 41 − 10 − 5 − 3 (manifest 16→13) − 2
-(diff_planner 14→12) + 27 + 5 (the conversions' net new: manifest +2
-arm pins and diff_planner's planner_keeps_every_header are inside the
-+27) = **1484**. The otp-13 floor (≥1483) is met at the deletion
+**Arithmetic (corrected per codex B5):** 1513 − 41 (died in modules)
+− 10 (deleted integration files) − 5 (retired with the surface — the
+net shrink of the two converted blocks: manifest 16→13, diff_planner
+14→12) + 27 (new pins; `planner_keeps_every_header` and the two
+manifest arm pins are NEW pins in this bucket, not conversions) =
+**1484**. The 25 conversions replaced old tests in place and do not
+appear in the delta. The otp-13 floor (≥1483) is met at the deletion
 slice itself, by real pins, margin +1.
 
 **Guard proof this slice:** `file_needs_copy_with_mode` SizeOnly arm

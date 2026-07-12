@@ -136,17 +136,18 @@ consent (`docs/DECISIONS.md` D-2026-06-07-1).
 ## Style
 
 - Rust edition 2021; format with rustfmt. Modules snake_case, types
-  PascalCase, constants SHOUT_CASE; match existing names (`transfer_engine`,
-  `TransferOrchestrator`, `PLAN_OPTIONS`).
+  PascalCase, constants SHOUT_CASE; match existing names
+  (`transfer_session`, `TransferSession`, `PLAN_OPTIONS`).
 - No blocking calls inside async contexts (use async send APIs in Tokio).
 - Prefer async-aware tests (`#[tokio::test]`) for planner/engine work; keep
   tests deterministic; capture long logs under `logs/`.
 
 ## Project Map
 
-- `crates/blit-core/` — core library (enumeration, planner, transfer engine,
-  orchestrator); most logic and unit tests live here. New modules get
-  re-exported in `crates/blit-core/src/lib.rs`.
+- `crates/blit-core/` — core library (enumeration, planner, the unified
+  `transfer_session` — every transfer, local included, since otp-11);
+  most logic and unit tests live here. New modules get re-exported in
+  `crates/blit-core/src/lib.rs`.
 - `crates/blit-cli/`, `crates/blit-daemon/` — CLI and daemon binaries; admin
   verbs (scan, ls, find, du, df, rm, completions, profile, list-modules) live
   in `blit-cli` alongside transfer commands.

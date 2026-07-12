@@ -87,6 +87,10 @@ fn print_coefficient_block(label: &str, summary: &ProfileSummary) {
             coeffs.transfer.gamma_ms
         );
     } else {
-        println!("Predictor [{label}]: no profile yet (needs ≥5 observations)");
+        println!(
+            "Predictor [{label}]: no profile (historical — training \
+             retired with the engine at otp-11b; persisted profiles \
+             still display)"
+        );
     }
 }

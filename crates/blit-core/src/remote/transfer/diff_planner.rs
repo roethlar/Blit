@@ -1,26 +1,15 @@
-//! Unified diff + payload planning stage.
+//! Payload planning for the session's SOURCE send half.
 //!
-//! Sits between `TransferSource::scan` (which emits headers from the
-//! origin's filesystem) and `execute_sink_pipeline_streaming` (which
-//! dispatches payloads to one or more sinks). Decides:
-//!
-//!   1. Which source headers represent files that genuinely need to
-//!      transfer (against the target's destination state).
-//!   2. What payload shapes the surviving files become (whole-file
-//!      `File` payloads, batched `TarShard`, or — once step 4 lands —
-//!      block-level resume `FileBlock` + `FileBlockComplete` pairs).
-//!
-//! Step 3a of `docs/plan/PIPELINE_UNIFICATION.md`. Today this module
-//! consolidates the local-mirror path that lived in `orchestrator.rs`
-//! (`filter_headers_for_copy` + the call to `plan_transfer_payloads`).
-//! Push and pull will adopt the same module in 3b and step 4.
-//!
-//! `ComparisonMode` in `proto/blit.proto` is the canonical input shape.
-//! As of R2-F1 (`docs/reviews/followup_review_2026-05-02.md`) we honor
-//! every variant with concrete semantics — no silent fall-through to
-//! size+mtime. This means callers passing `SizeOnly`, `IgnoreTimes`,
-//! or `Force` get the behavior the wire enum
-//! advertises, not whatever the historical default happened to do.
+//! [`plan_push_payloads`] shapes already-diffed need headers into
+//! payloads (whole-file `File`, batched `TarShard`) via
+//! `plan_transfer_payloads`. The diff itself is destination-owned
+//! (`transfer_session::destination_needs` →
+//! `manifest::header_transfer_status`) on every carrier; this module's
+//! own local-mirror diff stage (`plan_local_mirror`/`filter_unchanged`)
+//! died at otp-11b with the engine. The per-mode comparison semantics
+//! (R2-F1: every `ComparisonMode` variant honored, no silent
+//! fall-through) live in `copy::file_needs_copy_with_mode` — the sink's
+//! defense layer — pinned in this module's tests.
 
 use std::path::Path;
 

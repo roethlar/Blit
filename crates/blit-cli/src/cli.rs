@@ -353,8 +353,8 @@ pub struct TransferArgs {
     /// paths don't honor the null sink, so the flag would be silently
     /// ignored).
     ///
-    /// Performance records are tagged so the adaptive predictor
-    /// does not learn from null-sink runs.
+    /// Performance-history records are tagged (`null_sink` lane) so
+    /// real-transfer profiling never learns from null-sink runs.
     #[arg(long, help_heading = "Performance / debug")]
     pub null: bool,
 

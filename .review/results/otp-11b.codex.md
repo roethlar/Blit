@@ -72,3 +72,78 @@ mcp: ptk/ptk_invoke started
 mcp: ptk/ptk_invoke (completed)
 mcp: ptk/ptk_invoke started
 mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_job started
+mcp: ptk/ptk_job (completed)
+mcp: ptk/ptk_job started
+mcp: ptk/ptk_job (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_job started
+mcp: ptk/ptk_job (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+mcp: ptk/ptk_invoke started
+mcp: ptk/ptk_invoke (completed)
+codex
+- [docs/STATE.md:5](/Users/michael/Dev/blit_v2/docs/STATE.md:5) — **Medium** — Canonical state still queues otp-11b, reports suite 1513, and says the old orchestration remains in-tree at line 54. At this commit those claims are false.
+
+- [docs/WHITEPAPER.md:25](/Users/michael/Dev/blit_v2/docs/WHITEPAPER.md:25) — **Medium** — The required live-doc sweep is incomplete: the whitepaper maps local transfers to the deleted orchestrator and still advertises auto-tune/journal behavior. [ARCHITECTURE.md:26](/Users/michael/Dev/blit_v2/docs/ARCHITECTURE.md:26), [repo-guidance.md:139](/Users/michael/Dev/blit_v2/.agents/repo-guidance.md:139), and [diff_planner.rs:1](/Users/michael/Dev/blit_v2/crates/blit-core/src/remote/transfer/diff_planner.rs:1) likewise describe deleted ownership.
+
+- [f4.rs:377](/Users/michael/Dev/blit_v2/crates/blit-tui/src/screens/f4.rs:377) — **Medium** — The TUI tells users transfers will populate the predictor, but this commit removes its only production `observe`/`save` path. [profile.rs:90](/Users/michael/Dev/blit_v2/crates/blit-cli/src/profile.rs:90) and [cli.rs:356](/Users/michael/Dev/blit_v2/crates/blit-cli/src/cli.rs:356) repeat the false promise.
+
+- [local.rs:306](/Users/michael/Dev/blit_v2/crates/blit-cli/src/transfers/local.rs:306) — **Low** — “Workers used” prints `options.workers`—normally CPU count—while the session actually uses one sink worker unless hidden debug mode is enabled. The revised debug banner is accurate; this adjacent summary is not.
+
+- [otp-11b-local-orchestration-deletion.md:168](/Users/michael/Dev/blit_v2/.review/findings/otp-11b-local-orchestration-deletion.md:168) — **Low** — The derivation double-subtracts the five manifest/diff retirements, cancels them with an unexplained `+5`, and misclassifies `planner_keeps_every_header`. The exact equation is `1513 − 41 − 10 − 5 + 27 = 1484`.
+
+- [otp-11b-local-orchestration-deletion.md:37](/Users/michael/Dev/blit_v2/.review/findings/otp-11b-local-orchestration-deletion.md:37) — **Low** — The verbatim dial relocation carries 17 tests, not 15. Its old/new blob hashes are identical, so this is accounting-only.
+
+**VERDICT: CHANGES REQUESTED — deletion, re-homes, converted coverage, remote-session behavior, one-transfer-path structure, and the 1484-pass suite check out; active documentation, frontend presentation, and the accounting record need correction.**
+tokens used
+203,440
+- [docs/STATE.md:5](/Users/michael/Dev/blit_v2/docs/STATE.md:5) — **Medium** — Canonical state still queues otp-11b, reports suite 1513, and says the old orchestration remains in-tree at line 54. At this commit those claims are false.
+
+- [docs/WHITEPAPER.md:25](/Users/michael/Dev/blit_v2/docs/WHITEPAPER.md:25) — **Medium** — The required live-doc sweep is incomplete: the whitepaper maps local transfers to the deleted orchestrator and still advertises auto-tune/journal behavior. [ARCHITECTURE.md:26](/Users/michael/Dev/blit_v2/docs/ARCHITECTURE.md:26), [repo-guidance.md:139](/Users/michael/Dev/blit_v2/.agents/repo-guidance.md:139), and [diff_planner.rs:1](/Users/michael/Dev/blit_v2/crates/blit-core/src/remote/transfer/diff_planner.rs:1) likewise describe deleted ownership.
+
+- [f4.rs:377](/Users/michael/Dev/blit_v2/crates/blit-tui/src/screens/f4.rs:377) — **Medium** — The TUI tells users transfers will populate the predictor, but this commit removes its only production `observe`/`save` path. [profile.rs:90](/Users/michael/Dev/blit_v2/crates/blit-cli/src/profile.rs:90) and [cli.rs:356](/Users/michael/Dev/blit_v2/crates/blit-cli/src/cli.rs:356) repeat the false promise.
+
+- [local.rs:306](/Users/michael/Dev/blit_v2/crates/blit-cli/src/transfers/local.rs:306) — **Low** — “Workers used” prints `options.workers`—normally CPU count—while the session actually uses one sink worker unless hidden debug mode is enabled. The revised debug banner is accurate; this adjacent summary is not.
+
+- [otp-11b-local-orchestration-deletion.md:168](/Users/michael/Dev/blit_v2/.review/findings/otp-11b-local-orchestration-deletion.md:168) — **Low** — The derivation double-subtracts the five manifest/diff retirements, cancels them with an unexplained `+5`, and misclassifies `planner_keeps_every_header`. The exact equation is `1513 − 41 − 10 − 5 + 27 = 1484`.
+
+- [otp-11b-local-orchestration-deletion.md:37](/Users/michael/Dev/blit_v2/.review/findings/otp-11b-local-orchestration-deletion.md:37) — **Low** — The verbatim dial relocation carries 17 tests, not 15. Its old/new blob hashes are identical, so this is accounting-only.
+
+**VERDICT: CHANGES REQUESTED — deletion, re-homes, converted coverage, remote-session behavior, one-transfer-path structure, and the 1484-pass suite check out; active documentation, frontend presentation, and the accounting record need correction.**

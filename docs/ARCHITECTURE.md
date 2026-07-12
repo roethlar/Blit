@@ -23,11 +23,11 @@ This document describes the high-level architecture of Blit, a high-performance 
 │  │   TransferSource → plan_transfer_payloads → TransferSink    │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │  ┌──────────────┬──────────────┬──────────────┬───────────────┐ │
-│  │ Orchestrator │ MirrorPlan   │ Remote/gRPC  │ ChangeJournal │ │
+│  │ Session      │ MirrorPlan   │ Remote/gRPC  │ Dial          │ │
 │  ├──────────────┼──────────────┼──────────────┼───────────────┤ │
-│  │ Enumeration  │ Checksum     │ TarStream    │ Copy Engine   │ │
+│  │ Enumeration  │ Checksum     │ TarStream    │ Copy          │ │
 │  ├──────────────┼──────────────┼──────────────┼───────────────┤ │
-│  │ ZeroCopy     │ PerfPredict  │ Config       │ AutoTune      │ │
+│  │ ZeroCopy     │ PerfPredict  │ Config       │ PerfHistory   │ │
 │  └──────────────┴──────────────┴──────────────┴───────────────┘ │
 ├─────────────────────────────────────────────────────────────────┤
 │                    Platform Abstraction                          │
