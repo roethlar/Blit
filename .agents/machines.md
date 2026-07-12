@@ -24,9 +24,14 @@ every Linux target in play).
 
 ## Rig residue (recorded 2026-07-10)
 
-- Windows box: `blit-bench-daemon` firewall rule + staged
-  `purge-standby.ps1`; repo checkout DETACHED at `0f922de` with the
-  owner's prior state stashed (`bench-cargo-lock`).
+- Windows box = **`michael@netwatch-01`, IP 10.1.10.177 as of
+  2026-07-12** (the earlier-recorded 10.1.10.173 is STALE — DHCP; ssh
+  by hostname). Rules: `blit-bench-daemon` (otp-2w, repo-path-scoped)
+  + `blit-otp12-daemon` (active-path-scoped) + staged
+  `purge-standby.ps1`; repo checkout DETACHED at `e21cf84` since the
+  otp-12b session (owner's `bench-cargo-lock` stash untouched); old
+  `0f922de` exes aside-copied at `D:\blit-test\bins\0f922de\`; run
+  bins under `D:\blit-test\bins\<sha>\`.
 - zoey: binaries staged 2026-07-10 in `blit-temp/` — **corrected
   2026-07-12**: the staged daemon embeds `731023bfc8a1.dirty.…`, NOT
   `e757dcc` as previously recorded (otp-2 README carries the full

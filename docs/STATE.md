@@ -77,12 +77,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
-   c-1/2), **otp-11 (a + b)**, **otp-12a (zoey)** `[x]`. otp-12 design
-   ACTIVE (owner flip + D-2026-07-12-1). otp-12a recorded
-   (`docs/bench/otp12-zoey-2026-07-12/`): 10 PASS, 2 to the otp-13 walk
-   (pull_tcp_large reference-drift; push_tcp_small 1.105). Current:
-   **otp-12b (Mac↔Windows cross-direction + invariance)**, then 12c
-   (delegated), 12d, otp-13.
+   c-1/2), **otp-11 (a + b)**, **otp-12a (zoey)**, **otp-12b
+   (Mac↔Windows)** `[x]`. 12a: 10 PASS, 2 to the walk. 12b — THE
+   INVARIANCE CRITERION: 11/12 PASS (1.003–1.057); wm_tcp_mixed 1.237
+   (TCP×mixed×dest-initiator, code-shaped); push_tcp_small 1.149
+   (both rigs); Win→Mac beats the better old direction 6/6; Mac→Win
+   gap shapes recorded for the walk
+   (`docs/bench/otp12-{zoey,win}-2026-07-12/`). Current: **otp-12c
+   (delegated, netwatch-01↔skippy)**, then 12d, otp-13.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -137,11 +139,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Rigs**: owner testing go GIVEN 2026-07-12 ("any previously used
-  hosts") — zoey session done (otp-12a). Next: Windows pair
-  (`michael@10.1.10.173`) = 12b cross-direction rig; Windows+skippy
-  (`admin@skippy`, x86_64; pool paths only — /tmp,/home noexec; July
-  binaries pre-`Transfer`, unusable) = 12c delegated rig.
+- **Rigs**: owner go GIVEN 2026-07-12; zoey (12a) + netwatch-01 (12b)
+  sessions done. Remaining: 12c delegated = netwatch-01↔skippy
+  (`admin@skippy`, x86_64, pool paths only; fresh staging needed).
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 - **Push go**: origin/master = `6d37a22` (re-verified via `ls-remote`

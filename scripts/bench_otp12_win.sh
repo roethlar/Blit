@@ -72,8 +72,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
-WIN_SSH=${WIN_SSH:-michael@10.1.10.173}
-WIN_HOST=${WIN_HOST:-10.1.10.173}
+# Defaults match the box's 2026-07-12 reality: hostname netwatch-01,
+# IP 10.1.10.177 (the previously recorded 10.1.10.173 went stale —
+# DHCP; machines.md).
+WIN_SSH=${WIN_SSH:-michael@netwatch-01}
+WIN_HOST=${WIN_HOST:-10.1.10.177}
 WIN_TEST=${WIN_TEST:-'D:\blit-test'}
 WIN_DRIVE=${WIN_DRIVE:-D}
 MAC_HOST=${MAC_HOST:?set MAC_HOST to the Mac 10GbE IP that the Windows-initiated arms dial}
