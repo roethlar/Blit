@@ -74,18 +74,20 @@ The owner's sentence, measured: per direction × fixture × carrier,
 ## Cross-direction (F4 + the D-2026-07-12-1 discriminator)
 
 - **Win→Mac: all six cells PASS** — the unified path beats even the
-  better committed old direction (ratios 0.71–0.99).
-- **Mac→Win: all six cells FAIL** `min(old_push, old_pull) × 1.10` —
-  and the gap rows attribute it: the same-session old direction gap
-  (`old_push/old_pull`) vs the unified gap (`new_mw/new_wm`) is
-  **unchanged on large (1.979 → 1.951 tcp; 1.956 → 1.945 grpc)** and
-  **narrowed on mixed (1.946 → 1.408) and grpc_small (1.929 → 1.644)**
-  — the residue is the Windows destination write path, present
-  identically without blit's old choreography (D-2026-07-12-1: such
-  cells count as satisfying criterion 2's cross-direction half). The
-  one exception: **tcp_small's gap widened (1.332 → 1.527)** — the
-  widening tracks the push_tcp_small code gap above, i.e. that cell's
-  cross miss is NOT fully platform-attributable.
+  better committed old direction (cross-row ratios 0.760–0.990).
+- **Mac→Win: all six cells FAIL** `min(old_push, old_pull) × 1.10`.
+  What the gap rows RECORD (adjudication is the otp-13 walk's — this
+  README draws no criterion conclusion, codex otp-12b-run F1):
+  - **large (tcp 1.979 → 1.951; grpc 1.956 → 1.945): unchanged** —
+    exactly the D-2026-07-12-1 discriminator shape (the old arm shows
+    the same direction gap in the same session).
+  - **mixed (1.946 → 1.408) and grpc_small (1.929 → 1.644): NARROWED**
+    — the unified path closed part of the old gap (code improvement);
+    a residual gap remains above the bar, and how much of that residue
+    is platform is the owner's call with these numbers.
+  - **tcp_small: WIDENED (1.332 → 1.527)** — tracks the
+    push_tcp_small code gap above; that cell's cross miss is NOT
+    fully platform-attributable.
 
 ## Cross-block consistency note
 
