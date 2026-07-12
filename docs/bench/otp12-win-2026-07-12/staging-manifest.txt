@@ -1,0 +1,8 @@
+arm,role,sha,sha256,path
+old,client,0f922de,ba919d7292dfae8f2a67aa29a9514d345496cb55f2112c0fcd6e79ab590e8dd6,/Users/michael/blit-bench-work/bins/blit-0f922de
+new,client,e21cf84,d37391652c3693244cbcefa122da7e7e26c770d553b72dead754eaef812234f8,/Users/michael/Dev/blit_v2/target/release/blit
+new,mac-daemon,e21cf84,a6dd94d7547968ca2667dfd86edc6f19bae4f5a05f24dc75b60285c4d3ab75e0,/Users/michael/Dev/blit_v2/target/release/blit-daemon
+old,win-daemon,0f922de,97d22441575481a4d44621720fd1db22267528a55e3a28d62c2f271dad8ff841,D:\blit-test\bins\0f922de\blit-daemon.exe
+new,win-daemon,e21cf84,511e0f81efa35a7e24cb5755a0c2be1c689eee1df98199e776dd907406645067,D:\blit-test\bins\e21cf84\blit-daemon.exe
+new,win-client,e21cf84,32660cb2c17a606922316d00379904c96162a8554407d275ebe1c4a7f38e7ffb,D:\blit-test\bins\e21cf84\blit.exe
+-,reference,-,9ccb5c86d8654fc9de93dd25455f03bfb4dfaf856bab64f82fe371b245aa1337,/Users/michael/Dev/blit_v2/docs/bench/otp2w-baseline-2026-07-10/summary.csv
