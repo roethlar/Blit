@@ -409,6 +409,13 @@ timed_push_run() {   # arm cell rid src [flags...]; fresh dest per run
         > /dev/null 2> "$OUT_DIR/blit-logs/${cell}_${arm}_${rid}.err" || rc=$?
     end=$(now_ms)
     RUN_FLUSH=$(sync_dest_ms)   # durable at dest, self-timed
+    # Sweep THIS run's destination now that its flush is measured
+    # (2026-07-12 session lesson: accumulated destinations drove the
+    # daemon host into an I/O-backlog storm — load 444, 10x run times,
+    # both arms equally; per-run deletion kept back-to-back probes at
+    # baseline. Outside the timed window; the next run's drain loop
+    # absorbs the deletion I/O. The EXIT sweep stays as backstop.)
+    zssh "rm -rf '$MODULE_ROOT/push_${SESSION_TAG}_${cell}_${arm}_${rid}'"
     RUN_MS=$(( end - start + RUN_FLUSH ))
     RUN_EXIT=$rc
     RUN_VALID=yes
