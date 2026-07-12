@@ -281,9 +281,16 @@ individually-clean run whose partner voided reads `no`; amended at the
 `cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted`
 (medians over valid runs only — the D2 valid-run rule)
 `verdicts.csv`: `comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome`
-where `cell` = `<fixture>_<direction>_<carrier>`, `arm` ∈
+where `cell` = `<verb>_<carrier>_<fixture>` (the otp-2 label grammar,
+e.g. `push_tcp_large` — matches the committed reference CSV; corrected
+at the 12a review, codex F9), `arm` ∈
 `old|new|mac_init|win_init|delegated|direct`, `build` = short sha,
 `initiator` = host name, `kind` ∈ `converge|invariance|delegated|cross`.
+Verdict outcome vocabulary: per-reference rows carry `PASS|FAIL`; a
+comparison's `combined` row carries the registered D2 set
+(`PASS|FAIL-SAME-SESSION|FAIL-REFERENCE-DRIFT|FAIL-BOTH|INCOMPLETE`);
+nothing else is legal, and a missing committed-reference row aborts the
+verdict pass (fail closed).
 
 Fixtures: identical shapes to otp-2 (1 GiB large / 10k×4 KiB small /
 512 MiB+5k×2 KiB mixed), generated with the existing recipes (BSD vs GNU

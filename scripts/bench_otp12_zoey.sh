@@ -86,7 +86,9 @@ NEW_BLIT=${NEW_BLIT:-$REPO_ROOT/target/release/blit}
 OLD_BLIT=${OLD_BLIT:-$MAC_WORK/bins/blit-$OLD_SHA}
 OLD_DAEMON=${OLD_DAEMON:-$ZOEY_TEMP/blit-daemon}
 NEW_DAEMON=${NEW_DAEMON:-$ZOEY_TEMP/blit-daemon-$NEW_SHA}
-BASELINE_SUMMARY=${BASELINE_SUMMARY:-$REPO_ROOT/docs/bench/otp2-baseline-2026-07-10/summary.csv}
+# The committed reference is FIXED (pre-registered, design D2) — no env
+# override (codex otp-12a F5); its sha256 is recorded in the manifest.
+BASELINE_SUMMARY="$REPO_ROOT/docs/bench/otp2-baseline-2026-07-10/summary.csv"
 
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/logs/otp12_zoey_$(date +%Y%m%dT%H%M%S)}
 mkdir -p "$OUT_DIR" "$OUT_DIR/blit-logs" "$MAC_WORK"
@@ -131,6 +133,8 @@ arm_sha()    { case "$1" in old) echo "$OLD_SHA";;    new) echo "$NEW_SHA";;    
 
 # --- Preflight ---------------------------------------------------------
 preflight() {
+    [[ "$RUNS" == 4 || "$RUNS" == 8 ]] \
+        || die "RUNS must be 4 (standard) or 8 (the D2 escalation) — got '$RUNS' (codex otp-12a F8: odd values break ABBA balance)"
     [[ -x "$NEW_BLIT" ]] || die "missing $NEW_BLIT (cargo build --release first)"
     [[ -x "$OLD_BLIT" ]] || die "old client not staged at $OLD_BLIT (rebuild at $OLD_SHA in a detached worktree: git worktree add --detach /tmp/blit-old $OLD_SHA && cargo build --release in it, then copy target/release/blit here)"
     command -v python3 >/dev/null || die "python3 required (timing + fsync_tree + verdicts)"
@@ -138,34 +142,73 @@ preflight() {
     sudo -n /usr/sbin/purge || die "cold-cache purge needs a NOPASSWD sudoers rule for /usr/sbin/purge"
     zssh "test -x '$OLD_DAEMON'" || die "old daemon not staged at $OLD_DAEMON"
     zssh "test -x '$NEW_DAEMON'" || die "new daemon not staged at $NEW_DAEMON (zigbuild aarch64-musl at $NEW_SHA, stage BESIDE the old one)"
+    # Provenance enforcement (codex otp-12a F3): a stale-but-matching
+    # pair passes the handshake yet is not the labeled build. Every
+    # binary must embed its arm's sha (session_build_id/BLIT_GIT_SHA is
+    # a compile-time literal in the binary; the old commits embed it
+    # too — they postdate otp-3).
+    grep -q "$NEW_SHA" "$NEW_BLIT" \
+        || die "$NEW_BLIT does not embed $NEW_SHA — rebuild at the run commit (stale target/release?)"
+    grep -q "$OLD_SHA" "$OLD_BLIT" \
+        || die "$OLD_BLIT does not embed $OLD_SHA — restage the old client"
+    zssh "grep -q '$NEW_SHA' '$NEW_DAEMON'" \
+        || die "$NEW_DAEMON does not embed $NEW_SHA — restage the new daemon"
+    zssh "grep -q '$OLD_SHA' '$OLD_DAEMON'" \
+        || die "$OLD_DAEMON does not embed $OLD_SHA — the staged old daemon is not the pinned pair"
     # Stale-daemon refusal (the otp-2w F2 posture, new on this rig): a
     # leftover daemon would mask a bind failure and get benchmarked in
     # place of the arm's build.
     if zssh "pgrep blit-daemon >/dev/null 2>&1"; then
         die "a blit-daemon is already running on zoey — stop it first"
     fi
-    if [[ -n $(git -C "$REPO_ROOT" status --porcelain) ]]; then
-        log "WARNING: working tree DIRTY — the new client's build id is <sha>.dirty.* and the D-2026-07-05-2 handshake will refuse a clean-built daemon; the new-pair smoke will fail"
-    fi
+    # Clean tree is MANDATORY for the new arm (design D1: dirty builds
+    # mint <sha>.dirty.* ids; the run must be the recorded commit) —
+    # die, don't warn (codex otp-12a F3).
+    [[ -z $(git -C "$REPO_ROOT" status --porcelain) ]] \
+        || die "working tree DIRTY — the recorded run must be a clean checkout of $NEW_SHA (D-2026-07-05-2)"
     log "preflight OK  old pair: $OLD_SHA  new pair: $NEW_SHA  runs/arm: $RUNS"
 }
 
+sha256_local() {   # $1 = path; dies on failure (codex otp-12a F3: no blanks)
+    local h
+    h=$(shasum -a 256 "$1" | cut -d' ' -f1) || die "sha256 failed for $1"
+    [[ ${#h} -eq 64 ]] || die "sha256 produced '$h' for $1"
+    echo "$h"
+}
+sha256_remote() {   # $1 = remote path; dies on failure
+    local h
+    h=$(zssh "sha256sum '$1'" | cut -d' ' -f1) || die "remote sha256 failed for $1"
+    [[ ${#h} -eq 64 ]] || die "remote sha256 produced '$h' for $1"
+    echo "$h"
+}
 write_manifest() {   # binary provenance for the evidence README (design D6)
+    local h_oc h_nc h_od h_nd h_ref
+    h_oc=$(sha256_local "$OLD_BLIT")
+    h_nc=$(sha256_local "$NEW_BLIT")
+    h_od=$(sha256_remote "$OLD_DAEMON")
+    h_nd=$(sha256_remote "$NEW_DAEMON")
+    h_ref=$(sha256_local "$BASELINE_SUMMARY")
     {
         echo "arm,role,sha,sha256,path"
-        echo "old,client,$OLD_SHA,$(shasum -a 256 "$OLD_BLIT" | cut -d' ' -f1),$OLD_BLIT"
-        echo "new,client,$NEW_SHA,$(shasum -a 256 "$NEW_BLIT" | cut -d' ' -f1),$NEW_BLIT"
-        echo "old,daemon,$OLD_SHA,$(zssh "sha256sum '$OLD_DAEMON'" | cut -d' ' -f1),$OLD_DAEMON"
-        echo "new,daemon,$NEW_SHA,$(zssh "sha256sum '$NEW_DAEMON'" | cut -d' ' -f1),$NEW_DAEMON"
+        echo "old,client,$OLD_SHA,$h_oc,$OLD_BLIT"
+        echo "new,client,$NEW_SHA,$h_nc,$NEW_BLIT"
+        echo "old,daemon,$OLD_SHA,$h_od,$OLD_DAEMON"
+        echo "new,daemon,$NEW_SHA,$h_nd,$NEW_DAEMON"
+        echo "-,reference,-,$h_ref,$BASELINE_SUMMARY"
     } > "$OUT_DIR/staging-manifest.txt"
-    log "staging manifest recorded"
+    log "staging manifest recorded (5 hashes)"
 }
 
 # --- Daemon lifecycle (everything inside ZOEY_TEMP; one arm at a time) --
+# The EXIT trap acts only after THIS session started a daemon, and the
+# kill is comm-verified — a stale pidfile's recycled PID is never killed
+# (codex otp-12a F4).
 CURRENT_ARM=""
+DAEMON_EVER_STARTED=0
 start_daemon() {   # $1 = arm
     local arm="$1" bin
     bin=$(arm_daemon "$arm")
+    DAEMON_EVER_STARTED=1
     zssh "mkdir -p '$MODULE_ROOT' && cat > '$ZOEY_TEMP/bench-config.toml' <<EOF
 [daemon]
 bind = \"0.0.0.0\"
@@ -186,9 +229,17 @@ echo \$! > '$ZOEY_TEMP/bench-daemon.pid'"
     log "daemon up ($arm pair, $(arm_sha "$arm")) on $ZOEY_HOST:$PORT"
 }
 stop_daemon() {
-    zssh "kill \$(cat '$ZOEY_TEMP/bench-daemon.pid' 2>/dev/null) 2>/dev/null; \
+    zssh "p=\$(cat '$ZOEY_TEMP/bench-daemon.pid' 2>/dev/null); \
+          if [ -n \"\$p\" ] && grep -q blit-daemon \"/proc/\$p/comm\" 2>/dev/null; then kill \"\$p\"; fi; \
           rm -f '$ZOEY_TEMP/bench-daemon.pid'" || true
     CURRENT_ARM=""
+}
+on_exit() {
+    if [[ "$DAEMON_EVER_STARTED" == 1 ]]; then
+        stop_daemon
+        sweep_push_dirs
+    fi
+    rm -rf "$MAC_WORK/dst_pull_${SESSION_TAG}_"* 2>/dev/null || true
 }
 ensure_daemon() {   # $1 = arm; swap only when the arm changes (untimed)
     [[ "$CURRENT_ARM" == "$1" ]] && return 0
@@ -234,6 +285,27 @@ drop_caches() {   # $1 = run label; sets RUN_DRAIN
 }
 
 # --- Fixtures (client disk; generated once; shapes = otp-2/sf-1) -------
+# Existence alone is NOT trusted (codex otp-12a F2): an interrupted
+# generation/staging leaves a partial workload that later runs would
+# silently benchmark. Every fixture is verified by file count + byte
+# sum; a present-but-wrong dir is a hard stop with an explicit removal
+# instruction (never auto-deleted).
+FIX_COUNT_large=1;     FIX_BYTES_large=1073741824
+FIX_COUNT_small=10000; FIX_BYTES_small=40960000
+FIX_COUNT_mixed=5001;  FIX_BYTES_mixed=547110912
+
+fixture_shape() {   # $1 = dir; prints "count,bytes" (macOS stat)
+    find "$1" -type f -exec stat -f%z {} + 2>/dev/null \
+        | awk '{ s += $1 } END { printf "%d,%d\n", NR, s }'
+}
+verify_fixture() {   # $1 = workload name; dies on shape mismatch
+    local w="$1" want_count want_bytes got
+    want_count=$(eval echo "\$FIX_COUNT_$w")
+    want_bytes=$(eval echo "\$FIX_BYTES_$w")
+    got=$(fixture_shape "$MAC_WORK/src_$w")
+    [[ "$got" == "$want_count,$want_bytes" ]] \
+        || die "fixture src_$w has shape $got, want $want_count,$want_bytes — partial generation? remove $MAC_WORK/src_$w and re-run"
+}
 gen_fixtures() {
     if [[ ! -d "$MAC_WORK/src_large" ]]; then
         mkdir -p "$MAC_WORK/src_large"
@@ -257,6 +329,9 @@ gen_fixtures() {
         done
         log "generated mixed fixture (512 MiB + 5000 x 2 KiB)"
     fi
+    local w
+    for w in large small mixed; do verify_fixture "$w"; done
+    log "fixtures verified (count + byte sum)"
 }
 
 # --- Smoke + staging ----------------------------------------------------
@@ -278,19 +353,28 @@ smoke_pair() {   # $1 = arm; 1-file untimed transfer proves the pair works.
 
 stage_pull_sources() {
     # Untimed; sources are SHARED across arms by design (bytes are
-    # bytes — design D5); kept across sessions, staged only if absent.
+    # bytes — design D5); kept across sessions. A kept dir is verified
+    # by remote file count (codex otp-12a F2) — a partial staging is
+    # re-staged (blit converges: identical files skip, missing land),
+    # then re-verified.
     log "staging pull sources (untimed, new pair)"
     ensure_daemon new
-    local w
+    local w want got
     for w in large small mixed; do
-        if zssh "test -d '$MODULE_ROOT/pull_src_$w/src_$w'"; then
-            log "  pull_src_$w already staged (kept from a prior session)"
-        else
-            "$NEW_BLIT" copy "$MAC_WORK/src_$w" "${REMOTE}pull_src_$w/" --yes \
-                > "$OUT_DIR/blit-logs/stage_$w.log" 2>&1 \
-                || die "staging pull_src_$w failed (blit-logs/stage_$w.log)"
-            log "  staged pull_src_$w"
+        want=$(eval echo "\$FIX_COUNT_$w")
+        got=$(zssh "find '$MODULE_ROOT/pull_src_$w/src_$w' -type f 2>/dev/null | wc -l" | tr -d '[:space:]')
+        if [[ "$got" == "$want" ]]; then
+            log "  pull_src_$w verified ($got files, kept from a prior session)"
+            continue
         fi
+        log "  pull_src_$w has $got/$want files — (re)staging"
+        "$NEW_BLIT" copy "$MAC_WORK/src_$w" "${REMOTE}pull_src_$w/" --yes \
+            > "$OUT_DIR/blit-logs/stage_$w.log" 2>&1 \
+            || die "staging pull_src_$w failed (blit-logs/stage_$w.log)"
+        got=$(zssh "find '$MODULE_ROOT/pull_src_$w/src_$w' -type f 2>/dev/null | wc -l" | tr -d '[:space:]')
+        [[ "$got" == "$want" ]] \
+            || die "pull_src_$w still wrong after staging ($got/$want files)"
+        log "  staged pull_src_$w ($got files)"
     done
 }
 
@@ -309,8 +393,11 @@ timed_push_run() {   # arm cell rid src [flags...]; fresh dest per run
     ensure_daemon "$arm"
     drop_caches "${cell}_${arm}-$rid"
     start=$(now_ms)
+    # stdout (arm-dependent progress volume) goes to /dev/null exactly
+    # like the frozen harness; only stderr — silent unless failing — is
+    # kept for diagnostics (codex otp-12a F6).
     "$blit" copy "$src" "${REMOTE}push_${SESSION_TAG}_${cell}_${arm}_${rid}/" --yes "$@" \
-        > "$OUT_DIR/blit-logs/${cell}_${arm}_${rid}.log" 2>&1 || rc=$?
+        > /dev/null 2> "$OUT_DIR/blit-logs/${cell}_${arm}_${rid}.err" || rc=$?
     end=$(now_ms)
     RUN_FLUSH=$(sync_dest_ms)   # durable at dest, self-timed
     RUN_MS=$(( end - start + RUN_FLUSH ))
@@ -324,14 +411,18 @@ timed_pull_run() {   # arm cell rid remote_src [flags...]; fresh dest per run
     local blit start end rc=0
     blit=$(arm_blit "$arm")
     ensure_daemon "$arm"
-    rm -rf "$MAC_WORK/dst_pull"
-    mkdir -p "$MAC_WORK/dst_pull"
+    # Never-seen destination path per run (design D5; codex otp-12a
+    # F7), removed after its flush is measured so pulls don't
+    # accumulate GiBs on the client disk.
+    local dst="$MAC_WORK/dst_pull_${SESSION_TAG}_${cell}_${arm}_${rid}"
+    mkdir -p "$dst"
     drop_caches "${cell}_${arm}-$rid"
     start=$(now_ms)
-    "$blit" copy "$rsrc" "$MAC_WORK/dst_pull" --yes "$@" \
-        > "$OUT_DIR/blit-logs/${cell}_${arm}_${rid}.log" 2>&1 || rc=$?
+    "$blit" copy "$rsrc" "$dst" --yes "$@" \
+        > /dev/null 2> "$OUT_DIR/blit-logs/${cell}_${arm}_${rid}.err" || rc=$?
     end=$(now_ms)
-    RUN_FLUSH=$(fsync_tree_ms "$MAC_WORK/dst_pull")   # durable, self-timed
+    RUN_FLUSH=$(fsync_tree_ms "$dst")   # durable, self-timed
+    rm -rf "$dst"
     RUN_MS=$(( end - start + RUN_FLUSH ))
     RUN_EXIT=$rc
     RUN_VALID=yes
@@ -401,9 +492,20 @@ def median(v):
     n = len(v)
     return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) // 2
 
+# A cell is usable only when its comparison completed (RUNS valid
+# pairs, codex otp-12a F1): summary medians are written for complete
+# cells ONLY — never a median over fewer than RUNS valid runs. The
+# verdict loop iterates EVERY attempted comparison (meta), so a
+# zero-valid cell still surfaces as INCOMPLETE.
+def complete(cell):
+    return (meta[cell]["complete"] == "yes"
+            and (cell, "new") in by_arm and (cell, "old") in by_arm)
+
 with open(summary_p, "w") as f:
     f.write("cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted\n")
     for (cell, arm) in sorted(by_arm):
+        if not complete(cell):
+            continue
         v = by_arm[(cell, arm)]
         spread = round(100.0 * (max(v) - min(v)) / max(min(v), 1), 1)
         f.write(f"{cell},{arm},{median(v)},{sum(v)//len(v)},{min(v)},{spread},"
@@ -414,22 +516,22 @@ def bar_pass(new, ref):   # new <= ref * 1.10, integer-exact
 
 with open(verdicts_p, "w") as f:
     f.write("comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome\n")
-    for cell in sorted({c for (c, _) in by_arm}):
-        if meta[cell]["complete"] != "yes" or (cell, "new") not in by_arm or (cell, "old") not in by_arm:
+    for cell in sorted(meta):
+        if not complete(cell):
             f.write(f"{cell},converge,new,combined,,,,1.10,INCOMPLETE\n")
             continue
         new_m = median(by_arm[(cell, "new")])
         old_m = median(by_arm[(cell, "old")])
-        ref_m = base.get(cell)
+        if cell not in base:
+            # Fail CLOSED (codex otp-12a F5): every matrix cell has a
+            # committed reference row; a miss is a harness/reference
+            # bug, not a benchmark outcome.
+            sys.exit(f"FATAL: no committed reference row for {cell} in {base_p}")
+        ref_m = base[cell]
         p1 = bar_pass(new_m, old_m)
+        p2 = bar_pass(new_m, ref_m)
         f.write(f"{cell},converge,new,old_session,{new_m},{old_m},"
                 f"{new_m/old_m:.3f},1.10,{'PASS' if p1 else 'FAIL'}\n")
-        if ref_m is None:
-            f.write(f"{cell},converge,new,old_committed,{new_m},,,1.10,NO-REFERENCE\n")
-            f.write(f"{cell},converge,new,combined,{new_m},{old_m},,1.10,"
-                    f"{'FAIL-SAME-SESSION' if not p1 else 'NO-REFERENCE'}\n")
-            continue
-        p2 = bar_pass(new_m, ref_m)
         f.write(f"{cell},converge,new,old_committed,{new_m},{ref_m},"
                 f"{new_m/ref_m:.3f},1.10,{'PASS' if p2 else 'FAIL'}\n")
         combined = ("PASS" if p1 and p2
@@ -477,5 +579,5 @@ main() {
 }
 
 SESSION_TAG=$(date +%H%M%S).$$
-trap 'stop_daemon; sweep_push_dirs' EXIT
+trap on_exit EXIT
 main "$@"
