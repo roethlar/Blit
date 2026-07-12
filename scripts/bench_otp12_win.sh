@@ -506,7 +506,11 @@ win_client_run() {   # cell rid src dst flags_string; sets T_MS/T_RC
     # to T_RC=99 and voids the run; nothing can masquerade as a time.
     local cell="$1" rid="$2" src="$3" dst="$4" flags="${5:-}"
     local out
-    out=$(wssh "\$sw = [Diagnostics.Stopwatch]::StartNew(); & '$WIN_BLIT' copy '$src' '$dst' --yes $flags > \$null 2> '$WIN_TEST\\client-err.log'; \$rc = \$LASTEXITCODE; \$sw.Stop(); \"R:\$([int]\$sw.Elapsed.TotalMilliseconds),\$rc:R\"" \
+    # ${rc} braces are load-bearing: PowerShell parses bare `$rc:R` as
+    # a SCOPE-qualified variable (like $env:PATH), so the sentinel
+    # never printed and every win-initiated run read rc=99 (found live
+    # at the first win->mac smoke, 2026-07-12).
+    out=$(wssh "\$sw = [Diagnostics.Stopwatch]::StartNew(); & '$WIN_BLIT' copy '$src' '$dst' --yes $flags > \$null 2> '$WIN_TEST\\client-err.log'; \$rc = \$LASTEXITCODE; \$sw.Stop(); \"R:\$([int]\$sw.Elapsed.TotalMilliseconds),\${rc}:R\"" \
         | sed -n 's/.*R:\([0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1)
     if [[ "$out" == *,* ]]; then T_MS=${out%%,*}; T_RC=${out##*,}; else T_MS=0; T_RC=99; fi
     if [[ "$T_RC" != 0 ]]; then
