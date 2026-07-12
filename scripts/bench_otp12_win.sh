@@ -83,8 +83,10 @@ PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
 CELLS=${CELLS:-}
 MAC_WORK=${MAC_WORK:-$HOME/blit-bench-work}
 # The Mac module root IS the fixture workdir (design F6): both
-# initiators of a Mac->Win cell read the same physical inodes.
-MAC_MODULE_ROOT=${MAC_MODULE_ROOT:-$MAC_WORK}
+# initiators of a Mac->Win cell read the same physical inodes. NOT
+# overridable (codex otp-12b F6) — an override could point the two
+# initiators at different trees or devices.
+MAC_MODULE_ROOT="$MAC_WORK"
 
 OLD_SHA=${OLD_SHA_WIN:-0f922de}
 NEW_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
@@ -113,10 +115,14 @@ wssh() { ssh "${SSH_MUX[@]}" "$WIN_SSH" "$@"; }
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 
 # --- Self-timed durability (destination-OS-keyed, never verb-keyed) ----
-flush_win_ms() {   # Windows volume flush; prints its own elapsed ms
+flush_win_ms() {   # Windows volume flush, self-timed; prints ms or NA
+    # Sentinel-framed and error-terminating (codex otp-12b F7): a
+    # failed flush or garbage output must never read as a plausible
+    # number — NA makes the caller VOID the run per the D2 rule.
     local v
-    v=$(wssh "\$sw = [Diagnostics.Stopwatch]::StartNew(); Write-VolumeCache $WIN_DRIVE; \$sw.Stop(); [int]\$sw.Elapsed.TotalMilliseconds" | tr -cd '0-9')
-    echo "${v:-0}"
+    v=$(wssh "\$ErrorActionPreference = 'Stop'; \$sw = [Diagnostics.Stopwatch]::StartNew(); Write-VolumeCache $WIN_DRIVE; \$sw.Stop(); \"F:\$([int]\$sw.Elapsed.TotalMilliseconds):F\"" 2>/dev/null \
+        | sed -n 's/.*F:\([0-9][0-9]*\):F.*/\1/p' | head -1)
+    echo "${v:-NA}"
 }
 fsync_tree_ms() {   # macOS per-file fsync walk; prints its own elapsed ms
     python3 - "$1" <<'PYEOF'
@@ -196,17 +202,30 @@ preflight() {
     log "preflight OK  old pair: $OLD_SHA  new pair: $NEW_SHA  runs/arm: $RUNS  mac endpoint: $MAC_HOST:$PORT"
 }
 
+OLD_WIN_DAEMON_HASH=""
+NEW_WIN_DAEMON_HASH=""
 write_manifest() {
+    # Hashes are captured into variables FIRST so a failure dies for
+    # real — `echo "$(die …)"` only exits the subshell (codex otp-12b
+    # F1, the otp-12a F3 lesson re-applied).
     local f="$OUT_DIR/staging-manifest.txt"
+    local h_oc h_nc h_md h_wc h_ref
+    h_oc=$(sha256_local "$OLD_BLIT")
+    h_nc=$(sha256_local "$NEW_BLIT")
+    h_md=$(sha256_local "$MAC_DAEMON")
+    OLD_WIN_DAEMON_HASH=$(sha256_win "$OLD_WIN_DAEMON")
+    NEW_WIN_DAEMON_HASH=$(sha256_win "$NEW_WIN_DAEMON")
+    h_wc=$(sha256_win "$WIN_BLIT")
+    h_ref=$(sha256_local "$BASELINE_SUMMARY")
     {
         echo "arm,role,sha,sha256,path"
-        echo "old,client,$OLD_SHA,$(sha256_local "$OLD_BLIT"),$OLD_BLIT"
-        echo "new,client,$NEW_SHA,$(sha256_local "$NEW_BLIT"),$NEW_BLIT"
-        echo "new,mac-daemon,$NEW_SHA,$(sha256_local "$MAC_DAEMON"),$MAC_DAEMON"
-        echo "old,win-daemon,$OLD_SHA,$(sha256_win "$OLD_WIN_DAEMON"),$OLD_WIN_DAEMON"
-        echo "new,win-daemon,$NEW_SHA,$(sha256_win "$NEW_WIN_DAEMON"),$NEW_WIN_DAEMON"
-        echo "new,win-client,$NEW_SHA,$(sha256_win "$WIN_BLIT"),$WIN_BLIT"
-        echo "-,reference,-,$(sha256_local "$BASELINE_SUMMARY"),$BASELINE_SUMMARY"
+        echo "old,client,$OLD_SHA,$h_oc,$OLD_BLIT"
+        echo "new,client,$NEW_SHA,$h_nc,$NEW_BLIT"
+        echo "new,mac-daemon,$NEW_SHA,$h_md,$MAC_DAEMON"
+        echo "old,win-daemon,$OLD_SHA,$OLD_WIN_DAEMON_HASH,$OLD_WIN_DAEMON"
+        echo "new,win-daemon,$NEW_SHA,$NEW_WIN_DAEMON_HASH,$NEW_WIN_DAEMON"
+        echo "new,win-client,$NEW_SHA,$h_wc,$WIN_BLIT"
+        echo "-,reference,-,$h_ref,$BASELINE_SUMMARY"
     } > "$f"
     log "staging manifest recorded (7 hashes)"
 }
@@ -219,11 +238,20 @@ setup_host() {
         scp -q -o BatchMode=yes "$SCRIPT_DIR/windows/purge-standby.ps1" \
             "$WIN_SSH:$WIN_TEST/purge-standby.ps1"
     }
+    # An existing rule is verified, never trusted by name alone (codex
+    # otp-12b F11) — and never silently mutated (owner's firewall).
     wssh "New-Item -ItemType Directory -Force -Path '$WIN_MODULE','$WIN_BINS\\active' | Out-Null
-if (-not (Get-NetFirewallRule -DisplayName blit-otp12-daemon -ErrorAction SilentlyContinue)) {
+\$rule = Get-NetFirewallRule -DisplayName blit-otp12-daemon -ErrorAction SilentlyContinue
+if (-not \$rule) {
   New-NetFirewallRule -DisplayName blit-otp12-daemon -Direction Inbound -Program '$ACTIVE_WIN_DAEMON' -Action Allow | Out-Null
   'firewall rule added (blit-otp12-daemon -> active path)'
-} else { 'firewall rule present' }"
+} else {
+  \$prog = (\$rule | Get-NetFirewallApplicationFilter).Program
+  if (\$prog -ne '$ACTIVE_WIN_DAEMON' -or \$rule.Action -ne 'Allow' -or \$rule.Enabled -ne 'True') {
+    \"firewall rule blit-otp12-daemon exists but mismatched (program=\$prog action=\$(\$rule.Action) enabled=\$(\$rule.Enabled)) - fix or remove it\"; exit 1
+  }
+  'firewall rule present (verified: program, action, enabled)'
+}" || die "firewall rule verification failed"
 }
 
 # --- Windows daemon lifecycle (arm-swapped via the fixed active path) ---
@@ -234,8 +262,17 @@ win_daemon_start() {   # $1 = old|new
     case "$arm" in old) src="$OLD_WIN_DAEMON";; new) src="$NEW_WIN_DAEMON";; esac
     wssh "if (Get-Process blit-daemon -ErrorAction SilentlyContinue) { 'STALE blit-daemon running'; exit 1 }" \
         || die "refusing to start over a stale Windows daemon"
+    # The active copy must provably BE the requested arm before launch
+    # (codex otp-12b F2): terminate on copy errors and verify the
+    # landed hash against the manifest hash for this arm — the old arm
+    # has no handshake to catch a stale active exe.
+    local want_hash
+    case "$arm" in old) want_hash="$OLD_WIN_DAEMON_HASH";; new) want_hash="$NEW_WIN_DAEMON_HASH";; esac
+    [[ -n "$want_hash" ]] || die "arm hash not captured (write_manifest must run first)"
     WIN_DAEMON_STARTED=1
-    wssh "Copy-Item '$src' '$ACTIVE_WIN_DAEMON' -Force
+    wssh "\$ErrorActionPreference = 'Stop'
+Copy-Item '$src' '$ACTIVE_WIN_DAEMON' -Force
+if ((Get-FileHash -Algorithm SHA256 '$ACTIVE_WIN_DAEMON').Hash.ToLower() -ne '$want_hash') { 'active exe hash mismatch after copy'; exit 1 }
 Set-Content -Path '$WIN_TEST\\bench-config.toml' -Value @'
 [daemon]
 bind = \"0.0.0.0\"
@@ -247,11 +284,17 @@ name = \"bench\"
 path = '$WIN_MODULE'
 '@
 \$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = 'cmd /c \"\"$ACTIVE_WIN_DAEMON\" --config \"$WIN_TEST\\bench-config.toml\" > \"$WIN_TEST\\daemon-out.log\" 2> \"$WIN_TEST\\daemon-err.log\"\"' }
-if (\$r.ReturnValue -ne 0) { \"wmi create failed: \$(\$r.ReturnValue)\"; exit 1 }"
+if (\$r.ReturnValue -ne 0) { \"wmi create failed: \$(\$r.ReturnValue)\"; exit 1 }
+Set-Content -Path '$WIN_TEST\\daemon-wmi.pid' -Value \$r.ProcessId"
+    # The WMI pid is cmd's, recorded IMMEDIATELY so an interruption
+    # before the verify step leaves nothing untracked (codex otp-12b
+    # F9); the verify step resolves the daemon pid as the blit-daemon
+    # whose PARENT is our cmd — a name lookup tied to THIS launch.
     sleep 2
-    wssh "\$d = Get-Process blit-daemon -ErrorAction SilentlyContinue
+    wssh "\$cmdpid = Get-Content '$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue
+\$d = Get-CimInstance Win32_Process -Filter \"Name='blit-daemon.exe'\" | Where-Object { \$_.ParentProcessId -eq \$cmdpid } | Select-Object -First 1
 if (-not \$d) { Get-Content '$WIN_TEST\\daemon-err.log' -ErrorAction SilentlyContinue | Select-Object -First 10; exit 1 }
-Set-Content -Path '$WIN_TEST\\daemon.pid' -Value \$d.Id" \
+Set-Content -Path '$WIN_TEST\\daemon.pid' -Value \$d.ProcessId" \
         || die "$arm Windows daemon failed to start"
     WIN_ARM="$arm"
     log "windows daemon up ($arm pair) on $WIN_HOST:$PORT"
@@ -261,8 +304,14 @@ win_daemon_stop() {
 if (\$p) {
   \$proc = Get-Process -Id \$p -ErrorAction SilentlyContinue
   if (\$proc -and \$proc.ProcessName -eq 'blit-daemon') { Stop-Process -Id \$p -Force }
-  Remove-Item '$WIN_TEST\\daemon.pid' -ErrorAction SilentlyContinue
-}" || true
+} else {
+  \$c = Get-Content '$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue
+  if (\$c) {
+    \$d2 = Get-CimInstance Win32_Process -Filter \"Name='blit-daemon.exe'\" | Where-Object { \$_.ParentProcessId -eq \$c } | Select-Object -First 1
+    if (\$d2) { Stop-Process -Id \$d2.ProcessId -Force }
+  }
+}
+Remove-Item '$WIN_TEST\\daemon.pid','$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue" || true
     WIN_ARM=""
 }
 win_ensure() {   # $1 = arm; swap only on change (untimed)
@@ -429,7 +478,9 @@ mac_push_run() {   # blit_bin cell rid dest_remote src [flags...]
         RUN_FLUSH=$(fsync_tree_ms "$MAC_MODULE_ROOT/push_${SESSION_TAG}_${cell}_${rid}")
         rm -rf "$MAC_MODULE_ROOT/push_${SESSION_TAG}_${cell}_${rid}"
     fi
-    RUN_MS=$(( end - start + RUN_FLUSH )); RUN_EXIT=$rc; RUN_VALID=yes
+    RUN_VALID=yes
+    [[ "$RUN_FLUSH" == NA ]] && { RUN_VALID=no; RUN_FLUSH=0; }
+    RUN_MS=$(( end - start + RUN_FLUSH )); RUN_EXIT=$rc
     [[ $rc -eq 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
 }
 mac_pull_run() {   # blit_bin cell rid remote_src [flags...]
@@ -450,11 +501,14 @@ mac_pull_run() {   # blit_bin cell rid remote_src [flags...]
 # Windows-initiated runs (block 2 win_init arms): the transfer window is
 # a Stopwatch ON Windows printing "<ms>,<exit>"; CRLF-stripped.
 win_client_run() {   # cell rid src dst flags_string; sets T_MS/T_RC
+    # Sentinel-framed (codex otp-12b F7): anything but a clean
+    # "R:<ms>,<rc>:R" — pwsh noise, a crash, a negative exit — parses
+    # to T_RC=99 and voids the run; nothing can masquerade as a time.
     local cell="$1" rid="$2" src="$3" dst="$4" flags="${5:-}"
     local out
-    out=$(wssh "\$sw = [Diagnostics.Stopwatch]::StartNew(); & '$WIN_BLIT' copy '$src' '$dst' --yes $flags > \$null 2> '$WIN_TEST\\client-err.log'; \$rc = \$LASTEXITCODE; \$sw.Stop(); \"\$([int]\$sw.Elapsed.TotalMilliseconds),\$rc\"" | tr -cd '0-9,')
-    T_MS=${out%%,*}; T_RC=${out##*,}
-    [[ -n "$T_MS" && -n "$T_RC" && "$out" == *,* ]] || { T_MS=0; T_RC=99; }
+    out=$(wssh "\$sw = [Diagnostics.Stopwatch]::StartNew(); & '$WIN_BLIT' copy '$src' '$dst' --yes $flags > \$null 2> '$WIN_TEST\\client-err.log'; \$rc = \$LASTEXITCODE; \$sw.Stop(); \"R:\$([int]\$sw.Elapsed.TotalMilliseconds),\$rc:R\"" \
+        | sed -n 's/.*R:\([0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1)
+    if [[ "$out" == *,* ]]; then T_MS=${out%%,*}; T_RC=${out##*,}; else T_MS=0; T_RC=99; fi
     if [[ "$T_RC" != 0 ]]; then
         wssh "Get-Content '$WIN_TEST\\client-err.log' -ErrorAction SilentlyContinue | Select-Object -First 20" \
             > "$OUT_DIR/blit-logs/${cell}_${rid}.err" 2>&1 || true
@@ -466,7 +520,9 @@ win_pull_run() {   # cell rid remote_src(from mac) [flag]; dest = win module
     win_client_run "$cell" "$rid" "$rsrc" "$WIN_MODULE\\pull_${SESSION_TAG}_${cell}_${rid}" "$flag"
     RUN_FLUSH=$(flush_win_ms)
     wssh "Remove-Item -Recurse -Force '$WIN_MODULE\\pull_${SESSION_TAG}_${cell}_${rid}' -ErrorAction SilentlyContinue" || true
-    RUN_MS=$(( T_MS + RUN_FLUSH )); RUN_EXIT=$T_RC; RUN_VALID=yes
+    RUN_VALID=yes
+    [[ "$RUN_FLUSH" == NA ]] && { RUN_VALID=no; RUN_FLUSH=0; }
+    RUN_MS=$(( T_MS + RUN_FLUSH )); RUN_EXIT=$T_RC
     [[ "$T_RC" == 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
 }
 win_push_run() {   # cell rid src(win local path) [flag]; dest = mac module
@@ -491,12 +547,15 @@ run_pair_loop() {   # cell armA armB runA_fn runB_fn (fns take: cell rid)
         local order pair_valid=yes arm fn rid rowA="" rowB=""
         if (( slot % 2 )); then order="A B"; else order="B A"; fi
         for arm in $order; do
-            rid="s${slot}a${attempts}"
-            if [[ "$arm" == A ]]; then fn="$fnA"; else fn="$fnB"; fi
+            local aname bld init
+            if [[ "$arm" == A ]]; then fn="$fnA"; aname="$armA"; else fn="$fnB"; aname="$armB"; fi
+            # The arm is part of every rid — and therefore every
+            # destination path — so the two arms of a slot can never
+            # collide on leftover data if a sweep fails (codex otp-12b
+            # F3; the zoey harness always had this).
+            rid="${aname}_s${slot}a${attempts}"
             "$fn" "$cell" "$rid"
             [[ "$RUN_VALID" == yes ]] || pair_valid=no
-            local aname bld init
-            if [[ "$arm" == A ]]; then aname="$armA"; else aname="$armB"; fi
             case "$aname" in
                 old) bld="$OLD_SHA"; init=mac;;
                 new|mac_init) bld="$NEW_SHA"; init=mac;;
@@ -529,14 +588,25 @@ b1_push_new() { win_ensure new; mac_push_run "$NEW_BLIT" "$1" "$2" "$WIN_REMOTE"
 b1_pull_old() { win_ensure old; mac_pull_run "$OLD_BLIT" "$1" "$2" "${WIN_REMOTE}pull_src_$CUR_W/src_$CUR_W/" $CUR_FLAG; }
 b1_pull_new() { win_ensure new; mac_pull_run "$NEW_BLIT" "$1" "$2" "${WIN_REMOTE}pull_src_$CUR_W/src_$CUR_W/" $CUR_FLAG; }
 # Block-2 arm wrappers (new pair; both daemons stay up). Both arms of a
-# pair do IDENTICAL work: no-trailing-slash sources everywhere, so both
-# initiators land the same one-level-nested tree at the destination
-# (avoids betting on Windows trailing-separator semantics; block 1
-# keeps the otp-2w shapes verbatim for baseline comparability).
-b2_mw_mac() { mac_push_run "$NEW_BLIT" "$1" "$2" "$WIN_REMOTE" "$MAC_WORK/src_$CUR_W" $CUR_FLAG; }
-b2_mw_win() { win_pull_run "$1" "$2" "${MAC_REMOTE}src_$CUR_W" "$CUR_FLAG"; }
+# pair do IDENTICAL work (codex otp-12b F5): no-trailing-slash sources
+# everywhere AND a destination CONTAINER precreated OUTSIDE the timed
+# window on every arm — each transfer lands the same one-level-nested
+# `container/src_<w>` tree, and no arm pays an in-window container
+# mkdir the other does not. (Block 1 keeps the otp-2w shapes verbatim
+# for baseline comparability.)
+b2_mw_mac() {
+    wssh "New-Item -ItemType Directory -Force -Path '$WIN_MODULE\\push_${SESSION_TAG}_${1}_${2}' | Out-Null"
+    mac_push_run "$NEW_BLIT" "$1" "$2" "$WIN_REMOTE" "$MAC_WORK/src_$CUR_W" $CUR_FLAG
+}
+b2_mw_win() {
+    wssh "New-Item -ItemType Directory -Force -Path '$WIN_MODULE\\pull_${SESSION_TAG}_${1}_${2}' | Out-Null"
+    win_pull_run "$1" "$2" "${MAC_REMOTE}src_$CUR_W" "$CUR_FLAG"
+}
 b2_wm_mac() { mac_pull_run "$NEW_BLIT" "$1" "$2" "${WIN_REMOTE}pull_src_$CUR_W/src_$CUR_W" $CUR_FLAG; }
-b2_wm_win() { win_push_run "$1" "$2" "$WIN_MODULE\\pull_src_$CUR_W\\src_$CUR_W" "$CUR_FLAG"; }
+b2_wm_win() {
+    mkdir -p "$MAC_MODULE_ROOT/push_${SESSION_TAG}_${1}_${2}"
+    win_push_run "$1" "$2" "$WIN_MODULE\\pull_src_$CUR_W\\src_$CUR_W" "$CUR_FLAG"
+}
 
 smoke() {   # arm smoke transfers (untimed): old pair, new pair, win->mac
     mkdir -p "$MAC_WORK/smoke_src"
@@ -630,39 +700,49 @@ for cell in b2_cells:
     inv = bar(hi, lo)   # max/min <= 1.10
     out.write(f"{cell},invariance,mac_init,win_init,{a},{b},{hi/lo:.3f},1.10,{'PASS' if inv else 'FAIL'}\n")
     # F3: each arm independently meets the direction's converge bars.
+    # Committed references are MANDATORY (fail closed, codex otp-12b
+    # F8); the same-session reference requires the block-1 counterpart
+    # COMPLETE (codex otp-12b F4 — a partial median never referees),
+    # else the row says so in registered vocabulary.
     d, carrier, fixture = cell.split("_")
     verb = "push" if d == "mw" else "pull"
     b1 = f"{verb}_{carrier}_{fixture}"
-    ref_m = base.get(b1)
-    old_sess = m(b1, "old")
+    if b1 not in base:
+        sys.exit(f"FATAL: no committed reference row for {b1} (needed by {cell})")
+    ref_m = base[b1]
+    old_sess = m(b1, "old") if complete(b1) else None
     for armname, val in (("mac_init", a), ("win_init", b)):
         if old_sess is not None:
             out.write(f"{cell},converge,{armname},old_session,{val},{old_sess},{val/old_sess:.3f},1.10,{'PASS' if bar(val, old_sess) else 'FAIL'}\n")
-        if ref_m is not None:
-            out.write(f"{cell},converge,{armname},old_committed,{val},{ref_m},{val/ref_m:.3f},1.10,{'PASS' if bar(val, ref_m) else 'FAIL'}\n")
+        else:
+            out.write(f"{cell},converge,{armname},old_session,{val},,,1.10,NO-SAME-SESSION-REF\n")
+        out.write(f"{cell},converge,{armname},old_committed,{val},{ref_m},{val/ref_m:.3f},1.10,{'PASS' if bar(val, ref_m) else 'FAIL'}\n")
     # F4 cross: each direction vs min of the two committed old
-    # directions for this fixture x carrier.
-    p_ref, l_ref = base.get(f"push_{carrier}_{fixture}"), base.get(f"pull_{carrier}_{fixture}")
-    if p_ref is not None and l_ref is not None:
-        cross_ref = min(p_ref, l_ref)
-        worst = max(a, b)
-        out.write(f"{cell},cross,worst_arm,min_old_committed,{worst},{cross_ref},{worst/cross_ref:.3f},1.10,{'PASS' if bar(worst, cross_ref) else 'FAIL'}\n")
+    # directions for this fixture x carrier (mandatory, fail closed).
+    p_ref = base.get(f"push_{carrier}_{fixture}")
+    l_ref = base.get(f"pull_{carrier}_{fixture}")
+    if p_ref is None or l_ref is None:
+        sys.exit(f"FATAL: committed push/pull reference missing for {carrier}_{fixture}")
+    cross_ref = min(p_ref, l_ref)
+    worst = max(a, b)
+    out.write(f"{cell},cross,worst_arm,min_old_committed,{worst},{cross_ref},{worst/cross_ref:.3f},1.10,{'PASS' if bar(worst, cross_ref) else 'FAIL'}\n")
 
-# Discriminator gap rows: same-session old direction gap vs unified gap
-# (per fixture x carrier; needs both directions complete).
+# Discriminator gap rows (D-2026-07-12-1; recorded, never adjudicated):
+# emitted only when ALL FOUR contributing cells are complete (codex
+# otp-12b F4). Row operands are labeled exactly (codex otp-12b F12).
 for carrier in ("tcp", "grpc"):
     for fixture in ("large", "small", "mixed"):
-        po, lo_ = m(f"push_{carrier}_{fixture}", "old"), m(f"pull_{carrier}_{fixture}", "old")
-        mw = [m(f"mw_{carrier}_{fixture}", x) for x in ("mac_init", "win_init")]
-        wm = [m(f"wm_{carrier}_{fixture}", x) for x in ("mac_init", "win_init")]
-        if None in (po, lo_) or None in mw or None in wm:
+        four = [f"push_{carrier}_{fixture}", f"pull_{carrier}_{fixture}",
+                f"mw_{carrier}_{fixture}", f"wm_{carrier}_{fixture}"]
+        if not all(complete(c) for c in four):
             continue
-        old_gap = po / lo_
-        new_gap = max(mw) / max(wm) if max(wm) else 0
-        out.write(f"gap_{carrier}_{fixture},cross-gap,old_push/old_pull,new_mw/new_wm,"
-                  f"{po},{lo_},{old_gap:.3f},,RECORDED\n")
-        out.write(f"gap_{carrier}_{fixture},cross-gap,new_mw,new_wm,"
-                  f"{max(mw)},{max(wm)},{new_gap:.3f},,RECORDED\n")
+        po, lo_ = m(four[0], "old"), m(four[1], "old")
+        mw_w = max(m(four[2], "mac_init"), m(four[2], "win_init"))
+        wm_w = max(m(four[3], "mac_init"), m(four[3], "win_init"))
+        out.write(f"gap_{carrier}_{fixture},cross-gap,old_push,old_pull,"
+                  f"{po},{lo_},{po/lo_:.3f},,RECORDED\n")
+        out.write(f"gap_{carrier}_{fixture},cross-gap,new_mw_worst,new_wm_worst,"
+                  f"{mw_w},{wm_w},{mw_w/wm_w:.3f},,RECORDED\n")
 out.close()
 PYEOF
 }
@@ -716,7 +796,9 @@ main() {
     if [[ -n "$CELLS" ]]; then
         local c
         for c in ${CELLS//,/ }; do
-            grep -q "^$c," "$META" \
+            # Header excluded — CELLS=cell must not match "cell,…"
+            # (codex otp-12b F10).
+            tail -n +2 "$META" | grep -q "^$c," \
                 || die "CELLS entry '$c' matched no comparison — nothing was measured for it"
         done
     fi

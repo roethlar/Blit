@@ -295,12 +295,18 @@ direction Mac→Win / Win→Mac), and `gap_<carrier>_<fixture>` for the
 discriminator gap rows (kind `cross-gap`, outcome `RECORDED` — never
 self-adjudicated; added at the 12b harness slice), `arm` ∈
 `old|new|mac_init|win_init|delegated|direct`, `build` = short sha,
-`initiator` = host name, `kind` ∈ `converge|invariance|delegated|cross`.
-Verdict outcome vocabulary: per-reference rows carry `PASS|FAIL`; a
-comparison's `combined` row carries the registered D2 set
+`initiator` = host name, `kind` ∈
+`converge|invariance|delegated|cross|cross-gap`.
+Verdict outcome vocabulary (closed; 12b review, codex F12): per-reference
+rows carry `PASS|FAIL`; a comparison's `combined`/`invariance` row
+carries the registered D2 set
 (`PASS|FAIL-SAME-SESSION|FAIL-REFERENCE-DRIFT|FAIL-BOTH|INCOMPLETE`);
-nothing else is legal, and a missing committed-reference row aborts the
-verdict pass (fail closed).
+`cross-gap` rows carry `RECORDED` only (never adjudicated); a block-2
+converge row whose same-session block-1 counterpart is absent or
+incomplete carries `NO-SAME-SESSION-REF` (an escalation-session
+artifact — the committed-reference row still governs). Nothing else is
+legal, and a missing committed-reference row aborts the verdict pass
+(fail closed).
 
 Fixtures: identical shapes to otp-2 (1 GiB large / 10k×4 KiB small /
 512 MiB+5k×2 KiB mixed), generated with the existing recipes (BSD vs GNU
