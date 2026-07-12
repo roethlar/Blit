@@ -598,10 +598,16 @@ Comparative mirror bench against rsync:
 | large 4 GiB no-op | **0.01 s** | 0.21 s | 0.16 s |
 | large 4 GiB incr (mtime touch only) | **3.96 s** | 2.23 s | 4.15 s |
 
-blit wins the no-op (filesystem journal fast-path: `crates/blit-core/src/change_journal/`)
-but loses the incremental: rsync's rolling-checksum diff sends 0 bytes
-when content matches despite mtime change; blit re-transfers the
-whole file.
+blit won that no-op via the filesystem journal fast-path —
+**RETIRED at otp-11b (2026-07-12): the skip was proven unsound**
+(its `NoChanges` verdict decayed to root-dir metadata a deep
+modification never touches — silent data loss, reproduced;
+`docs/bench/otp11-local-2026-07-11/README.md`). The unified session's
+no-op is a full enumerate+diff, 2.2× faster than the old SOUND pass;
+sound journal replay is a designed future session capability
+(`docs/plan/OTP11_LOCAL_SESSION.md` D3). blit loses the incremental:
+rsync's rolling-checksum diff sends 0 bytes when content matches
+despite mtime change; blit re-transfers the whole file.
 
 The block-hash resume path exists (`stream_via_data_plane_resume`) but
 isn't triggered for plain `mirror` — only when `--resume` is set or

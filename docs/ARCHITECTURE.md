@@ -49,16 +49,13 @@ The core library containing all transfer logic, protocols, and platform abstract
 | `remote::transfer::source` | `TransferSource` trait (read side) + `FsTransferSource` implementation |
 | `remote::transfer::sink` | `TransferSink` trait (write side) + `FsTransferSink`, `DataPlaneSink`, `NullSink` implementations |
 | `remote::transfer::payload` | `plan_transfer_payloads` — classifies files into tar shards / raw bundles / large-file payloads |
-| `orchestrator` | Local transfer entry: journal fast-path, mirror deletions, perf history; delegates execution to `execute_sink_pipeline` |
 | `transfer_session` | The ONE transfer choreography (`TransferSession`, both roles); the per-direction driver modules were deleted at cutover (otp-10c-2, D-2026-07-05-1) |
 | `mirror_planner` | Computes file differences for sync operations |
 | `enumeration` | Directory traversal and file discovery |
 | `copy` | Platform-optimized file copying (zero-copy cascade: copy_file_range, sendfile, clonefile, block clone) |
 | `checksum` | File integrity verification |
-| `change_journal` | OS-specific change detection (USN on Windows, FSEvents on macOS, metadata snapshot on Linux) |
 | `remote` | gRPC control plane + TCP data plane |
 | `tar_stream` | Batched small-file transfers |
-| `auto_tune` | Dynamic tuning of chunk sizes and stream counts based on manifest size |
 | `perf_predictor` | Performance optimization heuristics |
 | `perf_history` | Versioned JSONL performance record storage |
 | `fs_capability` | Per-filesystem capability detection and caching |
@@ -507,7 +504,7 @@ Located in each module's source file or adjacent `tests/` directory.
 ## Future Directions
 
 1. **RDMA Support**: Reserved fields in protocol for RDMA data plane
-2. **Incremental Sync**: Enhanced change journal integration
+2. **Incremental Sync**: journal-assisted no-op detection as a negotiated session capability (sound replay; designed at otp-11, docs/plan/OTP11_LOCAL_SESSION.md D3)
 3. **Compression**: Optional transfer compression
 4. **Encryption**: End-to-end encryption for data plane
 5. **Clustering**: Multi-daemon coordination

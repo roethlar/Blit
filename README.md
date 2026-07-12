@@ -7,7 +7,7 @@ Blit delivers a high-performance, extensible file enumeration, planning, transfe
 ## Features
 
 - **Modular Core Engine**
-  Async file enumeration, planner, transfer, and orchestrator modules in `blit-core` for maximum performance and extensibility.
+  Async file enumeration, planner, and one unified transfer session in `blit-core` for maximum performance and extensibility.
 - **CLI and Daemon Binaries**
   Minimal, ergonomic command-line interface; full daemon/server for automation and concurrent requests.
 - **Resumable Transfers**
