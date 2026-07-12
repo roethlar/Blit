@@ -61,4 +61,6 @@ verified the relocation blob-identical).
 
 ## Disposition
 
-6/6 accepted and fixed. Fix sha: (appended after the gate).
+6/6 accepted and fixed. Fix sha: `9e810ee` (gate green: fmt, clippy
+-D warnings, cargo test --workspace 1484/0 (2 ignored), the
+pre-existing blit_utils flake run in isolation 22/22).

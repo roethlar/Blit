@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-12
 
-- Recent sessions (2026-07-11/12, 44th–45th): **otp-10 fully closed (cutover + deletion) and otp-11a closed through the codex loop** — local transfers ride the session (in-process transport + local byte-carrier); the journal question RESOLVED (old fast path proven unsound; sound-vs-sound the session wins 2.2×) so **otp-11b is unblocked**. Suite **1513**. SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked.
+- Recent sessions (2026-07-11/12, 44th–45th): **otp-10 AND otp-11 fully closed through the codex loop** — every transfer (local included) rides the ONE session; the separate local orchestration no longer exists (−6.2k lines at 11b); the old journal fast path was proven UNSOUND (data-loss repro recorded) and died with it. Suite **1484** (the otp-13 ≥1483 floor met at the deletion slice). SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked.
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -43,21 +43,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     of tree AND proto (−13.8k lines, no bridge); DelegatedPull
     no-payload proof recorded. Suite 1555 → … → **1488**. Per-slice
     detail: DEVLOG 2026-07-11 entries + `.review/`.
-  - **otp-11a `[x]` CLOSED (the local route; deletion is 11b)** —
-    slice design `docs/plan/OTP11_LOCAL_SESSION.md` (D1–D3,
-    codex-reviewed): local transfers ride the session
-    (`run_local_session`, both role drivers over `in_process_pair`);
-    the LOCAL byte-carrier = process-local `LocalApply` (no wire
-    shape — the destination plans + applies needs in-process through
-    `FsTransferSink`, clonefile/block-clone preserved); the `blit_app`
-    local chokepoint re-pointed, CLI/TUI untouched, all verb + move
-    data-loss regression pins green; old orchestration in-tree but
-    production-caller-less (11b deletes it). Design codex 10 + slice
-    codex 9 findings adjudicated (`.review/results/otp-11{-design,a}.*`).
-    Perf gate: huge/tree/small PASS (1 GiB local = 22 ms both — clone
-    kept); no-op cell RESOLVED — the old journal skip was proven
-    unsound (Blocked below); sound-vs-sound the session wins 2.8×.
-    Suite 1488 → **1513**. Detail: DEVLOG 2026-07-12.
+  - **otp-11 `[x]` CLOSED (a + addendum + b)** — local transfers ride
+    the session (`run_local_session` over `in_process_pair`; the
+    LOCAL byte-carrier = process-local `LocalApply`, no wire shape,
+    clonefile/block-clone preserved — slice design
+    `docs/plan/OTP11_LOCAL_SESSION.md`, every round codex-reviewed:
+    design 10 + slice 9 + addendum 4 + deletion 6 findings, all
+    adjudicated in `.review/results/otp-11*`). Perf gate PASS against
+    SOUND baselines (1 GiB local = 22 ms both binaries; the old 21 ms
+    journal no-op was proven UNSOUND — silent data loss on deep
+    modifications, repro in `docs/bench/otp11-local-2026-07-11/`).
+    **11b deleted the whole old orchestration** (−6.2k lines:
+    orchestrator/engine/local_worker/auto_tune/change_journal +
+    the compare_manifests sweep; dial re-homed verbatim; types →
+    `transfer_session/local.rs`); the acceptance criteria's
+    deletion-proof line for "the separate local orchestration path"
+    COMPLETES. Suite 1488 → 1513 → **1484** (≥1483 floor met at the
+    deletion slice, margin +1). Detail: DEVLOG 2026-07-12 entries.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
   until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
@@ -75,10 +77,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    codex loop per slice (owner re-affirmed). otp-1, otp-3, otp-4a,
    otp-4b (1/2/3), otp-5a, otp-5b (1/2), otp-6 (a/b), otp-7 (a, b-1,
    b-2), otp-8, otp-9 (a/b), otp-2 (+ otp-2w), otp-10 (a, b-1/2,
-   c-1/2), **otp-11a** `[x]`. Current: **otp-11b (the local
-   orchestration deletion + compare_manifests sweep + retirement
-   accounting, ≈+44 pins)** — unblocked (journal question RESOLVED,
-   Blocked below).
+   c-1/2), **otp-11 (a + b)** `[x]`. Current: **otp-12 (the
+   symmetric-rig acceptance run — initiator/verb invariance A/B +
+   every cell ≤ the better old direction + noise)** — needs the rigs
+   (Blocked below); then otp-13 (owner checklist walk).
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -187,12 +189,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-12 (45th, this session)** — **otp-11a CLOSED (design doc
-  + slice + fix round + the journal-hole investigation + addendum
-  review; suite 1488 → 1513; perf gate PASS against CERTIFIED sound
-  baselines — the old 21 ms journal skip proven unsound, repro
-  recorded, codex-confirmed)**. In-flight: none; tree clean.
-  **Next**: otp-11b (unblocked).
+- **2026-07-12 (45th, this session)** — **otp-11 CLOSED WHOLE (11a
+  route + journal-hole addendum + 11b deletion, four codex rounds;
+  suite 1488 → 1484 with the ≥1483 floor met by real pins; the
+  separate local orchestration no longer exists)**. In-flight: none;
+  tree clean. **Next**: otp-12 (rig-gated, Blocked) → otp-13.
 - **2026-07-11 (44th)** — otp-10c closed (relay removal + the cutover
   deletion); suite 1605 → 1488. Owner ask pending: `725aa07` snapshot.
 - **2026-07-11 (43rd)** — otp-10a/10b closed; verb cutover complete.
