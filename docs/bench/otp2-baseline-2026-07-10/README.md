@@ -13,6 +13,20 @@ designated the Mac↔Windows pair for that
 daemon static aarch64-musl via
 `cargo zigbuild --release --target aarch64-unknown-linux-musl`); the
 recorded run used the harness as of `ceea6ed`+review fixes.
+
+> **Correction (2026-07-12, found by the otp-12a provenance preflight)**:
+> the daemon staged in zoey's `blit-temp/` — the binary this dataset's
+> daemon end actually ran — embeds build id `0.1.0+731023bfc8a1.dirty.…`,
+> i.e. a DIRTY build of `731023b`, not `e757dcc` as claimed above.
+> `git diff 731023b e757dcc -- crates proto Cargo.toml Cargo.lock` is
+> empty, so the committed daemon code is identical between the two
+> commits and these medians most plausibly stand (the working-tree dirt
+> at build time was the in-progress otp-2 harness/docs); but a dirty
+> build's content is unprovable after the fact. otp-12a therefore runs
+> its old arm on a CLEAN `e757dcc` rebuild staged separately
+> (`blit-daemon-e757dcc`), keeps this dataset as the committed reference
+> per OTP12 D2, and the pre-registered `FAIL-REFERENCE-DRIFT` outcome
+> covers any disagreement. The original staged pair is left untouched.
 **Harness**: `scripts/bench_otp2_baseline.sh` (methodology in its
 header; the probe CSVs here are the evidence that earned each rule).
 
