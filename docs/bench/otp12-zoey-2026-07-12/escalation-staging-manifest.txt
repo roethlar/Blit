@@ -1,0 +1,6 @@
+arm,role,sha,sha256,path
+old,client,e757dcc,7170e15f27f3fa61ebcdda010e32db0cf95d60dcbc1c19cc1d50a5e4416b4813,/Users/michael/blit-bench-work/bins/blit-e757dcc
+new,client,6bc9cb6,91a21259a922344c3c40d511f36b98c26c9dca159170f4c740ef7815aa935ba3,/Users/michael/Dev/blit_v2/target/release/blit
+old,daemon,e757dcc,a49a58a5acad34ce5f60f4bacf183ef93c60e714f2c21db1fb7b6edc212b5348,/volume/a595ddbf-d201-4e55-8183-ec78c8cd83e0/.srv/.unifi-drive/michael/.data/blit-temp/blit-daemon-e757dcc
+new,daemon,6bc9cb6,e2b4535bcb35f6e9689bba7202819b9f266c7558eef7521773e1d71cbf218bc1,/volume/a595ddbf-d201-4e55-8183-ec78c8cd83e0/.srv/.unifi-drive/michael/.data/blit-temp/blit-daemon-6bc9cb6
+-,reference,-,087affc260d484b8305b1541a2408c2dfe1023cbbdd5bc408ba3a66d03c85e0b,/Users/michael/Dev/blit_v2/docs/bench/otp2-baseline-2026-07-10/summary.csv

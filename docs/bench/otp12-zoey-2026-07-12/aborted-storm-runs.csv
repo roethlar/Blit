@@ -1,0 +1,13 @@
+cell,arm,build,initiator,run,ms,flush_ms,exit,drain,valid
+push_tcp_large,old,e757dcc,mac,1,28894,17390,0,drained_4x2s,yes
+push_tcp_large,new,ba86d3e,mac,1,27501,10320,0,drained_12x2s,yes
+push_tcp_large,old,e757dcc,mac,2,29738,20,0,drained_13x2s,yes
+push_tcp_large,new,ba86d3e,mac,2,31044,15510,0,drained_14x2s,yes
+push_tcp_large,old,e757dcc,mac,3,29408,7190,0,drained_14x2s,yes
+push_tcp_large,new,ba86d3e,mac,3,19358,15030,0,drained_14x2s,yes
+push_tcp_large,old,e757dcc,mac,4,33940,13310,0,drained_12x2s,yes
+push_tcp_large,new,ba86d3e,mac,4,24572,9010,0,drained_13x2s,yes
+push_grpc_large,old,e757dcc,mac,1,35038,16340,0,drained_14x2s,yes
+push_grpc_large,new,ba86d3e,mac,1,39797,23230,0,drained_13x2s,yes
+push_grpc_large,old,e757dcc,mac,2,32899,18180,0,drained_14x2s,yes
+push_grpc_large,new,ba86d3e,mac,2,25034,13740,0,drained_14x2s,yes

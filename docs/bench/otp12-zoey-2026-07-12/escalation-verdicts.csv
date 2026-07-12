@@ -1,0 +1,10 @@
+comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome
+pull_tcp_large,converge,new,old_session,2167,2177,0.995,1.10,PASS
+pull_tcp_large,converge,new,old_committed,2167,1744,1.243,1.10,FAIL
+pull_tcp_large,converge,new,combined,2167,,,1.10,FAIL-REFERENCE-DRIFT
+push_tcp_large,converge,new,old_session,2464,2570,0.959,1.10,PASS
+push_tcp_large,converge,new,old_committed,2464,2702,0.912,1.10,PASS
+push_tcp_large,converge,new,combined,2464,,,1.10,PASS
+push_tcp_small,converge,new,old_session,3984,3605,1.105,1.10,FAIL
+push_tcp_small,converge,new,old_committed,3984,4263,0.935,1.10,PASS
+push_tcp_small,converge,new,combined,3984,,,1.10,FAIL-SAME-SESSION

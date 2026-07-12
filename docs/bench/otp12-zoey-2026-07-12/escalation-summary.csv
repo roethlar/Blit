@@ -1,0 +1,7 @@
+cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted
+pull_tcp_large,new,2167,2442,1885,132.9,0,8
+pull_tcp_large,old,2177,2111,1809,27.9,0,8
+push_tcp_large,new,2464,2479,2199,20.9,0,8
+push_tcp_large,old,2570,2645,2244,60.6,0,8
+push_tcp_small,new,3984,4062,3853,16.7,0,8
+push_tcp_small,old,3605,3685,3487,18.7,0,8
