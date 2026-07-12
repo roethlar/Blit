@@ -84,7 +84,12 @@ OLD_SHA=${OLD_SHA_ZOEY:-e757dcc}
 NEW_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
 NEW_BLIT=${NEW_BLIT:-$REPO_ROOT/target/release/blit}
 OLD_BLIT=${OLD_BLIT:-$MAC_WORK/bins/blit-$OLD_SHA}
-OLD_DAEMON=${OLD_DAEMON:-$ZOEY_TEMP/blit-daemon}
+# The 2026-07-10 staging at $ZOEY_TEMP/blit-daemon FAILED provenance
+# (embeds 731023bfc8a1.dirty.…, not e757dcc — correction note in the
+# otp-2 README); both arms therefore run sha-named CLEAN rebuilds
+# staged beside it. The original is left untouched as the otp-2
+# artifact.
+OLD_DAEMON=${OLD_DAEMON:-$ZOEY_TEMP/blit-daemon-$OLD_SHA}
 NEW_DAEMON=${NEW_DAEMON:-$ZOEY_TEMP/blit-daemon-$NEW_SHA}
 # The committed reference is FIXED (pre-registered, design D2) — no env
 # override (codex otp-12a F5); its sha256 is recorded in the manifest.
@@ -147,13 +152,17 @@ preflight() {
     # binary must embed its arm's sha (session_build_id/BLIT_GIT_SHA is
     # a compile-time literal in the binary; the old commits embed it
     # too — they postdate otp-3).
-    grep -q "$NEW_SHA" "$NEW_BLIT" \
+    # -a + LC_ALL=C are load-bearing: BSD grep on macOS silently
+    # misses matches inside binaries without them (UTF-8 line
+    # handling) — observed live against a binary that provably embeds
+    # the id (2026-07-12 staging session).
+    LC_ALL=C grep -qa "$NEW_SHA" "$NEW_BLIT" \
         || die "$NEW_BLIT does not embed $NEW_SHA — rebuild at the run commit (stale target/release?)"
-    grep -q "$OLD_SHA" "$OLD_BLIT" \
+    LC_ALL=C grep -qa "$OLD_SHA" "$OLD_BLIT" \
         || die "$OLD_BLIT does not embed $OLD_SHA — restage the old client"
-    zssh "grep -q '$NEW_SHA' '$NEW_DAEMON'" \
+    zssh "grep -qa '$NEW_SHA' '$NEW_DAEMON'" \
         || die "$NEW_DAEMON does not embed $NEW_SHA — restage the new daemon"
-    zssh "grep -q '$OLD_SHA' '$OLD_DAEMON'" \
+    zssh "grep -qa '$OLD_SHA' '$OLD_DAEMON'" \
         || die "$OLD_DAEMON does not embed $OLD_SHA — the staged old daemon is not the pinned pair"
     # Stale-daemon refusal (the otp-2w F2 posture, new on this rig): a
     # leftover daemon would mask a bind failure and get benchmarked in

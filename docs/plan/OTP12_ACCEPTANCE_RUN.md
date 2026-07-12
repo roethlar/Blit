@@ -317,7 +317,7 @@ preflight check and exit before fixtures).
 | host | old arm | new arm |
 |------|---------|---------|
 | Mac | rebuild client at the pinned sha in a detached worktree → `~/blit-bench-work/bins/blit-<sha>` | `cargo build --release` at the run commit |
-| zoey | already staged (`$ZOEY_TEMP/blit-daemon`, `e757dcc` pair kept for otp-12 — machines.md) | `cargo zigbuild --release --target aarch64-unknown-linux-musl` → staged BESIDE the old one as `blit-daemon-<sha>` (never overwrite); everything stays inside `blit-temp/` |
+| zoey | clean `e757dcc` zigbuild staged as `blit-daemon-e757dcc` — the 2026-07-10 staging at `blit-daemon` FAILED provenance (a dirty `731023b` build; correction note in the otp-2 README) and is left untouched as the otp-2 artifact | `cargo zigbuild --release --target aarch64-unknown-linux-musl` → staged beside as `blit-daemon-<sha>` (never overwrite); everything stays inside `blit-temp/` |
 | Windows | copy the detached-checkout exes ASIDE first (`D:\blit-test\bins\0f922de\`) before any checkout movement | fresh git bundle (pushes are owner-gated; origin lags at `6d37a22`) → checkout run commit → native `cargo build --release` (daemon AND `blit.exe` client) → `D:\blit-test\bins\<sha>\` |
 | skippy | none (no old baseline; July binaries unusable) | `cargo zigbuild --release --target x86_64-unknown-linux-musl` (static — sidesteps the recorded glibc 2.36 ceiling) → `$SKIPPY_BIN/bins/<sha>/` (pool paths are exec-friendly; `/tmp` and `/home` are noexec) — `blit` + `blit-daemon` |
 
