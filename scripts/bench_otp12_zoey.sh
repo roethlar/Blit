@@ -77,6 +77,10 @@ ZOEY_HOST=${ZOEY_HOST:-10.1.10.206}
 PORT=${PORT:-9031}
 RUNS=${RUNS:-4}
 PREFLIGHT_ONLY=${PREFLIGHT_ONLY:-0}
+# Comma-separated comparison allowlist for the D2 escalation rule
+# (straddle + spread>25% -> fresh session at RUNS=8 for JUST those
+# comparisons; both sessions committed). Empty = the full matrix.
+CELLS=${CELLS:-}
 # Real-disk client workdir. NOT /tmp: keep the client end on APFS SSD.
 MAC_WORK=${MAC_WORK:-$HOME/blit-bench-work}
 
@@ -132,6 +136,7 @@ print(int((time.monotonic() - t) * 1000))
 PYEOF
 }
 
+want_cell() { [[ -z "$CELLS" ]] || [[ ",$CELLS," == *",$1,"* ]]; }
 arm_blit()   { case "$1" in old) echo "$OLD_BLIT";;   new) echo "$NEW_BLIT";;   esac; }
 arm_daemon() { case "$1" in old) echo "$OLD_DAEMON";; new) echo "$NEW_DAEMON";; esac; }
 arm_sha()    { case "$1" in old) echo "$OLD_SHA";;    new) echo "$NEW_SHA";;    esac; }
@@ -576,10 +581,10 @@ main() {
 
     local w
     for w in large small mixed; do
-        run_comparison "push_tcp_${w}"  push "$MAC_WORK/src_$w"
-        run_comparison "push_grpc_${w}" push "$MAC_WORK/src_$w" --force-grpc
-        run_comparison "pull_tcp_${w}"  pull "${REMOTE}pull_src_$w/src_$w/"
-        run_comparison "pull_grpc_${w}" pull "${REMOTE}pull_src_$w/src_$w/" --force-grpc
+        if want_cell "push_tcp_${w}";  then run_comparison "push_tcp_${w}"  push "$MAC_WORK/src_$w"; fi
+        if want_cell "push_grpc_${w}"; then run_comparison "push_grpc_${w}" push "$MAC_WORK/src_$w" --force-grpc; fi
+        if want_cell "pull_tcp_${w}";  then run_comparison "pull_tcp_${w}"  pull "${REMOTE}pull_src_$w/src_$w/"; fi
+        if want_cell "pull_grpc_${w}"; then run_comparison "pull_grpc_${w}" pull "${REMOTE}pull_src_$w/src_$w/" --force-grpc; fi
     done
 
     stop_daemon
