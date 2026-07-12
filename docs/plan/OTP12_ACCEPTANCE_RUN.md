@@ -1,6 +1,9 @@
 # otp-12 — symmetric-rig acceptance run (design)
 
-**Status**: Draft
+**Status**: Active (owner "yes to both", 2026-07-12 — the doc's only open
+question was ruled by D-2026-07-12-1; design codex round closed at
+`92e1d51`. The zoey RIG RUN still requires its own fresh owner go at run
+time — standing STATE rule.)
 **Created**: 2026-07-12
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-12.
 **Contract**: `docs/TRANSFER_SESSION.md` (unchanged — this slice adds NO code
