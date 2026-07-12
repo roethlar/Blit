@@ -45,7 +45,8 @@ The unsoundness conclusion is unchanged (codex: "remains correct").
 
 ## Disposition
 
-4/4 accepted and fixed (fix sha appended below). The addendum's core
-verdict stands confirmed by the independent reviewer; otp-11b remains
-unblocked with the certified 2.2× sound-vs-sound margin.
-Fix sha: (appended after the gate)
+4/4 accepted and fixed. The addendum's core verdict stands confirmed
+by the independent reviewer; otp-11b remains unblocked with the
+certified 2.2× sound-vs-sound margin.
+Fix sha: `5f1188c` (fmt clean; `local_session` 23/23; docs gate OK —
+docs/comment/measurement changes only, no behavior surface).
