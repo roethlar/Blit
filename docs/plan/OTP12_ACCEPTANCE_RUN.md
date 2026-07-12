@@ -287,9 +287,13 @@ individually-clean run whose partner voided reads `no`; amended at the
 `cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted`
 (medians over valid runs only — the D2 valid-run rule)
 `verdicts.csv`: `comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome`
-where `cell` = `<verb>_<carrier>_<fixture>` (the otp-2 label grammar,
-e.g. `push_tcp_large` — matches the committed reference CSV; corrected
-at the 12a review, codex F9), `arm` ∈
+where `cell` = `<verb>_<carrier>_<fixture>` for converge-up blocks (the
+otp-2 label grammar, e.g. `push_tcp_large` — matches the committed
+reference CSVs; corrected at the 12a review, codex F9),
+`<mw|wm>_<carrier>_<fixture>` for rig-W invariance cells (data
+direction Mac→Win / Win→Mac), and `gap_<carrier>_<fixture>` for the
+discriminator gap rows (kind `cross-gap`, outcome `RECORDED` — never
+self-adjudicated; added at the 12b harness slice), `arm` ∈
 `old|new|mac_init|win_init|delegated|direct`, `build` = short sha,
 `initiator` = host name, `kind` ∈ `converge|invariance|delegated|cross`.
 Verdict outcome vocabulary: per-reference rows carry `PASS|FAIL`; a
