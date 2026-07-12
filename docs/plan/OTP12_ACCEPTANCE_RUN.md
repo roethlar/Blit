@@ -150,8 +150,9 @@ count = floor of the mean of the middle two; per-cell spread
   old choreography and lands on the platform write path (NTFS/Defender vs
   APFS — the plan's Non-goals: different hardware need not perform
   identically); gap closed ⇒ the code was the cost and the bar is met. The
-  README records BOTH computations per cell; adjudication of any residual
-  failure is the owner's at otp-13 (Open question Q1).
+  README records BOTH computations per cell; a discriminator-attributed
+  platform-residue cell counts as satisfied (owner, D-2026-07-12-1), and
+  the otp-13 walk reviews the recorded numbers.
 
 Escalation rule (pre-registered, not ad-hoc): if a comparison straddles its
 bar and either arm's spread exceeds 25%, that comparison reruns at RUNS=8
@@ -345,8 +346,8 @@ is the assembly. Raw session logs stay under `logs/` (untracked) as usual.
   instantiated by the owner-designated closest-spec pair; rig W's two
   directions still land on different OS write paths (APFS vs NTFS +
   Defender at its normal state). D2's discriminator computation is the
-  pre-registered, evidence-backed handling; residual adjudication is
-  otp-13's (Q1).
+  pre-registered, evidence-backed handling; a platform-residue cell counts
+  as satisfied per D-2026-07-12-1.
 - **Old-arm provenance is a staging record, not a handshake** (old paths
   predate it). Mitigated by machines.md provenance + the sha256 manifest;
   accepted residual risk.
@@ -362,15 +363,13 @@ is the assembly. Raw session logs stay under `logs/` (untracked) as usual.
 - **Suite/test count**: untouched — no crates/proto changes anywhere in
   otp-12; the ≥1483 floor stands at 1484 from otp-11b.
 
-## Open questions (owner)
+## Open questions — RESOLVED (owner, 2026-07-12; D-2026-07-12-1)
 
-- **Q1 — cross-direction residue on rig W**: if a unified direction beats
-  its own old direction and is initiator-invariant, but stays above
-  `min(old_push, old_pull) × 1.10` with the discriminator attributing the
-  gap to the platform write path (same gap in the old arm), does the
-  cross-direction half of criterion 2 count as satisfied for that cell?
-  Recommendation: yes — the plan's Non-goals already exclude making
-  different hardware perform identically, and D-2026-07-05-1 restricts
-  cross-direction verdicts to symmetric endpoints; the evidence records
-  both computations either way. Decide at otp-13 with the numbers in hand,
-  not now.
+- **Q1 — cross-direction residue on rig W**: RESOLVED "yes" — a cell that
+  beats its own old direction, is initiator-invariant, and misses the
+  `min(old_push, old_pull) × 1.10` bar only by a discriminator-attributed
+  platform write-path residue (same gap in the old arm, same session)
+  **counts as satisfying the cross-direction half of criterion 2**
+  (D-2026-07-12-1). The evidence still records both computations per
+  cell; the otp-13 walk reviews the numbers, but a platform-residue cell
+  is not a blocker.

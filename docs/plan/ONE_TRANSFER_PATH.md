@@ -119,6 +119,11 @@ no second code path to differ.
       the OLD paths, both directions; after cutover, every unified
       cell must be ≤ the better of that cell's two old directions
       + run noise (±10%). A symmetric-but-slower result fails.
+      (Evaluation rule on the owner-designated cross-direction rig:
+      a cell that meets per-direction converge-up and invariance but
+      misses this bar only by a discriminator-attributed destination
+      write-path residue counts as satisfied — D-2026-07-12-1;
+      `docs/plan/OTP12_ACCEPTANCE_RUN.md` D2.)
 - [ ] **Deletion proof**: `remote/pull.rs` (driver), `remote/push/`
       (driver), daemon `push/control.rs` choreography, daemon
       `pull_sync.rs` choreography, the delegated-pull driver, the
