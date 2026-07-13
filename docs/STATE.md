@@ -144,10 +144,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   (`admin@skippy`, x86_64, pool paths only; fresh staging needed).
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
-- **Push go**: origin/master = `6d37a22` (re-verified via `ls-remote`
-  2026-07-11 — a partial push landed outside these sessions); unpushed
-  `6d37a22..HEAD` (12 at the 10c-1 record). Awaits the ref-listing +
-  approval flow; windows-latest CI on the w9-3 fix rides it.
+- ~~Push go~~ **RESOLVED 2026-07-12 (owner: push approved via the
+  ref-listing flow)**: pushed `f19776c..fbef546` (9 commits) →
+  origin/master = `fbef546`. Note: a second partial push outside these
+  sessions had already moved the remote `6d37a22` → `f19776c`
+  (fast-forward ancestor of HEAD, no divergence), carrying the w9-3
+  windows-latest CI fix. Local and remote are now in sync.
 - **otp-5b-3** (pull mid-transfer cancel e2e, marked optional): pick
   up while otp-10 runs, or drop? — standing question.
 - ~~The change-journal question~~ **RESOLVED 2026-07-12 (owner:
@@ -174,8 +176,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   snapshot removed via `git rm -r .claude/worktrees/vigilant-mayer`
   (236 files; dir was not a registered worktree). Historical docs
   embedding `/Users/...` paths: leave (owner-accepted rec).
-- **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` describes the deleted
-  `determine_remote_tuning` — fold into w10-docs-batch?
+- **(SLOTTED 2026-07-12 — owner ack)** `docs/WHITEPAPER.md` §8 (~line
+  592) describes the deleted `determine_remote_tuning` — fix folded
+  into **w10-docs-batch** (rewrite the stale sentence to current
+  `auto_tune` reality); no one-off edit now.
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
   three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
 - **(OPEN, new 2026-07-05)** CLI foot-gun: a bare local dir name with
