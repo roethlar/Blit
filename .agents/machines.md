@@ -56,6 +56,39 @@ every Linux target in play).
 - Mismatched MTUs on one L2 segment are fine: TCP MSS negotiation
   handles it, each host advertising what it can receive. What is NOT
   fine is a host advertising a size it cannot actually send.
+- **Fleet MTU as of 2026-07-13 — the whole 10 GbE fabric is now 9000:**
+
+  | host | iface | MTU | persistent? |
+  |---|---|---|---|
+  | Mac | `en9` (Aquantia) | 9000 | yes (macOS net service) |
+  | netwatch-01 | Ethernet | 9000 | yes (raised 1500→9000 today) |
+  | skippy | `enp66s0f1` | 9000 | yes |
+  | **zoey** | `enp0s0` (RJ45, NFS data .206) | **9000** | yes — `[Link] MTUBytes=9000` in `/etc/systemd/network/enp0s0.network` |
+  | **zoey** | `enp0s1` (SFP, mgmt .210) | **9000** | yes — same, in `enp0s1.network` |
+  | altiera | `enp1s0`/`enp2s0` | 9000 | yes (NetworkManager profiles) |
+  | magneto | `enp1s0f1` | 9000 | **NO — NM profile still `mtu=auto`**; needs `nmcli con mod "Wired connection 3" 802-3-ethernet.mtu 9000` or it reverts on reboot |
+
+- **zoey (UniFi UNAS Pro) jumbo — how it was done, and the trap.**
+  Debian 11 + `systemd-networkd`; NIC `maxmtu` is 9216 so the hardware is
+  fine. Persistence = a `[Link]` / `MTUBytes=9000` stanza in each
+  `/etc/systemd/network/enp0s*.network` (originals backed up as
+  `*.premtu`). Proven by `networkctl reload && networkctl reconfigure`
+  with the static IP intact — no reboot needed. **TRAP: `/` is an
+  overlayfs** (`lowerdir=/mnt/.rofs` read-only + writable upper), so a
+  UniFi *firmware update* can replace the base image and silently drop
+  this. Re-check after any UNAS update:
+  `ssh root@zoey 'cat /sys/class/net/enp0s0/mtu'` → want 9000.
+  Method for any risky remote NIC change: arm a self-healing revert
+  first — `nohup setsid bash -c 'sleep 90; [ -f /tmp/ok ] || ip link set
+  IFACE mtu 1500' &` — then confirm with `touch /tmp/ok`. Change the NIC
+  you are NOT ssh'd through when a second one exists.
+- **Live NFS/TCP connections do NOT pick up a new MTU.** MSS is fixed at
+  connect time, so an existing mount keeps its old segment size until it
+  reconnects (reboot/remount). Not worth forcing for low-bandwidth
+  mounts.
+- Two-NICs-on-one-subnet (both `altiera` and `zoey`, and it is the
+  default `arp_ignore=0 arp_announce=0`) invites ARP flux + asymmetric
+  routing. Working today; a latent source of intermittent stalls.
 - Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Build-only
   fallback likewise.
 
