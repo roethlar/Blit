@@ -165,14 +165,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Open questions
 
-- **(OPEN — owner ack, 2026-07-05, otp-4a)** Unified SizeMtime semantic:
-  same-size + dest-NEWER — old push clobbers, session adopts **data-safe
-  SKIP** (converge-up; `--force` still overwrites; pinned by
-  `same_size_newer_destination_is_skipped_not_clobbered`). Owner: confirm
-  or ask for old-push clobber. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
-- **(OPEN)** `725aa07` tracked a stale worktree snapshot (rec
-  `git rm -r`, awaits go); historical docs embed `/Users/...` paths
-  (rec: leave).
+- **(RESOLVED 2026-07-12 — owner confirmed SKIP)** Unified SizeMtime
+  semantic: same-size + dest-NEWER = **data-safe SKIP** (converge-up;
+  `--force` still overwrites; pinned by
+  `same_size_newer_destination_is_skipped_not_clobbered`). Owner ack
+  after trade-off review. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
+- **(RESOLVED 2026-07-12 — owner go)** `725aa07` stale worktree
+  snapshot removed via `git rm -r .claude/worktrees/vigilant-mayer`
+  (236 files; dir was not a registered worktree). Historical docs
+  embedding `/Users/...` paths: leave (owner-accepted rec).
 - **(OPEN, 2026-07-04)** `docs/WHITEPAPER.md` describes the deleted
   `determine_remote_tuning` — fold into w10-docs-batch?
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
