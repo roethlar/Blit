@@ -205,20 +205,39 @@ prep_run() {   # $1 = dest host. Drain dest, then cold BOTH ends. A failed drop 
 cold_ok() { [[ "$RUN_COLD" == cold ]]; }
 
 # ---- one timed run -----------------------------------------------------------
-RUN_MS=0; RUN_EXIT=0; RUN_VALID=yes
+# DURABILITY IS KEYED BY THE DESTINATION HOST, NEVER BY THE INITIATOR/VERB.
+# (otp-2w/otp-12b harness rule, re-learned the hard way — the first revision of
+# this script ran `sync` inside the initiator's bracket. In the push arm the
+# initiator IS the source, which only READ, so its sync was a no-op and the
+# destination's writeback was never paid; in the pull arm the initiator IS the
+# destination, so it paid the FULL writeback. That charged one arm for durability
+# the other got free — multi-second on skippy's ZFS for a 1 GiB fixture — and it
+# manufactured invariance "failures" on BOTH carriers, incl. the gRPC control
+# that is supposed to be clean. The carrier-independence is what exposed it.)
+RUN_MS=0; RUN_FLUSH=0; RUN_EXIT=0; RUN_VALID=yes
+flush_dest_ms() {   # $1 = DESTINATION host; self-timed sync, sentinel-framed
+  local out
+  out="$(hssh "$1" "a=\$(awk '{print int(\$1*1000)}' /proc/uptime)
+if sync; then b=\$(awk '{print int(\$1*1000)}' /proc/uptime); echo \"F:\$((b-a)):F\"; fi" 2>/dev/null \
+    | nocr | sed -n 's/.*F:\([0-9][0-9]*\):F.*/\1/p' | head -1)"
+  echo "${out:-NA}"      # a failed sync must never read as a plausible flush
+}
 timed_run() {   # $1=initiating host  $2=src(spec)  $3=dst(spec)  $4=dest host  $5=flag
   local ih="$1" src="$2" dst="$3" dh="$4" flag="${5:-}" out bin
   bin="$(hblit "$ih")"
   prep_run "$dh"
-  # /proc/uptime bracket INSIDE one ssh (round trip outside the window); the
-  # destination-side sync is inside it, so durability is paid by both arms.
+  # The transfer window: bracketed on the initiating host, in ONE ssh, so the
+  # round trip stays outside it. NO sync here — see the note above.
   out="$(hssh "$ih" "a=\$(awk '{print int(\$1*1000)}' /proc/uptime)
 '$bin' copy '$src' '$dst' --yes $flag >/dev/null 2>/tmp/pf-client.err; rc=\$?
-sync
 b=\$(awk '{print int(\$1*1000)}' /proc/uptime); echo \"R:\$((b-a)),\${rc}:R\"" | nocr \
     | sed -n 's/.*R:\([0-9][0-9]*,[0-9][0-9]*\):R.*/\1/p' | head -1)"
   if [[ "$out" == *,* ]]; then RUN_MS="${out%%,*}"; RUN_EXIT="${out##*,}"; else RUN_MS=0; RUN_EXIT=99; fi
+  # Durability: ALWAYS the destination host, identically for both arms.
+  RUN_FLUSH="$(flush_dest_ms "$dh")"
   RUN_VALID=yes
+  if [[ "$RUN_FLUSH" == NA ]]; then RUN_VALID=no; RUN_FLUSH=0; fi
+  RUN_MS=$(( RUN_MS + RUN_FLUSH ))
   [[ "$RUN_EXIT" == 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
   cold_ok || RUN_VALID=no
 }
@@ -236,7 +255,7 @@ arm_destinit() {   # dest host pulls from the source daemon
   hssh "$dh" "rm -rf '$(hmod "$dh")/${SESSION_TAG}_${cell}_${rid}'" 2>/dev/null || true
 }
 
-CSV="$OUT_DIR/runs.csv"; echo "cell,arm,build,initiator,run,ms,exit,drain,cold,valid" > "$CSV"
+CSV="$OUT_DIR/runs.csv"; echo "cell,arm,build,initiator,run,ms,flush_ms,exit,drain,cold,valid" > "$CSV"
 META="$OUT_DIR/meta.csv"; echo "cell,pairs_attempted,complete" > "$META"
 
 run_pair_loop() {   # cell src_host dest_host
@@ -253,9 +272,9 @@ run_pair_loop() {   # cell src_host dest_host
       rid="${aname}_s${slot}a${attempts}"
       if [[ "$aname" == srcinit ]]; then arm_srcinit "$cell" "$rid" "$sh" "$dh"; else arm_destinit "$cell" "$rid" "$sh" "$dh"; fi
       [[ "$RUN_VALID" == yes ]] || pair=no
-      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
+      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_EXIT,$RUN_DRAIN,$RUN_COLD"
       [[ "$arm" == A ]] && rowA="$row" || rowB="$row"
-      log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
+      log "  $cell/$aname slot $slot (att $attempts): ${RUN_MS}ms (dest-flush ${RUN_FLUSH}ms, exit $RUN_EXIT, $RUN_DRAIN, $RUN_COLD)"
     done
     echo "$rowA,$pair" >> "$CSV"; echo "$rowB,$pair" >> "$CSV"
     if [[ "$pair" == yes ]]; then valid=$(( valid + 1 )); slot=$(( slot + 1 ))
