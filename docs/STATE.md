@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-13
 
-- Recent sessions (2026-07-11/13, 44th–46th): **otp-10, otp-11 closed through the codex loop; otp-12c RECORDED** — every transfer (local included) rides the ONE session; the separate local orchestration no longer exists (−6.2k lines at 11b); the old journal fast path was proven UNSOUND (data-loss repro recorded) and died with it. Both otp-12c rigs measured 2026-07-13 (evidence in Blocked; adjudication belongs to otp-13, and the slice still owes a codex round). Suite **1484** (the otp-13 ≥1483 floor met at the deletion slice). SMALL_FILE_CEILING paused (D-2026-07-05-1).
+- Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED; and the perf regressions are now proven to be CODE, not platform.** Every transfer rides the ONE session (the separate local orchestration is gone, −6.2k lines at 11b; the unsound journal fast path died with it). **P1 — the headline invariance criterion — FAILS and reproduces at 1.78 on a same-OS Linux↔Linux rig with no Mac/Windows in the path** (`docs/bench/otp12-perf-2026-07-13/`), so D-2026-07-12-1's platform-residue allowance cannot absorb it: it is a defect and the fix is mandatory. **otp-12d/otp-13 are DEFERRED behind the perf fixes** (`docs/plan/OTP12_PERF_FINDINGS.md`, queue 1a — Draft, awaiting codex convergence then the owner's Active flip). Suite **1484**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`

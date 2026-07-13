@@ -62,7 +62,7 @@ only variable — that part is clean. Arm medians (12c-win):
 | cell | data direction | dest-initiated arm | source-initiated arm | ratio | spreads |
 |---|---|---|---|---|---|
 | `wm_tcp_mixed` | Win→Mac | 1221 | 939 | **1.300 FAIL** | 6.4 / 8.4% |
-| `mw_tcp_mixed` | Mac→Win | 1477 | 1415 | 1.044 PASS | 20.5 / 20.8% |
+| `mw_tcp_mixed` | Mac→Win | 1477 | 1415 | 1.044 PASS | 20.8 / 20.5% |
 
 The initiator penalty is therefore **real and large in the Win→Mac
 direction only**. In Mac→Win the two layouts are within noise, and the
@@ -77,18 +77,76 @@ not "destination initiation" on its own.
 
 Worse, on a two-host rig the failing configuration is **confounded by
 construction**: in the slow arm the destination is the Mac (which dials)
-*and* the source is Windows (which accepts). "Mac-as-dialing-destination"
-and "Windows-as-accepting-source" are the same configuration here and
-cannot be separated by adding more runs on this rig. Two consequences,
-both binding on pf-1:
+*and* the source is Windows (which accepts). With only two hosts, **host
+identity IS role** — "Mac-as-dialing-destination" and
+"Windows-as-accepting-source" are the same configuration and cannot be
+separated by any number of additional runs on this rig.
+
+### THE CONFOUND IS BROKEN — and it breaks toward CODE (2026-07-13)
+
+**Probe: `docs/bench/otp12-perf-2026-07-13/` — magneto↔skippy, Linux on
+BOTH ends, real 10 GbE.** The owner offered magneto as a bench end and
+confirmed it saturates 10 GbE (unlike zoey, whose CPU is too slow to
+partner skippy — `.agents/machines.md`). Same `+f35702a` musl build both
+ends; `mixed` fixture; 3 runs/arm:
+
+| data direction | source-initiated | destination-initiated | ratio |
+|---|---|---|---|
+| skippy → magneto | 950 ms | **1690 ms** | **1.78** |
+| magneto → skippy | 1340 ms | unstable (1540–6370) | — |
+
+**P1 reproduces with no Mac and no Windows anywhere in the path** — and
+LARGER than rig W's 1.300. Therefore:
+
+- **The platform-residue explanation for P1 is DEAD.** There is no
+  macOS/Windows asymmetry left to attribute the gap to, so
+  **D-2026-07-12-1's escape hatch does not apply to P1**: it cannot be
+  accepted as a destination-write-path residue at the otp-13 walk.
+- **P1 is a property of blit's layout — i.e. our code.** H1/H5/H6 are
+  live, and a fix is MANDATORY for the parent plan's headline
+  invariance criterion. This is no longer a question the owner can
+  waive; it is a defect.
+- The probe is **not evidence-grade** (no cold caches — magneto lacks the
+  `drop_caches` grant; no drains/ABBA/pair-void; RUNS=3). It decides the
+  confound; it does not enter the acceptance matrix, and pf-final voids
+  it like every other pre-fix row. The magneto→skippy dest-init arm is
+  unstable (1540 vs 6370), unexplained, and must not be cited until the
+  harness resolves it.
+
+**Promoting magneto to a pf-1 rig needs** (owner): the `NOPASSWD`
+`/usr/bin/tee /proc/sys/vm/drop_caches` grant, and the torrent services
+quiesced. Then Linux↔Linux becomes pf-1's primary rig — it isolates the
+layout with no platform terms at all, which rig W structurally cannot do.
+
+### The residual confound (WHICH code) still needs a counterfactual
+
+Breaking platform-vs-code does NOT tell us *which* layout property costs
+the time. On any two-host rig, host identity remains welded to role, so
+"the accepting end" cannot be separated from "that host" by more runs:
+
 - **pf-1 must compare all four rig-W arms** (both cells × both
   initiators), not two, and report the interaction — not a single ratio.
-- **pf-1's same-platform local rig is the disambiguator.** On Mac↔Mac
-  (same OS, same fs, same stack both ends) the platform terms vanish: a
-  dest-initiator penalty that still appears there is **pure layout**
-  (code — H1/H5/H6); its absence means the effect *requires* the
-  Windows-responder / Mac-destination element, and the rig-side
-  instrumented run becomes mandatory (Method 2).
+- **The disambiguator is a dial/accept inversion counterfactual, not a
+  rig.** Today the initiator always dials and the responder accepts, so
+  role and host are welded together. pf-1 adds a **debug-flag that flips
+  which end dials** for a given source/destination assignment, then runs
+  the SAME data direction, SAME hosts, SAME fixture, changing only who
+  accepts. If the ~30% follows the **accept role**, H1 is CONFIRMED; if
+  it stays with the **platform** regardless of who accepts, H1 is KILLED
+  and the residue is a TCP-stack/write-path property (→ the D-2026-07-12-1
+  discriminator and the owner's walk). This changes connection topology
+  even behind a debug flag, so it **trips this plan's Contract
+  stop-and-amend rule** (`TRANSFER_SESSION.md` amended through the loop
+  BEFORE the flag is written). Same-build-both-ends (D-2026-07-05-2)
+  means no compatibility surface is created.
+- **The same-platform loopback run is a ONE-WAY test** (corrected — an
+  earlier draft of this section had it backwards). A dest-initiator
+  penalty that still appears on Mac↔Mac loopback proves **pure layout**
+  (code). Its ABSENCE proves **nothing**: loopback has no NIC, near-zero
+  RTT and a huge MTU, so it erases exactly the per-epoch accept/dial
+  round-trip cost H1 accuses. A negative local result is **INCONCLUSIVE**
+  and never reads as "no code bug" — it escalates to the inversion
+  counterfactual and the rig-side instrumented run (Method 2).
 
 This refines rather than weakens H1: H1 accuses the **source's accept
 branch** under resize, and the source in the slow arm is Windows —
@@ -156,11 +214,20 @@ cannot attribute code — Method 3(a)).
   session the SOURCE is the responder: each sf-2 resize epoch is
   ACCEPTED off the source's listener while the DESTINATION dials
   (otp-5b-2: `SourceSockets` Dial/Accept branches;
-  `InitiatorReceivePlaneRun.add_dialed_stream`). Mixed is the fixture
-  that exercises mid-transfer shape correction hardest (tar-shard small
-  half + big-file stream). Suspect: per-epoch accept/dial round-trips
-  or serialization in the accept branch that the dial branch does not
-  pay, surfacing only when resize fires under a fast source.
+  `InitiatorReceivePlaneRun.add_dialed_stream`). Suspect: per-epoch
+  accept/dial round-trips or serialization in the accept branch that the
+  dial branch does not pay.
+  **H1's fixture rationale is FALSIFIED (review round 4)**: the claim
+  was "mixed exercises resize hardest", but **all three fixtures target
+  eight streams before clamping** (`src/dial.rs:474`) — so resize
+  *count* cannot explain mixed-only behaviour, and H1 must name what
+  about mixed differs (shard-boundary timing? the tar-shard small half
+  interleaving with the big-file stream at the moment epochs fire?) or
+  be killed. **H1 also names the wrong half without proof**: it accuses
+  `Accept` while the destination's **synchronous dial-before-ACK** path
+  (`transfer_session/mod.rs:3113`) is an equally good suspect. pf-1 must
+  separate them with the dial/accept inversion counterfactual below —
+  "consistent with H1" is not confirmation.
 - **H2 (P1) — CONTRADICTED by code (review 2026-07-12)**: the claimed
   interleave cannot happen — resize begins only after
   `ManifestComplete` (`transfer_session/mod.rs` resize gate), and both
@@ -232,6 +299,23 @@ cannot attribute code — Method 3(a)).
   account for a material share of the P2 gap. If H6 is confirmed, the P2
   fix bar applies unchanged (≤ 1.10 against BOTH references, BOTH rigs);
   no separate bar is granted.
+
+- **H7 (P2; added by review round 4 — the SHARED-controller candidate
+  the gRPC caveat predicted)**: HEAD's need/manifest bookkeeping is
+  heavier than old push's per entry. The unified source keeps a
+  **mutex-protected sent-manifest map** with per-entry insertion and
+  removal, and routes each need through a **per-need event-channel hop**
+  (`transfer_session/mod.rs:1038`, `:1123`, `:1350`); old push used a
+  **task-local map and handled need batches inline**, with no lock and no
+  channel hop per entry. This is **per-entry**, so it scales with FILE
+  COUNT — exactly P2's 10k×4 KiB signature — and, critically, it is
+  **shared by BOTH carriers**. That is the precise class the round-3
+  gRPC caveat warned about: a shared regression can hide under gRPC's
+  larger carrier-specific gain, so "TCP-only symptom" does NOT exonerate
+  shared code. No prior hypothesis tested it. Discriminated by: per-entry
+  bookkeeping timings scaled against file count, plus the wall-time
+  counterfactual (a task-local/batch-inline path behind a debug flag).
+  H7 and H6 are independent and may BOTH contribute.
 
 ## Method (the investigation slice — no behavior changes)
 
@@ -316,6 +400,33 @@ cannot attribute code — Method 3(a)).
    `docs/bench/otp12-perf-<date>/` (timings + the flag matrix), codex
    loop per slice as usual.
 
+## pf-1 decision rule — UNIFORM, pre-registered (added round 5)
+
+Round-4 review: individual hypotheses had no shared decision threshold —
+H1 accepted any positive phase delta, H4's cadence replay had no
+threshold, H5 left a 1–49% recovery undecided, H6 left "material share"
+undefined. A phase-timing delta is **descriptive**; only wall time
+decides. So ONE rule governs every hypothesis (H1, H4, H5, H6, H7):
+
+- Each hypothesis must have a **wall-time counterfactual**: a debug-flag
+  variant that removes or restores exactly the accused mechanism, run
+  interleaved against the unmodified build on the same rig and fixture.
+  A hypothesis with no counterfactual **cannot be confirmed** — it is
+  carried as UNTESTED and pf-1 does not close.
+- Let `Δ` = the measured new-vs-old-same-session gap for that finding.
+  The counterfactual's wall-time recovery `r` (as a share of `Δ`) is
+  graded on a **pre-registered scale**, no post-hoc bands:
+  - `r ≥ 50%` → **CONFIRMED DOMINANT** (fix it first)
+  - `20% ≤ r < 50%` → **CONFIRMED CONTRIBUTING** (fix it, but it is not
+    the whole story — keep hunting)
+  - `r < 20%` → **KILLED** as a material cause (recorded, not pursued)
+- **pf-1 closes only when the confirmed contributions account for ≥ 70%
+  of `Δ`** for each finding. If they do not, the residue is unexplained
+  and pf-1 **stays open** with the shortfall stated in the probe record —
+  never "several hypotheses were consistent, moving on".
+- Every measurement runs instrumentation-on/off pairs (per-member tracing
+  across ~10k files can itself perturb a double-digit share of `Δ`).
+
 ## Fix criteria (pre-registered; the owner walks the final numbers)
 
 - **The global rule dominates every bar below** (review round 2 flagged
@@ -387,8 +498,14 @@ cannot attribute code — Method 3(a)).
   verdict cells (+ the gRPC smoke) therefore rerun on the final build;
   both arms are new-build by construction there (rig D has no old
   baseline), so the whole cell is re-measured.
-  If any shared controller/planner/sink code changed, the
-  gRPC control cells rerun on the final build too. Results land in fresh
+  **Every gRPC row the acceptance method requires reruns
+  UNCONDITIONALLY on the final build** (corrected, review round 4 — the
+  earlier "if shared code changed, the gRPC cells rerun too" left the
+  decision to the author's own judgement of what counts as shared, which
+  is exactly the loophole H7 exploits: a shared regression can hide under
+  a gRPC-specific gain). `OTP12_ACCEPTANCE_RUN.md` D2 requires the
+  complete Z/W gRPC converge and invariance rows, so those are
+  final-build rows, full stop — no conditional. Results land in fresh
   dated evidence dirs. **Then** otp-12d assembles the matrix from
   final-build rows, and the otp-13 owner walk reads it.
 

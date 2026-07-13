@@ -32,6 +32,16 @@ every Linux target in play).
   otp-12b session (owner's `bench-cargo-lock` stash untouched); old
   `0f922de` exes aside-copied at `D:\blit-test\bins\0f922de\`; run
   bins under `D:\blit-test\bins\<sha>\`.
+- **Rig pairing constraint (owner, 2026-07-13): zoey's CPU is too slow
+  to be a match for skippy** — a zoey↔skippy pair is NOT a valid
+  symmetric/performance-matched rig; a zoey endpoint becomes the
+  bottleneck and MASKS data-plane effects rather than measuring them.
+  Consequence, recorded so it is not re-proposed: the fleet has **no
+  same-OS, real-network, performance-matched pair** (one Mac; zoey too
+  slow for skippy; magneto is a busy BitTorrent box — build-only, never
+  a bench end). Platform-vs-role confounds on a two-host rig therefore
+  cannot be broken by rig juggling and need a code-level counterfactual
+  (see `docs/plan/OTP12_PERF_FINDINGS.md`).
 - zoey: binaries staged 2026-07-10 in `blit-temp/` — **corrected
   2026-07-12**: the staged daemon embeds `731023bfc8a1.dirty.…`, NOT
   `e757dcc` as previously recorded (otp-2 README carries the full
