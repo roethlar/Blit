@@ -162,7 +162,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   says a CANCELLED must stay CANCELLED). Both record receivers now
   match the block-record handling; suite 39/39. Companion commit
   `ace91de` shipped the CLI foot-gun `./NAME` suggestion + unified
-  remote-refusal wording. Local only — NOT pushed.
+  remote-refusal wording. Pushed 2026-07-12 (owner: "commit then
+  push"): `fbef546..8f15ce2` (6 commits, incl. otp12 review
+  artifacts) → origin/master = `8f15ce2`.
 - ~~The change-journal question~~ **RESOLVED 2026-07-12 (owner:
   "neither option passes — figure out a real fix"; the premise was
   false)**: the old 21 ms journal skip was UNSOUND — `NoChanges`
