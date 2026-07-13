@@ -18,9 +18,8 @@ use std::time::Duration;
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
     session_error, BlockHashList, ComparisonMode, FileData, FileHeader, FilterSpec,
-    ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings,
-    SessionError, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
-    TransferSummary,
+    ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings, SessionError,
+    SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole, TransferSummary,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{PreparedPayload, TransferPayload};

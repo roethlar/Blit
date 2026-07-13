@@ -244,7 +244,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("myfolder")).unwrap();
         let hint = local_path_hint_in(tmp.path(), "myfolder").unwrap();
-        assert!(hint.contains("'myfolder' exists here as a folder"), "{hint}");
+        assert!(
+            hint.contains("'myfolder' exists here as a folder"),
+            "{hint}"
+        );
         assert!(hint.contains("./myfolder"), "{hint}");
     }
 
