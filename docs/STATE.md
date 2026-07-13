@@ -186,10 +186,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   `auto_tune` reality); no one-off edit now.
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
   three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
-- **(OPEN, new 2026-07-05)** CLI foot-gun: a bare local dir name with
-  no `./` parses as an mDNS discovery endpoint and errors (blit-app
-  endpoints.rs). Local-path existence wins, or better error? Owner to
-  slot.
+- **(RESOLVED 2026-07-12 — owner: better error, parsing unchanged)**
+  CLI foot-gun: a bare local dir name with no `./` still parses as an
+  mDNS endpoint (no local-wins ambiguity introduced), but when the
+  lookup fails AND a local path of that name exists, the error must
+  suggest it: "'NAME' exists here as a folder — did you mean ./NAME?"
+  (blit-app endpoints.rs). Small standalone slice.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: w9-3 fixed the
   Linux daemon-spawn flakiness; windows-latest CI pending the next
   push. NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
