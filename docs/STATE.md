@@ -1,8 +1,8 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
-- Recent sessions (2026-07-11/12, 44th–45th): **otp-10 AND otp-11 fully closed through the codex loop** — every transfer (local included) rides the ONE session; the separate local orchestration no longer exists (−6.2k lines at 11b); the old journal fast path was proven UNSOUND (data-loss repro recorded) and died with it. Suite **1484** (the otp-13 ≥1483 floor met at the deletion slice). SMALL_FILE_CEILING paused (D-2026-07-05-1). Push state: see Blocked.
+- Recent sessions (2026-07-11/13, 44th–46th): **otp-10, otp-11 closed through the codex loop; otp-12c RECORDED** — every transfer (local included) rides the ONE session; the separate local orchestration no longer exists (−6.2k lines at 11b); the old journal fast path was proven UNSOUND (data-loss repro recorded) and died with it. Both otp-12c rigs measured 2026-07-13 (evidence in Blocked; adjudication belongs to otp-13, and the slice still owes a codex round). Suite **1484** (the otp-13 ≥1483 floor met at the deletion slice). SMALL_FILE_CEILING paused (D-2026-07-05-1).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -143,121 +143,58 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Rigs**: owner go GIVEN 2026-07-12; zoey (12a) + netwatch-01 (12b)
-  sessions done. Remaining: 12c delegated = netwatch-01↔skippy
-  (`admin@skippy`, x86_64, pool paths only; fresh staging needed).
-- **otp-12c prep DONE 2026-07-12**: same-build `f35702a` on both ends;
-  corpus restaged; cross-machine smokes pass both directions. Rig
-  foot-gun (cost one debugging round): Win32-OpenSSH reaps
-  `Start-Process` children when the spawning SSH session closes — the
-  netwatch daemon silently died and 9031 stealth-dropped (mimicked a
-  firewall block; rules were never the problem). Start Windows daemons
-  detached via WMI `Invoke-CimMethod Win32_Process Create` (Linux
-  side unaffected — skippy daemons survive SSH close fine). The prep
-  daemons were stopped before the 12c recorded runs; harnesses own
-  their daemon lifecycles end-to-end.
-- **otp-12c direct-path baseline RECORDED 2026-07-13**
-  (`docs/bench/otp12c-win-2026-07-13/`): rig-W matrix re-run, new arm
-  at the cutover sha `f35702a` (12b's new arm was `e21cf84`), old arm
-  `0f922de`. 198 timed runs, 24/24 cells complete, 3 DRAIN-TIMEOUT
-  pairs voided+re-run, 0 CR residue. Verdicts: 93 PASS / 12 FAIL /
-  3 FAIL-SAME-SESSION / 12 RECORDED. Texture: wm_tcp_mixed invariance
-  **1.300** (12b: 1.237 — the same code-shaped cell, not washed out at
-  the cutover sha); new-vs-old_session losses concentrate in
-  TCP×{small,mixed}×push + pull_tcp_mixed (1.14–1.25) while the new
-  arm wins the small-pull side; mw_* cross rows restate the push>pull
-  gap vs the committed 12b baselines. Adjudication belongs to otp-13.
-- **otp-12c delegated session RECORDED 2026-07-13**
-  (`docs/bench/otp12c-delegated-2026-07-13/`): rig D =
-  netwatch-01↔skippy, harness `scripts/bench_otp12_delegated.sh` at
-  `a2dea3f`, binaries `EXPECT_SHA=f35702a` (5-hash manifest, same in
-  both sessions). Primary RUNS=4: 56 timed runs, 7/7 cells, 0 voided
-  — **5 PASS / 2 FAIL** (`sw_tcp_mixed` 1.119, `ws_tcp_large` 1.129).
-  Confirmation RUNS=8 on exactly those two cells: 32 runs, 0 voided —
-  **both PASS** (1.035, 1.068), and at n=8 the spread shows up on the
-  *direct* arm too (31.5%/64.0%), so the 4-pair FAILs read as
-  low-n noise rather than delegation cost. Both records are committed;
-  neither supersedes the other — **the 4-vs-8 pair reading is an
-  owner call at otp-13**, not self-adjudicated here. Harness fixes
-  found live: `:?` messages with apostrophes swallowed assignments
-  (`b49413d`), macOS `TMPDIR` blew the 104-byte ControlPath limit
-  (`b49413d`), skippy `drop_caches` must go through the exact
-  NOPASSWD grant `tee /proc/sys/vm/drop_caches` (`a2dea3f`).
-  **Not yet through the codex loop** (D-2026-07-04-1) — harness +
-  evidence commits owe a review round.
+- **Rigs**: owner go GIVEN 2026-07-12 (standing through the otp-12
+  sessions). zoey (12a), netwatch-01 (12b), netwatch-01↔skippy (12c)
+  all done. Rig plumbing facts (Windows WMI daemon launch, skippy pool
+  paths + the exact NOPASSWD grant, delegation allowlists are IP/CIDR
+  only): DEVLOG 2026-07-13.
+- **otp-12c RECORDED 2026-07-13, adjudication owed to otp-13**:
+  direct-path re-baseline at the cutover sha
+  (`docs/bench/otp12c-win-2026-07-13/` — 198 runs; 93 PASS / 12 FAIL /
+  3 FAIL-SAME-SESSION / 12 RECORDED; `wm_tcp_mixed` invariance
+  **1.300** vs 12b's 1.237 — the TCP×mixed×dest-initiator cell did not
+  wash out at the cutover sha) and the delegated rig-D matrix
+  (`docs/bench/otp12c-delegated-2026-07-13/` — RUNS=4: 5 PASS / 2 FAIL,
+  `sw_tcp_mixed` 1.119 and `ws_tcp_large` 1.129; RUNS=8 on exactly
+  those two: **both PASS**, 1.035 / 1.068, with the big spread on the
+  *direct* arm too). Both records stand; **the 4-vs-8 reading is an
+  owner call**, not self-adjudicated. **Owes a codex round**
+  (D-2026-07-04-1): harness `scripts/bench_otp12_delegated.sh` plus
+  both evidence commits.
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
-- ~~Push go~~ **RESOLVED 2026-07-12 (owner: push approved via the
-  ref-listing flow)**: pushed `f19776c..fbef546` (9 commits) →
-  origin/master = `fbef546`. Note: a second partial push outside these
-  sessions had already moved the remote `6d37a22` → `f19776c`
-  (fast-forward ancestor of HEAD, no divergence), carrying the w9-3
-  windows-latest CI fix. Local and remote are now in sync.
-- ~~otp-5b-3~~ **RESOLVED 2026-07-12 (owner: "write the test")** —
-  re-scoped: the pull-specific framing is mooted by direction-invariance
-  (one session, D-2026-07-05-1); what's missing is a direction-agnostic
-  **mid-copy cancel e2e** (cancel while file data is in flight; existing
-  coverage only hits mirror-purge cancel + jobs lifecycle). Near-term
-  standalone slice; codex loop applies. **LANDED `920c6a7`**: the test
-  exposed a real bug — a peer `Frame::Error` arriving mid-record
-  (file or tar-shard) was misreported as a ProtocolViolation about
-  frame position instead of surfacing the peer's own fault (plan D4
-  says a CANCELLED must stay CANCELLED). Both record receivers now
-  match the block-record handling; suite 39/39. Companion commit
-  `ace91de` shipped the CLI foot-gun `./NAME` suggestion + unified
-  remote-refusal wording. Pushed 2026-07-12 (owner: "commit then
-  push"): `fbef546..8f15ce2` (6 commits, incl. otp12 review
-  artifacts) → origin/master = `8f15ce2`.
-- ~~The change-journal question~~ **RESOLVED 2026-07-12 (owner:
-  "neither option passes — figure out a real fix"; the premise was
-  false)**: the old 21 ms journal skip was UNSOUND — `NoChanges`
-  decays to root-dir mtime equality, so deep modifications silently
-  never synced (REPRODUCED against the pre-otp-11 binary; transcript
-  in `docs/bench/otp11-local-2026-07-11/README.md`). Sound-vs-sound
-  the session no-op wins 2.2× (226 vs 507 ms/10k, 5-run medians) →
-  gate passes;
-  11b's journal deletion removes a data-loss bug. Pinned:
-  `deep_modification_after_warm_runs_syncs`. Sound O(changes) no-op
-  (journal REPLAY as a session phase, both carriers) filed as future
-  capability — slice doc D3. **otp-11b is UNBLOCKED.**
 
 ## Open questions
 
-- **(RESOLVED 2026-07-12 — owner confirmed SKIP)** Unified SizeMtime
-  semantic: same-size + dest-NEWER = **data-safe SKIP** (converge-up;
-  `--force` still overwrites; pinned by
-  `same_size_newer_destination_is_skipped_not_clobbered`). Owner ack
-  after trade-off review. Reasoning: `.review/findings/otp-4-daemon-serves-transfer.md`.
-- **(RESOLVED 2026-07-12 — owner go)** `725aa07` stale worktree
-  snapshot removed via `git rm -r .claude/worktrees/vigilant-mayer`
-  (236 files; dir was not a registered worktree). Historical docs
-  embedding `/Users/...` paths: leave (owner-accepted rec).
-- **(SLOTTED 2026-07-12 — owner ack)** `docs/WHITEPAPER.md` §8 (~line
-  592) describes the deleted `determine_remote_tuning` — fix folded
-  into **w10-docs-batch** (rewrite the stale sentence to current
-  `auto_tune` reality); no one-off edit now.
 - **(OPEN, ripe — data in hand)** REV4 → Shipped flip: awaits the
   three declarations in Blocked (zero-copy resolved, D-2026-07-05-3).
-- **(RESOLVED 2026-07-12 — owner: better error, parsing unchanged)**
-  CLI foot-gun: a bare local dir name with no `./` still parses as an
-  mDNS endpoint (no local-wins ambiguity introduced), but when the
-  lookup fails AND a local path of that name exists, the error must
-  suggest it: "'NAME' exists here as a folder — did you mean ./NAME?"
-  (blit-app endpoints.rs). Small standalone slice.
+- **(SLOTTED 2026-07-12 — owner ack)** `docs/WHITEPAPER.md` §8 (~line
+  592) describes the deleted `determine_remote_tuning` — fix folded
+  into **w10-docs-batch**; no one-off edit.
 - **(PARTIALLY RESOLVED 2026-07-04)** Windows triage: w9-3 fixed the
-  Linux daemon-spawn flakiness; windows-latest CI pending the next
-  push. NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
+  Linux daemon-spawn flakiness; windows-latest CI pending a push.
+  NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
   reproduced at `6d37a22`) ran ELEVATED under heavy load (~3/12 vs 2/8
   historical) — own finding if it persists on a quiet machine.
+- *(Resolved 2026-07-12/13 — the SizeMtime data-safe SKIP semantic,
+  the `725aa07` worktree snapshot, the CLI `./NAME` foot-gun, otp-5b-3
+  mid-copy cancel, and the change-journal premise: all landed; see
+  DEVLOG.)*
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-12 (45th, this session)** — **otp-11 CLOSED WHOLE (11a
-  route + journal-hole addendum + 11b deletion, four codex rounds;
-  suite 1488 → 1484 with the ≥1483 floor met by real pins; the
-  separate local orchestration no longer exists)**. In-flight: none;
-  tree clean. **Next**: otp-12 (rig-gated, Blocked) → otp-13.
+- **2026-07-13 (46th, this session)** — **otp-12c RECORDED**: rig prep,
+  the direct-path re-baseline (`d12534d`) and the delegated rig-D
+  session (`68bb490`); three harness bugs found live and fixed
+  (`b49413d`, `a2dea3f`). Also landed earlier in the session: the
+  mid-copy cancel e2e + the plan-D4 mid-record fault fix (`920c6a7`)
+  and the CLI `./NAME` hint (`ace91de`). In-flight: none; tree clean.
+  **Next**: the codex round otp-12c owes, then **otp-12d assembly** →
+  otp-13 owner walk.
+- **2026-07-12 (45th)** — **otp-11 CLOSED WHOLE** (11a route +
+  journal-hole addendum + 11b deletion, four codex rounds; suite
+  1488 → 1484, the ≥1483 floor met; the separate local orchestration
+  no longer exists).
 - **2026-07-11 (44th)** — otp-10c closed (relay removal + the cutover
-  deletion); suite 1605 → 1488. Owner ask pending: `725aa07` snapshot.
-- **2026-07-11 (43rd)** — otp-10a/10b closed; verb cutover complete.
-- *(42nd and earlier pruned to the cap — see DEVLOG 2026-07-06..12.)*
+  deletion); suite 1605 → 1488.
+- *(43rd and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*
