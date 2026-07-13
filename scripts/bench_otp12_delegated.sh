@@ -91,13 +91,13 @@ NEW_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 EXPECT_SHA="${EXPECT_SHA:-$NEW_SHA}"          # binary-embed gate; override only with proof
 
 # Mac — initiator of the delegated arm (NOT a data endpoint)
-MAC_HOST="${MAC_HOST:?set MAC_HOST to the Mac's 10GbE IP (numeric — used in [delegation] allowlists)}"
+MAC_HOST="${MAC_HOST:?set MAC_HOST to the Mac 10GbE IP, numeric, used in delegation allowlists}"
 MAC_BLIT="${MAC_BLIT:-$REPO_ROOT/target/release/blit}"
 MAC_WORK="${MAC_WORK:-$HOME/blit-bench-work}"
 
 # skippy — Linux daemon host (source for sw_*, dest for ws_*)
 SKIPPY_SSH="${SKIPPY_SSH:-admin@skippy}"
-SKIPPY_HOST="${SKIPPY_HOST:?set SKIPPY_HOST to skippy's 10GbE IP (numeric)}"
+SKIPPY_HOST="${SKIPPY_HOST:?set SKIPPY_HOST to the skippy 10GbE IP, numeric}"
 SKIPPY_BIN="${SKIPPY_BIN:-/mnt/generic-pool/video/blit-bin}"
 SKIPPY_BLIT="${SKIPPY_BLIT:-$SKIPPY_BIN/bins/$NEW_SHA/blit}"
 SKIPPY_DAEMON="${SKIPPY_DAEMON:-$SKIPPY_BIN/bins/$NEW_SHA/blit-daemon}"
@@ -131,7 +131,7 @@ WIN_DRAIN_THRESH="${WIN_DRAIN_THRESH:-1048576}"   # bytes/sec on D: considered i
 SKIPPY_DRAIN_SECTORS="${SKIPPY_DRAIN_SECTORS:-4096}"  # sectors written / 2s considered idle
 
 # ssh multiplexing
-MUX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/blit-deleg-mux.XXXXXX")"
+MUX_DIR="$(mktemp -d /tmp/blit-deleg-mux.XXXXXX)"   # /tmp, not $TMPDIR: macOS TMPDIR busts the 104-byte ControlPath socket limit
 SSH_MUX=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=20
          -o ControlMaster=auto -o "ControlPath=$MUX_DIR/%C" -o ControlPersist=180)
 
