@@ -89,13 +89,25 @@ cargo test --workspace
 
 ## Remotes & Sync
 
-- `origin` — `https://github.com/roethlar/Blit.git` (GitHub, canonical).
-- `gitea` — `http://q:3000/michael/blit_v2.git` (LAN gitea mirror; pushed
-  manually alongside or after `origin`, not auto-synced by any hook or CI
-  job — it can lag GitHub by a commit or more at any given time).
-- (Names verified against `git remote -v` 2026-07-04; an earlier revision
-  of this doc called GitHub `github` and the mirror `origin` — that never
-  matched the actual config and misread `origin/master` references.)
+- `origin` — `http://q:3000/michael/blit_v2.git` (**LAN gitea**). This is
+  what a bare `git push` / `git ls-remote origin` talks to.
+- `github` — `https://github.com/roethlar/Blit.git` (**GitHub**).
+- **`git push` does NOT update GitHub.** The two remotes are independent
+  and nothing auto-syncs them: pushing `origin` moves the LAN gitea only,
+  and GitHub needs its own explicit `git push github`. Either can lag the
+  other by many commits. A ref-listing before a push must therefore name
+  the remote's **URL**, not just "origin" — the name alone does not say
+  which host is being published to.
+- **CORRECTED 2026-07-13** against `git remote -v` (evidence in the
+  session's push output: a bare `git push` printed
+  `To http://q:3000/michael/blit_v2.git`, while `git push github` printed
+  `To https://github.com/roethlar/Blit.git` and fast-forwarded GitHub
+  `6d37a22..be1989d` — i.e. GitHub had been dozens of commits stale while
+  every agent push went to the mirror). The prior text had the two names
+  **inverted** (`origin` = GitHub, plus a `gitea` remote that does not
+  exist) and asserted it had been "verified against `git remote -v`
+  2026-07-04" while disparaging an earlier revision that was in fact
+  correct. Do not re-invert this without re-reading `git remote -v`.
 - Push policy: `.agents/push-policy.md` (ask). This repo's git-safety rules
   go well beyond a simple push policy — see Earned Practices below.
 
