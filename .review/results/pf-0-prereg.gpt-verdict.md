@@ -136,4 +136,4 @@ rebaseline, or close P1/P2 without a reviewed amendment.
 `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` rewritten (F1-F7),
 `docs/STATE.md` corrected (F6). Fix sha: recorded below on landing.
 
-fix sha: 0da4e79
+fix sha: `7921adc`
