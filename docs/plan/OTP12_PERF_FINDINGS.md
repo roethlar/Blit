@@ -82,41 +82,58 @@ identity IS role** — "Mac-as-dialing-destination" and
 "Windows-as-accepting-source" are the same configuration and cannot be
 separated by any number of additional runs on this rig.
 
-### THE CONFOUND IS BROKEN — and it breaks toward CODE (2026-07-13)
+### THE CONFOUND IS BROKEN — and it breaks toward PLATFORM (2026-07-13)
 
-**Probe: `docs/bench/otp12-perf-2026-07-13/` — magneto↔skippy, Linux on
-BOTH ends, real 10 GbE.** The owner offered magneto as a bench end and
-confirmed it saturates 10 GbE (unlike zoey, whose CPU is too slow to
-partner skippy — `.agents/machines.md`). Same `+f35702a` musl build both
-ends; `mixed` fixture; 3 runs/arm:
+**Evidence: `docs/bench/otp12-perf-2026-07-13/` — magneto↔skippy, Linux on
+BOTH ends, real 10 GbE, full otp-12 methodology** (cold caches both ends,
+destination drained, ABBA, pair-void, RUNS=4; 64 runs, 8/8 cells, zero
+voided). Harness `scripts/bench_otp12pf_linux.sh`.
 
-| data direction | source-initiated | destination-initiated | ratio |
-|---|---|---|---|
-| skippy → magneto | 950 ms | **1690 ms** | **1.78** |
-| magneto → skippy | 1340 ms | unstable (1540–6370) | — |
+**P1 does NOT reproduce.** Its own cell passes with room to spare:
 
-**P1 reproduces with no Mac and no Windows anywhere in the path** — and
-LARGER than rig W's 1.300. Therefore:
+| cell | srcinit | destinit | ratio | outcome |
+|---|---|---|---|---|
+| `sm_tcp_mixed` (P1's cell) | 1745 | 1905 | **1.092** | PASS |
+| `ms_tcp_mixed` (P1's cell) | 2085 | 2079 | **1.003** | PASS |
 
-- **The platform-residue explanation for P1 is DEAD.** There is no
-  macOS/Windows asymmetry left to attribute the gap to, so
-  **D-2026-07-12-1's escape hatch does not apply to P1**: it cannot be
-  accepted as a destination-write-path residue at the otp-13 walk.
-- **P1 is a property of blit's layout — i.e. our code.** H1/H5/H6 are
-  live, and a fix is MANDATORY for the parent plan's headline
-  invariance criterion. This is no longer a question the owner can
-  waive; it is a defect.
-- The probe is **not evidence-grade** (no cold caches — magneto lacks the
-  `drop_caches` grant; no drains/ABBA/pair-void; RUNS=3). It decides the
-  confound; it does not enter the acceptance matrix, and pf-final voids
-  it like every other pre-fix row. The magneto→skippy dest-init arm is
-  unstable (1540 vs 6370), unexplained, and must not be cited until the
-  harness resolves it.
+**8/8 invariance cells PASS** (`ms_grpc_mixed` via its pre-registered
+RUNS=8 escalation → 1.063). There is no destination-initiator penalty at
+all when both ends are Linux.
 
-**Promoting magneto to a pf-1 rig needs** (owner): the `NOPASSWD`
-`/usr/bin/tee /proc/sys/vm/drop_caches` grant, and the torrent services
-quiesced. Then Linux↔Linux becomes pf-1's primary rig — it isolates the
-layout with no platform terms at all, which rig W structurally cannot do.
+Therefore:
+
+- **P1 requires the Mac↔Windows pairing.** It is NOT a pure layout
+  property of blit's code — a pure layout cost would have appeared here,
+  on the same code, same carrier, same fixture. **D-2026-07-12-1's
+  platform-residue discriminator is the relevant frame for P1** at the
+  otp-13 walk, and the owner may be able to accept it on that basis.
+- **This does NOT fully exonerate the code.** It rules out a pure layout
+  property; it does not rule out a code path whose cost only becomes
+  material under a particular platform — e.g. a slow accept branch on the
+  Windows side, which is exactly what H1 accuses. H1/H5/H6 stay LIVE but
+  are now **narrowed to platform-interacting mechanisms**, and only the
+  dial/accept inversion counterfactual on rig W can finish the job.
+- **P2 is untested by this rig** (it is a converge bar vs the OLD build,
+  and no `0f922de` build is staged on these hosts). Nothing here speaks
+  to it.
+
+> **⚠ A RETRACTED CLAIM LIVED HERE.** An earlier revision of this section
+> asserted the opposite — "P1 reproduces at 1.78 → the confound breaks
+> toward CODE → the fix is mandatory and cannot be waived" — and STATE and
+> the acceptance plan were amended to match. That was **WRONG**. It rested
+> on a scratch probe (and a first harness revision) that ran the durability
+> `sync` inside the INITIATING host's timed bracket: in the push arm the
+> initiator is the SOURCE, which only read, so its sync was a no-op and the
+> destination's writeback was never paid; in the pull arm the initiator IS
+> the destination, so it paid the full writeback. One arm was charged for
+> durability the other got free — multi-second on skippy's ZFS — which
+> manufactured "failures" on every carrier and fixture, **including the
+> gRPC control that is supposed to be clean**. That carrier-independence is
+> what exposed it: a real code effect is carrier-specific; an accounting
+> artifact is not. Fixed at `2c0af86` (durability keyed by DESTINATION,
+> never by verb — the otp-2w rule, re-learned). The retraction is recorded
+> rather than quietly overwritten because the wrong number was reported to
+> the owner and briefly drove this plan.
 
 ### The residual confound (WHICH code) still needs a counterfactual
 

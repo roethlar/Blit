@@ -1,0 +1,17 @@
+cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted
+ms_grpc_mixed,destinit,2974,3139,2789,36.9,0,4
+ms_grpc_mixed,srcinit,4139,4085,3581,25.1,0,4
+ms_tcp_large,destinit,5029,5009,4819,7.1,0,4
+ms_tcp_large,srcinit,4584,4567,4270,13.1,0,4
+ms_tcp_mixed,destinit,2079,2077,1959,11.8,0,4
+ms_tcp_mixed,srcinit,2085,2168,1991,26.1,0,4
+ms_tcp_small,destinit,2114,2210,2000,30.6,0,4
+ms_tcp_small,srcinit,2135,2132,2080,4.8,0,4
+sm_grpc_mixed,destinit,2325,2285,2150,8.8,0,4
+sm_grpc_mixed,srcinit,2390,2332,2060,20.9,0,4
+sm_tcp_large,destinit,2530,2532,2460,6.1,0,4
+sm_tcp_large,srcinit,2595,2567,2470,5.7,0,4
+sm_tcp_mixed,destinit,1905,1922,1840,10.9,0,4
+sm_tcp_mixed,srcinit,1745,1737,1710,2.3,0,4
+sm_tcp_small,destinit,870,867,860,1.2,0,4
+sm_tcp_small,srcinit,820,815,780,7.7,0,4

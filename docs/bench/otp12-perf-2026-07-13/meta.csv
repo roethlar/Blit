@@ -1,0 +1,9 @@
+cell,pairs_attempted,complete
+sm_tcp_mixed,4,yes
+ms_tcp_mixed,4,yes
+sm_grpc_mixed,4,yes
+ms_grpc_mixed,4,yes
+sm_tcp_small,4,yes
+ms_tcp_small,4,yes
+sm_tcp_large,4,yes
+ms_tcp_large,4,yes

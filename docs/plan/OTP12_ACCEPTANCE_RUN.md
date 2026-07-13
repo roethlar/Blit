@@ -8,21 +8,27 @@ time — standing STATE rule.)
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active, D-2026-07-05-4), slice otp-12.
 **Contract**: `docs/TRANSFER_SESSION.md` (unchanged — this slice adds NO code
 and NO wire surface; it is harness scripts + rig runs + committed evidence).
-**AMENDED 2026-07-13 — 12d is GATED on the perf fixes.** 12a/12b/12c are
-recorded, and they measured two regressions against this plan's own bars:
+**AMENDED 2026-07-13 — 12d is GATED on `OTP12_PERF_FINDINGS.md`.** 12a/12b/12c
+are recorded, and they measured two regressions against this plan's own bars:
 P1 (`wm_tcp_mixed` invariance 1.237 → 1.300, a miss of the PARENT plan's
-headline criterion) and P2 (`push_tcp_small` 1.149 → 1.201). Both are now
-attributed to **code, not platform** — P1 reproduces at 1.78 on a same-OS
-Linux↔Linux rig with no Mac and no Windows in the path
-(`docs/bench/otp12-perf-2026-07-13/`), so D-2026-07-12-1's platform-residue
-allowance cannot absorb it. `docs/plan/OTP12_PERF_FINDINGS.md` therefore
-governs the next step, and **12d must NOT assemble the matrix from the
-current rows**: they are pre-fix, and that plan's `pf-final` voids pre-fix
-unified arms for acceptance. Sequence is now
-**12a/12b/12c (done) → pf-1 → pf-2..n → pf-final (rerun all three rigs on
-the fixed build) → 12d → otp-13.** The "this slice adds NO code" line above
-scopes otp-12 itself; the perf plan's fix slices are code and are governed
-by that plan.
+headline criterion) and P2 (`push_tcp_small` 1.149 → 1.201).
+**P1 does NOT reproduce on a same-OS rig**: with Linux on both ends
+(magneto↔skippy, full methodology) all 8 invariance cells PASS and P1's own
+cell lands at 1.092 / 1.003 (`docs/bench/otp12-perf-2026-07-13/`). So P1 is
+not a pure layout property — it needs the Mac↔Windows pairing, and
+**D-2026-07-12-1's platform-residue discriminator is the frame for it at the
+otp-13 walk**. (An earlier version of this amendment said the reverse, on a
+harness whose durability accounting was broken; retracted — see the perf
+plan.) That does not exonerate the code: a platform-INTERACTING code path
+(H1's Windows accept branch) would look identical, and only the dial/accept
+inversion counterfactual settles it. `docs/plan/OTP12_PERF_FINDINGS.md`
+therefore still governs the next step, and **12d must NOT assemble the matrix
+from the current rows** — they are pre-fix, and that plan's `pf-final` voids
+pre-fix unified arms for acceptance. Sequence:
+**12a/12b/12c (done) → pf-1 → pf-2..n (if a fix is warranted) → pf-final
+(rerun all three rigs on the final build) → 12d → otp-13.** The "this slice
+adds NO code" line above scopes otp-12 itself; the perf plan's slices are
+governed by that plan.
 
 **Governs**: execution proceeds 12a → 12b → 12c → (perf fixes) → 12d, each
 commit through the

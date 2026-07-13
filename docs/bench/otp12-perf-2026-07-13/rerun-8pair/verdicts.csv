@@ -1,0 +1,2 @@
+comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome
+ms_grpc_mixed,invariance,srcinit,destinit,3435,3230,1.063,1.10,PASS

@@ -1,0 +1,6 @@
+# harness_head=2c0af86 binary_identity=f35702a
+host,role,sha,sha256,path
+skippy,client,f35702a,de8db7cc09cd32061db19a5f4c05a4f19bcea3e70876c012118a343df4fcd0af,/mnt/generic-pool/video/blit-bin/blit
+skippy,daemon,f35702a,743abf92fa0a49de46f0c14563ab319fa8308d7e8c0d560b39dedba173a072b2,/mnt/generic-pool/video/blit-bin/blit-daemon
+magneto,client,f35702a,de8db7cc09cd32061db19a5f4c05a4f19bcea3e70876c012118a343df4fcd0af,/home/michael/blit-probe/bin/blit
+magneto,daemon,f35702a,743abf92fa0a49de46f0c14563ab319fa8308d7e8c0d560b39dedba173a072b2,/home/michael/blit-probe/bin/blit-daemon

@@ -1,0 +1,9 @@
+comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome
+ms_grpc_mixed,invariance,srcinit,destinit,4139,2974,1.392,1.10,FAIL
+ms_tcp_large,invariance,srcinit,destinit,4584,5029,1.097,1.10,PASS
+ms_tcp_mixed,invariance,srcinit,destinit,2085,2079,1.003,1.10,PASS
+ms_tcp_small,invariance,srcinit,destinit,2135,2114,1.010,1.10,PASS
+sm_grpc_mixed,invariance,srcinit,destinit,2390,2325,1.028,1.10,PASS
+sm_tcp_large,invariance,srcinit,destinit,2595,2530,1.026,1.10,PASS
+sm_tcp_mixed,invariance,srcinit,destinit,1745,1905,1.092,1.10,PASS
+sm_tcp_small,invariance,srcinit,destinit,820,870,1.061,1.10,PASS

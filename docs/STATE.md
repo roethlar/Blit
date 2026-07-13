@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-13
 
-- Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED; and the perf regressions are now proven to be CODE, not platform.** Every transfer rides the ONE session (the separate local orchestration is gone, −6.2k lines at 11b; the unsound journal fast path died with it). **P1 — the headline invariance criterion — FAILS and reproduces at 1.78 on a same-OS Linux↔Linux rig with no Mac/Windows in the path** (`docs/bench/otp12-perf-2026-07-13/`), so D-2026-07-12-1's platform-residue allowance cannot absorb it: it is a defect and the fix is mandatory. **otp-12d/otp-13 are DEFERRED behind the perf fixes** (`docs/plan/OTP12_PERF_FINDINGS.md`, queue 1a — Draft, awaiting codex convergence then the owner's Active flip). Suite **1484**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
+- Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED; P1 does NOT reproduce on a same-OS rig.** Every transfer rides the ONE session (the separate local orchestration is gone, −6.2k lines at 11b; the unsound journal fast path died with it). **P1 (the headline invariance criterion) fails on rig W (1.237→1.300) but PASSES 8/8 with Linux on both ends** (magneto↔skippy, full methodology; P1's own cell 1.092/1.003 — `docs/bench/otp12-perf-2026-07-13/`), so it is NOT a pure layout property: it needs the Mac↔Windows pairing, and **D-2026-07-12-1's platform-residue discriminator is the frame for it at otp-13**. That does not exonerate the code — a platform-INTERACTING path (H1's Windows accept branch) looks identical, and only the dial/accept inversion counterfactual settles it. (A claim of the opposite was reported and retracted 2026-07-13 — the first harness keyed durability to the initiator, not the destination; see the perf plan's retraction note.) **otp-12d/otp-13 stay DEFERRED behind `docs/plan/OTP12_PERF_FINDINGS.md`** (queue 1a — Draft, awaiting codex convergence then the owner's Active flip). Suite **1484**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 
 Rules: this file wins over every other doc (AGENTS.md §1). Keep it ≤ 200 lines and
 ≤ 3 handoff entries — prune into `DEVLOG.md`. Update it via the `handoff`
@@ -61,14 +61,11 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
     COMPLETES. Suite 1488 → 1513 → **1484** (≥1483 floor met at the
     deletion slice, margin +1). Detail: DEVLOG 2026-07-12 entries.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
-  `[x]` (shape-correction resize, `c70c2ac`+`7627e7b`); **sf-3a+ blocked**
-  until ONE_TRANSFER_PATH ships, then resume/re-derive on the unified
-  baseline. Principle stands: ceiling-driven, never competitor-relative
-  (D-2026-07-04-4; a ≥25% margin answer was retracted — do not
-  re-litigate). Evidence `docs/bench/10gbe-2026-07-05/`.
-- **Background (2026-07-04/05, all `[x]`)**: REV4 code-complete, gates
-  DATA-COMPLETE (declarations pending in Blocked); codex loop governs
-  all changes (D-2026-07-04-1; DEVLOG 07-04/05).
+  `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
+  resume/re-derive on the unified baseline. Principle: ceiling-driven,
+  never competitor-relative (D-2026-07-04-4 — do not re-litigate).
+- **Background**: REV4 code-complete, gates DATA-COMPLETE (declarations
+  in Blocked); the codex loop governs all changes (D-2026-07-04-1).
 
 ## Queue (ordered)
 
@@ -95,24 +92,28 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 1a. **`docs/plan/OTP12_PERF_FINDINGS.md` — THE REAL NEXT ITEM** (Draft;
    owner 2026-07-12: "fix the code before devoting another block of time
    to testing. plan, reviewloop codex, then fix once converged").
-   **P1 misses the plan's HEADLINE criterion** (initiator/verb
-   invariance): `wm_tcp_mixed` FAILs in two independent sessions and got
-   WORSE at the cutover sha (1.237 → **1.300**) on tight spreads
-   (6.4/8.4%) far below D2's 25% escalation trigger — it cannot be
-   re-run away. P2 (`push_tcp_small`) likewise worsened (1.149 →
-   **1.201**; zoey 1.105). Codex: r2 REVISE, **r3 NEEDS ANOTHER ROUND**
-   (6/6 accepted); r4 fixes in, r4 review pending. **Blocked on: owner
-   flip to Active** once codex converges → pf-1 (investigate) → pf-2..n
-   (fix) → pf-final (rerun ALL THREE rigs) → otp-12d → otp-13.
+   **P1 misses the plan's HEADLINE criterion on rig W** (initiator/verb
+   invariance): `wm_tcp_mixed` FAILs in two independent sessions, worse at
+   the cutover sha (1.237 → **1.300**), on tight spreads (6.4/8.4%) far
+   below D2's escalation trigger — not re-runnable away. **But it does NOT
+   reproduce on a same-OS rig**: Linux both ends = **8/8 PASS**, P1's cell
+   at 1.092/1.003 (`docs/bench/otp12-perf-2026-07-13/`) → not a pure
+   layout property; it needs the Mac↔Windows pairing, so D-2026-07-12-1's
+   platform-residue discriminator is the frame at otp-13. Not exonerated:
+   a platform-INTERACTING code path (H1's Windows accept branch) looks the
+   same — the dial/accept inversion counterfactual settles it. P2
+   (`push_tcp_small` 1.149 → **1.201**; zoey 1.105) is a converge bar and
+   is UNTESTED on the Linux rig. Codex: r2 REVISE, r3 + **r4 NEEDS ANOTHER
+   ROUND** (6/6 accepted each); r5 fixes in, review pending. **Blocked on:
+   owner flip to Active** once codex converges → pf-1 → (fix, if warranted)
+   → pf-final (ALL THREE rigs) → otp-12d → otp-13.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
-   Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
-   largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
-   moved to Blocked → Rig availability.
+   Shipped (zero-copy resolved — D-2026-07-05-3). Follow-ups largely
+   absorbed by otp-2/otp-12's rig matrices.
 3. **PAUSED: `docs/plan/SMALL_FILE_CEILING.md`** (D-2026-07-05-1) —
    resumes/re-derives after ONE_TRANSFER_PATH ships.
-4. **PAUSED: design-review queue** (`REVIEW.md` order; w7-1 topmost
-   open row) — same directive; w7-1 likely landed for free inside
-   otp-6's one-delete-rule slice; re-check before picking it up.
+4. **PAUSED: design-review queue** (`REVIEW.md`; w7-1 topmost open row —
+   likely landed inside otp-6's one-delete-rule slice; re-check first).
 5. **Zero-copy receive — UNPARKED (D-2026-07-05-3)**: gate met (UNAS 8
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
@@ -177,23 +178,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   NOTE 2026-07-12: the macOS `blit_utils` residual (pre-existing,
   reproduced at `6d37a22`) ran ELEVATED under heavy load (~3/12 vs 2/8
   historical) — own finding if it persists on a quiet machine.
-- *(Resolved 2026-07-12/13 — the SizeMtime data-safe SKIP semantic,
-  the `725aa07` worktree snapshot, the CLI `./NAME` foot-gun, otp-5b-3
-  mid-copy cancel, and the change-journal premise: all landed; see
-  DEVLOG.)*
+- *(Resolved 2026-07-12/13 — SizeMtime data-safe SKIP, the `725aa07`
+  snapshot, the CLI `./NAME` foot-gun, otp-5b-3 mid-copy cancel, the
+  change-journal premise: all landed; see DEVLOG.)*
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-13 (46th, this session)** — **otp-12c RECORDED**: rig prep,
-  the direct-path re-baseline (`d12534d`) and the delegated rig-D
-  session (`68bb490`); three harness bugs found live and fixed
-  (`b49413d`, `a2dea3f`). Also landed earlier in the session: the
-  mid-copy cancel e2e + the plan-D4 mid-record fault fix (`920c6a7`)
-  and the CLI `./NAME` hint (`ace91de`). In-flight: none; tree clean.
-  **Next**: the codex round otp-12c owes, then **otp-12d assembly** →
-  otp-13 owner walk.
-- **2026-07-12 (45th)** — **otp-11 CLOSED WHOLE** (11a route +
-  journal-hole addendum + 11b deletion, four codex rounds; suite
-  1488 → 1484, the ≥1483 floor met; the separate local orchestration
-  no longer exists).
+- **2026-07-13 (46th, this session)** — **otp-12c CLOSED through the
+  codex loop** (`d12534d` re-baseline, `68bb490` rig D 7/7, review 7/7
+  accepted) + **the same-OS rig answered the P1 confound**: Linux both
+  ends = 8/8 PASS, so P1 is platform-interacting, not pure layout
+  (`docs/bench/otp12-perf-2026-07-13/`). **A wrong claim (P1 = code, 1.78)
+  was reported and RETRACTED** — my harness keyed durability to the
+  initiator, not the destination; fixed `2c0af86`. Also landed: mid-copy
+  cancel e2e + the D4 mid-record fault fix (`920c6a7`), the CLI `./NAME`
+  hint (`ace91de`). In-flight: none; tree clean. **Next**: perf-plan codex
+  round 5 → owner's Active flip → pf-1.
+- **2026-07-12 (45th)** — **otp-11 CLOSED WHOLE** (11a + addendum + 11b
+  deletion; suite 1488 → 1484, floor met; the separate local
+  orchestration no longer exists).
 - *(44th and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*

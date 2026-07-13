@@ -1,0 +1,17 @@
+cell,arm,build,initiator,run,ms,flush_ms,exit,drain,cold,valid
+ms_grpc_mixed,srcinit,f35702a,magneto,1,3450,460,0,drained_3x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,1,3811,1491,0,drained_5x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,2,4040,1160,0,drained_5x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,2,3521,1360,0,drained_8x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,3,3390,500,0,drained_5x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,3,4061,1700,0,drained_4x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,4,4360,1610,0,drained_6x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,4,2940,540,0,drained_5x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,5,4490,1610,0,drained_5x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,5,3780,1530,0,drained_8x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,6,3030,190,0,drained_4x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,6,2680,529,0,drained_5x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,7,3420,440,0,drained_6x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,7,2870,520,0,drained_5x2s,cold,yes
+ms_grpc_mixed,srcinit,f35702a,magneto,8,3230,270,0,drained_4x2s,cold,yes
+ms_grpc_mixed,destinit,f35702a,skippy,8,2519,449,0,drained_6x2s,cold,yes
