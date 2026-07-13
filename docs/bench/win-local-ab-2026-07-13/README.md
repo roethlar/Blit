@@ -2,107 +2,148 @@
 
 **Status**: Evidence (recorded). **This README declares nothing** — it records
 what was measured. Adjudication belongs to the owner.
+**Revision 2** — the original headline was WRONG (see §The correction). Codex
+review of `4402987`: 3 HIGH + 5 MEDIUM, all accepted
+(`.review/results/win-local-ab.gpt-verdict.md`).
 
 **Why**: owner request — a local-only A/B on the Windows box. It strips the
-network out entirely: no MTU, no MSS, no initiator layout, no daemon, no
-carrier, no wire. If blit trails robocopy *here*, the problem was never the
-wire.
+network out entirely: no MTU, no MSS, no initiator layout, no daemon, no wire.
+If blit trails robocopy *here*, the problem was never the wire.
 
-**Harness**: `scripts/bench_win_local_ab.sh` + `scripts/windows/local-ab-run.ps1`.
 **blit**: `D:\blit-test\bins\f35702a\blit.exe` (embed-verified `+f35702a`).
 `f35702a` is the SHIPPING transfer code — the only delta `f35702a..HEAD` is
-`bb28ddd` (cargo fmt on `blit-app/endpoints.rs` + a test), and otp-11 (local
-rides the unified session) is already **in** `f35702a`.
+`bb28ddd` (cargo fmt), and otp-11 (local rides the unified session) is already
+**in** `f35702a`.
+**Rig**: D: = disk#0, E: = disk#3 — two **separate, identical** Crucial T705
+4 TB NVMe drives.
 
-**Rig**: D: = disk#0 and E: = disk#3 — two **separate, identical** Crucial
-T705 4 TB NVMe drives. No read/write contention on one device; neither side of
-the copy is a bottleneck the other lacks.
+## ⚠ The correction (owner, 2026-07-13)
 
-**Method** (identical to the blit rig harnesses; anything less is not
-comparable): cold caches every run (standby purge), writeback **drained**
-before the window opens, fresh never-seen destination per run, destination
-container precreated **outside** the window on both arms, durability keyed by
-the **destination volume** (`Write-VolumeCache -DriveLetter E`, self-timed,
-added to wall time), ABBA interleave, pair-void, nonzero exit voids the run,
-and the landed file count is verified per run (a tool that "succeeds" while
-writing nothing cannot score a fast time).
+Revision 1 reported "blit is ~2× slower than robocopy". **That was
+8-thread robocopy against 1-worker blit.** The harness passed `/MT:8` while
+blit's local apply runs **one** worker by default
+(`transfer_session/local.rs:602` — `sink_workers` is 1 unless the hidden
+`--workers` flag sets `debug_mode`; the CLI prints `Workers used: 1`). It was
+also generous to robocopy versus its own default — plain `robocopy /E` with no
+`/MT` is single-threaded.
 
-## Result — two independent sessions agree
+Owner: *"robocopy with /mt:N beats our tar streaming? or was that
+single-threaded robocopy?"* — it was `/MT:8`.
 
-RUNS=8, medians in ms (transfer + destination flush):
+## The result (4-arm interleaved session — `summary-4arm.csv`)
 
-| fixture | shape | blit | robocopy | ratio | reading |
-|---|---|---|---:|---:|---|
-| `large` | 1 × 1 GiB | **539** | 541 | **0.996** | parity |
-| `mixed` | 512 MiB + 5000 × 2 KiB | **934** | 501 | **1.863** | blit ~1.9× slower |
-| `small` | 10 000 × 4 KiB | **1388** | 697 | **1.991** | blit ~2× slower |
+All four arms in ONE session, rotating the start arm per slot, so every
+comparison is internally controlled. RUNS=6, medians in ms (transfer +
+destination flush):
 
-Replicated at RUNS=4 in a prior session (`summary-runs4-biased.csv`; see the
-ordering-bias note below): 0.991 / 1.877 / 2.024.
+| fixture | blit (ship, 1 worker) | blit `--workers 8` | robocopy `/MT:1` | robocopy `/MT:8` |
+|---|---:|---:|---:|---:|
+| `large` 1 × 1 GiB | 538 | 538 | 538 | 542 |
+| `small` 10 000 × 4 KiB | 1402 | 1336 | 1540 | **697** |
+| `mixed` 512 MiB + 5000 | 930 | 784 | 1052 | **487** |
 
-**blit matches robocopy byte-for-byte on bulk throughput and costs ~2× the
-moment there are many files.** With no network in the picture, that is a
-per-file cost inside blit.
+**At EQUAL concurrency, blit WINS:**
+
+| | blit | robocopy | ratio |
+|---|---:|---:|---:|
+| `small` @ 1 thread | **1402** | 1540 | **0.911** |
+| `mixed` @ 1 thread | **930** | 1052 | **0.884** |
+| `small` @ 8 threads | 1336 | **697** | 1.918 |
+| `mixed` @ 8 threads | 784 | **487** | 1.610 |
+
+**The actual defect — blit does not SCALE:**
+
+| | 1 → 8 |
+|---|---|
+| blit, `small` | **1.05×** |
+| blit, `mixed` | **1.19×** |
+| robocopy, `small` | 2.21× |
+| robocopy, `mixed` | 2.16× |
+
+blit's per-file path is **not** slow — it beats robocopy at one thread. blit
+fails to convert concurrency into throughput, **and it ships one worker**.
+`large` is at parity in every arm (a ≥1 MiB file becomes a `File` payload →
+one `CopyFileExW`, the same syscall robocopy makes; thread count is irrelevant
+for a single file).
+
+## ⚠ blit is doing LESS work, not more (codex F3 — and it is a BUG)
+
+The obvious defence of a slow tool is "it does more". blit does **less**:
+it silently drops **Windows attributes (ReadOnly/Hidden/System) and alternate
+data streams** on the tar path, on both the local and the remote route
+(exit 0, no warning). Robocopy's defaults (`/COPY:DAT`, `/DCOPY:DA`) preserve
+them, and `/E` preserves empty directories.
+
+**That is now its own finding** —
+`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md`, D-2026-07-13-3. It makes
+this comparison **more** unfavourable to blit, not less. Any fidelity fix adds
+per-file work to the tar path, so these numbers get worse before they get
+better — which is why the fidelity fix and `LOCAL_SMALL_FILE_PATH.md` are to be
+planned together.
+
+blit is NOT paying a durability or integrity premium either: no content hashing
+by default (BLAKE3 only under `--checksum`), no verification pass, no per-file
+fsync (`sink.rs:368` — "Intentionally no sync_all").
+
+## Instrument notes (all found live; all recorded rather than tuned away)
+
+- **The rig is BI-STABLE for blit and stable for robocopy.** blit's shipped
+  config measured **1388 ms** (`summary.csv`) and **2225 ms**
+  (`summary-fairA-mt1.csv`) for `small` — identical binary, identical flags,
+  flat within each session — while `robocopy /MT:8` read **697 ms** in every
+  session. Cause: an 8-thread neighbour leaves the CPU boosted, and blit's
+  single-worker, syscall-bound run inherits it; robocopy at `/MT:8` generates
+  its own load and is immune. Both single-threaded arms move together
+  (`robo_mt1` 2531 → 1540 alongside blit 2225 → 1402), and **the ratio holds**
+  (0.879 → 0.911). **CONSEQUENCE: absolute times on this rig are only
+  meaningful WITHIN a session.** Cross-session comparison of blit arms is
+  invalid. The 4-arm design exists for exactly this.
+- **Ordering bias, found and fixed.** With no warm-up, ABBA fixes the first arm
+  of slot 1, so the previous cell's teardown (a 10k-file delete still settling
+  past the drain) was charged to it every time. An untimed discarded warm-up
+  per cell absorbs it (`mixed` spread 43.2% → 4.2%). `summary-runs4-biased.csv`
+  is the biased session, kept as the record.
+- **The cold-allocation story is NOT established** (codex F7). Warm-up and the
+  first timed arm were both blit, so robocopy never saw the same cell-start
+  state — that confounds tool with order. The honest statement is "an
+  unexplained first-blit outlier"; medians are robust to it.
+- **An unpinned blit-only cost sits inside the timed window** (codex F5):
+  perf-history is enabled by default and written before the process returns
+  (`blit-cli/src/context.rs:8`, `transfer_session/local.rs:694`), with a
+  read/rewrite rotation past a 1 MB cap (`perf_history.rs:443`). Robocopy pays
+  no equivalent. `large` parity makes it unlikely to explain the shape-dependent
+  gap, but it is a real confound and future runs should disable or record it.
+- **Validity proves COUNTS, not bytes** (codex F6). Each run verifies the landed
+  file count, not content. A correct-count-but-truncated tree would pass. Read
+  `large` as *throughput* parity, not byte-for-byte verification.
+- Codex found **no timed-window, tree-shape, or flush defect**: both arms land
+  the same precreated `$DestRoot\$leaf`, and the E: flush is symmetric and
+  properly charged. Note removing the flush would **enlarge** the gaps
+  (≈2.37×/2.35×), so charging it is conservative toward blit.
 
 ## What this does NOT say
 
-- **It says nothing about P1.** A local copy has no initiator axis — there is
-  no "who dials" to vary. P1 is an initiator-invariance failure and cannot be
-  observed here.
-- **It is not an otp-11 regression.** otp-11's own local gate already A/B'd
-  old-vs-new blit locally (`docs/bench/otp11-local-2026-07-11/`): `small`
-  (10 000 × 4 KiB) went **1684 ms → 1750 ms, +3.9% PASS**. The unified session
-  did not introduce this cost; it predates otp-11.
-- **It is not P2.** P2 is a *new-vs-old blit* regression on the TCP push path.
-  Old blit carries this local cost too (per the otp-11 gate above).
-- **It is cross-tool**, so it is NOT a controlled protocol comparison —
-  robocopy is a plain Win32 copy loop; blit rides the unified
-  `transfer_session` (local included, since otp-11). This is "what a user
-  experiences with each tool", which is the SHIPPING bar, not a mechanism
-  attribution.
-
-## Known gaps (stated, not hidden)
-
-- **The old blit client was never staged on Windows** — only
-  `bins\0f922de\blit-daemon.exe` exists (the otp-12 sessions ran the old
-  *client* from the Mac). So "old blit is also ~2× robocopy **on Windows**" is
-  an **INFERENCE** from the Mac otp-11 gate, **not a measurement on this box**.
-  Closing it requires a native `0f922de` client build on netwatch-01.
-- **A cold-allocation outlier survives, and it is a lead, not noise.** blit's
-  warm-up (2253 ms) *and* first timed run (2175 ms) in the `small` cell are
-  slow; runs 2-8 settle hard at 1386-1430. Robocopy shows the same effect far
-  more weakly (742 → ~690). **blit is disproportionately sensitive to cold
-  NTFS destination-allocation state (+57% vs robocopy's +8%).** The outlier is
-  KEPT in `runs.csv` (medians are robust to it; it inflates `small/blit`
-  `spread_pct` to 57.3%). It may itself be informative and is recorded rather
-  than tuned away.
-- **Ordering bias, found and fixed mid-session.** The first harness revision
-  had no warm-up, and ABBA fixes `blit` as slot 1's first arm — so the
-  previous cell's teardown (a 10k-file delete still settling past the drain)
-  was charged to blit in *every* cell. `summary-runs4-biased.csv` is that
-  biased run, kept for the record: it inflated `mixed/blit` spread to 43.2%.
-  An untimed discarded warm-up run per cell now absorbs it (`mixed` spread
-  43.2% → 4.2%). The medians moved <1% and the conclusion was unaffected.
-
-## Relevance to the ACTIVE plan (`docs/plan/OTP12_PERF_FINDINGS.md`)
-
-Not adjudicated here — surfaced for the owner:
-
-- **H7** accuses HEAD's per-entry bookkeeping (a mutex-protected sent-manifest
-  map + a per-need event-channel hop, `transfer_session/mod.rs:1038,:1123,:1350`)
-  — **per-file, carrier-independent, shared by both carriers**. Since otp-11,
-  local copies ride that same unified session. A network-free local
-  reproduction is what H7 predicts.
-- pf-1's Method proposes reproducing on "two-daemon in-process rigs on the
-  Mac". This local rig is cheaper (~10 min), has no network confounds, and no
-  initiator axis to muddy attribution.
-- **But note the tension**: the otp-11 gate says old ≈ new locally, while H7
-  accuses code that is *new*. If both hold, the local cost is NOT H7 — it is
-  older than the unified session, and H7 must be tested against P2's *network*
-  gap, not against this. That contradiction is not resolved by this evidence.
+- **Nothing about P1.** A local copy has no initiator axis — there is no "who
+  dials" to vary. P1 is an initiator-invariance failure and cannot appear here.
+- **It is not an H7 reproduction** (codex F4). The local route sends no
+  `NeedBatch` — it plans and applies directly, emitting only `NeedComplete`
+  (`transfer_session/mod.rs:3353`). It therefore exercises H7's
+  mutex-protected **manifest-map insertion** but **not** its cited per-need
+  channel hop. A supplemental lead, not a pf-1 substitute.
+- **"Not an otp-11 regression" was too categorical** (codex F8). otp-11's gate
+  was RUNS=3, **macOS/APFS**, same-volume, old-vs-new blit
+  (`docs/bench/otp11-local-2026-07-11/`). It shows no material otp-11
+  regression **on the Mac**. Windows old-vs-new is **UNMEASURED** — the old blit
+  *client* was never staged on netwatch-01 (only the old daemon). The claim
+  "old blit carries this Windows cost too" is **not established**.
+- **Cross-tool wall clock**, so this is the SHIPPING bar, not a controlled
+  protocol comparison.
 
 ## Files
 
-`runs.csv` (48 timed runs, RUNS=8), `summary.csv`,
-`summary-runs4-biased.csv` (the pre-warm-up session, kept as the record of the
-ordering bias).
+`summary-4arm.csv` + `runs-4arm.csv` — **the authoritative session** (4 arms,
+one session, RUNS=6). `summary.csv` + `runs.csv` — the RUNS=8 two-arm session
+(the 8-vs-1 comparison; superseded as a headline).
+`summary-fairA-mt1.csv` / `summary-fairB-mt8.csv` — the equal-concurrency pair
+that first exposed the inversion. `summary-runs4-biased.csv` — the
+pre-warm-up session, kept as the record of the ordering bias.

@@ -1,0 +1,13 @@
+fixture,arm,median_ms,best_ms,spread_pct,n
+large,blit_ship,538,534,1.3,6
+large,blit_w8,538,535,1.1,6
+large,robo_mt1,537,535,1.5,6
+large,robo_mt8,542,535,12.1,6
+mixed,blit_ship,929,924,4.4,6
+mixed,blit_w8,784,775,4.0,6
+mixed,robo_mt1,1051,1017,7.5,6
+mixed,robo_mt8,487,476,16.6,6
+small,blit_ship,1402,1384,60.2,6
+small,blit_w8,1336,1310,9.1,6
+small,robo_mt1,1540,1499,10.3,6
+small,robo_mt8,697,671,8.2,6

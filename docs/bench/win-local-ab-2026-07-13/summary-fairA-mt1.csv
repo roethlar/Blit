@@ -1,0 +1,5 @@
+fixture,tool,median_ms,best_ms,spread_pct,n
+mixed,blit,942,926,3.5,6
+mixed,robocopy,1045,1005,7.7,6
+small,blit,2225,2176,3.8,6
+small,robocopy,2531,2504,6.1,6
