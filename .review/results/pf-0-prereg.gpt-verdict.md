@@ -1,6 +1,12 @@
 # pf-0-prereg — adjudication of the codex review of `35b9620`
 
-reviewer: gpt-5.5 (codex exec, read-only)
+reviewer: **gpt-5.6-sol**, reasoning effort **ultra** (codex exec, read-only;
+codex-cli 0.144.3). Corrected 2026-07-13: this file first said `gpt-5.5`
+because `docs/agent/GPT_REVIEW_LOOP.md` §Environment still named that model.
+`~/.codex/config.toml` is ground truth and reads
+`model = "gpt-5.6-sol"` / `model_reasoning_effort = "ultra"`; the loop doc is
+fixed in the same commit. Signing a review with the wrong model is exactly what
+the loop's Identity rule forbids.
 subject: `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md`
 codex verdict: **NOT READY** — 4 BLOCKER, 3 HIGH, 1 NOTE
 adjudicated by: Claude (author), against source/CSVs

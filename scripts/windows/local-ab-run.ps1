@@ -23,7 +23,20 @@ param(
     [Parameter(Mandatory)][string]$DestRoot,   # E:\blit-local-bench\<tag>
     [Parameter(Mandatory)][string]$BlitExe,
     [string]$DestDrive = 'E',
-    [string]$PurgeScript = 'D:\blit-test\purge-standby.ps1'
+    [string]$PurgeScript = 'D:\blit-test\purge-standby.ps1',
+    # Concurrency knobs — the two tools must be compared at EQUAL concurrency
+    # or the result conflates "blit's per-file path is slow" with "blit ships
+    # one worker". robocopy /MT:8 vs blit's default single apply worker is NOT
+    # a like-for-like comparison (owner, 2026-07-13).
+    #   RoboThreads : robocopy /MT:N. NOTE robocopy with NO /MT is
+    #                 single-threaded; /MT:8 is what we passed originally.
+    #   BlitWorkers : 0 = ship default (ONE apply worker —
+    #                 transfer_session/local.rs:602). N>0 passes `--workers N`,
+    #                 which sets debug_mode and widens sink_workers to N. That
+    #                 flag's ONLY effect on the local session is the worker
+    #                 count (local.rs:328-332), so it is a clean lever.
+    [int]$RoboThreads = 8,
+    [int]$BlitWorkers = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,13 +66,18 @@ New-Item -ItemType Directory -Force -Path $dest | Out-Null
 # --- the timed window -------------------------------------------------------
 $sw = [Diagnostics.Stopwatch]::StartNew()
 if ($Tool -eq 'blit') {
-    & $BlitExe copy $Src $DestRoot --yes > $null 2>&1
+    if ($BlitWorkers -gt 0) {
+        & $BlitExe copy $Src $DestRoot --yes --workers $BlitWorkers > $null 2>&1
+    }
+    else {
+        & $BlitExe copy $Src $DestRoot --yes > $null 2>&1
+    }
     $rc = $LASTEXITCODE
 }
 else {
-    # /MT:8 is robocopy's own default thread count. Retries bounded so a
-    # transient error cannot hang the run for hours on the default /R:1000000.
-    robocopy $Src $dest /E /MT:8 /R:2 /W:2 /NFL /NDL /NJH /NJS > $null 2>&1
+    # Retries bounded so a transient error cannot hang the run for hours on
+    # robocopy's default /R:1000000.
+    robocopy $Src $dest /E /MT:$RoboThreads /R:2 /W:2 /NFL /NDL /NJH /NJS > $null 2>&1
     $rc = $LASTEXITCODE
 }
 $sw.Stop()

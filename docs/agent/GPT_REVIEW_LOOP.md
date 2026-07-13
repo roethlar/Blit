@@ -119,8 +119,13 @@ validation and review.
 
 ## Environment notes
 
-- `codex` runs headless here (provider `headroom`, model `gpt-5.5`, no
-  interactive login). Reviews run read-only sandboxed.
+- `codex` runs headless here (no interactive login); reviews run read-only
+  sandboxed. **The reviewer model is whatever `~/.codex/config.toml` says —
+  read it, do not assume.** As of 2026-07-13 it is **`gpt-5.6-sol`** at
+  `model_reasoning_effort = "ultra"` (codex-cli 0.144.3); this section
+  previously said `gpt-5.5`, and a verdict file was signed with that stale
+  name before the drift was caught. Sign every verdict with the model the
+  config actually names (`.review/README.md` → Identity).
 - The `superpowers@openai-curated` codex plugin injects a skill framework
   that derails focused reviews — disable it per-invocation as shown.
 - The retired async two-agent loop is documented in `.review/README.md`

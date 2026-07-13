@@ -54,6 +54,14 @@ SRC_ROOT="${SRC_ROOT:-$WIN_TEST\\bench-module}"
 DEST_BASE="${DEST_BASE:-E:\\blit-local-bench}"
 DEST_DRIVE="${DEST_DRIVE:-E}"
 PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
+# Concurrency — compare at EQUAL concurrency or the result conflates "blit's
+# per-file path is slow" with "blit ships one apply worker" (owner, 2026-07-13).
+# ROBO_MT=8 + BLIT_WORKERS=0 (the first session) was 8-thread robocopy vs
+# 1-worker blit. Fair pairs: (ROBO_MT=1, BLIT_WORKERS=0) and (ROBO_MT=8,
+# BLIT_WORKERS=8). ROBO_MT=1 is also robocopy's true default — plain
+# `robocopy /E` with no /MT is single-threaded.
+ROBO_MT="${ROBO_MT:-8}"
+BLIT_WORKERS="${BLIT_WORKERS:-0}"   # 0 = blit's shipped default (one worker)
 
 SESSION="$(date +%Y%m%dT%H%M%S)"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/logs/win_local_ab_$SESSION}"
@@ -94,7 +102,9 @@ preflight() {
     done
     # Stale destination from an interrupted run would be re-used as a warm cache.
     wssh "Remove-Item -Recurse -Force '$DEST_BASE' -ErrorAction SilentlyContinue" || true
+    local bw="ship-default(1)"; [[ "$BLIT_WORKERS" -gt 0 ]] && bw="--workers $BLIT_WORKERS"
     log "preflight OK  blit=$BLIT_SHA  runs/arm=$RUNS  fixtures=$FIXTURES  D: -> ${DEST_DRIVE}:"
+    log "  CONCURRENCY: robocopy /MT:$ROBO_MT   vs   blit $bw"
 }
 
 stage_runner() {
@@ -105,10 +115,13 @@ stage_runner() {
 }
 
 # One timed run. Sets RUN_MS/RUN_FLUSH/RUN_EXIT/RUN_FILES/RUN_DRAIN/RUN_VALID.
+# ARM_TOOL/ARM_N select the tool and its concurrency for this run.
 RUN_MS=0; RUN_FLUSH=0; RUN_EXIT=0; RUN_FILES=0; RUN_DRAIN=""; RUN_VALID=yes
-one_run() {   # fixture tool tag
-    local w="$1" tool="$2" tag="$3" out
-    out="$(wssh "pwsh -NoProfile -File '$WIN_TEST\\local-ab-run.ps1' -Tool $tool -Src '$SRC_ROOT\\pull_src_$w\\src_$w' -DestRoot '$DEST_BASE\\$tag' -BlitExe '$BLIT_EXE' -DestDrive $DEST_DRIVE" 2>>"$OUT_DIR/err.log" \
+ARM_TOOL=blit; ARM_N=0
+one_run() {   # fixture tool tag   (concurrency comes from ARM_TOOL/ARM_N)
+    local w="$1" tool="$2" tag="$3" out mt=$ROBO_MT bw=$BLIT_WORKERS
+    if [[ "$tool" == robocopy ]]; then mt="$ARM_N"; else bw="$ARM_N"; fi
+    out="$(wssh "pwsh -NoProfile -File '$WIN_TEST\\local-ab-run.ps1' -Tool $tool -Src '$SRC_ROOT\\pull_src_$w\\src_$w' -DestRoot '$DEST_BASE\\$tag' -BlitExe '$BLIT_EXE' -DestDrive $DEST_DRIVE -RoboThreads $mt -BlitWorkers $bw" 2>>"$OUT_DIR/err.log" \
         | tr -d '\r' | sed -n 's/.*R:\([0-9-]*,[0-9-]*,[0-9-]*,[0-9]*,[A-Za-z0-9_-]*\):R.*/\1/p' | head -1)"
     if [[ -z "$out" ]]; then
         RUN_MS=0; RUN_FLUSH=0; RUN_EXIT=99; RUN_FILES=0; RUN_DRAIN="PARSE-FAIL"; RUN_VALID=no
@@ -127,6 +140,55 @@ one_run() {   # fixture tool tag
     local want; want="$(eval echo "\$FIX_FILES_$1")"
     [[ "$RUN_FILES" == "$want" ]] || RUN_VALID=no                 # wrong tree voids
     RUN_MS=$(( RUN_MS + RUN_FLUSH ))
+}
+
+# --- N-arm interleaved cell (the cross-session bi-stability fix) -------------
+# WHY (found live 2026-07-13): blit's DEFAULT config measured 1388ms for
+# `small` in one session and 2225ms in another — a 60% swing on the same
+# binary, same flags, flat within each session — while robocopy /MT:8 measured
+# 697ms in BOTH. The rig is stable for robocopy and bi-stable for blit, cause
+# unknown. Cross-session comparison is therefore INVALID for blit arms.
+# Fix: put EVERY arm in ONE session, rotating the start arm per slot so no arm
+# systematically follows the same predecessor. Every comparison is then
+# internally controlled and no conclusion crosses a session boundary.
+#
+# ARMS entries: "<label>:<tool>:<n>"  — n = --workers for blit (0 = the SHIPPED
+# default, no flag), /MT:n for robocopy.
+ARMS_SPEC="${ARMS_SPEC:-blit_ship:blit:0,blit_w8:blit:8,robo_mt1:robocopy:1,robo_mt8:robocopy:8}"
+
+run_cell_multi() {   # fixture — all arms interleaved, slot-voided
+    local w="$1" slot=1 attempts=0 valid=0 max=$(( 2 * RUNS ))
+    local -a arms=(); IFS=, read -r -a arms <<< "$ARMS_SPEC"
+    local n_arms=${#arms[@]}
+    log "=== $w ($n_arms arms interleaved, rotating start, $RUNS slots) ==="
+    log "    arms: ${arms[*]}"
+    # One untimed warm-up (absorbs the previous cell's teardown still settling).
+    ARM_TOOL=blit; ARM_N=0
+    one_run "$w" blit "${SESSION}_${w}_warmup" || true
+    log "  $w/warmup (untimed, discarded): ${RUN_MS}ms ($RUN_DRAIN)"
+    while (( valid < RUNS && attempts < max )); do
+        attempts=$(( attempts + 1 ))
+        local slot_valid=yes i idx spec label tool n
+        local -a rows=()
+        for (( i = 0; i < n_arms; i++ )); do
+            idx=$(( (i + slot - 1) % n_arms ))          # rotate the start arm
+            spec="${arms[$idx]}"
+            label="${spec%%:*}"; tool="$(echo "$spec" | cut -d: -f2)"; n="${spec##*:}"
+            ARM_TOOL="$tool"; ARM_N="$n"
+            one_run "$w" "$tool" "${SESSION}_${w}_${label}_s${slot}a${attempts}"
+            [[ "$RUN_VALID" == yes ]] || slot_valid=no
+            rows+=("$w,$label,$slot,$attempts,$RUN_MS,$RUN_FLUSH,$RUN_EXIT,$RUN_FILES,$RUN_DRAIN")
+            log "  $w/$label slot $slot: ${RUN_MS}ms (flush ${RUN_FLUSH}ms, exit $RUN_EXIT, $RUN_FILES files, $RUN_DRAIN)"
+        done
+        local r
+        for r in "${rows[@]}"; do echo "$r,$slot_valid" >> "$CSV"; done
+        if [[ "$slot_valid" == yes ]]; then
+            valid=$(( valid + 1 )); slot=$(( slot + 1 ))
+        else
+            log "  $w: slot $slot VOIDED — re-running the whole slot"
+        fi
+    done
+    (( valid >= RUNS )) || log "  $w INCOMPLETE: $valid/$RUNS valid slots after $attempts attempts"
 }
 
 run_cell() {   # fixture — ABBA over blit/robocopy, pair-void, 2xRUNS cap
@@ -174,25 +236,50 @@ for r in rows:
     by.setdefault((r["fixture"], r["tool"]), []).append(int(r["ms"]))
 
 with open(summary_p, "w") as f:
-    f.write("fixture,tool,median_ms,best_ms,spread_pct,n\n")
+    f.write("fixture,arm,median_ms,best_ms,spread_pct,n\n")
     for k in sorted(by):
         v = sorted(by[k])
         spread = round(100.0 * (max(v) - min(v)) / max(min(v), 1), 1)
         f.write(f"{k[0]},{k[1]},{int(st.median(v))},{min(v)},{spread},{len(v)}\n")
 
-print(f"\n{'fixture':8} {'blit':>9} {'robocopy':>9} {'ratio':>7}  verdict")
-print("-" * 48)
-for w in ("large", "small", "mixed"):
-    b, r = by.get((w, "blit")), by.get((w, "robocopy"))
-    if not b or not r:
-        continue
-    bm, rm = st.median(b), st.median(r)
-    ratio = bm / rm
-    verdict = "blit FASTER" if ratio < 1.0 else "blit SLOWER"
-    print(f"{w:8} {bm:8.0f}ms {rm:8.0f}ms {ratio:7.3f}  {verdict}")
-print("\nratio = blit / robocopy  (<1.00 means blit wins)")
-print("Cross-tool wall clock, NOT a controlled protocol comparison.")
+def med(w, arm):
+    v = by.get((w, arm))
+    return st.median(v) if v else None
+
+fixtures = [w for w in ("large", "small", "mixed") if any(k[0] == w for k in by)]
+arms = sorted({k[1] for k in by})
+
+print(f"\n{'fixture':8} " + " ".join(f"{a:>10}" for a in arms))
+print("-" * (9 + 11 * len(arms)))
+for w in fixtures:
+    cells = []
+    for a in arms:
+        m = med(w, a)
+        cells.append(f"{m:9.0f}ms" if m else f"{'-':>11}")
+    print(f"{w:8} " + " ".join(cells))
+
+# The comparisons that matter, each INSIDE one session (no cross-session math).
+print("\n=== EQUAL-CONCURRENCY comparisons (the only fair cross-tool ones) ===")
+for w in fixtures:
+    for bl, ro, tag in (("blit_ship", "robo_mt1", "1 thread "),
+                        ("blit_w8", "robo_mt8", "8 threads")):
+        b, r = med(w, bl), med(w, ro)
+        if b and r:
+            print(f"  {w:6} @{tag}: blit {b:6.0f}ms  robocopy {r:6.0f}ms  "
+                  f"ratio {b/r:5.3f}  {'blit WINS' if b < r else 'blit LOSES'}")
+
+print("\n=== SCALING: what does 8x the workers/threads actually buy each tool? ===")
+for w in fixtures:
+    b1, b8 = med(w, "blit_ship"), med(w, "blit_w8")
+    r1, r8 = med(w, "robo_mt1"), med(w, "robo_mt8")
+    if b1 and b8:
+        print(f"  {w:6} blit     1 -> 8 workers: {b1:6.0f} -> {b8:6.0f}ms  = {b1/b8:4.2f}x speedup")
+    if r1 and r8:
+        print(f"  {w:6} robocopy 1 -> 8 threads: {r1:6.0f} -> {r8:6.0f}ms  = {r1/r8:4.2f}x speedup")
+
+print("\nCross-tool wall clock, NOT a controlled protocol comparison.")
 print("This says NOTHING about P1 — there is no initiator axis in a local copy.")
+print("blit_ship = the SHIPPED default (one apply worker, no --workers flag).")
 PYEOF
 }
 
@@ -201,7 +288,9 @@ main() {
     [[ "$PREFLIGHT_ONLY" == 1 ]] && { log "PREFLIGHT_ONLY: nothing timed"; exit 0; }
     stage_runner
     local w
-    for w in ${FIXTURES//,/ }; do run_cell "$w"; done
+    for w in ${FIXTURES//,/ }; do
+        if [[ "${MULTI:-0}" == 1 ]]; then run_cell_multi "$w"; else run_cell "$w"; fi
+    done
     wssh "Remove-Item -Recurse -Force '$DEST_BASE' -ErrorAction SilentlyContinue" || true
     summarize | tee -a "$OUT_DIR/bench.log"
     log "runs: $CSV"
