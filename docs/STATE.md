@@ -98,6 +98,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    1.201, both rigs) is a converge bar vs the OLD build and is UNTESTED
    on the Linux rig. Sequence: **jumbo re-run → pf-1 → fix → pf-final
    (ALL THREE rigs) → otp-12d → otp-13.**
+1b. **AFTER otp-12 — the Windows/local pair, planned TOGETHER** (same tar
+   path, opposite directions: a fidelity fix ADDS per-file work to a path
+   already losing to robocopy, so planning them apart optimises one against
+   the other). Both docs own their detail; do not restate it here.
+   - **`docs/bugs/windows-attrs-and-ads-lost-on-tar-path.md` (D-2026-07-13-3)**
+     — Windows attributes + ADS silently dropped, exit 0, **both routes
+     (measured)**; loss is **conditional on file count**
+     (`transfer_plan.rs:103-109`). Unlanded Windows support, NOT a regression.
+     **Fix = WIRE CONTRACT change** → amend `TRANSFER_SESSION.md` first.
+   - **`docs/plan/LOCAL_SMALL_FILE_PATH.md` (Draft, D-2026-07-13-2)** — local
+     apply **does not scale** (8 workers buy 1.05×; robocopy gets ~2.2× from 8
+     threads) and ships **one** worker. At EQUAL concurrency blit BEATS
+     robocopy; at 8-vs-8 it loses 1.9×. `docs/bench/win-local-ab-2026-07-13/`.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Follow-ups largely
    absorbed by otp-2/otp-12's rig matrices.
@@ -113,13 +126,7 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    **Standing owner safety rule**: ALL activity on rig `zoey` stays
    inside its `…/blit-temp/` folder — nothing written outside it, ever;
    no daemon runs on zoey without a fresh go.
-6. **Post-REV4 residue** (unowned): epoch-0/early-ADD hardening; remote
-   perf-history lanes (1e gap); receive-side dial tuning residue (w3-1
-   scoped it out); the source send half's bounded `dp.queue()` is not
-   raced against control-lane events (codex otp-7b-1 F3; residual: the
-   narrow CANCELLED→INTERNAL decay); the CLI progress monitor lives
-   through the in-session mirror purge (display-only; fix = the M-C
-   `AppProgressEvent` phase reshape — codex otp-10b-2 F5).
+6. **Post-REV4 residue** (unowned, 5 items) — list in DEVLOG 2026-07-13 21:00Z.
 
 ## Authoritative docs right now
 
