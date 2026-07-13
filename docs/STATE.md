@@ -2,7 +2,7 @@
 
 Last updated: 2026-07-13
 
-- **NEXT ACTION — run the jumbo re-run BEFORE any code (Queue 1a).** Windows sat at **MTU 1500 for every benchmark ever recorded**, so jumbo was never once exercised; the whole fleet is now verified at **9000** (`.agents/machines.md` §Network/MTU). P1's failing cell is TCP × **mixed** — the most packet-heavy fixture we test — exactly where ~6× fewer packets could move the number. Re-run rig-W invariance at jumbo first; it may dissolve P1 outright. Control the confound: the Mac's NIC ALSO changed (Aquantia @ .54, was the TB5 dock @ .91), so if the asymmetry vanishes, re-run at 1500 on the SAME adapter to separate MTU from hardware.
+- **NEXT ACTION — run the MTU experiment BEFORE any code (Queue 1a).** Windows sat at **MTU 1500 for every benchmark ever recorded**, so jumbo was never once exercised; the fleet is now at **9000** and the negotiated MSS on the rig-W path is **8948 both directions** (measured — `getsockopt(TCP_MAXSEG)` + Linux `ss -ti`; 1448 at MTU 1500). Design + decision rule are PRE-REGISTERED: `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` (rev 2, codex 7/7 accepted). **Both MTU conditions get measured** (9000 and 1500, identical scope, RUNS=8, same NIC/sha) — a single jumbo run cannot attribute anything, because no prior session is a matched control and a FAIL would prove only that jumbo is *insufficient*, not that MTU contributes nothing. **CORRECTION (codex F6): `mixed` is NOT "the most packet-heavy fixture" — `large` is, by ~2× (~741k segments vs ~378k at MSS 1448).** `mixed` is P1's cell because that is where the failure was *observed*; `wm_tcp_large` is now the bulk-packet positive control.
 - Recent sessions (2026-07-11/13, 44th–46th): **otp-10/otp-11 closed; otp-12c RECORDED (rig D 7/7); the perf plan is ACTIVE (D-2026-07-13-1).** Every transfer rides the ONE session (separate local orchestration gone, −6.2k lines at 11b; the unsound journal fast path died with it). Suite **1488**. SMALL_FILE_CEILING paused (D-2026-07-05-1).
 - **P1 (the headline invariance criterion) — the one thing between blit and shipping.** Fails rig W (`wm_tcp_mixed` 1.237 and 1.300 — do NOT read that as a regression, it is **two different Mac NICs**), but **PASSES 8/8 with Linux on both ends** (`docs/bench/otp12-perf-2026-07-13/`; P1's own cell 1.092/1.003). So it is **platform-INTERACTING, not pure layout** — yet **NOT exonerated**: a code path that only bites on one platform (H1's Windows accept branch) looks identical. **P1 HAS NO ESCAPE HATCH** (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for a cell that ALREADY passes invariance — P1 *is* the invariance failure. So: **fix it to ≤1.10, or the owner amends acceptance criterion 1.** Neither is assumed.
 - **⚠ THREE of my claims were reported and RETRACTED on 2026-07-13**, all the same root cause — trusting an instrument I had not validated: (1) "P1 is code" (a harness that keyed durability to the *initiator*, not the destination); (2) "P1 is acceptable platform residue" (D-2026-07-12-1 does not cover it); (3) "macOS can't send jumbo / the switch is broken" (it was `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — it cost the owner a pointless adapter swap). **Verify the instrument before believing the measurement.**
@@ -74,16 +74,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    (**ACTIVE**, D-2026-07-13-1 — owner: "just write the code and
    reviewloop slice by slice"; implementation proceeds, each slice
    through the codex loop).
-   **RUN THIS FIRST — the cheapest experiment we have never run**:
-   Windows sat at **MTU 1500 for every benchmark ever recorded**, so
-   jumbo was never exercised; it is now at 9000 (`.agents/machines.md`
-   §Network/MTU). P1's failing cell is TCP × **mixed** (one big file +
-   5000 small), i.e. the packet-heaviest workload — exactly where ~6×
-   fewer packets could move the number. **Re-run rig-W invariance at
-   jumbo before touching any code.** Confound to control: the Mac's NIC
-   ALSO changed (Aquantia @ .54, was the TB5 dock @ .91) — so if the
-   asymmetry vanishes, re-run once with Windows back at 1500 on the SAME
-   adapter to prove it was the MTU and not the hardware.
+   **RUN THIS FIRST — the MTU experiment.** Design + decision rule are
+   PRE-REGISTERED before any data (the doc owns the detail; do not restate
+   it here): `docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md`
+   rev 2 — codex NOT READY (4 BLOCKER + 3 HIGH), **7/7 accepted**;
+   adjudication `.review/results/pf-0-prereg.gpt-verdict.md`. Headlines:
+   **both** MTU conditions get measured (9000 AND 1500, identical CELLS,
+   RUNS=8, same NIC + sha) — a lone jumbo run attributes nothing, since
+   12b differs by sha and 12c by NIC. **CORRECTION: `mixed` is NOT "the
+   packet-heaviest fixture" — `large` is, by ~2×** (~741k vs ~378k
+   segments at MSS 1448); that old rationale was factually wrong.
    **P1 misses the plan's HEADLINE criterion on rig W** (initiator/verb
    invariance): `wm_tcp_mixed` FAILs twice — 1.237 and 1.300 — on tight
    spreads, so not re-runnable away. (Do NOT read 1.237→1.300 as a
