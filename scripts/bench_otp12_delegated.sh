@@ -187,8 +187,8 @@ $dirty"
   sssh "test -x '$SKIPPY_DAEMON'" || die "skippy blit-daemon missing/not exec: $SKIPPY_DAEMON"
   sssh "grep -qa -- '+$EXPECT_SHA' '$SKIPPY_BLIT'"   || die "skippy blit does not embed +$EXPECT_SHA"
   sssh "grep -qa -- '+$EXPECT_SHA' '$SKIPPY_DAEMON'" || die "skippy blit-daemon does not embed +$EXPECT_SHA"
-  sssh "sudo -n true" 2>/dev/null \
-    || log "  WARNING: 'sudo -n' on skippy not permitted — drop_caches will be skipped and runs may read warm"
+  sssh "sudo -n -l /usr/bin/tee /proc/sys/vm/drop_caches" >/dev/null 2>&1 \
+    || log "  WARNING: sudo -n tee /proc/sys/vm/drop_caches not permitted on skippy — drop_caches will be skipped and runs may read warm"
 
   # windows client + staged daemon
   wssh "if(-not(Test-Path '$WIN_BLIT')){exit 1}"        || die "windows client missing: $WIN_BLIT"
@@ -374,7 +374,7 @@ prep_run() {   # $1 = dest kind (win|skippy). Drain the dest, then cold BOTH end
   echo "$RUN_DRAIN" >> "$OUT_DIR/drain.log"
   [[ "$RUN_DRAIN" == drained* ]] || log "  WARNING: dest($dest_kind) window UNDRAINED ($RUN_DRAIN) — pair will void, rerun"
   # cold BOTH data-plane ends every run (plan D4)
-  sssh "sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'" 2>/dev/null || true
+  sssh "sync; echo 3 | sudo -n /usr/bin/tee /proc/sys/vm/drop_caches >/dev/null" 2>/dev/null || true
   wssh "pwsh -NoProfile -File '$WIN_TEST\\purge-standby.ps1'" >/dev/null 2>&1 \
     || wssh "powershell -NoProfile -File '$WIN_TEST\\purge-standby.ps1'" >/dev/null 2>&1 || true
 }
