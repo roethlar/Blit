@@ -66,7 +66,12 @@ every Linux target in play).
   | **zoey** | `enp0s0` (RJ45, NFS data .206) | **9000** | yes — `[Link] MTUBytes=9000` in `/etc/systemd/network/enp0s0.network` |
   | **zoey** | `enp0s1` (SFP, mgmt .210) | **9000** | yes — same, in `enp0s1.network` |
   | altiera | `enp1s0`/`enp2s0` | 9000 | yes (NetworkManager profiles) |
-  | magneto | `enp1s0f1` | 9000 | **NO — NM profile still `mtu=auto`**; needs `nmcli con mod "Wired connection 3" 802-3-ethernet.mtu 9000` or it reverts on reboot |
+  | magneto | `enp1s0f1` | 9000 | yes — NM profile `Wired connection 3` saved `mtu=9000` (2026-07-13) |
+
+  **Verified end-to-end 2026-07-13**: a jumbo DF ping from skippy reaches
+  magneto, zoey, altiera, netwatch-01 AND the Mac — all OK. Every 10 GbE
+  pair in the fleet carries 9000-byte frames. (Always test from a LINUX
+  host; the Mac's `ping` cannot send >8192 — see the raw-socket trap.)
 
 - **zoey (UniFi UNAS Pro) jumbo — how it was done, and the trap.**
   Debian 11 + `systemd-networkd`; NIC `maxmtu` is 9216 so the hardware is
