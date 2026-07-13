@@ -1,0 +1,5 @@
+cell,arm,median_ms,avg_ms,best_ms,spread_pct,voided_runs,pairs_attempted
+sw_tcp_mixed,delegated,2054,2162,1838,65.5,0,8
+sw_tcp_mixed,direct,1985,1957,1623,31.5,0,8
+ws_tcp_large,delegated,4093,4121,3632,30.0,0,8
+ws_tcp_large,direct,4370,4603,3690,64.0,0,8

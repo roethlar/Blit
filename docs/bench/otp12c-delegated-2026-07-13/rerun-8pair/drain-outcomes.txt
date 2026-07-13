@@ -1,0 +1,10 @@
+# drain outcome counts per cell/arm (recorded; undrained voids the pair per D2)
+sw_tcp_mixed           delegated  drained_6s       4
+sw_tcp_mixed           delegated  drained_8s       4
+sw_tcp_mixed           direct     drained_6s       2
+sw_tcp_mixed           direct     drained_8s       6
+ws_tcp_large           delegated  drained_4x2s     5
+ws_tcp_large           delegated  drained_5x2s     2
+ws_tcp_large           delegated  drained_9x2s     1
+ws_tcp_large           direct     drained_4x2s     7
+ws_tcp_large           direct     drained_5x2s     1

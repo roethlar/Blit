@@ -1,0 +1,3 @@
+comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome
+sw_tcp_mixed,delegated,delegated,direct,2054,1985,1.035,1.10,PASS
+ws_tcp_large,delegated,delegated,direct,4093,4370,1.068,1.10,PASS

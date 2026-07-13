@@ -83,11 +83,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    (TCP×mixed×dest-initiator, code-shaped); push_tcp_small 1.149
    (both rigs); Win→Mac beats the better old direction 6/6; Mac→Win
    gap shapes recorded for the walk
-   (`docs/bench/otp12-{zoey,win}-2026-07-12/`). Current: **otp-12c
-   (delegated, netwatch-01↔skippy)** — direct-path baseline at
-   `f35702a` recorded 2026-07-13
-   (`docs/bench/otp12c-win-2026-07-13/`); delegated session next.
-   Then 12d, otp-13.
+   (`docs/bench/otp12-{zoey,win}-2026-07-12/`). **otp-12c `[x]`
+   RECORDED 2026-07-13**: direct-path baseline at the cutover sha
+   (`docs/bench/otp12c-win-2026-07-13/`) + the delegated rig-D
+   matrix (`docs/bench/otp12c-delegated-2026-07-13/`, 5/7 PASS at
+   RUNS=4; both FAIL cells PASS at RUNS=8 — see Blocked). Current:
+   **otp-12d (assembly)**, then otp-13.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -166,10 +167,24 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   TCP×{small,mixed}×push + pull_tcp_mixed (1.14–1.25) while the new
   arm wins the small-pull side; mw_* cross rows restate the push>pull
   gap vs the committed 12b baselines. Adjudication belongs to otp-13.
-  Delegated harness: `scripts/bench_otp12_delegated.sh` (committed as
-  a draft; before a live run it needs `EXPECT_SHA=f35702a` + skippy
-  binary/module path confirmation, and its first session is a
-  shakeout — see script header).
+- **otp-12c delegated session RECORDED 2026-07-13**
+  (`docs/bench/otp12c-delegated-2026-07-13/`): rig D =
+  netwatch-01↔skippy, harness `scripts/bench_otp12_delegated.sh` at
+  `a2dea3f`, binaries `EXPECT_SHA=f35702a` (5-hash manifest, same in
+  both sessions). Primary RUNS=4: 56 timed runs, 7/7 cells, 0 voided
+  — **5 PASS / 2 FAIL** (`sw_tcp_mixed` 1.119, `ws_tcp_large` 1.129).
+  Confirmation RUNS=8 on exactly those two cells: 32 runs, 0 voided —
+  **both PASS** (1.035, 1.068), and at n=8 the spread shows up on the
+  *direct* arm too (31.5%/64.0%), so the 4-pair FAILs read as
+  low-n noise rather than delegation cost. Both records are committed;
+  neither supersedes the other — **the 4-vs-8 pair reading is an
+  owner call at otp-13**, not self-adjudicated here. Harness fixes
+  found live: `:?` messages with apostrophes swallowed assignments
+  (`b49413d`), macOS `TMPDIR` blew the 104-byte ControlPath limit
+  (`b49413d`), skippy `drop_caches` must go through the exact
+  NOPASSWD grant `tee /proc/sys/vm/drop_caches` (`a2dea3f`).
+  **Not yet through the codex loop** (D-2026-07-04-1) — harness +
+  evidence commits owe a review round.
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 - ~~Push go~~ **RESOLVED 2026-07-12 (owner: push approved via the

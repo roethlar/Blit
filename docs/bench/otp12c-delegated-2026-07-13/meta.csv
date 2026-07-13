@@ -1,0 +1,8 @@
+cell,pairs_attempted,complete
+sw_tcp_large,4,yes
+ws_tcp_large,4,yes
+sw_tcp_small,4,yes
+ws_tcp_small,4,yes
+sw_tcp_mixed,4,yes
+ws_tcp_mixed,4,yes
+sw_grpc_large,4,yes

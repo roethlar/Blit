@@ -1,0 +1,8 @@
+comparison,kind,lhs,rhs,lhs_ms,rhs_ms,ratio,bar,outcome
+sw_grpc_large,delegated,delegated,direct,3159,3120,1.012,1.10,PASS
+sw_tcp_large,delegated,delegated,direct,1921,1891,1.016,1.10,PASS
+sw_tcp_mixed,delegated,delegated,direct,2154,1925,1.119,1.10,FAIL
+sw_tcp_small,delegated,delegated,direct,1860,1799,1.034,1.10,PASS
+ws_tcp_large,delegated,delegated,direct,4647,4115,1.129,1.10,FAIL
+ws_tcp_mixed,delegated,delegated,direct,1732,1735,1.002,1.10,PASS
+ws_tcp_small,delegated,delegated,direct,1994,1885,1.058,1.10,PASS

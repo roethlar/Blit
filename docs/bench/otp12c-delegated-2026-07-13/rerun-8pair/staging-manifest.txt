@@ -1,0 +1,6 @@
+host,role,sha,sha256,path
+mac,client,a2dea3f,0a4ba2f8dd68dd11c628439ced52995007b45b485023d7e1783e1e6137cd78b7,/Users/michael/Dev/blit_v2/target/release/blit
+skippy,client,a2dea3f,de8db7cc09cd32061db19a5f4c05a4f19bcea3e70876c012118a343df4fcd0af,/mnt/generic-pool/video/blit-bin/blit
+skippy,daemon,a2dea3f,743abf92fa0a49de46f0c14563ab319fa8308d7e8c0d560b39dedba173a072b2,/mnt/generic-pool/video/blit-bin/blit-daemon
+windows,client,a2dea3f,50cb9ed90d1f2aa5b2d0b2c1369a44826234cc90f02498f9c099c2849a05de83,D:\blit-test\bins\f35702a\blit.exe
+windows,daemon,a2dea3f,fa0ffd7a70e2ba932a0156e877d31337528d8ff839de8ea2d6cf963bffdf349a,D:\blit-test\bins\f35702a\blit-daemon.exe
