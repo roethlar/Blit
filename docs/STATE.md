@@ -84,7 +84,10 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    (both rigs); Win→Mac beats the better old direction 6/6; Mac→Win
    gap shapes recorded for the walk
    (`docs/bench/otp12-{zoey,win}-2026-07-12/`). Current: **otp-12c
-   (delegated, netwatch-01↔skippy)**, then 12d, otp-13.
+   (delegated, netwatch-01↔skippy)** — direct-path baseline at
+   `f35702a` recorded 2026-07-13
+   (`docs/bench/otp12c-win-2026-07-13/`); delegated session next.
+   Then 12d, otp-13.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -142,6 +145,31 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **Rigs**: owner go GIVEN 2026-07-12; zoey (12a) + netwatch-01 (12b)
   sessions done. Remaining: 12c delegated = netwatch-01↔skippy
   (`admin@skippy`, x86_64, pool paths only; fresh staging needed).
+- **otp-12c prep DONE 2026-07-12**: same-build `f35702a` on both ends;
+  corpus restaged; cross-machine smokes pass both directions. Rig
+  foot-gun (cost one debugging round): Win32-OpenSSH reaps
+  `Start-Process` children when the spawning SSH session closes — the
+  netwatch daemon silently died and 9031 stealth-dropped (mimicked a
+  firewall block; rules were never the problem). Start Windows daemons
+  detached via WMI `Invoke-CimMethod Win32_Process Create` (Linux
+  side unaffected — skippy daemons survive SSH close fine). The prep
+  daemons were stopped before the 12c recorded runs; harnesses own
+  their daemon lifecycles end-to-end.
+- **otp-12c direct-path baseline RECORDED 2026-07-13**
+  (`docs/bench/otp12c-win-2026-07-13/`): rig-W matrix re-run, new arm
+  at the cutover sha `f35702a` (12b's new arm was `e21cf84`), old arm
+  `0f922de`. 198 timed runs, 24/24 cells complete, 3 DRAIN-TIMEOUT
+  pairs voided+re-run, 0 CR residue. Verdicts: 93 PASS / 12 FAIL /
+  3 FAIL-SAME-SESSION / 12 RECORDED. Texture: wm_tcp_mixed invariance
+  **1.300** (12b: 1.237 — the same code-shaped cell, not washed out at
+  the cutover sha); new-vs-old_session losses concentrate in
+  TCP×{small,mixed}×push + pull_tcp_mixed (1.14–1.25) while the new
+  arm wins the small-pull side; mw_* cross rows restate the push>pull
+  gap vs the committed 12b baselines. Adjudication belongs to otp-13.
+  Delegated harness: `scripts/bench_otp12_delegated.sh` (committed as
+  a draft; before a live run it needs `EXPECT_SHA=f35702a` + skippy
+  binary/module path confirmation, and its first session is a
+  shakeout — see script header).
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 - ~~Push go~~ **RESOLVED 2026-07-12 (owner: push approved via the
