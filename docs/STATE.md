@@ -150,8 +150,12 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   sessions had already moved the remote `6d37a22` → `f19776c`
   (fast-forward ancestor of HEAD, no divergence), carrying the w9-3
   windows-latest CI fix. Local and remote are now in sync.
-- **otp-5b-3** (pull mid-transfer cancel e2e, marked optional): pick
-  up while otp-10 runs, or drop? — standing question.
+- ~~otp-5b-3~~ **RESOLVED 2026-07-12 (owner: "write the test")** —
+  re-scoped: the pull-specific framing is mooted by direction-invariance
+  (one session, D-2026-07-05-1); what's missing is a direction-agnostic
+  **mid-copy cancel e2e** (cancel while file data is in flight; existing
+  coverage only hits mirror-purge cancel + jobs lifecycle). Near-term
+  standalone slice; codex loop applies.
 - ~~The change-journal question~~ **RESOLVED 2026-07-12 (owner:
   "neither option passes — figure out a real fix"; the premise was
   false)**: the old 21 ms journal skip was UNSOUND — `NoChanges`
