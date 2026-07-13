@@ -155,7 +155,14 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   (one session, D-2026-07-05-1); what's missing is a direction-agnostic
   **mid-copy cancel e2e** (cancel while file data is in flight; existing
   coverage only hits mirror-purge cancel + jobs lifecycle). Near-term
-  standalone slice; codex loop applies.
+  standalone slice; codex loop applies. **LANDED `920c6a7`**: the test
+  exposed a real bug — a peer `Frame::Error` arriving mid-record
+  (file or tar-shard) was misreported as a ProtocolViolation about
+  frame position instead of surfacing the peer's own fault (plan D4
+  says a CANCELLED must stay CANCELLED). Both record receivers now
+  match the block-record handling; suite 39/39. Companion commit
+  `ace91de` shipped the CLI foot-gun `./NAME` suggestion + unified
+  remote-refusal wording. Local only — NOT pushed.
 - ~~The change-journal question~~ **RESOLVED 2026-07-12 (owner:
   "neither option passes — figure out a real fix"; the premise was
   false)**: the old 21 ms journal skip was UNSOUND — `NoChanges`
