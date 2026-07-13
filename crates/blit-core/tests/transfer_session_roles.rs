@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use blit_core::generated::transfer_frame::Frame;
 use blit_core::generated::{
-    session_error, BlockHashList, ComparisonMode, FileHeader, FilterSpec, ManifestComplete,
-    MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings, SessionError, SessionHello,
-    SessionOpen, SourceDone, TransferFrame, TransferRole, TransferSummary,
+    session_error, BlockHashList, ComparisonMode, FileData, FileHeader, FilterSpec,
+    ManifestComplete, MirrorMode, NeedBatch, NeedComplete, NeedEntry, ResumeSettings,
+    SessionError, SessionHello, SessionOpen, SourceDone, TransferFrame, TransferRole,
+    TransferSummary,
 };
 use blit_core::remote::transfer::source::{FsTransferSource, TransferSource};
 use blit_core::remote::transfer::{PreparedPayload, TransferPayload};
@@ -1869,6 +1870,114 @@ async fn cancel_frame_during_mirror_purge_aborts_the_deletions() {
         "the purge must abort instead of deleting all 2000 entries \
          behind a cancelled session"
     );
+}
+
+#[tokio::test]
+async fn cancel_mid_file_record_surfaces_the_peers_fault() {
+    // otp-5b-3 (re-scoped, direction-agnostic): cancel while file DATA
+    // is in flight. The scripted source opens a 3 MiB record, delivers
+    // one partial FileData frame, then sends CANCELLED mid-record —
+    // bytes still owed. The destination must surface the peer's fault
+    // (code CANCELLED, message preserved), NOT a ProtocolViolation
+    // about frame position, and must not finalize the partial file.
+    // Direction-invariance (D-2026-07-05-1) makes this one scripted
+    // shape stand for both user-facing directions: the in-stream
+    // record receive is the same code under either initiator.
+    let tmp = tempfile::tempdir().unwrap();
+    let dst_root = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst_root).unwrap();
+
+    let dest_cfg = DestinationSessionConfig {
+        hello: HelloConfig::default(),
+        endpoint: SessionEndpoint::Responder,
+        data_plane_host: None,
+        instruments: Default::default(),
+        local_apply: None,
+    };
+    let (mut peer, dest_transport) = in_process_pair();
+    let dest = tokio::spawn(run_destination(
+        dest_cfg,
+        dest_transport,
+        DestinationTarget::Fixed(dst_root.clone()),
+    ));
+
+    peer.send(hello_frame()).await.unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Hello(_)));
+    peer.send(wire(Frame::Open(basic_open(TransferRole::Source))))
+        .await
+        .unwrap();
+    assert!(matches!(recv_or_panic(&mut peer).await, Frame::Accept(_)));
+
+    let size = 3 * 1024 * 1024 + 17;
+    let header = FileHeader {
+        relative_path: "big.bin".into(),
+        size: size as u64,
+        mtime_seconds: 1_600_000_000,
+        permissions: 0o644,
+        checksum: vec![],
+    };
+    peer.send(wire(Frame::ManifestEntry(header.clone())))
+        .await
+        .unwrap();
+    peer.send(wire(Frame::ManifestComplete(ManifestComplete {
+        scan_complete: true,
+    })))
+    .await
+    .unwrap();
+
+    // Missing at the destination → must be granted.
+    let mut granted = false;
+    loop {
+        match recv_or_panic(&mut peer).await {
+            Frame::NeedBatch(batch) => {
+                granted |= batch.entries.iter().any(|e| e.relative_path == "big.bin");
+            }
+            Frame::NeedComplete(_) => break,
+            other => panic!("expected need choreography, got {other:?}"),
+        }
+    }
+    assert!(granted, "'big.bin' must be on the need list");
+
+    // Open the record, land ONE partial frame, cancel mid-record.
+    peer.send(wire(Frame::FileBegin(header))).await.unwrap();
+    peer.send(wire(Frame::FileData(FileData {
+        content: make_patterned(64 * 1024),
+    })))
+    .await
+    .unwrap();
+    peer.send(wire(Frame::Error(SessionError {
+        code: session_error::Code::Cancelled as i32,
+        message: "job cancelled by operator".into(),
+        ..Default::default()
+    })))
+    .await
+    .unwrap();
+
+    let dest_err = tokio::time::timeout(SUITE_TIMEOUT, dest)
+        .await
+        .expect("destination must not hang on a cancelled record")
+        .unwrap()
+        .expect_err("a session cancelled mid-record must not report success");
+    let fault = fault_of(&dest_err);
+    assert_eq!(
+        fault.code,
+        session_error::Code::Cancelled,
+        "the peer's CANCELLED must own the outcome — not a violation \
+         about frame position; got: {dest_err:#}"
+    );
+    assert!(
+        fault.message.contains("cancelled by operator"),
+        "the peer's message must survive the wire, got: {}",
+        fault.message
+    );
+    // The 64 KiB partial must not be finalized as 'big.bin'.
+    let final_path = dst_root.join("big.bin");
+    if let Ok(meta) = std::fs::metadata(&final_path) {
+        assert!(
+            meta.len() < size as u64,
+            "a cancelled record must never finalize at full size"
+        );
+    }
 }
 
 #[tokio::test]

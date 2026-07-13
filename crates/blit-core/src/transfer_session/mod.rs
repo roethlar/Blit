@@ -4003,8 +4003,15 @@ async fn receive_file_record(
                     pipe_wr.write_all(&data.content).await?;
                     remaining -= len;
                 }
+                Some(Frame::Error(err)) => {
+                    // A mid-record abort (plan D4): the peer says why
+                    // before closing — surface ITS fault (a CANCELLED
+                    // must stay CANCELLED), not a violation about the
+                    // frame's position.
+                    return Err(eyre::Report::new(SessionFault::from_wire(err)));
+                }
                 other => {
-                    // Strict serialization: nothing may interleave
+                    // Strict serialization: nothing else may interleave
                     // with an open record on the source lane.
                     return Err(violation_for(
                         &header.relative_path,
@@ -4076,6 +4083,11 @@ async fn receive_tar_record(
                         data,
                     })
                     .await;
+            }
+            Some(Frame::Error(err)) => {
+                // Same mid-record abort contract (plan D4) as file and
+                // block records: the peer's fault owns the outcome.
+                return Err(eyre::Report::new(SessionFault::from_wire(err)));
             }
             other => {
                 return Err(violation(format!(
