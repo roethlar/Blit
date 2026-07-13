@@ -35,37 +35,49 @@ both sessions — no restaging between them.
 
 ## Verdicts
 
-Primary (4-pair) — 7 rows: **5 PASS / 2 FAIL**. FAIL rows verbatim
-from `verdicts.csv`:
+**Primary (RUNS=4)** — 7 rows: 5 PASS, 2 FAIL. The two FAIL rows,
+verbatim from `verdicts.csv`:
 
 ```
 sw_tcp_mixed,delegated,delegated,direct,2154,1925,1.119,1.10,FAIL
 ws_tcp_large,delegated,delegated,direct,4647,4115,1.129,1.10,FAIL
 ```
 
-Confirmation (8-pair, same cells) — 2 rows: **2 PASS**, verbatim:
+**Both cells met D2's pre-registered escalation trigger** — each
+straddles its bar (1.119 / 1.129 against 1.10) *and* has an arm whose
+spread exceeds 25% (delegated 86.0% / 55.4%). Per that rule they were
+re-run at RUNS=8, interleaved, in a fresh session; per D2's supersession
+amendment (2026-07-12, codex otp-12a-run F2) **the RUNS=8 medians govern
+the escalated comparison's outcome**, and the RUNS=4 rows stay committed
+and visible. The escalated rows, verbatim from
+`rerun-8pair/verdicts.csv`:
 
 ```
 sw_tcp_mixed,delegated,delegated,direct,2054,1985,1.035,1.10,PASS
 ws_tcp_large,delegated,delegated,direct,4093,4370,1.068,1.10,PASS
 ```
 
-Reading notes (numbers only, no adjudication):
+**Governing outcome for rig D: 7/7 PASS** (5 at RUNS=4 + 2 escalated
+to RUNS=8). Acceptance is still the owner's at otp-13; this README
+applies the pre-registered arithmetic and declares nothing beyond it.
 
-- The primary FAILs sit on high delegated-arm spread:
-  `sw_tcp_mixed` 86.0%, `sw_tcp_small` 93.6%, `ws_tcp_large` 55.4%
-  vs 8.5%/9.1%/17.3% direct — single slow early slots pull the avg
-  well above the median (`sw_tcp_mixed` delegated median 2154 vs avg
-  2533; `sw_tcp_small` 1860 vs 2277).
-- At 8 pairs the same two cells recorded 1.035 and 1.068, and the
-  spread appeared on the **direct** arm too (31.5% / 64.0%);
-  `ws_tcp_large` direct median moved 4115→4370, landing above the
-  delegated median. The noise is not arm-specific at higher n.
-- `ws_tcp_large` primary delegated best (3000ms) is **faster** than
-  the direct best (3870ms) in the same session.
-- The gRPC secondary cell `sw_grpc_large` recorded 1.012.
-- Both the 4-pair FAIL rows and the 8-pair PASS rows are on record;
-  neither supersedes the other here.
+Reading notes (numbers, no adjudication):
+
+- The primary FAILs ride high **delegated-arm** spread — `sw_tcp_mixed`
+  86.0% and `ws_tcp_large` 55.4%, against 8.5% / 17.3% on their direct
+  arms — where single slow early slots pull the average far above the
+  median (`sw_tcp_mixed` delegated median 2154 vs avg 2533). The
+  widest spread in the session, `sw_tcp_small` delegated at 93.6%,
+  belongs to a cell that **passed** (1.034): spread alone does not
+  decide a cell.
+- At 8 pairs comparable spread appears on the **direct** arm too
+  (31.5% / 64.0%), and `ws_tcp_large`'s direct median moves 4115→4370,
+  landing *above* the delegated median. The noise is not arm-specific
+  once n is larger — which is what the escalation rule exists to
+  resolve.
+- `ws_tcp_large`'s primary delegated best (3000 ms) is **faster** than
+  its direct best (3870 ms) in the same session.
+- The secondary gRPC carrier cell `sw_grpc_large` recorded 1.012.
 
 ## Files
 

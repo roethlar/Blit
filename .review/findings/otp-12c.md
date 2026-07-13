@@ -65,16 +65,31 @@ sw_tcp_mixed,delegated,delegated,direct,2054,1985,1.035,1.10,PASS
 ws_tcp_large,delegated,delegated,direct,4093,4370,1.068,1.10,PASS
 ```
 
-The reading recorded in the evidence README, numbers only: the primary
-FAILs ride high delegated-arm spread (86.0% / 55.4%) driven by slow
-early slots, and at n=8 comparable spread appears on the **direct** arm
-too (31.5% / 64.0%) — `ws_tcp_large`'s direct median moves 4115→4370
-and lands *above* the delegated median, while its primary delegated
-best (3000 ms) already beat the direct best (3870 ms). Both records are
-committed and **neither supersedes the other**: D2's escalation
-amendment (RUNS=8 governs) was written for the converge-up rows, and
-these parity rows are not that shape, so the 4-vs-8 reading is
-explicitly reserved to the **owner at otp-13**.
+Both FAIL cells met **D2's pre-registered escalation trigger** — each
+straddles its bar (1.119 / 1.129 vs 1.10) AND has an arm whose spread
+exceeds 25% (delegated 86.0% / 55.4%) — so the RUNS=8 re-run IS that
+rule firing, not an ad-hoc retry. Per D2's supersession amendment
+(2026-07-12, codex otp-12a-run F2) **the RUNS=8 medians govern the
+escalated comparison**; the RUNS=4 rows stay committed and visible.
+**Governing outcome: rig D 7/7 PASS.**
+
+(Corrected at the review round — codex otp-12c F2. The first draft of
+this record claimed "neither session supersedes the other" on the
+theory that D2's escalation amendment covered only the converge-up
+rows. That was wrong: the escalation rule and its amendment sit in D2
+after *all four* bar definitions and speak of "a comparison"
+generically — delegated parity included. Re-interpreting a
+pre-registered rule after seeing the numbers is exactly what the plan
+forbids, and the error ran in my favour by letting the slice avoid a
+verdict. Acceptance remains the owner's at otp-13, but the arithmetic
+is pre-registered and now applied as written.)
+
+Supporting texture, numbers only: the primary FAILs ride high
+delegated-arm spread driven by slow early slots; at n=8 comparable
+spread appears on the **direct** arm too (31.5% / 64.0%) —
+`ws_tcp_large`'s direct median moves 4115→4370 and lands *above* the
+delegated median, while its primary delegated best (3000 ms) already
+beat the direct best (3870 ms).
 
 The re-baseline session (198 runs, 24/24 cells, 3 DRAIN-TIMEOUT pairs
 voided and re-run, 0 CR residue): 93 PASS / 12 FAIL /

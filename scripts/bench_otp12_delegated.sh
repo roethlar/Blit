@@ -99,8 +99,8 @@ MAC_WORK="${MAC_WORK:-$HOME/blit-bench-work}"
 SKIPPY_SSH="${SKIPPY_SSH:-admin@skippy}"
 SKIPPY_HOST="${SKIPPY_HOST:?set SKIPPY_HOST to the skippy 10GbE IP, numeric}"
 SKIPPY_BIN="${SKIPPY_BIN:-/mnt/generic-pool/video/blit-bin}"
-SKIPPY_BLIT="${SKIPPY_BLIT:-$SKIPPY_BIN/bins/$NEW_SHA/blit}"
-SKIPPY_DAEMON="${SKIPPY_DAEMON:-$SKIPPY_BIN/bins/$NEW_SHA/blit-daemon}"
+SKIPPY_BLIT="${SKIPPY_BLIT:-$SKIPPY_BIN/bins/$EXPECT_SHA/blit}"
+SKIPPY_DAEMON="${SKIPPY_DAEMON:-$SKIPPY_BIN/bins/$EXPECT_SHA/blit-daemon}"
 SKIPPY_MODULE="${SKIPPY_MODULE:-/mnt/generic-pool/video/bench-data}"   # module 'bench' data root
 SKIPPY_TEMP="${SKIPPY_TEMP:-/mnt/generic-pool/video/blit-bin}"         # config/log dir (exec-friendly pool)
 SKIPPY_DISK_REGEX="${SKIPPY_DISK_REGEX:-^sd[a-z]$|^nvme[0-9]+n1$|^dm-[0-9]+$}"  # /proc/diskstats field-3 match
@@ -110,7 +110,7 @@ WIN_SSH="${WIN_SSH:-michael@netwatch-01}"
 WIN_HOST="${WIN_HOST:-10.1.10.177}"
 WIN_DRIVE="${WIN_DRIVE:-D}"
 WIN_TEST="${WIN_TEST:-D:\\blit-test}"
-WIN_BINS="${WIN_BINS:-$WIN_TEST\\bins\\$NEW_SHA}"
+WIN_BINS="${WIN_BINS:-$WIN_TEST\\bins\\$EXPECT_SHA}"
 WIN_BLIT="${WIN_BLIT:-$WIN_BINS\\blit.exe}"
 NEW_WIN_DAEMON="${NEW_WIN_DAEMON:-$WIN_BINS\\blit-daemon.exe}"
 ACTIVE_WIN_DAEMON="${ACTIVE_WIN_DAEMON:-$WIN_TEST\\bins\\active\\blit-daemon.exe}"
@@ -153,7 +153,13 @@ flush_win_ms() {   # Windows volume flush, self-timed; prints ms or NA
     | nocr | sed -n 's/.*F:\([0-9][0-9]*\):F.*/\1/p;s/.*F:NA:F.*/NA/p' | head -1
 }
 sync_skippy_ms() {   # skippy sync bracketed by /proc/uptime in one shell
-  sssh "a=\$(awk '{print int(\$1*1000)}' /proc/uptime); sync; b=\$(awk '{print int(\$1*1000)}' /proc/uptime); echo \$((b-a))" 2>/dev/null | nocr | tr -dc '0-9' || echo NA
+  # codex otp-12c F5: a FAILED sync must not read as a plausible flush. The
+  # sentinel is emitted only on rc=0, so a broken sync yields NA -> the run
+  # voids (fail closed), instead of a numeric flush on unflushed bytes.
+  local out
+  out="$(sssh "a=\$(awk '{print int(\$1*1000)}' /proc/uptime); if sync; then b=\$(awk '{print int(\$1*1000)}' /proc/uptime); echo \"S:\$((b-a)):S\"; fi" 2>/dev/null \
+    | nocr | sed -n 's/.*S:\([0-9][0-9]*\):S.*/\1/p' | head -1)"
+  echo "${out:-NA}"
 }
 
 # ---- sha256 + version-embed provenance ---------------------------------------
@@ -164,6 +170,23 @@ sha256_win()   { local h; h=$(wssh "(Get-FileHash -Algorithm SHA256 '$1' -ErrorA
 # binary itself (a compile-time literal; otp-12a-run F1). There is NO usable
 # `blit --version` — the CLI rejects the flag — so grep the exe, never run it.
 # LC_ALL=C + -a are load-bearing on BSD grep (macOS) for matches inside binaries.
+#
+# codex otp-12c F3: a bare substring test for "+<sha>" ALSO matches a dirty
+# build id ("+<sha>.dirty.<hash>" — the exact shape that fooled otp-12a's
+# provenance check on zoey). A clean build must embed "+<sha>" NOT followed by
+# ".dirty", so each gate below asserts the id is present AND that no dirty
+# variant of it is present.
+embeds_clean_local() {   # $1 = path
+  LC_ALL=C grep -qa -- "+$EXPECT_SHA" "$1" || return 1
+  LC_ALL=C grep -qa -- "+$EXPECT_SHA.dirty" "$1" && return 1
+  return 0
+}
+embeds_clean_skippy() {   # $1 = remote path
+  sssh "grep -qa -- '+$EXPECT_SHA' '$1' && ! grep -qa -- '+$EXPECT_SHA.dirty' '$1'"
+}
+embeds_clean_win() {   # $1 = remote path
+  wssh "if((Select-String -Path '$1' -SimpleMatch -Quiet -Pattern '+$EXPECT_SHA') -and -not (Select-String -Path '$1' -SimpleMatch -Quiet -Pattern '+$EXPECT_SHA.dirty')){exit 0}else{exit 1}"
+}
 
 # ------------------------------------------------------------------ preflight -
 preflight() {
@@ -172,31 +195,40 @@ preflight() {
   command -v python3 >/dev/null || die "python3 required on the Mac"
   command -v shasum  >/dev/null || die "shasum required on the Mac"
 
-  # clean SOURCE tree (docs churn allowed; crates/Cargo dirt is not)
-  local dirty; dirty="$(git -C "$REPO_ROOT" status --porcelain -- crates Cargo.toml Cargo.lock)"
-  [[ -z "$dirty" ]] || die "source tree DIRTY (crates/Cargo.*) — binary identity unclear:
+  # Clean SOURCE tree. codex otp-12c F3: `proto/` was omitted — blit-core's build
+  # script compiles proto/blit.proto into the binaries, so proto dirt changes the
+  # build exactly like crates dirt does. Docs churn stays allowed.
+  local dirty; dirty="$(git -C "$REPO_ROOT" status --porcelain -- crates proto Cargo.toml Cargo.lock)"
+  [[ -z "$dirty" ]] || die "source tree DIRTY (crates/proto/Cargo.*) — binary identity unclear:
 $dirty"
 
   # Mac client
   [[ -x "$MAC_BLIT" ]] || die "MAC_BLIT not executable: $MAC_BLIT (cargo build --release)"
-  LC_ALL=C grep -qa -- "+$EXPECT_SHA" "$MAC_BLIT" \
-    || die "MAC_BLIT does not embed +$EXPECT_SHA — rebuild at HEAD or set EXPECT_SHA"
+  embeds_clean_local "$MAC_BLIT" \
+    || die "MAC_BLIT does not embed a CLEAN +$EXPECT_SHA — rebuild at HEAD or set EXPECT_SHA"
 
   # skippy client + daemon
   sssh "test -x '$SKIPPY_BLIT'"   || die "skippy blit missing/not exec: $SKIPPY_BLIT"
   sssh "test -x '$SKIPPY_DAEMON'" || die "skippy blit-daemon missing/not exec: $SKIPPY_DAEMON"
-  sssh "grep -qa -- '+$EXPECT_SHA' '$SKIPPY_BLIT'"   || die "skippy blit does not embed +$EXPECT_SHA"
-  sssh "grep -qa -- '+$EXPECT_SHA' '$SKIPPY_DAEMON'" || die "skippy blit-daemon does not embed +$EXPECT_SHA"
-  sssh "sudo -n -l /usr/bin/tee /proc/sys/vm/drop_caches" >/dev/null 2>&1 \
-    || log "  WARNING: sudo -n tee /proc/sys/vm/drop_caches not permitted on skippy — drop_caches will be skipped and runs may read warm"
+  embeds_clean_skippy "$SKIPPY_BLIT"   || die "skippy blit does not embed a CLEAN +$EXPECT_SHA"
+  embeds_clean_skippy "$SKIPPY_DAEMON" || die "skippy blit-daemon does not embed a CLEAN +$EXPECT_SHA"
+  # codex otp-12c F1: cold caches are METHODOLOGY, not a nicety — a session that
+  # cannot drop them measures warm reads and its numbers are worthless. This was
+  # a warning; it is now a hard gate (COLD_REQUIRED=0 to measure warm on purpose).
+  if [[ "${COLD_REQUIRED:-1}" == 1 ]]; then
+    sssh "sudo -n -l /usr/bin/tee /proc/sys/vm/drop_caches" >/dev/null 2>&1 \
+      || die "skippy cannot drop caches (need NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches) — runs would read WARM. Fix the sudoers grant, or set COLD_REQUIRED=0 to record a deliberately-warm session."
+  else
+    log "  WARNING: COLD_REQUIRED=0 — cache drops are best-effort; this session may read WARM"
+  fi
 
   # windows client + staged daemon
   wssh "if(-not(Test-Path '$WIN_BLIT')){exit 1}"        || die "windows client missing: $WIN_BLIT"
   wssh "if(-not(Test-Path '$NEW_WIN_DAEMON')){exit 1}"  || die "windows staged daemon missing: $NEW_WIN_DAEMON"
-  wssh "if(Select-String -Path '$WIN_BLIT' -SimpleMatch -Quiet -Pattern '+$EXPECT_SHA'){exit 0}else{exit 1}" \
-    || die "windows blit does not embed +$EXPECT_SHA — restage the native build"
-  wssh "if(Select-String -Path '$NEW_WIN_DAEMON' -SimpleMatch -Quiet -Pattern '+$EXPECT_SHA'){exit 0}else{exit 1}" \
-    || die "windows daemon does not embed +$EXPECT_SHA — restage the native build"
+  embeds_clean_win "$WIN_BLIT" \
+    || die "windows blit does not embed a CLEAN +$EXPECT_SHA — restage the native build"
+  embeds_clean_win "$NEW_WIN_DAEMON" \
+    || die "windows daemon does not embed a CLEAN +$EXPECT_SHA — restage the native build"
   wssh "if(-not(Test-Path '$WIN_TEST\\purge-standby.ps1')){exit 1}" \
     || log "  WARNING: $WIN_TEST\\purge-standby.ps1 missing — Windows standby purge will be skipped (stage scripts/windows/purge-standby.ps1)"
 
@@ -216,15 +248,20 @@ write_manifest() {
   h_sd="$(sha256_skippy "$SKIPPY_DAEMON")"
   h_wc="$(sha256_win "$WIN_BLIT")"
   h_wd="$(sha256_win "$NEW_WIN_DAEMON")"
+  # codex otp-12c F4: the `sha` column must be the BINARY's identity (the id the
+  # binaries actually embed, gated above), NOT the harness checkout's HEAD. When
+  # EXPECT_SHA is overridden these differ, and recording HEAD made the
+  # machine-readable field FALSE. Harness HEAD is recorded separately, as itself.
   {
+    echo "# harness_head=$NEW_SHA binary_identity=$EXPECT_SHA"
     echo "host,role,sha,sha256,path"
-    echo "mac,client,$NEW_SHA,$h_mc,$MAC_BLIT"
-    echo "skippy,client,$NEW_SHA,$h_sc,$SKIPPY_BLIT"
-    echo "skippy,daemon,$NEW_SHA,$h_sd,$SKIPPY_DAEMON"
-    echo "windows,client,$NEW_SHA,$h_wc,$WIN_BLIT"
-    echo "windows,daemon,$NEW_SHA,$h_wd,$NEW_WIN_DAEMON"
+    echo "mac,client,$EXPECT_SHA,$h_mc,$MAC_BLIT"
+    echo "skippy,client,$EXPECT_SHA,$h_sc,$SKIPPY_BLIT"
+    echo "skippy,daemon,$EXPECT_SHA,$h_sd,$SKIPPY_DAEMON"
+    echo "windows,client,$EXPECT_SHA,$h_wc,$WIN_BLIT"
+    echo "windows,daemon,$EXPECT_SHA,$h_wd,$NEW_WIN_DAEMON"
   } > "$f"
-  log "staging manifest recorded (5 hashes)"
+  log "staging manifest recorded (5 hashes; harness_head=$NEW_SHA binary_identity=$EXPECT_SHA)"
 }
 
 # ------------------------------------------------------------ daemon config ----
@@ -289,8 +326,17 @@ skippy_daemon_stop() {
   [[ "$SKIPPY_DAEMON_STARTED" == 1 && -n "$SKIPPY_PID" ]] || return 0
   # PID-scoped, comm-verified: only kill if THAT pid is still a blit process.
   sssh "if [ -r /proc/$SKIPPY_PID/comm ] && grep -qi blit /proc/$SKIPPY_PID/comm; then kill $SKIPPY_PID 2>/dev/null; for i in 1 2 3 4 5 6; do [ -d /proc/$SKIPPY_PID ] || break; sleep 0.5; done; [ -d /proc/$SKIPPY_PID ] && kill -9 $SKIPPY_PID 2>/dev/null; fi; true" 2>/dev/null || true
+  # codex otp-12c F6: the teardown used to clear the flag and log "stopped"
+  # unconditionally — the harness could exit 0 with a daemon still holding the
+  # port, and the EXIT trap would never retry. VERIFY the pid is gone; a
+  # survivor is loud and leaves the flag set so the trap tries again.
+  if sssh "[ -d /proc/$SKIPPY_PID ]" 2>/dev/null; then
+    TEARDOWN_LEAK=1
+    log "ERROR: skippy daemon pid $SKIPPY_PID SURVIVED teardown — port $PORT may still be held"
+    return 1
+  fi
   SKIPPY_DAEMON_STARTED=0
-  log "skippy daemon stopped (pid $SKIPPY_PID)"
+  log "skippy daemon stopped (pid $SKIPPY_PID, verified gone)"
 }
 
 win_daemon_start() {
@@ -333,8 +379,14 @@ win_daemon_stop() {
 if(\$p){ \$proc=Get-Process -Id \$p -ErrorAction SilentlyContinue; if(\$proc -and \$proc.ProcessName -eq 'blit-daemon'){ Stop-Process -Id \$p -Force } }
 else { \$c=Get-Content '$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue; if(\$c){ \$d=Get-CimInstance Win32_Process -Filter \"Name='blit-daemon.exe'\" | Where-Object { \$_.ParentProcessId -eq \$c } | Select-Object -First 1; if(\$d){ Stop-Process -Id \$d.ProcessId -Force } } }
 Remove-Item '$WIN_TEST\\daemon-wmi.pid' -ErrorAction SilentlyContinue" 2>/dev/null || true
+  # codex otp-12c F6: verify the kill landed — never log "stopped" on faith.
+  if wssh "if(Get-Process -Id '$WIN_PID' -ErrorAction SilentlyContinue){exit 0}else{exit 1}" 2>/dev/null; then
+    TEARDOWN_LEAK=1
+    log "ERROR: windows daemon pid $WIN_PID SURVIVED teardown — port $PORT may still be held"
+    return 1
+  fi
   WIN_DAEMON_STARTED=0
-  log "windows daemon stopped (pid $WIN_PID)"
+  log "windows daemon stopped (pid $WIN_PID, verified gone)"
 }
 
 daemons_start() { write_configs; skippy_daemon_start; win_daemon_start; }
@@ -353,7 +405,13 @@ for(\$i=0; \$i -lt $DRAIN_ITERS; \$i++){
 'DRAIN-TIMEOUT'" 2>/dev/null | nocr || echo DRAIN-ERROR
 }
 drain_skippy() {   # sync then poll /proc/diskstats sectors-written until quiet
-  sssh "sync
+  # codex otp-12c F5: if SKIPPY_DISK_REGEX matches NO device, awk sums nothing,
+  # every delta is 0, and the loop reports "drained" on the first windows — a
+  # never-drained disk reading as drained. Assert the regex matches >=1 device
+  # BEFORE polling; no match is DRAIN-NODEV (not drained -> the pair voids).
+  sssh "n=\$(awk '\$3 ~ /$SKIPPY_DISK_REGEX/ {c++} END{print c+0}' /proc/diskstats)
+if [ \"\$n\" -eq 0 ]; then echo DRAIN-NODEV; exit 0; fi
+sync
 quiet=0
 for i in \$(seq 1 $DRAIN_ITERS); do
   a=\$(awk '\$3 ~ /$SKIPPY_DISK_REGEX/ {s+=\$10} END{printf \"%.0f\", s}' /proc/diskstats)
@@ -366,18 +424,35 @@ echo DRAIN-TIMEOUT" 2>/dev/null | nocr || echo DRAIN-ERROR
 }
 
 RUN_DRAIN=""
+RUN_COLD=""
 prep_run() {   # $1 = dest kind (win|skippy). Drain the dest, then cold BOTH ends.
   local dest_kind="$1" outcome
   if [[ "$dest_kind" == win ]]; then outcome="$(drain_win)"; else outcome="$(drain_skippy)"; fi
   RUN_DRAIN="${outcome:-DRAIN-ERROR}"
   RUN_DRAIN="${RUN_DRAIN// /_}"
-  echo "$RUN_DRAIN" >> "$OUT_DIR/drain.log"
   [[ "$RUN_DRAIN" == drained* ]] || log "  WARNING: dest($dest_kind) window UNDRAINED ($RUN_DRAIN) — pair will void, rerun"
-  # cold BOTH data-plane ends every run (plan D4)
-  sssh "sync; echo 3 | sudo -n /usr/bin/tee /proc/sys/vm/drop_caches >/dev/null" 2>/dev/null || true
+
+  # Cold BOTH data-plane ends every run (plan D4). codex otp-12c F1: these were
+  # `|| true` — a purge that silently failed produced a WARM run that still
+  # counted as valid, the same failure class as the a2dea3f sudo no-op. The
+  # outcome is now recorded per run and a failure VOIDS the pair (fail closed).
+  local cold_s=ok cold_w=ok
+  sssh "sync; echo 3 | sudo -n /usr/bin/tee /proc/sys/vm/drop_caches >/dev/null" >/dev/null 2>&1 \
+    || cold_s=FAIL
   wssh "pwsh -NoProfile -File '$WIN_TEST\\purge-standby.ps1'" >/dev/null 2>&1 \
-    || wssh "powershell -NoProfile -File '$WIN_TEST\\purge-standby.ps1'" >/dev/null 2>&1 || true
+    || wssh "powershell -NoProfile -File '$WIN_TEST\\purge-standby.ps1'" >/dev/null 2>&1 \
+    || cold_w=FAIL
+  if [[ "$cold_s" == ok && "$cold_w" == ok ]]; then
+    RUN_COLD=cold
+  else
+    RUN_COLD="COLD-FAIL(skippy=$cold_s,win=$cold_w)"
+    log "  WARNING: cold-cache step FAILED ($RUN_COLD) — pair voids, rerun"
+    [[ "${COLD_REQUIRED:-1}" == 1 ]] || RUN_COLD="warm-allowed"
+  fi
+  echo "$RUN_DRAIN $RUN_COLD" >> "$OUT_DIR/drain.log"
 }
+# A run is cold iff both ends purged (or the operator opted out via COLD_REQUIRED=0).
+cold_ok() { [[ "$RUN_COLD" == cold || "$RUN_COLD" == warm-allowed ]]; }
 
 # ------------------------------------------------------------ fixtures --------
 # Identical shapes to otp-2 (plan D5): 1 GiB large / 10k x 4 KiB small /
@@ -459,6 +534,7 @@ deleg_run() {
   [[ -z "$RUN_FLUSH" || "$RUN_FLUSH" == NA ]] && { RUN_VALID=no; RUN_FLUSH=0; }
   RUN_MS=$(( end - start + RUN_FLUSH )); RUN_EXIT=$rc
   [[ $rc -eq 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
+  cold_ok || RUN_VALID=no   # codex otp-12c F1: a warm run never counts
 }
 
 # direct_run CELL RID DEST_KIND SRC_REMOTE  — dest-host self-timed local pull
@@ -490,6 +566,7 @@ direct_run() {
   [[ -z "$RUN_FLUSH" || "$RUN_FLUSH" == NA ]] && { RUN_VALID=no; RUN_FLUSH=0; }
   RUN_MS=$(( T_MS + RUN_FLUSH )); RUN_EXIT=$T_RC
   [[ "$T_RC" == 0 && "$RUN_DRAIN" == drained* ]] || RUN_VALID=no
+  cold_ok || RUN_VALID=no   # codex otp-12c F1: a warm run never counts
 }
 
 # arm wrappers (CUR_W bound by the matrix driver)
@@ -514,7 +591,9 @@ run_pair_loop() {
       rid="${aname}_s${slot}a${attempts}"   # arm in every path -> no cross-arm collision
       "$fn" "$cell" "$rid"
       [[ "$RUN_VALID" == yes ]] || pair_valid=no
-      local row="$cell,$aname,$NEW_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_EXIT,$RUN_DRAIN"
+      # codex otp-12c F4: `build` is the binary identity that was gated and
+      # hashed into the manifest, not the harness checkout's HEAD.
+      local row="$cell,$aname,$EXPECT_SHA,$init,$slot,$RUN_MS,$RUN_FLUSH,$RUN_EXIT,$RUN_DRAIN"
       if [[ "$arm" == A ]]; then rowA="$row"; else rowB="$row"; fi
       log "  $cell/$aname slot $slot (attempt $attempts): ${RUN_MS}ms (flush ${RUN_FLUSH}ms, exit $RUN_EXIT, $RUN_DRAIN)"
     done
@@ -621,9 +700,16 @@ PYEOF
 }
 
 # ------------------------------------------------------------ cleanup ---------
+TEARDOWN_LEAK=0
 on_exit() {
   local rc=$?
   daemons_stop || true
+  # codex otp-12c F6: a daemon that survived teardown is still holding $PORT and
+  # will trip the NEXT session's stale-listener refusal. Never exit 0 on a leak.
+  if [[ "$TEARDOWN_LEAK" == 1 ]]; then
+    log "FATAL: a benchmark daemon survived teardown — stop it before the next session"
+    [[ "$rc" == 0 ]] && rc=1
+  fi
   # best-effort sweep of any leftover fresh dirs from THIS session
   sssh "rm -rf '$SKIPPY_MODULE'/${SESSION_TAG}_* 2>/dev/null; true" 2>/dev/null || true
   wssh "Get-ChildItem '$WIN_MODULE' -Directory -ErrorAction SilentlyContinue | Where-Object { \$_.Name -like '${SESSION_TAG}_*' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true

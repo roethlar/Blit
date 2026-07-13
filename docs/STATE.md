@@ -155,12 +155,16 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   **1.300** vs 12b's 1.237 — the TCP×mixed×dest-initiator cell did not
   wash out at the cutover sha) and the delegated rig-D matrix
   (`docs/bench/otp12c-delegated-2026-07-13/` — RUNS=4: 5 PASS / 2 FAIL,
-  `sw_tcp_mixed` 1.119 and `ws_tcp_large` 1.129; RUNS=8 on exactly
-  those two: **both PASS**, 1.035 / 1.068, with the big spread on the
-  *direct* arm too). Both records stand; **the 4-vs-8 reading is an
-  owner call**, not self-adjudicated. **Owes a codex round**
-  (D-2026-07-04-1): harness `scripts/bench_otp12_delegated.sh` plus
-  both evidence commits.
+  `sw_tcp_mixed` 1.119 and `ws_tcp_large` 1.129; both cells met D2's
+  pre-registered escalation trigger (straddle + >25% arm spread) and
+  re-ran at RUNS=8, where the D2 supersession amendment makes the
+  8-pair medians govern: **both PASS**, 1.035 / 1.068 → **rig D 7/7
+  PASS**, RUNS=4 rows still committed and visible). Acceptance is the
+  owner's at otp-13; the evidence applies only the pre-registered
+  arithmetic. Codex round DONE (`.review/results/otp-12c.*`): FAIL →
+  **7/7 findings accepted**, incl. F2 — the first draft misread D2 as
+  scoping escalation to converge-up rows only (it does not) and so
+  ducked the verdict; corrected.
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 
