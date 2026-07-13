@@ -1,9 +1,29 @@
 # otp-12 perf findings — investigate + fix before acceptance (design)
 
-**Status**: Draft (owner, 2026-07-12: "let's fix the code before
-devoting another block of time to testing. plan, reviewloop codex, then
-fix once converged" — the flip to Active happens at codex convergence
-per that instruction; implementation not before).
+**Status**: Active
+**Approved**: D-2026-07-13-1 — owner, 2026-07-13, verbatim:
+**"one more round with codex on the plan then just write the code and
+reviewloop slice by slice. that converges faster than plans with no
+ground truth to test."** The final round ran (round 5, verdict NOT READY,
+3 blockers — F1 the missing P1 escape, F2 the non-isolating H1
+counterfactual, F3 the inexecutable decision rule); all three are fixed
+in this revision, and implementation now proceeds **slice by slice, each
+through the codex loop** (D-2026-07-04-1 unchanged). A non-converged plan
+verdict is no longer a gate — the plan's earlier "flip to Active at codex
+convergence" rule is superseded by D-2026-07-13-1, because rounds 2–5
+were increasingly finding defects in the *prose* while the plan's central
+factual claim was settled by *measurement* (the same-OS rig refuted a
+claim four review rounds had left standing). pf-1 exists to generate
+ground truth; it starts now.
+
+**⚠ THE DECISION P1 NEEDS (surfaced round 5, owner's to make — NOT
+assumed by this plan):** P1 has **no escape hatch on the books**.
+D-2026-07-12-1 waives a cross-direction converge-up miss only for a cell
+that is *already* invariance-passing; P1 is the invariance failure
+itself. So P1 must either be **FIXED** (≤1.10 on rig W — the default this
+plan pursues) or the owner must **amend acceptance criterion 1** in a new
+decision. pf-1 proceeds either way: it produces the evidence that
+decision would rest on.
 **Created**: 2026-07-12
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active), whose Constraints
 say the quiet part: "Unification that slows the fast direction fails
@@ -104,9 +124,28 @@ Therefore:
 
 - **P1 requires the Mac↔Windows pairing.** It is NOT a pure layout
   property of blit's code — a pure layout cost would have appeared here,
-  on the same code, same carrier, same fixture. **D-2026-07-12-1's
-  platform-residue discriminator is the relevant frame for P1** at the
-  otp-13 walk, and the owner may be able to accept it on that basis.
+  on the same code, same carrier, same fixture.
+
+- **⚠ BUT P1 HAS NO ESCAPE HATCH TODAY (review round 5, BLOCKER).** An
+  earlier revision of this section said D-2026-07-12-1 lets the owner
+  accept P1 as a platform residue. **It does not.** That decision excuses
+  a **cross-direction converge-up** miss for a cell that has ALREADY
+  satisfied its precondition **"(b) is initiator/verb-invariant within
+  ±10%"** (`docs/DECISIONS.md` D-2026-07-12-1). **P1 IS the invariance
+  failure** (`wm_tcp_mixed` 1.300 FAIL) — the precondition it would need
+  is the very thing it violates. No decision on the books waives it.
+  Therefore exactly two exits exist, and pf-1 must aim at them:
+  1. **FIX IT** — P1 ≤ 1.10 on rig W. This remains the default and the
+     bar (`ONE_TRANSFER_PATH.md` acceptance criterion 1 is mandatory).
+  2. **A NEW OWNER DECISION amending criterion 1** — for which the
+     same-OS result is the honest evidence base: criterion 1 asks for
+     invariance "on a symmetric rig", Mac↔Windows was designated only
+     because no better pair existed, and one now does — magneto↔skippy,
+     where blit measures **8/8 invariant**. An owner could reasonably
+     rule that criterion 1 is judged on the rig that isolates blit's own
+     behaviour, with the Mac↔Windows delta recorded as platform residue.
+     **That ruling does not exist. It must not be assumed, and this plan
+     must not be written as though it will be granted.**
 - **This does NOT fully exonerate the code.** It rules out a pure layout
   property; it does not rule out a code path whose cost only becomes
   material under a particular platform — e.g. a slow accept branch on the
@@ -144,18 +183,34 @@ the time. On any two-host rig, host identity remains welded to role, so
 - **pf-1 must compare all four rig-W arms** (both cells × both
   initiators), not two, and report the interaction — not a single ratio.
 - **The disambiguator is a dial/accept inversion counterfactual, not a
-  rig.** Today the initiator always dials and the responder accepts, so
-  role and host are welded together. pf-1 adds a **debug-flag that flips
-  which end dials** for a given source/destination assignment, then runs
-  the SAME data direction, SAME hosts, SAME fixture, changing only who
-  accepts. If the ~30% follows the **accept role**, H1 is CONFIRMED; if
-  it stays with the **platform** regardless of who accepts, H1 is KILLED
-  and the residue is a TCP-stack/write-path property (→ the D-2026-07-12-1
-  discriminator and the owner's walk). This changes connection topology
-  even behind a debug flag, so it **trips this plan's Contract
-  stop-and-amend rule** (`TRANSFER_SESSION.md` amended through the loop
-  BEFORE the flag is written). Same-build-both-ends (D-2026-07-05-2)
-  means no compatibility surface is created.
+  rig** — but it is **NOT sufficient on its own** (review round 5): the
+  inversion swaps the source's `Accept`, the destination's `Dial`, AND
+  the epoch-0 topology **simultaneously**, so a positive result implicates
+  *the topology pair*, not H1 specifically. It cannot distinguish
+  source-accept serialization from synchronous destination dialing
+  (`transfer_session/mod.rs:3113`), nor prove the resize-specific claim.
+  pf-1 therefore runs **three ablations, not one**, each varying ONE thing:
+  1. **dial/accept inversion** — same direction, same hosts, same fixture;
+     only who dials changes. Implicates the topology pair (or exonerates it).
+  2. **no-resize / pre-opened streams** — force the final stream count at
+     epoch 0 so no resize epoch ever fires. If the gap survives with zero
+     resizes, H1's resize-specific mechanism is **KILLED** regardless of
+     what (1) shows (and note `dial.rs:474`: all three fixtures already
+     target 8 streams, so resize *count* was never the discriminator).
+  3. **per-side ordering** — hold the topology fixed and vary only whether
+     the destination's dial-before-ACK is synchronous. Separates the two
+     halves the inversion conflates.
+  H1 is CONFIRMED only if the wall-time recovery tracks the **accept role**
+  across (1) AND survives (2); it is KILLED if the gap persists with no
+  resizes, or if (3) shows the cost is the synchronous dial rather than the
+  accept branch. Any of these that changes connection topology — (1) and
+  (2) do — **trips this plan's Contract stop-and-amend rule**
+  (`TRANSFER_SESSION.md` amended through the loop BEFORE the flag is
+  written). Same-build-both-ends (D-2026-07-05-2) means no compatibility
+  surface is created.
+  **H1 is also WEAKENED by the Linux null** (it predicts a layout cost that
+  did not appear on a real-network same-OS pair), so pf-1 must be prepared
+  to kill it and fall through to H5/H6/H7.
 - **The same-platform loopback run is a ONE-WAY test** (corrected — an
   earlier draft of this section had it backwards). A dest-initiator
   penalty that still appears on Mac↔Mac loopback proves **pure layout**
@@ -316,6 +371,16 @@ cannot attribute code — Method 3(a)).
   account for a material share of the P2 gap. If H6 is confirmed, the P2
   fix bar applies unchanged (≤ 1.10 against BOTH references, BOTH rigs);
   no separate bar is granted.
+  **H6's WALL-TIME counterfactual (added round 5 — timings alone would
+  strand pf-1 under the uniform decision rule):** behind a debug flag,
+  claim the whole tar shard under ONE lock on the TCP receive path —
+  i.e. give TCP the same batch-claim shape the gRPC path already uses
+  (`transfer_session/mod.rs:3047`), rather than a per-member claim
+  (`data_plane.rs:1167`). This is safe and wire-neutral (it changes only
+  the granularity of a local mutex/hash-set claim, not any frame), so it
+  does NOT trip the Contract rule. Grade its recovery against `Δ_P2` on
+  the uniform scale. If per-member claiming is the cost, batch-claiming
+  recovers it; if not, H6 dies with a number rather than a shrug.
 
 - **H7 (P2; added by review round 4 — the SHARED-controller candidate
   the gRPC caveat predicted)**: HEAD's need/manifest bookkeeping is
@@ -430,9 +495,32 @@ decides. So ONE rule governs every hypothesis (H1, H4, H5, H6, H7):
   interleaved against the unmodified build on the same rig and fixture.
   A hypothesis with no counterfactual **cannot be confirmed** — it is
   carried as UNTESTED and pf-1 does not close.
-- Let `Δ` = the measured new-vs-old-same-session gap for that finding.
-  The counterfactual's wall-time recovery `r` (as a share of `Δ`) is
-  graded on a **pre-registered scale**, no post-hoc bands:
+- **`Δ` is defined per finding and per rig — it is NOT one number**
+  (review round 5: the earlier text left it ambiguous between P1's
+  layout gap and P2's old/new gap, which are different quantities):
+  - **`Δ_P1(rig)`** = `destinit_median − srcinit_median` for
+    `wm_tcp_mixed` on THAT rig (an invariance gap: new-vs-new, no old
+    build involved). On rig W it is 1221 − 939 = **282 ms**. On
+    magneto↔skippy it is ~0 (8/8 pass) — so **P1 counterfactuals are
+    graded on rig W only**; a Linux-rig recovery is meaningless against a
+    gap that does not exist there.
+  - **`Δ_P2(rig)`** = `new_median − old_same_session_median` for
+    `push_tcp_small` on THAT rig (a converge gap, requires the `0f922de`
+    build on that rig). netwatch-01: 1975 − 1644 = **331 ms**; zoey:
+    4033 − 3636 = **397 ms**.
+  Every reported recovery names its `Δ` and its rig. A counterfactual run
+  on a rig whose `Δ` is ~0 proves nothing and is not reported as a kill.
+- **Overlapping causes are attributed SEQUENTIALLY, never summed**
+  (review round 5: H4/H7, and H6/H7, can each recover the same
+  milliseconds, so independent recoveries would double-count and could
+  "explain" >100% of `Δ`). Procedure: grade each hypothesis's recovery
+  ALONE against the unmodified build; then, for every confirmed
+  hypothesis in descending order of solo recovery, measure the
+  **incremental** recovery of adding it to the already-applied set. The
+  ≥70% closure test below is evaluated on the **cumulative combined**
+  build, not on the sum of solo recoveries.
+- The counterfactual's wall-time recovery `r` (as a share of the named
+  `Δ`) is graded on a **pre-registered scale**, no post-hoc bands:
   - `r ≥ 50%` → **CONFIRMED DOMINANT** (fix it first)
   - `20% ≤ r < 50%` → **CONFIRMED CONTRIBUTING** (fix it, but it is not
     the whole story — keep hunting)
