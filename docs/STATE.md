@@ -87,8 +87,23 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    RECORDED 2026-07-13**: direct-path baseline at the cutover sha
    (`docs/bench/otp12c-win-2026-07-13/`) + the delegated rig-D
    matrix (`docs/bench/otp12c-delegated-2026-07-13/`, 5/7 PASS at
-   RUNS=4; both FAIL cells PASS at RUNS=8 — see Blocked). Current:
-   **otp-12d (assembly)**, then otp-13.
+   RUNS=4; both FAIL cells PASS at RUNS=8 — see Blocked; rig D 7/7).
+   **otp-12d and otp-13 are DEFERRED, not next** — otp-12c's rows are
+   PRE-FIX, and `docs/plan/OTP12_PERF_FINDINGS.md` (pf-final) voids
+   pre-fix new arms for acceptance. Assembling the acceptance matrix now
+   would build otp-13's artifact from void rows.
+1a. **`docs/plan/OTP12_PERF_FINDINGS.md` — THE REAL NEXT ITEM** (Draft;
+   owner 2026-07-12: "fix the code before devoting another block of time
+   to testing. plan, reviewloop codex, then fix once converged").
+   **P1 misses the plan's HEADLINE criterion** (initiator/verb
+   invariance): `wm_tcp_mixed` FAILs in two independent sessions and got
+   WORSE at the cutover sha (1.237 → **1.300**) on tight spreads
+   (6.4/8.4%) far below D2's 25% escalation trigger — it cannot be
+   re-run away. P2 (`push_tcp_small`) likewise worsened (1.149 →
+   **1.201**; zoey 1.105). Codex: r2 REVISE, **r3 NEEDS ANOTHER ROUND**
+   (6/6 accepted); r4 fixes in, r4 review pending. **Blocked on: owner
+   flip to Active** once codex converges → pf-1 (investigate) → pf-2..n
+   (fix) → pf-final (rerun ALL THREE rigs) → otp-12d → otp-13.
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Optional follow-ups
    largely absorbed by otp-2/otp-12's rig matrices; skippy env facts
@@ -102,23 +117,17 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    Pro daemon CPU-bound below 10 GbE from SSD cache). Executes AFTER
    cutover as a runtime-selected write strategy in the unified receive
    sink (design: eval doc §If-FAST-evidence; dead module deletes in
-   w8-1). Rig facts + the aarch64-musl static build recipe: DEVLOG
-   2026-07-05 10:00. **Standing owner safety rule**: ALL activity on
-   rig `zoey` is confined to its `…/blit-temp/` folder — module roots,
-   test data, everything; nothing written outside it, ever. Zero-copy
-   is pre-authorized to be tested there when the post-cutover slice set
-   reaches it; no daemon runs on zoey before then without a fresh go.
-6. **Post-REV4 residue** (unowned): ~~pull 1s-start restructuring~~
-   (absorbed by ONE_TRANSFER_PATH choreography, D-2026-07-05-1);
-   epoch-0/early-ADD hardening; remote perf-history lanes (1e gap);
-   `derive_local_plan_tuning` fold-or-retire; receive-side dial
-   tuning residue (w3-1 scoped it out); the source send half's bounded
-   `dp.queue()` is not raced against control-lane events (deferred at
-   codex otp-7b-1 F3; otp-8 F1 gave the in-stream sends a fault race —
-   residual: the narrow CANCELLED→INTERNAL decay, verdict file);
-   CLI progress monitor lives through the in-session mirror purge
-   (display-only ticks/avg dilution; fix = the M-C `AppProgressEvent`
-   phase reshape — deferred at codex otp-10b-2 F5).
+   w8-1). Rig facts + build recipe: DEVLOG 2026-07-05 10:00.
+   **Standing owner safety rule**: ALL activity on rig `zoey` stays
+   inside its `…/blit-temp/` folder — nothing written outside it, ever;
+   no daemon runs on zoey without a fresh go.
+6. **Post-REV4 residue** (unowned): epoch-0/early-ADD hardening; remote
+   perf-history lanes (1e gap); receive-side dial tuning residue (w3-1
+   scoped it out); the source send half's bounded `dp.queue()` is not
+   raced against control-lane events (codex otp-7b-1 F3; residual: the
+   narrow CANCELLED→INTERNAL decay); the CLI progress monitor lives
+   through the in-session mirror purge (display-only; fix = the M-C
+   `AppProgressEvent` phase reshape — codex otp-10b-2 F5).
 
 ## Authoritative docs right now
 
@@ -146,19 +155,13 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **Rigs**: owner go GIVEN 2026-07-12 (standing through otp-12). zoey
   (12a), netwatch-01 (12b), netwatch-01↔skippy (12c) all done. Rig
   plumbing facts: DEVLOG 2026-07-13.
-- **otp-12c RECORDED 2026-07-13, acceptance owed to otp-13**:
-  direct-path re-baseline at the cutover sha
-  (`docs/bench/otp12c-win-2026-07-13/` — 198 runs; 93 PASS / 12 FAIL /
-  3 FAIL-SAME-SESSION / 12 RECORDED; `wm_tcp_mixed` invariance
-  **1.300** vs 12b's 1.237 — that cell did not wash out) and the
-  delegated rig-D matrix (`docs/bench/otp12c-delegated-2026-07-13/` —
-  RUNS=4: 5 PASS / 2 FAIL; both FAIL cells met D2's pre-registered
-  escalation trigger and re-ran at RUNS=8, whose medians govern per the
-  D2 amendment: both PASS → **rig D 7/7 PASS**, RUNS=4 rows still
-  visible). Codex round DONE (`.review/results/otp-12c.*`): FAIL →
-  **7/7 accepted** — incl. F2, where the first draft misread D2 as
-  scoping escalation to converge-up rows only and so ducked the
-  verdict.
+- **otp-12c RECORDED 2026-07-13** (pre-fix rows → replication + control
+  evidence, NOT acceptance evidence; see Queue 1a):
+  `docs/bench/otp12c-win-2026-07-13/` (198 runs; 93 PASS / 12 FAIL /
+  3 FAIL-SAME-SESSION) and `docs/bench/otp12c-delegated-2026-07-13/`
+  (**rig D 7/7 PASS** — 5 at RUNS=4, 2 via D2's escalation at RUNS=8).
+  Codex: FAIL → **7/7 accepted** (`.review/results/otp-12c.*`).
+  Detail: DEVLOG 2026-07-13.
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 
@@ -193,6 +196,4 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   journal-hole addendum + 11b deletion, four codex rounds; suite
   1488 → 1484, the ≥1483 floor met; the separate local orchestration
   no longer exists).
-- **2026-07-11 (44th)** — otp-10c closed (relay removal + the cutover
-  deletion); suite 1605 → 1488.
-- *(43rd and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*
+- *(44th and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*

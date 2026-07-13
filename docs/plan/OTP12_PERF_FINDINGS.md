@@ -49,13 +49,53 @@ a different day at a different sha — the round-2 review's objection that
 the 1.313 corroboration was "same rig/session, not independent" is now
 answered by an independent session reproducing the same cell.)
 
-The signature is razor-sharp, and 12c-win tightens it with the control
-that matters most — **the opposite data direction, same carrier, same
-fixture, PASSES**:
-- **direction**: `wm_tcp_mixed` (dest-initiated) **1.300 FAIL**, while
-  `mw_tcp_mixed` (source-initiated, identical carrier + fixture) is
-  **1.044 PASS**. The fixture and carrier are therefore not the cause on
-  their own — the destination-initiator layout is;
+**What the evidence actually supports — and the confound it does NOT
+escape** (corrected, review round 3; an earlier draft of this section
+claimed the `mw` cell was a clean control isolating "destination
+initiation" as the cause. It is not, and the correction matters because
+it re-aims the hypotheses):
+
+Every invariance cell compares two arms that share the same endpoints
+and the same data direction, so **within** a cell the initiator is the
+only variable — that part is clean. Arm medians (12c-win):
+
+| cell | data direction | dest-initiated arm | source-initiated arm | ratio | spreads |
+|---|---|---|---|---|---|
+| `wm_tcp_mixed` | Win→Mac | 1221 | 939 | **1.300 FAIL** | 6.4 / 8.4% |
+| `mw_tcp_mixed` | Mac→Win | 1477 | 1415 | 1.044 PASS | 20.5 / 20.8% |
+
+The initiator penalty is therefore **real and large in the Win→Mac
+direction only**. In Mac→Win the two layouts are within noise, and the
+ordering even **flips between sessions** (12b: dest-initiated 1502 was
+*faster* than source-initiated 1587), on spreads of 17–25%.
+
+Crossing from `wm` to `mw` is **not** a controlled swap of one variable:
+it also swaps the destination filesystem (APFS vs NTFS), the TCP stack,
+which host runs the client, and the flush method. So the supported
+signature is an **interaction — TCP × mixed × Win→Mac × initiator** —
+not "destination initiation" on its own.
+
+Worse, on a two-host rig the failing configuration is **confounded by
+construction**: in the slow arm the destination is the Mac (which dials)
+*and* the source is Windows (which accepts). "Mac-as-dialing-destination"
+and "Windows-as-accepting-source" are the same configuration here and
+cannot be separated by adding more runs on this rig. Two consequences,
+both binding on pf-1:
+- **pf-1 must compare all four rig-W arms** (both cells × both
+  initiators), not two, and report the interaction — not a single ratio.
+- **pf-1's same-platform local rig is the disambiguator.** On Mac↔Mac
+  (same OS, same fs, same stack both ends) the platform terms vanish: a
+  dest-initiator penalty that still appears there is **pure layout**
+  (code — H1/H5/H6); its absence means the effect *requires* the
+  Windows-responder / Mac-destination element, and the rig-side
+  instrumented run becomes mandatory (Method 2).
+
+This refines rather than weakens H1: H1 accuses the **source's accept
+branch** under resize, and the source in the slow arm is Windows —
+consistent. But consistency is not confirmation, and the confound above
+is exactly why pf-1 exists.
+
+The rest of the signature is unchanged and sharp:
 - **carrier**: TCP only — `wm_grpc_mixed` **1.021 PASS** (12b: 1.013);
 - **fixture**: mixed only — `wm_tcp_large` **1.039** and `wm_tcp_small`
   **1.027** both PASS;
@@ -77,17 +117,29 @@ on zoey — that PASS must not be read as absence or masking evidence.
 | 12b netwatch-01 (3–4% spreads) | `e21cf84` | 2080 | 1811 | **1.149** |
 | 12c-win (2026-07-13) | `f35702a` (cutover) | 1975 | 1644 | **1.201** |
 
-**gRPC small push did NOT regress — it got materially FASTER**
-(correction, review round 2: the earlier "win 0.98-ish per cells" was
-wrong against the committed CSVs). `push_grpc_small` new-vs-old:
-netwatch-01 **0.801** same-session / **0.835** committed (12b), and
-**0.852** / **0.802** (12c-win); zoey is at parity (1.001). So the
-honest statement is: **TCP regressed while gRPC did not — and on
-Windows the gRPC small push improved materially.** That asymmetry is
-the finding's sharpest constraint on mechanism: whatever P2 is, it is
-TCP-data-plane-specific, source-initiated, and small-file-heavy
-(10k×4 KiB), and it must not implicate code shared with the gRPC
-carrier (which got faster on the same fixture).
+**gRPC small push did NOT regress** (correction, review round 2: the
+earlier "win 0.98-ish per cells" was wrong against the committed CSVs;
+range corrected again in round 3). `push_grpc_small` new-vs-old,
+same-session / committed:
+
+| rig | same-session | committed |
+|---|---|---|
+| zoey | **1.001** | 0.907 |
+| netwatch-01 (12b) | **0.801** | 0.835 |
+| netwatch-01 (12c-win) | **0.852** | 0.802 |
+
+So the cross-rig range is **0.801–1.001**: gRPC small push is at parity
+on zoey and materially FASTER on Windows. The honest statement is **"TCP
+regressed while gRPC did not"** — not "gRPC is uniformly faster".
+
+That asymmetry is the finding's sharpest constraint on mechanism:
+whatever P2 is, it is TCP-data-plane-specific, source-initiated, and
+small-file-heavy (10k×4 KiB). **But it is a constraint, not a proof of
+innocence** (review round 3): an aggregate gRPC *improvement* cannot
+exclude a shared regression on both carriers that a larger
+gRPC-specific gain simply masks. Shared controller/planner/sink code is
+therefore NOT exonerated by the gRPC numbers, and pf-1 must attribute
+the TCP gap to a named delta rather than infer "TCP-only ⇒ not shared".
 
 Cross-block note (12b README): block-2 `mw_tcp_small` mac_init measured
 1922 vs block-1 new 2080 in the same session — the only mechanical
@@ -117,17 +169,24 @@ cannot attribute code — Method 3(a)).
   manifest/need emission in either layout. Kept only as a residual: if
   pf-1 timing shows a layout-dependent need-batch delta anyway, the
   mechanism must be re-derived from the trace, not from this text.
-- **H3 (P2) — mechanics CORRECTED (review 2026-07-12)**: dest-side
-  cost in the receive path that old push didn't pay — but the listed
-  candidates were wrong: the small half is tar-sharded and written
-  with parallel per-file `create_dir_all`/`fs::write` and NO per-file
-  flush, and per-file progress emission to the served push destination
-  is disabled (`remote/transfer/sink.rs`); old push used the same
-  served sink. So per-file fsync/flush policy and progress emission
-  are NOT old/new deltas. Surviving candidates: dest-side directory
-  work/handle churn (the 12b cross-block 8% precreated-container lead
-  on NTFS) plus whatever the pf-1 trace names; zoey showing 1.105 says
-  the residue is not Windows-only.
+- **H3 (P2) — RETIRED as a code hypothesis (review round 3)**. Round 2
+  already killed its named candidates (the small half is tar-sharded and
+  written with parallel per-file `create_dir_all`/`fs::write`, NO
+  per-file flush; per-file progress emission to the served push
+  destination is disabled — `remote/transfer/sink.rs`; and old push used
+  the same served sink, so fsync/flush policy and progress emission are
+  NOT old/new deltas). What was left — "dest-side directory work/handle
+  churn" — **names no old/new code delta at all**, and its only probe
+  (precreate-vs-not) is explicitly environmental and cannot attribute
+  code (Method 3(a)). A hypothesis that cannot be confirmed *or* killed
+  by pf-1 is not a hypothesis; keeping it would let pf-1 close with a
+  shrug. It is therefore retired, and its one code-attributable
+  descendant — a per-member cost on the TCP receive path that old push
+  did not pay — lives on as **H6**, which names an executed-path delta.
+  H3 may only be revived if the pf-1 trace names a concrete old/new
+  delta in the destination directory/handle path; the 12b cross-block
+  precreated-container lead (8%, NTFS) is recorded as an environmental
+  lead for that trace, not as an attribution.
 - **H4 (P2) — NARROWED (review 2026-07-12)**: binary record framing is
   unchanged since `0f922de` (`remote/transfer/data_plane.rs`; the
   earlier `dial.rs` attribution was wrong), and old small push ALSO
@@ -141,7 +200,9 @@ cannot attribute code — Method 3(a)).
   (`transfer_session/mod.rs`), while old push negotiated and queued
   TCP payloads mid-manifest (`0f922de` `push/client/mod.rs:863-940`).
   gRPC's in-stream carrier did not change comparably — which matches
-  the exact signature "TCP regressed, gRPC at parity". NOTE: an H5 fix
+  the exact signature "TCP regressed while gRPC did not" (zoey gRPC at
+  parity 1.001, Windows gRPC faster; NOT "gRPC uniformly at parity" —
+  review round 3). NOTE: an H5 fix
   reorders session phases and multi-ADD/pipelined epochs conflict with
   the one-token/one-ADD contract (`TRANSFER_SESSION.md` §Phase
   ordering), so any H5 fix triggers this plan's Contract
@@ -153,14 +214,24 @@ cannot attribute code — Method 3(a)).
   a whole shard under one lock (`transfer_session/mod.rs:3047`).
   TCP-only and per-member (so small-file-heavy) — matches the P2
   signature independently of H5. Discriminated by the pf-1 per-member
-  locking timings (Method 3(e), now unconditional). Historical
-  control (review round 2): check whether the `NeedListSink`
-  per-member claim already exists at 0f922de — if it does, H6 must
-  name what in the new layout multiplies claim frequency (need-batch
-  shape per Method 3(c)), otherwise a pre-existing lock cannot alone
-  explain a regression introduced after 0f922de. If H6 is confirmed,
-  the P2 fix bar applies unchanged (≤ 1.10 against BOTH references,
-  BOTH rigs); no separate bar is granted.
+  locking timings (Method 3(e), now unconditional).
+  **Historical control — corrected (review round 3): test the EXECUTED
+  path, not source presence.** `NeedListSink` *exists* in the tree at
+  `0f922de`, so "does the symbol exist there" is the wrong question and
+  would wrongly force H6 into a "multiplied claim frequency" story. What
+  matters is what old push actually RAN: at `0f922de` the served push
+  data plane goes `socket → StallGuard → execute_receive_pipeline →
+  FsTransferSink → disk`
+  (`crates/blit-daemon/src/service/push/data_plane.rs:185-206`) —
+  it **bypasses `NeedListSink` entirely** and takes no per-member claim.
+  So H6's claim is precise and falsifiable: the unified TCP receive path
+  introduced a per-member lock/hash-set claim on a path whose old
+  counterpart took none. pf-1 confirms it by (a) reading the executed
+  old path (done — cited above) and (b) the per-member locking timings;
+  it is KILLED if those timings do not scale with member count or do not
+  account for a material share of the P2 gap. If H6 is confirmed, the P2
+  fix bar applies unchanged (≤ 1.10 against BOTH references, BOTH rigs);
+  no separate bar is granted.
 
 ## Method (the investigation slice — no behavior changes)
 
@@ -212,15 +283,36 @@ cannot attribute code — Method 3(a)).
    TCP data plane); `t_first_payload_received` (destination side —
    requires the two clocks to be reconciled, so record the ssh/NTP
    offset per run and report it with the number, or state that the
-   destination event was not usable). The H5 claim is confirmed only if
-   `t_first_socket_write − t_manifest_complete` is ≈0-or-positive on
-   the new build and provably NEGATIVE on the pinned `0f922de` control
-   for the SAME fixture — i.e. old push really did put TCP bytes on the
-   wire before its manifest completed, and the new session does not;
+   destination event was not usable). The overlap DIFFERENCE is
+   established only if `t_first_socket_write − t_manifest_complete` is
+   ≈0-or-positive on the new build and provably NEGATIVE on the pinned
+   `0f922de` control for the SAME fixture — i.e. old push really did put
+   TCP bytes on the wire before its manifest completed, and the new
+   session does not.
+   **That timestamp proves ORDERING, not CAUSATION, so it cannot confirm
+   H5 (review round 3).** H5 is confirmed only by a causal
+   counterfactual: a debug-flag toggle that restores mid-manifest TCP
+   payload queueing (queueing/ordering only — if it cannot be done
+   without a wire change, this plan's Contract stop-and-amend rule fires
+   FIRST) and measures WALL TIME on the same fixture and rig,
+   interleaved old-vs-new. Pre-registered: H5 is CONFIRMED iff the
+   toggle closes ≥ half of the new-vs-old-same-session P2 delta, and
+   KILLED if it restores the old ordering but does not move wall time —
+   which would prove the lost overlap is real and irrelevant, and hand
+   P2 to H6;
    (e) per-member locking/framing timings are now an unconditional pf-1
    measurement (they discriminate H6), not contingent on the trace
    implicating them.
-4. Every experiment lands as a committed probe record under
+4. **Rig fallback applies to P2 as well as P1 (review round 3).** The
+   local rig is Mac↔Mac loopback: it removes the very platform terms P1
+   is confounded with, and it may equally fail to surface P2 (whose
+   Windows arms are the sharpest). So the rule is symmetric — **if a
+   finding does not reproduce locally, pf-1 REQUIRES the rig-side
+   instrumented run** (netwatch-01 for P1; netwatch-01 AND zoey for P2,
+   since P2 was measured on both) with the same spans and the CELLS
+   fixtures, before pf-1 may close. Every hypothesis exits pf-1
+   confirmed or killed — never "did not reproduce, moving on".
+5. Every experiment lands as a committed probe record under
    `docs/bench/otp12-perf-<date>/` (timings + the flag matrix), codex
    loop per slice as usual.
 
@@ -244,9 +336,14 @@ cannot attribute code — Method 3(a)).
   this bar does not by itself accept the build — see the global rule.)
 - **P2's bar is met** ⇔ `push_tcp_small` ≤ 1.10 against BOTH references
   (same-session AND committed) on BOTH rigs (CELLS sessions), with the
-  gRPC small-push cells unregressed against both references — note
-  those are currently FASTER than old (0.801–0.852), so "unregressed"
-  means they must not slide back toward 1.0, not merely stay ≤ 1.10.
+  gRPC small-push cells unregressed. **"Unregressed" is given a
+  reference and a tolerance (review round 3)**: each gRPC small-push
+  cell must stay ≤ 1.10 against both of its own references AND must not
+  worsen by more than **10% against its own pre-fix median on the same
+  rig** (zoey 4731 ms; netwatch-01 2264 ms at 12c-win). The second
+  clause exists because those cells currently range 0.801–1.001 — a fix
+  that dragged Windows gRPC from 0.85 back to 1.05 would still pass a
+  bare ≤1.10 bar while having eaten a real, measured win.
 - Cross-direction converge-up is a SEPARATE bar (review round 2):
   every final cross-direction row must still meet the parent plan's
   new-vs-old ceiling (`ONE_TRANSFER_PATH.md` acceptance) or satisfy
@@ -272,14 +369,25 @@ cannot attribute code — Method 3(a)).
   change that moves the phase timing; A/B'd locally before rig time).
 - **pf-final**: NOT just the two escalation cells — the final build
   reruns the COMPLETE affected-carrier matrices (all TCP cells + the
-  gRPC controls) on BOTH rigs. **No mixed-build evidence: every
+  gRPC controls) on **all THREE rigs: Z (zoey), W (netwatch-01) and
+  D (delegated, netwatch-01↔skippy)**. **No mixed-build evidence: every
   NEW/UNIFIED arm cited for acceptance comes from the final fix build**
   (corrected, review round 2 — "every row" was impossible: the
   same-session `old` arms and the committed baselines are OLD builds by
   construction, which is the entire point of a reference). Pre-fix
   new-arm rows are void for acceptance — including otp-12a/12b/12c's,
   which are **replication and control evidence, not acceptance
-  evidence**. If any shared controller/planner/sink code changed, the
+  evidence**.
+  **Rig D is included even though it is not a suspect (review round
+  3).** Voiding otp-12c's pre-fix rows while re-running only Z and W
+  would leave the parent plan's **delegated-parity bar**
+  (`OTP12_ACCEPTANCE_RUN.md` D2, a hard bar) with *no* final-build
+  evidence at all. "Not implicated" scopes what pf-1 must
+  *instrument* — it does not waive an acceptance bar. Rig D's TCP
+  verdict cells (+ the gRPC smoke) therefore rerun on the final build;
+  both arms are new-build by construction there (rig D has no old
+  baseline), so the whole cell is re-measured.
+  If any shared controller/planner/sink code changed, the
   gRPC control cells rerun on the final build too. Results land in fresh
   dated evidence dirs. **Then** otp-12d assembles the matrix from
   final-build rows, and the otp-13 owner walk reads it.
@@ -305,8 +413,12 @@ cannot attribute code — Method 3(a)).
   P1 to the destination-initiator layout, and (c) serve as the pre-pf-1
   baseline. Both findings got WORSE at the cutover sha (P1 1.237→1.300,
   P2 1.149→1.201), so neither is drifting toward the bar on its own.
-- **Rig-D delegated parity is NOT implicated** (2026-07-13): the
+- **Rig-D delegated parity is not a SUSPECT, but it is still an
+  ACCEPTANCE bar** (2026-07-13; scoped correctly at review round 3): the
   delegated-vs-direct matrix passed 7/7
   (`docs/bench/otp12c-delegated-2026-07-13/`), so delegation adds no
-  measurable cost and is not a suspect for either finding. pf-1 need not
-  instrument the delegated trigger path.
+  measurable cost and pf-1 need not instrument the delegated trigger
+  path. That is a statement about *where to look for the bug* — it does
+  **not** waive the parent plan's delegated-parity bar, whose evidence
+  is pre-fix and therefore void under pf-final. Rig D reruns on the
+  final build (see pf-final).
