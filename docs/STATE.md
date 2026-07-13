@@ -20,46 +20,24 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
   cells. **D-2026-07-05-2: same-build peers only, refusal at session
   open.** Progress (each slice through the codex loop; per-slice
   detail lives in DEVLOG + `.review/`, NOT here):
-  - **Closed `[x]`: otp-1, otp-3, otp-4 (a, b-1/2/3), otp-5 (a,
-    b-1/2), otp-6 (a/b), otp-7 (a, b-1/2), otp-8, otp-9 (a/b)** —
-    the full session machine: contract, role drivers, daemon
-    serving, both data planes + sf-2 resize + cancel, mirror/filters
-    (one delete rule), resume both carriers (wire bounds
-    D-2026-07-10-1/-2), fallback byte-carrier, delegated-on-session.
-    Suite → **1555** (as of `1ce73b5`; later commits are
-    bench/docs-only). SizeMtime = data-safe skip (open Q below).
-    Per-slice detail: DEVLOG 2026-07-10 entries + `.review/`.
-  - **otp-2 `[x]` (both halves).** zoey = PER-DIRECTION reference;
-    Mac↔Windows = cross-direction rig (otp-2w). Harnesses
-    `scripts/bench_otp2{,w}_baseline.sh`, evidence
-    `docs/bench/otp2{,w}-baseline-2026-07-10/README.md`. Key reading:
-    old push trails old pull on BOTH rigs — otp-12's interleaved
-    old-vs-new discriminates code cost from platform write-path cost.
-  - **otp-10 `[x]` CLOSED (a, b-1/2, c-1/2)** — verb cutover + THE
-    CUTOVER DELETION: one chokepoint per verb shape (`blit_app
-    run_remote_push`/`run_remote_pull`), ONE args→compare mapping,
-    move maps IgnoreTimes/Checksum-only on every route; relay removed
-    (D-2026-07-11-1); 4 drivers + `Push`/`PullSync` + 13 messages out
-    of tree AND proto (−13.8k lines, no bridge); DelegatedPull
-    no-payload proof recorded. Suite 1555 → … → **1488**. Per-slice
-    detail: DEVLOG 2026-07-11 entries + `.review/`.
-  - **otp-11 `[x]` CLOSED (a + addendum + b)** — local transfers ride
-    the session (`run_local_session` over `in_process_pair`; the
-    LOCAL byte-carrier = process-local `LocalApply`, no wire shape,
-    clonefile/block-clone preserved — slice design
-    `docs/plan/OTP11_LOCAL_SESSION.md`, every round codex-reviewed:
-    design 10 + slice 9 + addendum 4 + deletion 6 findings, all
-    adjudicated in `.review/results/otp-11*`). Perf gate PASS against
-    SOUND baselines (1 GiB local = 22 ms both binaries; the old 21 ms
-    journal no-op was proven UNSOUND — silent data loss on deep
-    modifications, repro in `docs/bench/otp11-local-2026-07-11/`).
-    **11b deleted the whole old orchestration** (−6.2k lines:
-    orchestrator/engine/local_worker/auto_tune/change_journal +
-    the compare_manifests sweep; dial re-homed verbatim; types →
-    `transfer_session/local.rs`); the acceptance criteria's
-    deletion-proof line for "the separate local orchestration path"
-    COMPLETES. Suite 1488 → 1513 → **1484** (≥1483 floor met at the
-    deletion slice, margin +1). Detail: DEVLOG 2026-07-12 entries.
+  - **Closed `[x]`: otp-1, otp-3 … otp-9** — the whole session machine
+    (contract, role drivers, daemon serving, both data planes + resize +
+    cancel, mirror/filters, resume, fallback carrier, delegated).
+    SizeMtime = data-safe skip. Detail: DEVLOG 2026-07-10.
+  - **otp-2 `[x]`** — baselines. zoey = per-direction reference;
+    Mac↔Windows = cross-direction rig (otp-2w). Evidence
+    `docs/bench/otp2{,w}-baseline-2026-07-10/`. Key reading: old push
+    trails old pull on BOTH rigs.
+  - **otp-10 `[x]`** — verb cutover + **THE CUTOVER DELETION**: 4
+    drivers + `Push`/`PullSync` + 13 messages out of tree AND proto
+    (−13.8k lines, no bridge); relay removed (D-2026-07-11-1).
+    Detail: DEVLOG 2026-07-11.
+  - **otp-11 `[x]`** — local transfers ride the session; **11b deleted
+    the whole old orchestration** (−6.2k lines: orchestrator, engine,
+    local_worker, auto_tune, change_journal — the last one an UNSOUND
+    fast path that silently lost data, repro in
+    `docs/bench/otp11-local-2026-07-11/`). The deletion-proof acceptance
+    line COMPLETES. Detail: DEVLOG 2026-07-12.
 - **SMALL_FILE_CEILING PAUSED at sf-2 (D-2026-07-05-1)** — sf-1/sf-2
   `[x]`; **sf-3a+ blocked** until ONE_TRANSFER_PATH ships, then
   resume/re-derive on the unified baseline. Principle: ceiling-driven,
@@ -89,24 +67,34 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
    PRE-FIX, and `docs/plan/OTP12_PERF_FINDINGS.md` (pf-final) voids
    pre-fix new arms for acceptance. Assembling the acceptance matrix now
    would build otp-13's artifact from void rows.
-1a. **`docs/plan/OTP12_PERF_FINDINGS.md` — THE REAL NEXT ITEM** (Draft;
-   owner 2026-07-12: "fix the code before devoting another block of time
-   to testing. plan, reviewloop codex, then fix once converged").
+1a. **`docs/plan/OTP12_PERF_FINDINGS.md` — THE REAL NEXT ITEM**
+   (**ACTIVE**, D-2026-07-13-1 — owner: "just write the code and
+   reviewloop slice by slice"; implementation proceeds, each slice
+   through the codex loop).
+   **RUN THIS FIRST — the cheapest experiment we have never run**:
+   Windows sat at **MTU 1500 for every benchmark ever recorded**, so
+   jumbo was never exercised; it is now at 9000 (`.agents/machines.md`
+   §Network/MTU). P1's failing cell is TCP × **mixed** (one big file +
+   5000 small), i.e. the packet-heaviest workload — exactly where ~6×
+   fewer packets could move the number. **Re-run rig-W invariance at
+   jumbo before touching any code.** Confound to control: the Mac's NIC
+   ALSO changed (Aquantia @ .54, was the TB5 dock @ .91) — so if the
+   asymmetry vanishes, re-run once with Windows back at 1500 on the SAME
+   adapter to prove it was the MTU and not the hardware.
    **P1 misses the plan's HEADLINE criterion on rig W** (initiator/verb
-   invariance): `wm_tcp_mixed` FAILs in two independent sessions, worse at
-   the cutover sha (1.237 → **1.300**), on tight spreads (6.4/8.4%) far
-   below D2's escalation trigger — not re-runnable away. **But it does NOT
-   reproduce on a same-OS rig**: Linux both ends = **8/8 PASS**, P1's cell
-   at 1.092/1.003 (`docs/bench/otp12-perf-2026-07-13/`) → not a pure
-   layout property; it needs the Mac↔Windows pairing, so D-2026-07-12-1's
-   platform-residue discriminator is the frame at otp-13. Not exonerated:
-   a platform-INTERACTING code path (H1's Windows accept branch) looks the
-   same — the dial/accept inversion counterfactual settles it. P2
-   (`push_tcp_small` 1.149 → **1.201**; zoey 1.105) is a converge bar and
-   is UNTESTED on the Linux rig. Codex: r2 REVISE, r3 + **r4 NEEDS ANOTHER
-   ROUND** (6/6 accepted each); r5 fixes in, review pending. **Blocked on:
-   owner flip to Active** once codex converges → pf-1 → (fix, if warranted)
-   → pf-final (ALL THREE rigs) → otp-12d → otp-13.
+   invariance): `wm_tcp_mixed` FAILs twice — 1.237 and 1.300 — on tight
+   spreads, so not re-runnable away. (Do NOT read 1.237→1.300 as a
+   regression: **different Mac NICs**, see machines.md.) **But it does
+   NOT reproduce on a same-OS rig**: Linux both ends = **8/8 PASS**, P1's
+   cell at 1.092/1.003 (`docs/bench/otp12-perf-2026-07-13/`) → it is
+   platform-INTERACTING, not pure layout. **P1 HAS NO ESCAPE HATCH**
+   (codex r5 F1): D-2026-07-12-1 waives only a *cross-direction* miss for
+   a cell that ALREADY passes invariance — P1 *is* the invariance
+   failure. So: **fix it to ≤1.10, or the owner amends acceptance
+   criterion 1.** Not assumed either way. P2 (`push_tcp_small` 1.105–
+   1.201, both rigs) is a converge bar vs the OLD build and is UNTESTED
+   on the Linux rig. Sequence: **jumbo re-run → pf-1 → fix → pf-final
+   (ALL THREE rigs) → otp-12d → otp-13.**
 2. **10 GbE owner declarations (still pending)**: ue-1, ue-2, REV4 →
    Shipped (zero-copy resolved — D-2026-07-05-3). Follow-ups largely
    absorbed by otp-2/otp-12's rig matrices.
@@ -153,16 +141,15 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Rigs**: owner go GIVEN 2026-07-12 (standing through otp-12). zoey
-  (12a), netwatch-01 (12b), netwatch-01↔skippy (12c) all done. Rig
-  plumbing facts: DEVLOG 2026-07-13.
-- **otp-12c RECORDED 2026-07-13** (pre-fix rows → replication + control
-  evidence, NOT acceptance evidence; see Queue 1a):
-  `docs/bench/otp12c-win-2026-07-13/` (198 runs; 93 PASS / 12 FAIL /
-  3 FAIL-SAME-SESSION) and `docs/bench/otp12c-delegated-2026-07-13/`
-  (**rig D 7/7 PASS** — 5 at RUNS=4, 2 via D2's escalation at RUNS=8).
-  Codex: FAIL → **7/7 accepted** (`.review/results/otp-12c.*`).
-  Detail: DEVLOG 2026-07-13.
+- **Rigs**: owner go standing through otp-12. zoey (12a), netwatch-01
+  (12b), netwatch-01↔skippy (12c) done; **magneto↔skippy = the same-OS
+  rig** (new 2026-07-13). Rig facts + the macOS ping/MTU trap:
+  `.agents/machines.md`.
+- **otp-12c RECORDED 2026-07-13** (pre-fix rows = replication/control
+  evidence, NOT acceptance evidence; Queue 1a):
+  `docs/bench/otp12c-win-2026-07-13/` (198 runs) and
+  `otp12c-delegated-2026-07-13/` (**rig D 7/7 PASS**). Codex: FAIL →
+  **7/7 accepted**. Detail: DEVLOG 2026-07-13.
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 
@@ -184,17 +171,20 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-13 (46th, this session)** — **otp-12c CLOSED through the
-  codex loop** (`d12534d` re-baseline, `68bb490` rig D 7/7, review 7/7
-  accepted) + **the same-OS rig answered the P1 confound**: Linux both
-  ends = 8/8 PASS, so P1 is platform-interacting, not pure layout
-  (`docs/bench/otp12-perf-2026-07-13/`). **A wrong claim (P1 = code, 1.78)
-  was reported and RETRACTED** — my harness keyed durability to the
-  initiator, not the destination; fixed `2c0af86`. Also landed: mid-copy
-  cancel e2e + the D4 mid-record fault fix (`920c6a7`), the CLI `./NAME`
-  hint (`ace91de`). In-flight: none; tree clean. **Next**: perf-plan codex
-  round 5 → owner's Active flip → pf-1.
-- **2026-07-12 (45th)** — **otp-11 CLOSED WHOLE** (11a + addendum + 11b
-  deletion; suite 1488 → 1484, floor met; the separate local
-  orchestration no longer exists).
-- *(44th and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*
+- **2026-07-13 (46th)** — **otp-12c closed** (rig D 7/7; codex 7/7
+  accepted). **Same-OS rig built** (magneto↔skippy): Linux both ends =
+  **8/8 PASS**, so P1 is platform-INTERACTING, not pure layout. Perf plan
+  → **ACTIVE** (D-2026-07-13-1). Also landed: mid-copy cancel e2e + the
+  D4 mid-record fault fix (`920c6a7`), CLI `./NAME` hint (`ace91de`), CI
+  fmt fix (`bb28ddd`, suite **1488**).
+  **THREE claims of mine were reported and RETRACTED this session** —
+  all from trusting an unvalidated instrument: (1) "P1 is code" (1.78),
+  from a harness that keyed durability to the *initiator*, not the
+  destination (fixed `2c0af86`); (2) "P1 is acceptable platform residue"
+  (D-2026-07-12-1 does not cover an invariance failure — codex r5 F1);
+  (3) "macOS can't send jumbo / the switch is broken" (it was
+  `net.inet.raw.maxdgram` capping *ping*; TCP was always fine — cost the
+  owner an adapter swap for nothing). **Verify the instrument before the
+  measurement.** In-flight: none; tree clean.
+  **Next**: the jumbo re-run (Queue 1a) → pf-1.
+- *(45th and earlier pruned to the cap — see DEVLOG 2026-07-06..13.)*

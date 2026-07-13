@@ -16,17 +16,74 @@ there are a FALLBACK only (the Mac's zigbuild already cross-compiles
 every Linux target in play).
 
 - `michael@magneto` — Arch Linux x86_64 (kernel 7.1.3-arch1-1), 4
-  cores, 32 GiB RAM, 10 GbE. **Busy BitTorrent machine** — do not
-  benchmark against it or load it. ssh key auth works (probed
-  2026-07-12).
+  cores, 32 GiB RAM, 10 GbE, WD SN850 NVMe. ~~Busy BitTorrent machine —
+  never a bench end~~ **SUPERSEDED 2026-07-13: magneto IS a valid bench
+  end** (owner: "power efficient intel, but it should be fast enough to
+  saturate 10GbE where Zoey is definitely not"; services quiescable on
+  request). Only ONE NIC is in use: `enp1s0f1` = 10.1.10.10 (the other
+  three have no IP). Used as the **same-OS rig** magneto↔skippy —
+  the only pair in the fleet that can measure blit's layout with zero
+  platform terms. NOPASSWD `drop_caches` grant added 2026-07-13.
+- `michael@altiera` — Linux, 2.5 GbE (enp1s0=10.1.10.53,
+  enp2s0=10.1.10.59, both MTU 9000). **NOT usable as a bench end**: at
+  2.5 GbE the link (~312 MB/s) is slower than the fixtures need, so it
+  bottlenecks BOTH arms of an invariance pair equally, dragging the
+  ratio toward 1.0 and MASKING the effect under test — zoey's failure
+  mode by a different route.
+
+## Network / MTU (rig-critical — read before touching MTU)
+
+- **THE macOS PING TRAP (cost ~1h on 2026-07-13; do not repeat).**
+  macOS caps **raw sockets** at 8192 bytes via `net.inet.raw.maxdgram`,
+  and `ping` uses a raw socket. So DF pings above ~8164 payload FAIL
+  from a Mac **no matter what the real path MTU is**. This is a limit on
+  the ping tool, NOT on the network, and it does **not** affect TCP.
+  I misread it as "macOS cannot transmit jumbo frames", blamed the
+  switch, then blamed two innocent adapters, and had the owner swap
+  hardware for nothing. **Verify jumbo with a real TCP transfer** (e.g.
+  `scp` a large file), never with `ping`.
+- **Jumbo works end-to-end at MTU 9000** (verified 2026-07-13 by real
+  TCP, not ping): Mac↔Windows 231/225 MB/s, Mac↔skippy 157 MB/s (all
+  ssh-encrypted, so CPU-bound floors — the wire is not the limit). The
+  UniFi switching passes 9018-byte frames fine.
+- **Windows (netwatch-01) ran at MTU 1500 for EVERY benchmark ever
+  recorded** (otp-2w, otp-12a/b/c). It was raised to 9000 on 2026-07-13.
+  Every prior measurement therefore negotiated down to a 1460-byte MSS:
+  **jumbo has never been exercised in a blit benchmark.** Those numbers
+  are valid — they are simply *1500-MTU* numbers — and rig W at jumbo is
+  a genuinely untested condition. magneto is still 1500 (raise
+  `enp1s0f1` to 9000 to make the Linux rig jumbo too).
+- Mismatched MTUs on one L2 segment are fine: TCP MSS negotiation
+  handles it, each host advertising what it can receive. What is NOT
+  fine is a host advertising a size it cannot actually send.
 - Local VM on the Mac — Ubuntu ARM (aarch64), per owner. Build-only
   fallback likewise.
 
 ## Rig residue (recorded 2026-07-10)
 
+- **The Mac's 10GbE IP and NIC CHANGED 2026-07-13** — this is a live
+  confound in the otp-12 numbers, not a bookkeeping detail:
+  * **now: `en9` = 10.1.10.54**, a Thunderbolt **Aquantia** adapter,
+    MTU 9000, 10Gbase-T. (SSH into the Mac = `michael@10.1.10.54`;
+    Remote Login is ON and netwatch-01's key is in the Mac's
+    `authorized_keys`, so Windows→Mac ssh/sftp works.)
+  * otp-12b (`wm_tcp_mixed` **1.237**) ran on the Aquantia at
+    **10.1.10.54**; otp-12c (**1.300**) ran on a Thunderbolt-5 dock's
+    built-in 10GbE at **10.1.10.91**. **Different NICs.** So the
+    "1.237 → 1.300, it got worse at the cutover sha" reading is
+    CONFOUNDED by a hardware change and must not be cited as evidence
+    of a code regression. Both runs still showed the same qualitative
+    asymmetry; only the delta is suspect.
+  * Harnesses take the Mac IP via `MAC_HOST=` — pass **10.1.10.54**
+    (older invocations in the DEVLOG say 10.1.10.91).
 - Windows box = **`michael@netwatch-01`, IP 10.1.10.177 as of
   2026-07-12** (the earlier-recorded 10.1.10.173 is STALE — DHCP; ssh
-  by hostname). Rules: `blit-bench-daemon` (otp-2w, repo-path-scoped)
+  by hostname; if the bare name stops resolving, `netwatch-01.local` or
+  the IP both work — the host key is filed under both). **MTU raised
+  1500 → 9000 on 2026-07-13** (see Network/MTU above). SMB File Sharing
+  is now ON on the Mac and Windows is authenticated to it
+  (`net use \\10.1.10.91\blit-bench-work`), so robocopy can reach it.
+  Rules: `blit-bench-daemon` (otp-2w, repo-path-scoped)
   + `blit-otp12-daemon` (active-path-scoped) + staged
   `purge-standby.ps1`; repo checkout DETACHED at `e21cf84` since the
   otp-12b session (owner's `bench-cargo-lock` stash untouched); old
