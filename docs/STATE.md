@@ -143,28 +143,22 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Blocked / waiting (all owner declarations; checkpoints are owner-only)
 
-- **Rigs**: owner go GIVEN 2026-07-12 (standing through the otp-12
-  sessions). zoey (12a), netwatch-01 (12b), netwatch-01↔skippy (12c)
-  all done. Rig plumbing facts (Windows WMI daemon launch, skippy pool
-  paths + the exact NOPASSWD grant, delegation allowlists are IP/CIDR
-  only): DEVLOG 2026-07-13.
-- **otp-12c RECORDED 2026-07-13, adjudication owed to otp-13**:
+- **Rigs**: owner go GIVEN 2026-07-12 (standing through otp-12). zoey
+  (12a), netwatch-01 (12b), netwatch-01↔skippy (12c) all done. Rig
+  plumbing facts: DEVLOG 2026-07-13.
+- **otp-12c RECORDED 2026-07-13, acceptance owed to otp-13**:
   direct-path re-baseline at the cutover sha
   (`docs/bench/otp12c-win-2026-07-13/` — 198 runs; 93 PASS / 12 FAIL /
   3 FAIL-SAME-SESSION / 12 RECORDED; `wm_tcp_mixed` invariance
-  **1.300** vs 12b's 1.237 — the TCP×mixed×dest-initiator cell did not
-  wash out at the cutover sha) and the delegated rig-D matrix
-  (`docs/bench/otp12c-delegated-2026-07-13/` — RUNS=4: 5 PASS / 2 FAIL,
-  `sw_tcp_mixed` 1.119 and `ws_tcp_large` 1.129; both cells met D2's
-  pre-registered escalation trigger (straddle + >25% arm spread) and
-  re-ran at RUNS=8, where the D2 supersession amendment makes the
-  8-pair medians govern: **both PASS**, 1.035 / 1.068 → **rig D 7/7
-  PASS**, RUNS=4 rows still committed and visible). Acceptance is the
-  owner's at otp-13; the evidence applies only the pre-registered
-  arithmetic. Codex round DONE (`.review/results/otp-12c.*`): FAIL →
-  **7/7 findings accepted**, incl. F2 — the first draft misread D2 as
-  scoping escalation to converge-up rows only (it does not) and so
-  ducked the verdict; corrected.
+  **1.300** vs 12b's 1.237 — that cell did not wash out) and the
+  delegated rig-D matrix (`docs/bench/otp12c-delegated-2026-07-13/` —
+  RUNS=4: 5 PASS / 2 FAIL; both FAIL cells met D2's pre-registered
+  escalation trigger and re-ran at RUNS=8, whose medians govern per the
+  D2 amendment: both PASS → **rig D 7/7 PASS**, RUNS=4 rows still
+  visible). Codex round DONE (`.review/results/otp-12c.*`): FAIL →
+  **7/7 accepted** — incl. F2, where the first draft misread D2 as
+  scoping escalation to converge-up rows only and so ducked the
+  verdict.
 - **Three 10 GbE gate declarations**: ue-1, ue-2 (pass/fail or
   re-scope), REV4 → Shipped. (Zero-copy RESOLVED — D-2026-07-05-3.)
 

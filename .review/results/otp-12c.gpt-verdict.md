@@ -8,7 +8,7 @@ the rig-W re-baseline at the cutover sha + the new harness).
 **Codex verdict**: FAIL — "methodology, D2 recording, and provenance
 fixes required."
 **Adjudication**: **7 findings, 7 accepted, 0 rejected, 0 deferred.**
-**Fix sha**: `<FIXSHA>`.
+**Fix sha**: `0fb4a64` (+ `docs/STATE.md` cap trim in the follow-up).
 
 Codex independently confirmed, and I re-verified: the otp-12b F5
 asymmetry does **not** recur (both arms pass contents-form sources,
