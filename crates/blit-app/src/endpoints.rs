@@ -86,7 +86,8 @@ pub fn ensure_remote_destination_supported(remote: &RemoteEndpoint) -> Result<()
     match &remote.path {
         RemotePath::Module { .. } | RemotePath::Root { .. } => Ok(()),
         RemotePath::Discovery => bail!(
-            "remote destination must include a module or root (e.g., server:/module/ or server://path)"
+            "remote destination must include a module or root (e.g., server:/module/ or server://path){}",
+            local_path_hint(&remote.host)
         ),
     }
 }
@@ -96,9 +97,33 @@ pub fn ensure_remote_source_supported(remote: &RemoteEndpoint) -> Result<()> {
     match remote.path {
         RemotePath::Module { .. } | RemotePath::Root { .. } => Ok(()),
         RemotePath::Discovery => bail!(
-            "remote source must include a module or root (e.g., server:/module/ or server://path)"
+            "remote source must include a module or root (e.g., server:/module/ or server://path){}",
+            local_path_hint(&remote.host)
         ),
     }
+}
+
+/// Owner decision 2026-07-12 (STATE.md, CLI foot-gun): a bare local
+/// dir name with no `./` parses as a Discovery endpoint on purpose —
+/// parsing is deliberately unchanged (no local-wins ambiguity). But
+/// when the transfer gates refuse it AND a file or directory of that
+/// exact name exists relative to `dir`, the refusal must point at the
+/// `./` escape hatch instead of leaving a pure network-shaped error.
+fn local_path_hint_in(dir: &Path, host: &str) -> Option<String> {
+    let meta = std::fs::metadata(dir.join(host)).ok()?;
+    let kind = if meta.is_dir() { "folder" } else { "file" };
+    Some(format!(
+        "; '{host}' exists here as a {kind} — did you mean ./{host}?"
+    ))
+}
+
+/// CWD-anchored wrapper for the gates. Returns an empty string when
+/// there is nothing to suggest so the gates can append unconditionally.
+pub(crate) fn local_path_hint(host: &str) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| local_path_hint_in(&dir, host))
+        .unwrap_or_default()
 }
 
 /// Common transfer-flag gate shared by every remote-touching
@@ -210,5 +235,34 @@ mod tests {
             parse_transfer_endpoint("skippy:/backup/"),
             Ok(Endpoint::Remote(_))
         ));
+    }
+
+    /// Owner decision 2026-07-12: when the Discovery refusal fires and
+    /// a directory of that name exists, the error suggests `./NAME`.
+    #[test]
+    fn discovery_hint_suggests_dot_slash_for_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("myfolder")).unwrap();
+        let hint = local_path_hint_in(tmp.path(), "myfolder").unwrap();
+        assert!(hint.contains("'myfolder' exists here as a folder"), "{hint}");
+        assert!(hint.contains("./myfolder"), "{hint}");
+    }
+
+    /// A plain file gets the same suggestion, worded as a file.
+    #[test]
+    fn discovery_hint_suggests_dot_slash_for_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"x").unwrap();
+        let hint = local_path_hint_in(tmp.path(), "notes.txt").unwrap();
+        assert!(hint.contains("'notes.txt' exists here as a file"), "{hint}");
+        assert!(hint.contains("./notes.txt"), "{hint}");
+    }
+
+    /// No local path of that name -> no suggestion; the gate message
+    /// stays exactly the network-shaped refusal.
+    #[test]
+    fn discovery_hint_absent_when_no_local_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(local_path_hint_in(tmp.path(), "no-such-host").is_none());
     }
 }

@@ -399,7 +399,8 @@ pub fn destination_spec_fields(dst: &RemoteEndpoint) -> Result<(String, String)>
         }
         RemotePath::Root { rel_path } => Ok((String::new(), normalize_for_request(rel_path))),
         RemotePath::Discovery => bail!(
-            "remote destination must include a module or root (e.g., server:/module/ or server://path)"
+            "remote destination must include a module or root (e.g., server:/module/ or server://path){}",
+            crate::endpoints::local_path_hint(&dst.host)
         ),
     }
 }
