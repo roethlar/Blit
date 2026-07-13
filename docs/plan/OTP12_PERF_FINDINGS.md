@@ -1,4 +1,4 @@
-# otp-12 perf findings — investigate + fix before otp-12c (design)
+# otp-12 perf findings — investigate + fix before acceptance (design)
 
 **Status**: Draft (owner, 2026-07-12: "let's fix the code before
 devoting another block of time to testing. plan, reviewloop codex, then
@@ -7,37 +7,94 @@ per that instruction; implementation not before).
 **Created**: 2026-07-12
 **Parent**: `docs/plan/ONE_TRANSFER_PATH.md` (Active), whose Constraints
 say the quiet part: "Unification that slows the fast direction fails
-review." otp-12a/b measured exactly two such cells; otp-12c/12d/13 are
-deferred until they are fixed or explained at code level.
+review." P1 is a miss of the parent's HEADLINE acceptance criterion
+(initiator/verb invariance, ±10%) — not a nice-to-have.
 **Contract**: `docs/TRANSFER_SESSION.md` — no wire changes are expected;
 if an investigation slice needs one, it stops and this doc is amended
 through the loop first.
 
+**Sequencing (corrected 2026-07-13).** This doc originally deferred
+otp-12c/12d/13 outright. In fact **otp-12c RAN on 2026-07-13** under a
+fresh in-session owner go (rig D delegated parity + a rig-W re-baseline
+at the cutover sha `f35702a`; `docs/bench/otp12c-{delegated,win}-2026-07-13/`).
+That does not change this plan's standing, and the rows are not lost
+work — under `pf-final` they are **pre-fix rows, void for acceptance**,
+but they serve two real purposes: (a) an **independent replication** of
+both findings at the shipped sha (below), which is exactly the
+independent corroboration the round-2 review said P1 lacked; and (b) the
+pre-pf-1 control the investigation needs. **otp-12d and otp-13 remain
+deferred** until P1/P2 are fixed or explained at code level — assembling
+an acceptance matrix out of pre-fix rows would build the artifact otp-13
+walks from rows this plan declares void.
+
 ## The two findings (evidence, both committed)
 
-**P1 — destination-initiated TCP mixed transfers pay ~25%**
-(`docs/bench/otp12-win-2026-07-12/`): `wm_tcp_mixed` invariance FAIL at
-**1.237** (mac_init pull 1127 ms vs win_init push 911 ms, spreads
-8.2/3.3%), corroborated independently by block-1 `pull_tcp_mixed` new
-1138 vs old-same-session 867 (**1.313**). The signature is sharp:
-- carrier: TCP data plane only (wm_grpc_mixed = 1.013 PASS);
-- fixture: mixed only (512 MiB + 5k×2 KiB; large 1.023, small 1.011);
-- role: only when the DESTINATION end initiates (pull-verb).
+**P1 — destination-initiated TCP mixed transfers pay ~25–30%**
+(`docs/bench/otp12-win-2026-07-12/`, replicated in
+`docs/bench/otp12c-win-2026-07-13/`). `wm_tcp_mixed` invariance FAILs in
+**two independent sessions**, and got WORSE at the shipped sha:
+
+| session | build | mac_init | win_init | ratio | arm spreads |
+|---|---|---|---|---|---|
+| 12b (2026-07-12) | `e21cf84` | 1127 | 911 | **1.237** | 8.2 / 3.3% |
+| 12c-win (2026-07-13) | `f35702a` (cutover) | 1221 | 939 | **1.300** | 6.4 / 8.4% |
+
+Corroborated by block-1 `pull_tcp_mixed` new-vs-old-same-session:
+**1.313** (12b: 1138/867) and **1.247** (12c-win: 1192/956).
+
+**This cannot be re-run away.** Both sessions' arm spreads are far below
+D2's 25% escalation trigger, so no escalation session is even available;
+the cells stand as measured. (The 12c-win session was a fresh staging on
+a different day at a different sha — the round-2 review's objection that
+the 1.313 corroboration was "same rig/session, not independent" is now
+answered by an independent session reproducing the same cell.)
+
+The signature is razor-sharp, and 12c-win tightens it with the control
+that matters most — **the opposite data direction, same carrier, same
+fixture, PASSES**:
+- **direction**: `wm_tcp_mixed` (dest-initiated) **1.300 FAIL**, while
+  `mw_tcp_mixed` (source-initiated, identical carrier + fixture) is
+  **1.044 PASS**. The fixture and carrier are therefore not the cause on
+  their own — the destination-initiator layout is;
+- **carrier**: TCP only — `wm_grpc_mixed` **1.021 PASS** (12b: 1.013);
+- **fixture**: mixed only — `wm_tcp_large` **1.039** and `wm_tcp_small`
+  **1.027** both PASS;
+- **isolation**: in 12c-win, 11 of 12 invariance cells pass at
+  1.003–1.044. `wm_tcp_mixed` is the sole outlier, by a wide margin.
+
 Also present in 12a's data? NOT testable there (review 2026-07-12):
 zoey's rig anchors converge-up only (12a README), so it has no
 mac_init/win_init invariance pair; its pull_tcp_mixed 0.966 is a
 new-vs-old check, not a two-layout measurement. P1 was never measured
 on zoey — that PASS must not be read as absence or masking evidence.
 
-**P2 — unified small-file push pays ~11–15% vs old push, both rigs**:
-zoey `push_tcp_small` 1.105 (RUNS=8, tight), netwatch-01 1.149 (3–4%
-spreads); grpc small pushes are AT parity (zoey 1.001, win 0.98-ish per
-cells) — so P2 is also TCP-data-plane-specific, source-initiated,
-10k×4 KiB. Cross-block note (12b README): block-2 `mw_tcp_small`
-mac_init measured 1922 vs block-1 new 2080 in the same session — the
-only mechanical difference is block-2's precreated destination
-container and per-arm path shapes; the investigation must confirm or
-kill that lead.
+**P2 — unified small-file push pays ~10–20% vs old push, both rigs**,
+`push_tcp_small` new-vs-old-same-session:
+
+| session | build | new | old | ratio |
+|---|---|---|---|---|
+| 12a zoey (RUNS=8, tight) | `e757dcc` old arm | — | — | **1.105** |
+| 12b netwatch-01 (3–4% spreads) | `e21cf84` | 2080 | 1811 | **1.149** |
+| 12c-win (2026-07-13) | `f35702a` (cutover) | 1975 | 1644 | **1.201** |
+
+**gRPC small push did NOT regress — it got materially FASTER**
+(correction, review round 2: the earlier "win 0.98-ish per cells" was
+wrong against the committed CSVs). `push_grpc_small` new-vs-old:
+netwatch-01 **0.801** same-session / **0.835** committed (12b), and
+**0.852** / **0.802** (12c-win); zoey is at parity (1.001). So the
+honest statement is: **TCP regressed while gRPC did not — and on
+Windows the gRPC small push improved materially.** That asymmetry is
+the finding's sharpest constraint on mechanism: whatever P2 is, it is
+TCP-data-plane-specific, source-initiated, and small-file-heavy
+(10k×4 KiB), and it must not implicate code shared with the gRPC
+carrier (which got faster on the same fixture).
+
+Cross-block note (12b README): block-2 `mw_tcp_small` mac_init measured
+1922 vs block-1 new 2080 in the same session — the only mechanical
+difference is block-2's precreated destination container and per-arm
+path shapes; the investigation must confirm or kill that lead. It is a
+lead, not an attribution (a precreated container is environmental and
+cannot attribute code — Method 3(a)).
 
 ## Hypotheses (H*, ranked; each cites the recorded mechanism it accuses)
 
@@ -143,30 +200,53 @@ kill that lead.
    ramp pin discriminated nothing (old push also opened at one
    stream), but H4 keeps a code-level counterfactual: a batch-cadence
    replay toggle that processes need batches at the recorded old-push
-   shard-boundary cadence; (d) NEW, for H5: measure the
-   manifest-complete→first-TCP-payload gap new vs old (overlap
-   experiment); (e) per-member locking/framing timings are now an
-   unconditional pf-1 measurement (they discriminate H6), not
-   contingent on the trace implicating them.
+   shard-boundary cadence; (d) NEW, for H5 — the overlap experiment,
+   metric DEFINED (review round 2: "manifest-complete→first-payload
+   gap" was underdefined, and for old push the quantity is expected to
+   be NEGATIVE, which an unsigned "gap" cannot express). Record, per
+   run, on ONE common clock with a SIGNED offset from the
+   `ManifestComplete` event, three separately-named events on the
+   source side plus one on the destination:
+   `t_manifest_complete`; `t_first_payload_queued` (the payload enters
+   the send queue); `t_first_socket_write` (first byte handed to the
+   TCP data plane); `t_first_payload_received` (destination side —
+   requires the two clocks to be reconciled, so record the ssh/NTP
+   offset per run and report it with the number, or state that the
+   destination event was not usable). The H5 claim is confirmed only if
+   `t_first_socket_write − t_manifest_complete` is ≈0-or-positive on
+   the new build and provably NEGATIVE on the pinned `0f922de` control
+   for the SAME fixture — i.e. old push really did put TCP bytes on the
+   wire before its manifest completed, and the new session does not;
+   (e) per-member locking/framing timings are now an unconditional pf-1
+   measurement (they discriminate H6), not contingent on the trace
+   implicating them.
 4. Every experiment lands as a committed probe record under
    `docs/bench/otp12-perf-<date>/` (timings + the flag matrix), codex
    loop per slice as usual.
 
 ## Fix criteria (pre-registered; the owner walks the final numbers)
 
-- Per parent D2 (`OTP12_ACCEPTANCE_RUN.md` §criteria): EVERY arm in an
-  acceptance cell passes independently against BOTH its same-session
-  reference AND the committed baseline. The listed bars below are
-  necessary, not sufficient — no arm may exceed 1.10 against either
-  reference even when its counterpart bar passes (closes the
-  1.10×1.10 ≈ 1.21 hole; review 2026-07-12).
-- P1 fixed ⇔ `wm_tcp_mixed` invariance ≤ 1.10 AND `pull_tcp_mixed`
-  ≤ 1.10 against BOTH references on the netwatch-01 rig (CELLS
-  escalation session, RUNS=8), with `wm_grpc_mixed` and the other
-  invariance PASSes unregressed against both references.
-- P2 fixed ⇔ `push_tcp_small` ≤ 1.10 against BOTH references
-  (same-session AND committed) on BOTH rigs (CELLS sessions), grpc
-  small parity unregressed against both.
+- **The global rule dominates every bar below** (review round 2 flagged
+  a contradiction between "necessary, not sufficient" and the `⇔`
+  bars — the `⇔`s are hereby scoped as *definitions of the named
+  finding's own bar*, never as a sufficient condition for acceptance).
+  Per parent D2 (`OTP12_ACCEPTANCE_RUN.md` §criteria): EVERY arm in
+  EVERY acceptance cell passes independently against BOTH its
+  same-session reference AND the committed baseline — no arm may exceed
+  1.10 against either reference even when its counterpart bar passes
+  (closes the 1.10×1.10 ≈ 1.21 hole). A build that satisfies the P1 and
+  P2 bars below but regresses any other cell against either reference is
+  **not** accepted.
+- **P1's bar is met** ⇔ `wm_tcp_mixed` invariance ≤ 1.10 AND
+  `pull_tcp_mixed` ≤ 1.10 against BOTH references on the netwatch-01
+  rig (CELLS escalation session, RUNS=8), with `wm_grpc_mixed` and the
+  other invariance PASSes unregressed against both references. (Meeting
+  this bar does not by itself accept the build — see the global rule.)
+- **P2's bar is met** ⇔ `push_tcp_small` ≤ 1.10 against BOTH references
+  (same-session AND committed) on BOTH rigs (CELLS sessions), with the
+  gRPC small-push cells unregressed against both references — note
+  those are currently FASTER than old (0.801–0.852), so "unregressed"
+  means they must not slide back toward 1.0, not merely stay ≤ 1.10.
 - Cross-direction converge-up is a SEPARATE bar (review round 2):
   every final cross-direction row must still meet the parent plan's
   new-vs-old ceiling (`ONE_TRANSFER_PATH.md` acceptance) or satisfy
@@ -192,13 +272,17 @@ kill that lead.
   change that moves the phase timing; A/B'd locally before rig time).
 - **pf-final**: NOT just the two escalation cells — the final build
   reruns the COMPLETE affected-carrier matrices (all TCP cells + the
-  gRPC controls) on BOTH rigs. No mixed-build evidence: every row
-  cited for acceptance comes from the final build; pre-fix PASS rows
-  are void for acceptance. If any shared controller/planner/sink code
-  changed, the gRPC control cells rerun on the final build too.
-  Results land in fresh dated evidence dirs; the otp-13 walk
-  re-verifies on the full matrix; then otp-12c proceeds on the fixed
-  code.
+  gRPC controls) on BOTH rigs. **No mixed-build evidence: every
+  NEW/UNIFIED arm cited for acceptance comes from the final fix build**
+  (corrected, review round 2 — "every row" was impossible: the
+  same-session `old` arms and the committed baselines are OLD builds by
+  construction, which is the entire point of a reference). Pre-fix
+  new-arm rows are void for acceptance — including otp-12a/12b/12c's,
+  which are **replication and control evidence, not acceptance
+  evidence**. If any shared controller/planner/sink code changed, the
+  gRPC control cells rerun on the final build too. Results land in fresh
+  dated evidence dirs. **Then** otp-12d assembles the matrix from
+  final-build rows, and the otp-13 owner walk reads it.
 
 ## Known gaps
 
@@ -212,3 +296,17 @@ kill that lead.
   says nothing about layout asymmetry (review 2026-07-12). pf-1's
   local rig must be fast enough to surface P1 (the Mac's APFS NVMe
   qualifies per the 12b wm numbers).
+- **The 12c-win rows are replication, not acceptance** (2026-07-13).
+  They are pre-fix by definition, so `pf-final` voids them for
+  acceptance; their value is that they (a) reproduce P1 and P2 on an
+  independent session at the shipped sha, (b) supply the
+  opposite-direction control (`mw_tcp_mixed` 1.044 PASS vs
+  `wm_tcp_mixed` 1.300 FAIL — same carrier, same fixture) that narrows
+  P1 to the destination-initiator layout, and (c) serve as the pre-pf-1
+  baseline. Both findings got WORSE at the cutover sha (P1 1.237→1.300,
+  P2 1.149→1.201), so neither is drifting toward the bar on its own.
+- **Rig-D delegated parity is NOT implicated** (2026-07-13): the
+  delegated-vs-direct matrix passed 7/7
+  (`docs/bench/otp12c-delegated-2026-07-13/`), so delegation adds no
+  measurable cost and is not a suspect for either finding. pf-1 need not
+  instrument the delegated trigger path.
