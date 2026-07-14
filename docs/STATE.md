@@ -1,6 +1,6 @@
 # STATE — single entry point for "what is true right now"
 
-Last updated: 2026-07-14 (state-hygiene `drift` pass; last handoff was the 49th session)
+Last updated: 2026-07-14 (51st handoff — both Macs confirmed ready; DEVLOG backfilled for rounds 7-11)
 
 - **NEXT ACTION — fix ROUND 11's findings (all documented, none started), then re-review, then run.** Instrument at `8997f92`, prereg **rev 10**, rule **rewritten and simplified** (D-2026-07-14-3, owner: "simplify"). **NO DATA HAS EVER BEEN TAKEN.** Read `.review/results/macmac-harness-r11.{codex-engine,codex-harness,grok}.md`.
   **THE ENGINE HAS NO BLOCKERS FOR THE FIRST TIME IN ELEVEN ROUNDS.** Two HIGHs remain in it:
@@ -182,18 +182,19 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 
 ## Handoff log (newest first, keep ≤ 3)
 
-- **2026-07-14 (50th, `f933097`)** — **`drift`: STATE hygiene. No code, no rig time.**
-  The handoff log was **four rounds stale**: it said the round-7 review was in flight
-  while rounds 7–11 had all landed (`1e03063..e65863c`) — a cold session would have
-  re-adjudicated closed work. Also: `docs/history/state-archive.md` created (the landed
-  otp-1..11 record rotated into it), `Suite 1488` anchored **as of `bb28ddd`**, rig IPs →
-  `.agents/machines.md`, a stale push-state line deleted. **⚠ DEVLOG OWES AN ENTRY FOR
-  ROUNDS 7–11** — its newest is 18:45Z (rounds 5+6); the only record of those five rounds
-  is `.review/results/macmac-harness-r{7,8,9,9b,10,11}.*` + their commit messages.
-  **NEXT: fix round 11's findings (NEXT ACTION, top of this file) → re-review → run.**
-- **2026-07-14 (49th)** — **Mac↔Mac instrument, rounds 3–6: 48 findings, 48 accepted, NO
-  DATA TAKEN; the harness REFUSES a timed run.** Each cycle found a defect capable of a
-  **false claim**, in a branch the previous fix had not covered (the timer read a 1000 ms
-  sleep as **−1 ms**; the **settle had NEVER RUN in any revision**). Full: **DEVLOG 18:45Z**.
-- **2026-07-14 (48th)** — pf-0 ran; **MTU is KILLED as a cause of P1** (`r = −3.1%`, 256 runs). The fast arm is **BISTABLE**. Full: **DEVLOG 2026-07-14 06:20Z**.
-- *(47th and earlier pruned to the cap — see DEVLOG 2026-07-06..14.)*
+- **2026-07-14 (51st)** — **BOTH MACS CONFIRMED READY (owner); DEVLOG backfilled for rounds
+  7–11, closing the 50th's gap. No code, no rig time, no data.** Verified, not assumed: tree
+  clean; local = `origin` = `github` (via `ls-remote`, not tracking refs); docs gate OK; **zero
+  `blit-daemon` on either Mac**; **TM autobackup = 0 on BOTH** (the gate is fail-closed on
+  *enabled*, not merely *running* — so neither Mac backs up until the owner re-enables it).
+  **⛔ A READY RIG IS NOT A READY INSTRUMENT** — round 11's harness BLOCKER stands (topology
+  unenforced, **MTU never checked**: a run could go over the **1GbE** NIC or at **MTU 1500**,
+  and pf-0 spent 256 runs proving MTU moves wall time). **NEXT: fix round 11 → re-review →
+  THEN run**; the owner must close `codex` first (the quiescence gate refuses on either Mac).
+- **2026-07-14 (50th, `f933097`)** — **`drift`: STATE hygiene.** The handoff log was four rounds
+  stale (said round 7 in flight; 7–11 had landed). Created `docs/history/state-archive.md`,
+  anchored `Suite 1488 as of bb28ddd`, rig IPs → `.agents/machines.md`. Full: **DEVLOG 21:10Z**.
+- **2026-07-14 (49th)** — **Mac↔Mac instrument, rounds 3–6: 48 findings, 48 accepted, NO DATA
+  TAKEN; the harness REFUSES a timed run.** Every cycle found a defect capable of a **false
+  claim** in a branch the previous fix missed. Full: **DEVLOG 18:45Z**.
+- *(48th and earlier pruned to the cap — pf-0/MTU is summarised at the top of this file; full entries in DEVLOG 2026-07-06..14.)*
