@@ -38,11 +38,18 @@ def engine():
 
 
 def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=(),
-            per_cell=None, void_reason="", pairs=8, env_extra=None):
+            per_cell=None, void_reason="", pairs=8, env_extra=None, extra_rows=()):
     """`src` may be an int OR a per-pair list. The bar is computed on the MARGINAL
     medians and the CI on the PAIRED differences, and the two only disagree when the
     source arm varies -- a constant-only helper made that whole class of bug
-    unguardable by construction."""
+    unguardable by construction.
+
+    `extra_rows` = [(cell, arm, ms), ...]: valid rows in ONE arm with no partner in the
+    other. Same reason (round-11, codex + grok, independently): every row this helper could
+    write was PAIRED, so a CSV with a duplicate or unpaired valid row -- which skews that
+    arm's MEDIAN, and therefore T, B and the bar, while the PAIR count still looks right --
+    was unrepresentable, and the engine's arm-count check was consequently unguarded. A fix
+    no test can express is a fix no test can PROVE."""
     control_d = [5] * pairs if control_d is None else control_d
     per_cell = per_cell or {}
     tmp = tempfile.mkdtemp()
@@ -65,6 +72,11 @@ def session(measurand_d, src=2000, control_d=None, control_src=1000, drop_cells=
                             "drained_1x2s", "cold", "yes"])
                 w.writerow([cell, "destinit", "x", "h", i, si + di, 0, 250, 5, 1, 1, 0,
                             "drained_1x2s", "cold", "yes"])
+        # UNPAIRED valid rows: a run id no other arm carries, so the PAIR count is untouched
+        # and only the arm's own median moves.
+        for j, (cell, arm, ms) in enumerate(extra_rows, 1):
+            w.writerow([cell, arm, "x", "h", "x%d" % j, ms, 0, 250, 5, 1, 1, 0,
+                        "drained_1x2s", "cold", "yes"])
     with open(meta, "w") as f:
         f.write("cell,pairs_attempted,complete\n")
         for cell in present:
@@ -135,6 +147,18 @@ CASES = [
     ("a SHORT cell (6 of 8 pairs) claiming complete=yes is INCOMPLETE",
      dict(measurand_d=[-4, -2, -1, 0, 1, 2], src=2000),
      "INCOMPLETE", "DOES-NOT-REPRODUCE"),
+
+    # codex r11 (MEDIUM) + grok r11 (HIGH), found INDEPENDENTLY: the arm-count check was the
+    # engine's only defence against a valid-but-UNPAIRED row, and NOTHING guarded it -- delete
+    # the two conjuncts and all 34 cases still passed. The 8 pairs are intact here, so the pair
+    # count looks right; 12 extra valid srcinit rows at 100ms drag that ARM's median from
+    # 1000ms to 100ms, T = src/10 collapses from 100 to 10, and a +50ms difference -- a NULL at
+    # the true arm speed -- becomes an EFFECT. The CSV is the harness's, but the engine must not
+    # be the thing that trusts it: this is the row-integrity check, and it now has a proof.
+    ("codex+grok r11: unpaired valid rows skew the ARM median -- exactly 8 rows per arm, or INCOMPLETE",
+     dict(measurand_d=[50] * 8, src=1000, control_d=[0] * 8,
+          extra_rows=[("nq_tcp_mixed", "srcinit", 100)] * 12),
+     "INCOMPLETE", "REPRODUCES"),
 
     # --- the controls are a precondition -----------------------------------------
     ("grok r2: a bar-FAIL control whose CI crosses zero blocks every verdict",
@@ -371,6 +395,16 @@ MUTATIONS = [
       '            or len(by.get((c, "destinit"), [])) != PAIRS):',
       '    if meta.get(c, {}).get("complete") != "yes" or ci is None:'],
      "SHORT cell (6 of 8 pairs)"),
+
+    # SELECTIVELY: only the two ARM-count conjuncts, leaving meta.complete and the PAIR count
+    # in place. The combined mutation above dies on the short-pair case and so proved nothing
+    # about these two lines (round-11, codex + grok).
+    ("the engine counts PAIRS but not the rows in each ARM (codex+grok r11)",
+     ['    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None\n'
+      '            or len(by.get((c, "srcinit"), [])) != PAIRS\n'
+      '            or len(by.get((c, "destinit"), [])) != PAIRS):',
+      '    if (meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None):'],
+     "unpaired valid rows skew the ARM median"),
 
     ("a missing registered cell is filtered away (codex r2)",
      ["for c in sorted(set(REGISTERED) | set(meta)):", "for c in sorted(meta):"],
