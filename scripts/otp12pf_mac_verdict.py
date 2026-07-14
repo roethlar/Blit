@@ -18,9 +18,15 @@ WHY IT IS THIS SMALL
 THE STATISTIC (paired, because the design is paired)
     d_i = destinit_i - srcinit_i          per ABBA slot (positive = destination slower)
     D   = median(d_i)                     low median, even n
-    CI  = exact distribution-free order-statistic interval on the population median,
-          the narrowest whose coverage is >= 95%. At n=8 that is [min(d), max(d)]
-          (99.22%); at n=16, [d_(4), d_(13)] (97.87%). No bootstrap, no approximation.
+    CI  = exact distribution-free order-statistic interval on the population median, the
+          narrowest whose coverage is >= 95%. AT THE REGISTERED n=8 THAT IS [min(d), max(d)]
+          (99.22%) -- i.e. it CANNOT trim. No bootstrap, no approximation.
+    RANGE = [min(d), max(d)], and a NULL is judged on the RANGE, never on a trimmed CI.
+
+    n IS EXACTLY 8. Not "at least": at any larger n the >=95% interval starts TRIMMING
+    outliers, and a bimodal arm then yields a narrow median CI and a FALSE verdict. grok
+    drove exactly that with a 16-pair CSV (3 pairs at -500 trimmed away, 13 at +200 left)
+    -> REPRODUCES. The cell must carry EXACTLY the registered pair count or it is INCOMPLETE.
 
 THE THRESHOLD (one)
     T = min(srcinit_median / 10, DELTA_REF)
@@ -164,15 +170,16 @@ def thresholds(s_med, scale=1.0):
 def classify(ci_lo, ci_hi, rng_lo, rng_hi, t_pos, t_neg):
     """THE RULE. Four states, mutually exclusive and exhaustive BY CONSTRUCTION.
 
-    EFFECT/INVERTED use the >=95% CI on the median: a POSITIVE claim can tolerate a few
-    outliers (13 of 16 pairs clearing T is evidence, and 3 stragglers do not undo it).
+    EFFECT/INVERTED use the >=95% CI on the median; NONE uses the FULL RANGE. At the
+    registered n=8 these coincide (the CI IS the range), so nothing can be trimmed either
+    way -- the distinction is the SEMANTICS that keeps the rule sound if a larger n is ever
+    registered, and the engine REFUSES any n but 8.
 
     NONE uses the FULL RANGE -- EVERY pair must lie inside +-T. Round 8 (codex, BLOCKER):
-    at n=16 the CI is [d(4), d(13)], which TRIMS three outliers per side, so a BIMODAL arm
-    produces a NARROW median CI and a FALSE NULL (driven: CI = [1,1] from modes at +-110).
-    An equivalence claim must never be reachable by trimming away the very pairs that
-    contradict it. This is also why bimodality needs no special branch: it cannot hide
-    from the range.
+    a >=95% CI at n>8 TRIMS outliers, so a BIMODAL arm produces a NARROW median CI and a
+    FALSE NULL (driven: CI = [1,1] from modes at +-110). An equivalence claim must never be
+    reachable by trimming away the very pairs that contradict it. This is also why
+    bimodality needs no special branch: it cannot hide from the range.
     """
     if ci_lo >= t_pos:
         return "EFFECT"
@@ -190,7 +197,7 @@ for c in sorted(set(REGISTERED) | set(meta)):
     ci = median_ci(d) if d else None
     # COMPLETE is checked against the DATA, never against meta's say-so: a one-pair CSV
     # with a lying meta once graded as a full cell and emitted a null at 0% coverage.
-    if meta.get(c, {}).get("complete") != "yes" or len(d) < PAIRS or ci is None:
+    if meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None:
         cell[c] = dict(state="INCOMPLETE", n=len(d))
         continue
     s_med, d_med = med(by[(c, "srcinit")]), med(by[(c, "destinit")])
@@ -308,7 +315,7 @@ elif dirty:
     why = ("control cell(s) are not free of an arm asymmetry at T/2: %s. P1 is claimed "
            "TCP-only and mixed-only; if the gRPC/large controls may be carrying the same "
            "asymmetry, then NEITHER a reproduction NOR a null is readable off this rig. "
-           "Re-run at RUNS=16 to buy the power to certify them."
+           "There is no escalation: a noisy rig is fixed by a QUIETER RIG, not more pairs."
            % ", ".join("%s(%s, D=%+dms, CI=[%+d,%+d], T/2=%d)"
                        % (c, cell[c]["ctrl_state"], cell[c]["D"], cell[c]["ci"][0],
                           cell[c]["ci"][1], round(cell[c]["T"] / 2))
@@ -339,7 +346,7 @@ elif all(s == "NONE" for s in m.values()):
 else:
     verdict = "UNCLEAR"
     why = ("the CI spans the threshold in: %s. The rig could not resolve an effect of "
-           "size T either way -- this is NOT 'P1 vanishes'. Re-run at RUNS=16."
+           "size T either way -- this is NOT 'P1 vanishes'. Fix the rig, do not add pairs."
            % ", ".join(c for c, s in m.items() if s == "UNCLEAR"))
 
 out = ["SESSION VERDICT: %s" % verdict, "", why, "",

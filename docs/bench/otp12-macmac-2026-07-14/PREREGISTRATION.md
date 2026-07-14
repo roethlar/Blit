@@ -294,11 +294,20 @@ measurand and be gone before the controls ran, and they would pronounce the rig 
   registered in advance — but it is **not nothing**, and it does not hide inside the word
   "none".
 
-### There is NO escalation. `RUNS = 8`, and only 8.
+### There is NO escalation. `n` is EXACTLY 8.
 
-The `RUNS=16` escalation is **removed** (owner, 2026-07-14). A null is judged on the **full
-range**, which only **widens** with n — so more pairs could never rescue an `UNCLEAR` rig,
-nor certify a marginal control; and if you already have an `EFFECT`, you do not need them.
+The old `RUNS=16` escalation is **removed** (owner, 2026-07-14). A null is judged on the
+**full range**, which only **widens** with n — so more pairs could never rescue an `UNCLEAR`
+rig, nor certify a marginal control; and if you already have an `EFFECT`, you do not need
+them.
+
+**And `n` must be EXACTLY 8, not "at least 8" (round-9, grok, BLOCKER).** At the registered
+n=8 the ≥95% interval **is** `[min, max]` — it *cannot* trim. At any larger n it starts
+trimming outliers, and a bimodal arm then yields a narrow median CI and a false verdict:
+grok drove a 16-pair CSV (three pairs at −500 trimmed away, thirteen at +200 left) straight
+to **`REPRODUCES`**. A cell carrying any count but the registered one is **`INCOMPLETE`**.
+*(I removed 16 from the registered list and left the completeness check saying `>=`. Fixed
+where I looked, not where it lived — again.)*
 
 **A noisy rig is fixed by a quieter rig, not by more pairs — and `UNCLEAR` says exactly
 that.** Removing it also removes its entire p-hacking guard surface (a "once" marker, a

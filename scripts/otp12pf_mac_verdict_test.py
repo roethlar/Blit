@@ -117,6 +117,10 @@ CASES = [
      dict(measurand_d=[10, 10, 10, 10, 10, 10, 10, 800], src=1000),
      "UNCLEAR", "REPRODUCES"),
 
+    ("grok r9: a LONG cell (16 pairs) is INCOMPLETE — a CI at n>8 TRIMS the pairs that contradict it",
+     dict(measurand_d=[-500] * 3 + [200] * 13, src=1000, control_d=[0] * 16),
+     "INCOMPLETE", "REPRODUCES"),
+
     ("a SHORT cell (6 of 8 pairs) claiming complete=yes is INCOMPLETE",
      dict(measurand_d=[-4, -2, -1, 0, 1, 2], src=2000),
      "INCOMPLETE", "DOES-NOT-REPRODUCE"),
@@ -256,7 +260,7 @@ MUTATIONS = [
      "exactly T is NOT a reproduction"),
 
     ("the engine trusts meta.complete and never counts the pairs (grok r3)",
-     ['    if meta.get(c, {}).get("complete") != "yes" or len(d) < PAIRS or ci is None:',
+     ['    if meta.get(c, {}).get("complete") != "yes" or len(d) != PAIRS or ci is None:',
       '    if meta.get(c, {}).get("complete") != "yes" or ci is None:'],
      "SHORT cell (6 of 8 pairs)"),
 
