@@ -1,9 +1,39 @@
 #!/usr/bin/env bash
 # =============================================================================
+# ⛔⛔ DO NOT RUN — THIS HARNESS IS KNOWN BROKEN (codex round 2, 2026-07-14) ⛔⛔
+#
+# It will happily produce a clean-looking session with 0 voided pairs and a
+# CONFIDENT, MEANINGLESS verdict. Findings + fix list:
+#   .review/results/macmac-harness-r2.gpt-verdict.md   (12 findings, 12 accepted)
+#
+# The killer, VERIFIED: the transfer timer captures time.monotonic() in TWO
+# separate `python3 -c` processes and subtracts them. On macOS Python 3.9
+# monotonic() is PROCESS-RELATIVE, so a 1000 ms transfer measures as ~1 ms
+# (measured: nagatha 1 ms, q 0 ms). Every `ms` row would therefore be roughly the
+# FSYNC TIME ALONE, and the invariance ratio — the entire measurand — would be
+# computed on fsync noise, which can manufacture or mask a one-directional effect
+# at will. (The other two harnesses get this right: the Linux one brackets with
+# /proc/uptime, which is system-wide; the Windows one uses ONE PowerShell
+# Stopwatch.)
+#
+# Also outstanding: preflight cannot even succeed (grep -c exits 1 on no match,
+# so a CLEAN binary trips the dirty-marker probe; norm_mac uses gawk's strtonum(),
+# absent from macOS awk); a rig-W-sized effect (d_i = 230 ms on a 2500 ms arm)
+# still reports VANISHES because the equivalence margin is tied to the BAR (250 ms)
+# rather than to the reference effect; several gates still fail OPEN.
+#
+# A round-3 rework + review must land BEFORE this touches the rig.
+# =============================================================================
 # bench_otp12pf_mac.sh — THE MAC<->MAC RIG (nagatha <-> q), the missing 2x2 cell
 # Design + decision rule: docs/bench/otp12-macmac-2026-07-14/PREREGISTRATION.md
 # Parent plan: docs/plan/OTP12_PERF_FINDINGS.md (queue 1(ii)).
 # =============================================================================
+if [[ "${I_HAVE_READ_THE_ROUND2_REVIEW:-0}" != 1 ]]; then
+  echo "REFUSING TO RUN: this harness is known broken (see the banner above and" >&2
+  echo ".review/results/macmac-harness-r2.gpt-verdict.md). Its transfer timer" >&2
+  echo "measures ~1ms for a 1000ms transfer, so every row is fsync noise." >&2
+  exit 2
+fi
 #
 # WHY THIS RIG EXISTS
 # -------------------
