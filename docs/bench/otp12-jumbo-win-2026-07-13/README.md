@@ -1,8 +1,13 @@
 # MTU IS NOT THE CAUSE OF P1 — A-B-B-A jumbo experiment, rig `q` ↔ netwatch-01 (2026-07-14)
 
 **Status**: Evidence (recorded). This README applies the **pre-registered**
-decision rule in `PREREGISTRATION.md` (**rev 4**, committed before any datum
-existed) to the data, and states nothing the rule does not license. It is
+decision rule in `PREREGISTRATION.md` to the data, and states nothing the rule
+does not license. **Provenance of the rule, stated precisely**: the decision
+rule, thresholds and guards were fixed in **rev 3**, before any of the S1–S4
+data existed, and rev 4 left them untouched (it re-described the *rig* after the
+`q` baseline). So no threshold was authored around these numbers — but "the
+document was written before any data existed" would be false, since a `q`
+baseline and a discarded A-B-B-A attempt preceded rev 4. It is
 **not** a plan amendment: per the pre-registration, a result here "licenses
 evidence for a plan amendment only" — killing the MTU hypothesis in
 `docs/plan/OTP12_PERF_FINDINGS.md` is a separate, reviewed change.
@@ -45,6 +50,48 @@ and `Δ_9000 (236) > N_Δ (78)`, so the residual gap is **not** inside the noise
 **P1 fails in all four sessions** (1.237–1.362) regardless of MTU, by the
 harness's exact integer arithmetic (`10·hi ≤ 11·lo`), not the printed ratio.
 
+## ⚠ The resolution limit — this run cannot exclude a *contributing*-size effect
+
+The registered rule grades the **point estimate**, and the point estimate is ~0.
+But the experiment's own noise floor bounds what it could have seen:
+
+| effect size | in ms (of Δ_1500 = 229) | vs floor N_Δ = 78 ms | can this run exclude it? |
+|---|---:|---|---|
+| DOMINANT (`r ≥ 50%`) | ≥ 114 ms | comfortably above | **yes** |
+| CONTRIBUTING (`r ≥ 20%`) | ≥ 46 ms | **below the floor** | **NO** |
+
+So the honest scope of this null is: **jumbo is not a dominant cause of P1, and
+its measured contribution is indistinguishable from zero — but a
+contributing-size (~46 ms) MTU effect could be swamped by this rig's
+session-to-session noise and would not have been detected.** The KILLED grade
+stands as the pre-registered rule returns it; it must not be re-read as a
+stronger exclusion than that. (Pre-registration §"the noise model" fixed the
+floor as *measured*, not assumed — this is the price of that honesty, and it is
+stated rather than hidden.)
+
+## Where the noise actually comes from: the fast arm is BISTABLE
+
+The 78 ms floor is not diffuse jitter. The `win_init` runs are **bimodal** —
+one cluster near ~730 ms and one near ~840 ms — and the two same-MTU replicates
+simply drew different **mixtures** of the two modes:
+
+    S1 (9000) win_init: 699 715 750 753 767 776 | 843 844      -> 6 low, 2 high, median 760
+    S4 (9000) win_init: 752 755 | 825 828 836 837 838 860      -> 2 low, 6 high, median 832
+
+Same MTU, same build, same rig: the 72 ms gap between those medians is a
+**mode-mixture artifact**, and it is what sets N_Δ. The `mac_init` arm shows
+nothing of the kind (replicate medians differ by **5 and 6 ms**). This matches
+the local-rig bi-stability already recorded in
+`docs/bench/win-local-ab-2026-07-13/`.
+
+**Consequence for pf-1 (a trap):** a counterfactual that merely shifts the mode
+mixture would look exactly like a partial recovery. Grade on the run
+distribution, not the median alone.
+
+**The MTU verdict is robust to it.** Pooling all 16 runs per condition (instead
+of averaging session medians) gives `Δ_9000 = 232`, `Δ_1500 = 221.5`,
+**`r = −4.7%`** — the same KILLED grade.
+
 ## The manipulation demonstrably reached the wire (the null is not vacuous)
 
 The most important defense of a null result is proof that the treatment was
@@ -63,7 +110,12 @@ actually applied. Three independent instruments say it was:
 ## Masking guard — the ratio did not improve, and no artifact is hiding a fix
 
 Rebuilt on the measured noise (`N_arm = 72 ms`, the largest same-MTU replicate
-difference across both arms):
+difference across both arms). **Disclosure**: the pre-registration did not say
+how the two replicate medians become one condition-level value per arm; this
+analysis uses their **mean**. Every plausible alternative (either replicate
+alone, or the pooled runs) gives the same guard outcome, but "exactly as
+pre-registered" would overstate the spec's precision, so the choice is named
+here rather than left implicit.
 
 - **Fast-arm guard**: `win_init` at 9000 did **not** regress (−43.5 ms, i.e.
   faster). OK.

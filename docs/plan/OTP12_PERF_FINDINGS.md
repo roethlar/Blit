@@ -278,61 +278,88 @@ path shapes; the investigation must confirm or kill that lead. It is a
 lead, not an attribution (a precreated container is environmental and
 cannot attribute code — Method 3(a)).
 
-## pf-0 — the environmental control (MTU): **EXCLUDED** (recorded 2026-07-14)
+## pf-0 — the environmental control (MTU): **KILLED as a material cause of P1** (recorded 2026-07-14)
 
-Executed exactly as pre-registered
-(`docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md` rev 4, committed
-before any datum existed); evidence + full adjudication in that directory's
-`README.md`. Counterbalanced **A-B-B-A** (9000, 1500, 1500, 9000) on rig W with
-the `q` Mac end, `RUNS=8`, **256 timed runs, 0 voided**, MSS gate held at the
-start AND end of every session (8948 jumbo / 1448 at 1500).
+Executed as pre-registered
+(`docs/bench/otp12-jumbo-win-2026-07-13/PREREGISTRATION.md`); evidence + full
+adjudication in that directory's `README.md`. **The decision rule, thresholds
+and guards were registered in rev 3, before any of the S1–S4 data existed, and
+were unchanged by rev 4** (rev 4 re-described the *rig* after the `q` baseline —
+so "written before the data" is true of the rule, not of the whole document, and
+no threshold was authored around these numbers). Counterbalanced **A-B-B-A**
+(9000, 1500, 1500, 9000) on rig W with the `q` Mac end, `RUNS=8`, **256 timed
+runs, 0 voided**, MSS gate held at the start AND end of every session (8948
+jumbo / 1448 at 1500).
 
     Δ_9000 = 236 ms    Δ_1500 = 229 ms    N_Δ (measured noise floor) = 78 ms
     r = (Δ_1500 − Δ_9000) / Δ_1500 = −3.1%   →   KILLED (r < 20%, the scale below)
 
-**What this licenses.** The **environmental escape for P1 is closed**: MTU /
-packetization does not cause the destination-initiator gap, so H1/H5/H6/H7 keep
-the premise they all rest on — P1 is a property of the code, not of the wire.
-The null is **not vacuous**: the manipulation demonstrably reached the wire
-(`wm_tcp_large` ran **3–4% faster at jumbo on both arms**, and both
-`wm_tcp_mixed` arms sped up slightly) — the benefit is **symmetric**, which is
-exactly why it cannot explain an **asymmetry**. P1 FAILED in all four sessions
-(1.237–1.362) regardless of MTU; all controls passed in all four.
+**What this licenses — exactly the registered outcome, and no more.** Raising
+the MTU **did not improve these cells under the observed packetization**: the
+point estimate of the MTU contribution to P1 is ~0. The null is **not vacuous**
+— the manipulation demonstrably reached the wire (`wm_tcp_large` ran **3–4%
+faster at jumbo on both arms**, and both `wm_tcp_mixed` arms sped up slightly) —
+and the benefit is **symmetric**, which is why it cannot explain an
+**asymmetry**. P1 FAILED in all four sessions (1.237–1.362) regardless of MTU;
+all controls passed in all four.
 
-**What it does NOT license.** It confirms no hypothesis — pf-1 still owns
-attribution. Segment *fill* is unmeasured (8948 is the MSS ceiling, not the
-fill), so the supported claim is "raising the MTU did not improve these cells
-under the observed packetization", not "per-packet cost is irrelevant to blit".
+**What it does NOT license (do not restate this result as more than it is).**
+- **The wire is not exonerated, and "P1 is code-shaped" is NOT established
+  here.** MTU is *one* environmental variable. Segment **fill** is unmeasured
+  (8948 is the MSS *ceiling*), so underfilled segments, a bottleneck elsewhere,
+  or a smaller wire contribution are all still live. This result kills **MTU**,
+  not "the environment".
+- **It is not powered to exclude a CONTRIBUTING-size MTU effect.** The
+  CONFIRMED-CONTRIBUTING threshold is 20% of Δ_P1 ≈ **46 ms**, which is
+  **below the rig's measured between-session noise floor of 78 ms**. So the
+  experiment can exclude a **DOMINANT** effect (50% ≈ 114 ms, comfortably above
+  the floor) but **cannot exclude a contributing-size one** — a 46 ms effect
+  could be swamped. The registered rule returns KILLED on the point estimate,
+  and that grade stands as registered; the *resolution limit* is stated here so
+  the grade is never read as a stronger exclusion than the data supports.
+- It confirms no hypothesis. pf-1 still owns attribution.
 
-**`Δ_P1(rig W)` is re-estimated, and the noise floor now constrains pf-1's
-grading.** The `282 ms` above comes from a single nagatha session; four sessions
-on the `q` pairing give **Δ_P1 ≈ 230 ms** (229 at 1500, 236 at 9000). More
-important, **N_Δ = 78 ms is the *between-session* noise on this rig** — and a
-20% recovery of Δ_P1 (~46 ms), the CONFIRMED-CONTRIBUTING threshold, is
-**smaller than that floor**. Consequence, load-bearing for pf-1: a
-counterfactual graded by comparing *separate sessions* cannot distinguish
-CONTRIBUTING from KILLED here. The interleaved same-session A/B the pf-1 rule
-already mandates is therefore **not a nicety — it is the only design with
-enough resolution**, and any pf-1 result that quotes a between-session delta
-below ~78 ms is uninterpretable. The noise is concentrated almost entirely in
-the **`win_init` (fast) arm** (same-MTU replicate spread 19 and 72 ms); the
-`mac_init` arm is remarkably stable (5 and 6 ms).
+**`Δ_P1(rig W)` is re-estimated, and the noise floor constrains how pf-1 may
+grade.** The `282 ms` above is a **single nagatha session**; four sessions on
+the `q` pairing give **Δ_P1 ≈ 230 ms** (229 at 1500, 236 at 9000).
 
-**OPEN — the committed baseline is MTU-locked (owner's decision, not settled
-here).** The whole 10 GbE fabric now runs at MTU 9000, but the committed
-reference `docs/bench/otp2w-baseline-2026-07-10/summary.csv` was recorded at
-**MTU 1500**, and acceptance requires **both** references — the global rule
-(§Fix criteria: "EVERY arm … against BOTH its same-session reference AND the
-committed baseline") and P1's own bar both cite it. At jumbo, every
-`converge … old_committed`, `cross … min_old_committed`, and block-1 `combined`
-row is therefore **VOID**. Only two ways forward, and pf-final cannot be
-assembled until one is chosen:
-- **(A)** run `pf-final` at **MTU 1500**, matching the committed baseline — no
-  re-baseline, but the fleet is measured in a configuration it no longer runs;
-- **(B)** keep jumbo and **re-record the committed baseline** with the
-  `0f922de` build at 9000 — costs a baseline session on each affected rig AND a
-  harness change (`bench_otp12_win.sh:105` hardcodes `BASELINE_SUMMARY` with no
-  override, deliberately).
+- **Between-session grading of a counterfactual is now definitively ruled out**
+  on this rig: a 46 ms (20%) recovery is smaller than the 78 ms between-session
+  floor, so an unpaired before/after across sessions cannot separate
+  CONTRIBUTING from KILLED.
+- **This does NOT prove the interleaved design has enough resolution** — that is
+  a different (paired, within-session) variance, and pf-0 did not measure it.
+  **pf-1 must measure its own paired within-session noise floor on the
+  unmodified build and register a resolution check** (its smallest reportable
+  recovery must exceed that floor) *before* grading any hypothesis. A pf-1
+  recovery quoted without its paired floor is uninterpretable.
+- **The noise is not diffuse — it is a bistable fast arm.** The `win_init` runs
+  are **bimodal** (roughly ~730 ms and ~840 ms clusters); S1 drew 6 low/2 high
+  and S4 drew 2 low/6 high **at the same MTU**, and that mixture — not MTU — is
+  what produced the 72 ms `win_init` replicate spread and hence N_Δ. The
+  `mac_init` arm is by contrast stable to **5–6 ms**. **Trap for pf-1: a
+  counterfactual that merely shifts the mode mixture would masquerade as a
+  recovery.** Grade on the run distribution, not the median alone. (The MTU
+  verdict is robust to this: pooling all 16 runs per condition gives
+  Δ_9000 = 232, Δ_1500 = 221.5, r = −4.7% — same KILLED grade.)
+
+**OPEN — pf-final's committed reference is MTU-mismatched (owner's amendment,
+NOT decided here).** The fabric now runs MTU 9000; the committed reference
+`docs/bench/otp2w-baseline-2026-07-10/summary.csv` was recorded at **MTU 1500**
+and is deliberately **frozen** as an anti-drift ceiling
+(`OTP12_ACCEPTANCE_RUN.md` D2/D5). Acceptance requires **both** references, so
+this plan must not quietly reinterpret the contract — the following is the
+exposure, stated for the owner, and this plan asserts no void rule of its own:
+
+- pf-0 measured jumbo making both arms **3–4% faster**. A jumbo NEW arm compared
+  against a **1500-recorded** ceiling is therefore **lenient, not conservative**
+  — the MTU gain flatters the ratio and could let a real regression pass. That
+  is the actual risk, and it argues the mismatch matters.
+- The ways out (re-recording the frozen baseline at 9000; running pf-final at
+  1500; or an explicit MTU-mismatch rule) each **change the frozen-baseline
+  contract or the rig configuration, and so require an owner amendment**.
+  Re-recording additionally needs a harness change (`bench_otp12_win.sh:105`
+  hardcodes `BASELINE_SUMMARY` with no override, by design).
 
 Same-session references (`old_session`) are MTU-matched by construction and are
 unaffected either way.
@@ -561,9 +588,10 @@ decides. So ONE rule governs every hypothesis (H1, H4, H5, H6, H7):
     `wm_tcp_mixed` on THAT rig (an invariance gap: new-vs-new, no old
     build involved). On rig W it is 1221 − 939 = **282 ms** — a **single
     nagatha session**; §pf-0 re-estimates it from four sessions on the `q`
-    pairing and, more importantly, **measures the between-session noise floor
-    that bounds what a counterfactual can resolve**. Read §pf-0 before grading
-    any recovery against `Δ_P1`. On magneto↔skippy it is ~0 (8/8 pass) — so
+    pairing, rules out **between-session** grading of any counterfactual, and
+    requires pf-1 to measure its own **paired within-session** floor before
+    grading. Read §pf-0 before grading any recovery against `Δ_P1`. On
+    magneto↔skippy it is ~0 (8/8 pass) — so
     **P1 counterfactuals are graded on rig W only**; a Linux-rig recovery is
     meaningless against a gap that does not exist there.
   - **`Δ_P2(rig)`** = `new_median − old_same_session_median` for

@@ -4,10 +4,16 @@
 what was measured.
 
 **Why this session exists**: P1 (`wm_tcp_mixed` invariance failure) had **only
-ever been measured on one Mac** — nagatha. Every live hypothesis in
-`docs/plan/OTP12_PERF_FINDINGS.md` (H1, H5, H6, H7) assumes P1 is a property of
-the **macOS↔Windows pairing**. *That assumption had never been tested.* This
-session tests it on a different Mac.
+ever been measured on one Mac** — nagatha. The live **P1** hypothesis in
+`docs/plan/OTP12_PERF_FINDINGS.md` — **H1**, plus H2's residual — assumes P1 is
+a property of the **macOS↔Windows pairing**. *That assumption had never been
+tested.* This session tests it on a different Mac.
+
+**CORRECTION (2026-07-14, codex review of the pf-0 amendment)**: this README
+originally named "H1, H5, H6, H7" here and below. **H5, H6 and H7 are P2
+hypotheses, not P1** (see the plan's hypothesis list) — only H1 (and H2 as a
+residual) bear on P1. The error propagated to `docs/STATE.md`; both are fixed.
+The session's *result* is unaffected.
 
 **Rig (NEW — `q`)**: Apple M4 Mac mini, 16 GB, macOS 26.5.2, arm64. 10GbE =
 `en8` (the Aquantia adapter physically moved from nagatha), **10.1.10.54**,
@@ -42,7 +48,8 @@ comparison, which is the only kind this project has learned to trust
 
 - **P1 is NOT a nagatha artifact.** Different Mac, different CPU and disk (M4
   mini vs nagatha), same adapter → the failure follows the **platform pairing**,
-  not the machine. The assumption under H1/H5/H6/H7 survives its first real test.
+  not the machine. The assumption under **H1** (see the correction above)
+  survives its first real test.
 - **The signature is unchanged and sharp**: TCP only (gRPC passes at 1.020),
   `mixed` only (`large` passes at 1.002), destination-initiator only (the
   reverse direction passes at 1.043).

@@ -175,8 +175,9 @@ procedure in `docs/agent/PROTOCOL.md`; never let it describe a past session.
 - **2026-07-13/14 (47th)** — HEAD `0f52e6a` + this handoff. **P1 REPRODUCES ON
   A SECOND MAC** (`q`, 1.385 FAIL at MTU 9000; three controls PASS 1.002–1.043
   in-session → rig noise 2–4%): P1 is the macOS↔Windows **pairing**, not one
-  machine — the untested assumption under H1/H5/H6/H7 — and **jumbo does not
-  dissolve it**. **New dedicated bench Mac `q`** (M4 mini, quiet, 1.18 GB/s;
+  machine — the untested assumption under **H1** (corrected 2026-07-14: H5/H6/H7
+  are **P2** hypotheses; the earlier "H1/H5/H6/H7" was wrong) — and **jumbo does
+  not dissolve it**. **New dedicated bench Mac `q`** (M4 mini, quiet, 1.18 GB/s;
   `.agents/machines.md`) — because **the Mac is a bench END and the codex loop
   cannot run during a rig-W session**: a 53-min A-B-B-A run was contaminated by
   codex on the Mac and DISCARDED (asymmetric — it inflates `mac_init` and
