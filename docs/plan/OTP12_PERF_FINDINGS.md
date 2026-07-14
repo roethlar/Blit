@@ -47,57 +47,60 @@ deferred** until P1/P2 are fixed or explained at code level — assembling
 an acceptance matrix out of pre-fix rows would build the artifact otp-13
 walks from rows this plan declares void.
 
-## ⭐ P1 MECHANISM — PINNED BY CODE READING (2026-07-15). Read this before re-deriving it.
+## ⭐ P1 — where code reading got to, and where it STOPPED (2026-07-15). Read before re-deriving.
 
-*This section exists so no future session re-discovers what is already known. It is the
-distilled answer to "where is P1"; the H1 discussion below is the historical hypothesis space
-this narrowed. Grounded in file:line at the shipped sha `f35702a`.*
+*This section exists so no future session re-walks the dead ends. Grounded in file:line at the
+shipped sha `f35702a`. It records one CONFIRMED code asymmetry, three mechanisms RULED OUT, and
+one REFUTED causal story (mine — refuted by codex the same session, verified against the code).
+The honest bottom line: static reading identified the suspect and killed the wrong stories, but
+CANNOT decide whether the suspect costs ~300 ms — that needs an instrumented rig run.*
 
-**THE MECHANISM (the sole push/pull asymmetry on the destination's critical path).**
-The destination runs ONE sequential control loop —
-`crates/blit-core/src/transfer_session/mod.rs:2799` (`loop { match received.frame }`). In it:
-- the `ManifestEntry` arm (`mod.rs:2809`) diffs each chunk and calls
-  `diff_chunk_and_send_needs` (`mod.rs:2838`) — **sending needs is how the destination tells the
-  source what to transfer; if it stalls, the source runs dry and the data plane idles.**
-- the `Resize` arm (`mod.rs:3079`) handles `DataPlaneResize{Add}`. **In PULL** (dest is
-  `DestRecvPlane::Initiator`) it calls `run.add_dialed_stream(...).await` at **`mod.rs:3125`** —
-  a **blocking TCP dial** to the source (`data_plane.rs:553` → `dial_data_plane`) — **inline in
-  this loop**. **In PUSH** (dest is `DestRecvPlane::Responder`) the same arm calls `run.arm(...)`
-  at `mod.rs:3122`, a **non-blocking channel send**; the accept happens in a separate task
-  (`data_plane.rs` `accept_loop` ~241). So **pull serializes every resize-socket dial into the
-  need-sending loop; push never blocks it.**
+**CONFIRMED code asymmetry (the one push/pull difference on the destination side).** The
+destination runs one sequential control loop — `transfer_session/mod.rs:2799`
+(`loop { match received.frame }`). Its `Resize` arm (`mod.rs:3079`) handles
+`DataPlaneResize{Add}`: **in PULL** (dest is `DestRecvPlane::Initiator`) it awaits
+`run.add_dialed_stream(...)` at **`mod.rs:3125`** — a **blocking, authenticated TCP dial** to the
+source (`data_plane.rs:553` → `dial_data_plane`) — **inline**; **in PUSH** (dest is
+`DestRecvPlane::Responder`) the same arm calls the **non-blocking** `run.arm(...)` at
+`mod.rs:3122` and the accept runs in its own task (`data_plane.rs` accept_loop ~241). Real, and
+it is the only such asymmetry on the destination.
 
-**RULED OUT by reading — do NOT re-investigate these:**
+**RULED OUT by reading — do NOT re-investigate:**
 - **Nagle.** `configure_data_socket` (`remote/transfer/socket.rs:86`) sets `TCP_NODELAY`
-  unconditionally, and it is applied on the dial path (`socket.rs:162`), the accept path
-  (`data_plane.rs:383`, reached by both epoch-0 and resize accepts), and thus symmetrically.
-- **Socket buffers.** Asymmetric (dial gets a sized buffer, the pull-side accept gets kernel
-  default — `socket.rs:74-80`) but this affects only **bulk throughput**; if it mattered,
-  large-alone (1 GB, 1 file) would fail. Large passes at 1.002.
-- **The synchronous dial as a per-transfer cost.** All three fixtures ramp to 8 streams
-  (`dial.rs:474`), so resize *count* (~7 dials) is identical across fixtures and cannot by
-  itself explain a mixed-ONLY effect.
+  unconditionally, applied on dial (`socket.rs:162`) AND accept (`data_plane.rs:383`). Symmetric.
+- **Socket buffers.** Asymmetric (`socket.rs:74-80`) but affects only **bulk throughput**; if it
+  mattered, large-alone (1 GB) would fail. It passes at 1.002.
+- **Resize count.** All three fixtures ramp to 8 streams (`dial.rs:474`) — ~7 dials each — so
+  resize count is constant and cannot explain a mixed-ONLY effect.
 
-**WHY IT FITS EVERY FACT:** pull-only (push arms async); TCP-only (this is the TCP data-plane
-resize path — the gRPC carrier does not use it); **mixed-only** — the stall costs wall time only
-when needs are *still flowing under sustained bulk*: the mixed fixture (one 512 MB file + 5000 ×
-2 KB files, `bench_otp12_win.sh:428-429`) keeps the transfer running long enough for the resize
-epochs to fire *while* thousands of small-file needs are still being diffed and sent, so each
-blocking dial starves the data plane; large-alone has no further needs to stall and small-alone
-(40 MB) is too short/bandwidth-trivial to expose it (both pass); no Linux P1 (the per-stall cost
-is a macOS↔Windows connection-timing artifact, not present on the Linux stack).
+**REFUTED causal story (recorded so it is not retried).** This session first claimed the pull
+inline dial *stalls the destination's need-flow and starves the data plane*. **That is WRONG,
+and codex refuted it against the code (verified):** the destination sends every need *during
+manifest receipt* and finishes at `ManifestComplete` (`mod.rs:2856`); the source proposes a
+resize **only in the payload phase**, strictly after it sends `ManifestComplete` (`mod.rs:1356`
+comment: "none is proposed before the payload phase"; only send site `mod.rs:1794-1812`). Frame
+ordering therefore guarantees the destination has flushed the final diff and sent `NeedComplete`
+*before* it can even see a `Resize` frame — there is no need-work left to stall. And the
+data-plane receive workers are **independent tasks** (`data_plane.rs:568-574` pull /
+`218-233` push), so a blocked control loop does not pause payload receipt on already-live
+sockets. Full refutation: `docs/bench/P1_FIX_NOTES.md`. **codex correctly declined to write a
+fix for a mechanism that is not there.**
 
-**THE ONE UNCONFIRMED NUMBER:** the *per-resize stall magnitude* on the real macOS↔Windows path
-(~7 stalls × ~40 ms ≈ the observed ~300 ms is the working estimate, but the per-dial cost is not
-yet measured). That — not the mechanism — is what an instrumented rig run confirms.
+**The suspect that SURVIVES, and the limit of reading.** The pull inline dial is still a real
+asymmetry; the live way it could cost time is **stream-ramp latency / the platform-dependent
+dial-accept handshake** — pull reaches full stream parallelism more slowly because each epoch-N
+socket is acquired by a *serialized synchronous* dial, where push arms asynchronously. Whether
+that costs ~300 ms depends entirely on the **per-dial cost on the macOS↔Windows path** (a LAN RTT
+is sub-ms → negligible; only a tens-of-ms per-dial pathology would reach 300 ms), which reading
+cannot determine. **This is the boundary: reading found the suspect and killed the wrong stories;
+the magnitude is an empirical question.**
 
-**FIX DIRECTION:** make the pull destination's resize-socket dial **not block** the control loop
-(perform it concurrently / spawned), mirroring push's async arm, **while preserving** the
-documented invariants: dial-before-ack (the source never accepts a socket the dest did not dial),
-a dial failure stays **fatal** to the session, and at most one resize in flight. This is a
-destination-side **concurrency** change, expected to preserve the wire format (no
-`TRANSFER_SESSION.md` amendment) — but the review must confirm that. **Status: codex is writing
-the fix + phase-timing instrumentation this session (uncommitted, grok to review).**
+**NEXT (correctly targeted now):** an instrumented rig run on netwatch-01 (owner-gated benchmark)
+recording, per resize epoch: the dial start/complete time, the stream count over wall time (the
+ramp), and per-stream payload progress — the four measurements in `P1_FIX_NOTES.md` §Timing. If
+the ~300 ms tracks the resize ramp, the fix is to de-serialize the pull dial (preserving
+dial-before-ack, fatal-on-failure, one-in-flight); if it does not, the suspect is exonerated and
+the search moves on. Do not write a behavior fix before that measurement.
 
 ## The two findings (evidence, both committed)
 
